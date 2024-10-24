@@ -1,69 +1,10 @@
-from typing import (TYPE_CHECKING, List, Literal, Optional, Sequence,
-                    TypedDict, Union, cast, overload)
+from typing import (TYPE_CHECKING, Any, Dict, Generic, Iterable, List,
+                    Optional, Tuple, Union, cast)
 
-from typing_extensions import NotRequired
+from typing_extensions import NotRequired, TypedDict, TypeVar
 
 if TYPE_CHECKING:
     from vllm.multimodal import MultiModalDataDict
-
-
-class ParsedText(TypedDict):
-    content: str
-    is_tokens: Literal[False]
-
-
-class ParsedTokens(TypedDict):
-    content: List[int]
-    is_tokens: Literal[True]
-
-
-# https://github.com/vllm-project/vllm/pull/4028
-@overload
-def parse_and_batch_prompt(
-        prompt: Union[str, List[str]]) -> Sequence[ParsedText]:
-    ...
-
-
-@overload
-def parse_and_batch_prompt(
-        prompt: Union[List[int], List[List[int]]]) -> Sequence[ParsedTokens]:
-    ...
-
-
-def parse_and_batch_prompt(
-    prompt: Union[str, List[str], List[int], List[List[int]]],
-) -> Union[Sequence[ParsedText], Sequence[ParsedTokens]]:
-    if isinstance(prompt, str):
-        # case 1: a string
-        return [ParsedText(content=prompt, is_tokens=False)]
-
-    if isinstance(prompt, list):
-        if len(prompt) == 0:
-            raise ValueError("please provide at least one prompt")
-
-        if isinstance(prompt[0], str):
-            # case 2: array of strings
-            return [
-                ParsedText(content=elem, is_tokens=False)
-                for elem in cast(List[str], prompt)
-            ]
-        if isinstance(prompt[0], int):
-            # case 3: array of tokens
-            elem = cast(List[int], prompt)
-            return [ParsedTokens(content=elem, is_tokens=True)]
-        if isinstance(prompt[0], list):
-            if len(prompt[0]) == 0:
-                raise ValueError("please provide at least one prompt")
-
-            if isinstance(prompt[0][0], int):
-                # case 4: array of token arrays
-                return [
-                    ParsedTokens(content=elem, is_tokens=True)
-                    for elem in cast(List[List[int]], prompt)
-                ]
-
-    raise ValueError("prompt must be a string, array of strings, "
-                     "array of tokens, or array of token arrays")
 
 
 class TextPrompt(TypedDict):
@@ -76,6 +17,14 @@ class TextPrompt(TypedDict):
     """
     Optional multi-modal data to pass to the model,
     if the model supports it.
+    """
+
+    mm_processor_kwargs: NotRequired[Dict[str, Any]]
+    """
+    Optional multi-modal processor kwargs to be forwarded to the
+    multimodal input mapper & processor. Note that if multiple modalities
+    have registered mappers etc for the model being considered, we attempt
+    to pass the mm_processor_kwargs to each of them.
     """
 
 
@@ -91,43 +40,88 @@ class TokensPrompt(TypedDict):
     if the model supports it.
     """
 
-
-class TextTokensPrompt(TypedDict):
-    """It is assumed that :attr:`prompt` is consistent with
-    :attr:`prompt_token_ids`. This is currently used in
-    :class:`AsyncLLMEngine` for logging both the text and token IDs."""
-
-    prompt: str
-    """The prompt text."""
-
-    prompt_token_ids: List[int]
-    """The token IDs of the prompt."""
-
-    multi_modal_data: NotRequired["MultiModalDataDict"]
+    mm_processor_kwargs: NotRequired[Dict[str, Any]]
     """
-    Optional multi-modal data to pass to the model,
-    if the model supports it.
+    Optional multi-modal processor kwargs to be forwarded to the
+    multimodal input mapper & processor. Note that if multiple modalities
+    have registered mappers etc for the model being considered, we attempt
+    to pass the mm_processor_kwargs to each of them.
     """
 
 
-PromptStrictInputs = Union[str, TextPrompt, TokensPrompt]
+SingletonPrompt = Union[str, TextPrompt, TokensPrompt]
 """
-The inputs to the LLM, which can take one of the following forms:
+Set of possible schemas for a single prompt:
 
 - A text prompt (:class:`str` or :class:`TextPrompt`)
 - A tokenized prompt (:class:`TokensPrompt`)
+
+Note that "singleton" is as opposed to a data structure
+which encapsulates multiple prompts, i.e. of the sort
+which may be utilized for encoder/decoder models when
+the user desires to express both the encoder & decoder
+prompts explicitly, i.e. :class:`ExplicitEncoderDecoderPrompt`
+
+A prompt of type :class:`SingletonPrompt` may be employed
+as (1) input to a decoder-only model, (2) input to
+the encoder of an encoder/decoder model, in the scenario
+where the decoder-prompt is not specified explicitly, or
+(3) as a member of a larger data structure encapsulating
+more than one prompt, i.e. :class:`ExplicitEncoderDecoderPrompt`
 """
 
-PromptInputs = Union[str, TextPrompt, TokensPrompt, TextTokensPrompt]
-"""Same as :const:`PromptStrictInputs` but additionally accepts
-:class:`TextTokensPrompt`."""
+_T1_co = TypeVar("_T1_co",
+                 bound=SingletonPrompt,
+                 default=SingletonPrompt,
+                 covariant=True)
+_T2_co = TypeVar("_T2_co",
+                 bound=SingletonPrompt,
+                 default=SingletonPrompt,
+                 covariant=True)
 
 
-class LLMInputs(TypedDict):
+# TODO: Make fields ReadOnly once mypy supports it
+class ExplicitEncoderDecoderPrompt(TypedDict, Generic[_T1_co, _T2_co]):
     """
-    The inputs in :class:`~vllm.LLMEngine` before they are
-    passed to the model executor.
+    Represents an encoder/decoder model input prompt,
+    comprising an explicit encoder prompt and a decoder prompt.
+
+    The encoder and decoder prompts, respectively, may be formatted
+    according to any of the :class:`SingletonPrompt` schemas,
+    and are not required to have the same schema.
+
+    Only the encoder prompt may have multi-modal data. mm_processor_kwargs
+    should be at the top-level, and should not be set in the encoder/decoder
+    prompts, since they are agnostic to the encoder/decoder.
+
+    Note that an :class:`ExplicitEncoderDecoderPrompt` may not
+    be used as an input to a decoder-only model,
+    and that the :code:`encoder_prompt` and :code:`decoder_prompt`
+    fields of this data structure themselves must be
+    :class:`SingletonPrompt` instances.
     """
+
+    encoder_prompt: _T1_co
+
+    decoder_prompt: Optional[_T2_co]
+
+    mm_processor_kwargs: NotRequired[Dict[str, Any]]
+
+
+PromptType = Union[SingletonPrompt, ExplicitEncoderDecoderPrompt]
+"""
+Set of possible schemas for an LLM input, including
+both decoder-only and encoder/decoder input types:
+
+- A text prompt (:class:`str` or :class:`TextPrompt`)
+- A tokenized prompt (:class:`TokensPrompt`)
+- A single data structure containing both an encoder and a decoder prompt
+  (:class:`ExplicitEncoderDecoderPrompt`)
+"""
+
+
+class TokenInputs(TypedDict):
+    """Represents token-based inputs."""
     prompt_token_ids: List[int]
     """The token IDs of the prompt."""
 
@@ -141,3 +135,154 @@ class LLMInputs(TypedDict):
     Optional multi-modal data to pass to the model,
     if the model supports it.
     """
+
+    mm_processor_kwargs: NotRequired[Optional[Dict[str, Any]]]
+    """
+    Optional multi-modal processor kwargs to be forwarded to the
+    multimodal input mapper & processor. Note that if multiple modalities
+    have registered mappers etc for the model being considered, we attempt
+    to pass the mm_processor_kwargs to each of them.
+    """
+
+
+def token_inputs(
+    prompt_token_ids: List[int],
+    prompt: Optional[str] = None,
+    multi_modal_data: Optional["MultiModalDataDict"] = None,
+    mm_processor_kwargs: Optional[Dict[str, Any]] = None,
+) -> TokenInputs:
+    """Construct :class:`TokenInputs` from optional values."""
+    inputs = TokenInputs(prompt_token_ids=prompt_token_ids)
+
+    if prompt is not None:
+        inputs["prompt"] = prompt
+    if multi_modal_data is not None:
+        inputs["multi_modal_data"] = multi_modal_data
+    if mm_processor_kwargs is not None:
+        inputs["mm_processor_kwargs"] = mm_processor_kwargs
+
+    return inputs
+
+
+SingletonInputs = TokenInputs
+"""
+A processed :class:`SingletonPrompt` which can be passed to
+:class:`vllm.sequence.Sequence`.
+"""
+
+DecoderOnlyInputs = TokenInputs
+"""
+The inputs in :class:`~vllm.LLMEngine` before they are
+passed to the model executor.
+This specifies the data required for decoder-only models.
+"""
+
+
+class EncoderDecoderInputs(TokenInputs):
+    """
+    The inputs in :class:`~vllm.LLMEngine` before they are
+    passed to the model executor.
+
+    This specifies the required data for encoder-decoder models.
+    """
+    encoder_prompt_token_ids: List[int]
+    """The token IDs of the encoder prompt."""
+
+    encoder_prompt: NotRequired[Optional[str]]
+    """
+    The original encoder prompt text corresponding to the token IDs, if
+    available.
+    """
+
+    encoder_multi_modal_data: NotRequired[Optional["MultiModalDataDict"]]
+    """
+    Optional multi-modal data to pass to the encoder model,
+    if the model supports it.
+    """
+
+
+_T1 = TypeVar("_T1", bound=SingletonPrompt, default=SingletonPrompt)
+_T2 = TypeVar("_T2", bound=SingletonPrompt, default=SingletonPrompt)
+
+
+def build_explicit_enc_dec_prompt(
+    encoder_prompt: _T1,
+    decoder_prompt: Optional[_T2],
+    mm_processor_kwargs: Optional[Dict[str, Any]] = None,
+) -> ExplicitEncoderDecoderPrompt[_T1, _T2]:
+    if mm_processor_kwargs is None:
+        mm_processor_kwargs = {}
+    return ExplicitEncoderDecoderPrompt(
+        encoder_prompt=encoder_prompt,
+        decoder_prompt=decoder_prompt,
+        mm_processor_kwargs=mm_processor_kwargs)
+
+
+def zip_enc_dec_prompts(
+    enc_prompts: Iterable[_T1],
+    dec_prompts: Iterable[Optional[_T2]],
+    mm_processor_kwargs: Optional[Union[Iterable[Dict[str, Any]],
+                                        Dict[str, Any]]] = None,
+) -> List[ExplicitEncoderDecoderPrompt[_T1, _T2]]:
+    """
+    Zip encoder and decoder prompts together into a list of
+    :class:`ExplicitEncoderDecoderPrompt` instances. mm_processor_kwargs
+    may also be provided; if a dict is passed, the same dictionary will be
+    used for every encoder/decoder prompt. If an iterable is provided, it will
+    be zipped with the encoder/decoder prompts.
+    """
+    if mm_processor_kwargs is None:
+        mm_processor_kwargs = cast(Dict[str, Any], {})
+    if isinstance(mm_processor_kwargs, dict):
+        return [
+            build_explicit_enc_dec_prompt(
+                encoder_prompt, decoder_prompt,
+                cast(Dict[str, Any], mm_processor_kwargs))
+            for (encoder_prompt,
+                 decoder_prompt) in zip(enc_prompts, dec_prompts)
+        ]
+    return [
+        build_explicit_enc_dec_prompt(encoder_prompt, decoder_prompt,
+                                      mm_proc_kwargs)
+        for (encoder_prompt, decoder_prompt, mm_proc_kwargs
+             ) in zip(enc_prompts, dec_prompts, mm_processor_kwargs)
+    ]
+
+
+def to_enc_dec_tuple_list(
+    enc_dec_prompts: Iterable[ExplicitEncoderDecoderPrompt[_T1, _T2]],
+) -> List[Tuple[_T1, Optional[_T2]]]:
+    return [(enc_dec_prompt["encoder_prompt"],
+             enc_dec_prompt["decoder_prompt"])
+            for enc_dec_prompt in enc_dec_prompts]
+
+
+def __getattr__(name: str):
+    import warnings
+
+    if name == "PromptInput":
+        msg = ("PromptInput has been renamed to PromptType. "
+               "The original name will be removed in an upcoming version.")
+
+        warnings.warn(DeprecationWarning(msg), stacklevel=2)
+
+        return PromptType
+
+    if name == "LLMInputs":
+        msg = ("LLMInputs has been renamed to DecoderOnlyInputs. "
+               "The original name will be removed in an upcoming version.")
+
+        warnings.warn(DeprecationWarning(msg), stacklevel=2)
+
+        return DecoderOnlyInputs
+
+    if name == "EncoderDecoderLLMInputs":
+        msg = (
+            "EncoderDecoderLLMInputs has been renamed to EncoderDecoderInputs. "
+            "The original name will be removed in an upcoming version.")
+
+        warnings.warn(DeprecationWarning(msg), stacklevel=2)
+
+        return EncoderDecoderInputs
+
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

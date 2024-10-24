@@ -5,6 +5,7 @@ from typing import Sequence as GenericSequence
 from typing import Tuple
 
 from vllm.sequence import Sequence, SequenceGroup
+from vllm.utils import Device
 
 
 class AllocStatus(enum.Enum):
@@ -27,23 +28,21 @@ class BlockSpaceManager(ABC):
     def get_block_space_manager_class(version: str):
         version = version.lower()
 
-        if version == "v1":
-            from vllm.core.block_manager_v1 import BlockSpaceManagerV1
-            return BlockSpaceManagerV1
+        if version == "selfattn":
+            from vllm.core.block_manager import SelfAttnBlockSpaceManager
+            return SelfAttnBlockSpaceManager
 
-        if version == "v2":
-            from vllm.core.block_manager_v2 import BlockSpaceManagerV2
-            return BlockSpaceManagerV2
-
-        if version == "embedding":
-            from vllm.core.embedding_model_block_manager import (
-                EmbeddingModelBlockSpaceManager)
-            return EmbeddingModelBlockSpaceManager
+        if version == "placeholder":
+            from vllm.core.placeholder_block_space_manager import (
+                PlaceholderBlockSpaceManager)
+            return PlaceholderBlockSpaceManager
 
         raise ValueError(f"Unknown version {version=}")
 
     @abstractmethod
-    def can_allocate(self, seq_group: SequenceGroup) -> AllocStatus:
+    def can_allocate(self,
+                     seq_group: SequenceGroup,
+                     num_lookahead_slots: int = 0) -> AllocStatus:
         pass
 
     @abstractmethod
@@ -114,5 +113,11 @@ class BlockSpaceManager(ABC):
         pass
 
     @abstractmethod
-    def mark_blocks_as_computed(self, seq_group: SequenceGroup):
+    def mark_blocks_as_computed(self, seq_group: SequenceGroup,
+                                token_chunk_size: int):
+        pass
+
+    @abstractmethod
+    def get_prefix_cache_hit_rate(self, device: Device) -> float:
+        """Prefix cache hit rate. -1 means not supported or disabled."""
         pass

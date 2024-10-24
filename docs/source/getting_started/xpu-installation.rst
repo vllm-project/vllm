@@ -17,8 +17,8 @@ Requirements
 ------------
 
 * OS: Linux
-* Supported Hardware: Intel Data Center GPU (Intel ARC GPU WIP)
-* OneAPI requirements: oneAPI 2024.1 
+* Supported Hardware: Intel Data Center GPU, Intel ARC GPU
+* OneAPI requirements: oneAPI 2024.2 
 
 .. _xpu_backend_quick_start_dockerfile:
 
@@ -40,12 +40,13 @@ Quick start using Dockerfile
 Build from source
 -----------------
 
-- First, install required driver and intel OneAPI 2024.1.
+- First, install required driver and intel OneAPI 2024.2 or later.
 
 - Second, install Python packages for vLLM XPU backend building:
 
 .. code-block:: console
 
+    $ source /opt/intel/oneapi/setvars.sh
     $ pip install --upgrade pip
     $ pip install -v -r requirements-xpu.txt 
 

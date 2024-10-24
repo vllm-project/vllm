@@ -132,7 +132,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
 
     def allocate_immutable_blocks(self, prev_block: Optional[Block],
                                   block_token_ids: List[List[int]],
-                                  device: Optional[Device]) -> List[Block]:
+                                  device: Device) -> List[Block]:
         """Allocates a new group of immutable blocks with the provided block 
         token IDs on the specified device.
 
@@ -259,25 +259,22 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
                 current_swap_mapping[src_block_id] = dst_block_id
         return current_swap_mapping
 
-    def get_num_blocks_touched(self,
-                               blocks: List[Block],
-                               device: Device,
-                               num_lookahead_slots: int = 0) -> int:
-        """Returns the number of blocks that will be touched by
+    def get_num_full_blocks_touched(self, blocks: List[Block],
+                                    device: Device) -> int:
+        """Returns the number of full blocks that will be touched by
         swapping in/out the given blocks on to the 'device'.
 
         Args:
             blocks: List of blocks to be swapped.
             device (Device): Device to swap the 'blocks' on.
-            num_lookahead_slots (int): Number of lookahead slots used in 
-                speculative decoding, default to 0.
 
         Returns:
-            int: the number of blocks that will be touched by
+            int: the number of full blocks that will be touched by
                 swapping in/out the given blocks on to the 'device'.
+                Non full blocks are ignored when deciding the number
+                of blocks to touch.
         """
-        return self._allocators[device].get_num_blocks_touched(
-            blocks, num_lookahead_slots)
+        return self._allocators[device].get_num_full_blocks_touched(blocks)
 
     def clear_copy_on_writes(self) -> List[Tuple[int, int]]:
         """Clears the copy-on-write (CoW) state and returns the mapping of
@@ -322,6 +319,11 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
     @property
     def all_block_ids(self) -> FrozenSet[int]:
         return frozenset(self._block_ids_to_allocator.keys())
+
+    def get_prefix_cache_hit_rate(self, device: Device) -> float:
+        """Prefix cache hit rate. -1 means not supported or disabled."""
+        assert device in self._allocators
+        return self._allocators[device].get_prefix_cache_hit_rate()
 
     def get_and_reset_swaps(self) -> List[Tuple[int, int]]:
         """Returns and clears the mapping of source to destination block IDs.

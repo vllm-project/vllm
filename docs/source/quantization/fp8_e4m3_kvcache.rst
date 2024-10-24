@@ -45,5 +45,3 @@ Here is an example of how to enable this feature:
         # output w/ scaling factors:  England, the United Kingdom, and one of the world's leading financial,
         # output w/o scaling factors:  England, located in the southeastern part of the country. It is known 
 
-Note, current prefix caching doesn't work with FP8 KV cache enabled, forward_prefix kernel should handle different KV and cache type.
-

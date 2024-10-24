@@ -6,8 +6,10 @@ from typing import Dict, Tuple
 import numpy as np
 import pytest
 from PIL import Image
+from transformers import AutoConfig, AutoTokenizer
 
-from vllm.multimodal.utils import ImageFetchAiohttp, fetch_image
+from vllm.multimodal.utils import (async_fetch_image, fetch_image,
+                                   repeat_and_pad_placeholder_tokens)
 
 # Test different image extensions (JPG/PNG) and formats (gray/RGB/RGBA)
 TEST_IMAGE_URLS = [
@@ -37,15 +39,15 @@ def _image_equals(a: Image.Image, b: Image.Image) -> bool:
     return (np.asarray(a) == np.asarray(b.convert(a.mode))).all()
 
 
-@pytest.mark.asyncio(scope="module")
+@pytest.mark.asyncio
 @pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
 async def test_fetch_image_http(image_url: str):
     image_sync = fetch_image(image_url)
-    image_async = await ImageFetchAiohttp.fetch_image(image_url)
+    image_async = await async_fetch_image(image_url)
     assert _image_equals(image_sync, image_async)
 
 
-@pytest.mark.asyncio(scope="module")
+@pytest.mark.asyncio
 @pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
 @pytest.mark.parametrize("suffix", get_supported_suffixes())
 async def test_fetch_image_base64(url_images: Dict[str, Image.Image],
@@ -78,5 +80,36 @@ async def test_fetch_image_base64(url_images: Dict[str, Image.Image],
         else:
             pass  # Lossy format; only check that image can be opened
 
-        data_image_async = await ImageFetchAiohttp.fetch_image(data_url)
+        data_image_async = await async_fetch_image(data_url)
         assert _image_equals(data_image_sync, data_image_async)
+
+
+@pytest.mark.parametrize("model", ["llava-hf/llava-v1.6-mistral-7b-hf"])
+def test_repeat_and_pad_placeholder_tokens(model):
+    config = AutoConfig.from_pretrained(model)
+    image_token_id = config.image_token_index
+
+    tokenizer = AutoTokenizer.from_pretrained(model)
+
+    test_cases = [
+        ("<image>", 2, "<image><image>", [32000, 32000]),
+        ("<image><image>", 2, "<image><image><image>", [32000, 32000, 32000]),
+        ("<image><image>", [3, 2], "<image><image><image><image><image>",
+         [32000, 32000, 32000, 32000, 32000]),
+        ("Image:<image>Image:<image>!", [3, 2],
+         "Image:<image><image><image>Image:<image><image>!",
+         [9833, 28747, 32000, 32000, 32000, 9833, 28747, 32000, 32000, 918]),
+        ("<image>", [3, 2], "<image><image><image>", [32000, 32000, 32000]),
+    ]
+
+    for prompt, repeat_count, expected_prompt, expected_token_ids in test_cases:
+        new_prompt, new_token_ids = repeat_and_pad_placeholder_tokens(
+            tokenizer=tokenizer,
+            prompt=prompt,
+            prompt_token_ids=tokenizer.encode(prompt,
+                                              add_special_tokens=False),
+            placeholder_token_id=image_token_id,
+            repeat_count=repeat_count,
+        )
+        assert new_prompt == expected_prompt
+        assert new_token_ids == expected_token_ids

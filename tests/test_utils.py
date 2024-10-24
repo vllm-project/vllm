@@ -1,47 +1,33 @@
 import asyncio
 import os
 import socket
-import sys
-from typing import (TYPE_CHECKING, Any, AsyncIterator, Awaitable, Protocol,
-                    Tuple, TypeVar)
+from functools import partial
+from typing import AsyncIterator, Tuple
 
 import pytest
 
 from vllm.utils import (FlexibleArgumentParser, deprecate_kwargs,
-                        get_open_port, merge_async_iterators)
+                        get_open_port, merge_async_iterators, supports_kw)
 
 from .utils import error_on_warning
-
-if sys.version_info < (3, 10):
-    if TYPE_CHECKING:
-        _AwaitableT = TypeVar("_AwaitableT", bound=Awaitable[Any])
-        _AwaitableT_co = TypeVar("_AwaitableT_co",
-                                 bound=Awaitable[Any],
-                                 covariant=True)
-
-        class _SupportsSynchronousAnext(Protocol[_AwaitableT_co]):
-
-            def __anext__(self) -> _AwaitableT_co:
-                ...
-
-    def anext(i: "_SupportsSynchronousAnext[_AwaitableT]", /) -> "_AwaitableT":
-        return i.__anext__()
 
 
 @pytest.mark.asyncio
 async def test_merge_async_iterators():
 
-    async def mock_async_iterator(idx: int) -> AsyncIterator[str]:
+    async def mock_async_iterator(idx: int):
         try:
             while True:
                 yield f"item from iterator {idx}"
                 await asyncio.sleep(0.1)
         except asyncio.CancelledError:
-            pass
+            print(f"iterator {idx} cancelled")
 
     iterators = [mock_async_iterator(i) for i in range(3)]
-    merged_iterator: AsyncIterator[Tuple[int, str]] = merge_async_iterators(
-        *iterators)
+    merged_iterator = merge_async_iterators(*iterators,
+                                            is_cancelled=partial(asyncio.sleep,
+                                                                 0,
+                                                                 result=False))
 
     async def stream_output(generator: AsyncIterator[Tuple[int, str]]):
         async for idx, output in generator:
@@ -55,7 +41,8 @@ async def test_merge_async_iterators():
 
     for iterator in iterators:
         try:
-            await asyncio.wait_for(anext(iterator), 1)
+            # Can use anext() in python >= 3.10
+            await asyncio.wait_for(iterator.__anext__(), 1)
         except StopAsyncIteration:
             # All iterators should be cancelled and print this message.
             print("Iterator was cancelled normally")
@@ -72,7 +59,7 @@ def test_deprecate_kwargs_always():
     with pytest.warns(DeprecationWarning, match="'old_arg'"):
         dummy(old_arg=1)
 
-    with error_on_warning():
+    with error_on_warning(DeprecationWarning):
         dummy(new_arg=1)
 
 
@@ -82,10 +69,10 @@ def test_deprecate_kwargs_never():
     def dummy(*, old_arg: object = None, new_arg: object = None):
         pass
 
-    with error_on_warning():
+    with error_on_warning(DeprecationWarning):
         dummy(old_arg=1)
 
-    with error_on_warning():
+    with error_on_warning(DeprecationWarning):
         dummy(new_arg=1)
 
 
@@ -99,15 +86,15 @@ def test_deprecate_kwargs_dynamic():
     with pytest.warns(DeprecationWarning, match="'old_arg'"):
         dummy(old_arg=1)
 
-    with error_on_warning():
+    with error_on_warning(DeprecationWarning):
         dummy(new_arg=1)
 
     is_deprecated = False
 
-    with error_on_warning():
+    with error_on_warning(DeprecationWarning):
         dummy(old_arg=1)
 
-    with error_on_warning():
+    with error_on_warning(DeprecationWarning):
         dummy(new_arg=1)
 
 
@@ -142,6 +129,18 @@ def parser():
     parser.add_argument('--model-name')
     parser.add_argument('--batch-size', type=int)
     parser.add_argument('--enable-feature', action='store_true')
+    return parser
+
+
+@pytest.fixture
+def parser_with_config():
+    parser = FlexibleArgumentParser()
+    parser.add_argument('serve')
+    parser.add_argument('model_tag')
+    parser.add_argument('--served-model-name', type=str)
+    parser.add_argument('--config', type=str)
+    parser.add_argument('--port', type=int)
+    parser.add_argument('--tensor-parallel-size', type=int)
     return parser
 
 
@@ -189,3 +188,81 @@ def test_missing_required_argument(parser):
     parser.add_argument('--required-arg', required=True)
     with pytest.raises(SystemExit):
         parser.parse_args([])
+
+
+def test_cli_override_to_config(parser_with_config):
+    args = parser_with_config.parse_args([
+        'serve', 'mymodel', '--config', './data/test_config.yaml',
+        '--tensor-parallel-size', '3'
+    ])
+    assert args.tensor_parallel_size == 3
+    args = parser_with_config.parse_args([
+        'serve', 'mymodel', '--tensor-parallel-size', '3', '--config',
+        './data/test_config.yaml'
+    ])
+    assert args.tensor_parallel_size == 3
+    assert args.port == 12312
+    args = parser_with_config.parse_args([
+        'serve', 'mymodel', '--tensor-parallel-size', '3', '--config',
+        './data/test_config.yaml', '--port', '666'
+    ])
+    assert args.tensor_parallel_size == 3
+    assert args.port == 666
+
+
+def test_config_args(parser_with_config):
+    args = parser_with_config.parse_args(
+        ['serve', 'mymodel', '--config', './data/test_config.yaml'])
+    assert args.tensor_parallel_size == 2
+
+
+def test_config_file(parser_with_config):
+    with pytest.raises(FileNotFoundError):
+        parser_with_config.parse_args(
+            ['serve', 'mymodel', '--config', 'test_config.yml'])
+
+    with pytest.raises(ValueError):
+        parser_with_config.parse_args(
+            ['serve', 'mymodel', '--config', './data/test_config.json'])
+
+    with pytest.raises(ValueError):
+        parser_with_config.parse_args([
+            'serve', 'mymodel', '--tensor-parallel-size', '3', '--config',
+            '--batch-size', '32'
+        ])
+
+
+def test_no_model_tag(parser_with_config):
+    with pytest.raises(ValueError):
+        parser_with_config.parse_args(
+            ['serve', '--config', './data/test_config.yaml'])
+
+
+# yapf: enable
+@pytest.mark.parametrize(
+    "callable,kw_name,requires_kw_only,allow_var_kwargs,is_supported",
+    [
+        # Tests for positional argument support
+        (lambda foo: None, "foo", True, True, False),
+        (lambda foo: None, "foo", False, True, True),
+        # Tests for positional or keyword / keyword only
+        (lambda foo=100: None, "foo", True, True, False),
+        (lambda *, foo: None, "foo", False, True, True),
+        # Tests to make sure the names of variadic params are NOT supported
+        (lambda *args: None, "args", False, True, False),
+        (lambda **kwargs: None, "kwargs", False, True, False),
+        # Tests for if we allow var kwargs to add support
+        (lambda foo: None, "something_else", False, True, False),
+        (lambda foo, **kwargs: None, "something_else", False, True, True),
+        (lambda foo, **kwargs: None, "kwargs", True, True, False),
+        (lambda foo, **kwargs: None, "foo", True, True, False),
+    ])
+# yapf: disable
+def test_supports_kw(callable,kw_name,requires_kw_only,
+                     allow_var_kwargs,is_supported):
+    assert supports_kw(
+        callable=callable,
+        kw_name=kw_name,
+        requires_kw_only=requires_kw_only,
+        allow_var_kwargs=allow_var_kwargs
+    ) == is_supported

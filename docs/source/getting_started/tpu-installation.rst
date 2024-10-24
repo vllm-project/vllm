@@ -8,7 +8,7 @@ vLLM supports Google Cloud TPUs using PyTorch XLA.
 Requirements
 ------------
 
-* Google Cloud TPU VM (single host)
+* Google Cloud TPU VM (single & multi host)
 * TPU versions: v5e, v5p, v4
 * Python: 3.10
 
@@ -56,16 +56,17 @@ First, install the dependencies:
     $ pip uninstall torch torch-xla -y
 
     $ # Install PyTorch and PyTorch XLA.
-    $ export DATE="+20240601"
-    $ pip install https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch-nightly${DATE}-cp310-cp310-linux_x86_64.whl
-    $ pip install https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch_xla-nightly${DATE}-cp310-cp310-linux_x86_64.whl
+    $ export DATE="20240828"
+    $ export TORCH_VERSION="2.5.0"
+    $ pip install https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch-${TORCH_VERSION}.dev${DATE}-cp310-cp310-linux_x86_64.whl
+    $ pip install https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch_xla-${TORCH_VERSION}.dev${DATE}-cp310-cp310-linux_x86_64.whl
 
     $ # Install JAX and Pallas.
     $ pip install torch_xla[tpu] -f https://storage.googleapis.com/libtpu-releases/index.html
     $ pip install torch_xla[pallas] -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html -f https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html
 
     $ # Install other build dependencies.
-    $ pip install packaging aiohttp
+    $ pip install -r requirements-tpu.txt
 
 
 Next, build vLLM from source. This will only take a few seconds:
@@ -73,6 +74,13 @@ Next, build vLLM from source. This will only take a few seconds:
 .. code-block:: console
 
     $ VLLM_TARGET_DEVICE="tpu" python setup.py develop
+
+
+.. note::
+
+    Since TPU relies on XLA which requires static shapes, vLLM bucketizes the possible input shapes and compiles an XLA graph for each different shape.
+    The compilation time may take 20~30 minutes in the first run.
+    However, the compilation time reduces to ~5 minutes afterwards because the XLA graphs are cached in the disk (in :code:`VLLM_XLA_CACHE_PATH` or :code:`~/.cache/vllm/xla_cache` by default).
 
 
 .. tip::
@@ -85,7 +93,7 @@ Next, build vLLM from source. This will only take a few seconds:
         ImportError: libopenblas.so.0: cannot open shared object file: No such file or directory
 
 
-    You can install OpenBLAS with the following command:
+    Please install OpenBLAS with the following command:
 
     .. code-block:: console
 

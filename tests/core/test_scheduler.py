@@ -1,47 +1,30 @@
 import time
 from collections import deque
-from typing import Deque, List, Set, Tuple
+from typing import List, Set, Tuple
 from unittest.mock import MagicMock
 
 import pytest  # noqa
+from torch import Use  # noqa
 
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.core.interfaces import AllocStatus
-from vllm.core.policy import PolicyFactory
 from vllm.core.scheduler import Scheduler, SchedulingBudget
 from vllm.lora.request import LoRARequest
-from vllm.sequence import Logprob, SequenceGroup, SequenceStatus
+from vllm.sequence import SequenceGroup
 
-from .utils import create_dummy_prompt
-
-
-def get_sequence_groups(scheduler_output):
-    return [s.seq_group for s in scheduler_output.scheduled_seq_groups]
-
-
-def append_new_token(out, token_id: int):
-    seq_groups = get_sequence_groups(out)
-    for seq_group in seq_groups:
-        for seq in seq_group.get_seqs():
-            seq.append_token_id(token_id, {token_id: Logprob(token_id)})
-
-
-def schedule_and_update_computed_tokens(scheduler):
-    metas, out = scheduler.schedule()
-    for s, meta in zip(out.scheduled_seq_groups, metas):
-        s.seq_group.update_num_computed_tokens(meta.token_chunk_size)
-    return metas, out
-
-
-def append_new_token_seq_group(token_chunk_size, seq_group, token_id: int):
-    seq_group.update_num_computed_tokens(token_chunk_size)
-    for seq in seq_group.get_seqs():
-        seq.append_token_id(token_id, {token_id: Logprob(token_id)})
+from .utils import (append_new_token, append_new_token_seq_group,
+                    create_dummy_prompt, get_sequence_groups,
+                    schedule_and_update_computed_tokens)
 
 
 def test_scheduler_add_seq_group():
     block_size = 4
-    scheduler_config = SchedulerConfig(100, 64, 1)
+    scheduler_config = SchedulerConfig(
+        "generate",
+        max_num_batched_tokens=100,
+        max_num_seqs=64,
+        max_model_len=1,
+    )
     cache_config = CacheConfig(block_size, 1.0, 1, cache_dtype="auto")
     cache_config.num_cpu_blocks = 4
     cache_config.num_gpu_blocks = 4
@@ -50,14 +33,21 @@ def test_scheduler_add_seq_group():
     # Add seq group to scheduler.
     num_seq_group = 4
     for i in range(num_seq_group):
-        _, seq_group = create_dummy_prompt(str(i), block_size)
+        _, seq_group = create_dummy_prompt(str(i),
+                                           block_size,
+                                           block_size=block_size)
         scheduler.add_seq_group(seq_group)
         assert scheduler.get_num_unfinished_seq_groups() == i + 1
 
 
 def test_scheduler_abort_seq_group():
     block_size = 4
-    scheduler_config = SchedulerConfig(100, 64, 1)
+    scheduler_config = SchedulerConfig(
+        "generate",
+        max_num_batched_tokens=100,
+        max_num_seqs=64,
+        max_model_len=1,
+    )
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 4
     cache_config.num_gpu_blocks = 4
@@ -81,7 +71,12 @@ def test_scheduler_schedule_simple():
     block_size = 4
     num_seq_group = 4
     max_model_len = 16
-    scheduler_config = SchedulerConfig(64, num_seq_group, max_model_len)
+    scheduler_config = SchedulerConfig(
+        "generate",
+        max_num_batched_tokens=64,
+        max_num_seqs=num_seq_group,
+        max_model_len=max_model_len,
+    )
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 8
     cache_config.num_gpu_blocks = 8
@@ -90,7 +85,9 @@ def test_scheduler_schedule_simple():
 
     # Add seq groups to scheduler.
     for i in range(num_seq_group):
-        _, seq_group = create_dummy_prompt(str(i), prompt_length=block_size)
+        _, seq_group = create_dummy_prompt(str(i),
+                                           prompt_length=block_size,
+                                           block_size=block_size)
         scheduler.add_seq_group(seq_group)
         running.append(seq_group)
 
@@ -119,15 +116,19 @@ def test_scheduler_prefill_prioritized():
     block_size = 4
     max_model_len = 30
     max_batched_num_tokens = 30
-    scheduler_config = SchedulerConfig(max_batched_num_tokens, 2,
-                                       max_model_len)
+    scheduler_config = SchedulerConfig(
+        "generate",
+        max_num_batched_tokens=max_batched_num_tokens,
+        max_num_seqs=2,
+        max_model_len=max_model_len,
+    )
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
-    cache_config.num_cpu_blocks = 2
-    cache_config.num_gpu_blocks = 2
+    cache_config.num_cpu_blocks = 16
+    cache_config.num_gpu_blocks = 16
     scheduler = Scheduler(scheduler_config, cache_config, None)
 
     # Add seq groups to scheduler.
-    _, seq_group_a = create_dummy_prompt("1", 1)
+    _, seq_group_a = create_dummy_prompt("1", 1, block_size=block_size)
     scheduler.add_seq_group(seq_group_a)
 
     # Schedule seq groups prompts.
@@ -135,7 +136,7 @@ def test_scheduler_prefill_prioritized():
     assert get_sequence_groups(out) == [seq_group_a]
 
     # Add a new prefill request B.
-    _, seq_group_b = create_dummy_prompt("2", 30)
+    _, seq_group_b = create_dummy_prompt("2", 30, block_size=block_size)
     scheduler.add_seq_group(seq_group_b)
 
     # Verify prefill requests are prioritized. Since max_batched_num_tokens
@@ -147,15 +148,24 @@ def test_scheduler_prefill_prioritized():
 def test_scheduler_schedule_preempt_abort():
     block_size = 4
     max_model_len = 16
-    scheduler_config = SchedulerConfig(64, 2, max_model_len)
+    scheduler_config = SchedulerConfig(
+        "generate",
+        max_num_batched_tokens=64,
+        max_num_seqs=2,
+        max_model_len=max_model_len,
+    )
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 2
     cache_config.num_gpu_blocks = 2
     scheduler = Scheduler(scheduler_config, cache_config, None)
 
     # Add seq groups to scheduler.
-    seq_a, seq_group_a = create_dummy_prompt("1", block_size)
-    seq_b, seq_group_b = create_dummy_prompt("2", block_size)
+    seq_a, seq_group_a = create_dummy_prompt("1",
+                                             block_size,
+                                             block_size=block_size)
+    seq_b, seq_group_b = create_dummy_prompt("2",
+                                             block_size,
+                                             block_size=block_size)
     scheduler.add_seq_group(seq_group_a)
     scheduler.add_seq_group(seq_group_b)
 
@@ -198,7 +208,12 @@ def test_scheduler_max_seqs():
     num_seq_group = 4
     max_seq_group = 2
     max_model_len = 16
-    scheduler_config = SchedulerConfig(64, max_seq_group, max_model_len)
+    scheduler_config = SchedulerConfig(
+        "generate",
+        max_num_batched_tokens=64,
+        max_num_seqs=max_seq_group,
+        max_model_len=max_model_len,
+    )
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 8
     cache_config.num_gpu_blocks = 8
@@ -207,7 +222,9 @@ def test_scheduler_max_seqs():
     all_seq_groups: List[SequenceGroup] = []
     # Add seq groups to scheduler.
     for i in range(num_seq_group):
-        _, seq_group = create_dummy_prompt(str(i), prompt_length=block_size)
+        _, seq_group = create_dummy_prompt(str(i),
+                                           prompt_length=block_size,
+                                           block_size=block_size)
         all_seq_groups.append(seq_group)
 
     # Append 1 seq group
@@ -236,7 +253,13 @@ def test_scheduler_max_seqs():
 
 def test_scheduler_delay_factor():
     block_size = 4
-    scheduler_config = SchedulerConfig(100, 64, 16, delay_factor=0.5)
+    scheduler_config = SchedulerConfig(
+        "generate",
+        max_num_batched_tokens=100,
+        max_num_seqs=64,
+        max_model_len=16,
+        delay_factor=0.5,
+    )
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 8
     cache_config.num_gpu_blocks = 8
@@ -244,7 +267,8 @@ def test_scheduler_delay_factor():
 
     # schedule first prompt
     seq_group_meta, seq_group = create_dummy_prompt("0",
-                                                    prompt_length=block_size)
+                                                    prompt_length=block_size,
+                                                    block_size=block_size)
     scheduler.add_seq_group(seq_group)
     seq_group_meta, out = schedule_and_update_computed_tokens(scheduler)
     assert out.num_prefill_groups > 0
@@ -254,7 +278,8 @@ def test_scheduler_delay_factor():
     # wait for a second before scheduling next prompt
     time.sleep(1)
     seq_group_meta, seq_group = create_dummy_prompt("1",
-                                                    prompt_length=block_size)
+                                                    prompt_length=block_size,
+                                                    block_size=block_size)
     scheduler.add_seq_group(seq_group)
 
     # second prompt should *not* be scheduled
@@ -271,56 +296,26 @@ def test_scheduler_delay_factor():
     append_new_token(out, 1)
 
 
-def test_swapped_out_prioritized():
-    scheduler = initialize_scheduler(max_num_seqs=6)
-    # best_of=2 * 3 == 6 sequences.
-    for i in range(3):
-        _, seq_group = create_dummy_prompt(str(i), prompt_length=60, best_of=2)
-        scheduler.add_seq_group(seq_group)
-    seq_group_meta, out = schedule_and_update_computed_tokens(scheduler)
-    # prefill scheduled now.
-    assert len(out.scheduled_seq_groups) == 3
-    append_new_token(out, 1)
-
-    # The last request should be swapped out.
-    scheduler.block_manager.can_append_slots = MagicMock()
-
-    def cannot_append_second_group(seq_group, num_lookahead_slots):
-        return seq_group.request_id != "2"
-
-    scheduler.block_manager.can_append_slots.side_effect = (
-        cannot_append_second_group)
-
-    seq_group_meta, out = schedule_and_update_computed_tokens(scheduler)
-    assert len(out.scheduled_seq_groups) == 2
-    assert out.num_batched_tokens == 2
-    assert out.blocks_to_swap_out != []
-    assert out.blocks_to_swap_in == []
-    append_new_token(out, 1)
-
-    # Add 1 more task. Swap should be prioritized over prefill.
-    _, seq_group = create_dummy_prompt(str(i), prompt_length=60, best_of=2)
-    scheduler.add_seq_group(seq_group)
-    seq_group_meta, out = schedule_and_update_computed_tokens(scheduler)
-    append_new_token(out, 1)
-    assert len(out.scheduled_seq_groups) == 3
-    # 3 decodes. It is swapped in.
-    assert out.num_batched_tokens == 3
-    assert out.blocks_to_swap_in != []
-    assert out.blocks_to_swap_out == []
-
-
-def initialize_scheduler(*,
-                         max_num_seqs=1000,
-                         max_token_budget=1000,
-                         max_model_len=1000,
-                         lora_config=None):
-    block_size = 4
-    scheduler_config = SchedulerConfig(max_token_budget, max_num_seqs,
-                                       max_model_len)
+def initialize_scheduler(
+    *,
+    max_num_seqs=1000,
+    max_token_budget=1000,
+    max_model_len=1000,
+    lora_config=None,
+    block_size=4,
+    num_cpu_blocks=8,
+    num_gpu_blocks=8,
+):
+    block_size = block_size
+    scheduler_config = SchedulerConfig(
+        "generate",
+        max_num_batched_tokens=max_token_budget,
+        max_num_seqs=max_num_seqs,
+        max_model_len=max_model_len,
+    )
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
-    cache_config.num_cpu_blocks = 8
-    cache_config.num_gpu_blocks = 8
+    cache_config.num_cpu_blocks = num_cpu_blocks
+    cache_config.num_gpu_blocks = num_gpu_blocks
     scheduler = Scheduler(scheduler_config, cache_config, lora_config)
     return scheduler
 
@@ -346,12 +341,15 @@ def test_prefill_schedule_max_prompt_len():
     """
     Test prompt longer than max_prompt_len is aborted.
     """
-    scheduler = initialize_scheduler(max_model_len=30)
-    _, seq_group = create_dummy_prompt("0", prompt_length=60)
-    waiting = deque([seq_group])
+    block_size = 4
+    scheduler = initialize_scheduler(max_model_len=30, block_size=block_size)
+    _, seq_group = create_dummy_prompt("0",
+                                       prompt_length=60,
+                                       block_size=block_size)
+    scheduler.add_seq_group(seq_group)
     budget = create_token_budget()
-    remaining_waiting, output = scheduler._schedule_prefills(
-        waiting, budget, None)
+    output = scheduler._schedule_prefills(budget, None)
+    remaining_waiting = scheduler.waiting
     assert len(output.ignored_seq_groups) == 1
     assert len(output.seq_groups) == 0
     assert budget.num_batched_tokens == 0
@@ -363,16 +361,20 @@ def test_prefill_schedule_token_budget():
     """
     Test token budget respected.
     """
-    scheduler = initialize_scheduler()
-    waiting: Deque[SequenceGroup] = deque()
+    block_size = 4
+    scheduler = initialize_scheduler(block_size=block_size,
+                                     num_cpu_blocks=64,
+                                     num_gpu_blocks=64)
     budget = create_token_budget(token_budget=0)
     for i in range(2):
-        _, seq_group = create_dummy_prompt(str(i), prompt_length=60)
-        waiting.append(seq_group)
+        _, seq_group = create_dummy_prompt(str(i),
+                                           prompt_length=60,
+                                           block_size=block_size)
+        scheduler.add_seq_group(seq_group)
 
     # 0 token budget == nothing is scheduled.
-    remaining_waiting, output = scheduler._schedule_prefills(
-        waiting, budget, None)
+    output = scheduler._schedule_prefills(budget, None)
+    remaining_waiting = scheduler.waiting
     assert len(output.ignored_seq_groups) == 0
     assert len(output.seq_groups) == 0
     assert budget.num_batched_tokens == 0
@@ -381,8 +383,8 @@ def test_prefill_schedule_token_budget():
 
     # 60 token budget == 1 request scheduled.
     budget = create_token_budget(token_budget=60)
-    remaining_waiting, output = scheduler._schedule_prefills(
-        waiting, budget, None)
+    output = scheduler._schedule_prefills(budget, None)
+    remaining_waiting = scheduler.waiting
     assert len(output.ignored_seq_groups) == 0
     assert len(output.seq_groups) == 1
     assert budget.num_batched_tokens == 60
@@ -390,15 +392,18 @@ def test_prefill_schedule_token_budget():
     assert len(remaining_waiting) == 1
 
     # Test when current_batched_tokens respected.
-    scheduler = initialize_scheduler()
-    waiting = deque()
+    scheduler = initialize_scheduler(block_size=block_size,
+                                     num_cpu_blocks=16,
+                                     num_gpu_blocks=16)
     budget = create_token_budget(token_budget=60)
     add_token_budget(budget, 30, 0)
-    _, seq_group = create_dummy_prompt(str(i), prompt_length=60)
+    _, seq_group = create_dummy_prompt(str(i),
+                                       prompt_length=60,
+                                       block_size=block_size)
     # Cannot schedule a prompt that doesn't fit the budget.
-    waiting.append(seq_group)
-    remaining_waiting, output = scheduler._schedule_prefills(
-        waiting, budget, None)
+    scheduler.add_seq_group(seq_group)
+    output = scheduler._schedule_prefills(budget, None)
+    remaining_waiting = scheduler.waiting
     assert len(output.ignored_seq_groups) == 0
     assert len(output.seq_groups) == 0
     assert budget.num_batched_tokens == 30
@@ -406,8 +411,8 @@ def test_prefill_schedule_token_budget():
     assert len(remaining_waiting) == 1
     budget = create_token_budget(token_budget=90)
     add_token_budget(budget, 30, 0)
-    remaining_waiting, output = scheduler._schedule_prefills(
-        waiting, budget, None)
+    output = scheduler._schedule_prefills(budget, None)
+    remaining_waiting = scheduler.waiting
     assert len(output.seq_groups) == 1
     assert budget.num_batched_tokens == 90
     assert budget.num_curr_seqs == 1
@@ -418,14 +423,18 @@ def test_prefill_schedule_max_seqs():
     """
     Test max seq respected.
     """
-    scheduler = initialize_scheduler()
-    waiting: Deque[SequenceGroup] = deque()
+    block_size = 4
+    scheduler = initialize_scheduler(block_size=block_size,
+                                     num_cpu_blocks=64,
+                                     num_gpu_blocks=64)
     budget = create_token_budget(max_num_seqs=2)
     for i in range(3):
-        _, seq_group = create_dummy_prompt(str(i), prompt_length=60)
-        waiting.append(seq_group)
-    remaining_waiting, output = scheduler._schedule_prefills(
-        waiting, budget, None)
+        _, seq_group = create_dummy_prompt(str(i),
+                                           prompt_length=60,
+                                           block_size=block_size)
+        scheduler.add_seq_group(seq_group)
+    output = scheduler._schedule_prefills(budget, None)
+    remaining_waiting = scheduler.waiting
     assert len(output.ignored_seq_groups) == 0
     assert len(output.seq_groups) == 2
     assert budget.num_batched_tokens == 120
@@ -433,13 +442,15 @@ def test_prefill_schedule_max_seqs():
     assert len(remaining_waiting) == 1
 
     # Verify curr_num_seqs respected.
-    waiting = deque()
+    scheduler.waiting = deque()
     budget = create_token_budget(max_num_seqs=2)
     add_token_budget(budget, 0, 2)
-    _, seq_group = create_dummy_prompt(str(i), prompt_length=60)
-    waiting.append(seq_group)
-    remaining_waiting, output = scheduler._schedule_prefills(
-        waiting, budget, None)
+    _, seq_group = create_dummy_prompt(str(i),
+                                       prompt_length=60,
+                                       block_size=block_size)
+    scheduler.add_seq_group(seq_group)
+    output = scheduler._schedule_prefills(budget, None)
+    remaining_waiting = scheduler.waiting
     assert len(output.ignored_seq_groups) == 0
     assert len(output.seq_groups) == 0
     assert budget.num_batched_tokens == 0
@@ -451,30 +462,36 @@ def test_prefill_schedule_max_lora():
     """
     Test max lora is respected and prioritized.
     """
+    block_size = 4
     lora_config = LoRAConfig(max_lora_rank=8, max_loras=1)
-    scheduler = initialize_scheduler(lora_config=lora_config)
-    waiting: Deque[SequenceGroup] = deque()
+    scheduler = initialize_scheduler(lora_config=lora_config,
+                                     block_size=block_size,
+                                     num_cpu_blocks=64,
+                                     num_gpu_blocks=64)
     budget = create_token_budget(token_budget=120)
     curr_loras: Set[int] = set()
     for i in range(2):
         _, seq_group = create_dummy_prompt(str(i),
                                            prompt_length=60,
+                                           block_size=block_size,
                                            lora_request=LoRARequest(
                                                lora_name=str(i),
                                                lora_int_id=i + 1,
-                                               lora_local_path="abc"))
-        waiting.append(seq_group)
+                                               lora_path="abc"))
+        scheduler.add_seq_group(seq_group)
     # Add two more requests to verify lora is prioritized.
     # 0: Lora, 1: Lora, 2: regular, 3: regular
     # In the first iteration, index 0, 2 is scheduled.
     # If a request is not scheduled because it hits max lora, it is
     # prioritized. Verify that.
     for i in range(2, 4):
-        _, seq_group = create_dummy_prompt(str(i), prompt_length=60)
-        waiting.append(seq_group)
+        _, seq_group = create_dummy_prompt(str(i),
+                                           prompt_length=60,
+                                           block_size=block_size)
+        scheduler.add_seq_group(seq_group)
     # Schedule 2 requests (0 and 2)
-    remaining_waiting, output = scheduler._schedule_prefills(
-        waiting, budget, curr_loras)
+    output = scheduler._schedule_prefills(budget, curr_loras)
+    remaining_waiting = scheduler.waiting
     assert len(output.ignored_seq_groups) == 0
     assert len(output.seq_groups) == 2
     assert budget.num_batched_tokens == 120
@@ -485,8 +502,8 @@ def test_prefill_schedule_max_lora():
     # Reset curr_loras so that it can be scheduled.
     curr_loras = set()
     budget = create_token_budget(token_budget=60)
-    remaining_waiting, output = scheduler._schedule_prefills(
-        remaining_waiting, budget, curr_loras)
+    output = scheduler._schedule_prefills(budget, curr_loras)
+    remaining_waiting = scheduler.waiting
     assert len(output.seq_groups) == 1
     assert output.seq_groups[0].seq_group.request_id == "1"
     assert len(remaining_waiting) == 1
@@ -498,32 +515,37 @@ def test_prefill_schedule_no_block_manager_capacity():
     """
     Test sequence cannot be scheduled due to block manager has no capacity.
     """
-    scheduler = initialize_scheduler()
-    waiting: Deque[SequenceGroup] = deque()
+    block_size = 4
+    scheduler = initialize_scheduler(block_size=block_size,
+                                     num_gpu_blocks=128,
+                                     num_cpu_blocks=128)
     budget = create_token_budget()
     for i in range(3):
-        _, seq_group = create_dummy_prompt(str(i), prompt_length=60)
-        waiting.append(seq_group)
+        _, seq_group = create_dummy_prompt(str(i),
+                                           prompt_length=60,
+                                           block_size=block_size)
+        scheduler.add_seq_group(seq_group)
     scheduler.block_manager.can_allocate = MagicMock()
     scheduler.block_manager.can_allocate.return_value = AllocStatus.LATER
-    remainig_waiting, output = scheduler._schedule_prefills(
-        waiting, budget, None)
+    output = scheduler._schedule_prefills(budget, None)
+    remaining_waiting = scheduler.waiting
     assert len(output.ignored_seq_groups) == 0
     assert len(output.seq_groups) == 0
     assert budget.num_batched_tokens == 0
     assert budget.num_curr_seqs == 0
-    assert len(remainig_waiting) == 3
+    assert len(remaining_waiting) == 3
 
     scheduler = initialize_scheduler()
-    waiting = deque()
     budget = create_token_budget()
     for i in range(3):
-        _, seq_group = create_dummy_prompt(str(i), prompt_length=60)
-        waiting.append(seq_group)
+        _, seq_group = create_dummy_prompt(str(i),
+                                           prompt_length=60,
+                                           block_size=block_size)
+        scheduler.add_seq_group(seq_group)
     scheduler.block_manager.can_allocate = MagicMock()
     scheduler.block_manager.can_allocate.return_value = AllocStatus.NEVER
-    remaining_waiting, output = scheduler._schedule_prefills(
-        waiting, budget, None)
+    output = scheduler._schedule_prefills(budget, None)
+    remaining_waiting = scheduler.waiting
     assert len(output.ignored_seq_groups) == 3
     assert len(output.seq_groups) == 0
     assert budget.num_batched_tokens == 0
@@ -535,15 +557,18 @@ def test_decode_schedule_preempted():
     """
     Test decodes cannot be scheduled and preempted.
     """
-    scheduler = initialize_scheduler()
-    running: Deque[SequenceGroup] = deque()
-    policy = PolicyFactory.get_policy(policy_name="fcfs")
+    block_size = 4
+    scheduler = initialize_scheduler(block_size=block_size,
+                                     num_cpu_blocks=64,
+                                     num_gpu_blocks=64)
     curr_loras = None
     for i in range(3):
-        _, seq_group = create_dummy_prompt(str(i), prompt_length=60)
+        _, seq_group = create_dummy_prompt(str(i),
+                                           prompt_length=60,
+                                           block_size=block_size)
         scheduler._allocate_and_set_running(seq_group)
         append_new_token_seq_group(60, seq_group, 1)
-        running.append(seq_group)
+        scheduler._add_seq_group_to_running(seq_group)
     scheduler.block_manager.can_append_slots = MagicMock()
 
     def cannot_append_second_group(seq_group, num_lookahead_slots):
@@ -555,8 +580,8 @@ def test_decode_schedule_preempted():
     # 1 cannot be scheduled, and the lowest priority (request 2)
     # should be preempted. 1 will also be preempted.
     budget = create_token_budget()
-    remainig_running, output = scheduler._schedule_running(
-        running, budget, curr_loras, policy)
+    output = scheduler._schedule_running(budget, curr_loras)
+    remainig_running = scheduler.running
     assert len(remainig_running) == 0
     assert len(output.decode_seq_groups) == 1
     assert len(output.prefill_seq_groups) == 0
@@ -572,76 +597,30 @@ def test_decode_schedule_preempted():
     assert output.blocks_to_copy == []
 
 
-def test_decode_swap_beam_search():
-    """
-    Test best_of > 1 swap out blocks
-    """
-    scheduler = initialize_scheduler()
-    running: Deque[SequenceGroup] = deque()
-    policy = PolicyFactory.get_policy(policy_name="fcfs")
-    curr_loras = None
-    budget = create_token_budget()
-    for i in range(3):
-        _, seq_group = create_dummy_prompt(str(i), prompt_length=60, best_of=2)
-        scheduler._allocate_and_set_running(seq_group)
-        running.append(seq_group)
-        append_new_token_seq_group(60, seq_group, 1)
-        budget.add_num_seqs(seq_group.request_id,
-                            seq_group.get_max_num_running_seqs())
-        budget.add_num_batched_tokens(
-            seq_group.request_id, seq_group.num_seqs(SequenceStatus.RUNNING))
-
-    # The last request should be swapped out.
-    scheduler.block_manager.can_append_slots = MagicMock()
-
-    def cannot_append_second_group(seq_group, num_lookahead_slots):
-        return seq_group.request_id != "2"
-
-    scheduler.block_manager.can_append_slots.side_effect = (
-        cannot_append_second_group)
-    scheduler.block_manager.swap_out = MagicMock()
-    expected_swap_mapping = [("5", "7")]
-    scheduler.block_manager.swap_out.return_value = expected_swap_mapping
-
-    remainig_running, output = scheduler._schedule_running(
-        running, budget, curr_loras, policy)
-    assert len(remainig_running) == 0
-    assert len(output.decode_seq_groups) == 2
-    assert len(output.prefill_seq_groups) == 0
-    assert output.decode_seq_groups[0].seq_group.request_id == "0"
-    assert output.decode_seq_groups[1].seq_group.request_id == "1"
-    assert len(output.preempted) == 0
-    assert len(output.swapped_out) == 1
-    # Budget should refledct preempted requests.
-    assert budget.num_batched_tokens == 2
-    # since there are 2 sequences, 2 should be subtracted.
-    assert budget.num_curr_seqs == 4
-    # Both should be preempted, not swapped.
-    assert output.blocks_to_swap_out == expected_swap_mapping
-    # Nothing is copied.
-    assert output.blocks_to_copy == []
-
-
 def test_schedule_decode_blocks_to_copy_update():
     """
     Verify blocks_to_copy is updated.
     """
-    scheduler = initialize_scheduler()
-    _, seq_group = create_dummy_prompt("1", prompt_length=60, best_of=2)
-    running: Deque[SequenceGroup] = deque()
-    policy = PolicyFactory.get_policy(policy_name="fcfs")
+    block_size = 4
+    scheduler = initialize_scheduler(block_size=4,
+                                     num_cpu_blocks=16,
+                                     num_gpu_blocks=16)
+    _, seq_group = create_dummy_prompt("1",
+                                       prompt_length=60,
+                                       best_of=2,
+                                       block_size=block_size)
     curr_loras = None
     scheduler._allocate_and_set_running(seq_group)
     append_new_token_seq_group(60, seq_group, 1)
-    running.append(seq_group)
+    scheduler._add_seq_group_to_running(seq_group)
 
     # The last request should be swapped out.
     scheduler.block_manager.append_slots = MagicMock()
     scheduler.block_manager.append_slots.return_value = [(2, 3)]
 
     budget = create_token_budget()
-    remaining_running, output = scheduler._schedule_running(
-        running, budget, curr_loras, policy)
+    output = scheduler._schedule_running(budget, curr_loras)
+    remaining_running = scheduler.running
     assert len(remaining_running) == 0
     assert len(output.decode_seq_groups) == 1
     assert len(output.prefill_seq_groups) == 0
@@ -654,121 +633,31 @@ def test_schedule_decode_blocks_to_copy_update():
     assert output.blocks_to_copy == [(2, 3)]
 
 
-def test_schedule_swapped_simple():
-    scheduler = initialize_scheduler()
-    swapped: Deque[SequenceGroup] = deque()
-    policy = PolicyFactory.get_policy(policy_name="fcfs")
-    curr_loras = None
-    blocks_to_swap_out: List[Tuple[int, int]] = []
-    _, seq_group = create_dummy_prompt("1", prompt_length=60, best_of=2)
-    scheduler._allocate_and_set_running(seq_group)
-    append_new_token_seq_group(60, seq_group, 1)
-    scheduler._swap_out(seq_group, blocks_to_swap_out)
-    swapped.append(seq_group)
-
-    budget = create_token_budget()
-    remaining_swapped, output = scheduler._schedule_swapped(
-        swapped, budget, curr_loras, policy)
-    assert len(remaining_swapped) == 0
-    assert budget.num_batched_tokens == 1
-    assert budget.num_curr_seqs == 2
-    assert len(output.decode_seq_groups) == 1
-    assert len(output.prefill_seq_groups) == 0
-    # swap in is the reverse of swap out
-    blocks_to_swap_in_reverse = []
-    for swapin, swapout in output.blocks_to_swap_in:
-        blocks_to_swap_in_reverse.append((swapout, swapin))
-    assert blocks_to_swap_out == blocks_to_swap_in_reverse
-
-
-def test_schedule_swapped_max_token_budget():
-    scheduler = initialize_scheduler()
-    swapped: Deque[SequenceGroup] = deque()
-    policy = PolicyFactory.get_policy(policy_name="fcfs")
-    curr_loras = None
-    blocks_to_swap_out: List[Tuple[int, int]] = []
-    for _ in range(2):
-        _, seq_group = create_dummy_prompt("1", prompt_length=60, best_of=2)
-        scheduler._allocate_and_set_running(seq_group)
-        append_new_token_seq_group(60, seq_group, 1)
-        scheduler._swap_out(seq_group, blocks_to_swap_out)
-        swapped.append(seq_group)
-
-    budget = create_token_budget(token_budget=1)
-    remaining_swapped, output = scheduler._schedule_swapped(
-        swapped, budget, curr_loras, policy)
-    assert len(remaining_swapped) == 1
-    assert budget.num_batched_tokens == 1
-    assert budget.num_curr_seqs == 2
-    assert len(output.decode_seq_groups) == 1
-    assert len(output.prefill_seq_groups) == 0
-
-    # Verify num_batched_tokens are respected.
-    budget = create_token_budget(token_budget=1)
-    add_token_budget(budget, 1, 0)
-    remaining_swapped, output = scheduler._schedule_swapped(
-        remaining_swapped, budget, curr_loras, policy)
-    assert len(remaining_swapped) == 1
-    assert budget.num_batched_tokens == 1
-    assert budget.num_curr_seqs == 0
-    assert len(output.decode_seq_groups) == 0
-    assert len(output.prefill_seq_groups) == 0
-
-
-def test_schedule_swapped_max_seqs():
-    scheduler = initialize_scheduler()
-    swapped: Deque[SequenceGroup] = deque()
-    policy = PolicyFactory.get_policy(policy_name="fcfs")
-    curr_loras = None
-    blocks_to_swap_out: List[Tuple[int, int]] = []
-    for i in range(4):
-        _, seq_group = create_dummy_prompt(str(i), prompt_length=60)
-        scheduler._allocate_and_set_running(seq_group)
-        append_new_token_seq_group(60, seq_group, 1)
-        scheduler._swap_out(seq_group, blocks_to_swap_out)
-        swapped.append(seq_group)
-
-    budget = create_token_budget(max_num_seqs=2)
-    remaining_swapped, output = scheduler._schedule_swapped(
-        swapped, budget, curr_loras, policy)
-    assert len(remaining_swapped) == 2
-    assert budget.num_batched_tokens == 2
-    assert budget.num_curr_seqs == 2
-    assert len(output.decode_seq_groups) == 2
-    assert len(output.prefill_seq_groups) == 0
-
-    # Verify num_curr_seqs are respected.
-    remaining_swapped, output = scheduler._schedule_swapped(
-        remaining_swapped, budget, curr_loras, policy)
-    assert len(remaining_swapped) == 2
-    assert budget.num_batched_tokens == 2
-    assert budget.num_curr_seqs == 2
-    assert len(output.decode_seq_groups) == 0
-    assert len(output.prefill_seq_groups) == 0
-
-
 def test_schedule_swapped_max_loras():
+    block_size = 4
     lora_config = LoRAConfig(max_lora_rank=8, max_loras=1)
-    scheduler = initialize_scheduler(lora_config=lora_config)
-    swapped: Deque[SequenceGroup] = deque()
-    policy = PolicyFactory.get_policy(policy_name="fcfs")
+    scheduler = initialize_scheduler(lora_config=lora_config,
+                                     block_size=block_size,
+                                     num_cpu_blocks=32,
+                                     num_gpu_blocks=32)
     curr_loras: Set[int] = set()
     blocks_to_swap_out: List[Tuple[int, int]] = []
     for i in range(2):
         _, seq_group = create_dummy_prompt(str(i),
                                            prompt_length=60,
+                                           block_size=block_size,
                                            lora_request=LoRARequest(
                                                lora_name=str(i),
                                                lora_int_id=i + 1,
-                                               lora_local_path="abc"))
+                                               lora_path="abc"))
         scheduler._allocate_and_set_running(seq_group)
         append_new_token_seq_group(60, seq_group, 1)
         scheduler._swap_out(seq_group, blocks_to_swap_out)
-        swapped.append(seq_group)
+        scheduler._add_seq_group_to_swapped(seq_group)
 
     budget = create_token_budget()
-    remaining_swapped, output = scheduler._schedule_swapped(
-        swapped, budget, curr_loras, policy)
+    output = scheduler._schedule_swapped(budget, curr_loras)
+    remaining_swapped = scheduler.swapped
     assert len(remaining_swapped) == 1
     assert budget.num_batched_tokens == 1
     assert budget.num_curr_seqs == 1
@@ -778,25 +667,29 @@ def test_schedule_swapped_max_loras():
 
 
 def test_schedule_swapped_cannot_swap_in():
-    scheduler = initialize_scheduler()
-    swapped: Deque[SequenceGroup] = deque()
-    policy = PolicyFactory.get_policy(policy_name="fcfs")
+    block_size = 4
+    scheduler = initialize_scheduler(block_size=block_size,
+                                     num_cpu_blocks=32,
+                                     num_gpu_blocks=32)
     curr_loras = None
     blocks_to_swap_out: List[Tuple[int, int]] = []
-    for _ in range(2):
-        _, seq_group = create_dummy_prompt("1", prompt_length=60, best_of=2)
+    for i in range(2):
+        _, seq_group = create_dummy_prompt(str(i),
+                                           prompt_length=60,
+                                           best_of=2,
+                                           block_size=block_size)
         scheduler._allocate_and_set_running(seq_group)
         append_new_token_seq_group(60, seq_group, 1)
         scheduler._swap_out(seq_group, blocks_to_swap_out)
-        swapped.append(seq_group)
+        scheduler._add_seq_group_to_swapped(seq_group)
 
     # The last request should be swapped out.
     scheduler.block_manager.can_swap_in = MagicMock()
     scheduler.block_manager.can_swap_in.return_value = AllocStatus.LATER
     # Since we cannot swap in, none of the requests are swapped in.
     budget = create_token_budget()
-    remaining_swapped, output = scheduler._schedule_swapped(
-        swapped, budget, curr_loras, policy)
+    output = scheduler._schedule_swapped(budget, curr_loras)
+    remaining_swapped = scheduler.swapped
     assert len(remaining_swapped) == 2
     assert budget.num_batched_tokens == 0
     assert budget.num_curr_seqs == 0
@@ -805,25 +698,29 @@ def test_schedule_swapped_cannot_swap_in():
 
 
 def test_infeasible_swap():
-    scheduler = initialize_scheduler()
-    swapped: Deque[SequenceGroup] = deque()
-    policy = PolicyFactory.get_policy(policy_name="fcfs")
+    block_size = 4
+    scheduler = initialize_scheduler(block_size=block_size,
+                                     num_cpu_blocks=32,
+                                     num_gpu_blocks=32)
     curr_loras = None
     blocks_to_swap_out: List[Tuple[int, int]] = []
-    for _ in range(2):
-        _, seq_group = create_dummy_prompt("1", prompt_length=60, best_of=2)
+    for i in range(2):
+        _, seq_group = create_dummy_prompt(str(i),
+                                           prompt_length=60,
+                                           best_of=2,
+                                           block_size=block_size)
         scheduler._allocate_and_set_running(seq_group)
         append_new_token_seq_group(60, seq_group, 1)
         scheduler._swap_out(seq_group, blocks_to_swap_out)
-        swapped.append(seq_group)
+        scheduler._add_seq_group_to_swapped(seq_group)
 
     # The last request should be swapped out.
     scheduler.block_manager.can_swap_in = MagicMock()
     scheduler.block_manager.can_swap_in.return_value = AllocStatus.NEVER
     # Since we cannot swap in, none of the requests are swapped in.
     budget = create_token_budget()
-    remaining_swapped, output = scheduler._schedule_swapped(
-        swapped, budget, curr_loras, policy)
+    output = scheduler._schedule_swapped(budget, curr_loras)
+    remaining_swapped = scheduler.swapped
     assert len(remaining_swapped) == 0
     assert len(output.infeasible_seq_groups) == 2
     assert budget.num_batched_tokens == 0
@@ -833,24 +730,28 @@ def test_infeasible_swap():
 
 
 def test_schedule_swapped_blocks_to_copy():
-    scheduler = initialize_scheduler()
-    swapped: Deque[SequenceGroup] = deque()
-    policy = PolicyFactory.get_policy(policy_name="fcfs")
+    block_size = 4
+    scheduler = initialize_scheduler(block_size=block_size,
+                                     num_cpu_blocks=32,
+                                     num_gpu_blocks=32)
     curr_loras = None
-    _, seq_group = create_dummy_prompt("1", prompt_length=60, best_of=2)
+    _, seq_group = create_dummy_prompt("1",
+                                       prompt_length=60,
+                                       best_of=2,
+                                       block_size=block_size)
     scheduler._allocate_and_set_running(seq_group)
     append_new_token_seq_group(60, seq_group, 1)
     blocks_to_swap_out: List[Tuple[int, int]] = []
     scheduler._swap_out(seq_group, blocks_to_swap_out)
-    swapped.append(seq_group)
+    scheduler._add_seq_group_to_swapped(seq_group)
 
     # The last request should be swapped out.
     scheduler.block_manager.append_slots = MagicMock()
     scheduler.block_manager.append_slots.return_value = [(2, 3)]
 
     budget = create_token_budget()
-    remaining_swapped, output = scheduler._schedule_swapped(
-        swapped, budget, curr_loras, policy)
+    output = scheduler._schedule_swapped(budget, curr_loras)
+    remaining_swapped = scheduler.swapped
     assert len(remaining_swapped) == 0
     assert len(output.decode_seq_groups) == 1
     assert len(output.prefill_seq_groups) == 0

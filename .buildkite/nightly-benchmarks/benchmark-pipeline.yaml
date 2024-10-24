@@ -8,10 +8,9 @@ steps:
           containers:
           - image: badouralix/curl-jq
             command:
-            - sh
-            - .buildkite/nightly-benchmarks/scripts/wait-for-image.sh
+            - sh .buildkite/nightly-benchmarks/scripts/wait-for-image.sh
   - wait
-  - label: "A100 Benchmark"
+  - label: "A100"
     agents:
       queue: A100
     plugins:
@@ -21,7 +20,7 @@ steps:
           containers:
           - image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT
             command:
-            - bash .buildkite/nightly-benchmarks/run-benchmarks-suite.sh
+            - bash .buildkite/nightly-benchmarks/scripts/run-performance-benchmarks.sh
             resources:
               limits:
                 nvidia.com/gpu: 8
@@ -42,7 +41,7 @@ steps:
           - name: devshm
             emptyDir:
               medium: Memory
-  # - label: "H100: NVIDIA SMI"
+  # - label: "H100"
   #   agents:
   #     queue: H100
   #   plugins:
@@ -53,7 +52,6 @@ steps:
   #       - .buildkite/nightly-benchmarks/run-benchmarks-suite.sh
   #       mount-buildkite-agent: true
   #       propagate-environment: true
-  #       propagate-uid-gid: false
   #       ipc: host
   #       gpus: all
   #       environment:

@@ -1,19 +1,21 @@
 """A CPU worker class."""
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Type
 
 import torch
 import torch.distributed
 
+import vllm.envs as envs
 from vllm.attention import get_attn_backend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, MultiModalConfig, ParallelConfig,
-                         PromptAdapterConfig, SchedulerConfig)
+                         ModelConfig, ParallelConfig, PromptAdapterConfig,
+                         SchedulerConfig)
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
 from vllm.sequence import ExecuteModelRequest
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, init_kmp_env
+from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
+from vllm.worker.cpu_enc_dec_model_runner import CPUEncoderDecoderModelRunner
 from vllm.worker.cpu_model_runner import CPUModelRunner
 from vllm.worker.worker_base import (LocalOrDistributedWorkerBase,
                                      LoraNotSupportedWorkerBase, WorkerInput)
@@ -54,13 +56,11 @@ class CPUCacheEngine:
 
         # Get attention backend.
         self.attn_backend = get_attn_backend(
-            self.model_config.get_num_attention_heads(self.parallel_config),
             self.model_config.get_head_size(),
-            self.model_config.get_num_kv_heads(self.parallel_config),
-            self.model_config.get_sliding_window(),
             self.model_config.dtype,
             cache_config.cache_dtype,
             self.block_size,
+            self.model_config.is_attention_free,
         )
 
         # Initialize the cache.
@@ -131,7 +131,6 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         rank: int,
         distributed_init_method: str,
         lora_config: Optional[LoRAConfig] = None,
-        multimodal_config: Optional[MultiModalConfig] = None,
         kv_cache_dtype: Optional[str] = "auto",
         prompt_adapter_config: Optional[PromptAdapterConfig] = None,
         is_driver_worker: bool = False,
@@ -147,19 +146,26 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         self.distributed_init_method = distributed_init_method
         self.lora_config = lora_config
         self.prompt_adapter_config = prompt_adapter_config
-        self.multimodal_config = multimodal_config
         self.is_driver_worker = is_driver_worker
         if self.is_driver_worker:
             assert self.rank == 0, "The driver worker must have rank 0."
-
-        # try to initialize intel openmp optimized tunings
-        init_kmp_env()
 
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
             from vllm.utils import init_cached_hf_modules
             init_cached_hf_modules()
-        self.model_runner: CPUModelRunner = CPUModelRunner(
+
+        # Setup OpenMP threads affinity.
+        omp_cpuids = envs.VLLM_CPU_OMP_THREADS_BIND
+        if omp_cpuids == "all":
+            self.local_omp_cpuid = "all"
+        else:
+            self.local_omp_cpuid = omp_cpuids.split("|")[rank]
+
+        ModelRunnerClass: Type[CPUModelRunner] = CPUModelRunner
+        if self._is_encoder_decoder_model():
+            ModelRunnerClass = CPUEncoderDecoderModelRunner
+        self.model_runner: CPUModelRunner = ModelRunnerClass(
             model_config,
             parallel_config,
             scheduler_config,
@@ -167,7 +173,6 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
             cache_config,
             load_config=self.load_config,
             lora_config=self.lora_config,
-            multimodal_config=self.multimodal_config,
             kv_cache_dtype=kv_cache_dtype,
             prompt_adapter_config=self.prompt_adapter_config,
             is_driver_worker=is_driver_worker)
@@ -176,7 +181,41 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         self.cache_engine: List[CPUCacheEngine]
         self.cpu_cache: List[List[torch.Tensor]]
 
+        # Torch profiler. Enabled and configured through env vars:
+        # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
+        if envs.VLLM_TORCH_PROFILER_DIR:
+            torch_profiler_trace_dir = envs.VLLM_TORCH_PROFILER_DIR
+            logger.info("Profiling enabled. Traces will be saved to: %s",
+                        torch_profiler_trace_dir)
+            self.profiler = torch.profiler.profile(
+                activities=[
+                    torch.profiler.ProfilerActivity.CPU,
+                ],
+                with_stack=True,
+                on_trace_ready=torch.profiler.tensorboard_trace_handler(
+                    torch_profiler_trace_dir, use_gzip=True))
+        else:
+            self.profiler = None
+
+    def start_profile(self):
+        if self.profiler is None:
+            raise RuntimeError("Profiler is not enabled.")
+        self.profiler.start()
+
+    def stop_profile(self):
+        if self.profiler is None:
+            raise RuntimeError("Profiler is not enabled.")
+        self.profiler.stop()
+
+    def _is_encoder_decoder_model(self):
+        return self.model_config.is_encoder_decoder_model
+
     def init_device(self) -> None:
+        if self.local_omp_cpuid != "all":
+            ret = torch.ops._C_utils.init_cpu_threads_env(self.local_omp_cpuid)
+            if ret:
+                logger.info(ret)
+
         self.init_distributed_environment()
         # Set random seed.
         set_random_seed(self.model_config.seed)

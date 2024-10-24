@@ -58,10 +58,10 @@ def test_allocate_immutable_block(num_cpu_blocks: int, num_gpu_blocks: int,
 
     unique_token_ids = list(
         range((num_cpu_blocks + num_gpu_blocks) * block_size))
-    gpu_token_ids = chunk_list(unique_token_ids[:num_gpu_blocks * block_size],
-                               block_size)
-    cpu_token_ids = chunk_list(unique_token_ids[num_gpu_blocks * block_size:],
-                               block_size)
+    gpu_token_ids = list(
+        chunk_list(unique_token_ids[:num_gpu_blocks * block_size], block_size))
+    cpu_token_ids = list(
+        chunk_list(unique_token_ids[num_gpu_blocks * block_size:], block_size))
 
     assert allocator.get_num_free_blocks(Device.CPU) == num_cpu_blocks
     assert allocator.get_num_free_blocks(Device.GPU) == num_gpu_blocks

@@ -1,9 +1,9 @@
 """Token blocks."""
-from typing import List
+from typing import TYPE_CHECKING, Iterator, List, Optional
 
 from vllm.utils import Device
 
-DEFAULT_LAST_ACCESSED_TIME = -1
+DEFAULT_LAST_ACCESSED_TIME: float = -1
 
 
 class PhysicalTokenBlock:
@@ -37,5 +37,52 @@ class PhysicalTokenBlock:
                 f'computed={self.computed})')
 
 
-# Mapping: logical block number -> physical block.
-BlockTable = List[PhysicalTokenBlock]
+class BlockTable:
+    """Holds a list of blocks with caching of their associated block_ids 
+    """
+
+    def __init__(self, blocks: Optional[List[PhysicalTokenBlock]] = None):
+        self._blocks: List[PhysicalTokenBlock] = []
+        self._block_ids: List[int] = []
+
+        if blocks is not None:
+            for block in blocks:
+                self.append(block)
+
+    def append(self, block: PhysicalTokenBlock):
+        self._blocks.append(block)
+        self._block_ids.append(block.block_number)
+
+    def __len__(self) -> int:
+        return len(self._blocks)
+
+    def __getitem__(self, key):
+        return self._blocks[key]
+
+    if TYPE_CHECKING:
+
+        def __iter__(self) -> Iterator[PhysicalTokenBlock]:
+            raise RuntimeError("Method should be automatically generated")
+
+    def __setitem__(self, key, value):
+        if isinstance(key, slice):
+            blocks = value
+            self._blocks[key] = blocks
+            self._block_ids[key] = [b.block_number for b in blocks]
+        else:
+            block = value
+            self._blocks[key] = block
+            self._block_ids[key] = block.block_number
+
+    def reset(self):
+        self._blocks = []
+        self._block_ids = []
+
+    def copy(self) -> "BlockTable":
+        return BlockTable(self._blocks)
+
+    def list(self) -> List[PhysicalTokenBlock]:
+        return self._blocks
+
+    def ids(self) -> List[int]:
+        return self._block_ids

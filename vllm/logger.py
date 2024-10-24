@@ -15,8 +15,10 @@ import vllm.envs as envs
 VLLM_CONFIGURE_LOGGING = envs.VLLM_CONFIGURE_LOGGING
 VLLM_LOGGING_CONFIG_PATH = envs.VLLM_LOGGING_CONFIG_PATH
 VLLM_LOGGING_LEVEL = envs.VLLM_LOGGING_LEVEL
+VLLM_LOGGING_PREFIX = envs.VLLM_LOGGING_PREFIX
 
-_FORMAT = "%(levelname)s %(asctime)s %(filename)s:%(lineno)d] %(message)s"
+_FORMAT = (f"{VLLM_LOGGING_PREFIX}%(levelname)s %(asctime)s "
+           "%(filename)s:%(lineno)d] %(message)s")
 _DATE_FORMAT = "%m-%d %H:%M:%S"
 
 DEFAULT_LOGGING_CONFIG = {
@@ -43,6 +45,7 @@ DEFAULT_LOGGING_CONFIG = {
         },
     },
     "version": 1,
+    "disable_existing_loggers": False
 }
 
 

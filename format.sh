@@ -21,6 +21,20 @@ builtin cd "$(dirname "${BASH_SOURCE:-$0}")"
 ROOT="$(git rev-parse --show-toplevel)"
 builtin cd "$ROOT" || exit 1
 
+check_command() {
+    if ! command -v "$1" &> /dev/null; then
+        echo "❓❓$1 is not installed, please run \`pip install -r requirements-lint.txt\`"
+        exit 1
+    fi
+}
+
+check_command yapf
+check_command ruff
+check_command mypy
+check_command codespell
+check_command isort
+check_command clang-format
+
 YAPF_VERSION=$(yapf --version | awk '{print $2}')
 RUFF_VERSION=$(ruff --version | awk '{print $2}')
 MYPY_VERSION=$(mypy --version | awk '{print $2}')
@@ -31,7 +45,7 @@ CLANGFORMAT_VERSION=$(clang-format --version | awk '{print $3}')
 # # params: tool name, tool version, required version
 tool_version_check() {
     if [[ $2 != $3 ]]; then
-        echo "Wrong $1 version installed: $3 is required, not $2."
+        echo "❓❓Wrong $1 version installed: $3 is required, not $2."
         exit 1
     fi
 }
@@ -96,23 +110,8 @@ echo 'vLLM yapf: Done'
 
 # Run mypy
 echo 'vLLM mypy:'
-mypy tests --config-file pyproject.toml
-mypy vllm/*.py --config-file pyproject.toml
-mypy vllm/attention --config-file pyproject.toml
-mypy vllm/core --config-file pyproject.toml
-mypy vllm/distributed --config-file pyproject.toml
-mypy vllm/engine  --config-file pyproject.toml
-mypy vllm/entrypoints --config-file pyproject.toml
-mypy vllm/executor --config-file pyproject.toml
-mypy vllm/logging --config-file pyproject.toml
-mypy vllm/lora --config-file pyproject.toml
-mypy vllm/model_executor  --config-file pyproject.toml
-mypy vllm/multimodal --config-file pyproject.toml
-mypy vllm/prompt_adapter --config-file pyproject.toml
-mypy vllm/spec_decode --config-file pyproject.toml
-mypy vllm/transformers_utils --config-file pyproject.toml
-mypy vllm/usage --config-file pyproject.toml
-mypy vllm/worker --config-file pyproject.toml
+tools/mypy.sh
+echo 'vLLM mypy: Done'
 
 
 # If git diff returns a file that is in the skip list, the file may be checked anyway:
@@ -131,7 +130,7 @@ spell_check_all(){
   codespell --toml pyproject.toml "${CODESPELL_EXCLUDES[@]}"
 }
 
-# Spelling  check of files that differ from main branch.
+# Spelling check of files that differ from main branch.
 spell_check_changed() {
     # The `if` guard ensures that the list of filenames is not empty, which
     # could cause ruff to receive 0 positional arguments, making it hang
@@ -164,7 +163,7 @@ echo 'vLLM codespell: Done'
 
 # Lint specified files
 lint() {
-    ruff "$@"
+    ruff check "$@"
 }
 
 # Lint files that differ from main branch. Ignores dirs that are not slated
@@ -180,7 +179,7 @@ lint_changed() {
 
     if ! git diff --diff-filter=ACM --quiet --exit-code "$MERGEBASE" -- '*.py' '*.pyi' &>/dev/null; then
         git diff --name-only --diff-filter=ACM "$MERGEBASE" -- '*.py' '*.pyi' | xargs \
-             ruff
+             ruff check
     fi
 
 }
@@ -245,12 +244,11 @@ echo 'vLLM isort: Done'
 # NOTE: Keep up to date with .github/workflows/clang-format.yml
 CLANG_FORMAT_EXCLUDES=(
     'csrc/moe/topk_softmax_kernels.cu'
-    'csrc/punica/bgmv/bgmv_bf16_bf16_bf16.cu'
-    'csrc/punica/bgmv/bgmv_config.h'
-    'csrc/punica/bgmv/bgmv_impl.cuh'
-    'csrc/punica/bgmv/vec_dtypes.cuh'
-    'csrc/punica/punica_ops.cu'
-    'csrc/punica/type_convert.h'
+    'csrc/quantization/gguf/ggml-common.h'
+    'csrc/quantization/gguf/dequantize.cuh'
+    'csrc/quantization/gguf/vecdotq.cuh'
+    'csrc/quantization/gguf/mmq.cuh'
+    'csrc/quantization/gguf/mmvq.cuh'
 )
 
 # Format specified files with clang-format
@@ -269,7 +267,7 @@ clang_format_changed() {
     MERGEBASE="$(git merge-base origin/main HEAD)"
 
     # Get the list of changed files, excluding the specified ones
-    changed_files=$(git diff --name-only --diff-filter=ACM "$MERGEBASE" -- '*.h' '*.cpp' '*.cu' '*.cuh' | grep -vFf <(printf "%s\n" "${CLANG_FORMAT_EXCLUDES[@]}"))
+    changed_files=$(git diff --name-only --diff-filter=ACM "$MERGEBASE" -- '*.h' '*.cpp' '*.cu' '*.cuh' | (grep -vFf <(printf "%s\n" "${CLANG_FORMAT_EXCLUDES[@]}") || echo -e))
     if [ -n "$changed_files" ]; then
         echo "$changed_files" | xargs -P 5 clang-format -i
     fi
@@ -292,12 +290,17 @@ else
 fi
 echo 'vLLM clang-format: Done'
 
+echo 'vLLM actionlint:'
+tools/actionlint.sh -color
+echo 'vLLM actionlint: Done'
 
 if ! git diff --quiet &>/dev/null; then
-    echo 'Reformatted files. Please review and stage the changes.'
-    echo 'Changes not staged for commit:'
-    echo
+    echo 
+    echo "🔍🔍There are files changed by the format checker or by you that are not added and committed:"
     git --no-pager diff --name-only
+    echo "🔍🔍Format checker passed, but please add, commit and push all the files above to include changes made by the format checker."
 
     exit 1
+else
+    echo "✨🎉 Format check passed! Congratulations! 🎉✨"
 fi

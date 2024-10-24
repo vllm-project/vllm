@@ -9,11 +9,12 @@ from unittest.mock import patch
 import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
-from zmq import PUB, REP, REQ, SUB, SUBSCRIBE, Context  # type: ignore
+from zmq import IPV6  # type: ignore
+from zmq import SUB, SUBSCRIBE, XPUB, XPUB_VERBOSE, Context  # type: ignore
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.utils import get_ip, get_open_port
+from vllm.utils import get_ip, get_open_port, is_valid_ipv6_address
 
 VLLM_RINGBUFFER_WARNING_INTERVAL = envs.VLLM_RINGBUFFER_WARNING_INTERVAL
 
@@ -108,8 +109,15 @@ class ShmRingBuffer:
             # created by the process. The following patch is a workaround.
             with patch("multiprocessing.resource_tracker.register",
                        lambda *args, **kwargs: None):
-                self.shared_memory = shared_memory.SharedMemory(name=name)
-            assert self.shared_memory.size == self.total_bytes_of_buffer
+                try:
+                    self.shared_memory = shared_memory.SharedMemory(name=name)
+                    assert (
+                        self.shared_memory.size == self.total_bytes_of_buffer)
+                except FileNotFoundError:
+                    # we might deserialize the object in a different node
+                    # in this case, this object is not used,
+                    # and we should suppress the error
+                    pass
 
     def __reduce__(self):
         return (
@@ -119,9 +127,10 @@ class ShmRingBuffer:
         )
 
     def __del__(self):
-        self.shared_memory.close()
-        if self.is_creator:
-            self.shared_memory.unlink()
+        if hasattr(self, "shared_memory"):
+            self.shared_memory.close()
+            if self.is_creator:
+                self.shared_memory.unlink()
 
     @contextmanager
     def get_data(self, current_idx: int):
@@ -145,9 +154,7 @@ class Handle:
 
     buffer: Optional[ShmRingBuffer] = None
     local_subscribe_port: Optional[int] = None
-    local_sync_port: Optional[int] = None
     remote_subscribe_port: Optional[int] = None
-    remote_sync_port: Optional[int] = None
 
 
 class MessageQueue:
@@ -170,7 +177,7 @@ class MessageQueue:
         self.n_remote_reader = n_remote_reader
 
         if connect_ip is None:
-            connect_ip = get_ip()
+            connect_ip = get_ip() if n_remote_reader > 0 else "127.0.0.1"
 
         context = Context()
 
@@ -181,38 +188,41 @@ class MessageQueue:
             self.buffer = ShmRingBuffer(n_local_reader, max_chunk_bytes,
                                         max_chunks)
 
-            self.local_socket = context.socket(PUB)
+            # XPUB is very similar to PUB,
+            # except that it can receive subscription messages
+            # to confirm the number of subscribers
+            self.local_socket = context.socket(XPUB)
+            # set the verbose option so that we can receive every subscription
+            # message. otherwise, we will only receive the first subscription
+            # see http://api.zeromq.org/3-3:zmq-setsockopt for more details
+            self.local_socket.setsockopt(XPUB_VERBOSE, True)
             local_subscribe_port = get_open_port()
-            self.local_socket.bind(f"tcp://*:{local_subscribe_port}")
+            socket_addr = f"tcp://127.0.0.1:{local_subscribe_port}"
+            logger.debug("Binding to %s", socket_addr)
+            self.local_socket.bind(socket_addr)
 
-            self.local_sync_socket = context.socket(REP)
-            local_sync_port = get_open_port()
-            self.local_sync_socket.bind(f"tcp://*:{local_sync_port}")
             self.current_idx = 0
 
         else:
             self.buffer = None  # type: ignore
             local_subscribe_port = None
-            local_sync_port = None
             self.local_socket = None
-            self.local_sync_socket = None
             self.current_idx = -1
 
         if n_remote_reader > 0:
             # for remote readers, we will:
             # create a publish-subscribe socket to communicate large data
-            self.remote_socket = context.socket(PUB)
+            self.remote_socket = context.socket(XPUB)
+            self.remote_socket.setsockopt(XPUB_VERBOSE, True)
             remote_subscribe_port = get_open_port()
-            self.remote_socket.bind(f"tcp://*:{remote_subscribe_port}")
+            if is_valid_ipv6_address(connect_ip):
+                self.remote_socket.setsockopt(IPV6, 1)
+            socket_addr = f"tcp://*:{remote_subscribe_port}"
+            self.remote_socket.bind(socket_addr)
 
-            self.remote_sync_socket = context.socket(REP)
-            remote_sync_port = get_open_port()
-            self.remote_sync_socket.bind(f"tcp://*:{remote_sync_port}")
         else:
             remote_subscribe_port = None
-            remote_sync_port = None
             self.remote_socket = None
-            self.remote_sync_socket = None
 
         self._is_writer = True
         self._is_local_reader = False
@@ -225,10 +235,10 @@ class MessageQueue:
             local_reader_ranks=local_reader_ranks,
             buffer=self.buffer,
             local_subscribe_port=local_subscribe_port,
-            local_sync_port=local_sync_port,
             remote_subscribe_port=remote_subscribe_port,
-            remote_sync_port=remote_sync_port,
         )
+
+        logger.info("vLLM message queue communication handle: %s", self.handle)
 
     def export_handle(self) -> Handle:
         return self.handle
@@ -251,15 +261,11 @@ class MessageQueue:
 
             self.local_socket = context.socket(SUB)
             self.local_socket.setsockopt_string(SUBSCRIBE, "")
-            self.local_socket.connect(
-                f"tcp://{handle.connect_ip}:{handle.local_subscribe_port}")
-
-            self.local_sync_socket = context.socket(REQ)
-            self.local_sync_socket.connect(
-                f"tcp://{handle.connect_ip}:{handle.local_sync_port}")
+            socket_addr = f"tcp://127.0.0.1:{handle.local_subscribe_port}"
+            logger.debug("Connecting to %s", socket_addr)
+            self.local_socket.connect(socket_addr)
 
             self.remote_socket = None
-            self.remote_sync_socket = None
         else:
             self.buffer = None  # type: ignore
             self.current_idx = -1
@@ -268,16 +274,14 @@ class MessageQueue:
             self._is_remote_reader = True
 
             self.local_socket = None
-            self.local_sync_socket = None
 
             self.remote_socket = context.socket(SUB)
             self.remote_socket.setsockopt_string(SUBSCRIBE, "")
-            self.remote_socket.connect(
-                f"tcp://{handle.connect_ip}:{handle.remote_subscribe_port}")
-
-            self.remote_sync_socket = context.socket(REQ)
-            self.remote_sync_socket.connect(
-                f"tcp://{handle.connect_ip}:{handle.remote_sync_port}")
+            if is_valid_ipv6_address(handle.connect_ip):
+                self.remote_socket.setsockopt(IPV6, 1)
+            socket_addr = f"tcp://{handle.connect_ip}:{handle.remote_subscribe_port}"
+            logger.debug("Connecting to %s", socket_addr)
+            self.remote_socket.connect(socket_addr)
 
         return self
 
@@ -290,29 +294,27 @@ class MessageQueue:
 
             # local readers
             for i in range(self.n_local_reader):
-                recv = self.local_sync_socket.recv()
-                assert recv == b"READY"
-                self.local_sync_socket.send(b"READY")
+                # wait for subscription messages from all local readers
+                self.local_socket.recv()
             if self.n_local_reader > 0:
+                # send a message to all local readers
+                # to make sure the publish channel is working
                 self.local_socket.send(b"READY")
 
             # remote readers
             for i in range(self.n_remote_reader):
-                recv = self.remote_sync_socket.recv()
-                assert recv == b"READY"
-                self.remote_sync_socket.send(b"READY")
+                # wait for subscription messages from all remote readers
+                self.remote_socket.recv()
             if self.n_remote_reader > 0:
+                # send a message to all remote readers
+                # to make sure the publish channel is working
                 self.remote_socket.send(b"READY")
         elif self._is_local_reader:
-            self.local_sync_socket.send(b"READY")
-            recv = self.local_sync_socket.recv()
-            assert recv == b"READY"
+            # wait for the writer to send a message
             recv = self.local_socket.recv()
             assert recv == b"READY"
         elif self._is_remote_reader:
-            self.remote_sync_socket.send(b"READY")
-            recv = self.remote_sync_socket.recv()
-            assert recv == b"READY"
+            # wait for the writer to send a message
             recv = self.remote_socket.recv()
             assert recv == b"READY"
 
@@ -335,8 +337,8 @@ class MessageQueue:
                     time.sleep(RINGBUFFER_SLEEP_INTERVAL)
 
                     # if we wait for a long time, we should warn the user
-                    if time.monotonic(
-                    ) - start_time > VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning:  # noqa
+                    if (time.monotonic() - start_time >
+                            VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning):
                         logger.warning(
                             "No available block found in %s second. ",
                             VLLM_RINGBUFFER_WARNING_INTERVAL)
@@ -389,8 +391,8 @@ class MessageQueue:
                     time.sleep(RINGBUFFER_SLEEP_INTERVAL)
 
                     # if we wait for a long time, we should warn the user
-                    if time.monotonic(
-                    ) - start_time > VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning:  # noqa
+                    if (time.monotonic() - start_time >
+                            VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning):
                         logger.warning(
                             "No available block found in %s second. ",
                             VLLM_RINGBUFFER_WARNING_INTERVAL)
@@ -426,7 +428,6 @@ class MessageQueue:
 
     def dequeue(self):
         if self._is_local_reader:
-            overflow = False
             with self.acquire_read() as buf:
                 overflow = buf[0] == 1
                 if not overflow:

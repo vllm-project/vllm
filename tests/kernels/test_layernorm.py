@@ -1,7 +1,9 @@
 import pytest
 import torch
 
+from tests.kernels.utils import opcheck
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.utils import seed_everything
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
 NUM_TOKENS = [7, 83, 4096]  # Arbitrary values for testing
@@ -29,9 +31,7 @@ def test_rms_norm(
     seed: int,
     device: str,
 ) -> None:
-    torch.random.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
+    seed_everything(seed)
     torch.set_default_device(device)
     layer = RMSNorm(hidden_size).to(dtype=dtype)
     layer.weight.data.normal_(mean=1.0, std=0.1)
@@ -48,7 +48,14 @@ def test_rms_norm(
     # numerical errors than other operators because they involve reductions.
     # Therefore, we use a larger tolerance.
     if add_residual:
-        assert torch.allclose(out[0], ref_out[0], atol=1e-2, rtol=1e-2)
-        assert torch.allclose(out[1], ref_out[1], atol=1e-2, rtol=1e-2)
+        torch.testing.assert_close(out[0], ref_out[0], atol=1e-2, rtol=1e-2)
+        torch.testing.assert_close(out[1], ref_out[1], atol=1e-2, rtol=1e-2)
     else:
-        assert torch.allclose(out, ref_out, atol=1e-2, rtol=1e-2)
+        torch.testing.assert_close(out, ref_out, atol=1e-2, rtol=1e-2)
+
+    if residual is not None:
+        opcheck(torch.ops._C.fused_add_rms_norm,
+                (x, residual, layer.weight.data, layer.variance_epsilon))
+    else:
+        opcheck(torch.ops._C.rms_norm,
+                (out, x, layer.weight.data, layer.variance_epsilon))

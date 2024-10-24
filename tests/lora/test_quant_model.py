@@ -6,9 +6,9 @@ from typing import List
 import pytest
 
 import vllm
+from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.lora.request import LoRARequest
-
-from .conftest import cleanup
+from vllm.utils import is_hip
 
 
 @dataclass
@@ -17,12 +17,23 @@ class ModelWithQuantization:
     quantization: str
 
 
-MODELS: List[ModelWithQuantization] = [
-    ModelWithQuantization(model_path="TheBloke/TinyLlama-1.1B-Chat-v0.3-AWQ",
-                          quantization="AWQ"),
-    ModelWithQuantization(model_path="TheBloke/TinyLlama-1.1B-Chat-v0.3-GPTQ",
-                          quantization="GPTQ"),
-]
+MODELS: List[ModelWithQuantization]
+#AWQ quantization is currently not supported in ROCm.
+if is_hip():
+    MODELS = [
+        ModelWithQuantization(
+            model_path="TheBloke/TinyLlama-1.1B-Chat-v0.3-GPTQ",
+            quantization="GPTQ"),
+    ]
+else:
+    MODELS = [
+        ModelWithQuantization(
+            model_path="TheBloke/TinyLlama-1.1B-Chat-v0.3-AWQ",
+            quantization="AWQ"),
+        ModelWithQuantization(
+            model_path="TheBloke/TinyLlama-1.1B-Chat-v0.3-GPTQ",
+            quantization="GPTQ"),
+    ]
 
 
 def do_sample(llm: vllm.LLM,
@@ -59,19 +70,21 @@ def do_sample(llm: vllm.LLM,
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("tp_size", [1])
-def test_quant_model_lora(tinyllama_lora_files, model, tp_size):
-    # Cannot use as it will initialize torch.cuda too early...
-    # if torch.cuda.device_count() < tp_size:
-    #     pytest.skip(f"Not enough GPUs for tensor parallelism {tp_size}")
+def test_quant_model_lora(tinyllama_lora_files, num_gpus_available, model,
+                          tp_size):
+    if num_gpus_available < tp_size:
+        pytest.skip(f"Not enough GPUs for tensor parallelism {tp_size}")
 
-    llm = vllm.LLM(model=model.model_path,
-                   enable_lora=True,
-                   max_num_seqs=16,
-                   max_loras=4,
-                   max_model_len=400,
-                   tensor_parallel_size=tp_size,
-                   quantization=model.quantization,
-                   trust_remote_code=True)
+    llm = vllm.LLM(
+        model=model.model_path,
+        enable_lora=True,
+        max_num_seqs=16,
+        max_loras=4,
+        max_model_len=400,
+        tensor_parallel_size=tp_size,
+        gpu_memory_utilization=0.2,  #avoid OOM
+        quantization=model.quantization,
+        trust_remote_code=True)
 
     if model.quantization is None:
         expected_no_lora_output = [
@@ -146,37 +159,40 @@ def test_quant_model_lora(tinyllama_lora_files, model, tp_size):
     print("removing lora")
 
     del llm
-    cleanup()
+    cleanup_dist_env_and_memory()
 
 
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.skip("Requires multiple GPUs")
-def test_quant_model_tp_equality(tinyllama_lora_files, model):
-    # Cannot use as it will initialize torch.cuda too early...
-    # if torch.cuda.device_count() < 2:
-    #     pytest.skip(f"Not enough GPUs for tensor parallelism {2}")
+def test_quant_model_tp_equality(tinyllama_lora_files, num_gpus_available,
+                                 model):
+    if num_gpus_available < 2:
+        pytest.skip(f"Not enough GPUs for tensor parallelism {2}")
 
-    llm_tp1 = vllm.LLM(model=model.model_path,
-                       enable_lora=True,
-                       max_num_seqs=16,
-                       max_loras=4,
-                       tensor_parallel_size=1,
-                       quantization=model.quantization,
-                       trust_remote_code=True)
+    llm_tp1 = vllm.LLM(
+        model=model.model_path,
+        enable_lora=True,
+        max_num_seqs=16,
+        max_loras=4,
+        tensor_parallel_size=1,
+        gpu_memory_utilization=0.2,  #avoid OOM
+        quantization=model.quantization,
+        trust_remote_code=True)
     output_tp1 = do_sample(llm_tp1, tinyllama_lora_files, lora_id=1)
 
     del llm_tp1
-    cleanup()
+    cleanup_dist_env_and_memory()
 
-    llm_tp2 = vllm.LLM(model=model.model_path,
-                       enable_lora=True,
-                       max_num_seqs=16,
-                       max_loras=4,
-                       tensor_parallel_size=2,
-                       quantization=model.quantization)
+    llm_tp2 = vllm.LLM(
+        model=model.model_path,
+        enable_lora=True,
+        max_num_seqs=16,
+        max_loras=4,
+        tensor_parallel_size=2,
+        gpu_memory_utilization=0.2,  #avoid OOM
+        quantization=model.quantization)
     output_tp2 = do_sample(llm_tp2, tinyllama_lora_files, lora_id=1)
 
     del llm_tp2
-    cleanup()
+    cleanup_dist_env_and_memory()
 
     assert output_tp1 == output_tp2

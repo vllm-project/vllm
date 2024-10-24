@@ -3,13 +3,15 @@
 #include <optional>
 #include <torch/library.h>
 
+#include "core/scalar_type.hpp"
+
 void paged_attention_v1(
     torch::Tensor& out, torch::Tensor& query, torch::Tensor& key_cache,
     torch::Tensor& value_cache, int64_t num_kv_heads, double scale,
     torch::Tensor& block_tables, torch::Tensor& seq_lens, int64_t block_size,
     int64_t max_seq_len, const c10::optional<torch::Tensor>& alibi_slopes,
-    const std::string& kv_cache_dtype, double kv_scale, const int64_t tp_rank,
-    const int64_t blocksparse_local_blocks,
+    const std::string& kv_cache_dtype, double k_scale, double v_scale,
+    const int64_t tp_rank, const int64_t blocksparse_local_blocks,
     const int64_t blocksparse_vert_stride, const int64_t blocksparse_block_size,
     const int64_t blocksparse_head_sliding_step);
 
@@ -19,8 +21,8 @@ void paged_attention_v2(
     torch::Tensor& value_cache, int64_t num_kv_heads, double scale,
     torch::Tensor& block_tables, torch::Tensor& seq_lens, int64_t block_size,
     int64_t max_seq_len, const c10::optional<torch::Tensor>& alibi_slopes,
-    const std::string& kv_cache_dtype, double kv_scale, const int64_t tp_rank,
-    const int64_t blocksparse_local_blocks,
+    const std::string& kv_cache_dtype, double k_scale, double v_scale,
+    const int64_t tp_rank, const int64_t blocksparse_local_blocks,
     const int64_t blocksparse_vert_stride, const int64_t blocksparse_block_size,
     const int64_t blocksparse_head_sliding_step);
 
@@ -52,16 +54,32 @@ void gelu_fast(torch::Tensor& out, torch::Tensor& input);
 
 void gelu_quick(torch::Tensor& out, torch::Tensor& input);
 
+void advance_step_flashattn(int64_t num_seqs, int64_t num_queries,
+                            int64_t block_size, torch::Tensor& input_tokens,
+                            torch::Tensor& sampled_token_ids,
+                            torch::Tensor& input_positions,
+                            torch::Tensor& seq_lens,
+                            torch::Tensor& slot_mapping,
+                            torch::Tensor& block_tables);
+
+void advance_step_flashinfer(
+    int64_t num_seqs, int64_t num_queries, int64_t block_size,
+    torch::Tensor& input_tokens, torch::Tensor& sampled_token_ids,
+    torch::Tensor& input_positions, torch::Tensor& seq_lens,
+    torch::Tensor& slot_mapping, torch::Tensor& block_tables,
+    torch::Tensor& paged_kv_indices, torch::Tensor& paged_kv_indptr,
+    torch::Tensor& paged_kv_last_page_len, torch::Tensor& block_table_bounds);
+
 #ifndef USE_ROCM
 torch::Tensor aqlm_gemm(const torch::Tensor& input, const torch::Tensor& codes,
                         const torch::Tensor& codebooks,
                         const torch::Tensor& scales,
-                        const torch::Tensor& codebook_partition_sizes,
+                        const std::vector<int64_t>& codebook_partition_sizes,
                         const std::optional<torch::Tensor>& bias);
 
-torch::Tensor aqlm_dequant(const torch::Tensor& codes,
-                           const torch::Tensor& codebooks,
-                           const torch::Tensor& codebook_partition_sizes);
+torch::Tensor aqlm_dequant(
+    const torch::Tensor& codes, const torch::Tensor& codebooks,
+    const std::vector<int64_t>& codebook_partition_sizes);
 
 torch::Tensor awq_gemm(torch::Tensor _in_feats, torch::Tensor _kernel,
                        torch::Tensor _scaling_factors, torch::Tensor _zeros,
@@ -72,31 +90,16 @@ torch::Tensor awq_dequantize(torch::Tensor _kernel,
                              torch::Tensor _zeros, int64_t split_k_iters,
                              int64_t thx, int64_t thy);
 
-torch::Tensor marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
-                          torch::Tensor& b_scales, torch::Tensor& workspace,
-                          int64_t size_m, int64_t size_n, int64_t size_k);
+torch::Tensor permute_cols(torch::Tensor const& A, torch::Tensor const& perm);
 
-torch::Tensor gptq_marlin_24_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
-                                  torch::Tensor& b_meta,
-                                  torch::Tensor& b_scales,
-                                  torch::Tensor& workspace, int64_t num_bits,
-                                  int64_t size_m, int64_t size_n,
-                                  int64_t size_k);
+torch::Tensor ggml_dequantize(torch::Tensor W, int64_t type, int64_t m,
+                              int64_t n);
 
-torch::Tensor gptq_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
-                               torch::Tensor& b_scales, torch::Tensor& g_idx,
-                               torch::Tensor& perm, torch::Tensor& workspace,
-                               int64_t num_bits, int64_t size_m, int64_t size_n,
-                               int64_t size_k, bool is_k_full);
+torch::Tensor ggml_mul_mat_vec_a8(torch::Tensor W, torch::Tensor X,
+                                  int64_t type, int64_t row);
 
-torch::Tensor gptq_marlin_repack(torch::Tensor& b_q_weight, torch::Tensor& perm,
-                                 int64_t size_k, int64_t size_n,
-                                 int64_t num_bits);
-
-torch::Tensor fp8_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
-                              torch::Tensor& b_scales, torch::Tensor& workspace,
-                              int64_t num_bits, int64_t size_m, int64_t size_n,
-                              int64_t size_k);
+torch::Tensor ggml_mul_mat_a8(torch::Tensor W, torch::Tensor X, int64_t type,
+                              int64_t row);
 
 bool cutlass_scaled_mm_supports_fp8(int64_t cuda_device_capability);
 
@@ -105,16 +108,22 @@ void cutlass_scaled_mm(torch::Tensor& out, torch::Tensor const& a,
                        torch::Tensor const& b_scales,
                        c10::optional<torch::Tensor> const& bias);
 
+void cutlass_scaled_mm_azp(torch::Tensor& out, torch::Tensor const& a,
+                           torch::Tensor const& b,
+                           torch::Tensor const& a_scales,
+                           torch::Tensor const& b_scales,
+                           torch::Tensor const& azp_adj,
+                           c10::optional<torch::Tensor> const& azp,
+                           c10::optional<torch::Tensor> const& bias);
 #endif
 
 void static_scaled_int8_quant(torch::Tensor& out, torch::Tensor const& input,
-                              torch::Tensor const& scale);
+                              torch::Tensor const& scale,
+                              c10::optional<torch::Tensor> const& azp);
 
 void dynamic_scaled_int8_quant(torch::Tensor& out, torch::Tensor const& input,
-                               torch::Tensor& scales);
-
-void squeezellm_gemm(torch::Tensor vec, torch::Tensor mat, torch::Tensor mul,
-                     torch::Tensor lookup_table);
+                               torch::Tensor& scales,
+                               c10::optional<torch::Tensor> const& azp);
 
 torch::Tensor gptq_gemm(torch::Tensor a, torch::Tensor b_q_weight,
                         torch::Tensor b_gptq_qzeros,
@@ -123,24 +132,54 @@ torch::Tensor gptq_gemm(torch::Tensor a, torch::Tensor b_q_weight,
 
 void gptq_shuffle(torch::Tensor q_weight, torch::Tensor q_perm, int64_t bit);
 
-void static_scaled_fp8_quant(torch::Tensor& out, torch::Tensor& input,
-                             torch::Tensor& scale);
+void static_scaled_fp8_quant(torch::Tensor& out, torch::Tensor const& input,
+                             torch::Tensor const& scale);
 
-void dynamic_scaled_fp8_quant(torch::Tensor& out, torch::Tensor& input,
+void dynamic_scaled_fp8_quant(torch::Tensor& out, torch::Tensor const& input,
                               torch::Tensor& scale);
+
+void dynamic_per_token_scaled_fp8_quant(
+    torch::Tensor& out, torch::Tensor const& input, torch::Tensor& scale,
+    c10::optional<torch::Tensor> const& scale_ub);
 
 void moe_align_block_size(torch::Tensor topk_ids, int64_t num_experts,
                           int64_t block_size, torch::Tensor sorted_token_ids,
                           torch::Tensor experts_ids,
                           torch::Tensor num_tokens_post_pad);
 
+void selective_scan_fwd(const torch::Tensor& u, const torch::Tensor& delta,
+                        const torch::Tensor& A, const torch::Tensor& B,
+                        const torch::Tensor& C,
+                        const c10::optional<torch::Tensor>& D_,
+                        const c10::optional<torch::Tensor>& z_,
+                        const c10::optional<torch::Tensor>& delta_bias_,
+                        bool delta_softplus,
+                        const c10::optional<torch::Tensor>& query_start_loc,
+                        const c10::optional<torch::Tensor>& cache_indices,
+                        const c10::optional<torch::Tensor>& has_initial_state,
+                        const torch::Tensor& ssm_states, int64_t pad_slot_id);
+
+void causal_conv1d_update(const at::Tensor& x, const at::Tensor& conv_state,
+                          const at::Tensor& weight,
+                          const c10::optional<at::Tensor>& bias_,
+                          bool silu_activation,
+                          const c10::optional<at::Tensor>& cache_seqlens_,
+                          const c10::optional<at::Tensor>& conv_state_indices_,
+                          int64_t pad_slot_id);
+
+void causal_conv1d_fwd(const at::Tensor& x, const at::Tensor& weight,
+                       const c10::optional<at::Tensor>& bias_,
+                       const c10::optional<at::Tensor>& conv_states,
+                       const c10::optional<at::Tensor>& query_start_loc,
+                       const c10::optional<at::Tensor>& cache_indices,
+                       const c10::optional<at::Tensor>& has_initial_state,
+                       bool silu_activation, int64_t pad_slot_id);
+
 #ifndef USE_ROCM
 using fptr_t = int64_t;
 fptr_t init_custom_ar(torch::Tensor& meta, torch::Tensor& rank_data,
                       const std::vector<std::string>& handles,
                       const std::vector<int64_t>& offsets, int64_t rank,
-                      bool full_nvlink);
-bool should_custom_ar(torch::Tensor& inp, int64_t max_size, int64_t world_size,
                       bool full_nvlink);
 void all_reduce_reg(fptr_t _fa, torch::Tensor& inp, torch::Tensor& out);
 void all_reduce_unreg(fptr_t _fa, torch::Tensor& inp, torch::Tensor& reg_buffer,

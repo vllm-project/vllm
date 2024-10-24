@@ -3,13 +3,12 @@ import math
 import torch
 
 from vllm.platforms import current_platform
-from vllm.utils import is_cpu, is_hip
+from vllm.utils import is_hip
 
 from .utils import (dense_to_crow_col, get_head_sliding_step,
                     get_sparse_attn_mask)
 
-IS_COMPUTE_8_OR_ABOVE = (torch.cuda.is_available()
-                         and current_platform.get_device_capability()[0] >= 8)
+IS_COMPUTE_8_OR_ABOVE = current_platform.has_device_capability(80)
 
 if IS_COMPUTE_8_OR_ABOVE:
     from .blocksparse_attention_kernel import blocksparse_flash_attn_varlen_fwd
@@ -33,10 +32,10 @@ class LocalStridedBlockSparseAttn(torch.nn.Module):
     ):
         super().__init__()
         if use_spda is None:
-            use_spda = is_hip() or is_cpu() or not \
+            use_spda = is_hip() or current_platform.is_cpu() or not \
                        IS_COMPUTE_8_OR_ABOVE
         device = device or (torch.cuda.current_device()
-                            if torch.cuda.is_available() else "cpu")
+                            if current_platform.is_cuda_alike() else "cpu")
         device = torch.device(device)
         # NOTE: vllm CPU backend support BF16 instead of FP16.
         dtype = dtype or (torch.bfloat16 if IS_COMPUTE_8_OR_ABOVE
@@ -110,13 +109,13 @@ class LocalStridedBlockSparseAttn(torch.nn.Module):
         q, k, v: shape = (num_tokens, num_heads_q/kv, head_size).
         Support grouped attention, with `q[:, i*r:(i*r + r)]`
         is correspondent to `k[:, i]`, where `r` is the q/k ratio.
-        cu_seqlens_k: shape=(batch_size + 1,), 
-        indicating segment of samples, 
+        cu_seqlens_k: shape=(batch_size + 1,),
+        indicating segment of samples,
         e.g., `k[cu_seqlen[i]:cu_seqlne[i+1]]` is q of sample i
         cu_seqlens_q: shape=(batch_size + 1, ).
         Default None: same as cu_seqlens_k for prefilling or
         [0, 1, .., batch_size] for decoding.
-        The only case you need to specify is when q is a mix of 
+        The only case you need to specify is when q is a mix of
         prefilling and decoding.
         sm_scale: softmax scale, default to 1/sqrt(head_size).
 
@@ -172,7 +171,7 @@ class LocalStridedBlockSparseAttn(torch.nn.Module):
 
     def spda(self, q, k, v, cu_seqlens_k, cu_seqlens_q=None, sm_scale=None):
         """For CPU, V100 or other older GPUs.
-        NOTE: torch SPDA supports nested tensor, 
+        NOTE: torch SPDA supports nested tensor,
         but seems extremely slow. Choose to pad instead.
         """
         assert (cu_seqlens_q is None or
@@ -202,8 +201,8 @@ class LocalStridedBlockSparseAttn(torch.nn.Module):
         return self.transpose_and_unpad(spda_output, cu_seqlens)
 
     def forward(self, q, k, v, cu_seqlens_k, cu_seqlens_q=None, sm_scale=None):
-        """Dispatch to `varlen_attn` (Ampere or newer) or 
-        `self.spda`(cpu, Volta, Turing or older)based on 
+        """Dispatch to `varlen_attn` (Ampere or newer) or
+        `self.spda`(cpu, Volta, Turing or older)based on
         the type of device used and cuda compute capability.
 
         q, k, v: shape = (num_tokens, num_heads_q/kv, head_size).
@@ -214,8 +213,8 @@ class LocalStridedBlockSparseAttn(torch.nn.Module):
         cu_seqlens_q: shape=(batch_size + 1, ).
                     Default None: same as cu_seqlens_k for prefilling or
                     [0, 1, .., batch_size] for decoding.
-                    The only case you need to specify 
-                    is when q is a mix of prefilling 
+                    The only case you need to specify
+                    is when q is a mix of prefilling
                     and decoding.
         sm_scale: softmax scale, default to 1/sqrt(head_size).
 

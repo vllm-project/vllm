@@ -13,6 +13,7 @@ from vllm.logger import init_logger
 from vllm.lora.models import (LoRAModel, LoRAModelManager,
                               LRUCacheLoRAModelManager, create_lora_manager)
 from vllm.lora.request import LoRARequest
+from vllm.lora.utils import get_adapter_absolute_path
 
 logger = init_logger(__name__)
 
@@ -89,8 +90,9 @@ class WorkerLoRAManager(AbstractWorkerManager):
                         packed_modules_mapping[module])
                 else:
                     expected_lora_modules.append(module)
+            lora_path = get_adapter_absolute_path(lora_request.lora_path)
             lora = self._lora_model_cls.from_local_checkpoint(
-                lora_request.lora_local_path,
+                lora_path,
                 expected_lora_modules,
                 max_position_embeddings=self.max_position_embeddings,
                 lora_model_id=lora_request.lora_int_id,
@@ -102,8 +104,7 @@ class WorkerLoRAManager(AbstractWorkerManager):
                 embedding_padding_modules=self.embedding_padding_modules,
             )
         except Exception as e:
-            raise RuntimeError(
-                f"Loading lora {lora_request.lora_local_path} failed") from e
+            raise RuntimeError(f"Loading lora {lora_path} failed") from e
         if lora.rank > self.lora_config.max_lora_rank:
             raise ValueError(
                 f"LoRA rank {lora.rank} is greater than max_lora_rank "

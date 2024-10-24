@@ -4,8 +4,7 @@ from typing import List
 import pytest
 
 from vllm import LLM, EmbeddingRequestOutput, PoolingParams
-
-from ...conftest import cleanup
+from vllm.distributed import cleanup_dist_env_and_memory
 
 MODEL_NAME = "intfloat/e5-mistral-7b-instruct"
 
@@ -41,27 +40,12 @@ def llm():
 
         del llm
 
-    cleanup()
+    cleanup_dist_env_and_memory()
 
 
 def assert_outputs_equal(o1: List[EmbeddingRequestOutput],
                          o2: List[EmbeddingRequestOutput]):
     assert [o.outputs for o in o1] == [o.outputs for o in o2]
-
-
-@pytest.mark.skip_global_cleanup
-@pytest.mark.parametrize('prompt', PROMPTS)
-def test_v1_v2_api_consistency_single_prompt_string(llm: LLM, prompt):
-    pooling_params = PoolingParams()
-
-    with pytest.warns(DeprecationWarning, match="'prompts'"):
-        v1_output = llm.encode(prompts=prompt, pooling_params=pooling_params)
-
-    v2_output = llm.encode(prompt, pooling_params=pooling_params)
-    assert_outputs_equal(v1_output, v2_output)
-
-    v2_output = llm.encode({"prompt": prompt}, pooling_params=pooling_params)
-    assert_outputs_equal(v1_output, v2_output)
 
 
 @pytest.mark.skip_global_cleanup
@@ -76,25 +60,6 @@ def test_v1_v2_api_consistency_single_prompt_tokens(llm: LLM,
 
     v2_output = llm.encode({"prompt_token_ids": prompt_token_ids},
                            pooling_params=pooling_params)
-    assert_outputs_equal(v1_output, v2_output)
-
-
-@pytest.mark.skip_global_cleanup
-def test_v1_v2_api_consistency_multi_prompt_string(llm: LLM):
-    pooling_params = PoolingParams()
-
-    with pytest.warns(DeprecationWarning, match="'prompts'"):
-        v1_output = llm.encode(prompts=PROMPTS, pooling_params=pooling_params)
-
-    v2_output = llm.encode(PROMPTS, pooling_params=pooling_params)
-    assert_outputs_equal(v1_output, v2_output)
-
-    v2_output = llm.encode(
-        [{
-            "prompt": p
-        } for p in PROMPTS],
-        pooling_params=pooling_params,
-    )
     assert_outputs_equal(v1_output, v2_output)
 
 

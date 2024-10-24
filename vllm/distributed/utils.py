@@ -6,6 +6,11 @@ from typing import Sequence, Tuple
 
 import torch
 
+import vllm.envs as envs
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
 
 def ensure_divisibility(numerator, denominator):
     """Ensure that numerator is divisible by the denominator."""
@@ -54,11 +59,28 @@ def get_pp_indices(num_hidden_layers: int, pp_rank: int,
     If the number of layers is not divisible by the number of partitions,
     the last partition will have the remaining layers.
     """
-    layers_per_partition = num_hidden_layers // pp_size
-    start_layer = pp_rank * layers_per_partition
-    end_layer = start_layer + layers_per_partition
+    partition_list_str = envs.VLLM_PP_LAYER_PARTITION
+    if partition_list_str is not None:
+        try:
+            partitions = [
+                int(layer) for layer in partition_list_str.split(",")
+            ]
+        except ValueError as err:
+            raise ValueError("Invalid partition string: {}".format(
+                partition_list_str)) from err
+        if len(partitions) != pp_size:
+            raise ValueError(f"{len(partitions)=} does not match {pp_size=}.")
+        if sum(partitions) != num_hidden_layers:
+            raise ValueError(
+                f"{sum(partitions)=} does not match {num_hidden_layers=}.")
+        start_layer = sum(partitions[:pp_rank])
+        end_layer = start_layer + partitions[pp_rank]
+    else:
+        layers_per_partition = num_hidden_layers // pp_size
+        start_layer = pp_rank * layers_per_partition
+        end_layer = start_layer + layers_per_partition
 
-    if pp_rank == pp_size - 1:
-        end_layer = num_hidden_layers
+        if pp_rank == pp_size - 1:
+            end_layer = num_hidden_layers
 
     return (start_layer, end_layer)
