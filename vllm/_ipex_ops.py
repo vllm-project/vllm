@@ -163,8 +163,9 @@ class ipex_ops:
     @staticmethod
     def fused_add_rms_norm(input: torch.Tensor, residual: torch.Tensor,
                            weight: torch.Tensor, epsilon: float) -> None:
-        ipex.llm.functional.add_rms_norm(residual, input, weight, None,
-                                         epsilon, True)
+        tmp = ipex.llm.functional.add_rms_norm(residual, input, weight, None,
+                                               epsilon, True)
+        input.copy_(tmp)
 
     @staticmethod
     def varlen_attention(
@@ -187,7 +188,7 @@ class ipex_ops:
         ipex.llm.functional.varlen_attention(query.contiguous(),
                                              key.contiguous(),
                                              value.contiguous(), out,
-                                             seqlen_q, seqlen_k,
+                                             seqlen_q.int(), seqlen_k.int(),
                                              max_seqlen_q, max_seqlen_k,
                                              pdropout, softmax_scale,
                                              zero_tensors, is_causal,
