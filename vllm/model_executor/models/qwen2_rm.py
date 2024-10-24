@@ -119,5 +119,6 @@ class Qwen2ForRewardModel(nn.Module, SupportsPP):
         return self._pooler(hidden_states, pooling_metadata)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        loader = AutoWeightsLoader(self)
+        loader = AutoWeightsLoader(self,
+                                   ignore_unexpected_prefixes=["lm_head."])
         loader.load_weights(weights)
