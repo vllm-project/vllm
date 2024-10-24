@@ -85,6 +85,7 @@ class MistralTokenizer:
             raise TypeError(f"Unsupported tokenizer: {type(tokenizer_)}")
 
         self.tokenizer = tokenizer_
+        self._max_token_id = max(self._vocab.values())
 
     @classmethod
     def from_pretrained(cls,
@@ -157,6 +158,10 @@ class MistralTokenizer:
     @property
     def vocab_size(self) -> int:
         return len(self._vocab)
+
+    @property
+    def max_token_id(self) -> int:
+        return self._max_token_id
 
     def __len__(self) -> int:
         return self.vocab_size
