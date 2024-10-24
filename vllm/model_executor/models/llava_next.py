@@ -191,8 +191,8 @@ def dummy_data_for_llava_next(ctx: InputContext, seq_len: int,
         mm_data = dummy_image_for_clip(
             vision_config,
             num_images,
-            image_width_override=max_feat_height,
-            image_height_override=max_feat_width,
+            image_width_override=max_feat_width,
+            image_height_override=max_feat_height,
         )
 
         return seq_data, mm_data
@@ -208,8 +208,8 @@ def dummy_data_for_llava_next(ctx: InputContext, seq_len: int,
         mm_data = dummy_image_for_siglip(
             vision_config,
             num_images,
-            image_width_override=max_feat_height,
-            image_height_override=max_feat_width,
+            image_width_override=max_feat_width,
+            image_height_override=max_feat_height,
         )
 
         return seq_data, mm_data
