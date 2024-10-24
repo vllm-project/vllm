@@ -497,7 +497,10 @@ def _parse_chat_message_content_parts(
 
     for part in parts:
         parse_res = _parse_chat_message_content_part(
-            part, mm_parser, wrap_dicts=wrap_dicts)
+            part,
+            mm_parser,
+            wrap_dicts=wrap_dicts,
+        )
         if parse_res:
             content.append(parse_res)
 
