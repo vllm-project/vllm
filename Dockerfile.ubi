@@ -182,6 +182,9 @@ ENV HF_HUB_OFFLINE=1 \
     VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 \
     VLLM_USAGE_SOURCE=production-docker-image \
     VLLM_WORKER_MULTIPROC_METHOD=fork \
+    OUTLINES_CACHE_DIR=/tmp/outlines \
+    NUMBA_CACHE_DIR=/tmp/numba \
+    TRITON_CACHE_DIR=/tmp/triton \
     VLLM_NO_USAGE_STATS=1
 
 # setup non-root user for OpenShift
