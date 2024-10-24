@@ -89,7 +89,7 @@ def _get_num_image_in_last_group(prompt_token_ids: List[int]) -> int:
 
 def input_processor_for_mllama(ctx: InputContext,
                                inputs: EncoderDecoderInputs):
-    # Example inputs when initially passed to processor:
+    # Example input to processor:
     # {
     #     'encoder': {
     #         'type': 'token',
@@ -156,6 +156,21 @@ def input_processor_for_mllama(ctx: InputContext,
     token_per_chunk = (vision_config.image_size // 14)**2 + 1
     num_tokens = num_tiles * token_per_chunk
 
+    # Example output from processor:
+    # {
+    #     'encoder': {
+    #         'type': 'token',
+    #         'prompt_token_ids': [128256, 128256, ..., 128256],
+    #         'prompt': '<|image|><|image|>...<|image|>',
+    #         'multi_modal_data': {'image': <PIL.Image.Image image mode=RGB size=1770x1180 at 0x7FDE2C624880>},  # noqa: E501
+    #     },
+    #     'decoder': {
+    #         'type': 'token',
+    #         'prompt_token_ids': [128000, 128256, 128000, 3923, 374, 279, 2262, 315, 420, 2217, 30],  # noqa: E501
+    #         'prompt': '<|image|><|begin_of_text|>What is the content of this image?',  # noqa: E501
+    #         'multi_modal_data': {'image': <PIL.Image.Image image mode=RGB size=1770x1180 at 0x7FDE2C624880>},  # noqa: E501
+    #     },
+    # }
     return EncoderDecoderInputs(
         encoder=token_inputs(
             prompt_token_ids=[MLLAMA_IMAGE_TOKEN_ID] * num_tokens,
