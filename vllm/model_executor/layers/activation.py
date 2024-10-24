@@ -39,7 +39,13 @@ class FatreluAndMul(CustomOp):
         return x1 * x2
 
     def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
-        return self.forward_native(x)
+        from vllm import _custom_ops as ops
+
+        d = x.shape[-1] // 2
+        output_shape = (x.shape[:-1] + (d, ))
+        out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
+        ops.fatrelu_and_mul(out, x, self.threshold)
+        return out
 
 
 @CustomOp.register("silu_and_mul")

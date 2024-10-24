@@ -60,6 +60,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("gelu_tanh_and_mul(Tensor! out, Tensor input) -> ()");
   ops.impl("gelu_tanh_and_mul", torch::kCUDA, &gelu_tanh_and_mul);
 
+  // FATReLU implementation.
+  ops.def("fatrelu_and_mul(Tensor! out, Tensor input, float threshold) -> ()");
+  ops.impl("fatrelu_and_mul", torch::kCUDA, &fatrelu_and_mul);
+
   // GELU implementation used in GPT-2.
   ops.def("gelu_new(Tensor! out, Tensor input) -> ()");
   ops.impl("gelu_new", torch::kCUDA, &gelu_new);
