@@ -26,7 +26,8 @@ with contextlib.suppress(ImportError):
     import vllm._moe_C  # noqa: F401
     supports_moe_ops = True
 
-if TYPE_CHECKING:
+# neuron has torch version that doesn't even have impl_abstract
+if TYPE_CHECKING or current_platform.is_neuron():
 
     def register_fake(fn):
         return lambda name: fn
@@ -76,6 +77,12 @@ def gelu_and_mul(out: torch.Tensor, x: torch.Tensor) -> None:
 
 def gelu_tanh_and_mul(out: torch.Tensor, x: torch.Tensor) -> None:
     torch.ops._C.gelu_tanh_and_mul(out, x)
+
+
+def fatrelu_and_mul(out: torch.Tensor,
+                    x: torch.Tensor,
+                    threshold: float = 0.0) -> None:
+    torch.ops._C.fatrelu_and_mul(out, x, threshold)
 
 
 def gelu_fast(out: torch.Tensor, x: torch.Tensor) -> None:
