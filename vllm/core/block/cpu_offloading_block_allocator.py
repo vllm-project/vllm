@@ -94,6 +94,8 @@ class CpuOffloadingBlockAllocator(CpuGpuBlockAllocator):
         self._free: Set[int] = set(gpu_block_allocator.all_block_ids)
         self._cpu: Set[int] = set(cpu_block_allocator.all_block_ids)
 
+        self._cpu_blocks_allocated: Deque[int] = deque()
+
     def allocate_mutable_block(self, prev_block: Optional[Block],
                                device: Device) -> Block:
         """Allocates a new mutable block on the specified device.
@@ -132,6 +134,7 @@ class CpuOffloadingBlockAllocator(CpuGpuBlockAllocator):
             List[Block]: The newly allocated list of immutable blocks 
                 containing the provided block token IDs.
         """
+
         assert device == Device.GPU, "Calls to CPU offloading block allocator should always use Device.GPU --- CPU offloading block allocator handles CPU offloading internally."
 
         # repeatedly call allocate_immutable_block
@@ -161,43 +164,48 @@ class CpuOffloadingBlockAllocator(CpuGpuBlockAllocator):
             Block: The newly allocated immutable block containing the provided
                 token IDs.
         """
-        
+
+        assert device == Device.GPU, "Calls to CPU offloading block allocator should always use Device.GPU --- CPU offloading block allocator handles CPU offloading internally."
+
+        # allocate a GPU block        
         block = self._allocators[device].allocate_immutable_block(
             prev_block, block_token_ids)
         block_id = block.block_id
         
-        # maintain block status. Three cases:
-        # no cache hit: mark the block as uncopied, and free CPU block
-        
-        # 
+        # deal with prefix caching, three cases in total:
+        # 1. cache hit on GPU
+        # 2. no cache hit on GPU but cache hit on CPU
+        # 3. no cache hit
         if block.computed:
             # prefix hit on GPU
             # mark the block as copied
+            assert block_id in self._free or block_id in self._copied, "Internal implementation error: a caching GPU block block is neither copied nor free. This should never happen."
             if block_id in self._free:
                 self._free.remove(block_id)
                 self._copied.add(block_id)
-            else:
-                assert block_id in self._copied, "Internal implementation error: an immutable block is neither copied nor free. This should never happen."
         else:
+            # The GPU block must be a free block.
+            assert block_id in self._free, "Internal implementation error: a non-caching GPU block is not free. This should never happen."
+            
             # check if we can hit cache on CPU
             cpu_block = self.allocator[Device.CPU].allocate_immutable_block(prev_block, block_token_ids)
+            cpu_block_id = cpu_block.block_id
             if cpu_block.computed:
                 # CPU cache hit
-                # mark the GPU block as computed, issue a data copy, and free after this scheduler step finishes
-                
-        gpu_blockid = gpu_block.block_id
-        blockid = block.block_id
-        # an immutable block can be allocated from both copied and free block.
-        assert block_id in self._free or block_id in self._copied
-        # if the block is copied, we don't need to do anything
-        if block_id in self._free:
-            # if the block is free, this block may belong to two cases:
-            self._free.remove(block_id)
-            self._copied.add(block_id)
-        return block_id
+                # mark the GPU block as copied, copy the KV cache to CPU, and temporarily hold this cpu block to protect its data
+                block.computed = True
+                self._free.remove(block_id)
+                self._copied.add(block_id)
+                self._swap_mapping[cpu_block_id] = gpu_block_id
+                self._cpu_blocks_allocated.append(cpu_block_id)
+            else:
+                # No cache hit
+                # mark the GPU block as uncopied, and free cpu block
+                self._free.remove(block_id)
+                self._uncopied.add(block_id)
+                self.allocator[Device.CPU].free(cpu_block)
 
-        return self._allocators[device].allocate_immutable_block(
-            prev_block, token_ids)
+        return block
 
     def free(self, block: Block) -> None:
         """Frees the memory occupied by the given block.
@@ -210,7 +218,7 @@ class CpuOffloadingBlockAllocator(CpuGpuBlockAllocator):
             return
         block_id = block.block_id
         assert block_id is not None
-        allocator = self._block_ids_to_allocator[block_id]
+        allocator = self._block_ids_to_allocator[block_id]\
         allocator.free(block)
 
     def get_num_free_blocks(self, device: Device) -> int:
