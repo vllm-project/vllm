@@ -157,7 +157,7 @@ async def test_added_lora_tokens(client: openai.AsyncOpenAI):
 @pytest.mark.asyncio
 async def test_added_lora_tokens_base_model(client: openai.AsyncOpenAI):
     # test using token IDs
-    with pytest.raises(openai.error.OpenAIError, match="out of vocabulary"):
+    with pytest.raises(openai.BadRequestError, match="out of vocabulary"):
         # Added tokens should be rejected by the base model
         await client.completions.create(
             model=MODEL_NAME,
