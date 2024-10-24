@@ -6,7 +6,6 @@ from functools import cached_property
 from typing import Any, Dict, List, Optional, Set, Union
 
 import msgspec
-import torch
 
 from pydantic import BaseModel
 from typing_extensions import Annotated
