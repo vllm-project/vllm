@@ -156,7 +156,7 @@ def gemm_rs_ag_gemm(getitem_1: torch.Tensor,   # residual
         getitem_35 = getitem_34[0]
 
         print(f"DONE CUSTOM {getitem_31.shape}")
-        return getitem_35, getitem_31.clone(), slice_scatter_2
+        return getitem_35, getitem_31.clone(), slice_scatter_2   # check if clones are needed
 
 
 # this is wrong?  do we need it?
@@ -288,11 +288,13 @@ def process_matches(graph: fx.Graph, matches):
         last_node_in_match = match.nodes[-1] #max(match.nodes, key=lambda x: nodes.index(x))
 
         with graph.inserting_after(last_node_in_match):
-            if len(replacements) == 0:
+            if False and len(replacements) == 0:
                 replacements.append(graph.call_function(torch.ops.aten.empty.memory_format,
                                                         args = ([0, 0],),
                                                         kwargs = {"dtype": torch.float16, "device": "cuda", "pin_memory": False}))
                 graph.inserting_after(replacements[-1])
+            else:
+                replacements.append(kwargs["getitem_1"])
 
             kwargs = match.kwargs
             kwargs["first_layer"] = match == matches[0]
