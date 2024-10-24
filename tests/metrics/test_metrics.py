@@ -363,9 +363,10 @@ def assert_metrics(engine: LLMEngine, disable_log_stats: bool,
         request_histogram_metrics = [
             "vllm:e2e_request_latency_seconds",
             "vllm:request_prompt_tokens",
-            "vllm:request_generation_tokens",
             "vllm:request_params_n",
         ]
+        if not engine.is_embedding_model():
+            request_histogram_metrics.append("vllm:request_generation_tokens")
         for metric_name in request_histogram_metrics:
             metric_value = REGISTRY.get_sample_value(f"{metric_name}_count",
                                                      labels)
