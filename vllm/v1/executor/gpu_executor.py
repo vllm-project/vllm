@@ -8,7 +8,7 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
 from vllm.logger import init_logger
 from vllm.utils import get_distributed_init_method, get_ip, get_open_port
 from vllm.v1.outputs import ModelRunnerOutput
-from vllm.v1.worker.gpu_worker import GPUWorker
+from vllm.v1.worker.gpu_worker import Worker
 
 logger = init_logger(__name__)
 
@@ -47,7 +47,7 @@ class GPUExecutor:
             self,
             local_rank: int = 0,
             rank: int = 0,
-            distributed_init_method: Optional[str] = None) -> GPUWorker:
+            distributed_init_method: Optional[str] = None) -> Worker:
         """Return worker init args for a given rank."""
         # see https://github.com/NVIDIA/nccl/issues/1234
         os.environ['NCCL_CUMEM_ENABLE'] = '0'
@@ -55,7 +55,7 @@ class GPUExecutor:
         if distributed_init_method is None:
             distributed_init_method = get_distributed_init_method(
                 get_ip(), get_open_port())
-        return GPUWorker(
+        return Worker(
             model_config=self.model_config,
             parallel_config=self.parallel_config,
             scheduler_config=self.scheduler_config,

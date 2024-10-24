@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     from vllm.v1.core.scheduler import SchedulerOutput
 
 
-class GPUWorker:
+class Worker:
 
     def __init__(
         self,
