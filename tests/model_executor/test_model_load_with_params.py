@@ -1,6 +1,7 @@
 import os
 
 from vllm.model_executor.layers.pooler import PoolingType
+from vllm.model_executor.models.bert import BertEmbeddingModel
 
 MAX_MODEL_LEN = 128
 MODEL_NAME = os.environ.get("MODEL_NAME", "BAAI/bge-base-en-v1.5")
@@ -35,5 +36,10 @@ def test_model_loading_with_params(vllm_runner):
         assert model_tokenizer.tokenizer_config["do_lower_case"]
         assert model_tokenizer.tokenizer.model_max_length == 512
 
+        model = model.model.llm_engine.model_executor\
+                     .driver_worker.model_runner.model
+        assert isinstance(model, BertEmbeddingModel)
+        assert model._pooler.pooling_type == PoolingType.CLS
+        assert model._pooler.normalize
         # assert output
         assert output
