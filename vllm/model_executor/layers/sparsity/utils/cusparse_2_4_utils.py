@@ -47,20 +47,42 @@ def decompress_torch_sparse_semi_structured_mat(sp_mat):
 
 
 def semi_structured_sparse_dense_gemm(a_sparse: torch.Tensor,
-                                      b_dense: torch.Tensor):
+                                      b_dense: torch.Tensor,
+                                      bias: torch.Tensor = None):
     assert a_sparse.dtype in [
         torch.float16, torch.bfloat16, torch.int8, torch.float8_e4m3fn
     ], f"Semi structured sparse-dense matmul does not support {a_sparse.dtype}"
     if a_sparse.dtype == torch.float8_e4m3fn:
         return semi_structured_fp8_mm(a_sparse.packed,
                                       b_dense,
+                                      bias=bias,
                                       transpose_result=False)
     else:
         return torch.mm(a_sparse, b_dense)
 
 
-def semi_structured_dense_sparse_T_gemm(a: torch.Tensor, b_T: torch.Tensor):
-    return (semi_structured_sparse_dense_gemm(b_T, a.t())).t()
+def semi_structured_dense_sparse_T_gemm(a: torch.Tensor,
+                                        b_T: torch.Tensor,
+                                        bias: torch.Tensor = None):
+    return (semi_structured_sparse_dense_gemm(b_T, a.t(), bias)).t()
+
+
+def semi_structured_sparse_dense_gemm_scaled(a_sparse: torch.Tensor,
+                                             b_dense: torch.Tensor,
+                                             scale_a: torch.Tensor,
+                                             scale_b: torch.Tensor,
+                                             bias: torch.Tensor = None):
+    assert (a_sparse.dtype == torch.float8_e4m3fn
+            and b_dense.dtype == torch.float8_e4m3fn)
+    assert not b_dense.is_contiguous(
+    ), "cusparseLt requires dense matrix be non-contiguous"
+    # cusparseLt requires alpha to be float
+    assert scale_a.dtype == torch.float32 and scale_b.dtype == torch.float32
+    return semi_structured_fp8_mm(a_sparse.packed,
+                                  b_dense,
+                                  alpha=scale_a * scale_b,
+                                  bias=bias,
+                                  transpose_result=False)
 
 
 # test utils

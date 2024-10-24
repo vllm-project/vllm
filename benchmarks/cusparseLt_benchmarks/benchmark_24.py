@@ -10,16 +10,15 @@ import torch.utils.benchmark as TBenchmark
 from torch.utils.benchmark import Measurement as TMeasurement
 from weight_shapes import WEIGHT_SHAPES
 
-from vllm import _custom_ops as ops
-from vllm.utils import FlexibleArgumentParser
 from vllm.model_executor.layers.sparsity.utils.cusparse_2_4_utils import (
-    compress_to_torch_sparse_semi_structured_mat,
-    dense_matmul, get_random_mat,
+    compress_to_torch_sparse_semi_structured_mat, dense_matmul, get_random_mat,
     is_semi_structured_supported, semi_structured_sparse_dense_gemm)
+from vllm.utils import FlexibleArgumentParser
 
 DEFAULT_MODELS = list(WEIGHT_SHAPES.keys())
 DEFAULT_BATCH_SIZES = [32, 64, 128, 256, 512]
 DEFAULT_TP_SIZES = [1]
+
 
 # helpers
 def make_rand_tensors(dtype: torch.dtype, m: int, n: int,
@@ -27,6 +26,7 @@ def make_rand_tensors(dtype: torch.dtype, m: int, n: int,
     a = get_random_mat(m, k, dtype)
     b = get_random_mat(n, k, dtype).t()
     return a, b
+
 
 # bench
 def bench_fn(label: str, sub_label: str, description: str, fn: Callable, *args,
@@ -47,70 +47,62 @@ def bench_fn(label: str, sub_label: str, description: str, fn: Callable, *args,
     ).blocked_autorange(min_run_time=min_run_time)
 
 
-def bench(m: int, k: int, n: int, label: str,
-              sub_label: str, use_fp8: bool) -> Iterable[TMeasurement]:
+def bench(m: int, k: int, n: int, label: str, sub_label: str,
+          use_fp8: bool) -> Iterable[TMeasurement]:
     a, b = make_rand_tensors(torch.float16, m, n, k)
 
     timers = []
     # pytorch float16
     timers.append(
-        bench_fn(label, sub_label,
-                 "pytorch_fp16_fp16_matmul", torch.mm,
+        bench_fn(label, sub_label, "pytorch_fp16_fp16_matmul", torch.mm,
                  a.to(dtype=torch.float16), b.to(dtype=torch.float16)))
 
     # pytorch bf16
     timers.append(
-        bench_fn(label, sub_label, "pytorch_bf16_bf16_matmul",
-                 torch.mm, a.to(dtype=torch.bfloat16, device="cuda"),
+        bench_fn(label, sub_label, "pytorch_bf16_bf16_matmul", torch.mm,
+                 a.to(dtype=torch.bfloat16, device="cuda"),
                  b.to(dtype=torch.bfloat16, device="cuda")))
- 
+
     # cusparseLt fp16
     timers.append(
-        bench_fn(label,
-                 sub_label,
-                 "cusparseLt_fp16_fp16_2_4", semi_structured_sparse_dense_gemm, 
-                 compress_to_torch_sparse_semi_structured_mat(a), b)
-    )
+        bench_fn(label, sub_label, "cusparseLt_fp16_fp16_2_4",
+                 semi_structured_sparse_dense_gemm,
+                 compress_to_torch_sparse_semi_structured_mat(a), b))
 
     # cusparseLt bf16
     timers.append(
-        bench_fn(label,
-                 sub_label,
-                 "cusparseLt_bf16_bf16_2_4", semi_structured_sparse_dense_gemm, 
-                 compress_to_torch_sparse_semi_structured_mat(a.to(dtype=torch.bfloat16)), b.to(torch.bfloat16))
-    )
+        bench_fn(
+            label, sub_label, "cusparseLt_bf16_bf16_2_4",
+            semi_structured_sparse_dense_gemm,
+            compress_to_torch_sparse_semi_structured_mat(
+                a.to(dtype=torch.bfloat16)), b.to(torch.bfloat16)))
 
     a, b = make_rand_tensors(torch.int8, m, n, k)
     # cutlass i8
     timers.append(
         bench_fn(label, sub_label, "cutlass_i8_i8_matmul-w-scales",
                  dense_matmul, a, b, torch.int8))
-    
+
     # cusparseLt i8
     timers.append(
-        bench_fn(label,
-                 sub_label,
-                 "cusparseLt_i8_i8_2_4", semi_structured_sparse_dense_gemm, 
-                 compress_to_torch_sparse_semi_structured_mat(a), b)
-    )
+        bench_fn(label, sub_label, "cusparseLt_i8_i8_2_4",
+                 semi_structured_sparse_dense_gemm,
+                 compress_to_torch_sparse_semi_structured_mat(a), b))
 
     if use_fp8:
         a, b = make_rand_tensors(torch.float8_e4m3fn, m, n, k)
         # cutlass fp8
         timers.append(
             bench_fn(label, sub_label, "cutlass_fp8_fp8_matmul-w-scales",
-                    dense_matmul, a, b, torch.float8_e4m3fn))
-        
+                     dense_matmul, a, b, torch.float8_e4m3fn))
+
         # cusparseLt fp8
         timers.append(
-            bench_fn(label,
-                    sub_label,
-                    "cusparseLt_fp8_fp8_2_4", semi_structured_sparse_dense_gemm, 
-                    compress_to_torch_sparse_semi_structured_mat(a), b)
-        )
+            bench_fn(label, sub_label, "cusparseLt_fp8_fp8_2_4",
+                     semi_structured_sparse_dense_gemm,
+                     compress_to_torch_sparse_semi_structured_mat(a), b))
 
     return timers
-
 
 
 # runner
@@ -119,10 +111,11 @@ def print_timers(timers: Iterable[TMeasurement]):
     compare.print()
 
 
-def run(MKNs: Iterable[Tuple[int, int, int]], use_fp8: bool) -> Iterable[TMeasurement]:
+def run(MKNs: Iterable[Tuple[int, int, int]],
+        use_fp8: bool) -> Iterable[TMeasurement]:
     results = []
     for m, k, n in MKNs:
-        timers = bench(m, k, n, f"gemm", f"MKN=({m}x{k}x{n})", use_fp8)
+        timers = bench(m, k, n, "gemm", f"MKN=({m}x{k}x{n})", use_fp8)
         print_timers(timers)
         results.extend(timers)
 
@@ -205,23 +198,22 @@ Benchmark cuSparseLt 2:4 GEMMs.
         formatter_class=argparse.RawTextHelpFormatter)
 
     parser.add_argument("--models",
-                              nargs="+",
-                              type=str,
-                              default=DEFAULT_MODELS,
-                              choices=WEIGHT_SHAPES.keys())
+                        nargs="+",
+                        type=str,
+                        default=DEFAULT_MODELS,
+                        choices=WEIGHT_SHAPES.keys())
     parser.add_argument("--tp-sizes",
-                              nargs="+",
-                              type=int,
-                              default=DEFAULT_TP_SIZES)
+                        nargs="+",
+                        type=int,
+                        default=DEFAULT_TP_SIZES)
     parser.add_argument("--batch-sizes",
-                              nargs="+",
-                              type=int,
-                              default=DEFAULT_BATCH_SIZES)
-    parser.add_argument('--use-fp8',
-                        action='store_true',
-                        help='Add benchmarking fp8 matmul (on supporting fp8 platforms)')
+                        nargs="+",
+                        type=int,
+                        default=DEFAULT_BATCH_SIZES)
+    parser.add_argument(
+        '--use-fp8',
+        action='store_true',
+        help='Add benchmarking fp8 matmul (on supporting fp8 platforms)')
 
     args = parser.parse_args()
     run_model_bench(args)
-
-    

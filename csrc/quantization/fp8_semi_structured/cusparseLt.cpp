@@ -4,21 +4,20 @@
 #include <ATen/cuda/CUDAContext.h>
 
 #define STUB_FUNC_IMPL()                                                     \
-torch::Tensor cslt_compress_fp8_semi_structured(                           \
-    const torch::Tensor& input) {                                          \
+  torch::Tensor cslt_compress_fp8_semi_structured(                           \
+      const torch::Tensor& input) {                                          \
     TORCH_CHECK(false,                                                       \
                 "Unsupported dtype for compressed matrix in current "        \
                 "version of cuSPARSELt.");                                   \
-}                                                                          \
-                                                                            \
-torch::Tensor cslt_mm_fp8_semi_structured(                                 \
-    const torch::Tensor& compressed_A, const torch::Tensor& dense_B,       \
-    const c10::optional<torch::Tensor>& bias_opt, bool transpose_result) { \
+  }                                                                          \
+                                                                             \
+  torch::Tensor cslt_mm_fp8_semi_structured(                                 \
+      const torch::Tensor& compressed_A, const torch::Tensor& dense_B,       \
+      const c10::optional<torch::Tensor>& bias_opt, bool transpose_result) { \
     TORCH_CHECK(false,                                                       \
                 "Unsupported dtype for compressed matrix multiplication in " \
                 "current version of cuSPARSELt.");                           \
-}
-
+  }
 
 #if defined(VLLM_CUSPARSELT_ENABLED)
 
@@ -72,6 +71,7 @@ torch::Tensor cslt_compress_fp8_semi_structured(const torch::Tensor& input) {
 
 torch::Tensor cslt_mm_fp8_semi_structured(
     const torch::Tensor& compressed_A, const torch::Tensor& dense_B,
+    const c10::optional<torch::Tensor>& alpha_opt,
     const c10::optional<torch::Tensor>& bias_opt, bool transpose_result) {
   TORCH_CHECK(compressed_A.scalar_type() == at::ScalarType::Float8_e4m3fn,
               "Only float8 e4m3 is supported in vllm:cslt_compress");
@@ -85,6 +85,7 @@ torch::Tensor cslt_mm_fp8_semi_structured(
   cusparseLtMatmulPlan_t plan;
   cusparseLtMatmulAlgSelection_t alg_sel;
 
+  int tensor_alpha_mode = 0;
   float alpha = 1.0;
   float beta = 0.0;
   cudaDataType input_type = CUDA_R_8F_E4M3;
@@ -168,8 +169,24 @@ torch::Tensor cslt_mm_fp8_semi_structured(
         sizeof(dBias)));
   }
 
+  const auto alpha_tensor =
+      alpha_opt.has_value() ? *alpha_opt : torch::Tensor{};
+  auto alpha_ptr = &alpha;
+  if (alpha_opt.has_value()) {
+    if (alpha_tensor.numel() == 1) {
+      alpha = alpha_tensor.item<float>();
+    } else {
+      tensor_alpha_mode = 1;
+      TORCH_CUDASPARSE_CHECK(cusparseLtMatmulDescSetAttribute(
+          &handle, &matmul, CUSPARSELT_MATMUL_ALPHA_VECTOR_SCALING,
+          &tensor_alpha_mode, sizeof(tensor_alpha_mode)));
+      alpha_ptr = static_cast<float*>(alpha_tensor.data_ptr());
+    }
+  }
+
   cusparseLtMatmulAlgSelectionInit(&handle, &alg_sel, &matmul,
                                    CUSPARSELT_MATMUL_ALG_DEFAULT);
+
   cusparseLtMatmulPlanInit(&handle, &plan, &matmul, &alg_sel);
   size_t workspace_size;
   TORCH_CUDASPARSE_CHECK(
@@ -180,7 +197,7 @@ torch::Tensor cslt_mm_fp8_semi_structured(
   cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   TORCH_CUDASPARSE_CHECK(cusparseLtMatmul(
-      &handle, &plan, &alpha, compressed_A.data_ptr(), dense_B.data_ptr(),
+      &handle, &plan, alpha_ptr, compressed_A.data_ptr(), dense_B.data_ptr(),
       &beta, res.data_ptr(), res.data_ptr(), workspacePtr.get(), &stream, 1));
 
   // Destroy descriptors
@@ -193,11 +210,11 @@ torch::Tensor cslt_mm_fp8_semi_structured(
   TORCH_CUDASPARSE_CHECK(cusparseLtMatmulPlanDestroy(&plan));
   return res;
 }
-#else
+  #else
 
 STUB_FUNC_IMPL()
 
-#endif
+  #endif
 
 #else
 

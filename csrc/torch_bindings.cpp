@@ -312,7 +312,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   ops.def(
       "cslt_mm_fp8_semi_structured(Tensor! compressed_A, Tensor! denseB,"
-      "Tensor!? bias, bool transpose_result) -> Tensor");
+      "Tensor!? alpha, Tensor!? bias, bool transpose_result) -> Tensor");
 
   ops.impl("cslt_mm_fp8_semi_structured", torch::kCUDA,
            &cslt_mm_fp8_semi_structured);
