@@ -1,4 +1,4 @@
-from typing import Dict, List, Tuple
+from typing import List
 
 from vllm.config import SchedulerConfig
 from vllm.core.scheduler import Scheduler
@@ -6,9 +6,8 @@ from vllm.engine.output_processor.interfaces import (
     SequenceGroupOutputProcessor)
 from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.logger import init_logger
-from vllm.sequence import (CompletionSequenceGroupOutput, Sequence,
-                           SequenceGroup, SequenceGroupOutput, SequenceOutput,
-                           SequenceStatus)
+from vllm.sequence import (CompletionSequenceGroupOutput, SequenceGroup,
+                           SequenceGroupOutput)
 from vllm.transformers_utils.detokenizer import Detokenizer
 from vllm.utils import Counter
 
@@ -114,104 +113,22 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
                                         outputs: SequenceGroupOutput,
                                         is_async: bool) -> None:
         sampling_params = seq_group.sampling_params
-        if sampling_params.n == 1:
-            # only have one output sample
-            sample = outputs.samples[0]
-            # only have one sequence
-            seq = seq_group.seqs[0]
-            if not is_async:
-                seq.append_token_id(sample.output_token, sample.logprobs)
-            if sampling_params.detokenize and self.detokenizer:
-                new_char_count = self.detokenizer.decode_sequence_inplace(
-                    seq, sampling_params)
-            else:
-                new_char_count = 0
-            self.stop_checker.maybe_stop_sequence(
-                seq,
-                new_char_count,
-                sampling_params,
-                lora_req=seq_group.lora_request,
-            )
-            if seq.is_finished():
-                for scheduler in self.scheduler:
-                    scheduler.free_seq(seq)
-            return
 
-        # TODO: Add support for async for beam search
-        assert not is_async
-
-        # Process samples
-        samples = outputs.samples
-        parent_seqs = seq_group.get_seqs(status=SequenceStatus.RUNNING)
-        parent_child_dict: Dict[int, List[SequenceOutput]] = {
-            parent_seq.seq_id: []
-            for parent_seq in parent_seqs
-        }
-        for sample in samples:
-            # Guard against a KeyError which can occur if the request was
-            # aborted while the output was generated
-            if (child_list :=
-                    parent_child_dict.get(sample.parent_seq_id)) is not None:
-                child_list.append(sample)
-        # List of (child, parent)
-        child_seqs: List[Tuple[Sequence, Sequence]] = []
-
-        # Process the child samples for each parent sequence
-        for parent in parent_seqs:
-            child_samples: List[SequenceOutput] = parent_child_dict[
-                parent.seq_id]
-            if len(child_samples) == 0:
-                # This parent sequence has no children samples. Remove
-                # the parent sequence from the sequence group since it will
-                # not be used in the future iterations.
-                parent.status = SequenceStatus.FINISHED_ABORTED
-                seq_group.remove(parent.seq_id)
-                for scheduler in self.scheduler:
-                    scheduler.free_seq(parent)
-                continue
-            # Fork the parent sequence if there are multiple child samples.
-            for child_sample in child_samples[:-1]:
-                new_child_seq_id: int = next(self.seq_counter)
-                child = parent.fork(new_child_seq_id)
-                child.append_token_id(child_sample.output_token,
-                                      child_sample.logprobs)
-                child_seqs.append((child, parent))
-            # Continue the parent sequence for the last child sample.
-            # We reuse the parent sequence here to reduce redundant memory
-            # copies, especially when using non-beam search sampling methods.
-            last_child_sample = child_samples[-1]
-            parent.append_token_id(last_child_sample.output_token,
-                                   last_child_sample.logprobs)
-            child_seqs.append((parent, parent))
-
-        for seq, _ in child_seqs:
-            if sampling_params.detokenize and self.detokenizer:
-                new_char_count = self.detokenizer.decode_sequence_inplace(
-                    seq, sampling_params)
-            else:
-                new_char_count = 0
-            self.stop_checker.maybe_stop_sequence(
-                seq,
-                new_char_count,
-                sampling_params,
-                lora_req=seq_group.lora_request,
-            )
-
-        # For newly created child sequences, add them to the sequence group
-        # and fork them in block manager if they are not finished.
-        for seq, parent in child_seqs:
-            if seq is not parent:
-                seq_group.add(seq)
-                if not seq.is_finished():
-                    for scheduler in self.scheduler:
-                        scheduler.fork_seq(parent, seq)
-
-        # Free the finished and selected parent sequences' memory in block
-        # manager. Keep them in the sequence group as candidate output.
-        # NOTE: we need to fork the new sequences before freeing the
-        # old sequences.
-        for seq, parent in child_seqs:
-            if seq is parent and seq.is_finished():
-                for scheduler in self.scheduler:
-                    scheduler.free_seq(seq)
-        return
+        sample = outputs.samples[0]
+        seq = seq_group.first_seq
+        if not is_async:
+            seq.append_token_id(sample.output_token, sample.logprobs)
+        if sampling_params.detokenize and self.detokenizer:
+            new_char_count = self.detokenizer.decode_sequence_inplace(
+                seq, sampling_params)
+        else:
+            new_char_count = 0
+        self.stop_checker.maybe_stop_sequence(
+            seq,
+            new_char_count,
+            sampling_params,
+            lora_req=seq_group.lora_request,
+        )
+        if seq.is_finished():
+            for scheduler in self.scheduler:
+                scheduler.free_seq(seq)
