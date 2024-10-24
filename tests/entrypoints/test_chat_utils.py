@@ -17,7 +17,7 @@ PHI3V_MODEL_ID = "microsoft/Phi-3.5-vision-instruct"
 MLLAMA_MODEL_ID = "meta-llama/Llama-3.2-11B-Vision-Instruct"
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope="function")
 def phi3v_model_config():
     return ModelConfig(PHI3V_MODEL_ID,
                        task="generate",
@@ -26,6 +26,7 @@ def phi3v_model_config():
                        trust_remote_code=True,
                        dtype="bfloat16",
                        seed=0,
+                       chat_template_text_format="string",
                        limit_mm_per_prompt={
                            "image": 2,
                        })
@@ -328,6 +329,51 @@ def test_parse_chat_messages_multiple_images_across_messages(
         },
     ]
     _assert_mm_data_is_image_input(mm_data, 2)
+
+
+def test_parse_chat_messages_context_text_format(
+    phi3v_model_config,
+    phi3v_tokenizer,
+):
+    phi3v_model_config.chat_template_text_format = "openai"
+    conversation, mm_data = parse_chat_messages(
+        [{
+            "role": "user",
+            "content": [{
+                "type": "text",
+                "text": "What's in this text?"
+            }]
+        }, {
+            "role": "assistant",
+            "content": "Some stuff."
+        }, {
+            "role": "user",
+            "content": "What about this one?"
+        }], phi3v_model_config, phi3v_tokenizer)
+
+    assert conversation == [
+        {
+            "role": "user",
+            "content": [{
+                "type": "text",
+                "text": "What's in this text?"
+            }]
+        },
+        {
+            "role": "assistant",
+            "content": [{
+                "type": "text",
+                "text": "Some stuff."
+            }]
+        },
+        {
+            "role": "user",
+            "content": [{
+                "type": "text",
+                "text": "What about this one?"
+            }]
+        },
+    ]
 
 
 def test_parse_chat_messages_rejects_too_many_images_in_one_message(
