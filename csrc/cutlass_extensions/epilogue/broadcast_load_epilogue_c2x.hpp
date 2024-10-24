@@ -52,6 +52,7 @@
 // clang-format off
 
 #include "cutlass/epilogue/threadblock/fusion/visitor_2x.hpp"
+#include "cutlass/epilogue/threadblock/fusion/visitors.hpp"
 #include "cute/tensor.hpp"
 
 namespace cutlass::epilogue::threadblock {
