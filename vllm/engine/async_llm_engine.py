@@ -303,7 +303,7 @@ class _AsyncLLMEngine(LLMEngine):
             if not allow_async_output_proc and len(ctx.output_queue) > 0:
                 self._process_model_outputs(ctx=ctx)
 
-            if (self.scheduler_config.is_multi_step
+            if (self.scheduler_config.current_step_is_multi_step
                     and scheduler_outputs.num_lookahead_slots > 0):
                 # cache the scheduler outputs for the next iteration if we have
                 # lookahead slots
@@ -348,7 +348,7 @@ class _AsyncLLMEngine(LLMEngine):
 
             # we need to do this here so that last step's sampled_token_ids can
             # be passed to the next iteration for PP.
-            if self.scheduler_config.is_multi_step:
+            if self.scheduler_config.current_step_is_multi_step:
                 self._update_cached_scheduler_output(virtual_engine, outputs)
         else:
             if len(ctx.output_queue) > 0:
@@ -356,13 +356,13 @@ class _AsyncLLMEngine(LLMEngine):
             outputs = []
 
         # Finish the current step for all the sequence groups.
-        if self.scheduler_config.is_multi_step:
+        if self.scheduler_config.current_step_is_multi_step:
             for seq_group in seq_group_metadata_list:
                 seq_group.finish_step()
 
         if not self._has_remaining_steps(seq_group_metadata_list):
             # Clear the cache if we have finished all the steps
-            if self.scheduler_config.is_multi_step:
+            if self.scheduler_config.current_step_is_multi_step:
                 self.cached_scheduler_outputs[
                     virtual_engine] = SchedulerOutputState()
 
