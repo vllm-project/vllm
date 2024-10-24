@@ -17,6 +17,8 @@
 #include <unordered_map>
 #include <torch/custom_class.h>
 #include <c10/util/intrusive_ptr.h>
+#include <pthread.h>
+
 
 #define _MB (1 << 20)
 
@@ -132,6 +134,7 @@ private:
 
   // Internal functions
   void _cacheReleasedRegion(kvCacheRegion * region);
+  static void *memoryManagerThread(void * arg); 
   kvCacheRegion * _getLastCachedRegion(void); 
   void _gcPhyPages(int64_t toCollectPages);
   void _initializeAllocHandles(void);
@@ -140,10 +143,15 @@ private:
   // Allocate physical memory, map to the reserved virtual address space of dptr, and set access permission
   int64_t _allocCacheBlocksForRequest(int64_t region_id, int64_t blocks = 1);
 
-  std::atomic<bool> manager_running;
+  bool manager_running;
 
-  void wait_kvcache_manage_sync(void); 
-  void do_kvcache_manage(bool is_prefill_phase, std::vector<int64_t> free_caches, std::vector<std::vector<int64_t>> req_cache_blocks);
+  pthread_t thread_id;
+  void doAsyncKVCacheManage(std::vector<int64_t> free_caches, std::vector<std::vector<int64_t>> req_cache_blocks); 
+  pthread_mutex_t mutex_manager;
+  pthread_cond_t  cond_manager; 
+  bool require_memory_management;
+  std::vector<int64_t> free_caches;
+  std::vector<std::vector<int64_t>> req_cache_blocks; 
 
 public:
 

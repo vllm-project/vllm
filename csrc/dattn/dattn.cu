@@ -10,13 +10,16 @@
 #include <string>
 #include <cuda_runtime.h>
 #include <Python.h>
+#include <pthread.h>
+
 #include "dattn.h"
 
 
 #define KV_UTILIZATION_RATE (0.9)
 
 static CUmemAllocationProp _prop = {};
-static CUmemAccessDesc _accessDescr = {}; 
+static CUmemAccessDesc _accessDescr = {};
+ 
 /* 
   In this allocator, we only have the following concepts, but without the concept of tokens.
   The python portion should convert the number of tokens to tokens depending on their block_size (e.g., 16)
@@ -234,6 +237,22 @@ kvCacheAllocator::kvCacheAllocator(int64_t max_seq_length, int64_t layers_num, i
 
   this->manager_running = false;
   cuCtxGetCurrent(&origContext);
+
+  // Initialize of mutex lock and condition
+  pthread_mutex_init(&mutex_manager, NULL); 
+  pthread_cond_init(&cond_manager, NULL); 
+  manager_running = false; 
+
+  pthread_attr_t attr; 
+  pthread_attr_init(&attr);
+  // Set the thread to be detached
+  pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+
+  int result = pthread_create(&this->thread_id, &attr, kvCacheAllocator::memoryManagerThread, this);
+  if(result != 0) {
+    fprintf(stderr, "thread creation failed!"); 
+    exit(0); 
+  }
 }
 
 int64_t kvCacheAllocator::getPageSize() {
@@ -418,19 +437,60 @@ int64_t kvCacheAllocator::allocCacheBlocks(std::vector<std::vector<int64_t>> req
   return pages; 
 }
 
-void kvCacheAllocator::wait_kvcache_manage_sync(void) {
-  while(this->manager_running) ;
-  // fprintf(stderr, "waiting for release\n"); 
+
+void * kvCacheAllocator::memoryManagerThread(void * arg) {
+  kvCacheAllocator * instance = static_cast<kvCacheAllocator *>(arg); 
+
+  while(true) {
+    pthread_mutex_lock(&instance->mutex_manager); 
+
+    //pthread_cond_signal(&instance->cond_manager); 
+    // We will wait if manager_running is true (didn't finish last memory management operations)
+    // or there is no need to perform memory management
+    while(!instance->manager_running) {
+      pthread_cond_wait(&instance->cond_manager, &instance->mutex_manager); 
+    }
+    pthread_mutex_unlock(&instance->mutex_manager);
+
+    // Perform memory management asynchronously
+    instance->releaseRegions(instance->free_caches);
+    instance->allocCacheBlocks(instance->req_cache_blocks);
+
+    pthread_mutex_lock(&instance->mutex_manager); 
+    instance->manager_running = false; 
+    pthread_cond_signal(&instance->cond_manager); 
+    pthread_mutex_unlock(&instance->mutex_manager); 
+  }
+
+  return NULL;
 }
+/* 
+   This function mainly sets the work to be done, and then notify the manager thread to 
+   perform memory management asynchronously. 
+ */
+void kvCacheAllocator::doAsyncKVCacheManage(std::vector<int64_t> free_caches, std::vector<std::vector<int64_t>> req_cache_blocks) {
+    pthread_mutex_lock(&this->mutex_manager);
+    
+    // If the manager has not finished, waiting on the condition 
+    while(this->manager_running) {
+      pthread_cond_wait(&this->cond_manager, &this->mutex_manager); 
+    }
 
-void kvCacheAllocator::do_kvcache_manage(bool is_prefill_phase, std::vector<int64_t> free_caches, std::vector<std::vector<int64_t>> req_cache_blocks) {
-  std::thread([this, free_caches, req_cache_blocks]() {
-    this->manager_running = true;
-    this->releaseRegions(free_caches);
+    this->free_caches.clear(); 
+    this->req_cache_blocks.clear(); 
 
-    this->allocCacheBlocks(req_cache_blocks);
-    this->manager_running = false;
-  }).detach();
+    // Copying the work
+    for(auto cache_id: free_caches) {
+      this->free_caches.push_back(cache_id); 
+    }
+
+    for(auto cache_block: req_cache_blocks) {
+      this->req_cache_blocks.push_back(cache_block); 
+    }
+    
+    this->manager_running = true; 
+    pthread_cond_signal(&this->cond_manager); 
+    pthread_mutex_unlock(&this->mutex_manager);
 }
 
 void kvCacheAllocator::updateCacheBlocks(bool is_prefill_phase, std::vector<int64_t> free_caches, std::vector<std::vector<int64_t>> req_cache_blocks) {
@@ -442,8 +502,7 @@ void kvCacheAllocator::updateCacheBlocks(bool is_prefill_phase, std::vector<int6
     this->allocCacheBlocks(req_cache_blocks);
   }
   else {
-    wait_kvcache_manage_sync();
-    do_kvcache_manage(is_prefill_phase, free_caches, req_cache_blocks);
+    doAsyncKVCacheManage(free_caches, req_cache_blocks);
   }
   //Py_END_ALLOW_THREADS
 }
