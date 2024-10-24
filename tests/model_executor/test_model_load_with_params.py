@@ -18,6 +18,8 @@ def test_model_loading_with_params(vllm_runner):
 
         model_config = model.model.llm_engine.model_config
 
+        print(model.model.llm_engine.__dict__.items()) 
+
         assert model_config.max_model_len == 512
         assert model_config.do_lower_case
         assert model_config.pooling_config.pooling_type == 2

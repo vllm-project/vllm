@@ -17,7 +17,7 @@ from vllm.tracing import is_otel_available, otel_import_error_traceback
 from vllm.transformers_utils.config import (
     ConfigFormat, get_config, get_hf_image_processor_config,
     get_hf_text_config, get_pooling_config,
-    get_sentence_transformer_bert_config)
+    get_sentence_transformer_tokenizer_config)
 from vllm.utils import (GiB_bytes, cuda_device_count_stateless, get_cpu_memory,
                         is_hip, is_openvino, print_warning_once)
 
@@ -112,6 +112,10 @@ class ModelConfig:
             can not be gathered from the vllm arguments. 
         config_format: The config format which shall be loaded.
             Defaults to 'auto' which defaults to 'hf'.
+        pooling_config:  pooling and normalize config from the model - only applies 
+            to sentence-transformers models. 
+        bert_config: tokenizationconfiguration dictionary for a given 
+            Sentence Transformer BERT model.
         mm_processor_kwargs: Arguments to be forwarded to the model's processor
             for multi-modal data, e.g., image processor.
     """
@@ -176,8 +180,7 @@ class ModelConfig:
                                     config_format)
         self.hf_text_config = get_hf_text_config(self.hf_config)
         self.pooling_config = self.get_pooling_config()
-        self.bert_config = self._get_bert_config()
-        self.do_lower_case = self._get_bert_tokenization_config()
+        self.bert_config, self.do_lower_case = self._get_bert_config()
         self.hf_image_processor_config = get_hf_image_processor_config(
             self.model, revision)
         self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
@@ -249,15 +252,11 @@ class ModelConfig:
         return None
 
     def _get_bert_config(self):
-        bert_config = get_sentence_transformer_bert_config(
+        bert_config = get_sentence_transformer_tokenizer_config(
             self.model, self.revision)
         if bert_config is not None:
             return bert_config
         return None
-
-    def _get_bert_tokenization_config(self):
-        if self.bert_config:
-            return self.bert_config.get("do_lower_case")
 
     def _init_attention_free(self) -> bool:
         architectures = getattr(self.hf_config, "architectures", [])

@@ -305,7 +305,7 @@ def get_pooling_config(model, revision='main'):
     return None
 
 
-def get_sentence_transformer_bert_config(model, revision='main'):
+def get_sentence_transformer_tokenizer_config(model, revision='main'):
     """
     Returns the configuration dictionary for a 
     given Sentence Transformer BERT model.
