@@ -25,6 +25,12 @@ wheel="$new_wheel"
 version=$(unzip -p "$wheel" '**/METADATA' | grep '^Version: ' | cut -d' ' -f2)
 echo "Version: $version"
 
+# If the version contains "dev", rename it to v1.0.0.dev so there's one consistent name.
+if [[ $version == *dev* ]]; then
+    mv -- "$wheel" "${wheel/$version/1.0.0.dev}"
+    version="1.0.0.dev"
+fi
+
 # Upload the wheel to S3
 aws s3 cp "$wheel" "s3://vllm-wheels/$BUILDKITE_COMMIT/"
 aws s3 cp "$wheel" "s3://vllm-wheels/nightly/"
