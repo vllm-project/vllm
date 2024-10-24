@@ -6,6 +6,7 @@ MAX_MODEL_LEN = 128
 MODEL_NAME = os.environ.get("MODEL_NAME", "BAAI/bge-base-en-v1.5")
 REVISION = os.environ.get("REVISION", "main")
 
+
 def test_model_loading_with_params(vllm_runner):
     """
     Test parameter weight loading with tp>1.

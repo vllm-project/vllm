@@ -112,8 +112,8 @@ class ModelConfig:
             can not be gathered from the vllm arguments. 
         config_format: The config format which shall be loaded.
             Defaults to 'auto' which defaults to 'hf'.
-        pooling_config:  pooling and normalize config from the model - only applies 
-            to sentence-transformers models. 
+        pooling_config:  pooling and normalize config from the model - 
+            only applies to sentence-transformers models. 
         bert_config: tokenizationconfiguration dictionary for a given 
             Sentence Transformer BERT model.
         mm_processor_kwargs: Arguments to be forwarded to the model's processor
@@ -180,7 +180,7 @@ class ModelConfig:
                                     config_format)
         self.hf_text_config = get_hf_text_config(self.hf_config)
         self.pooling_config = self.get_pooling_config()
-        self.bert_config = self._get_bert_config() 
+        self.bert_config = self._get_bert_config()
         self.do_lower_case = self._get_bert_config()
         self.hf_image_processor_config = get_hf_image_processor_config(
             self.model, revision)

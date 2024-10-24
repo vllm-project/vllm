@@ -328,10 +328,8 @@ def get_sentence_transformer_tokenizer_config(model, revision='main'):
             "sentence_albert_config.json",
             "sentence_xlm-roberta_config.json",
             "sentence_xlnet_config.json",
-        ]:
-        bert_dict = get_hf_file_to_dict(config_name, 
-                                        model,
-                                        revision)
+    ]:
+        bert_dict = get_hf_file_to_dict(config_name, model, revision)
         if bert_dict:
             break
 
