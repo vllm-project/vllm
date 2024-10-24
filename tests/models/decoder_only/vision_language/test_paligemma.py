@@ -2,11 +2,12 @@ import os
 from typing import List, Optional, Tuple, Type
 
 import pytest
-from transformers import AutoConfig, AutoModelForVision2Seq, AutoTokenizer
+from transformers import (AutoConfig, AutoModelForVision2Seq, AutoTokenizer,
+                          BatchEncoding)
 
 from vllm.multimodal.utils import rescale_image_size
 from vllm.sequence import SampleLogprobs
-from vllm.utils import is_hip
+from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, is_hip
 
 from ....conftest import IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets
 from ...utils import check_logprobs_close
@@ -74,6 +75,7 @@ def run_test(
     Note, the text input is also adjusted to abide by vllm contract.
     The text output is sanitized to be able to compare with hf.
     """
+    torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[dtype]
     images = [asset.pil_image for asset in image_assets]
 
     inputs_per_image = [(
@@ -100,7 +102,14 @@ def run_test(
             for prompts, images in inputs_per_image
         ]
 
-    with hf_runner(model, dtype=dtype,
+    def process(hf_inputs: BatchEncoding):
+        hf_inputs["pixel_values"] = hf_inputs["pixel_values"] \
+            .to(torch_dtype)  # type: ignore
+        return hf_inputs
+
+    with hf_runner(model,
+                   dtype=dtype,
+                   postprocess_inputs=process,
                    auto_cls=AutoModelForVision2Seq) as hf_model:
         hf_outputs_per_image = [
             hf_model.generate_greedy_logprobs_limit(prompts,
