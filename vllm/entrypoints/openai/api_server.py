@@ -523,6 +523,28 @@ def init_app_state(
         chat_template=args.chat_template,
     )
 
+def create_server_socket() -> socket.socket:
+    # try to create a dualstack socket
+    try:
+        sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+        try:
+            sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        except socket.error as e:
+            logger.warning("Failed to disable IPV6_V6ONLY"
+                           "for server socket: %s", e)
+        
+        # still return this socket when IPV6_V6ONLY is not supported
+        return sock
+    except socket.error as e:
+        logger.warning("Failed to create dualstack socket: %s,"
+                       "use AF_INET for compatibility", e)
+
+    # fallback to AF_INET for compatibility
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        return sock
+    except socket.error:
+        raise
 
 async def run_server(args, **uvicorn_kwargs) -> None:
     logger.info("vLLM API server version %s", VLLM_VERSION)
@@ -540,7 +562,7 @@ async def run_server(args, **uvicorn_kwargs) -> None:
     # workaround to make sure that we bind the port before the engine is set up.
     # This avoids race conditions with ray.
     # see https://github.com/vllm-project/vllm/issues/8204
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock = create_server_socket()
     sock.bind(("", args.port))
 
     def signal_handler(*_) -> None:
