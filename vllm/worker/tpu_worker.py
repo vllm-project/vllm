@@ -137,10 +137,10 @@ class TPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         block_size = self.cache_config.block_size
         block_size_bytes = (dtype_btyes * block_size * num_layers * 2 *
                             head_size * num_kv_heads)
-
-        # Calculate the TPU KV cache size based on profiling.
         m = xm.get_memory_info(self.device)
         total_memory_size = m["bytes_limit"]
+
+        # Calculate the TPU KV cache size based on profiling.
         usable_memory_size = int(total_memory_size *
                                  self.cache_config.gpu_memory_utilization)
         profiled = m["bytes_used"]  # Weights + intermediate activations.
