@@ -89,24 +89,24 @@ Build from source
 Python-only build (without compilation)
 ---------------------------------------
 
-If you only need to change Python code, you can build and install vLLM without compilation.
+If you only need to change Python code, you can build and install vLLM without compilation. Using `pip's ``--editable`` flag <https://pip.pypa.io/en/stable/topics/local-project-installs/#editable-installs>`_, changes you make to the code will be reflected when you run vLLM:
 
 .. code-block:: console
 
     $ git clone https://github.com/vllm-project/vllm.git
     $ cd vllm
-    $ VLLM_USE_PRE_COMPILED=1 pip install --editable .
+    $ VLLM_USE_PRECOMPILED=1 pip install --editable .
 
-This will download and the latest available nightly wheel and include the compiled libraries from there. The wheel that is used to retrieve the prebuilt libraries can be set using the ``VLLM_PRECOMPILED_WHEEL_LOCATION`` environment variable, for example, to use the `PyPi wheel <https://pypi.org/project/vllm/#files>`:
+This will download the latest nightly wheel and use the compiled libraries from there in the install.
+
+The wheel that is used to retrieve the prebuilt libraries (e.g. the `PyPi wheel <https://pypi.org/project/vllm/#files>`_) can be set using the ``VLLM_PRECOMPILED_WHEEL_LOCATION`` environment variable:
 
 .. code-block:: console
 
    $ export VLLM_PRECOMPILED_WHEEL_LOCATION=https://files.pythonhosted.org/packages/4a/4c/ee65ba33467a4c0de350ce29fbae39b9d0e7fcd887cc756fa993654d1228/vllm-0.6.3.post1-cp38-abi3-manylinux1_x86_64.whl
-   $ VLLM_USE_PRE_COMPILED=1 pip install --editable .
+   $ VLLM_USE_PRECOMPILED=1 pip install --editable .
 
 You can find more information about vLLM's wheels `above <#install-the-latest-code>`_.
-
-Python code changes, will reflected when you run vLLM thanks to pip's ``--editable`` flag.
 
 .. note::
 
@@ -132,7 +132,7 @@ If you want to modify C++ or CUDA code, you'll need to build vLLM from source. T
     As long as ``which ccache`` command can find the ``ccache`` binary, it will be used automatically by the build system. After the first build, subsequent builds will be much faster.
 
     `sccache <https://github.com/mozilla/sccache>` works similarly to ``ccache``, but has the capability to utilize caching in remote storage environments.
-    The following env vars can be set for to configure the vLLM ``sccache`` remote: ``SCCACHE_BUCKET=vllm-build-sccache SCCACHE_REGION=us-west-2 SCCACHE_S3_NO_CREDENTIALS=1``. We also recommend setting ``SCCACHE_IDLE_TIMEOUT=0``
+    The following environment variables can be set to configure the vLLM ``sccache`` remote: ``SCCACHE_BUCKET=vllm-build-sccache SCCACHE_REGION=us-west-2 SCCACHE_S3_NO_CREDENTIALS=1``. We also recommend setting ``SCCACHE_IDLE_TIMEOUT=0``.
 
 
 Use an existing PyTorch installation
