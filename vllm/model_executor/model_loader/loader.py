@@ -148,18 +148,17 @@ def _get_model_initialization_kwargs(
     return extra_kwargs
 
 
-def build_model(model_class: Type[nn.Module],
-                hf_config: PretrainedConfig,
+def build_model(model_class: Type[nn.Module], hf_config: PretrainedConfig,
                 cache_config: Optional[CacheConfig],
-                quant_config: Optional[QuantizationConfig],
-                *,
+                quant_config: Optional[QuantizationConfig], *,
                 lora_config: Optional[LoRAConfig],
                 multimodal_config: Optional[MultiModalConfig],
                 scheduler_config: Optional[SchedulerConfig],
                 pooling_config: Optional[PoolingConfig] = None) -> nn.Module:
     extra_kwargs = _get_model_initialization_kwargs(model_class, lora_config,
                                                     multimodal_config,
-                                                    scheduler_config)
+                                                    scheduler_config
+                                                    )
 
     return model_class(config=hf_config,
                        cache_config=cache_config,

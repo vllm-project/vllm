@@ -269,7 +269,7 @@ class LLMEngine:
             model_config.trust_remote_code,
             model_config.dtype,
             model_config.max_model_len,
-            load_config.download_dir, 
+            load_config.download_dir,
             load_config.load_format,
             parallel_config.tensor_parallel_size,
             parallel_config.pipeline_parallel_size,
