@@ -342,5 +342,6 @@ def test_dummy_data_for_llava_next_feature_size(dummy_data_for_llava_next,
     )
 
     # The dummy data dims should match the gridpoint with the biggest feat size
-    assert mm_data["image"].size == expected_size
+    assert mm_data["image"].height == expected_size[0]
+    assert mm_data["image"].width == expected_size[1]
     assert len(seq_data.get_token_ids()) >= seq_len
