@@ -122,7 +122,6 @@ class InputPreprocessor:
     def _prepare_decoder_input_ids_for_generation(
         self,
         decoder_input_ids: Optional[List[int]],
-        force_bos: bool = True,
     ) -> List[int]:
         """
         Prepares `decoder_input_ids` for generation with encoder-decoder models.
@@ -151,10 +150,6 @@ class InputPreprocessor:
             # no decoder prompt input ->
             # use decoder_start_token_id as decoder_input_ids
             decoder_input_ids = self._get_default_enc_dec_decoder_prompt()
-
-        if force_bos and (len(decoder_input_ids) == 0
-                          or decoder_input_ids[0] != decoder_start_token_id):
-            decoder_input_ids = [decoder_start_token_id] + decoder_input_ids
 
         return decoder_input_ids
 
@@ -330,17 +325,11 @@ class InputPreprocessor:
             assert_never(encoder_inputs)
 
         if decoder_inputs is None:
-            dec_token_ids = self._prepare_decoder_input_ids_for_generation(
-                None,
-                force_bos="multi_modal_data" not in encoder_inputs,
-            )
+            dec_token_ids = self._prepare_decoder_input_ids_for_generation(None)
             decoder_inputs = token_inputs(dec_token_ids)
         elif decoder_inputs["type"] == "token":
             dec_token_ids = self._prepare_decoder_input_ids_for_generation(
-                decoder_inputs["prompt_token_ids"],
-                force_bos=("multi_modal_data" not in encoder_inputs
-                           and "multi_modal_data" not in decoder_inputs),
-            )
+                decoder_inputs["prompt_token_ids"])
             decoder_inputs["prompt_token_ids"] = dec_token_ids
 
             if "multi_modal_data" in decoder_inputs:
