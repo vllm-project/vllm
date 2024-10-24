@@ -452,7 +452,8 @@ def _parse_chat_message_content_mm_part(
         content = MM_PARSER_MAP[part_type](part)
 
         # Special case for 'image_url.detail'
-        if part_type == "image_url" and part.get("detail") != "auto":
+        # We only support 'auto', which is the default
+        if part_type == "image_url" and part.get("detail", "auto") != "auto":
             logger.warning("'image_url.detail' is currently not supported "
                            "and will be ignored.")
 
