@@ -5,8 +5,6 @@
 class DecoderXQARunner;
 class DecoderXQAImpl {
  public:
-  
-// DecoderXQAImpl(DecoderXQARunner* runner) : mRunner(runner) {}
 
   void run(XQAParams const& xqa_params, KVCacheListParams const& kv_cache_buffer, cudaStream_t const& stream);
  enum class ImplType
@@ -26,13 +24,6 @@ class DecoderXQAImpl {
   DecoderXQARunner* mRunner;
 };
 
-
-// std::unique_ptr<DecoderXQAImpl> DecoderXQAImpl::create(DecoderXQARunner* runner)
-// {
-
-//     return std::unique_ptr<DecoderXQAImpl>(new DecoderXQAImplPrecompiled(runner));
-  
-// }
 enum class XQAKernelType : int32_t {
   kAMPERE_WARP_SPECIALIZED = 0,
   kHOPPER_WARP_SPECIALIZED = 1

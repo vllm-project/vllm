@@ -17,7 +17,6 @@
 #include <torch/all.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
-// #include "xqa/kernels/decoderMaskedMultiheadAttention/utils.h"
 #include "decoder_xqa_impl_common.h"
 
 
@@ -28,13 +27,6 @@ bool const isPerfsim = []() {
     }
     return bool(std::stoi(v));
 }();
-
-// inline void checkCuda(cudaError_t err) {
-//     if (err != cudaSuccess) {
-//         printf("%s\n", cudaGetErrorName(err));
-//         throw std::runtime_error(cudaGetErrorName(err));
-//     }  
-// }
 
 template <typename T>
 class ManagedMemBuf

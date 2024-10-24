@@ -46,7 +46,6 @@ void buildXQALaunchParams(XQALaunchParam& launchParams,  XQAParams const& params
     memset(&launchParams, 0, sizeof(XQALaunchParam));
     launchParams.num_k_heads = params.num_kv_heads;
     launchParams.output = static_cast<uint8_t*>(params.output);
-    // launchParams.qkv = static_cast<uint8_t const*>(params.qkv);
     launchParams.batch_size = params.batch_size;
     launchParams.kv_scale_quant_orig = params.kv_scale_quant_orig;
     launchParams.semaphores = params.semaphores;

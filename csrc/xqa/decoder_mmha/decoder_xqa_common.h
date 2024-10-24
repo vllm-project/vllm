@@ -28,8 +28,6 @@
 #define HOST_DEVICE_FUNC __host__ __device__
 #define DEVICE_FUNC __device__
 
-// #define HEAD_GRP_SIZE 8
-
 inline void cuErrCheck_(CUresult stat, char const* file, int line) {
   if (stat != CUDA_SUCCESS) {
     char const* msg = nullptr;
@@ -50,16 +48,6 @@ inline void cuErrCheck_(CUresult stat, char const* file, int line) {
     }                                                               \
   } while (0)
 
-// inline void syncAndCheck(char const* const file, int const line)
-// {
-//     // if (doCheckError())
-//     {
-//         cuErrCheck(cudaGetLastError(), "cudaGetLastError", file, line);
-//         cuErrCheck(cudaDeviceSynchronize(), "cudaDeviceSynchronize", file, line);
-//     }
-// }
-
-// #define sync_check_cuda_error() syncAndCheck(__FILE__, __LINE__)
 
 inline constexpr int kMinHistoryTokensPerBlock = 128;
 
@@ -93,11 +81,9 @@ inline int getSMVersion()
 // For xqa kernel IO
 enum Data_type
 {
-    // DATA_TYPE_BOOL,
     DATA_TYPE_FP16,
     DATA_TYPE_BF16,
     DATA_TYPE_FP32,
-    // DATA_TYPE_INT4,
     DATA_TYPE_INT8,
     DATA_TYPE_INT32,
     DATA_TYPE_E4M3,
@@ -105,13 +91,6 @@ enum Data_type
     DATA_TYPE_UNKNOWN
 };
 
-
-// enum class KvCacheDataType
-// {
-//     BASE = 0,
-//     INT8,
-//     FP8
-// };
 
 // Type trait to map types to enum values
 template <typename T>
@@ -130,18 +109,10 @@ struct TypeToDataType<__half> {
     static constexpr Data_type value = Data_type::DATA_TYPE_FP16;
 };
 
-// template <>
-// struct TypeToDataType<uint8_t> {
-//     static constexpr Data_type value = Data_type::DATA_TYPE_INT8;
-// };
-
 template <>
 struct TypeToDataType<uint8_t> {
     static constexpr Data_type value = Data_type::DATA_TYPE_E4M3;
 };
-
-
-// ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 static inline size_t get_size_in_bytes(size_t n, Data_type dtype)
 {

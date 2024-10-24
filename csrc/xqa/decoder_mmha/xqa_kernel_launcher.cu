@@ -24,69 +24,9 @@
 #include "attention/attention_dtypes.h"
 #include "cuda_compat.h"
 #include "dispatch_utils.h"
-// #include "xqa/kernels/decoderMaskedMultiheadAttention/mha.h"
-// #include "xqa/kernels/decoderMaskedMultiheadAttention/mhaUtils.cuh"
 #include "decoder_xqa_impl_precompiled.h"
 #include "decoder_xqa_runner.h"
 
-// #include "cubin/xqa_kernel_cubin.h"
-
-// // There are 4 ways to pass ctaRowMax backward from gemm1 warps to gemm0
-// warps:
-// //  1. Protect with xFwdBarriers+xBwdBarriers. This way, ctaRowMax is
-// available to gemm0 warps together with x tiles and warpRowMax/warpRowSum. But
-// ctaRowMax is required before warp tile online softmax, while the other
-// buffers is needed only after online softmax. So xBwdBarriers wait will need
-// to be moved before online softmax.
-// //  2. Similar to approach 1, but we add an additional register copy of
-// ctaRowMax in gemm0 warps. It's loaded from smem ctaRowMax after warp tile
-// online softmax, so the current warp tile can't use it. But we can pass it to
-// next iteration so softmax of next tile can use it. The update will be delayed
-// by 1 more iteration and we need one or two more registers. Alternatively, put
-// the extra copy in shared memory, so we have double buffer for ctaRowMax.
-// //  3. Protected with dedicated backward barriers (xFwdBarriers +
-// ctaRowmaxBwdBarriers). Then we don't have drawbacks of 1 or 2, but we need
-// extra smem barriers and extra arrive/wait instructions.
-// //  4. No protection, just use volatile read/write. This approach gives most
-// timely update and has lowest cost, but the result is non-deterministic up to
-// an small numeric error.
-// // #define CTA_ROW_MAX_BACKWARD_METHOD 4
-// // 1 is 8% slower than 4. 2/3 are 10% slower than 4.
-// #define CTA_ROW_MAX_BACKWARD_METHOD 1
-
-// static_assert(inputElemSize >= cacheElemSize);
-
-// constexpr uint32_t cacheElemsPerGrain = exactDiv(grainBytes, cacheElemSize);
-// constexpr uint32_t inputElemsPerGrain = exactDiv(grainBytes, inputElemSize);
-// constexpr bool enableMicroFastPath = false;
-
-// // x: horizontal stacking for cta horizontal tile size
-// // y: vertical stacking for cta vertical tile size
-// // z: must be 2 for warp specialization.
-// constexpr uint3 ctaShapeInWarps = {4, 1, 2};
-
-// static_assert(ctaShapeInWarps.z == 2); // for warp specialization
-// constexpr uint32_t nbWarpsPerCta = ctaShapeInWarps.x * ctaShapeInWarps.y *
-// ctaShapeInWarps.z; constexpr uint32_t ctaSize = warp_size * nbWarpsPerCta;
-
-// constexpr uint32_t nbValidRows = headGrpSize * beamWidth;
-// constexpr uint2 warpTile = {64, roundUp(nbValidRows, 16U)};
-// static_assert(nbValidRows <= warpTile.y);
-
-// constexpr uint32_t gemm1WarpsPerGrp = exactDiv(headElems, warpTile.x);
-// constexpr uint32_t gemm1NbWarpGrps = exactDiv(ctaShapeInWarps.x,
-// gemm1WarpsPerGrp); // warp groups split along seqLen dim.
-
-// constexpr uint2 ctaTile = {
-//     warpTile.x * ctaShapeInWarps.x, // if .x is greater than headSize, then
-//     gemm1 uses split-K warpTile.y * ctaShapeInWarps.y
-// };
-
-// constexpr uint32_t cvtExpansion = exactDiv(inputElemSize, cacheElemSize);
-
-
-
-// std::unique_ptr<DecoderXQAImplPrecompiled> decoder;
 template <typename T, Data_type CACHE_T>
 void xqa_paged_attention_launcher(
     torch::Tensor& out, torch::Tensor& query, torch::Tensor& key_value_cache,
@@ -94,19 +34,11 @@ void xqa_paged_attention_launcher(
     double scale, torch::Tensor& block_tables, torch::Tensor& seq_lens,
     int64_t block_size, int64_t max_seq_len, const std::string kv_cache_dtype,
     double k_scale, double v_scale) {
-  /************** ************************/
 
   int num_seqs = query.size(0);
   int num_heads = query.size(1);
   int head_size = query.size(2);
   int max_num_blocks_per_seq = block_tables.size(1);
-
-  // int device;
-  // checkCuda(cudaGetDevice(&device));
-  // cudaDeviceProp prop;
-  // checkCuda(cudaGetDeviceProperties(&prop, device));
-  // const uint32_t nbSubSeqPerSeq = 1;  // no multi-block
-
 
   auto device = query.device();
   const auto stream = at::cuda::getCurrentCUDAStream(device.index());
@@ -115,40 +47,13 @@ void xqa_paged_attention_launcher(
   float const vScale = v_scale;
 
   uint32_t seqLen = max_seq_len;
-  uint32_t tokensPerPage = block_size;  // 16
-#if USE_PAGED_KV_CACHE
+  uint32_t tokensPerPage = block_size;
+
   size_t maxSeqLen = roundUp(seqLen, tokensPerPage);  // max_num_blocks_per_seq
-#else
-  size_t maxSeqLen = seqLen;
-#endif
+
   uint32_t nbKHeads = num_kv_heads;
   uint32_t nbVHeads = nbKHeads;
-  // uint32_t nbQHeads = nbKHeads * HEAD_GRP_SIZE;
-  // printf("**********cacheElemSize************ = %u \n", cacheElemSize);
-
-  // uint32_t const totalNbCacheHeads =
-  //     (nbKHeads + nbVHeads) * maxSeqLen * num_seqs;
-  // size_t const totalNbCacheElems =
-  //     validElemsPerHead * size_t(totalNbCacheHeads);
-  // size_t const qElems = validElemsPerHead * nbQHeads * num_seqs;
-  // size_t const outElems = validElemsPerHead * nbQHeads * num_seqs;
-  // size_t const cacheBytes = sizeof(CACHE_T) * totalNbCacheElems;
-  // size_t const inputBytes = sizeof(T) * qElems;
-  // size_t const outputBytes = sizeof(T) * outElems;
-  // size_t const seqLenListBytes = sizeof(uint32_t) * num_seqs;
-  // size_t const ctxLenListBytes = sizeof(uint32_t) * num_seqs;
-// #if USE_PAGED_KV_CACHE
-//   uint32_t const nbPagesPerSeq = divUp<uint32_t>(maxSeqLen, tokensPerPage);
-//   size_t const totalNbPages = nbPagesPerSeq * 2 * num_seqs;
-//   size_t const pageListBytes = sizeof(int) * totalNbPages;
-// #else
-//   size_t const pageListBytes = 0U;
-// #endif  
   auto batchSize = num_seqs;
-
-  size_t const nbSeq = nbKHeads * num_seqs;  // what is this?
-
-
 
   int const beamwidth = num_seqs / batchSize;  // always 1
 
@@ -172,31 +77,6 @@ void xqa_paged_attention_launcher(
     printf("generating input data\n");
   }
 
-
-  // auto scratch = reinterpret_cast<uintptr_t>(scratchBuf.get());
-/*
-  CUmodule cuModule{0};
-  cuErrCheck(cuModuleLoadData(
-      &cuModule,
-      // xqa_kernel_dt_fp16_d_128_beam_1_kvt_fp16_pagedKV_16_nqpkv_8_m_8_sm_90_cubin)); //fp16
-      xqa_kernel_dt_fp16_d_128_beam_1_kvt_e4m3_pagedKV_32_nqpkv_8_m_8_sm_90_cubin)); //e4m3
-
-
-  TORCH_CHECK(cuModule != nullptr, "cuModule wasn't loaded properly");
-  CUfunction xqaFunc = nullptr;
-  cuErrCheck(cuModuleGetFunction(&xqaFunc, cuModule, "kernel_mha"));
-  TORCH_CHECK(xqaFunc != nullptr, "kernel_mha wasn't loaded properly");
-*/
-
-
-  // Create the DecoderXQAImplPrecompiled object
-  // static std::unique_ptr<DecoderXQAImplPrecompiled> decoder = DecoderXQAImplPrecompiled::create();
-  // if (nullptr == decoder) {
-  //   decoder = DecoderXQAImplPrecompiled::create();
-  // }
-  // static std::unique_ptr<DecoderXQARunner> runner = std::make_unique<DecoderXQARunner>();
-
-
   auto io_type = TypeToDataType<T>::value;
   bool use_multi_block = true;
   XQAParams xqa_params;
@@ -219,67 +99,30 @@ void xqa_paged_attention_launcher(
   xqa_params.multi_block_mode = use_multi_block;
   xqa_params.timestep = 1024;
 
-  std::cout << "In xqaKernel.cu, iotype=" << io_type<<std::endl;
   DecoderXQARunner runner(io_type, num_heads, nbKHeads, head_size, use_multi_block);
-  // int max_context_length = 4096;
-  // int max_num_tokens = num_seqs * max_context_length;
 
-
-  size_t const nbSemaphores = nbKHeads * batchSize;//roundUp<size_t>(nbSeq, 2) + 2 + nbSeq + 2;
-  // auto const semaphores = ManagedMemBuf<uint32_t>(nbSemaphores);
-  size_t workspace_size = runner.getWorkspaceSize(nbSemaphores); //max_num_tokens is only useful when medusa
-  std::cout << "In xqaKernel.cu, workspace_size=" << workspace_size<<std::endl;  
-  // size_t const scratchSize = workspace_size;//(256u << 20);
-  // auto const scratchBuf = ManagedMemBuf<std::byte>(scratchSize);
+  size_t const nbSemaphores = nbKHeads * batchSize;
+  auto const semaphores = ManagedMemBuf<uint32_t>(nbSemaphores);
+  size_t workspace_size = runner.getWorkspaceSize(0); //max_num_tokens is only useful when medusa
   auto const kvCacheScale = ManagedMemBuf<float>(1);
   kvCacheScale[0] = kScale;  // only useful when fp8 cache
 
-  // auto prefetchToDevice = [&](int dev) {
-  //   semaphores.prefetch(dev, stream);
-  //   // scratchBuf.prefetch(dev, stream);
-  //   kvCacheScale.prefetch(dev, stream);
-  // };
-  // prefetchToDevice(device);
- 
-  torch::Tensor ws_tr = torch::empty(workspace_size, torch::TensorOptions().dtype(torch::kU8).device(device));
-
-
-  // checkCuda(cudaMemsetAsync(semaphores.get(), 0, 1 * nbSemaphores, stream));
-  // checkCuda(cudaStreamSynchronize(stream)) ;
-
+  auto prefetchToDevice = [&](int dev) {
+    semaphores.prefetch(dev, stream);
+    kvCacheScale.prefetch(dev, stream);
+  };
+  prefetchToDevice(device.index());
+  
+  checkCuda(cudaMemsetAsync(semaphores.get(), 0, 1 * nbSemaphores, stream));
+  checkCuda(cudaStreamSynchronize(stream));
   xqa_params.kv_scale_quant_orig = kvCacheScale.get();
+  xqa_params.semaphores = semaphores.get();
+  torch::Tensor ws_tr = torch::empty(workspace_size, torch::TensorOptions().dtype(torch::kU8).device(device));
   auto wk_ptr = ws_tr.mutable_data_ptr();
-  xqa_params.semaphores = (uint32_t*)(wk_ptr);//semaphores.get();
-  xqa_params.workspaces = (void*)(xqa_params.semaphores + nbSemaphores);//scratchBuf.get();
-
-
-  // decoder.get()->runWithKVBlockArray(xqa_params, kvcacheList, stream) ;
+  xqa_params.workspaces = (void*)(wk_ptr);
 
   runner.dispatch(xqa_params, kvcacheList, stream);
   return;
-
-  // static uint32_t const hostSmemSize = [&]() {
-  //   uint32_t size;
-  //   // Populate mSharedMemBytes.
-  //   CUdeviceptr shmem_dev_ptr = 0;
-  //   cuErrCheck(
-  //       cuModuleGetGlobal(&shmem_dev_ptr, nullptr, cuModule, "smemSize"));
-  //   cuErrCheck(cuMemcpyDtoH(&size, shmem_dev_ptr, sizeof(unsigned int)));
-  //   cuErrCheck(cuFuncSetAttribute(
-  //       xqaFunc, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES, size));
-  //   return size;
-  // }();
-  // // printf("hostSmemSize= %u\n", hostSmemSize);
-  // bool isGmmaKernel = false;
-  // auto kvCacheScalePtr = kvCacheScale.get();
-  // auto semaphoresPtr = semaphores.get();
-  // void* args[] = {&nbKHeads,         (void*)&output,        (void*)&qHeads,
-  //                 (void*)&kvcacheList, &batchSize,     &kvCacheScalePtr,
-  //                 &semaphoresPtr,    (void*)&scratch};
-  // // https://github.com/NVIDIA/TensorRT-LLM/blob/8681b3a4c0ccc1028bb48d83aacbb690af8f55e7/cpp/tensorrt_llm/kernels/decoderMaskedMultiheadAttention/decoderXQAImplPrecompiled.cpp#L301C54-L301C111
-  // cuErrCheck(cuLaunchKernel(xqaFunc, nbSubSeqPerSeq, nbKHeads, batchSize, 128,
-  //                           1, isGmmaKernel ? 3 : 2, hostSmemSize, stream, args,
-  //                           /*extra=*/0));
 }
 
 // NOTE(shuw): XQA only support block_size,
@@ -305,10 +148,8 @@ if (KV_DTYPE == "auto") { \
 } else { \
   if (KV_DTYPE == "fp8" || KV_DTYPE == "fp8_e4m3") { \
     if (SRC_DTYPE == at::ScalarType::Half) { \
-      std::cout << "half is op and kv dtype is e4m3\n"; \
       FN(half, Data_type::DATA_TYPE_E4M3); \
     } else if (SRC_DTYPE == at::ScalarType::BFloat16) { \
-    std::cout << "bf16 is op and kv dtype is e4m3\n"; \
       FN(__nv_bfloat16, Data_type::DATA_TYPE_E4M3); \
     } else { \
       TORCH_CHECK(false, "Unsupported input type of kv cache: ", SRC_DTYPE); \
@@ -317,7 +158,6 @@ if (KV_DTYPE == "auto") { \
     TORCH_CHECK(false, "Unsupported data type of kv cache: ", KV_DTYPE); \
   } \
 }
-
 
 void xqa_paged_attention(torch::Tensor& out, torch::Tensor& query,
                          torch::Tensor& key_value_cache, int64_t num_heads,

@@ -10,7 +10,6 @@ void DecoderXQAImpl::run(XQAParams const& xqa_params,
 
 std::unique_ptr<DecoderXQAImpl> DecoderXQAImpl::create(DecoderXQARunner* runner,
                                                        ImplType implType) {
-  std::cout << "Creating a decoderXQAImpl\n";
   switch (implType) {
     case ImplType::kPrecompiled:
       return std::unique_ptr<DecoderXQAImpl>(

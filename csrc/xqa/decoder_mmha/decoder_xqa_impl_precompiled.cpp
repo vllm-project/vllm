@@ -103,25 +103,19 @@ class XQAKernelList {
         hmod = findModuleIter->second;
       } else {
         cuErrCheck(cuModuleLoadData(&hmod, kernelMeta.mCubin));
-        // cuErrCheck(cuModuleLoadData(&hmod, xqa_kernel_dt_bf16_d_128_beam_1_kvt_e4m3_pagedKV_64_nqpkv_8_m_8_sm_90_cubin));
         mModules.insert(std::make_pair(kernelMeta.mCubin, hmod));
       }
-      // std::cout << "22222222222222\n";
+
       XQAKernelFuncInfo funcInfo{};
       funcInfo.mMetaInfoIndex = i;
-      // std::cout << "reading kernelMeta.mCubin:" <<kernelMeta.mCubin <<std::endl;
-      // std::cout << "reading mFuncName:" <<kernelMeta.mFuncName <<std::endl;
-      
       cuErrCheck(cuModuleGetFunction(&funcInfo.mDeviceFunction, hmod,
                                      kernelMeta.mFuncName));
       // std::cout << "reading mDeviceFunction:" <<funcInfo.mDeviceFunction <<std::endl;
       funcInfo.mSharedMemBytes =
           getGlobalVar<uint32_t>(hmod, "smemSize", true).value();
-      // std::cout << "I am reading in smemSize: " << funcInfo.mSharedMemBytes <<std::endl;
       funcInfo.mKernelType =
           getGlobalVar<XQAKernelType>(hmod, "kernelType", false)
               .value_or(XQAKernelType::kAMPERE_WARP_SPECIALIZED);
-      //  std::cout << "3333333333333\n";
       /* Set 46KB threshold here because we have to take static/driver shared
        * memory into consideration. */
       if (funcInfo.mSharedMemBytes >= 46 * 1024) {
@@ -130,18 +124,15 @@ class XQAKernelList {
                                CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
                                funcInfo.mSharedMemBytes));
       }
-      // std::cout << "4444444444444\n";
+
       XQAKernelRuntimeHashKey hash_key{
           kernelMeta.mKVDataType,   kernelMeta.mHeadDim,
           kernelMeta.mBeamWidth,    kernelMeta.mNumQHeadsOverKV,
           kernelMeta.mMTileSize,    kernelMeta.mTokensPerPage,
           kernelMeta.mPagedKVCache, kernelMeta.mMultiQueryTokens};
-      // std::cout << "In loadXQAKernels, hash_key=" << hash_key<< std::endl;
-      // std::cout << "yyyyyyyyyyyyyyyyyyyyyyy\n";
 
       mFunctions.insert(std::make_pair(hash_key, funcInfo));
     }
-    // std::cout << "finish loading " << mKernelMetaCount << "kernels" <<std::endl;
   }
 
   bool supportConfig(XQAParams const& xqaParams) const {
@@ -183,22 +174,6 @@ class XQAKernelList {
   bool mayHavePerfGain(XQAParams const& xqaParams,
                        int multiprocessor_count) const {
     return true;
-    // // NOTE: only XQA supports multi_query_tokens (Medusa mode).
-    // if (mForceXQA || xqaParams.multi_query_tokens)
-    // {
-    //     return true;
-    // }
-    // int num_kv_heads = xqaParams.num_kv_heads;
-    // int batch_size = static_cast<int>(xqaParams.batch_size);
-    // int multi_block_count = 1;
-    // if (xqaParams.multi_block_mode)
-    // {
-    //     int history_length = xqaParams.timestep;
-    //     multi_block_count = history_length / kMinHistoryTokensPerBlock;
-    // }
-    // int block_count = num_kv_heads * batch_size * multi_block_count;
-    // return static_cast<float>(block_count) * kEnableMinBlockFactor >=
-    // static_cast<float>(multiprocessor_count);
   }
 
 
@@ -215,21 +190,12 @@ class XQAKernelList {
     unsigned int beam_width = xqaParams.beam_width;
     unsigned int batch_beam_size = xqaParams.batch_size * beam_width;
 
-    // // const KvCacheDataType cache_type =
-    // xqaParams.kv_cache_quant_mode.hasInt8KvCache()
-    // //             ? KvCacheDataType::INT8
-    // //             : (xqaParams.kv_cache_quant_mode.hasFp8KvCache() ?
-    // KvCacheDataType::FP8 : KvCacheDataType::BASE);
-
-    // Data_type cache_type = Data_type::DATA_TYPE_FP16;
     XQALaunchParam launchParams;
 
     buildXQALaunchParams(launchParams, xqaParams, kv_cache_buffer);
     void* xqa_q_input_ptr = const_cast<void*>(xqaParams.qHeads);
 
     XQAKernelRuntimeHashKey hash_key = getRuntimeHashKeyFromXQAParams(xqaParams);
-    std::cout << "********************************\n";
-    std::cout << "seeing hash_key" << hash_key << std::endl;
     
     auto const findIter = mFunctions.find(hash_key);
     // std::cout << "at running mDeviceFunction:" <<findIter->second.mDeviceFunction <<std::endl;
@@ -249,7 +215,6 @@ class XQAKernelList {
                                    xqaParams.kv_cache_data_type ==
                                        XQADataType::DATA_TYPE_E4M3 &&
                                    xqaParams.beam_width == 1));
-      // bool const isGmmaKernel = false;
       constexpr uint32_t kMAX_NB_KERNEL_PARAMS = 11;
       uint32_t const maxNbKernelParams = (isGmmaKernel ? 11 : 10);
       uint32_t idxNextParam = 0;
@@ -278,30 +243,13 @@ class XQAKernelList {
       if (xqaParams.multi_block_mode) {
         multi_block = computeMultiBlockCount(xqaParams, xqaParams.batch_size,
                                              multiprocessor_count);
-        // multi_block = 2;
       }
-      std::cout << "At launching cuKernel:" << multi_block << "; " << xqaParams.num_kv_heads <<"; " << xqaParams.batch_size<<std::endl;
       auto blockz = isGmmaKernel ? 3 : 2;
-            std::cout << "At launching cuKernel blockz:" << blockz <<std::endl;
-            std::cout << "shared_mem_bytes: " <<shared_mem_bytes <<std::endl;
-// cudaDeviceSynchronize();
-// cudaError_t err = cudaGetLastError();
-
-//      if ( err != cudaSuccess )
-//      {
-//         printf("CUDA Error: %s\n", cudaGetErrorString(err));       
-
-//         // Possibly: exit(-1) if program cannot continue....
-//      }
-// cudaDeviceSynchronize();
-
-
       cuErrCheck(cuLaunchKernel(func, multi_block, xqaParams.num_kv_heads,
                                 xqaParams.batch_size, 128, 1,
                                 isGmmaKernel ? 3 : 2, shared_mem_bytes, stream,
                                 kernelParams, nullptr));
     }
-    // sync_check_cuda_error();
   }
 
  protected:
@@ -329,7 +277,6 @@ class XQAKernelLoader {
   XQAKernelList const* getXQAKernels(Data_type type, unsigned int sm) {
     static std::mutex s_mutex;
     std::lock_guard<std::mutex> lg(s_mutex);
-    std::cout << "in getXQAKernels " << "sm:" <<sm << "; type:" << type <<std::endl;
     XQAKernelLoadHashKey hash_key{type, sm};
 
     auto const findIter = mKernels.find(hash_key);
@@ -340,9 +287,8 @@ class XQAKernelLoader {
           std::make_pair(hash_key, std::unique_ptr<XQAKernelList>(newKernel)));
       return newKernel;
     } else {
-      std::cout << "kernel cache hit!\n";
+      return findIter->second.get();
     }
-    return findIter->second.get();
   }
 
   static XQAKernelLoader& Get() {
@@ -376,8 +322,7 @@ inline XQAKernelList const* getXQAKernels(Data_type type, unsigned int sm) {
 void DecoderXQAImplPrecompiled::runDispatchBuffer(
     XQAParams const& xqa_params, KVCacheListParams const& kv_cache_buffer,
     cudaStream_t const& stream) {
-  // Data_type tmp_data_type = DATA_TYPE_FP16;
-// DATA_TYPE_FP16;
+
   XQAKernelList const* xqa_kernel =
       getXQAKernels(/*mRunner->mDataType*/ mRunner->mDataType,  getSMVersion());
   int multi_processor_count = mRunner->mMultiProcessorCount;
@@ -393,12 +338,4 @@ void DecoderXQAImplPrecompiled::runWithKVBlockArray(
 {
     runDispatchBuffer(xqa_params, kv_block_array, stream);
 }
-
-// std::unique_ptr<DecoderXQAImplPrecompiled> DecoderXQAImplPrecompiled::create() {
-//     std::cout << "decoder obj created!\n";
-//     // DecoderXQAImplPrecompiled* new_xqa_impl = new DecoderXQAImplPrecompiled;
-//     // return std::unique_ptr<DecoderXQAImplPrecompiled>(new_xqa_impl); // equivalent wayt
-//     return std::make_unique<DecoderXQAImplPrecompiled>();
-// }
-
 #undef XQA_KERNEL_RUN

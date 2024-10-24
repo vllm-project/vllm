@@ -66,41 +66,4 @@ private:
     DecoderXQAImpl* getImplFromXQAParams(XQAParams const& params);
 
     friend DecoderXQAImplPrecompiled;
-    // friend DecoderXQAImplJIT;
 };
-
-// class DecoderXQARunner::Resource
-// {
-// public:
-//     Resource();
-//     Resource(Resource const& other);
-//     Resource& operator=(Resource const& other);
-//     Resource(Resource&& other) = default;
-//     Resource& operator=(Resource&& other) = default;
-//     // Construct from a serialized buffer.
-//     Resource(void const* buffer, size_t buffer_size);
-//     ~Resource() = default;
-
-//     // When initialize is true, initialize cubins.
-//     // void merge(Resource const& other, bool initialize)
-//     // {
-//     //     getCubinObjRegistry()->merge(*other.getCubinObjRegistry(), initialize);
-//     // }
-
-//     // jit::CubinObjRegistry* getCubinObjRegistry()
-//     // {
-//     //     return mCubinObjRegistry.get();
-//     // }
-
-//     // jit::CubinObjRegistry const* getCubinObjRegistry() const
-//     // {
-//     //     return mCubinObjRegistry.get();
-//     // }
-
-//     size_t getSerializationSize() const noexcept;
-//     void serialize(void* buffer, size_t buffer_size) const noexcept;
-
-// // private:
-//     // std::unique_ptr<jit::CubinObjRegistry> mCubinObjRegistry;
-// };
-
