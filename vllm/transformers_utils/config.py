@@ -6,16 +6,16 @@ from typing import Any, Dict, Optional, Type, Union
 import huggingface_hub
 from huggingface_hub import (file_exists, hf_hub_download,
                              try_to_load_from_cache)
-from huggingface_hub.utils import (RepositoryNotFoundError,
-                                   RevisionNotFoundError, EntryNotFoundError,
-                                   LocalEntryNotFoundError)
-from transformers import GenerationConfig, PretrainedConfig
+from huggingface_hub.utils import (EntryNotFoundError, LocalEntryNotFoundError,
+                                   RepositoryNotFoundError,
+                                   RevisionNotFoundError)
 from transformers.models.auto.image_processing_auto import (
     get_image_processor_config)
 from transformers.models.auto.modeling_auto import (
     MODEL_FOR_CAUSAL_LM_MAPPING_NAMES)
 from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
 
+from transformers import GenerationConfig, PretrainedConfig
 from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
 # yapf conflicts with isort for this block
