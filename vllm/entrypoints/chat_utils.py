@@ -492,7 +492,8 @@ def _parse_chat_message_content_parts(
     mm_parser = mm_tracker.create_parser()
     keep_multimodal_content = \
         mm_tracker._model_config.hf_config.model_type in \
-            MODEL_KEEP_MULTI_MODAL_CONTENT or (chat_template_text_format == "openai")
+            MODEL_KEEP_MULTI_MODAL_CONTENT or \
+        (chat_template_text_format == "openai")
 
     for part in parts:
         parse_res = _parse_chat_message_content_part(
