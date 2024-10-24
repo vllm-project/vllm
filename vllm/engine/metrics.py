@@ -133,17 +133,28 @@ class Metrics:
             name="vllm:e2e_request_latency_seconds",
             documentation="Histogram of end to end request latency in seconds.",
             labelnames=labelnames,
-            buckets=[0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0, 40.0, 50.0, 60.0])
+            buckets=[
+                0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0,
+                40.0, 50.0, 60.0
+            ])
         self.histogram_execute_time_request = self._histogram_cls(
             name="vllm:model_execute_time_seconds",
-            documentation="Histogram of time spent in the model execute function in seconds.",
+            documentation=
+            "Histogram of time spent in the model execute function in seconds.",
             labelnames=labelnames,
-            buckets=[0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0, 40.0, 50.0, 60.0])
+            buckets=[
+                0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0,
+                40.0, 50.0, 60.0
+            ])
         self.histogram_time_in_queue_request = self._histogram_cls(
             name="vllm:time_in_queue_requests",
-            documentation="Histogram of time the request spent in the queue in seconds.",
+            documentation=
+            "Histogram of time the request spent in the queue in seconds.",
             labelnames=labelnames,
-            buckets=[0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0, 40.0, 50.0, 60.0])
+            buckets=[
+                0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0,
+                40.0, 50.0, 60.0
+            ])
         #   Metadata
         self.histogram_num_prompt_tokens_request = self._histogram_cls(
             name="vllm:request_prompt_tokens",
