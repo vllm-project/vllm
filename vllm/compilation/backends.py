@@ -40,7 +40,12 @@ def should_slice(shape) -> bool:
 # arg8_1 = rms norm weights
 # getitem_1a = residual
 # arg9_1 = second gemm weights
-def match_gemm_rs_ag_gemm(getitem_1, arg7_1, getitem_22, arg8_1, arg9_1):
+def match_gemm_rs_ag_gemm(getitem_1,   # residual
+                          arg7_1,      # first gemm weight
+                          getitem_22,  # first gemm activation
+                          arg8_1,      # rms norm weight
+                          arg9_1,      # second gemm weight
+                          ):
     permute_2 = torch.ops.aten.permute.default(arg7_1, [1, 0])
     mm_1 = torch.ops.aten.mm.default(getitem_22, permute_2)
     auto_functionalized_4 = torch.ops.higher_order.auto_functionalized(torch.ops.vllm.inplace_all_reduce.default, tensor = mm_1, group_name = 'tp:0')  # how to deal with groupname?
@@ -168,8 +173,9 @@ def gemm_rs_ag_gemm_fake(getitem_1: torch.Tensor,
     return (mm_res, resid)
 
 
-def replace_gemm_rs_ag_gemm(getitem_1, getitem_28, arg7_1, getitem_22, arg8_1, arg9_1):
-    results = torch.ops.vllm.gemm_rs_ag_gemm(getitem_1, getitem_28, arg7_1, getitem_22, arg8_1, arg9_1)
+# doesn't matter, only needed for signature
+def replace_gemm_rs_ag_gemm(getitem_1, arg7_1, getitem_22, arg8_1, arg9_1):
+    results = torch.ops.vllm.gemm_rs_ag_gemm(getitem_1, getitem_1, arg7_1, getitem_22, arg8_1, arg9_1)
     getitem_34 = results[0]
     getitem_35 = results[1]
     return getitem_34, getitem_35
