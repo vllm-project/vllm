@@ -34,6 +34,7 @@ from vllm.model_executor.model_loader.tensorizer import (
     TensorizerConfig, is_vllm_tensorized, load_with_tensorizer,
     serialize_vllm_model, tensorizer_weights_iterator)
 from vllm.model_executor.model_loader.utils import (get_model_architecture,
+                                                    handle_oom,
                                                     set_default_torch_dtype)
 from vllm.model_executor.model_loader.weight_utils import (
     download_safetensors_index_file_from_hf, download_weights_from_hf,
@@ -386,6 +387,7 @@ class DefaultModelLoader(BaseModelLoader):
                               model_config.revision,
                               fall_back_to_pt=True)
 
+    @handle_oom("DefaultModelLoader.load_model")
     def load_model(self, *, model_config: ModelConfig,
                    device_config: DeviceConfig,
                    lora_config: Optional[LoRAConfig],
