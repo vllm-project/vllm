@@ -389,9 +389,7 @@ class LlamaModel(nn.Module):
                 (-1, param.shape[1])).to(torch.uint8)
 
         params_dict = dict(self.named_parameters())
-
         for name, loaded_weight in weights:
-
             if "rotary_emb.inv_freq" in name:
                 continue
             if ("rotary_emb.cos_cached" in name
