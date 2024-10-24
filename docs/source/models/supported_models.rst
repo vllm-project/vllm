@@ -3,9 +3,46 @@
 Supported Models
 ================
 
-vLLM supports a variety of generative Transformer models in `HuggingFace (HF) Transformers <https://huggingface.co/models>`_.
-The following is the list of model architectures that are currently supported by vLLM.
+vLLM supports a variety of generative and embedding models from `HuggingFace (HF) Transformers <https://huggingface.co/models>`_.
+This page lists the model architectures that are currently supported by vLLM.
 Alongside each architecture, we include some popular models that use it.
+
+For other models, you can check the :code:`config.json` file inside the model repository.
+If the :code:`"architectures"` field contains a model architecture listed below, then it should be supported in theory.
+
+.. tip::
+    The easiest way to check if your model is really supported at runtime is to run the program below:
+
+    .. code-block:: python
+
+        from vllm import LLM
+
+        llm = LLM(model=...)  # Name or path of your model
+        output = llm.generate("Hello, my name is")
+        print(output)
+
+    If vLLM successfully generates text, it indicates that your model is supported.
+
+Otherwise, please refer to :ref:`Adding a New Model <adding_a_new_model>` and :ref:`Enabling Multimodal Inputs <enabling_multimodal_inputs>` 
+for instructions on how to implement your model in vLLM.
+Alternatively, you can `open an issue on GitHub <https://github.com/vllm-project/vllm/issues/new/choose>`_ to request vLLM support.
+
+.. note::
+    To use models from `ModelScope <https://www.modelscope.cn>`_ instead of HuggingFace Hub, set an environment variable:
+
+    .. code-block:: shell
+
+       $ export VLLM_USE_MODELSCOPE=True
+
+    And use with :code:`trust_remote_code=True`.
+
+    .. code-block:: python
+
+        from vllm import LLM
+
+        llm = LLM(model=..., revision=..., trust_remote_code=True)  # Name or path of your model
+        output = llm.generate("Hello, my name is")
+        print(output)
 
 Text-only Language Models
 ^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -144,7 +181,7 @@ Text Generation
     - ✅︎
   * - :code:`JAISLMHeadModel`
     - Jais
-    - :code:`core42/jais-13b`, :code:`core42/jais-13b-chat`, :code:`core42/jais-30b-v3`, :code:`core42/jais-30b-chat-v3`, etc.
+    - :code:`inceptionai/jais-13b`, :code:`inceptionai/jais-13b-chat`, :code:`inceptionai/jais-30b-v3`, :code:`inceptionai/jais-30b-chat-v3`, etc.
     -
     - ✅︎
   * - :code:`JambaForCausalLM`
@@ -334,6 +371,14 @@ The following modalities are supported depending on the model:
 - **V**\ ideo
 - **A**\ udio
 
+Any combination of modalities joined by :code:`+` are supported.
+
+- e.g.: :code:`T + I` means that the model supports text-only, image-only, and text-with-image inputs.
+
+On the other hand, modalities separated by :code:`/` are mutually exclusive.
+
+- e.g.: :code:`T / I` means that the model supports text-only and image-only inputs, but not text-with-image inputs.
+
 .. _supported_vlms:
 
 Text Generation
@@ -376,7 +421,7 @@ Text Generation
   * - :code:`InternVLChatModel`
     - InternVL2
     - T + I\ :sup:`E+`
-    - :code:`OpenGVLab/InternVL2-4B`, :code:`OpenGVLab/InternVL2-8B`, etc.
+    - :code:`OpenGVLab/Mono-InternVL-2B`, :code:`OpenGVLab/InternVL2-4B`, :code:`OpenGVLab/InternVL2-8B`, etc.
     - 
     - ✅︎
   * - :code:`LlavaForConditionalGeneration`
@@ -417,7 +462,7 @@ Text Generation
     -
   * - :code:`MolmoForCausalLM`
     - Molmo
-    - Image
+    - T + I
     - :code:`allenai/Molmo-7B-D-0924`, :code:`allenai/Molmo-72B-0924`, etc.
     -
     - ✅︎
@@ -449,6 +494,12 @@ Text Generation
     - Qwen-VL
     - T + I\ :sup:`E+`
     - :code:`Qwen/Qwen-VL`, :code:`Qwen/Qwen-VL-Chat`, etc.
+    -
+    - ✅︎
+  * - :code:`Qwen2AudioForConditionalGeneration`
+    - Qwen2-Audio
+    - T + A\ :sup:`+`
+    - :code:`Qwen/Qwen2-Audio-7B-Instruct`
     -
     - ✅︎
   * - :code:`Qwen2VLForConditionalGeneration`
@@ -484,6 +535,12 @@ Multimodal Embedding
     - Example HF Models
     - :ref:`LoRA <lora>`
     - :ref:`PP <distributed_serving>`
+  * - :code:`LlavaNextForConditionalGeneration`
+    - LLaVA-NeXT-based
+    - T / I
+    - :code:`royokong/e5-v`
+    - 
+    - ✅︎
   * - :code:`Phi3VForCausalLM`
     - Phi-3-Vision-based
     - T + I
@@ -494,44 +551,6 @@ Multimodal Embedding
 .. important::
   Some model architectures support both generation and embedding tasks.
   In this case, you have to pass :code:`--task embedding` to run the model in embedding mode.
-
-----
-
-If your model uses one of the above model architectures, you can seamlessly run your model with vLLM.
-Otherwise, please refer to :ref:`Adding a New Model <adding_a_new_model>` and :ref:`Enabling Multimodal Inputs <enabling_multimodal_inputs>` 
-for instructions on how to implement support for your model.
-Alternatively, you can raise an issue on our `GitHub <https://github.com/vllm-project/vllm/issues>`_ project.
-
-.. tip::
-    The easiest way to check if your model is supported is to run the program below:
-
-    .. code-block:: python
-
-        from vllm import LLM
-
-        llm = LLM(model=...)  # Name or path of your model
-        output = llm.generate("Hello, my name is")
-        print(output)
-
-    If vLLM successfully generates text, it indicates that your model is supported.
-
-.. tip::
-    To use models from `ModelScope <https://www.modelscope.cn>`_ instead of HuggingFace Hub, set an environment variable:
-
-    .. code-block:: shell
-
-       $ export VLLM_USE_MODELSCOPE=True
-
-    And use with :code:`trust_remote_code=True`.
-
-    .. code-block:: python
-
-        from vllm import LLM
-
-        llm = LLM(model=..., revision=..., trust_remote_code=True)  # Name or path of your model
-        output = llm.generate("Hello, my name is")
-        print(output)
-
 
 Model Support Policy
 =====================

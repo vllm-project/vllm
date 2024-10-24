@@ -117,6 +117,9 @@ def input_mapper_for_ultravox(ctx: InputContext, data: object):
     if not isinstance(data, list):
         data = [data]
 
+    if len(data) == 0:
+        return MultiModalInputs()
+
     # If the audio inputs are embeddings, no need for preprocessing
     if is_list_of(data, torch.Tensor, check="all"):
         return MultiModalInputs({"audio_embeds": data})

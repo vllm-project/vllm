@@ -767,9 +767,17 @@ def input_processor_for_pixtral_hf(
 
 class PixtralHFMLP(nn.Module):
 
-    def __init__(self, config: PixtralVisionConfig):
+    def __init__(
+        self,
+        config: PixtralVisionConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+        *,
+        prefix: str = "",
+    ) -> None:
         super().__init__()
+
         assert config.intermediate_size is not None
+        # TODO: Use quant_config and prefix after optimizing this
         self.gate_proj = nn.Linear(config.hidden_size,
                                    config.intermediate_size,
                                    bias=False)
@@ -787,8 +795,15 @@ class PixtralHFMLP(nn.Module):
 
 class PixtralHFAttention(nn.Module):
 
-    def __init__(self, config: PixtralVisionConfig):
+    def __init__(
+        self,
+        config: PixtralVisionConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+        *,
+        prefix: str = "",
+    ) -> None:
         super().__init__()
+
         self.config = config
         assert not config.hidden_size % config.num_attention_heads
         self.n_heads = config.num_attention_heads
@@ -796,6 +811,7 @@ class PixtralHFAttention(nn.Module):
 
         self.scale = self.head_dim**-0.5
 
+        # TODO: Use quant_config and prefix after optimizing this
         self.q_proj = nn.Linear(config.hidden_size,
                                 config.hidden_size,
                                 bias=False)
@@ -840,11 +856,22 @@ class PixtralHFAttention(nn.Module):
 
 class PixtralHFTransformerBlock(nn.Module):
 
-    def __init__(self, config: PixtralVisionConfig):
+    def __init__(
+        self,
+        config: PixtralVisionConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+        *,
+        prefix: str = "",
+    ) -> None:
         super().__init__()
+
         self.attention_norm = RMSNorm(config.hidden_size, eps=1e-5)
-        self.attention = PixtralHFAttention(config)
-        self.feed_forward = PixtralHFMLP(config)
+        self.attention = PixtralHFAttention(config,
+                                            quant_config=quant_config,
+                                            prefix=f"{prefix}.attention")
+        self.feed_forward = PixtralHFMLP(config,
+                                         quant_config=quant_config,
+                                         prefix=f"{prefix}.feed_forward")
         self.ffn_norm = RMSNorm(config.hidden_size, eps=1e-5)
 
     def forward(
@@ -864,11 +891,27 @@ class PixtralHFTransformerBlock(nn.Module):
 
 class PixtralHFTransformer(nn.Module):
 
-    def __init__(self, config: PixtralVisionConfig):
+    def __init__(
+        self,
+        config: PixtralVisionConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+        *,
+        num_hidden_layers_override: Optional[int] = None,
+        prefix: str = "",
+    ) -> None:
         super().__init__()
-        self.layers = torch.nn.ModuleList()
-        for _ in range(config.num_hidden_layers):
-            self.layers.append(PixtralHFTransformerBlock(config))
+
+        if num_hidden_layers_override is None:
+            num_hidden_layers = config.num_hidden_layers
+        else:
+            num_hidden_layers = num_hidden_layers_override
+
+        self.layers = nn.ModuleList([
+            PixtralHFTransformerBlock(config=config,
+                                      quant_config=quant_config,
+                                      prefix=f"{prefix}.layers.{layer_idx}")
+            for layer_idx in range(num_hidden_layers)
+        ])
 
     def forward(
         self,
@@ -883,7 +926,15 @@ class PixtralHFTransformer(nn.Module):
 
 class PixtralHFVisionModel(nn.Module):
 
-    def __init__(self, config: PixtralVisionConfig):
+    def __init__(
+        self,
+        config: PixtralVisionConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+        *,
+        num_hidden_layers_override: Optional[int] = None,
+        require_post_norm: Optional[bool] = None,
+        prefix: str = "",
+    ) -> None:
         super().__init__()
 
         self.config = config
@@ -895,7 +946,24 @@ class PixtralHFVisionModel(nn.Module):
             bias=False,
         )
         self.ln_pre = RMSNorm(config.hidden_size, eps=1e-5)
-        self.transformer = PixtralHFTransformer(config)
+        self.transformer = PixtralHFTransformer(
+            config,
+            quant_config,
+            num_hidden_layers_override=num_hidden_layers_override,
+            prefix=f"{prefix}.transformer",
+        )
+
+        num_hidden_layers = config.num_hidden_layers
+        if len(self.transformer.layers) > config.num_hidden_layers:
+            raise ValueError(
+                f"The original encoder only has {num_hidden_layers} "
+                f"layers, but you requested {len(self.transformer.layers)} "
+                "layers.")
+
+        if require_post_norm is True:
+            msg = "PixtralHFVisionModel does not have post-layernorm"
+            raise ValueError(msg)
+
         self.dtype = next(self.parameters()).dtype
         self.device = next(self.parameters()).device
         self.patch_positional_embedding = PixtralRotaryEmbedding(
