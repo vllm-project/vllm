@@ -7,6 +7,7 @@ import gc
 import inspect
 import ipaddress
 import os
+import re
 import random
 import socket
 import subprocess
@@ -423,6 +424,10 @@ class PyObjectCache:
 
 def is_hip() -> bool:
     return torch.version.hip is not None
+
+
+def is_navi4x() -> bool:
+   return re.match("gfx12..", os.environ.get("PYTORCH_ROCM_ARCH", "")) is not None
 
 
 @lru_cache(maxsize=None)

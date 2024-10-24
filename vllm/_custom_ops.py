@@ -9,7 +9,7 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType
-from vllm.utils import is_hip
+from vllm.utils import is_hip, is_navi4x
 
 logger = init_logger(__name__)
 
@@ -692,7 +692,7 @@ def scaled_fp8_quant(
     assert (input.ndim == 2)
     shape: Union[Tuple[int, int], torch.Size] = input.shape
     # For rocm, the output fp8 dtype is torch.float_e3m3fnuz
-    out_dtype: torch.dtype = torch.float8_e4m3fnuz if is_hip() \
+    out_dtype: torch.dtype = torch.float8_e4m3fnuz if is_hip() and not is_navi4x() \
         else torch.float8_e4m3fn
     if num_token_padding:
         shape = (max(num_token_padding, input.shape[0]), shape[1])

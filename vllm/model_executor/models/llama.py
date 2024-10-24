@@ -54,7 +54,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, PoolerOutput
-from vllm.utils import is_hip
+from vllm.utils import is_hip, is_navi4x
 
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (AutoWeightsLoader, PPMissingLayer, is_pp_missing_parameter,
@@ -87,14 +87,15 @@ class LlamaMLP(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.down_proj",
         )
-        self.use_fp8 = isinstance(quant_config, Fp8Config)
+        self.use_fp8 = isinstance(quant_config, Fp8Config) if is_hip() and not is_navi4x() else False
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
                              "Only silu is supported for now.")
         self.act_fn = SiluAndMul()
 
     def forward(self, x):
-        if is_hip() and x.shape[0] == 1 and x.shape[1] == 1:
+        # Navi4x is an exception among HIP devices -- it uses the same FP8 format with CUDA devices
+        if is_hip() and not is_navi4x() and x.shape[0] == 1 and x.shape[1] == 1:
             out = torch.empty(x.shape[0],
                               self.gate_up_proj.weight.shape[0] // 2,
                               dtype=x.dtype,
@@ -189,8 +190,10 @@ class LlamaAttention(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
         )
+        # For CUDA devices and Navi4x, attn_fp8_out will be set to false.
         self.attn_fp8_out = envs.VLLM_USE_ROCM_CUSTOM_PAGED_ATTN_FP8_OUT \
                             and is_hip() \
+                            and not is_navi4x() \
                             and isinstance(quant_config, Fp8Config)
 
     def forward(
@@ -225,7 +228,7 @@ class LlamaDecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
-        self.use_fp8 = isinstance(quant_config, Fp8Config)
+        self.use_fp8 = isinstance(quant_config, Fp8Config) if is_hip() and not is_navi4x() else False
         rope_theta = getattr(config, "rope_theta", 10000)
         rope_scaling = getattr(config, "rope_scaling", None)
         if rope_scaling is not None and getattr(
@@ -456,7 +459,8 @@ class LlamaModel(nn.Module):
             if not isinstance(self.layers[layer_idx], nn.Identity):
                 layer_self_attn = self.layers[layer_idx].self_attn
 
-            if is_hip():
+            # Navi4x quantization should be treated as CUDA devices.
+            if is_hip() and not is_navi4x():
                 # The scaling factor convention we are assuming is
                 # quantized_value * scaling_factor ~= true_value
                 # which is consistent with the practice of setting
