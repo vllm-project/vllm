@@ -7,7 +7,7 @@ import vllm.envs as envs
 from vllm.compilation.levels import CompilationLevel
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import is_hip, print_warning_once
+from vllm.utils import print_warning_once
 
 logger = init_logger(__name__)
 
@@ -72,7 +72,7 @@ class CustomOp(nn.Module):
         if not enabled:
             return self.forward_native
 
-        if is_hip():
+        if current_platform.is_rocm():
             return self.forward_hip
         elif current_platform.is_cpu():
             return self.forward_cpu
