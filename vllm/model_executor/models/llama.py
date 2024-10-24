@@ -22,6 +22,7 @@
 """Inference-only LLaMA model compatible with HuggingFace weights."""
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Type, Union
 
+import os
 import torch
 from torch import nn
 from transformers import LlamaConfig
@@ -363,7 +364,7 @@ class LlamaModel(nn.Module):
                  prefix: str = "",
                  layer_type: Type[LlamaDecoderLayer] = LlamaDecoderLayer):
         super().__init__()
-        fuse_gemms = False #True
+        fuse_gemms = bool(os.environ.get("VLLM_FUSE_GEMMS", "0") == "1")
 
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
