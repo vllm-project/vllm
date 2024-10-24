@@ -23,6 +23,7 @@
 """Inference-only LLaMA model compatible with HuggingFace weights."""
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
+import os
 import torch
 from torch import nn
 from transformers import LlamaConfig
@@ -351,7 +352,7 @@ class LlamaModel(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        fuse_gemms = False # True
+        fuse_gemms = bool(os.environ.get("VLLM_FUSE_GEMMS", "0") == "1")
         self.config = config
         self.padding_idx = config.pad_token_id
         lora_vocab = (lora_config.lora_extra_vocab_size *
