@@ -400,7 +400,8 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.multimodal_config = multimodal_config
 
         # Initialize the vision tower only up to the required feature layer
-        self.vision_tower = init_vision_tower_for_llava(config, quant_config)
+        self.vision_tower = init_vision_tower_for_llava(
+            config, quant_config, require_post_norm=False)
         self.multi_modal_projector = LlavaOnevisionMultiModalProjector(config)
         self.language_model = init_vllm_registered_model(
             config.text_config, cache_config, quant_config)
