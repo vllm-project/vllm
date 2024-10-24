@@ -141,7 +141,7 @@ void moe_align_block_size(torch::Tensor topk_ids, int64_t num_experts,
       topk_ids.scalar_type(), "moe_align_block_size_kernel", [&] {
         // calc needed amount of shared mem for `tokens_cnts` and `cumsum`
         // tensors
-        const int32_t num_thread = max(num_experts, WARP_SIZE);
+        const int32_t num_thread = max((int32_t)num_experts, WARP_SIZE);
         const int32_t shared_mem =
             ((num_thread + 1) * num_experts + (num_experts + 1)) *
             sizeof(int32_t);
