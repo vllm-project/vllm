@@ -54,4 +54,5 @@ docker exec cpu-test bash -c "
     --model facebook/opt-125m \
     --num-prompts 20 \
     --endpoint /v1/completions \
-    --tokenizer facebook/opt-125m"
+    --tokenizer facebook/opt-125m \
+    --dtype bfloat16"
