@@ -103,6 +103,23 @@ vllm serve <model> --chat-template ./path-to-chat-template.jinja
 vLLM community provides a set of chat templates for popular models. You can find them in the examples
 directory [here](https://github.com/vllm-project/vllm/tree/main/examples/)
 
+With the inclusion of multi-modal chat APIs, the OpenAI spec now accepts chat messages in a new format which specifies 
+both a `type` and a `text` field. An example is provided below:
+```python
+completion = client.chat.completions.create(
+  model="NousResearch/Meta-Llama-3-8B-Instruct",
+  messages=[
+    {"role": "user", "content": [{"type": "text", "text": "Classify this sentiment: vLLM is wonderful!"}]}
+  ]
+)
+```
+Most chat templates for LLMs expect the `content` to be a `string` but there are some newer models like 
+`meta-llama/Llama-Guard-3-1B` that expect the content to be parsed with the new OpenAI spec. In order to choose which
+format the content needs to be parsed in by vLLM, please use the `--chat-template-text-format` argument to specify
+between `string` or `openai`. The default value is `string` and vLLM internally converts both spec formats to match 
+this, unless explicitly specified.
+
+
 ## Command line arguments for the server
 
 ```{argparse}
