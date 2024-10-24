@@ -27,6 +27,13 @@ class KVCacheBlock:
     # is closer to the end of a prompt and more likely to be evicted.
     num_hashed_tokens: int = 0
 
+    def reset(self):
+        self.prev_block_id = None
+        self.ref_cnt = 0
+        self.token_ids.clear()
+        self.block_hash = None
+        self.num_hashed_tokens = 0
+
 
 class KVCacheManager:
 
@@ -180,8 +187,8 @@ class KVCacheManager:
             # No new block is needed. We caching is enabled,
             # then token_id_idx must be equal to len(new_token_ids),
             # meaning that all tokens are added to allocated blocks.
-            assert not self.enable_caching or token_id_idx == len(
-                new_token_ids)
+            assert not self.enable_caching or token_id_idx == num_tokens, \
+                    f"{token_id_idx=} != {num_tokens=}"
             return []
 
         num_new_blocks = num_required_blocks - len(req_block_ids)
@@ -195,8 +202,12 @@ class KVCacheManager:
         if self.enable_caching:
             new_token_ids = new_token_ids[token_id_idx:]
             prev_block_id = req_block_ids[-1]
-        new_block_ids = self._get_new_blocks(num_new_blocks, new_token_ids,
-                                             prev_block_id)
+        else:
+            new_token_ids = None
+            prev_block_id = None
+        new_blocks = self._get_new_blocks(num_new_blocks, new_token_ids,
+                                          prev_block_id)
+        new_block_ids = [blk.block_id for blk in new_blocks]
         req_block_ids.extend(new_block_ids)
         return new_block_ids
 
@@ -235,7 +246,8 @@ class KVCacheManager:
         # request, so we must have all new token IDs in the prompt.
         num_computed_tokens = len(computed_block_ids) * self.block_size
         if self.enable_caching:
-            new_token_ids = request.prompt_token_ids[num_computed_tokens:]
+            new_token_ids = request.prompt_token_ids[
+                num_computed_tokens:num_computed_tokens + num_tokens]
             if not new_token_ids:
                 raise RuntimeError(
                     "Failed to infer the token IDs for allocation. "
@@ -337,6 +349,7 @@ class KVCacheManager:
                     else:
                         del self.cached_block_hash_to_block[block_hash][
                             curr_block.block_id]
+                curr_block.reset()
 
             curr_block.ref_cnt = 1
             ret.append(curr_block)
