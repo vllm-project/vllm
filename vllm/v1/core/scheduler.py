@@ -34,7 +34,7 @@ class Scheduler:
             block_size=self.cache_config.block_size,
             num_gpu_blocks=num_gpu_blocks,
             sliding_window=self.cache_config.sliding_window,
-            enable_caching=True)
+            enable_caching=self.cache_config.enable_prefix_caching)
         self.block_size = self.cache_config.block_size
 
         # Scheduling constraints.
@@ -137,6 +137,15 @@ class Scheduler:
                 # `request.num_prompt_tokens` to consider the resumed requests,
                 # which have output tokens.
                 num_new_tokens = request.num_tokens - num_computed_tokens
+                if num_new_tokens == 0:
+                    # FIXME: The happens when prompt length is divisible by
+                    # the block size and all blocks are cached. We have to
+                    # support query_len=0 in model runner to handle this case.
+                    # Now we force to recompute the last block, which hurts
+                    # performance and introduces duplications.
+                    num_computed_tokens -= self.block_size
+                    num_new_tokens = self.block_size
+                    computed_block_ids.pop()
                 num_new_tokens = min(num_new_tokens, token_budget)
                 assert num_new_tokens > 0
                 new_block_ids = self.kv_cache_manager.allocate_slots(
