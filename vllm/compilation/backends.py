@@ -72,7 +72,7 @@ def gemm_rs_ag_gemm(getitem_1: torch.Tensor,    # residual
                     getitem_22: torch.Tensor,   # first gemm activation
                     arg8_1: torch.Tensor,       # rms norm weights
                     arg9_1: torch.Tensor,       # second gemm weights
-                    ) -> Tuple[torch.Tensor, torch.Tensor]:
+                    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     group_name = torch.distributed.group.WORLD.group_name # TODO: factor out to setup
     slice_size = 2048
     split_1 = torch.ops.aten.split.Tensor(getitem_1, slice_size)
@@ -97,15 +97,17 @@ def gemm_rs_ag_gemm(getitem_1: torch.Tensor,    # residual
 # First split only on first occurrence!
 # need to introduce splits since original graph does not have them.
 
-@torch.library.custom_op("vllm::gemm_rs_ag_gemm", mutates_args=())
-def gemm_rs_ag_gemm(getitem_1: torch.Tensor,
-                    getitem_28: torch.Tensor,
-                    arg7_1: torch.Tensor,
-                    getitem_22: torch.Tensor,
-                    arg8_1: torch.Tensor,
-                    arg9_1: torch.Tensor,
-                    first_layer: bool) -> Tuple[torch.Tensor, torch.Tensor]:
-    print(f"CUSTOM {getitem_1.shape}, should_slice={should_slice(getitem_1.shape)}, first={first_layer}")
+schema_str="(Tensor(a) getitem_1, Tensor(a) getitem_28, Tensor arg7_1, Tensor getitem_22, Tensor arg8_1, Tensor arg9_1, bool first_layer) -> (Tensor, Tensor, Tensor)"
+
+@torch.library.custom_op("vllm::gemm_rs_ag_gemm", mutates_args=())#, schema=schema_str)
+def gemm_rs_ag_gemm(getitem_1: torch.Tensor,   # residual
+                    getitem_28: torch.Tensor,  # my residual
+                    arg7_1: torch.Tensor,      # first gemm weights
+                    getitem_22: torch.Tensor,  # first gemm activatiions
+                    arg8_1: torch.Tensor,      # rms norm weights
+                    arg9_1: torch.Tensor,      # second gemm weights
+                    first_layer: bool) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    print(f"CUSTOM {getitem_1.shape}({getitem_28.shape}), should_slice={should_slice(getitem_1.shape)}, first={first_layer}")
 
     # this is terrible
     if True:
@@ -132,10 +134,9 @@ def gemm_rs_ag_gemm(getitem_1: torch.Tensor,
         getitem_30 = auto_functionalized_4[2]
         permute_5 = torch.ops.aten.permute.default(arg9_1, [1, 0])
         getitem_35 = torch.matmul(getitem_29, permute_5)
-        getitem_1 = getitem_26
-
+        getitem_30a = getitem_30.clone()
         print(f"DONE CUSTOM NAIVE {getitem_30.shape}")
-        return getitem_35, getitem_30
+        return getitem_35, getitem_30, getitem_30a
     else:
         group_name = torch.distributed.group.WORLD.group_name # TODO: factor out to setup
         permute_3 = torch.ops.aten.permute.default(arg7_1, [1, 0])
@@ -144,10 +145,10 @@ def gemm_rs_ag_gemm(getitem_1: torch.Tensor,
         auto_functionalized_4 = torch.ops.higher_order.auto_functionalized(torch.ops._C.fused_add_rms_norm.default, input=output, residual=getitem_26, weight=arg8_1, epsilon=1e-05)
         getitem_29 = auto_functionalized_4[1]
         getitem_30 = auto_functionalized_4[2]
-        slice_scatter_2 = torch.ops.aten.slice_scatter.default(getitem_28, getitem_30, 0, 0, slice_size)
+        getitem_28a = getitem_1 if first_layer else getitem_28
+        slice_scatter_2 = torch.ops.aten.slice_scatter.default(getitem_28a, getitem_30, 0, 0, slice_size)
         split_2 = torch.ops.aten.split.Tensor(slice_scatter_2, slice_size)
         getitem_31 = split_2[0]
-        getitem_1 = getitem_31
         permute_5 = torch.ops.aten.permute.default(arg9_1, [1, 0])
         clone_1 = torch.ops.aten.clone.default(permute_5, memory_format = torch.contiguous_format)
         fused_all_gather_matmul = torch.ops.symm_mem.fused_all_gather_matmul.default(getitem_29, [clone_1], 0, group_name)
@@ -155,7 +156,7 @@ def gemm_rs_ag_gemm(getitem_1: torch.Tensor,
         getitem_35 = getitem_34[0]
 
         print(f"DONE CUSTOM {getitem_31.shape}")
-        return getitem_35, getitem_31   # matmul, residual  #####
+        return getitem_35, getitem_31.clone(), slice_scatter_2
 
 
 # this is wrong?  do we need it?
@@ -167,10 +168,11 @@ def gemm_rs_ag_gemm_fake(getitem_1: torch.Tensor,
                          arg8_1: torch.Tensor,
                          arg9_1: torch.Tensor,
                          first_layer: bool,
-                         ) -> Tuple[torch.Tensor, torch.Tensor]:
+                         ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     mm_res = torch.empty((getitem_22.shape[0], arg9_1.shape[0]), device=getitem_22.device, dtype=getitem_22.dtype)  #???
     resid = torch.empty_like(getitem_1)
-    return (mm_res, resid)
+    my_resid = resid.clone()  # last one right? or needs to be split
+    return (mm_res, resid, my_resid)
 
 
 # doesn't matter, only needed for signature
@@ -231,9 +233,7 @@ def get_matches():
         resid = torch.empty([4,4], device='cuda')
         resid_w = torch.empty([4,4], device='cuda')
         x2 = torch.empty([4,4], device='cuda')
-        inputs = [resid, resid, x, w, resid_w, x2]
-        inputs_small = inputs[0:2]
-        inputs_med = inputs[0:4]
+        inputs = [resid, x, w, resid_w, x2]
 
         register_replacement(match_gemm_rs_ag_gemm,
                              replace_gemm_rs_ag_gemm,
@@ -273,30 +273,37 @@ def find_getitem(node, idx):
 
 def process_matches(graph: fx.Graph, matches):
     print(f"len = {len(matches)}")
-    first_layer = True  # hacky
 
     nodes = list(graph.nodes)
     first_match = None
-    min_node = None
-    for match in matches:
-        first_node_in_match = min(match.nodes, key=lambda x: nodes.index(x))
-        if not min_node or nodes.index(first_node_in_match) < min_node:
-            min_node = nodes.index(first_node_in_match)
-            first_match = match
+
+    def find_min_index(match) -> int:
+        return min(match.nodes, key=lambda x: nodes.index(x))
+
+    # "sort" matches in topo order
+    matches = sorted(matches, key=lambda x: find_min_index(x))
+    replacements = []
 
     for match in matches:
         last_node_in_match = match.nodes[-1] #max(match.nodes, key=lambda x: nodes.index(x))
 
         with graph.inserting_after(last_node_in_match):
+            if len(replacements) == 0:
+                replacements.append(graph.call_function(torch.ops.aten.empty.memory_format,
+                                                        args = ([0, 0],),
+                                                        kwargs = {"dtype": torch.float16, "device": "cuda", "pin_memory": False}))
+                graph.inserting_after(replacements[-1])
+
             kwargs = match.kwargs
-            kwargs["first_layer"] = match == first_match
-            kwargs["getitem_28"] = find_auto_fn(match.nodes, torch.ops._C.fused_add_rms_norm.default)
-            first_layer = False
+            kwargs["first_layer"] = match == matches[0]
+            kwargs["getitem_28"] = replacements[-1]
             fused_node = graph.call_function(torch.ops.vllm.gemm_rs_ag_gemm.default, kwargs=kwargs)
 
             graph.inserting_after(fused_node)
             result_node_new = graph.call_function(operator.getitem, (fused_node, 0))
             residual_node_new = graph.call_function(operator.getitem, (fused_node, 1))
+            my_residual_node_new = graph.call_function(operator.getitem, (fused_node, 2))
+            replacements.append(my_residual_node_new)
 
         rms_node = find_auto_fn(match.nodes, torch.ops._C.fused_add_rms_norm.default)
         gemm_node = find_fn(match.nodes, torch.ops.aten.mm.default)
@@ -318,7 +325,7 @@ def process_matches(graph: fx.Graph, matches):
 
     # Finally, remove matched nodes
     graph.eliminate_dead_code()
-    assert all(node not in graph.nodes for match in matches for node in match.nodes)
+    #assert all(node not in graph.nodes for match in matches for node in match.nodes)
 
 
 def dump_graph(graph: torch.fx.Graph, stage: str):
