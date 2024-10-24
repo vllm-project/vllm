@@ -56,8 +56,8 @@ First, install the dependencies:
     $ pip uninstall torch torch-xla -y
 
     $ # Install PyTorch and PyTorch XLA.
-    $ export DATE="20240828"
-    $ export TORCH_VERSION="2.5.0"
+    $ export DATE="20241017"
+    $ export TORCH_VERSION="2.6.0"
     $ pip install https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch-${TORCH_VERSION}.dev${DATE}-cp310-cp310-linux_x86_64.whl
     $ pip install https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch_xla-${TORCH_VERSION}.dev${DATE}-cp310-cp310-linux_x86_64.whl
 
