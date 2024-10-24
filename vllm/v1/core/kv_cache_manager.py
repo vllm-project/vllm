@@ -295,6 +295,7 @@ class KVCacheManager:
                         # end of the free_block_list to maintain theeviction
                         # order.
                         self.free_block_queue.remove(self.block_pool[block_id])
+                        self.lazy_remove_block_ids.remove(block_id)
                     self.free_block_queue.append(self.block_pool[block_id])
                     self.num_free_blocks += 1
         else:
