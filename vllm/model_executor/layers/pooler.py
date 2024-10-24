@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from enum import IntEnum
 
 import torch
@@ -13,6 +14,33 @@ class PoolingType(IntEnum):
     LAST = 0
     ALL = 1
     CLS = 2
+    MEAN = 3
+
+
+@dataclass
+class PoolingConfig:
+    """A class that configures the pooling operation which
+      only applies to sentence-transformers models. 
+      More at: https://www.sbert.net/
+
+    Attributes:
+        pooling_type (str): The type of pooling to use. 
+        normalize (bool): Whether to normalize the pooled data.
+
+    Methods:
+        get_pooling_type(pooling_type_name): Returns the pooling 
+        type enum value corresponding to the given string.
+    """
+
+    def __init__(self, pooling_type: str, normalize: bool):
+        self.pooling_type = self.get_pooling_type(pooling_type)
+        self.normalize = normalize
+
+    def get_pooling_type(self, pooling_type_name: str) -> PoolingType:
+        pooling_types = PoolingType.__dict__.items()
+        return PoolingType(
+            next((value for key, value in pooling_types
+                  if key.lower() in pooling_type_name), PoolingType.CLS))
 
 
 class Pooler(nn.Module):
@@ -24,7 +52,7 @@ class Pooler(nn.Module):
     3. Returns structured results as `PoolerOutput`.
 
     Attributes:
-        pooling_type: The type of pooling to use (LAST, ALL, CLS).
+        pooling_type: The type of pooling to use (LAST, ALL, CLS, MEAN).
         normalize: Whether to normalize the pooled data.
     """
 
@@ -58,6 +86,17 @@ class Pooler(nn.Module):
             for prompt_len in prompt_lens:
                 pooled_data.append(hidden_states[offset:offset + prompt_len])
                 offset += prompt_len
+        elif self.pooling_type == PoolingType.MEAN:
+            # Calculate mean pooling
+            cumsum = torch.cumsum(hidden_states, dim=0)
+            start_indices = torch.cat([
+                torch.tensor([0], device=hidden_states.device),
+                torch.cumsum(prompt_lens[:-1], dim=0)
+            ])
+            end_indices = torch.cumsum(prompt_lens, dim=0)
+            pooled_data = (
+                cumsum[end_indices - 1] - cumsum[start_indices] +
+                hidden_states[start_indices]) / prompt_lens.unsqueeze(1)
         else:
             raise ValueError(f"Invalid pooling type: {self.pooling_type}")
 

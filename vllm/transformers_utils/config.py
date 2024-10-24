@@ -6,6 +6,9 @@ from typing import Any, Dict, Optional, Type, Union
 import huggingface_hub
 from huggingface_hub import (file_exists, hf_hub_download,
                              try_to_load_from_cache)
+from huggingface_hub.utils import (EntryNotFoundError, LocalEntryNotFoundError,
+                                   RepositoryNotFoundError,
+                                   RevisionNotFoundError)
 from transformers import GenerationConfig, PretrainedConfig
 from transformers.models.auto.image_processing_auto import (
     get_image_processor_config)
@@ -232,6 +235,115 @@ def get_config(
     return config
 
 
+def get_hf_file_to_dict(file_name, model, revision):
+    """
+    Downloads a file from the Hugging Face Hub and returns 
+    its contents as a dictionary.
+
+    Parameters:
+    - file_name (str): The name of the file to download.
+    - model (str): The name of the model on the Hugging Face Hub.
+    - revision (str): The specific version of the model. 
+
+    Returns:
+    - config_dict (dict): A dictionary containing 
+    the contents of the downloaded file.
+    """
+    file_path = Path(model) / file_name
+
+    if not file_path.is_file():
+        try:
+            hf_hub_file = hf_hub_download(model, file_name, revision=revision)
+        except (RepositoryNotFoundError, RevisionNotFoundError,
+                EntryNotFoundError, LocalEntryNotFoundError) as e:
+            logger.debug("File or repository not found in hf_hub_download", e)
+            return None
+        file_path = Path(hf_hub_file)
+
+    with open(file_path, "r") as file:
+        config_dict = json.load(file)
+
+    return config_dict
+
+
+def get_pooling_config(model, revision='main'):
+    """
+    This function gets the pooling and normalize 
+    config from the model - only applies to 
+    sentence-transformers models. 
+
+    Args:
+        model (str): The name of the Hugging Face model.
+        revision (str, optional): The specific version 
+        of the model to use. Defaults to 'main'.
+
+    Returns:
+        dict: A dictionary containing the pooling 
+        type and whether normalization is used.
+    """
+
+    modules_file_name = "modules.json"
+    modules_dict = get_hf_file_to_dict(modules_file_name, model, revision)
+
+    if modules_dict is None:
+        return None
+
+    pooling = next((item for item in modules_dict
+                    if item["type"] == "sentence_transformers.models.Pooling"),
+                   None)
+    normalize = bool(
+        next((item for item in modules_dict
+              if item["type"] == "sentence_transformers.models.Normalize"),
+             False))
+
+    if pooling:
+
+        pooling_file_name = "{}/config.json".format(pooling["path"])
+        pooling_dict = get_hf_file_to_dict(pooling_file_name, model, revision)
+        pooling_type_name = next(
+            (item for item, val in pooling_dict.items() if val is True), None)
+
+        return {"pooling_type": pooling_type_name, "normalize": normalize}
+
+    return None
+
+
+def get_sentence_transformer_tokenizer_config(model, revision='main'):
+    """
+    Returns the tokenization configuration dictionary for a 
+    given Sentence Transformer BERT model.
+
+    Parameters:
+    - model (str): The name of the Sentence Transformer 
+    BERT model.
+    - revision (str, optional): The revision of the m
+    odel to use. Defaults to 'main'.
+
+    Returns:
+    - dict: A dictionary containing the configuration parameters 
+    for the Sentence Transformer BERT model.
+    """
+    for config_name in [
+            "sentence_bert_config.json",
+            "sentence_roberta_config.json",
+            "sentence_distilbert_config.json",
+            "sentence_camembert_config.json",
+            "sentence_albert_config.json",
+            "sentence_xlm-roberta_config.json",
+            "sentence_xlnet_config.json",
+    ]:
+        bert_dict = get_hf_file_to_dict(config_name, model, revision)
+        if bert_dict:
+            break
+
+    if not bert_dict:
+        return None
+
+    if all(k in bert_dict for k in ("max_seq_length", "do_lower_case")):
+        return bert_dict
+    return None
+
+
 def maybe_register_config_serialize_by_value(trust_remote_code: bool) -> None:
     """Try to register HF model configuration class to serialize by value
 
@@ -300,14 +412,7 @@ def load_params_config(model, revision) -> PretrainedConfig:
 
     config_file_name = "params.json"
 
-    config_path = Path(model) / config_file_name
-
-    if not config_path.is_file():
-        config_path = Path(
-            hf_hub_download(model, config_file_name, revision=revision))
-
-    with open(config_path, "r") as file:
-        config_dict = json.load(file)
+    config_dict = get_hf_file_to_dict(config_file_name, model, revision)
 
     config_mapping = {
         "dim": "hidden_size",
