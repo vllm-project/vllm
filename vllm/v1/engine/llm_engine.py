@@ -300,6 +300,7 @@ class LLMEngine:
     def abort_request(self, request_id: Union[str, Iterable[str]]) -> None:
         self.scheduler.finish_requests(request_id,
                                        RequestStatus.FINISHED_ABORTED)
+        self._free_request(request_id)
 
     def get_num_unfinished_requests(self) -> int:
         """Gets the number of unfinished requests."""
@@ -361,6 +362,11 @@ class LLMEngine:
         num_reqs = len(detokenizer_output.req_ids)
         for i in range(num_reqs):
             req_id = detokenizer_output.req_ids[i]
+            if req_id not in self.requests:
+                # The request has been aborted while the detokenizer was
+                # processing the outputs.
+                continue
+
             req = self.requests[req_id]
             req.output_text += detokenizer_output.detokenized_texts[i]
 
@@ -373,9 +379,7 @@ class LLMEngine:
             req_outputs.append(req_output)
 
             if finished:
-                del self.requests[req_id]
-                del self.num_lagged_steps[req_id]
-                del self.request_outputs[req_id]
+                self._free_request(req_id)
         return req_outputs
 
     def terminate_detokenizer(self) -> None:
@@ -439,6 +443,11 @@ class LLMEngine:
             completion_output.stop_reason = request.stop_reason
             req_output.finished = finished
         return req_output
+
+    def _free_request(self, request_id: str) -> None:
+        self.requests.pop(request_id, None)
+        self.num_lagged_steps.pop(request_id, None)
+        self.request_outputs.pop(request_id, None)
 
     def check_health(self) -> None:
         if self.tokenizer:
