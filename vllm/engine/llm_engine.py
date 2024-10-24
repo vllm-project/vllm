@@ -1643,6 +1643,7 @@ class LLMEngine:
         # Request stats
         #   Latency
         time_e2e_requests: List[float] = []
+        time_execute_requests: List[float] = []
         #   Metadata
         num_prompt_tokens_requests: List[int] = []
         num_generation_tokens_requests: List[int] = []
@@ -1736,6 +1737,7 @@ class LLMEngine:
                     # Latency timings
                     time_e2e_requests.append(now -
                                              seq_group.metrics.arrival_time)
+                    time_execute_requests.append(seq_group.metrics.model_execute_time)
                     # Metadata
                     num_prompt_tokens_requests.append(
                         len(seq_group.prompt_token_ids))
@@ -1793,6 +1795,7 @@ class LLMEngine:
             # Request stats
             #   Latency
             time_e2e_requests=time_e2e_requests,
+            time_execute_requests=time_execute_requests,
             #   Metadata
             num_prompt_tokens_requests=num_prompt_tokens_requests,
             num_generation_tokens_requests=num_generation_tokens_requests,
