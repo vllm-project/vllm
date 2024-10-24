@@ -3,14 +3,14 @@ import copy
 from dataclasses import dataclass
 from enum import Enum, IntEnum
 from functools import cached_property
-from typing import Any, Callable, Dict, List, Optional, Set, Union
+from typing import Any, Dict, List, Optional, Set, Union
 
 import msgspec
-import torch
 from pydantic import BaseModel
 from typing_extensions import Annotated
 
 from vllm.logger import init_logger
+from vllm.logits_process import LogitsProcessor, NoBadWordsLogitsProcessor
 
 logger = init_logger(__name__)
 
@@ -22,16 +22,6 @@ class SamplingType(IntEnum):
     GREEDY = 0
     RANDOM = 1
     RANDOM_SEED = 2
-
-
-LogitsProcessor = Union[Callable[[List[int], torch.Tensor], torch.Tensor],
-                        Callable[[List[int], List[int], torch.Tensor],
-                                 torch.Tensor]]
-"""LogitsProcessor is a function that takes a list
-of previously generated tokens, the logits tensor
-for the next token and, optionally, prompt tokens as a
-first argument, and returns a modified tensor of logits
-to sample from."""
 
 
 # maybe make msgspec?
@@ -139,6 +129,10 @@ class SamplingParams(
         stop_token_ids: List of tokens that stop the generation when they are
             generated. The returned output will contain the stop tokens unless
             the stop tokens are special tokens.
+        bad_words: List of words that are not allowed to be generated.
+            More precisely, only the last token of a corresponding
+            token sequence is not allowed when the next generated token
+            can complete the sequence.
         include_stop_str_in_output: Whether to include the stop strings in
             output text. Defaults to False.
         ignore_eos: Whether to ignore the EOS token and continue generating
@@ -186,6 +180,7 @@ class SamplingParams(
     seed: Optional[int] = None
     stop: Optional[Union[str, List[str]]] = None
     stop_token_ids: Optional[List[int]] = None
+    bad_words: Optional[List[str]] = None
     ignore_eos: bool = False
     max_tokens: Optional[int] = 16
     min_tokens: int = 0
@@ -228,6 +223,7 @@ class SamplingParams(
         seed: Optional[int] = None,
         stop: Optional[Union[str, List[str]]] = None,
         stop_token_ids: Optional[List[int]] = None,
+        bad_words: Optional[List[str]] = None,
         include_stop_str_in_output: bool = False,
         ignore_eos: bool = False,
         max_tokens: Optional[int] = 16,
@@ -267,6 +263,7 @@ class SamplingParams(
             seed=seed,
             stop=stop,
             stop_token_ids=stop_token_ids,
+            bad_words=bad_words,
             include_stop_str_in_output=include_stop_str_in_output,
             ignore_eos=ignore_eos,
             max_tokens=max_tokens,
@@ -402,6 +399,16 @@ class SamplingParams(
         if self.n > 1:
             raise ValueError("n must be 1 when using greedy sampling, "
                              f"got {self.n}.")
+
+    def _init_bad_words_logits_processor(
+            self, bad_words_ids: List[List[int]]) -> None:
+        no_bad_words_processor = NoBadWordsLogitsProcessor(
+            bad_words_ids=bad_words_ids)
+
+        if self.logits_processors is not None:
+            self.logits_processors.append(no_bad_words_processor)
+        else:
+            self.logits_processors = [no_bad_words_processor]
 
     def update_from_generation_config(
             self,
