@@ -9,13 +9,13 @@ from huggingface_hub import (file_exists, hf_hub_download,
 from huggingface_hub.utils import (EntryNotFoundError, LocalEntryNotFoundError,
                                    RepositoryNotFoundError,
                                    RevisionNotFoundError)
+from transformers import GenerationConfig, PretrainedConfig
 from transformers.models.auto.image_processing_auto import (
     get_image_processor_config)
 from transformers.models.auto.modeling_auto import (
     MODEL_FOR_CAUSAL_LM_MAPPING_NAMES)
 from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
 
-from transformers import GenerationConfig, PretrainedConfig
 from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
 # yapf conflicts with isort for this block
@@ -256,7 +256,7 @@ def get_hf_file_to_dict(file_name, model, revision):
             hf_hub_file = hf_hub_download(model, file_name, revision=revision)
         except (RepositoryNotFoundError, RevisionNotFoundError,
                 EntryNotFoundError, LocalEntryNotFoundError) as e:
-            logger.info("File or repository not found in hf_hub_download", e)
+            logger.debug("File or repository not found in hf_hub_download", e)
             return None
         file_path = Path(hf_hub_file)
 
@@ -284,6 +284,9 @@ def get_pooling_config(model, revision='main'):
 
     modules_file_name = "modules.json"
     modules_dict = get_hf_file_to_dict(modules_file_name, model, revision)
+
+    if modules_dict is None:
+        return None
 
     pooling = next((item for item in modules_dict
                     if item["type"] == "sentence_transformers.models.Pooling"),
