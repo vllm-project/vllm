@@ -431,7 +431,7 @@ MM_PARSER_MAP: Dict[str, Callable[[ChatCompletionContentPartParam], str]] = {
 def _parse_chat_message_content_mm_part(
         part: ChatCompletionContentPartParam) -> Tuple[str, str]:
     """
-    Parses a given multi modal content part based on its type.
+    Parses a given multi-modal content part based on its type.
 
     Args:
         part: A dict containing the content part, with a potential 'type' field.
@@ -492,7 +492,7 @@ def _parse_chat_message_content_parts(
     mm_parser = mm_tracker.create_parser()
     keep_multimodal_content = \
         mm_tracker._model_config.hf_config.model_type in \
-            MODEL_KEEP_MULTI_MODAL_CONTENT
+            MODEL_KEEP_MULTI_MODAL_CONTENT or (chat_template_text_format == "openai")
 
     for part in parts:
         parse_res = _parse_chat_message_content_part(
@@ -510,9 +510,6 @@ def _parse_chat_message_content_parts(
     if mm_placeholder_counts:
         text_prompt = _get_full_multimodal_text_prompt(mm_placeholder_counts,
                                                        text_prompt)
-    if chat_template_text_format == "openai":
-        role_content = [{'type': 'text', 'text': text_prompt}]
-        return [ConversationMessage(role=role, content=role_content)]
     return [ConversationMessage(role=role, content=text_prompt)]
 
 
