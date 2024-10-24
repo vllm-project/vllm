@@ -180,7 +180,8 @@ class ModelConfig:
                                     config_format)
         self.hf_text_config = get_hf_text_config(self.hf_config)
         self.pooling_config = self.get_pooling_config()
-        self.bert_config, self.do_lower_case = self._get_bert_config()
+        self.bert_config = self._get_bert_config() 
+        self.do_lower_case = self._get_bert_config()
         self.hf_image_processor_config = get_hf_image_processor_config(
             self.model, revision)
         self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
@@ -1756,6 +1757,7 @@ def _get_and_verify_max_len(
         "max_seq_length",
         "seq_len",
     ]
+
     # Choose the smallest "max_length" from the possible keys.
     max_len_key = None
     for key in possible_keys:
