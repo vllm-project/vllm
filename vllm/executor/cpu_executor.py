@@ -2,8 +2,6 @@ import os
 from functools import partial
 from typing import Any, Awaitable, List, Optional, Set, Tuple, Union
 
-import torch
-
 import vllm.envs as envs
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig)

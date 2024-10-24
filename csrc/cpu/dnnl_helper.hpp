@@ -2,6 +2,7 @@
 #define DNNL_HELPER_HPP
 
 #include <c10/util/BFloat16.h>
+#include <c10/util/Half.h>
 
 #include "oneapi/dnnl/dnnl.hpp"
 
@@ -30,6 +31,11 @@ struct DNNLType<float> {
 template <>
 struct DNNLType<c10::BFloat16> {
   static constexpr dnnl::memory::data_type type = dnnl::memory::data_type::bf16;
+};
+
+template <>
+struct DNNLType<c10::Half> {
+  static constexpr dnnl::memory::data_type type = dnnl::memory::data_type::f16;
 };
 
 template <typename T>

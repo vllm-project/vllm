@@ -74,6 +74,12 @@ struct FP16Vec16 : public Vec<FP16Vec16> {
   explicit FP16Vec16(const FP32Vec16 &);
 
   void save(void *ptr) const { *reinterpret_cast<__m256i *>(ptr) = reg; }
+
+  void save(void* ptr, const int elem_num) const {
+    constexpr uint32_t M = 0xFFFFFFFF;
+    __mmask16 mask = _cvtu32_mask16(M >> (32 - elem_num));
+    _mm256_mask_storeu_epi16(ptr, mask, reg);
+  }
 };
 
 struct BF16Vec8 : public Vec<BF16Vec8> {
@@ -549,9 +555,14 @@ inline FP16Vec8::FP16Vec8(const FP32Vec8 &v)
     : reg(_mm256_cvtps_ph(v.reg,
                           _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC)) {}
 
+#ifdef __AVX512F__
 inline FP16Vec16::FP16Vec16(const FP32Vec16 &v)
     : reg(_mm512_cvtps_ph(v.reg,
                           _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC)) {}
+#else
+inline FP16Vec16::FP16Vec16(const FP32Vec16 &v)
+    : reg(_mm256_insertf128_si256(_mm256_castsi128_si256(FP16Vec8(FP32Vec8(v.reg_low)).reg), FP16Vec8(FP32Vec8(v.reg_low)).reg, 1)) {}
+#endif
 
 #ifdef __AVX512BF16__
 template <> inline void storeFP32<c10::BFloat16>(float v, c10::BFloat16 *ptr) {
