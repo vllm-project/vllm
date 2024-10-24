@@ -74,6 +74,7 @@ class IpexAttnMetadata(AttentionMetadata, PagedAttentionMetadata):
     seq_lens: Optional[List[int]]
     seqlen_q: Optional[torch.Tensor]
     max_seqlen: Optional[int]
+    max_decode_seq_len: int
 
     def __post_init__(self):
         # Set during the execution of the first attention op.
@@ -100,6 +101,29 @@ class IpexAttnMetadata(AttentionMetadata, PagedAttentionMetadata):
             return None
 
         return self
+
+    def advance_step(self, num_seqs, num_queries):
+        assert num_seqs == num_queries
+
+        assert self.num_prefills == 0
+        assert self.num_prefill_tokens == 0
+        assert self.num_decode_tokens == num_seqs
+        assert self.slot_mapping.shape == (num_seqs, )
+
+        assert self.seq_lens is not None
+        assert len(self.seq_lens) == num_seqs
+        assert self.seq_lens_tensor is not None
+        assert self.seq_lens_tensor.shape == (num_seqs, )
+        assert self.max_decode_seq_len == max(self.seq_lens)
+
+        assert self.block_tables is not None
+        assert self.block_tables.shape[0] == num_seqs
+
+        # Update query lengths. Note that we update only queries and not seqs,
+        # since tensors may be padded due to captured cuda graph batch size
+        for i in range(num_queries):
+            self.seq_lens[i] += 1
+        self.max_decode_seq_len = max(self.seq_lens)
 
 
 class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
