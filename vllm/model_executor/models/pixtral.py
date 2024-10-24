@@ -846,19 +846,10 @@ class PixtralHFAttention(nn.Module):
                                                   v,
                                                   attn_bias=attention_mask)
         else:
-            attn_weights = torch.matmul(q, k.transpose(2, 3)) * self.scale
-
-            if attention_mask is not None:
-                attn_weights = attn_weights + attention_mask
-
-            # upcast attention to fp32
-            attn_weights = nn.functional.softmax(attn_weights,
-                                                 dim=-1,
-                                                 dtype=torch.float32).to(
-                                                     q.dtype)
-            v = v.view(batch, patches, self.n_heads,
-                       self.head_dim).transpose(1, 2)
-            out = torch.matmul(attn_weights, v)
+            v = v.reshape(batch, patches, self.n_heads,
+                          self.head_dim).transpose(1, 2)
+            out = nn.functional.scaled_dot_product_attention(
+                q, k, v, attn_mask=attention_mask)
             out = out.transpose(1, 2)
 
         out = out.reshape(batch, patches, self.n_heads * self.head_dim)
