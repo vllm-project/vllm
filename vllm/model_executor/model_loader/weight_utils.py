@@ -128,9 +128,13 @@ def get_quant_config(model_config: ModelConfig,
     if model_config.quantization == "gguf":
         return quant_cls.from_config({})
 
-    if model_config.quantization == "hqq_marlin":
-        # TODO don't hardcode params
-        return quant_cls.from_config({"bits": 4, "group_size": 64})
+    if model_config.quantization == "hqq":
+        wq_params = (model_config.hf_config.quantization_config["quant_config"]
+                     ["weight_quant_params"])
+        return quant_cls.from_config({
+            "nbits": wq_params["nbits"],
+            "group_size": wq_params["group_size"]
+        })
 
     # Read the quantization config from the HF model config, if available.
     hf_quant_config = getattr(model_config.hf_config, "quantization_config",

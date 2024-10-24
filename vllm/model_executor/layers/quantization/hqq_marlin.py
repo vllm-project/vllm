@@ -44,7 +44,7 @@ class HQQMarlinConfig(QuantizationConfig):
 
     @classmethod
     def get_name(cls) -> str:
-        return "hqq_marlin"
+        return "hqq"
 
     @classmethod
     def get_supported_act_dtypes(cls) -> List[torch.dtype]:
@@ -60,7 +60,7 @@ class HQQMarlinConfig(QuantizationConfig):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "HQQMarlinConfig":
-        weight_bits = cls.get_from_keys(config, ["bits"])
+        weight_bits = cls.get_from_keys(config, ["nbits"])
         group_size = cls.get_from_keys(config, ["group_size"])
         return cls(weight_bits, group_size)
 
@@ -106,8 +106,8 @@ class HQQMarlinMethod(LinearMethodBase):
 
         weight_loader = extra_weight_attrs.get("weight_loader")
 
-        scales_and_zp_size = (input_size_per_partition //
-                              self.quant_config.group_size)
+        self.scales_and_zp_size = (input_size_per_partition //
+                                   self.quant_config.group_size)
 
         # Quantized weights
         qweight = ModelWeightParameter(data=torch.empty(
@@ -121,7 +121,7 @@ class HQQMarlinMethod(LinearMethodBase):
 
         zeros = GroupQuantScaleParameter(data=torch.empty(
             self.output_size_per_partition,
-            scales_and_zp_size,
+            self.scales_and_zp_size,
             dtype=params_dtype,
         ),
                                          input_dim=1,
@@ -130,20 +130,20 @@ class HQQMarlinMethod(LinearMethodBase):
 
         scales = GroupQuantScaleParameter(data=torch.empty(
             self.output_size_per_partition,
-            scales_and_zp_size,
+            self.scales_and_zp_size,
             dtype=params_dtype,
         ),
                                           input_dim=1,
                                           output_dim=0,
                                           weight_loader=weight_loader)
 
-        layer.register_parameter("qweight", qweight)
-        layer.register_parameter("zeros", zeros)
-        layer.register_parameter("scales", scales)
+        layer.register_parameter("W_q", qweight)
+        layer.register_parameter("zero", zeros)
+        layer.register_parameter("scale", scales)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        dev = layer.qweight.device
-        qweight_t = layer.qweight.transpose(1, 0)
+        dev = layer.W_q.device
+        qweight_t = layer.W_q.transpose(1, 0)
 
         gptq_w_q = gptq_pack(qweight_t, 4, self.input_size_per_partition,
                              self.output_size_per_partition)
@@ -156,14 +156,14 @@ class HQQMarlinMethod(LinearMethodBase):
             self.output_size_per_partition,
             4,
         ).to(dev)
-        marlin_s = marlin_permute_scales(layer.scales.transpose(1, 0),
-                                         self.input_size_per_partition,
-                                         self.output_size_per_partition,
-                                         64).to(dev)
-        marlin_zp = marlin_permute_scales(layer.zeros.transpose(1, 0),
-                                          self.input_size_per_partition,
-                                          self.output_size_per_partition,
-                                          64).to(dev)
+        marlin_s = marlin_permute_scales(
+            layer.scale.reshape(-1, self.scales_and_zp_size).transpose(1, 0),
+            self.input_size_per_partition, self.output_size_per_partition,
+            self.quant_config.group_size).to(dev)
+        marlin_zp = marlin_permute_scales(
+            layer.zero.reshape(-1, self.scales_and_zp_size).transpose(1, 0),
+            self.input_size_per_partition, self.output_size_per_partition,
+            self.quant_config.group_size).to(dev)
 
         layer.g_idx = marlin_make_empty_g_idx(dev)
         layer.g_idx_sort_indices = marlin_make_empty_g_idx(dev)

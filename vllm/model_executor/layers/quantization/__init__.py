@@ -49,7 +49,7 @@ QUANTIZATION_METHODS: Dict[str, Type[QuantizationConfig]] = {
     "compressed-tensors": CompressedTensorsConfig,
     "bitsandbytes": BitsAndBytesConfig,
     "qqq": QQQConfig,
-    "hqq_marlin": HQQMarlinConfig,
+    "hqq": HQQMarlinConfig,
     "experts_int8": ExpertsInt8Config,
     "neuron_quant": NeuronQuantConfig,
     "ipex": IPEXConfig,

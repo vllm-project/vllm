@@ -103,8 +103,6 @@ class AutoWeightsLoader:
 
         for prefix, group in itertools.groupby(weights_by_parts,
                                                key=lambda x: x[0][0]):
-            # for parts, weights_data in group:
-            #     print("part: ", parts, weights_data)
             yield (
                 prefix,
                 # Because maxsplit=1 in weight_name.split(...),
@@ -135,52 +133,24 @@ class AutoWeightsLoader:
         weights: Iterable[Tuple[str, torch.Tensor]],
     ) -> Iterable[str]:
         for weight_name, weight_data in weights:
+            weight_qualname = self._get_qualname(base_prefix, weight_name)
 
-            if torch.is_tensor(weight_data):
-                weight_qualname = self._get_qualname(base_prefix, weight_name)
+            if self._can_skip(weight_qualname):
+                continue
 
-                if self._can_skip(weight_qualname):
-                    continue
+            if weight_name != "":
+                if not self._can_ignore_unexpected(weight_qualname):
+                    raise ValueError(
+                        f"Attempted to load nested weight '{weight_qualname}' "
+                        f"into a single parameter '{base_prefix}'")
 
-                if weight_name != "":
-                    if not self._can_ignore_unexpected(weight_qualname):
-                        raise ValueError(
-                            f"Attempted to load nested weight "
-                            f"'{weight_qualname}' "
-                            f"into a single parameter '{base_prefix}'")
-                    continue
+                continue
 
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                weight_loader(param, weight_data)
-                yield weight_qualname
-            else:
-                # TODO remove this when we get a new hqq dataset format
-                for wn, wd in weight_data.items():
+            weight_loader = getattr(param, "weight_loader",
+                                    default_weight_loader)
+            weight_loader(param, weight_data)
 
-                    weight_qualname = self._get_qualname(base_prefix, wn)
-
-                    if self._can_skip(weight_qualname):
-                        continue
-
-                    weight_loader = getattr(param, "weight_loader",
-                                            default_weight_loader)
-                    weight_loader(param, wd)
-
-                    yield weight_qualname
-
-    def _load_one_param(
-        self,
-        base_prefix: str,
-        param: nn.Parameter,
-        weight_name: str,
-        weight_data: torch.Tensor,
-    ) -> Iterable[str]:
-        weight_qualname = self._get_qualname(base_prefix, weight_name)
-        weight_loader = getattr(param, "weight_loader", default_weight_loader)
-        weight_loader(param, weight_data)
-
-        yield weight_qualname
+            yield weight_qualname
 
     def _load_module(
         self,
@@ -206,13 +176,6 @@ class AutoWeightsLoader:
             prefix = self._get_qualname(base_prefix, child_prefix)
 
             if self._can_skip(prefix):
-                continue
-
-            # TODO remove this when we get a new hqq dataset format
-            if child_prefix == "" and isinstance(child_params, dict):
-                for _, c_weight in child_params.items():
-                    yield from self._load_param(prefix, c_weight,
-                                                child_weights)
                 continue
 
             if child_prefix in child_modules:

@@ -371,12 +371,6 @@ class LlamaModel(nn.Module):
             (".gate_up_proj", ".up_proj", 1),
         ]
 
-        hqq_map = [
-            (".qweight", "W_q", False),
-            (".zeros", "zero", True),
-            (".scales", "scale", True),
-        ]
-
         # unpack function from https://github.com/mobiusml/hqq
         def unpack_4bit_u8(
                 W_q: torch.Tensor,
@@ -389,48 +383,14 @@ class LlamaModel(nn.Module):
             tmp[step:] = W_q & 0b00001111
             return tmp
 
+        def rescale_hqq_wq(loaded_weight: torch.Tensor, param) -> torch.Tensor:
+            # TODO don't hardcode type
+            return unpack_4bit_u8(loaded_weight, dtype=torch.bfloat16).reshape(
+                (-1, param.shape[1])).to(torch.uint8)
+
         params_dict = dict(self.named_parameters())
+
         for name, loaded_weight in weights:
-
-            if self.is_hqq:
-                pick_shard_id = None
-                for param_name, weight_name, shard_id in stacked_params_mapping:
-                    if weight_name not in name:
-                        continue
-                    name = name.replace(weight_name, param_name)
-                    pick_shard_id = shard_id
-                    break
-                if name.endswith("_proj"):
-                    to_shape = loaded_weight["shape"]
-                    group_size = loaded_weight["group_size"]
-                    for c, k, should_scale in hqq_map:
-                        new_name = name + c
-                        if new_name not in params_dict:
-                            continue
-                        param = params_dict[new_name]
-                        weight_loader = param.weight_loader
-                        if should_scale:
-                            loaded = loaded_weight[k].reshape(
-                                -1, to_shape[1] // group_size)
-                        else:
-                            # TODO should we unpack inside the quantization
-                            # method / kernel?
-                            loaded = unpack_4bit_u8(
-                                loaded_weight[k],
-                                dtype=torch.bfloat16).reshape(to_shape).to(
-                                    torch.uint8)
-
-                        if pick_shard_id is not None:
-                            weight_loader(param, loaded, pick_shard_id)
-                        else:
-                            weight_loader(param, loaded)
-                else:
-                    name = name + ".weight"
-                    param = params_dict[name]
-                    weight_loader = getattr(param, "weight_loader",
-                                            default_weight_loader)
-                    weight_loader(param, loaded_weight["weight"])
-                continue
 
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -458,9 +418,27 @@ class LlamaModel(nn.Module):
                 if is_pp_missing_parameter(name, self):
                     continue
 
+                # TODO should input/output dim in hqq_marlin.py depend on this?
+                ignore_hqq = (".axis", ".channel_wise", ".compute_dtype",
+                              ".encoded_state_dict", ".group_size", ".nbits",
+                              ".offload_meta", ".optimize", ".packing",
+                              ".quant_scale", ".quant_zero", ".round_zero",
+                              ".shape", ".stores_quant_config",
+                              ".unpack_view_dtype", ".view_as_float")
+                if name.endswith(ignore_hqq) and name not in params_dict:
+                    continue
+
                 param = params_dict[name]
                 weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
+                if self.is_hqq and name.endswith(".W_q"):
+                    weight_loader(param, rescale_hqq_wq(loaded_weight, param),
+                                  shard_id)
+                elif self.is_hqq and name.endswith((".scale", ".zero")):
+                    weight_loader(param,
+                                  loaded_weight.reshape(-1, param.shape[1]),
+                                  shard_id)
+                else:
+                    weight_loader(param, loaded_weight, shard_id)
 
                 break
             else:
@@ -475,13 +453,26 @@ class LlamaModel(nn.Module):
                 if is_pp_missing_parameter(name, self):
                     continue
 
-                if name not in params_dict:
+                # TODO should input/output dim in hqq_marlin.py depend on this?
+                ignore_hqq = (".axis", ".channel_wise", ".compute_dtype",
+                              ".encoded_state_dict", ".group_size", ".nbits",
+                              ".offload_meta", ".optimize", ".packing",
+                              ".quant_scale", ".quant_zero", ".round_zero",
+                              ".shape", ".stores_quant_config",
+                              ".unpack_view_dtype", ".view_as_float")
+                if name.endswith(ignore_hqq) and name not in params_dict:
                     continue
 
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
-                weight_loader(param, loaded_weight)
+                if self.is_hqq and name.endswith(".W_q"):
+                    weight_loader(param, rescale_hqq_wq(loaded_weight, param))
+                elif self.is_hqq and name.endswith((".scale", ".zero")):
+                    weight_loader(param,
+                                  loaded_weight.reshape(-1, param.shape[1]))
+                else:
+                    weight_loader(param, loaded_weight)
 
     # If this function is called, it should always initialize KV cache scale
     # factors (or else raise an exception). Thus, handled exceptions should
