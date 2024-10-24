@@ -1820,7 +1820,7 @@ def _get_and_verify_max_len(
 
     if bert_config and "max_seq_lenght" in bert_config:
         derived_max_model_len = bert_config["max_seq_length"]
-        
+
     # If the user specified a max length, make sure it is smaller than the
     # derived length from the HF model config.
     if max_model_len is None:

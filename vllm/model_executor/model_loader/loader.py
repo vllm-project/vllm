@@ -177,15 +177,16 @@ def _initialize_model(
     """Initialize a model with the given configurations."""
     model_class, _ = get_model_architecture(model_config)
 
-    return build_model(model_class,
-                       model_config.hf_config,
-                       cache_config=cache_config,
-                       quant_config=_get_quantization_config(
-                           model_config, load_config),
-                       lora_config=lora_config,
-                       multimodal_config=model_config.multimodal_config,
-                       scheduler_config=scheduler_config,
-                       pooling_config=model_config.pooling_config)
+    return build_model(
+        model_class,
+        model_config.hf_config,
+        cache_config=cache_config,
+        quant_config=_get_quantization_config(model_config, load_config),
+        lora_config=lora_config,
+        multimodal_config=model_config.multimodal_config,
+        scheduler_config=scheduler_config,
+        pooling_config=model_config.pooling_config
+    )
 
 
 class BaseModelLoader(ABC):

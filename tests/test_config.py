@@ -125,6 +125,7 @@ def test_get_pooling_config():
 def test_get_bert_sentence_transformer_config():
     bge_model_config = ModelConfig(
         model="BAAI/bge-base-en-v1.5",
+        task="auto",
         tokenizer="BAAI/bge-base-en-v1.5",
         tokenizer_mode="auto",
         trust_remote_code=False,
@@ -137,6 +138,23 @@ def test_get_bert_sentence_transformer_config():
 
     assert bert_bge_model_config["max_seq_length"] == 512
     assert bert_bge_model_config["do_lower_case"]
+
+
+def test_get_tokenization_sentence_transformer_config():
+    bge_model_config = ModelConfig(
+        model="BAAI/bge-base-en-v1.5",
+        task="auto",
+        tokenizer="BAAI/bge-base-en-v1.5",
+        tokenizer_mode="auto",
+        trust_remote_code=False,
+        seed=0,
+        dtype="float16",
+        revision=None,
+    )
+
+    bert_config = bge_model_config._get_bert_tokenization_config()
+
+    assert bert_config
 
 
 def test_rope_customization():
