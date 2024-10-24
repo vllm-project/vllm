@@ -4,12 +4,7 @@ from typing import Dict, Iterable, List, Optional, Tuple, Union
 import torch
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
 
-from vllm.compilation.inductor_pass import InductorPass
-
-
-# TODO(luka) extract to common place
-def is_func(node: torch.fx.Node, target) -> bool:
-    return node.op == "call_function" and node.target == target
+from vllm.compilation.inductor_pass import InductorPass, is_func
 
 
 class FixFunctionalizationPass(InductorPass):

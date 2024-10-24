@@ -6,7 +6,7 @@ from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor.pattern_matcher import (Match, PatternMatcherPass,
                                              fwd_only, register_replacement)
 
-from vllm.compilation.inductor_pass import InductorPass
+from vllm.compilation.inductor_pass import InductorPass, is_func
 from vllm.config import CompilationConfig
 from vllm.logger import init_logger
 
@@ -90,8 +90,6 @@ def empty_fp32(*args, **kwargs):
 
 
 # Utilities for post-processing multi-output matches
-def is_func(node: torch.fx.Node, target) -> bool:
-    return node.op == "call_function" and node.target == target
 
 
 # Returns the first auto_functionalized node with the given op (if it exists)
