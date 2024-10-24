@@ -17,8 +17,8 @@ from transformers.models.pixtral.modeling_pixtral import (
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, ModelConfig, MultiModalConfig
-from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, InputContext,
-                         token_inputs)
+from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
+                         InputContext, token_inputs)
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -81,7 +81,13 @@ def dummy_data_for_pixtral(ctx: InputContext, seq_len: int,
     )
 
     mm_data = {"image": num_images * [image]}
-    return seq_data, mm_data
+    mm_placeholders = {
+        "image": [{
+            "offset": i,
+            "length": image_feature_size
+        } for i in range(num_images)]
+    }
+    return DummyData(seq_data, mm_data, mm_placeholders)
 
 
 def input_mapper_for_pixtral(ctx: InputContext,
@@ -627,13 +633,13 @@ def get_max_pixtral_hf_image_tokens(hf_config: PixtralVisionConfig) -> int:
 
 
 def dummy_seq_data_for_pixtral_hf(
-    hf_config: PixtralVisionConfig,
-    seq_len: int,
-    num_images: int,
-    *,
-    image_token_id: int,
-    image_feature_size_override: Optional[int] = None,
-):
+        hf_config: PixtralVisionConfig,
+        seq_len: int,
+        num_images: int,
+        *,
+        image_token_id: int,
+        image_feature_size_override: Optional[int] = None,
+        mm_key: str = "image"):
     if image_feature_size_override is None:
         image_feature_size = get_max_pixtral_hf_image_feature_size(hf_config)
     else:
@@ -642,7 +648,12 @@ def dummy_seq_data_for_pixtral_hf(
     return SequenceData.from_prompt_token_counts(
         (image_token_id, image_feature_size * num_images),
         (0, seq_len - image_feature_size * num_images),
-    )
+    ), {
+        mm_key: [{
+            "offset": i * image_feature_size,
+            "length": image_feature_size
+        } for i in range(num_images)]
+    }
 
 
 def dummy_image_for_pixtral_hf(
