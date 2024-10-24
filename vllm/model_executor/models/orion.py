@@ -249,7 +249,7 @@ class OrionModel(nn.Module):
         if get_pp_group().is_first_rank:
             hidden_states = self.embed_tokens(input_ids)
         else:
-            assert intermediate_tensors
+            assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
         for i in range(self.start_layer, self.end_layer):
             layer = self.layers[i]
