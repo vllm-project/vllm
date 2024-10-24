@@ -233,15 +233,6 @@ class OpenAIServing:
         else:
             input_ids = prompt_ids[-truncate_prompt_tokens:]
 
-        # Guard against out-of-vocab tokens.
-        # For some tokenizers, tokenizer.decode will happily return empty text
-        # for token ids that are out of vocab. However, oov token ids will
-        # later crash a cuda kernel at runtime, which will crash the entire
-        # server.
-        if max(input_ids) > tokenizer.max_token_id:
-            raise ValueError("Token id {} is out of vocabulary".format(
-                max(input_ids)))
-
         input_text = tokenizer.decode(input_ids)
 
         return self._validate_input(request, input_ids, input_text)

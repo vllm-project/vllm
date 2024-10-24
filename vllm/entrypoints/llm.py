@@ -5,7 +5,6 @@ from typing import (Any, ClassVar, Dict, List, Optional, Sequence, Tuple,
                     Union, cast, overload)
 
 from tqdm import tqdm
-from typing_extensions import TypeIs
 
 from vllm import envs
 from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
@@ -200,11 +199,8 @@ class LLM:
             engine_args, usage_context=UsageContext.LLM_CLASS)
         self.request_counter = Counter()
 
-    def get_tokenizer(self,
-                      lora_request: Optional[LoRARequest] = None
-                      ) -> AnyTokenizer:
-        return self.llm_engine.get_tokenizer_group(
-            TokenizerGroup).get_lora_tokenizer(lora_request=lora_request)
+    def get_tokenizer(self) -> AnyTokenizer:
+        return self.llm_engine.get_tokenizer_group(TokenizerGroup).tokenizer
 
     def set_tokenizer(self, tokenizer: AnyTokenizer) -> None:
         tokenizer_group = self.llm_engine.get_tokenizer_group(TokenizerGroup)
@@ -852,20 +848,6 @@ class LLM:
                 # We only care about the final output
                 sp.output_kind = RequestOutputKind.FINAL_ONLY
 
-        # Check for out-of-vocab token ids.
-        # These may crash the cuda kernels later, preventing this LLM instance
-        # from generating any more text.
-        for i, prompt in enumerate(prompts):
-            if self.is_token_prompt(prompt=prompt):
-                max_token_id = max(prompt["prompt_token_ids"])
-                lora_request = lora_request[i] if isinstance(
-                    lora_request, Sequence) else lora_request
-                tokenizer = self.get_tokenizer(lora_request)
-
-                if max_token_id > tokenizer.max_token_id:
-                    raise ValueError(
-                        f"Token id {max_token_id} is out of vocabulary.")
-
         # Add requests to the engine.
         for i, prompt in enumerate(prompts):
             self._add_request(
@@ -963,7 +945,3 @@ class LLM:
 
     def _is_encoder_decoder_model(self):
         return self.llm_engine.is_encoder_decoder_model()
-
-    @staticmethod
-    def is_token_prompt(prompt: PromptType) -> TypeIs[TokensPrompt]:
-        return isinstance(prompt, dict) and "prompt_token_ids" in prompt

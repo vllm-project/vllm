@@ -665,7 +665,7 @@ class LLMEngine:
             )
             return None
 
-        self._validate_model_inputs(processed_inputs)
+        self._validate_model_inputs(processed_inputs, lora_request)
         # Create the sequences.
         block_size = self.cache_config.block_size
         seq_id = next(self.seq_counter)
@@ -1925,7 +1925,8 @@ class LLMEngine:
         return self.input_preprocessor.is_encoder_decoder_model()
 
     def _validate_model_inputs(self, inputs: Union[DecoderOnlyInputs,
-                                                   EncoderDecoderInputs]):
+                                                   EncoderDecoderInputs],
+                               lora_request: Optional[LoRARequest]):
         if self.model_config.is_multimodal_model:
             # For encoder-decoder multimodal models, the max_prompt_len
             # restricts the decoder prompt length
@@ -1937,6 +1938,18 @@ class LLMEngine:
 
         if prompt_ids is None or len(prompt_ids) == 0:
             raise ValueError("Prompt cannot be empty")
+
+        # Guard against out-of-vocab tokens.
+        # For some tokenizers, tokenizer.decode will happily return empty text
+        # for token ids that are out of vocab, and we don't detect token ids
+        # that are greater than the max token id before running the model.
+        # However, these token ids will later crash a cuda kernel at runtime
+        # with an index out of bounds error. This will crash the entire engine.
+        tokenizer = self.get_tokenizer(lora_request)
+        max_input_id = max(prompt_ids)
+        if max_input_id > tokenizer.max_token_id:
+            raise ValueError(
+                "Token id {} is out of vocabulary".format(max_input_id))
 
         if self.model_config.is_multimodal_model:
             max_prompt_len = self.model_config.max_model_len
