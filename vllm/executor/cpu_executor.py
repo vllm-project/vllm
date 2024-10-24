@@ -66,13 +66,6 @@ class CPUExecutor(ExecutorBase):
         self.parallel_config = _verify_and_get_parallel_config(
             self.parallel_config)
 
-        # Multiprocessing-based executor does not support multi-node setting.
-        # Since it only works for single node, we can use the loopback address
-        # 127.0.0.1 for communication.
-        ip = "127.0.0.1"
-        port = get_open_port()
-        self.distributed_init_method = get_distributed_init_method(ip, port)
-
         is_async = isinstance(self, CPUExecutorAsync)
 
         world_size = self.parallel_config.tensor_parallel_size
@@ -126,7 +119,14 @@ class CPUExecutor(ExecutorBase):
         self,
         local_rank: int = 0,
         rank: int = 0,
+        distributed_init_method: Optional[str] = None,
     ):
+        if distributed_init_method is None:
+          # Multiprocessing-based executor does not support multi-node setting.
+          # Since it only works for single node, we can use the loopback address
+          # 127.0.0.1 for communication.
+          distributed_init_method = get_distributed_init_method("127.0.0.1", get_open_port())
+
         worker_module_name = "vllm.worker.cpu_worker"
         worker_class_name = "CPUWorker"
 
@@ -134,8 +134,6 @@ class CPUExecutor(ExecutorBase):
             worker_module_name=worker_module_name,
             worker_class_name=worker_class_name,
         )
-
-        assert self.distributed_init_method is not None
 
         kwargs = dict(
             model_config=self.model_config,
@@ -146,7 +144,7 @@ class CPUExecutor(ExecutorBase):
             load_config=self.load_config,
             local_rank=local_rank,
             rank=rank,
-            distributed_init_method=self.distributed_init_method,
+            distributed_init_method=distributed_init_method,
             lora_config=self.lora_config,
             kv_cache_dtype=self.cache_config.cache_dtype,
             prompt_adapter_config=self.prompt_adapter_config,
