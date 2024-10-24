@@ -334,6 +334,14 @@ The following modalities are supported depending on the model:
 - **V**\ ideo
 - **A**\ udio
 
+Any combination of modalities joined by :code:`+` are supported.
+
+- e.g.: :code:`T + I` means that the model supports text-only, image-only, and text-with-image inputs.
+
+On the other hand, modalities separated by :code:`/` are mutually exclusive.
+
+- e.g.: :code:`T / I` means that the model supports text-only and image-only inputs, but not text-with-image inputs.
+
 .. _supported_vlms:
 
 Text Generation
@@ -417,7 +425,7 @@ Text Generation
     -
   * - :code:`MolmoForCausalLM`
     - Molmo
-    - Image
+    - T + I
     - :code:`allenai/Molmo-7B-D-0924`, :code:`allenai/Molmo-72B-0924`, etc.
     -
     - ✅︎
@@ -449,6 +457,12 @@ Text Generation
     - Qwen-VL
     - T + I\ :sup:`E+`
     - :code:`Qwen/Qwen-VL`, :code:`Qwen/Qwen-VL-Chat`, etc.
+    -
+    - ✅︎
+  * - :code:`Qwen2AudioForConditionalGeneration`
+    - Qwen2-Audio
+    - T + A\ :sup:`+`
+    - :code:`Qwen/Qwen2-Audio-7B-Instruct`
     -
     - ✅︎
   * - :code:`Qwen2VLForConditionalGeneration`
@@ -484,6 +498,12 @@ Multimodal Embedding
     - Example HF Models
     - :ref:`LoRA <lora>`
     - :ref:`PP <distributed_serving>`
+  * - :code:`LlavaNextForConditionalGeneration`
+    - LLaVA-NeXT-based
+    - T / I
+    - :code:`royokong/e5-v`
+    - 
+    - ✅︎
   * - :code:`Phi3VForCausalLM`
     - Phi-3-Vision-based
     - T + I
