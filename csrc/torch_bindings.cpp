@@ -336,15 +336,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("dynamic_per_token_scaled_fp8_quant", torch::kCUDA,
            &dynamic_per_token_scaled_fp8_quant);
 
-  // Aligning the number of tokens to be processed by each expert such
-  // that it is divisible by the block size.
-  ops.def(
-      "moe_align_block_size(Tensor topk_ids, int num_experts,"
-      "                     int block_size, Tensor! sorted_token_ids,"
-      "                     Tensor! experts_ids,"
-      "                     Tensor! num_tokens_post_pad) -> ()");
-  ops.impl("moe_align_block_size", torch::kCUDA, &moe_align_block_size);
-
   // Compute int8 quantized tensor for given scaling factor.
   ops.def(
       "static_scaled_int8_quant(Tensor! out, Tensor input, Tensor scale,"
