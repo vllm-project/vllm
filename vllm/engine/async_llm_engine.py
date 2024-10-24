@@ -436,10 +436,12 @@ class _AsyncLLMEngine(LLMEngine):
 
         elif params.bad_words is not None:
             bad_words_ids: List[List[int]] = list()
-            tokenizer = self.get_tokenizer_group().get_lora_tokenizer(lora_request)
+            tokenizer = self.get_tokenizer_group().get_lora_tokenizer(
+                lora_request)
 
             for bad_word in params.bad_words:
-                # To prohibit words both at the beginning and in the middle of text
+                # To prohibit words both at the beginning
+                # and in the middle of text
                 # (related to add_prefix_space tokenizer parameter)
                 for add_prefix_space in [False, True]:
                     prefix = " " if add_prefix_space else ""
@@ -451,8 +453,8 @@ class _AsyncLLMEngine(LLMEngine):
                     # or if prefix space produces a new word token
                     if (not add_prefix_space) or (
                             add_prefix_space
-                            and prompt_token_ids[0] != bad_words_ids[-1][0]
-                            and len(prompt_token_ids) == len(bad_words_ids[-1])):
+                            and prompt_token_ids[0] != bad_words_ids[-1][0] and
+                            len(prompt_token_ids) == len(bad_words_ids[-1])):
                         bad_words_ids.append(prompt_token_ids)
 
             params._init_bad_words_logits_processor(bad_words_ids)

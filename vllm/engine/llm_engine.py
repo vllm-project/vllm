@@ -743,7 +743,8 @@ class LLMEngine:
         tokenizer = self.get_tokenizer_group().get_lora_tokenizer(lora_request)
 
         for bad_word in params.bad_words:
-            # To prohibit words both at the beginning and in the middle of text
+            # To prohibit words both at the beginning
+            # and in the middle of text
             # (related to add_prefix_space tokenizer parameter)
             for add_prefix_space in [False, True]:
                 prefix = " " if add_prefix_space else ""

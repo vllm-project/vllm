@@ -6,13 +6,11 @@ from functools import cached_property
 from typing import Any, Dict, List, Optional, Set, Union
 
 import msgspec
-import torch
 from pydantic import BaseModel
 from typing_extensions import Annotated
 
 from vllm.logger import init_logger
 from vllm.logits_process import LogitsProcessor, NoBadWordsLogitsProcessor
-
 
 logger = init_logger(__name__)
 
