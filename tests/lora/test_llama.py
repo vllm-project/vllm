@@ -38,7 +38,9 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> List[str]:
 
 
 @pytest.mark.parametrize("tp_size", [1, 2, 4])
-def test_llama_lora(sql_lora_files, tp_size, num_gpus_available):
+@pytest.mark.parametrize("enable_chunked_prefill", [False, True])
+def test_llama_lora(sql_lora_files, tp_size, enable_chunked_prefill,
+                    num_gpus_available):
     if num_gpus_available < tp_size:
         pytest.skip(f"Not enough GPUs for tensor parallelism {tp_size}")
 
@@ -46,7 +48,8 @@ def test_llama_lora(sql_lora_files, tp_size, num_gpus_available):
                    enable_lora=True,
                    max_num_seqs=16,
                    max_loras=4,
-                   tensor_parallel_size=tp_size)
+                   tensor_parallel_size=tp_size,
+                   enable_chunked_prefill=enable_chunked_prefill)
 
     expected_no_lora_output = [
         "\n\n [user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_75 (icao VARCHAR, airport VARCHAR)\n\n question: Name the ICAO for lilongwe international airport [/user] [assistant]\n\n [user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_76 (icao VARCHAR, airport VARCHAR)\n\n question: Name the ICAO for lilongwe international airport [/user] [assistant]\n\n [user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_77 (icao VARCHAR, airport VARCHAR)\n\n question: Name the ICAO for lilongwe international airport [/user] [assistant]\n\n [user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_78 (icao VARCHAR, airport VARCHAR)\n\n question: Name the ICAO for lilongwe international airport [/user]",  # noqa: E501
@@ -88,7 +91,8 @@ def test_llama_tensor_parallel_equality(sql_lora_files, num_gpus_available):
                        enable_lora=True,
                        max_num_seqs=16,
                        max_loras=4,
-                       tensor_parallel_size=1)
+                       tensor_parallel_size=1,
+                       enable_chunked_prefill=True)
     output_tp1 = do_sample(llm_tp1, sql_lora_files, lora_id=1)
 
     del llm_tp1
@@ -98,7 +102,8 @@ def test_llama_tensor_parallel_equality(sql_lora_files, num_gpus_available):
                        enable_lora=True,
                        max_num_seqs=16,
                        max_loras=4,
-                       tensor_parallel_size=2)
+                       tensor_parallel_size=2,
+                       enable_chunked_prefill=True)
     output_tp2 = do_sample(llm_tp2, sql_lora_files, lora_id=1)
 
     del llm_tp2
@@ -110,7 +115,8 @@ def test_llama_tensor_parallel_equality(sql_lora_files, num_gpus_available):
                        enable_lora=True,
                        max_num_seqs=16,
                        max_loras=4,
-                       tensor_parallel_size=4)
+                       tensor_parallel_size=4,
+                       enable_chunked_prefill=True)
     output_tp4 = do_sample(llm_tp4, sql_lora_files, lora_id=1)
 
     del llm_tp4
@@ -125,13 +131,18 @@ def test_llama_lora_warmup(sql_lora_files):
 
     @ray.remote(num_gpus=1)
     def get_num_gpu_blocks_lora():
-        llm = vllm.LLM(MODEL_PATH, enable_lora=True, max_num_seqs=16)
+        llm = vllm.LLM(MODEL_PATH,
+                       enable_lora=True,
+                       max_num_seqs=16,
+                       enable_chunked_prefill=True)
         num_gpu_blocks_lora_warmup = llm.llm_engine.cache_config.num_gpu_blocks
         return num_gpu_blocks_lora_warmup
 
     @ray.remote(num_gpus=1)
     def get_num_gpu_blocks_no_lora():
-        llm = vllm.LLM(MODEL_PATH, max_num_seqs=16)
+        llm = vllm.LLM(MODEL_PATH,
+                       max_num_seqs=16,
+                       enable_chunked_prefill=True)
         num_gpu_blocks_no_lora_warmup = (
             llm.llm_engine.cache_config.num_gpu_blocks)
         return num_gpu_blocks_no_lora_warmup

@@ -1,5 +1,7 @@
 from typing import List
 
+import pytest
+
 import vllm
 from vllm.lora.request import LoRARequest
 
@@ -37,13 +39,15 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> List[str]:
     return generated_texts
 
 
-def test_chatglm3_lora(chatglm3_lora_files):
+@pytest.mark.parametrize("enable_chunked_prefill", [False, True])
+def test_chatglm3_lora(chatglm3_lora_files, enable_chunked_prefill):
     llm = vllm.LLM(MODEL_PATH,
                    max_model_len=1024,
                    enable_lora=True,
                    max_loras=4,
                    max_lora_rank=64,
-                   trust_remote_code=True)
+                   trust_remote_code=True,
+                   enable_chunked_prefill=enable_chunked_prefill)
 
     expected_lora_output = [
         "SELECT count(*) FROM singer",

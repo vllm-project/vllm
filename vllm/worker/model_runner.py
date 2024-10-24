@@ -597,11 +597,13 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             inter_data.lora_requests.add(seq_group_metadata.lora_request)
         query_len = inter_data.query_lens[seq_idx]
         inter_data.lora_index_mapping.append([lora_id] * query_len)
-        inter_data.lora_prompt_mapping.append(
-            [lora_id] *
-            (query_len if seq_group_metadata.sampling_params
-             and seq_group_metadata.sampling_params.prompt_logprobs is not None
-             else 1))
+        sampling_params = seq_group_metadata.sampling_params
+        if sampling_params and sampling_params.prompt_logprobs is not None:
+            inter_data.lora_prompt_mapping.append([lora_id] * query_len)
+        elif seq_group_metadata.do_sample:
+            inter_data.lora_prompt_mapping.append([lora_id])
+        else:
+            inter_data.lora_prompt_mapping.append([])
 
     def _compute_prompt_adapter_input(
             self, inter_data: InterDataForSeqGroup,
