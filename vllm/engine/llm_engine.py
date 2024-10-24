@@ -254,7 +254,7 @@ class LLMEngine:
             "num_scheduler_steps=%d, chunked_prefill_enabled=%s "
             "multi_step_stream_outputs=%s, enable_prefix_caching=%s, "
             "use_async_output_proc=%s, use_cached_outputs=%s, "
-            "mm_processor_kwargs=%s)",
+            "chat_template_text_format=%s, mm_processor_kwargs=%s)",
             VLLM_VERSION,
             model_config.model,
             speculative_config,
@@ -289,6 +289,7 @@ class LLMEngine:
             cache_config.enable_prefix_caching,
             model_config.use_async_output_proc,
             use_cached_outputs,
+            model_config.chat_template_text_format,
             model_config.mm_processor_kwargs,
         )
         # TODO(woosuk): Print more configs in debug mode.
@@ -646,10 +647,24 @@ class LLMEngine:
         prompt_adapter_request: Optional[PromptAdapterRequest],
         trace_headers: Optional[Mapping[str, str]] = None,
         priority: int = 0,
-    ) -> SequenceGroup:
+    ) -> Optional[SequenceGroup]:
         """Add a processed request to the engine's request pool.
         return the created sequence group.
         """
+        if isinstance(params, SamplingParams) and params.n > 1:
+            ParallelSampleSequenceGroup.add_request(
+                request_id,
+                self,
+                params,
+                processed_inputs=processed_inputs,
+                arrival_time=arrival_time,
+                lora_request=lora_request,
+                trace_headers=trace_headers,
+                prompt_adapter_request=prompt_adapter_request,
+                priority=priority,
+            )
+            return None
+
         self._validate_model_inputs(processed_inputs)
         # Create the sequences.
         block_size = self.cache_config.block_size
@@ -720,7 +735,7 @@ class LLMEngine:
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
-    ) -> Optional[SequenceGroup]:
+    ) -> None:
         ...
 
     @overload
@@ -734,7 +749,7 @@ class LLMEngine:
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
-    ) -> Optional[SequenceGroup]:
+    ) -> None:
         ...
 
     @deprecate_kwargs(
@@ -753,7 +768,7 @@ class LLMEngine:
             priority: int = 0,
             *,
             inputs: Optional[PromptType] = None,  # DEPRECATED
-    ) -> Optional[SequenceGroup]:
+    ) -> None:
         """Add a request to the engine's request pool.
 
         The request is added to the request pool and will be processed by the
@@ -797,22 +812,6 @@ class LLMEngine:
             >>> # continue the request processing
             >>> ...
         """
-
-        if isinstance(params, SamplingParams) and params.n > 1:
-            ParallelSampleSequenceGroup.add_request(
-                request_id,
-                self,
-                params,
-                prompt=prompt,
-                arrival_time=arrival_time,
-                lora_request=lora_request,
-                trace_headers=trace_headers,
-                prompt_adapter_request=prompt_adapter_request,
-                priority=priority,
-                inputs=inputs,
-            )
-            return None
-
         if inputs is not None:
             prompt = inputs
         assert prompt is not None and params is not None
@@ -843,7 +842,7 @@ class LLMEngine:
         processed_inputs["mm_processor_kwargs"] = preprocessed_inputs.get(
             "mm_processor_kwargs")
 
-        return self._add_processed_request(
+        self._add_processed_request(
             request_id=request_id,
             processed_inputs=processed_inputs,
             params=params,
@@ -1612,7 +1611,7 @@ class LLMEngine:
         # KV Cache Usage in %
         num_total_gpu = self.cache_config.num_gpu_blocks
         gpu_cache_usage_sys = 0.
-        if num_total_gpu is not None:
+        if num_total_gpu:  # Guard against both None and 0
             num_free_gpu = sum(
                 scheduler.block_manager.get_num_free_gpu_blocks()
                 for scheduler in self.scheduler)
@@ -1620,7 +1619,7 @@ class LLMEngine:
 
         num_total_cpu = self.cache_config.num_cpu_blocks
         cpu_cache_usage_sys = 0.
-        if num_total_cpu is not None and num_total_cpu > 0:
+        if num_total_cpu:  # Guard against both None and 0
             num_free_cpu = sum(
                 scheduler.block_manager.get_num_free_cpu_blocks()
                 for scheduler in self.scheduler)
@@ -1718,6 +1717,15 @@ class LLMEngine:
                     # TPOTs.
                     latency = seq_group.get_last_latency(now)
                     time_per_output_tokens_iter.append(latency)
+                    if seq_group.state.current_step == 0:
+                        # For async_output_proc, the do_log_stats()
+                        # is called following init_multi_step(), which
+                        # sets the current_step to zero.
+                        actual_num_batched_tokens +=\
+                            seq_group.state.num_steps - 1
+                    else:
+                        actual_num_batched_tokens +=\
+                            seq_group.state.current_step - 1
 
                 # Because of chunked prefill, we can have a single sequence
                 # group that does multiple prompt_runs. To prevent logging
