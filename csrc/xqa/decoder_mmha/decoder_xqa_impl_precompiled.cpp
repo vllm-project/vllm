@@ -6,66 +6,84 @@
 #include <mutex>
 #include "cubin/xqa_kernel_cubin.h"
 #include "decoder_xqa_runner.h"
-uint32_t getElemBytes(CUtensorMapDataType_enum dataType)
-{
-    switch (dataType)
-    {
-    case CU_TENSOR_MAP_DATA_TYPE_UINT8: return 1;
-    case CU_TENSOR_MAP_DATA_TYPE_UINT16: return 2;
-    case CU_TENSOR_MAP_DATA_TYPE_UINT32: return 4;
-    case CU_TENSOR_MAP_DATA_TYPE_INT32: return 4;
-    case CU_TENSOR_MAP_DATA_TYPE_UINT64: return 8;
-    case CU_TENSOR_MAP_DATA_TYPE_INT64: return 8;
-    case CU_TENSOR_MAP_DATA_TYPE_FLOAT16: return 2;
-    case CU_TENSOR_MAP_DATA_TYPE_FLOAT32: return 4;
-    case CU_TENSOR_MAP_DATA_TYPE_FLOAT64: return 8;
-    case CU_TENSOR_MAP_DATA_TYPE_BFLOAT16: return 2;
-    case CU_TENSOR_MAP_DATA_TYPE_FLOAT32_FTZ: return 4;
-    case CU_TENSOR_MAP_DATA_TYPE_TFLOAT32: return 4;
-    case CU_TENSOR_MAP_DATA_TYPE_TFLOAT32_FTZ: return 4;
-    }
-    throw std::runtime_error("unsupported data type");
+uint32_t getElemBytes(CUtensorMapDataType_enum dataType) {
+  switch (dataType) {
+    case CU_TENSOR_MAP_DATA_TYPE_UINT8:
+      return 1;
+    case CU_TENSOR_MAP_DATA_TYPE_UINT16:
+      return 2;
+    case CU_TENSOR_MAP_DATA_TYPE_UINT32:
+      return 4;
+    case CU_TENSOR_MAP_DATA_TYPE_INT32:
+      return 4;
+    case CU_TENSOR_MAP_DATA_TYPE_UINT64:
+      return 8;
+    case CU_TENSOR_MAP_DATA_TYPE_INT64:
+      return 8;
+    case CU_TENSOR_MAP_DATA_TYPE_FLOAT16:
+      return 2;
+    case CU_TENSOR_MAP_DATA_TYPE_FLOAT32:
+      return 4;
+    case CU_TENSOR_MAP_DATA_TYPE_FLOAT64:
+      return 8;
+    case CU_TENSOR_MAP_DATA_TYPE_BFLOAT16:
+      return 2;
+    case CU_TENSOR_MAP_DATA_TYPE_FLOAT32_FTZ:
+      return 4;
+    case CU_TENSOR_MAP_DATA_TYPE_TFLOAT32:
+      return 4;
+    case CU_TENSOR_MAP_DATA_TYPE_TFLOAT32_FTZ:
+      return 4;
+  }
+  throw std::runtime_error("unsupported data type");
 }
 
 CUtensorMap makeTensorMapForPagedKVCache(void const* addr,
-    CUtensorMapDataType_enum dataType, uint32_t headElems, uint32_t nbKHeads, uint32_t tokensPerPage,
-    uint32_t nbTokensPerTile = 64)
-{
-    CUtensorMap tensorMap{};
-    uint32_t elemBytes = getElemBytes(dataType);
-    uint64_t const globalDims[] = {headElems, tokensPerPage, nbKHeads, 1U << 31};
-    uint32_t const headBytes = elemBytes * headElems;
-    uint64_t const globalStrides[] = {headBytes, headBytes * tokensPerPage, headBytes * tokensPerPage * nbKHeads};
-    TORCH_CHECK(headElems <= 256);
-    uint32_t const paddedHeadElems = headElems <= 64 ? 64 : (headElems <= 128 ? 128 : 256);
-    uint32_t const partElems = std::min(elemBytes * paddedHeadElems, 128U) / elemBytes;
-    uint32_t const boxDims[] = {partElems, std::min(tokensPerPage, nbTokensPerTile), 1, 1};
-    uint32_t const elemStrides[] = {1, 1, 1, 1};
+                                         CUtensorMapDataType_enum dataType,
+                                         uint32_t headElems, uint32_t nbKHeads,
+                                         uint32_t tokensPerPage,
+                                         uint32_t nbTokensPerTile = 64) {
+  CUtensorMap tensorMap{};
+  uint32_t elemBytes = getElemBytes(dataType);
+  uint64_t const globalDims[] = {headElems, tokensPerPage, nbKHeads, 1U << 31};
+  uint32_t const headBytes = elemBytes * headElems;
+  uint64_t const globalStrides[] = {headBytes, headBytes * tokensPerPage,
+                                    headBytes * tokensPerPage * nbKHeads};
+  TORCH_CHECK(headElems <= 256);
+  uint32_t const paddedHeadElems =
+      headElems <= 64 ? 64 : (headElems <= 128 ? 128 : 256);
+  uint32_t const partElems =
+      std::min(elemBytes * paddedHeadElems, 128U) / elemBytes;
+  uint32_t const boxDims[] = {partElems,
+                              std::min(tokensPerPage, nbTokensPerTile), 1, 1};
+  uint32_t const elemStrides[] = {1, 1, 1, 1};
 
-    auto const swizzle = [&]
-    {
-        switch (partElems)
-        {
-        case 128: return CU_TENSOR_MAP_SWIZZLE_128B;
-        case 64: return CU_TENSOR_MAP_SWIZZLE_64B;
-        default: throw std::runtime_error("unsupported cache head size");
+  auto const swizzle = [&] {
+    switch (partElems) {
+      case 128:
+        return CU_TENSOR_MAP_SWIZZLE_128B;
+      case 64:
+        return CU_TENSOR_MAP_SWIZZLE_64B;
+      default:
+        throw std::runtime_error("unsupported cache head size");
         // default: TLLM_THROW("unsupported cache head size");
-        }
-    }();
+    }
+  }();
 
-    cuErrCheck(cuTensorMapEncodeTiled(&tensorMap, dataType, 4, const_cast<void*>(addr), globalDims,
-                   globalStrides, boxDims, elemStrides, CU_TENSOR_MAP_INTERLEAVE_NONE, swizzle,
-                   CU_TENSOR_MAP_L2_PROMOTION_NONE, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE));
-    return tensorMap;
+  cuErrCheck(cuTensorMapEncodeTiled(
+      &tensorMap, dataType, 4, const_cast<void*>(addr), globalDims,
+      globalStrides, boxDims, elemStrides, CU_TENSOR_MAP_INTERLEAVE_NONE,
+      swizzle, CU_TENSOR_MAP_L2_PROMOTION_NONE,
+      CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE));
+  return tensorMap;
 }
 
-CUtensorMap makeTensorMapForKVCache(
-    XQAParams const& xqaParams, KVCacheListParams const& kv_cache_buffer)
-{
-        return makeTensorMapForPagedKVCache( kv_cache_buffer.pool, CU_TENSOR_MAP_DATA_TYPE_UINT8,
-            xqaParams.head_size, xqaParams.num_kv_heads, xqaParams.tokens_per_block);
+CUtensorMap makeTensorMapForKVCache(XQAParams const& xqaParams,
+                                    KVCacheListParams const& kv_cache_buffer) {
+  return makeTensorMapForPagedKVCache(
+      kv_cache_buffer.pool, CU_TENSOR_MAP_DATA_TYPE_UINT8, xqaParams.head_size,
+      xqaParams.num_kv_heads, xqaParams.tokens_per_block);
 }
-
 
 class XQAKernelList {
  public:
@@ -85,12 +103,12 @@ class XQAKernelList {
     if (!mFunctions.empty()) {
       return;
     }
-    std::cout << "here mKernelMetaCount=" << mKernelMetaCount <<std::endl;
+    std::cout << "here mKernelMetaCount=" << mKernelMetaCount << std::endl;
     for (unsigned int i = 0; i < mKernelMetaCount; ++i) {
       auto const& kernelMeta = mKernelMeta[i];
       // std::cout << "00000000000000\n";
-      // std::cout << kernelMeta.mSM << "; " << kernelMeta.mDataType << std::endl;
-      // std::cout << mSM << "; " << mDataType << std::endl;
+      // std::cout << kernelMeta.mSM << "; " << kernelMeta.mDataType <<
+      // std::endl; std::cout << mSM << "; " << mDataType << std::endl;
       if (kernelMeta.mSM != mSM || kernelMeta.mDataType != mDataType) continue;
 
       // Cubins for kernels that would take the JIT path are removed from
@@ -110,7 +128,8 @@ class XQAKernelList {
       funcInfo.mMetaInfoIndex = i;
       cuErrCheck(cuModuleGetFunction(&funcInfo.mDeviceFunction, hmod,
                                      kernelMeta.mFuncName));
-      // std::cout << "reading mDeviceFunction:" <<funcInfo.mDeviceFunction <<std::endl;
+      // std::cout << "reading mDeviceFunction:" <<funcInfo.mDeviceFunction
+      // <<std::endl;
       funcInfo.mSharedMemBytes =
           getGlobalVar<uint32_t>(hmod, "smemSize", true).value();
       funcInfo.mKernelType =
@@ -176,8 +195,6 @@ class XQAKernelList {
     return true;
   }
 
-
-
   template <typename T>
   void run(XQAParams const& xqaParams, KVCacheListParams const& kv_cache_buffer,
            int multiprocessor_count, cudaStream_t const& stream) const {
@@ -195,10 +212,12 @@ class XQAKernelList {
     buildXQALaunchParams(launchParams, xqaParams, kv_cache_buffer);
     void* xqa_q_input_ptr = const_cast<void*>(xqaParams.qHeads);
 
-    XQAKernelRuntimeHashKey hash_key = getRuntimeHashKeyFromXQAParams(xqaParams);
-    
+    XQAKernelRuntimeHashKey hash_key =
+        getRuntimeHashKeyFromXQAParams(xqaParams);
+
     auto const findIter = mFunctions.find(hash_key);
-    // std::cout << "at running mDeviceFunction:" <<findIter->second.mDeviceFunction <<std::endl;
+    // std::cout << "at running mDeviceFunction:"
+    // <<findIter->second.mDeviceFunction <<std::endl;
     TORCH_CHECK(findIter != mFunctions.end(), "XQAKernelFunc not found.");
 
     auto const& kernelMeta = mKernelMeta[findIter->second.mMetaInfoIndex];
@@ -231,8 +250,7 @@ class XQAKernelList {
       appendParam(&launchParams.kv_scale_quant_orig);
       CUtensorMap tensorMap{};
       if (isGmmaKernel) {
-        tensorMap =
-            makeTensorMapForKVCache(xqaParams, kv_cache_buffer);
+        tensorMap = makeTensorMapForKVCache(xqaParams, kv_cache_buffer);
         appendParam(&tensorMap);
       }
       appendParam(&launchParams.semaphores);
@@ -300,7 +318,7 @@ class XQAKernelLoader {
           std::make_unique<XQAKernelLoader>(XQAKernelLoader());
     }
 
-    return *(s_factory[device_id]) ;
+    return *(s_factory[device_id]);
   }
 
  private:
@@ -322,9 +340,8 @@ inline XQAKernelList const* getXQAKernels(Data_type type, unsigned int sm) {
 void DecoderXQAImplPrecompiled::runDispatchBuffer(
     XQAParams const& xqa_params, KVCacheListParams const& kv_cache_buffer,
     cudaStream_t const& stream) {
-
   XQAKernelList const* xqa_kernel =
-      getXQAKernels(/*mRunner->mDataType*/ mRunner->mDataType,  getSMVersion());
+      getXQAKernels(/*mRunner->mDataType*/ mRunner->mDataType, getSMVersion());
   int multi_processor_count = mRunner->mMultiProcessorCount;
   if (mRunner->mDataType == DATA_TYPE_FP16) {
     XQA_KERNEL_RUN(__half);
@@ -334,8 +351,8 @@ void DecoderXQAImplPrecompiled::runDispatchBuffer(
 }
 
 void DecoderXQAImplPrecompiled::runWithKVBlockArray(
-    XQAParams const& xqa_params, KVCacheListParams const& kv_block_array, cudaStream_t const& stream)
-{
-    runDispatchBuffer(xqa_params, kv_block_array, stream);
+    XQAParams const& xqa_params, KVCacheListParams const& kv_block_array,
+    cudaStream_t const& stream) {
+  runDispatchBuffer(xqa_params, kv_block_array, stream);
 }
 #undef XQA_KERNEL_RUN

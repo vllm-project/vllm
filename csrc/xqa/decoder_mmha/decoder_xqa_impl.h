@@ -5,22 +5,20 @@
 class DecoderXQARunner;
 class DecoderXQAImpl {
  public:
-
-  void run(XQAParams const& xqa_params, KVCacheListParams const& kv_cache_buffer, cudaStream_t const& stream);
- enum class ImplType
-    {
-        kPrecompiled = 0,
-    };
-  static std::unique_ptr<DecoderXQAImpl> create(DecoderXQARunner* runner, ImplType implType) ;
+  void run(XQAParams const& xqa_params,
+           KVCacheListParams const& kv_cache_buffer,
+           cudaStream_t const& stream);
+  enum class ImplType {
+    kPrecompiled = 0,
+  };
+  static std::unique_ptr<DecoderXQAImpl> create(DecoderXQARunner* runner,
+                                                ImplType implType);
 
  protected:
- DecoderXQAImpl(DecoderXQARunner* runner)
-        : mRunner(runner)
-    {
-    }
-  virtual  void runWithKVBlockArray(XQAParams const& xqa_params,
-                           KVCacheListParams const& kv_block_array,
-                           cudaStream_t const& stream) =0;
+  DecoderXQAImpl(DecoderXQARunner* runner) : mRunner(runner) {}
+  virtual void runWithKVBlockArray(XQAParams const& xqa_params,
+                                   KVCacheListParams const& kv_block_array,
+                                   cudaStream_t const& stream) = 0;
   DecoderXQARunner* mRunner;
 };
 

@@ -1,6 +1,6 @@
 /*
- * SPDX-FileCopyrightText: Copyright (c) 2022-2024 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-FileCopyrightText: Copyright (c) 2022-2024 NVIDIA CORPORATION &
+ * AFFILIATES. All rights reserved. SPDX-License-Identifier: Apache-2.0
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,14 +19,13 @@
 #include <cstdint>
 #include <optional>
 
-
 // XQA kernels (optimized kernels for generation phase).
 bool forceXQAKernels();
 
 // Whether XQA JIT is enabled.
 //
-// Returns the value of TRTLLM_ENABLE_XQA_JIT env var. If such env var doesn't exist, std::nullopt is returned.
-// std::optional<bool> getEnvEnableXQAJIT();
+// Returns the value of TRTLLM_ENABLE_XQA_JIT env var. If such env var doesn't
+// exist, std::nullopt is returned. std::optional<bool> getEnvEnableXQAJIT();
 
 // Tune the number of blocks per sequence for accuracy/performance purpose.
 // bool getEnvMmhaMultiblockDebug();

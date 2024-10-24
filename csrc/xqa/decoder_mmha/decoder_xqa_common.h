@@ -35,8 +35,10 @@ inline void cuErrCheck_(CUresult stat, char const* file, int line) {
     fprintf(stderr, "CUDA Error: %s %s %d\n", msg, file, line);
   }
 }
-#define cuErrCheck(stat) \
-  { cuErrCheck_((stat), __FILE__, __LINE__); }
+#define cuErrCheck(stat)                     \
+  {                                          \
+    cuErrCheck_((stat), __FILE__, __LINE__); \
+  }
 
 #define CUDACHECK(cmd)                                              \
   do {                                                              \
@@ -48,92 +50,95 @@ inline void cuErrCheck_(CUresult stat, char const* file, int line) {
     }                                                               \
   } while (0)
 
-
 inline constexpr int kMinHistoryTokensPerBlock = 128;
 
 inline constexpr float kEnableMinBlockFactor = 4.0;
 inline constexpr int kTargetWaveFactor = 8;
 
 // For multi-block mode. We reserve workspace for this amount of sub-sequences.
-// This should be enough. Huge batch size may result in larger value, but for large batch size,
-// multi-block mode is not useful. For llama v2 70b, 6000 results in ~12MB multi-block
-// workspace, and is enough for > 10 waves.
+// This should be enough. Huge batch size may result in larger value, but for
+// large batch size, multi-block mode is not useful. For llama v2 70b, 6000
+// results in ~12MB multi-block workspace, and is enough for > 10 waves.
 inline constexpr int kXQA_MAX_NUM_SUB_SEQ = 6000;
 inline constexpr int kMaxBeamWidth = 1;
 
-inline int getDevice()
-{
-    int current_dev_id = 0;
-    CUDACHECK(cudaGetDevice(&current_dev_id));
-    return current_dev_id;
+inline int getDevice() {
+  int current_dev_id = 0;
+  CUDACHECK(cudaGetDevice(&current_dev_id));
+  return current_dev_id;
 }
-inline int getSMVersion()
-{
-    int device{-1};
-    CUDACHECK(cudaGetDevice(&device));
-    int sm_major = 0;
-    int sm_minor = 0;
-    CUDACHECK(cudaDeviceGetAttribute(&sm_major, cudaDevAttrComputeCapabilityMajor, device));
-    CUDACHECK(cudaDeviceGetAttribute(&sm_minor, cudaDevAttrComputeCapabilityMinor, device));
-    return sm_major * 10 + sm_minor;
+inline int getSMVersion() {
+  int device{-1};
+  CUDACHECK(cudaGetDevice(&device));
+  int sm_major = 0;
+  int sm_minor = 0;
+  CUDACHECK(cudaDeviceGetAttribute(&sm_major, cudaDevAttrComputeCapabilityMajor,
+                                   device));
+  CUDACHECK(cudaDeviceGetAttribute(&sm_minor, cudaDevAttrComputeCapabilityMinor,
+                                   device));
+  return sm_major * 10 + sm_minor;
 }
 
 // For xqa kernel IO
-enum Data_type
-{
-    DATA_TYPE_FP16,
-    DATA_TYPE_BF16,
-    DATA_TYPE_FP32,
-    DATA_TYPE_INT8,
-    DATA_TYPE_INT32,
-    DATA_TYPE_E4M3,
-    DATA_TYPE_E5M2,
-    DATA_TYPE_UNKNOWN
+enum Data_type {
+  DATA_TYPE_FP16,
+  DATA_TYPE_BF16,
+  DATA_TYPE_FP32,
+  DATA_TYPE_INT8,
+  DATA_TYPE_INT32,
+  DATA_TYPE_E4M3,
+  DATA_TYPE_E5M2,
+  DATA_TYPE_UNKNOWN
 };
-
 
 // Type trait to map types to enum values
 template <typename T>
 struct TypeToDataType {
-    static constexpr Data_type value = Data_type::DATA_TYPE_UNKNOWN;
+  static constexpr Data_type value = Data_type::DATA_TYPE_UNKNOWN;
 };
 
 // Specialize the trait for specific types
 template <>
 struct TypeToDataType<__nv_bfloat16> {
-    static constexpr Data_type value = Data_type::DATA_TYPE_BF16;
+  static constexpr Data_type value = Data_type::DATA_TYPE_BF16;
 };
 
 template <>
 struct TypeToDataType<__half> {
-    static constexpr Data_type value = Data_type::DATA_TYPE_FP16;
+  static constexpr Data_type value = Data_type::DATA_TYPE_FP16;
 };
 
 template <>
 struct TypeToDataType<uint8_t> {
-    static constexpr Data_type value = Data_type::DATA_TYPE_E4M3;
+  static constexpr Data_type value = Data_type::DATA_TYPE_E4M3;
 };
 
-static inline size_t get_size_in_bytes(size_t n, Data_type dtype)
-{
-    switch (dtype)
-    {
-    case DATA_TYPE_FP32: return n * 4;
-    case DATA_TYPE_FP16: return n * 2;
-    case DATA_TYPE_INT32: return n * 4;
-    case DATA_TYPE_INT8: return n;
-    case DATA_TYPE_BF16: return n * 2;
-    case DATA_TYPE_E4M3: return n;
-    case DATA_TYPE_E5M2: return n;
-		default: TORCH_CHECK(false, "FMHA Data Type is not supported."); return 0;
-    }
+static inline size_t get_size_in_bytes(size_t n, Data_type dtype) {
+  switch (dtype) {
+    case DATA_TYPE_FP32:
+      return n * 4;
+    case DATA_TYPE_FP16:
+      return n * 2;
+    case DATA_TYPE_INT32:
+      return n * 4;
+    case DATA_TYPE_INT8:
+      return n;
+    case DATA_TYPE_BF16:
+      return n * 2;
+    case DATA_TYPE_E4M3:
+      return n;
+    case DATA_TYPE_E5M2:
+      return n;
+    default:
+      TORCH_CHECK(false, "FMHA Data Type is not supported.");
+      return 0;
+  }
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
-static inline size_t get_size_in_bytes(Data_type dtype)
-{
-    return get_size_in_bytes(1, dtype);
+static inline size_t get_size_in_bytes(Data_type dtype) {
+  return get_size_in_bytes(1, dtype);
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////

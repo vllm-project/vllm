@@ -29,8 +29,7 @@ void reshape_and_cache_flash(torch::Tensor& key, torch::Tensor& value,
                              const double k_scale, const double v_scale);
 
 void reshape_and_cache_xqa(torch::Tensor& key, torch::Tensor& value,
-                           torch::Tensor& kv_cache,
-                           torch::Tensor& slot_mapping,
+                           torch::Tensor& kv_cache, torch::Tensor& slot_mapping,
                            const std::string& kv_cache_dtype,
                            const double k_scale, const double v_scale);
 
