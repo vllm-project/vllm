@@ -490,14 +490,14 @@ def _parse_chat_message_content_parts(
     content: List[Union[str, Dict[str, str]]] = []
 
     mm_parser = mm_tracker.create_parser()
-    keep_multimodal_content = \
+    wrap_dicts = \
         mm_tracker._model_config.hf_config.model_type in \
             MODEL_KEEP_MULTI_MODAL_CONTENT or \
         (chat_template_text_format == "openai")
 
     for part in parts:
         parse_res = _parse_chat_message_content_part(
-            part, mm_parser, wrap_dicts=keep_multimodal_content)
+            part, mm_parser, wrap_dicts=wrap_dicts)
         if parse_res:
             content.append(parse_res)
 
