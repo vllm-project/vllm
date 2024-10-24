@@ -1,6 +1,6 @@
 # coding=utf-8
 # Adapted from
-# https://huggingface.co/core42/jais-30b-chat-v3/blob/main/modeling_jais.py
+# https://huggingface.co/inceptionai/jais-30b-chat-v3/blob/main/modeling_jais.py
 # Copyright 2023 The vLLM team.
 # Copyright 2023 the Jais authors and HuggingFace Inc. team.  All rights
 # reserved.

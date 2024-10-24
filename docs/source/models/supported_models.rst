@@ -144,7 +144,7 @@ Text Generation
     - ✅︎
   * - :code:`JAISLMHeadModel`
     - Jais
-    - :code:`core42/jais-13b`, :code:`core42/jais-13b-chat`, :code:`core42/jais-30b-v3`, :code:`core42/jais-30b-chat-v3`, etc.
+    - :code:`inceptionai/jais-13b`, :code:`inceptionai/jais-13b-chat`, :code:`inceptionai/jais-30b-v3`, :code:`inceptionai/jais-30b-chat-v3`, etc.
     -
     - ✅︎
   * - :code:`JambaForCausalLM`

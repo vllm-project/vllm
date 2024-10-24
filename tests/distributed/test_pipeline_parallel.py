@@ -148,7 +148,7 @@ GENERATION_MODEL_SETTINGS = {
     # Uses Llama
     # "internlm/internlm-chat-7b": PPTestSettings.fast(),
     "internlm/internlm2-chat-7b": PPTestSettings.fast(trust_remote_code=True),
-    "core42/jais-13b-chat": PPTestSettings.fast(),
+    "inceptionai/jais-13b-chat": PPTestSettings.fast(),
     # TODO: Implement PP
     # "ai21labs/AI21-Jamba-1.5-Mini": PPTestSettings.fast(),
     "openbmb/MiniCPM-2B-sft-bf16": PPTestSettings.fast(trust_remote_code=True),
