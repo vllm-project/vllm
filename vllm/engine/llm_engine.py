@@ -21,7 +21,7 @@ from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
 from vllm.core.scheduler import (ScheduledSequenceGroup, Scheduler,
                                  SchedulerOutputs)
 from vllm.engine.arg_utils import EngineArgs
-from vllm.engine.metrics_types import StatLoggerBase, Stats
+from vllm.engine.metrics_types import StatLoggerBase, Stats, GeneralStats, EmbeddingStats
 from vllm.engine.output_processor.interfaces import (
     SequenceGroupOutputProcessor)
 from vllm.engine.output_processor.stop_checker import StopChecker
@@ -1609,28 +1609,29 @@ class LLMEngine:
             len(scheduler.waiting) for scheduler in self.scheduler)
 
         # KV Cache Usage in %
-        num_total_gpu = self.cache_config.num_gpu_blocks
-        gpu_cache_usage_sys = 0.
-        if num_total_gpu:  # Guard against both None and 0
-            num_free_gpu = sum(
-                scheduler.block_manager.get_num_free_gpu_blocks()
-                for scheduler in self.scheduler)
-            gpu_cache_usage_sys = 1.0 - (num_free_gpu / num_total_gpu)
+        if not self.is_embedding_model():
+            num_total_gpu = self.cache_config.num_gpu_blocks
+            gpu_cache_usage_sys = 0.
+            if num_total_gpu is not None:
+                num_free_gpu = sum(
+                    scheduler.block_manager.get_num_free_gpu_blocks()
+                    for scheduler in self.scheduler)
+                gpu_cache_usage_sys = 1.0 - (num_free_gpu / num_total_gpu)
 
-        num_total_cpu = self.cache_config.num_cpu_blocks
-        cpu_cache_usage_sys = 0.
-        if num_total_cpu:  # Guard against both None and 0
-            num_free_cpu = sum(
-                scheduler.block_manager.get_num_free_cpu_blocks()
-                for scheduler in self.scheduler)
-            cpu_cache_usage_sys = 1.0 - (num_free_cpu / num_total_cpu)
+            num_total_cpu = self.cache_config.num_cpu_blocks
+            cpu_cache_usage_sys = 0.
+            if num_total_cpu is not None and num_total_cpu > 0:
+                num_free_cpu = sum(
+                    scheduler.block_manager.get_num_free_cpu_blocks()
+                    for scheduler in self.scheduler)
+                cpu_cache_usage_sys = 1.0 - (num_free_cpu / num_total_cpu)
 
-        # Prefix Cache Hit Rate. Note that we always use
-        # the cache hit rate of the first virtual engine.
-        cpu_prefix_cache_hit_rate = self.scheduler[
-            0].get_prefix_cache_hit_rate(Device.CPU)
-        gpu_prefix_cache_hit_rate = self.scheduler[
-            0].get_prefix_cache_hit_rate(Device.GPU)
+            # Prefix Cache Hit Rate. Note that we always use
+            # the cache hit rate of the first virtual engine.
+            cpu_prefix_cache_hit_rate = self.scheduler[
+                0].get_prefix_cache_hit_rate(Device.CPU)
+            gpu_prefix_cache_hit_rate = self.scheduler[
+                0].get_prefix_cache_hit_rate(Device.GPU)
 
         # Iteration stats
         num_prompt_tokens_iter = 0
@@ -1650,23 +1651,24 @@ class LLMEngine:
         finished_reason_requests: List[str] = []
 
         # Lora requests
-        running_lora_adapters = dict(
-            collectionsCounter([
-                running_request.lora_request.lora_name
-                for scheduler in self.scheduler
-                for running_request in scheduler.running
-                if running_request.lora_request
-            ]))
-        waiting_lora_adapters = dict(
-            collectionsCounter([
-                waiting_request.lora_request.lora_name
-                for scheduler in self.scheduler
-                for waiting_request in scheduler.waiting
-                if waiting_request.lora_request
-            ]))
-        max_lora_stat = "0"
-        if self.lora_config:
-            max_lora_stat = str(self.lora_config.max_loras)
+        if not self.is_embedding_model():
+            running_lora_adapters = dict(
+                collectionsCounter([
+                    running_request.lora_request.lora_name
+                    for scheduler in self.scheduler
+                    for running_request in scheduler.running
+                    if running_request.lora_request
+                ]))
+            waiting_lora_adapters = dict(
+                collectionsCounter([
+                    waiting_request.lora_request.lora_name
+                    for scheduler in self.scheduler
+                    for waiting_request in scheduler.waiting
+                    if waiting_request.lora_request
+                ]))
+            max_lora_stat = "0"
+            if self.lora_config:
+                max_lora_stat = str(self.lora_config.max_loras)
 
         # NOTE: This loop assumes prefill seq_groups are before
         # decode seq_groups in scheduled_seq_groups.
@@ -1699,33 +1701,38 @@ class LLMEngine:
                 # NOTE: a seq_group that completed all of its prefill tokens
                 # in the last iteration will have seq_group.is_prefill() = False
                 # with group_was_prefill = True
-                if group_was_prefill:
-                    # Number of prompt tokens.
+                if not self.is_embedding_model():
+                    if group_was_prefill:
+                        # Number of prompt tokens.
+                        num_prompt_tokens_iter += (
+                            scheduled_seq_group.token_chunk_size)
+
+                        # If the seq_group just finished the prefill state
+                        # get TTFT.
+                        if not seq_group.is_prefill():
+                            latency = seq_group.get_last_latency(now)
+                            time_to_first_tokens_iter.append(latency)
+
+                            # One generation token per finished prefill.
+                            num_generation_tokens_from_prefill_groups += (
+                                seq_group.num_seqs())
+                    else:
+                        # TPOTs.
+                        latency = seq_group.get_last_latency(now)
+                        time_per_output_tokens_iter.append(latency)
+                        if seq_group.state.current_step == 0:
+                            # For async_output_proc, the do_log_stats()
+                            # is called following init_multi_step(), which
+                            # sets the current_step to zero.
+                            actual_num_batched_tokens +=\
+                                seq_group.state.num_steps - 1
+                        else:
+                            actual_num_batched_tokens +=\
+                                seq_group.state.current_step - 1
+
+                else:
                     num_prompt_tokens_iter += (
                         scheduled_seq_group.token_chunk_size)
-
-                    # If the seq_group just finished the prefill state
-                    # get TTFT.
-                    if not seq_group.is_prefill():
-                        latency = seq_group.get_last_latency(now)
-                        time_to_first_tokens_iter.append(latency)
-
-                        # One generation token per finished prefill.
-                        num_generation_tokens_from_prefill_groups += (
-                            seq_group.num_seqs())
-                else:
-                    # TPOTs.
-                    latency = seq_group.get_last_latency(now)
-                    time_per_output_tokens_iter.append(latency)
-                    if seq_group.state.current_step == 0:
-                        # For async_output_proc, the do_log_stats()
-                        # is called following init_multi_step(), which
-                        # sets the current_step to zero.
-                        actual_num_batched_tokens +=\
-                            seq_group.state.num_steps - 1
-                    else:
-                        actual_num_batched_tokens +=\
-                            seq_group.state.current_step - 1
 
                 # Because of chunked prefill, we can have a single sequence
                 # group that does multiple prompt_runs. To prevent logging
@@ -1756,9 +1763,10 @@ class LLMEngine:
             #   num_generation_tokens = num_batched_tokens - num_prompt_tokens
             #   + num_generation_tokens_from_prefill_groups (since we generate
             #   one token on prefills on iters where the prefill finishes).
-            num_generation_tokens_iter = (
-                actual_num_batched_tokens - num_prompt_tokens_iter +
-                num_generation_tokens_from_prefill_groups)
+            if not self.is_embedding_model():
+                num_generation_tokens_iter = (
+                    actual_num_batched_tokens - num_prompt_tokens_iter +
+                    num_generation_tokens_from_prefill_groups)
 
         # Spec decode, if enabled, emits specialized metrics from the worker in
         # sampler output.
@@ -1768,7 +1776,28 @@ class LLMEngine:
         else:
             spec_decode_metrics = None
 
-        return Stats(
+        if self.is_embedding_model():
+            return EmbeddingStats(
+                now=now,
+                # System stats
+                #   Scheduler State
+                num_running_sys=num_running_sys,
+                num_swapped_sys=num_swapped_sys,
+                num_waiting_sys=num_waiting_sys,
+
+                # Iteration stats
+                num_prompt_tokens_iter=num_prompt_tokens_iter,
+
+                # Request stats
+                #   Latency
+                time_e2e_requests=time_e2e_requests,
+                #   Metadata
+                num_prompt_tokens_requests=num_prompt_tokens_requests,
+                n_requests=n_requests,
+                finished_reason_requests=finished_reason_requests,
+            )
+
+        return GeneralStats(
             now=now,
             # System stats
             #   Scheduler State

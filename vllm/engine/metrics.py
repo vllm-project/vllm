@@ -5,7 +5,8 @@ from typing import Dict, List, Optional, Type, Union, cast
 import numpy as np
 import prometheus_client
 
-from vllm.engine.metrics_types import (StatLoggerBase, Stats,
+from vllm.engine.metrics_types import (EmbeddingStats, GeneralStats,
+                                       StatLoggerBase, Stats,
                                        SupportsMetricsInfo)
 from vllm.executor.ray_utils import ray
 from vllm.logger import init_logger
@@ -338,6 +339,11 @@ class LoggingStatLogger(StatLoggerBase):
     def log(self, stats: Stats) -> None:
         """Called by LLMEngine.
            Logs to Stdout every self.local_interval seconds."""
+        stats.to_log(self)
+
+    def log_general_stats(self, stats: GeneralStats) -> None:
+        """Called by GeneralStats.
+           Logs GeneralStats to Stdout every self.local_interval seconds."""
 
         # Save tracked stats for token counters.
         self.num_prompt_tokens.append(stats.num_prompt_tokens_iter)
@@ -392,6 +398,38 @@ class LoggingStatLogger(StatLoggerBase):
             self.last_local_log = stats.now
             self.spec_decode_metrics = None
 
+    def log_embedding_stats(self, stats: EmbeddingStats) -> None:
+        """Called by EmbeddingStats.
+           Logs EmbeddingStats to Stdout every self.local_interval seconds."""
+
+        print("LoggingStatLogger log_embedding_stats")
+        # Save tracked stats for token counters.
+        self.num_prompt_tokens.append(stats.num_prompt_tokens_iter)
+
+        # Log locally every local_interval seconds.
+        if local_interval_elapsed(stats.now, self.last_local_log,
+                                  self.local_interval):
+            # Compute summary metrics for tracked stats (and log them
+            # to promethus if applicable).
+            prompt_throughput = get_throughput(self.num_prompt_tokens,
+                                               now=stats.now,
+                                               last_log=self.last_local_log)
+
+            # Log to stdout.
+            logger.info(
+                "Avg prompt throughput: %.1f tokens/s, "
+                "Running: %d reqs, Swapped: %d reqs, "
+                "Pending: %d reqs.",
+                prompt_throughput,
+                stats.num_running_sys,
+                stats.num_swapped_sys,
+                stats.num_waiting_sys,
+            )
+
+            # Reset tracked stats for next interval.
+            self.num_prompt_tokens = []
+            self.last_local_log = stats.now
+
     def _format_spec_decode_metrics_str(
             self, metrics: "SpecDecodeWorkerMetrics") -> str:
 
@@ -443,7 +481,7 @@ class PrometheusStatLogger(StatLoggerBase):
     def _log_gauge_string(self, gauge, data: Dict[str, str]) -> None:
         gauge.labels(**data).set(1)
 
-    def _log_prometheus(self, stats: Stats) -> None:
+    def _log_prometheus_general(self, stats: GeneralStats) -> None:
         # System state data
         self._log_gauge(self.metrics.gauge_scheduler_running,
                         stats.num_running_sys)
@@ -499,6 +537,33 @@ class PrometheusStatLogger(StatLoggerBase):
             stats.num_generation_tokens_requests)
         self._log_histogram(self.metrics.histogram_n_request, stats.n_requests)
 
+    def _log_prometheus_embedding(self, stats: EmbeddingStats) -> None:
+        # System state data
+        self._log_gauge(self.metrics.gauge_scheduler_running,
+                        stats.num_running_sys)
+        self._log_gauge(self.metrics.gauge_scheduler_swapped,
+                        stats.num_swapped_sys)
+        self._log_gauge(self.metrics.gauge_scheduler_waiting,
+                        stats.num_waiting_sys)
+
+        # Iteration level data
+        self._log_counter(self.metrics.counter_prompt_tokens,
+                          stats.num_prompt_tokens_iter)
+
+        # Request level data
+        # Latency
+        self._log_histogram(self.metrics.histogram_e2e_time_request,
+                            stats.time_e2e_requests)
+        # Metadata
+        finished_reason_counter = CollectionsCounter(
+            stats.finished_reason_requests)
+        self._log_counter_labels(self.metrics.counter_request_success,
+                                 finished_reason_counter,
+                                 Metrics.labelname_finish_reason)
+        self._log_histogram(self.metrics.histogram_num_prompt_tokens_request,
+                            stats.num_prompt_tokens_requests)
+        self._log_histogram(self.metrics.histogram_n_request, stats.n_requests)
+
     def _log_prometheus_interval(self, prompt_throughput: float,
                                  generation_throughput: float) -> None:
         # Logs metrics to prometheus that are computed every logging_interval.
@@ -513,10 +578,14 @@ class PrometheusStatLogger(StatLoggerBase):
         self.metrics.gauge_avg_generation_throughput.labels(
             **self.labels).set(generation_throughput)
 
-    def log(self, stats: Stats):
+    def log(self, stats: Stats) -> None:
         """Logs to prometheus and tracked stats every iteration."""
+        stats.to_log(self)
+
+    def log_general_stats(self, stats: GeneralStats):
+        """Logs GeneralStats to prometheus and tracked stats every iteration."""
         # Log to prometheus.
-        self._log_prometheus(stats)
+        self._log_prometheus_general(stats)
 
         # Save tracked stats for token counters.
         self.num_prompt_tokens.append(stats.num_prompt_tokens_iter)
@@ -563,6 +632,35 @@ class PrometheusStatLogger(StatLoggerBase):
             self.num_generation_tokens = []
             self.last_local_log = stats.now
             self.spec_decode_metrics = None
+
+    def log_embedding_stats(self, stats: EmbeddingStats):
+        """Logs EmbeddingStats to prometheus and tracked stats every iteration."""
+        # Log to prometheus.
+        self._log_prometheus_embedding(stats)
+
+        # Save tracked stats for token counters.
+        self.num_prompt_tokens.append(stats.num_prompt_tokens_iter)
+
+        # Log locally every local_interval seconds.
+        if local_interval_elapsed(stats.now, self.last_local_log,
+                                  self.local_interval):
+            # Compute summary metrics for tracked stats (and log them
+            # to promethus if applicable).
+            prompt_throughput = get_throughput(self.num_prompt_tokens,
+                                               now=stats.now,
+                                               last_log=self.last_local_log)
+            generation_throughput = get_throughput(
+                self.num_generation_tokens,
+                now=stats.now,
+                last_log=self.last_local_log)
+
+            self._log_prometheus_interval(
+                prompt_throughput=prompt_throughput,
+                generation_throughput=generation_throughput)
+
+            # Reset tracked stats for next interval.
+            self.num_prompt_tokens = []
+            self.last_local_log = stats.now
 
     def info(self, type: str, obj: SupportsMetricsInfo) -> None:
         # Info type metrics are syntactic sugar for a gauge permanently set to 1

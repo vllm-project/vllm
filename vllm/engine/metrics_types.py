@@ -21,7 +21,19 @@ from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
 
 @dataclass
 class Stats:
-    """Created by LLMEngine for use by StatLogger."""
+    """Created by LLMEngine for use by StatLogger.
+    This is the base class for Stats, implementing specified Stats according to needs."""
+
+    @abstractmethod
+    def to_log(self, logger: "StatLoggerBase"):
+        """use diffetent logger to log Stats"""
+        raise NotImplementedError
+
+
+@dataclass
+class GeneralStats(Stats):
+    """Stats for General Models."""
+
     now: float
 
     # System stats (should have _sys suffix)
@@ -57,6 +69,35 @@ class Stats:
 
     spec_decode_metrics: Optional["SpecDecodeWorkerMetrics"] = None
 
+    def to_log(self, logger: "StatLoggerBase"):
+        logger.log_general_stats(self)
+
+
+@dataclass
+class EmbeddingStats(Stats):
+    """Stats for Embedding Models."""
+    now: float
+
+    # System stats (should have _sys suffix)
+    #   Scheduler State
+    num_running_sys: int
+    num_waiting_sys: int
+    num_swapped_sys: int
+
+    # Iteration stats (should have _iter suffix)
+    num_prompt_tokens_iter: int
+
+    # Request stats (should have _requests suffix)
+    #   Latency
+    time_e2e_requests: List[float]
+    #   Metadata
+    num_prompt_tokens_requests: List[int]
+    n_requests: List[int]
+    finished_reason_requests: List[str]
+
+    def to_log(self, logger: "StatLoggerBase"):
+        logger.log_embedding_stats(self)
+
 
 class SupportsMetricsInfo(Protocol):
 
@@ -80,11 +121,19 @@ class StatLoggerBase(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def log_general_stats(self, stats: GeneralStats) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
+    def log_embedding_stats(self, stats: EmbeddingStats) -> None:
+        raise NotImplementedError
+
+    @abstractmethod
     def info(self, type: str, obj: SupportsMetricsInfo) -> None:
         raise NotImplementedError
 
     def maybe_update_spec_decode_metrics(self, stats: Stats):
         """Save spec decode metrics (since they are unlikely
         to be emitted at same time as log interval)."""
-        if stats.spec_decode_metrics is not None:
+        if isinstance(stats, GeneralStats) and stats.spec_decode_metrics is not None:
             self.spec_decode_metrics = stats.spec_decode_metrics
