@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from vllm.config import ModelConfig
-from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalDataBuiltins,
+from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalDataDict,
                              MultiModalInputs, MultiModalRegistry)
 from vllm.v1.processor.dist_processor import (Processor, ProcessorImpl,
                                               ProcessorInputs,
@@ -15,7 +15,8 @@ class MMInputMapperInputs(ProcessorInputs):
 
     # [num_reqs]
     req_ids: List[str]
-    mm_data: List[MultiModalDataBuiltins]
+    # TODO(woosuk): Optimize the serialization of PIL Image objects.
+    mm_data: List[MultiModalDataDict]
     mm_processor_kwargs: List[Optional[Dict[str, Any]]]
 
     @classmethod
