@@ -156,14 +156,14 @@ class HQQMarlinMethod(LinearMethodBase):
             self.output_size_per_partition,
             4,
         ).to(dev)
-        marlin_s = marlin_permute_scales(
-            layer.scale.reshape(-1, self.scales_and_zp_size).transpose(1, 0),
-            self.input_size_per_partition, self.output_size_per_partition,
-            self.quant_config.group_size).to(dev)
-        marlin_zp = marlin_permute_scales(
-            layer.zero.reshape(-1, self.scales_and_zp_size).transpose(1, 0),
-            self.input_size_per_partition, self.output_size_per_partition,
-            self.quant_config.group_size).to(dev)
+        marlin_s = marlin_permute_scales(layer.scale.transpose(1, 0),
+                                         self.input_size_per_partition,
+                                         self.output_size_per_partition,
+                                         self.quant_config.group_size).to(dev)
+        marlin_zp = marlin_permute_scales(layer.zero.transpose(1, 0),
+                                          self.input_size_per_partition,
+                                          self.output_size_per_partition,
+                                          self.quant_config.group_size).to(dev)
 
         layer.g_idx = marlin_make_empty_g_idx(dev)
         layer.g_idx_sort_indices = marlin_make_empty_g_idx(dev)
