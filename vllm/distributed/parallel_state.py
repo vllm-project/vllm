@@ -392,8 +392,12 @@ class GroupCoordinator:
             # Convert negative dim to positive.
             dim += input_.dim()
         input_size = input_.size()
+        # NOTE: we have to use concat-style all-gather here,
+        # stack-style all-gather has compatibility issues with
+        # torch.compile . see https://github.com/pytorch/pytorch/issues/138795
+        output_size = (input_size[0] * world_size, ) + input_size[1:]
         # Allocate output tensor.
-        output_tensor = torch.empty((world_size, ) + input_size,
+        output_tensor = torch.empty(output_size,
                                     dtype=input_.dtype,
                                     device=input_.device)
         # All-gather.
@@ -401,6 +405,7 @@ class GroupCoordinator:
                                                  input_,
                                                  group=self.device_group)
         # Reshape
+        output_tensor = output_tensor.reshape((world_size, ) + input_size)
         output_tensor = output_tensor.movedim(0, dim)
         output_tensor = output_tensor.reshape(input_size[:dim] +
                                               (world_size *
