@@ -29,6 +29,7 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, LoRAConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
@@ -263,6 +264,7 @@ class SolarDecoderLayer(nn.Module):
         return hidden_states, residual
 
 
+@support_torch_compile
 class SolarModel(nn.Module):
 
     def __init__(

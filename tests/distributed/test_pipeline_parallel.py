@@ -171,7 +171,8 @@ TEXT_GENERATION_MODELS = {
     "stabilityai/stablelm-3b-4e1t": PPTestSettings.fast(),
     "bigcode/starcoder2-3b": PPTestSettings.fast(),
     "upstage/solar-pro-preview-instruct": PPTestSettings.fast(tp_base=2),
-    # FIXME: Cannot load tokenizer in latest transformers version
+    # FIXME: Cannot load tokenizer in latest transformers version.
+    # Need to use tokenizer from `meta-llama/Llama-2-7b-chat-hf`
     # "xverse/XVERSE-7B-Chat": PPTestSettings.fast(trust_remote_code=True),
     # [Encoder-only]
     # TODO: Implement PP
