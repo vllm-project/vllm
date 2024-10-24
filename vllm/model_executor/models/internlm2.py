@@ -28,7 +28,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsPP
-from .utils import (is_pp_missing_parameter,
+from .utils import (get_inputs_embeds, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers)
 
 
@@ -268,12 +268,12 @@ class InternLM2Model(nn.Module):
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds_masks: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if get_pp_group().is_first_rank:
-            if inputs_embeds is not None:
-                hidden_states = inputs_embeds
-            else:
-                hidden_states = self.tok_embeddings(input_ids)
+            hidden_states = get_inputs_embeds(input_ids, self.tok_embeddings,
+                                              inputs_embeds,
+                                              inputs_embeds_masks)
             residual = None
         else:
             assert intermediate_tensors is not None
@@ -326,9 +326,12 @@ class InternLM2ForCausalLM(nn.Module, SupportsPP):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors],
-    ) -> torch.Tensor:
+        inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds_masks: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, IntermediateTensors]:
         hidden_states = self.model(input_ids, positions, kv_caches,
-                                   attn_metadata, intermediate_tensors)
+                                   attn_metadata, intermediate_tensors,
+                                   inputs_embeds, inputs_embeds_masks)
         return hidden_states
 
     def compute_logits(

@@ -28,8 +28,9 @@ from vllm.connections import global_http_connection
 from vllm.distributed import (cleanup_dist_env_and_memory,
                               init_distributed_environment,
                               initialize_model_parallel)
-from vllm.inputs import (ExplicitEncoderDecoderPrompt, TextPrompt,
-                         to_enc_dec_tuple_list, zip_enc_dec_prompts)
+from vllm.inputs import (EmbedsPrompt, ExplicitEncoderDecoderPrompt,
+                         TextPrompt, to_enc_dec_tuple_list,
+                         zip_enc_dec_prompts)
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
@@ -654,21 +655,26 @@ class VllmRunner:
 
     def get_inputs(
         self,
-        prompts: List[str],
+        prompts_or_prompt_embeds: Union[List[str], List[torch.Tensor]],
         images: Optional[PromptImageInput] = None,
         videos: Optional[PromptVideoInput] = None,
         audios: Optional[PromptAudioInput] = None,
-    ) -> List[TextPrompt]:
+    ) -> List[Union[TextPrompt, EmbedsPrompt]]:
         if images is not None:
-            assert len(prompts) == len(images)
+            assert len(prompts_or_prompt_embeds) == len(images)
 
         if videos is not None:
-            assert len(prompts) == len(videos)
+            assert len(prompts_or_prompt_embeds) == len(videos)
 
         if audios is not None:
-            assert len(prompts) == len(audios)
+            assert len(prompts_or_prompt_embeds) == len(audios)
 
-        inputs = [TextPrompt(prompt=prompt) for prompt in prompts]
+        inputs = [
+            EmbedsPrompt(prompt_embeds=prompt) if isinstance(
+                prompt, torch.Tensor) else TextPrompt(prompt=prompt)
+            for prompt in prompts_or_prompt_embeds
+        ]
+
         if images is not None:
             for i, image in enumerate(images):
                 if image is not None:
@@ -688,13 +694,13 @@ class VllmRunner:
 
     def generate(
         self,
-        prompts: List[str],
+        prompts_or_prompt_embeds: Union[List[str], List[torch.Tensor]],
         sampling_params: SamplingParams,
         images: Optional[PromptImageInput] = None,
         videos: Optional[PromptVideoInput] = None,
         audios: Optional[PromptAudioInput] = None,
     ) -> List[Tuple[List[List[int]], List[str]]]:
-        inputs = self.get_inputs(prompts,
+        inputs = self.get_inputs(prompts_or_prompt_embeds,
                                  images=images,
                                  videos=videos,
                                  audios=audios)
@@ -712,7 +718,7 @@ class VllmRunner:
                 output_str = sample.text
                 output_ids = list(sample.token_ids)
                 req_sample_output_ids.append(prompt_ids + output_ids)
-                req_sample_output_strs.append(prompt_str + output_str)
+                req_sample_output_strs.append((prompt_str or "") + output_str)
             outputs.append((req_sample_output_ids, req_sample_output_strs))
         return outputs
 
@@ -777,14 +783,14 @@ class VllmRunner:
 
     def generate_greedy(
         self,
-        prompts: List[str],
+        prompts_or_prompt_embeds: Union[List[str], List[torch.Tensor]],
         max_tokens: int,
         images: Optional[PromptImageInput] = None,
         videos: Optional[PromptVideoInput] = None,
         audios: Optional[PromptAudioInput] = None,
     ) -> List[Tuple[List[int], str]]:
         greedy_params = SamplingParams(temperature=0.0, max_tokens=max_tokens)
-        outputs = self.generate(prompts,
+        outputs = self.generate(prompts_or_prompt_embeds,
                                 greedy_params,
                                 images=images,
                                 videos=videos,

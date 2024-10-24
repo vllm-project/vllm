@@ -56,7 +56,7 @@ class FuyuImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
     data: torch.Tensor
     """
-    Shape: 
+    Shape:
     (batch_size, num_patches, patch_size_x * patch_size_y * num_channels)
     """
 
@@ -103,7 +103,7 @@ def dummy_seq_data_for_fuyu(ctx: InputContext, seq_len: int, num_images: int):
     token_ids = array(VLLM_TOKEN_ID_ARRAY_TYPE, image_token_ids) * num_images
     token_ids += array(VLLM_TOKEN_ID_ARRAY_TYPE,
                        [0]) * (seq_len - image_feature_size * num_images)
-    return SequenceData(token_ids)
+    return SequenceData.from_seqs(token_ids)
 
 
 def dummy_image_for_fuyu(

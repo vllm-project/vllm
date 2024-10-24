@@ -47,7 +47,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import RWConfig
 
 from .interfaces import SupportsPP
-from .utils import (is_pp_missing_parameter,
+from .utils import (get_inputs_embeds, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers)
 
 FalconConfig = Union[HF_FalconConfig, RWConfig]
@@ -370,9 +370,13 @@ class FalconModel(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors],
+        inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds_masks: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if get_pp_group().is_first_rank:
-            hidden_states = self.word_embeddings(input_ids)
+            hidden_states = get_inputs_embeds(input_ids, self.word_embeddings,
+                                              inputs_embeds,
+                                              inputs_embeds_masks)
         else:
             hidden_states = intermediate_tensors["hidden_states"]
         for i in range(self.start_layer, self.end_layer):
@@ -438,9 +442,12 @@ class FalconForCausalLM(nn.Module, SupportsPP):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
-    ) -> torch.Tensor:
+        inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds_masks: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, IntermediateTensors]:
         hidden_states = self.transformer(input_ids, positions, kv_caches,
-                                         attn_metadata, intermediate_tensors)
+                                         attn_metadata, intermediate_tensors,
+                                         inputs_embeds, inputs_embeds_masks)
         return hidden_states
 
     def compute_logits(

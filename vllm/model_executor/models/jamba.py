@@ -37,6 +37,7 @@ from vllm.worker.model_runner import (_BATCH_SIZES_TO_CAPTURE,
                                       _get_graph_batch_size)
 
 from .interfaces import HasInnerState, SupportsLoRA
+from .utils import get_inputs_embeds
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
@@ -470,8 +471,11 @@ class JambaModel(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         mamba_cache_params: MambaCacheParams,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds_masks: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        hidden_states = self.embed_tokens(input_ids)
+        hidden_states = get_inputs_embeds(input_ids, self.embed_tokens,
+                                          inputs_embeds, inputs_embeds_masks)
         residual = None
         for i in range(len(self.layers)):
             layer = self.layers[i]
@@ -563,6 +567,8 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA):
                 kv_caches: List[KVCache],
                 attn_metadata: AttentionMetadata,
                 intermediate_tensors: Optional[IntermediateTensors] = None,
+                inputs_embeds: Optional[torch.Tensor] = None,
+                inputs_embeds_masks: Optional[torch.Tensor] = None,
                 **kwargs):
         if self.mamba_cache is None:
             max_batch_size = (_get_graph_batch_size(
@@ -584,8 +590,16 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA):
         mamba_cache_params = MambaCacheParams(mamba_cache_tensors[0],
                                               mamba_cache_tensors[1],
                                               state_indices_tensor)
-        hidden_states = self.model(input_ids, positions, kv_caches,
-                                   attn_metadata, mamba_cache_params)
+        hidden_states = self.model(
+            input_ids,
+            positions,
+            kv_caches,
+            attn_metadata,
+            mamba_cache_params,
+            inputs_embeds=inputs_embeds,
+            inputs_embeds_masks=inputs_embeds_masks,
+        )
+
         return hidden_states
 
     def copy_inputs_before_cuda_graphs(self, input_buffers, **kwargs):

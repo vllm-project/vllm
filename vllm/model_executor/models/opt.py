@@ -41,7 +41,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsPP
-from .utils import (is_pp_missing_parameter,
+from .utils import (get_inputs_embeds, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers)
 
 
@@ -252,10 +252,13 @@ class OPTDecoder(nn.Module):
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors],
         inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds_masks: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if get_pp_group().is_first_rank:
-            if inputs_embeds is None:
-                inputs_embeds = self.get_input_embeddings(input_ids)
+            inputs_embeds = get_inputs_embeds(input_ids,
+                                              self.get_input_embeddings,
+                                              inputs_embeds,
+                                              inputs_embeds_masks)
             pos_embeds = self.embed_positions(positions)
             if self.project_in is not None:
                 inputs_embeds, _ = self.project_in(inputs_embeds)
@@ -304,13 +307,15 @@ class OPTModel(nn.Module):
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors],
         inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds_masks: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         return self.decoder(input_ids,
                             positions,
                             kv_caches,
                             attn_metadata,
                             intermediate_tensors,
-                            inputs_embeds=inputs_embeds)
+                            inputs_embeds=inputs_embeds,
+                            inputs_embeds_masks=inputs_embeds_masks)
 
 
 class OPTForCausalLM(nn.Module, SupportsPP):
@@ -355,9 +360,12 @@ class OPTForCausalLM(nn.Module, SupportsPP):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        inputs_embeds_masks: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         hidden_states = self.model(input_ids, positions, kv_caches,
-                                   attn_metadata, intermediate_tensors)
+                                   attn_metadata, intermediate_tensors,
+                                   inputs_embeds, inputs_embeds_masks)
         return hidden_states
 
     def compute_logits(

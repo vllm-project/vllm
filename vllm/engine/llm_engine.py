@@ -7,7 +7,7 @@ from functools import partial
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Deque, Dict,
                     Iterable, List, Mapping, NamedTuple, Optional)
 from typing import Sequence as GenericSequence
-from typing import Set, Type, Union, cast, overload
+from typing import Set, Tuple, Type, Union, cast, overload
 
 import torch
 from typing_extensions import TypeVar
@@ -30,8 +30,9 @@ from vllm.entrypoints.openai.logits_processors import get_logits_processors
 from vllm.executor.executor_base import ExecutorBase
 from vllm.executor.gpu_executor import GPUExecutor
 from vllm.executor.ray_utils import initialize_ray_cluster
-from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs,
-                         EncoderDecoderInputs, InputRegistry, PromptType)
+from vllm.inputs import (INPUT_REGISTRY, InputRegistry, ProcessorInputs,
+                         PromptType)
+from vllm.inputs.parse import is_encoder_decoder_inputs
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -59,6 +60,7 @@ from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
                                   usage_message)
 from vllm.utils import Counter, Device, deprecate_kwargs, weak_bind
 from vllm.version import __version__ as VLLM_VERSION
+from vllm.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
@@ -639,7 +641,7 @@ class LLMEngine:
     def _add_processed_request(
         self,
         request_id: str,
-        processed_inputs: Union[DecoderOnlyInputs, EncoderDecoderInputs],
+        processed_inputs: ProcessorInputs,
         params: Union[SamplingParams, PoolingParams],
         arrival_time: float,
         lora_request: Optional[LoRARequest],
@@ -651,23 +653,25 @@ class LLMEngine:
         return the created sequence group.
         """
         self._validate_model_inputs(processed_inputs)
+
         # Create the sequences.
         block_size = self.cache_config.block_size
         seq_id = next(self.seq_counter)
         eos_token_id = self.input_preprocessor.get_eos_token_id(lora_request)
 
-        seq = Sequence(seq_id, processed_inputs, block_size, eos_token_id,
+        if is_encoder_decoder_inputs(processed_inputs):
+            decoder_inputs = processed_inputs["decoder"]
+            encoder_inputs = processed_inputs["encoder"]
+        else:
+            decoder_inputs = processed_inputs
+            encoder_inputs = None
+
+        seq = Sequence(seq_id, decoder_inputs, block_size, eos_token_id,
                        lora_request, prompt_adapter_request)
 
-        encoder_seq = None
-        if 'encoder_prompt_token_ids' in processed_inputs:
-            encoder_seq = Sequence(seq_id,
-                                   processed_inputs,
-                                   block_size,
-                                   eos_token_id,
-                                   lora_request,
-                                   prompt_adapter_request,
-                                   from_decoder_prompt=False)
+        encoder_seq = (None if encoder_inputs is None else Sequence(
+            seq_id, encoder_inputs, block_size, eos_token_id, lora_request,
+            prompt_adapter_request))
 
         # Create a SequenceGroup based on SamplingParams or PoolingParams
         if isinstance(params, SamplingParams):
@@ -1925,18 +1929,43 @@ class LLMEngine:
     def is_encoder_decoder_model(self):
         return self.input_preprocessor.is_encoder_decoder_model()
 
-    def _validate_model_inputs(self, inputs: Union[DecoderOnlyInputs,
-                                                   EncoderDecoderInputs]):
-        if self.model_config.is_multimodal_model:
+    def _support_prompt_embeds(self) -> Tuple[bool, str]:
+        if self.speculative_config is not None:
+            return False, "Speculative decoding does not support prompt_embeds."
+        driver_worker = self.model_executor.driver_worker
+        model_runner = driver_worker.worker.model_runner if isinstance(
+            driver_worker, WorkerWrapperBase) else driver_worker.model_runner
+        if model_runner.model_supports_input_embeds:
+            return True, ""
+        return False, (f"Model {self.model_config.model} does not support "
+                       "input embeddings, but prompt_embeds was provided.")
+
+    def _validate_model_inputs(self, inputs: ProcessorInputs):
+        if is_encoder_decoder_inputs(inputs):
             # For encoder-decoder multimodal models, the max_prompt_len
             # restricts the decoder prompt length
-            prompt_ids = inputs.get("prompt_token_ids")
-        elif self.is_encoder_decoder_model():
-            prompt_ids = inputs.get("encoder_prompt_token_ids")
+            prompt_inputs = inputs["decoder" if self.model_config.
+                                   is_multimodal_model else "encoder"]
         else:
-            prompt_ids = inputs.get("prompt_token_ids")
+            prompt_inputs = inputs
 
-        if prompt_ids is None or len(prompt_ids) == 0:
+        prompt_ids = prompt_inputs.get("prompt_token_ids")
+        prompt_embeds = prompt_inputs.get("prompt_embeds")
+
+        if prompt_ids is None:
+            if prompt_embeds is None:
+                raise ValueError("You must provide a prompt")
+            else:
+                self._validate_prompt_embeds(prompt_embeds)
+        else:
+            if prompt_embeds is None:
+                self._validate_prompt_ids(prompt_ids)
+            else:
+                raise ValueError("You can only provide either tokens or "
+                                 "embeddings, not both")
+
+    def _validate_prompt_ids(self, prompt_ids: List[int]):
+        if len(prompt_ids) == 0:
             raise ValueError("Prompt cannot be empty")
 
         if self.model_config.is_multimodal_model:
@@ -1954,6 +1983,14 @@ class LLMEngine:
             # TODO: Find out how many placeholder tokens are there so we can
             # check that chunked prefill does not truncate them
             # max_batch_len = self.scheduler_config.max_num_batched_tokens
+
+    def _validate_prompt_embeds(self, prompt_embeds: torch.Tensor):
+        if len(prompt_embeds) == 0:
+            raise ValueError("Prompt cannot be empty")
+
+        support_prompt_embeds, error_msg = self._support_prompt_embeds()
+        if not support_prompt_embeds:
+            raise ValueError(error_msg)
 
     def _build_logits_processors(
             self, sampling_params: SamplingParams,

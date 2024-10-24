@@ -4,9 +4,9 @@ from typing_extensions import TypeIs
 
 from vllm.utils import is_list_of
 
-from .data import (DecoderOnlyInputs, EncoderDecoderInputs,
-                   ExplicitEncoderDecoderPrompt, PromptType, SingletonPrompt,
-                   TextPrompt, TokensPrompt)
+from .data import (EmbedsPrompt, EncoderDecoderInputs,
+                   ExplicitEncoderDecoderPrompt, ProcessorInputs, PromptType,
+                   SingletonPrompt, TextPrompt, TokensPrompt)
 
 
 class ParsedText(TypedDict):
@@ -83,13 +83,22 @@ class ParsedTokensPrompt(TypedDict):
     content: TokensPrompt
 
 
+class ParsedEmbedsPrompt(TypedDict):
+    type: Literal["embeds"]
+    content: EmbedsPrompt
+
+
 def parse_singleton_prompt(
     prompt: SingletonPrompt,
-) -> Union[ParsedStrPrompt, ParsedTextPrompt, ParsedTokensPrompt]:
+) -> Union[ParsedStrPrompt, ParsedTextPrompt, ParsedTokensPrompt,
+           ParsedEmbedsPrompt]:
     if isinstance(prompt, str):
         return ParsedStrPrompt(type="str", content=prompt)
     elif isinstance(prompt, dict):
-        if "prompt_token_ids" in prompt:
+        if 'prompt_embeds' in prompt:
+            return ParsedEmbedsPrompt(type="embeds",
+                                      content=prompt)  # type: ignore
+        elif "prompt_token_ids" in prompt:
             return ParsedTokensPrompt(type="tokens",
                                       content=prompt)  # type: ignore
         elif "prompt" in prompt:
@@ -104,6 +113,5 @@ def is_explicit_encoder_decoder_prompt(
 
 
 def is_encoder_decoder_inputs(
-    inputs: Union[DecoderOnlyInputs, EncoderDecoderInputs],
-) -> TypeIs[EncoderDecoderInputs]:
-    return "encoder_prompt_token_ids" in inputs
+        inputs: ProcessorInputs) -> TypeIs[EncoderDecoderInputs]:
+    return "encoder" in inputs and "decoder" in inputs

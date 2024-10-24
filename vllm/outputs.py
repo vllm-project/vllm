@@ -2,7 +2,7 @@ import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 from typing import Sequence as GenericSequence
-from typing import Union
+from typing import Tuple, Union
 
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import RequestOutputKind
@@ -83,10 +83,11 @@ class RequestOutput:
         finished: Whether the whole request is finished.
         metrics: Metrics associated with the request.
         lora_request: The LoRA request that was used to generate the output.
-        encoder_prompt: The encoder prompt string of the request; 
+        encoder_prompt: The encoder prompt string of the request;
                         None if decoder-only
         encoder_prompt_token_ids: The token IDs of the encoder prompt;
                                   None if decoder-only
+        prompt_embeds_shape: The shape of the prompt embeddings.
     """
 
     def __init__(
@@ -101,10 +102,12 @@ class RequestOutput:
         lora_request: Optional[LoRARequest] = None,
         encoder_prompt: Optional[str] = None,
         encoder_prompt_token_ids: Optional[List[int]] = None,
+        prompt_embeds_shape: Optional[Tuple[int, int]] = None,
     ) -> None:
         self.request_id = request_id
         self.prompt = prompt
         self.prompt_token_ids = prompt_token_ids
+        self.prompt_embeds_shape = prompt_embeds_shape
         self.prompt_logprobs = prompt_logprobs
         self.outputs = outputs
         self.finished = finished
@@ -227,12 +230,17 @@ class RequestOutput:
         if include_prompt:
             prompt = seq_group.prompt
             prompt_token_ids = seq_group.prompt_token_ids
+            if (prompt_embeds := seq_group.prompt_embeds) is not None:
+                prompt_embeds_shape = tuple(prompt_embeds.shape)
+            else:
+                prompt_embeds_shape = None
             encoder_prompt = seq_group.encoder_prompt
             encoder_prompt_token_ids = seq_group.encoder_prompt_token_ids
             prompt_logprobs = seq_group.prompt_logprobs
         else:
             prompt = None
             prompt_token_ids = None
+            prompt_embeds_shape = None
             encoder_prompt = None
             encoder_prompt_token_ids = None
             prompt_logprobs = None
@@ -242,7 +250,7 @@ class RequestOutput:
         init_args = (seq_group.request_id, prompt, prompt_token_ids,
                      prompt_logprobs, outputs, finished, seq_group.metrics,
                      seq_group.lora_request, encoder_prompt,
-                     encoder_prompt_token_ids)
+                     encoder_prompt_token_ids, prompt_embeds_shape)
 
         if use_cache:
             request_output = seq_group.cached_request_output
@@ -257,6 +265,7 @@ class RequestOutput:
         return (f"RequestOutput(request_id={self.request_id}, "
                 f"prompt={self.prompt!r}, "
                 f"prompt_token_ids={self.prompt_token_ids}, "
+                f"prompt_embeds_shape={self.prompt_embeds_shape}, "
                 f"encoder_prompt={self.encoder_prompt!r}, "
                 f"encoder_prompt_token_ids={self.encoder_prompt_token_ids}, "
                 f"prompt_logprobs={self.prompt_logprobs}, "
