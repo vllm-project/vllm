@@ -294,7 +294,7 @@ def process_matches(graph: fx.Graph, matches):
                                                         kwargs = {"dtype": torch.float16, "device": "cuda", "pin_memory": False}))
                 graph.inserting_after(replacements[-1])
             else:
-                replacements.append(kwargs["getitem_1"])
+                replacements.append(match.kwargs["getitem_1"])
 
             kwargs = match.kwargs
             kwargs["first_layer"] = match == matches[0]
