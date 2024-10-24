@@ -17,18 +17,19 @@ wheel="${wheel_files[0]}"
 # Rename 'linux' to 'manylinux1' in the wheel filename
 new_wheel="${wheel/linux/manylinux1}"
 mv -- "$wheel" "$new_wheel"
-
-# Update the wheel variable to the new filename
 wheel="$new_wheel"
 
 # Extract the version from the wheel
 version=$(unzip -p "$wheel" '**/METADATA' | grep '^Version: ' | cut -d' ' -f2)
 echo "Version: $version"
 
-# If the version contains "dev", rename it to v1.0.0.dev so there's one consistent name.
+# If the version contains "dev", rename it to v1.0.0.dev for consistency
 if [[ $version == *dev* ]]; then
-    mv -- "$wheel" "${wheel/$version/1.0.0.dev}"
-    version="1.0.0.dev"
+    new_version="1.0.0.dev"
+    new_wheel="${wheel/$version/$new_version}"
+    mv -- "$wheel" "$new_wheel"
+    wheel="$new_wheel"
+    version="$new_version"
 fi
 
 # Upload the wheel to S3
