@@ -1,17 +1,19 @@
 from functools import lru_cache
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import torch
 from PIL import Image
 from transformers.image_processing_base import BatchFeature
 
-from vllm.config import ModelConfig
 from vllm.inputs.registry import InputContext
 from vllm.logger import init_logger
 from vllm.transformers_utils.processor import get_image_processor
 from vllm.utils import is_list_of
 
 from .base import MultiModalData, MultiModalInputs, MultiModalPlugin
+
+if TYPE_CHECKING:
+    from vllm.config import ModelConfig
 
 logger = init_logger(__name__)
 
@@ -26,7 +28,7 @@ class ImagePlugin(MultiModalPlugin):
 
     def _get_hf_image_processor(
         self,
-        model_config: ModelConfig,
+        model_config: "ModelConfig",
         mm_processor_kwargs: Optional[Dict[str, Any]] = None,
     ):
         if mm_processor_kwargs is None:
