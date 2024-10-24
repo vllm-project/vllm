@@ -260,7 +260,7 @@ def machete_create_bench_fn(bt: BenchmarkTensors,
         b_group_zeros=w_g_zp,
         b_group_size=bt.group_size,
         b_channel_scales=bt.w_ch_s,
-        b_token_scales=bt.w_tok_s,
+        a_token_scales=bt.w_tok_s,
         out_type=out_type,
         schedule=schedule,
     )

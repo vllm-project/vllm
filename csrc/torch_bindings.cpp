@@ -179,7 +179,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   //  conditionally compiled so impl in source file
 
   // Machete (Dense) Optimized Mixed Precision GEMM for Hopper.
-  ops.def("machete_supported_schedules(int btype) -> str[]");
   ops.def(
       "machete_supported_schedules("
       "   ScalarType a_type,"

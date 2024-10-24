@@ -441,14 +441,14 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
     def machete_mm_fake(
         a: torch.Tensor,
         b_q: torch.
-    Tensor,  # Should be the tensor returned by machete_prepack_B
+        Tensor,  # Should be the tensor returned by machete_prepack_B
         b_type: ScalarType,
         out_type: Optional[torch.dtype] = None,
         b_group_scales: Optional[torch.Tensor] = None,
         b_group_zeros: Optional[torch.Tensor] = None,
         b_group_size: Optional[int] = None,
         b_channel_scales: Optional[torch.Tensor] = None,
-        b_token_scales: Optional[torch.Tensor] = None,
+        a_token_scales: Optional[torch.Tensor] = None,
         schedule: Optional[str] = None,
     ) -> torch.Tensor:
         m = a.size(0)
@@ -456,8 +456,9 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
         return torch.empty((m, n), device=a.device, dtype=a.dtype)
 
     @register_fake("_C::machete_prepack_B")
-    def machete_prepack_B_fake(b_q_weight: torch.Tensor, a_type: torch.dtype, b_type: ScalarType,
-        group_scales_type: Optional[torch.dtype]) -> torch.Tensor:
+    def machete_prepack_B_fake(
+            b_q_weight: torch.Tensor, a_type: torch.dtype, b_type: ScalarType,
+            group_scales_type: Optional[torch.dtype]) -> torch.Tensor:
         return torch.empty_like(b_q_weight,
                                 memory_format=torch.contiguous_format)
 
@@ -619,11 +620,11 @@ def machete_mm(
         b_group_zeros: Optional[torch.Tensor] = None,
         b_group_size: Optional[int] = None,
         b_channel_scales: Optional[torch.Tensor] = None,
-        b_token_scales: Optional[torch.Tensor] = None,
+        a_token_scales: Optional[torch.Tensor] = None,
         schedule: Optional[str] = None) -> torch.Tensor:
     return torch.ops._C.machete_mm(a, b_q, b_type.id, out_type, b_group_scales,
                                    b_group_zeros, b_group_size,
-                                   b_channel_scales, b_token_scales, schedule)
+                                   b_channel_scales, a_token_scales, schedule)
 
 
 def machete_prepack_B(
@@ -631,7 +632,6 @@ def machete_prepack_B(
         group_scales_type: Optional[torch.dtype]) -> torch.Tensor:
     return torch.ops._C.machete_prepack_B(b_q_weight, a_type, b_type.id,
                                           group_scales_type)
-
 
 
 if hasattr(torch.ops._C, "permute_cols"):

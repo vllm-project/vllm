@@ -60,11 +60,11 @@ static void prepack_B_template(
   auto ilvd_NKbNbKL_to_offset =
       PrepackedLayoutB::ilvd_NKbNbKL_to_offset(shape(B_layout));
 
-  TORCH_CHECK(size<0>(B_layout) % size<0>(pp_block_shape) == 0);
-  TORCH_CHECK(size<1>(B_layout) % size<1>(pp_block_shape) == 0);
+  TORCH_CHECK(size<0>(B_layout) % size<0>(TileShapeNKL{}) == 0);
+  TORCH_CHECK(size<1>(B_layout) % size<1>(TileShapeNKL{}) == 0);
 
-  auto N_tiles = size<0>(B_layout) / size<0>(pp_block_shape);
-  auto K_tiles = size<1>(B_layout) / size<1>(pp_block_shape);
+  auto N_tiles = size<0>(B_layout) / size<0>(TileShapeNKL{});
+  auto K_tiles = size<1>(B_layout) / size<1>(TileShapeNKL{});
   auto L_tiles = size<2>(B_layout);
 
   auto B_in = make_tensor(get_logical_ptr(B_in_ptr), B_layout);

@@ -21,7 +21,7 @@
 
 #include "cutlass_extensions/cute_utils.cuh"
 #include "cutlass_extensions/vllm_numeric_conversion.cuh"
-#include "cutlass_extensions/broadcast_load_epilogue_c3x.hpp"
+#include "cutlass_extensions/epilogue/scaled_mm_epilogues_c3x.hpp"
 #include "cutlass_extensions/torch_utils.hpp"
 #include "machete_collective_builder.cuh"
 #include "machete_prepacked_layout.cuh"
@@ -30,89 +30,6 @@
 namespace machete {
 
 using namespace cute;
-
-template <typename ElementAcc, typename ElementD, typename EpilogueDescriptor>
-struct ScaledEpilogueBase {
- protected:
-  using Accum = cutlass::epilogue::fusion::Sm90AccFetch;
-
-  template <typename T>
-  using ColOrScalarLoad = cutlass::epilogue::fusion::Sm90ColOrScalarBroadcast<
-      0 /*Stages*/, typename EpilogueDescriptor::TileShape, T,
-      Stride<Int<1>, Int<0>, Int<0>>>;
-
-  template <typename T>
-  using RowOrScalarLoad = cutlass::epilogue::fusion::Sm90RowOrScalarBroadcast<
-      0 /*Stages*/, typename EpilogueDescriptor::TileShape, T,
-      Stride<Int<0>, Int<1>, Int<0>>>;
-
-  // Don't want to support nullptr by default
-  template <typename T, bool EnableNullPtr = false>
-  using ColLoad = cutlass::epilogue::fusion::Sm90ColBroadcast<
-      0 /*Stages*/, typename EpilogueDescriptor::TileShape, T,
-      Stride<Int<1>, Int<0>, Int<0>>, 128 / sizeof_bits_v<T>, EnableNullPtr>;
-
-  // Don't want to support nullptr by default
-  template <typename T, bool EnableNullPtr = false>
-  using RowLoad = cutlass::epilogue::fusion::Sm90RowBroadcast<
-      0 /*Stages*/, typename EpilogueDescriptor::TileShape, T,
-      Stride<Int<0>, Int<1>, Int<0>>, 128 / sizeof_bits_v<T>, EnableNullPtr>;
-
-  // This utility function constructs the arguments for the load descriptors
-  // from a tensor. It can handle both row and column, as well as row/column or
-  // scalar cases.
-  template <typename Descriptor, typename T>
-  static auto args_from_tensor(torch::Tensor const& tensor) {
-    using Arguments = typename Descriptor::Arguments;
-    auto* data_ptr = static_cast<T*>(tensor.data_ptr());
-    if constexpr (std::is_same_v<Descriptor, ColOrScalarLoad<T>> ||
-                  std::is_same_v<Descriptor, RowOrScalarLoad<T>>) {
-      return Arguments{data_ptr, tensor.numel() != 1};
-    } else {
-      static_assert(!std::is_same_v<Descriptor, ColLoad<T, true>> &&
-                    !std::is_same_v<Descriptor, RowLoad<T, true>>);
-      return Arguments{data_ptr};
-    }
-  }
-};
-
-template <typename ElementAcc, typename ElementScale, typename ElementD,
-          typename EpilogueDescriptor>
-struct ScaledEpilogue
-    : private ScaledEpilogueBase<ElementAcc, ElementD, EpilogueDescriptor> {
- private:
-  using SUPER = ScaledEpilogueBase<ElementAcc, ElementD, EpilogueDescriptor>;
-  using Accum = typename SUPER::Accum;
-  using ScaleA = typename SUPER::template ColOrScalarLoad<ElementScale>;
-  using ScaleB = typename SUPER::template RowOrScalarLoad<ElementScale>;
-
-  using Compute0 = cutlass::epilogue::fusion::Sm90Compute<
-      cutlass::multiplies, ElementScale, ElementScale,
-      cutlass::FloatRoundStyle::round_to_nearest>;
-
-  using EVTCompute0 =
-      cutlass::epilogue::fusion::Sm90EVT<Compute0, ScaleB, Accum>;
-
-  using Compute1 = cutlass::epilogue::fusion::Sm90Compute<
-      cutlass::multiplies, ElementD, ElementScale,
-      cutlass::FloatRoundStyle::round_to_nearest>;
-
- public:
-  using EVTCompute =
-      cutlass::epilogue::fusion::Sm90EVT<Compute1, ScaleA, EVTCompute0>;
-  using ArgumentType = typename EVTCompute::Arguments;
-
-  static ArgumentType prepare_args(torch::Tensor const& a_scales,
-                                   torch::Tensor const& b_scales) {
-    auto a_args =
-        SUPER::template args_from_tensor<ScaleA, ElementScale>(a_scales);
-    auto b_args =
-        SUPER::template args_from_tensor<ScaleB, ElementScale>(b_scales);
-
-    typename EVTCompute0::Arguments evt0_args{b_args};
-    return ArgumentType{a_args, evt0_args};
-  }
-};
 
 // NOTE This kernel computes D = alpha * A * B + beta * C by computing
 //   D^t = alpha * B^t * A^t + beta * C^t, this is because the wgmma
@@ -214,14 +131,23 @@ struct MacheteKernelTemplate {
           TileShape, cutlass::epilogue::collective::EpilogueTileAuto, ElementD,
           ElementD, EpilogueSchedule>;
 
+  // Currently only supports float scales
   using ChTokScalesEpilogue =
-      ScaledEpilogue<ElementAccumulator, ElementSChannel, ElementD,
-                     EpilogueDescriptor>;
+      typename vllm::c3x::ScaledEpilogue<ElementAccumulator, ElementD,
+                                         EpilogueDescriptor>;
+  static_assert((with_channel_scales || with_token_scales) ||
+                    (std::is_same_v<ElementSChannel, float> &&
+                     std::is_same_v<ElementSToken, float>),
+                "Currently token and channel scales (if present) must be float "
+                "(and if one is present the other must be too)");
+
+  using StoreEpilogueCompute = typename cutlass::epilogue::fusion::Sm90EVT<
+      cutlass::epilogue::fusion::Sm90AccFetch>;
+
   using EVTCompute =
       std::conditional_t<with_channel_scales || with_token_scales,
                          typename ChTokScalesEpilogue::EVTCompute,
-                         cutlass::epilogue::fusion::Sm90EVT<
-                             cutlass::epilogue::fusion::Sm90AccFetch>>;
+                         StoreEpilogueCompute>;
 
   // EVTCompute
   using CollectiveEpilogue =
@@ -317,8 +243,9 @@ struct MacheteKernelTemplate {
     }
 
     if constexpr (with_channel_scales || with_token_scales) {
-      TORCH_CHECK(maybe_ch_scales->numel() == N &&
-                  maybe_tok_scales->numel() == M);
+      TORCH_CHECK(
+          (maybe_ch_scales->numel() == N || maybe_ch_scales->numel() == 1) &&
+          (maybe_tok_scales->numel() == M || maybe_tok_scales->numel() == 1));
     }
 
     // Transpose A and D

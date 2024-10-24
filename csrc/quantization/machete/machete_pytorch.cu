@@ -62,7 +62,7 @@ torch::Tensor prepack_B(
 
 TORCH_LIBRARY_IMPL_EXPAND(TORCH_EXTENSION_NAME, CUDA, m) {
   m.impl("machete_prepack_B", &prepack_B);
-  m.impl("machete_gemm", &mm);
+  m.impl("machete_mm", &mm);
 }
 
 // use CatchAll since supported_schedules has no tensor arguments
