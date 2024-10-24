@@ -254,9 +254,8 @@ class ModelConfig:
         return None
 
     def _get_bert_tokenization_config(self):
-        if self.bert_config and self.bert_config["do_lower_case"]:
-            return self.bert_config["do_lower_case"]
-        return False
+        if self.bert_config:
+            return self.bert_config.get("do_lower_case")
 
     def _init_attention_free(self) -> bool:
         architectures = getattr(self.hf_config, "architectures", [])
