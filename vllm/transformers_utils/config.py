@@ -307,7 +307,7 @@ def get_pooling_config(model, revision='main'):
 
 def get_sentence_transformer_tokenizer_config(model, revision='main'):
     """
-    Returns the configuration dictionary for a 
+    Returns the tokenization configuration dictionary for a 
     given Sentence Transformer BERT model.
 
     Parameters:
@@ -320,8 +320,20 @@ def get_sentence_transformer_tokenizer_config(model, revision='main'):
     - dict: A dictionary containing the configuration parameters 
     for the Sentence Transformer BERT model.
     """
-    bert_dict = get_hf_file_to_dict("sentence_bert_config.json", model,
-                                    revision)
+    for config_name in [
+            "sentence_bert_config.json",
+            "sentence_roberta_config.json",
+            "sentence_distilbert_config.json",
+            "sentence_camembert_config.json",
+            "sentence_albert_config.json",
+            "sentence_xlm-roberta_config.json",
+            "sentence_xlnet_config.json",
+        ]:
+        bert_dict = get_hf_file_to_dict(config_name, 
+                                        model,
+                                        revision)
+        if bert_dict:
+            break
 
     if not bert_dict:
         return None

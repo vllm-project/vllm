@@ -20,8 +20,8 @@ def test_model_loading_with_params(vllm_runner):
 
         print(model.model.llm_engine.__dict__.items()) 
 
-        assert model_config.max_model_len == 512
-        assert model_config.do_lower_case
+        assert model_config.bert_config["max_seq_length"] == 512
+        assert model_config.bert_config["do_lower_case"]
         assert model_config.pooling_config.pooling_type == 2
         assert model_config.pooling_config.normalize
         assert output
