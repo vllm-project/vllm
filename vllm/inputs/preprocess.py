@@ -325,7 +325,8 @@ class InputPreprocessor:
             assert_never(encoder_inputs)
 
         if decoder_inputs is None:
-            dec_token_ids = self._prepare_decoder_input_ids_for_generation(None)
+            dec_token_ids = self._prepare_decoder_input_ids_for_generation(
+                None)
             decoder_inputs = token_inputs(dec_token_ids)
         elif decoder_inputs["type"] == "token":
             dec_token_ids = self._prepare_decoder_input_ids_for_generation(
