@@ -22,7 +22,8 @@ from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
 @dataclass
 class Stats:
     """Created by LLMEngine for use by StatLogger.
-    This is the base class for Stats, implementing specified Stats according to needs."""
+    This is the base class for Stats, implementing specified Stats
+    according to needs."""
 
     @abstractmethod
     def to_log(self, logger: "StatLoggerBase"):
@@ -135,5 +136,6 @@ class StatLoggerBase(ABC):
     def maybe_update_spec_decode_metrics(self, stats: Stats):
         """Save spec decode metrics (since they are unlikely
         to be emitted at same time as log interval)."""
-        if isinstance(stats, GeneralStats) and stats.spec_decode_metrics is not None:
+        if (isinstance(stats, GeneralStats)
+                and stats.spec_decode_metrics is not None):
             self.spec_decode_metrics = stats.spec_decode_metrics

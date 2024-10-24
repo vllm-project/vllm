@@ -21,8 +21,8 @@ from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
 from vllm.core.scheduler import (ScheduledSequenceGroup, Scheduler,
                                  SchedulerOutputs)
 from vllm.engine.arg_utils import EngineArgs
-from vllm.engine.metrics_types import (StatLoggerBase, Stats,
-                                       GeneralStats, EmbeddingStats)
+from vllm.engine.metrics_types import (EmbeddingStats, GeneralStats,
+                                       StatLoggerBase, Stats)
 from vllm.engine.output_processor.interfaces import (
     SequenceGroupOutputProcessor)
 from vllm.engine.output_processor.stop_checker import StopChecker
@@ -1953,7 +1953,7 @@ class LLMEngine:
 
     def is_encoder_decoder_model(self):
         return self.input_preprocessor.is_encoder_decoder_model()
-    
+
     def is_embedding_model(self):
         return self.model_config.task == "embedding"
 

@@ -583,7 +583,7 @@ class PrometheusStatLogger(StatLoggerBase):
         stats.to_log(self)
 
     def log_general_stats(self, stats: GeneralStats):
-        """Logs GeneralStats to prometheus and tracked stats every iteration."""
+        """Logs GeneralStats"""
         # Log to prometheus.
         self._log_prometheus_general(stats)
 
@@ -634,7 +634,7 @@ class PrometheusStatLogger(StatLoggerBase):
             self.spec_decode_metrics = None
 
     def log_embedding_stats(self, stats: EmbeddingStats):
-        """Logs EmbeddingStats to prometheus and tracked stats every iteration."""
+        """Logs EmbeddingStats"""
         # Log to prometheus.
         self._log_prometheus_embedding(stats)
 
