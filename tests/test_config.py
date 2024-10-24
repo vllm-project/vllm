@@ -104,9 +104,11 @@ def test_get_sliding_window():
 
 
 def test_get_pooling_config():
+    model_id = "sentence-transformers/all-MiniLM-L12-v2"
     minilm_model_config = ModelConfig(
-        "sentence-transformers/all-MiniLM-L12-v2",
-        "sentence-transformers/all-MiniLM-L12-v2",
+        model_id,
+        task="auto",
+        tokenizer=model_id,
         tokenizer_mode="auto",
         trust_remote_code=False,
         seed=0,

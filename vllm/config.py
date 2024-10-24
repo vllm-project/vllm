@@ -181,7 +181,6 @@ class ModelConfig:
         self.hf_text_config = get_hf_text_config(self.hf_config)
         self.pooling_config = self.get_pooling_config()
         self.bert_config = self._get_bert_config()
-        self.do_lower_case = self._get_bert_config()
         self.hf_image_processor_config = get_hf_image_processor_config(
             self.model, revision)
         self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
@@ -253,11 +252,8 @@ class ModelConfig:
         return None
 
     def _get_bert_config(self):
-        bert_config = get_sentence_transformer_tokenizer_config(
+        return get_sentence_transformer_tokenizer_config(
             self.model, self.revision)
-        if bert_config is not None:
-            return bert_config
-        return None
 
     def _init_attention_free(self) -> bool:
         architectures = getattr(self.hf_config, "architectures", [])
@@ -422,10 +418,12 @@ class ModelConfig:
                 "fallback to the eager mode.")
             self.enforce_eager = True
 
-    def get_pooling_config(self) -> PoolingConfig:
+    def get_pooling_config(self) -> Optional[PoolingConfig]:
         pooling_config = get_pooling_config(self.model, self.revision)
-        return PoolingConfig(pooling_config["pooling_type"],
-                             pooling_config["normalize"])
+        if pooling_config is not None:
+            return PoolingConfig(pooling_config["pooling_type"],
+                                 pooling_config["normalize"])
+        return None
 
     def verify_async_output_proc(self, parallel_config, speculative_config,
                                  device_config) -> None:

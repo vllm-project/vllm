@@ -123,7 +123,8 @@ def _get_model_initialization_kwargs(
         model_class: Type[nn.Module],
         lora_config: Optional[LoRAConfig],
         multimodal_config: Optional[MultiModalConfig],
-        scheduler_config: Optional[SchedulerConfig] = None) -> Dict[str, Any]:
+        scheduler_config: Optional[SchedulerConfig] = None,
+        pooling_config: Optional[PoolingConfig] = None) -> Dict[str, Any]:
     """Get extra kwargs for model initialization."""
     extra_kwargs: Dict[str, Any] = {}
 
@@ -145,6 +146,9 @@ def _get_model_initialization_kwargs(
     if has_inner_state(model_class) and scheduler_config:
         extra_kwargs["scheduler_config"] = scheduler_config
 
+    if pooling_config is not None:
+        extra_kwargs["pooling_config"] = pooling_config
+
     return extra_kwargs
 
 
@@ -159,12 +163,12 @@ def build_model(model_class: Type[nn.Module],
                 pooling_config: Optional[PoolingConfig] = None) -> nn.Module:
     extra_kwargs = _get_model_initialization_kwargs(model_class, lora_config,
                                                     multimodal_config,
-                                                    scheduler_config)
+                                                    scheduler_config,
+                                                    pooling_config)
 
     return model_class(config=hf_config,
                        cache_config=cache_config,
                        quant_config=quant_config,
-                       pooling_config=pooling_config,
                        **extra_kwargs)
 
 
