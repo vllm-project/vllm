@@ -151,6 +151,10 @@ class InputPreprocessor:
             # use decoder_start_token_id as decoder_input_ids
             decoder_input_ids = self._get_default_enc_dec_decoder_prompt()
 
+        if (len(decoder_input_ids) == 0
+                or decoder_input_ids[0] != decoder_start_token_id):
+            decoder_input_ids = [decoder_start_token_id] + decoder_input_ids
+
         return decoder_input_ids
 
     def _apply_prompt_adapter(
