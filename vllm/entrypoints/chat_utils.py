@@ -501,7 +501,7 @@ def _parse_chat_message_content_parts(
         if parse_res:
             content.append(parse_res)
 
-    if keep_multimodal_content:
+    if wrap_dicts:
         # Parsing wraps images and texts as interleaved dictionaries
         return [ConversationMessage(role=role,
                                     content=content)]  # type: ignore
