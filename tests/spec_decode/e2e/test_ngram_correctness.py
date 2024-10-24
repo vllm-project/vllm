@@ -49,6 +49,16 @@ from .conftest import run_equality_correctness_test
         "speculative_model": "[ngram]",
         "num_speculative_tokens": 5,
         "ngram_prompt_lookup_max": 3,
+        "enable_chunked_prefill": False,
+    },
+    {
+        "speculative_model": "[ngram]",
+        "num_speculative_tokens": 5,
+        "ngram_prompt_lookup_max": 3,
+        "enable_chunked_prefill": True,
+        "speculative_disable_mqa_scorer": True,
+        "max_num_batched_tokens": 4,
+        "max_num_seqs": 4
     },
 ])
 @pytest.mark.parametrize("output_len", [
@@ -151,6 +161,16 @@ def test_ngram_e2e_greedy_logprobs(vllm_runner, common_llm_kwargs,
         "speculative_model": "[ngram]",
         "num_speculative_tokens": 5,
         "ngram_prompt_lookup_max": 3,
+        "enable_chunked_prefill": False,
+    },
+    {
+        "speculative_model": "[ngram]",
+        "num_speculative_tokens": 5,
+        "ngram_prompt_lookup_max": 3,
+        "enable_chunked_prefill": True,
+        "speculative_disable_mqa_scorer": True,
+        "max_num_batched_tokens": 4,
+        "max_num_seqs": 4
     },
 ])
 @pytest.mark.parametrize(
@@ -251,6 +271,15 @@ def test_ngram_different_k(vllm_runner, common_llm_kwargs,
                              "num_speculative_tokens": 5,
                              "ngram_prompt_lookup_max": 3,
                              "speculative_disable_by_batch_size": 4
+                         }, {
+                             "speculative_model": "[ngram]",
+                             "num_speculative_tokens": 5,
+                             "ngram_prompt_lookup_max": 3,
+                             "speculative_disable_by_batch_size": 4,
+                             "enable_chunked_prefill": True,
+                             "speculative_disable_mqa_scorer": True,
+                             "max_num_batched_tokens": 4,
+                             "max_num_seqs": 4
                          }])
 @pytest.mark.parametrize("batch_size", [1, 5])
 @pytest.mark.parametrize(
