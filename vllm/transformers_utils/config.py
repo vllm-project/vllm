@@ -6,16 +6,16 @@ from typing import Any, Dict, Optional, Type, Union
 import huggingface_hub
 from huggingface_hub import (file_exists, hf_hub_download,
                              try_to_load_from_cache)
-from huggingface_hub.utils import (RepositoryNotFoundError,
-                                   RevisionNotFoundError, EntryNotFoundError,
-                                   LocalEntryNotFoundError)
-from transformers import GenerationConfig, PretrainedConfig
+from huggingface_hub.utils import (EntryNotFoundError, LocalEntryNotFoundError,
+                                   RepositoryNotFoundError,
+                                   RevisionNotFoundError)
 from transformers.models.auto.image_processing_auto import (
     get_image_processor_config)
 from transformers.models.auto.modeling_auto import (
     MODEL_FOR_CAUSAL_LM_MAPPING_NAMES)
 from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
 
+from transformers import GenerationConfig, PretrainedConfig
 from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
 # yapf conflicts with isort for this block
@@ -305,9 +305,9 @@ def get_pooling_config(model, revision='main'):
     return None
 
 
-def get_sentence_transformer_bert_config(model, revision='main'):
+def get_sentence_transformer_tokenizer_config(model, revision='main'):
     """
-    Returns the configuration dictionary for a 
+    Returns the tokenization configuration dictionary for a 
     given Sentence Transformer BERT model.
 
     Parameters:
@@ -320,8 +320,18 @@ def get_sentence_transformer_bert_config(model, revision='main'):
     - dict: A dictionary containing the configuration parameters 
     for the Sentence Transformer BERT model.
     """
-    bert_dict = get_hf_file_to_dict("sentence_bert_config.json", model,
-                                    revision)
+    for config_name in [
+            "sentence_bert_config.json",
+            "sentence_roberta_config.json",
+            "sentence_distilbert_config.json",
+            "sentence_camembert_config.json",
+            "sentence_albert_config.json",
+            "sentence_xlm-roberta_config.json",
+            "sentence_xlnet_config.json",
+    ]:
+        bert_dict = get_hf_file_to_dict(config_name, model, revision)
+        if bert_dict:
+            break
 
     if not bert_dict:
         return None
