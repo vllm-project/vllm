@@ -13,9 +13,9 @@ from vllm.worker.worker_base import WorkerBase, WorkerWrapperBase
 logger = init_logger(__name__)
 
 
-def create_worker(worker_module_name: str, worker_class_name: str,
-                  worker_class_fn: Optional[Callable[[], Type[WorkerBase]]],
-                  **kwargs):
+def _create_worker(worker_module_name: str, worker_class_name: str,
+                   worker_class_fn: Optional[Callable[[], Type[WorkerBase]]],
+                   **kwargs):
     wrapper = WorkerWrapperBase(
         worker_module_name=worker_module_name,
         worker_class_name=worker_class_name,
@@ -35,7 +35,7 @@ class GPUExecutor(ExecutorBase):
         assert self.parallel_config.world_size == 1, (
             "GPUExecutor only supports single GPU.")
 
-        self.driver_worker = self._create_worker()
+        self.driver_worker = self.create_worker()
         self.driver_worker.init_device()
         self.driver_worker.load_model()
 
@@ -89,11 +89,11 @@ class GPUExecutor(ExecutorBase):
 
         return worker_kwargs
 
-    def _create_worker(self,
-                       local_rank: int = 0,
-                       rank: int = 0,
-                       distributed_init_method: Optional[str] = None):
-        return create_worker(**self._get_create_worker_kwargs(
+    def create_worker(self,
+                      local_rank: int = 0,
+                      rank: int = 0,
+                      distributed_init_method: Optional[str] = None):
+        return _create_worker(**self._get_create_worker_kwargs(
             local_rank=local_rank,
             rank=rank,
             distributed_init_method=distributed_init_method))

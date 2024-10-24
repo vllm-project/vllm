@@ -1,4 +1,4 @@
-from typing import List, Set, Tuple
+from typing import List, Optional, Set, Tuple
 
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.logger import init_logger
@@ -22,19 +22,23 @@ class NeuronExecutor(ExecutorBase):
                 ), "Speculative decoding not yet supported for Neuron backend."
 
         # Instantiate the worker and load the model to the device.
-        self._init_worker()
-
-    def _init_worker(self):
-        from vllm.worker.neuron_worker import NeuronWorker
-        distributed_init_method = get_distributed_init_method(
-            get_ip(), get_open_port())
-        self.driver_worker = NeuronWorker(
-            vllm_config=self.vllm_config,
-            local_rank=0,
-            rank=0,
-            distributed_init_method=distributed_init_method)
+        self.driver_worker = self.create_worker()
         self.driver_worker.init_device()
         self.driver_worker.load_model()
+
+    def create_worker(self,
+                       local_rank: int = 0,
+                       rank: int = 0,
+                       distributed_init_method: Optional[str] = None):
+        from vllm.worker.neuron_worker import NeuronWorker
+        if distributed_init_method is None:
+            distributed_init_method = get_distributed_init_method(
+                get_ip(), get_open_port())
+        return NeuronWorker(
+            vllm_config=self.vllm_config,
+            local_rank=local_rank,
+            rank=rank,
+            distributed_init_method=distributed_init_method)
 
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         """Determine the number of available KV blocks by invoking the

@@ -7,7 +7,6 @@ import torch
 
 from vllm.executor.distributed_gpu_executor import (  # yapf: disable
     DistributedGPUExecutor, DistributedGPUExecutorAsync)
-from vllm.executor.gpu_executor import create_worker
 from vllm.executor.multiproc_worker_utils import (ProcessWorkerWrapper,
                                                   ResultHandler, WorkerMonitor)
 from vllm.logger import init_logger
@@ -86,7 +85,7 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
                 worker = ProcessWorkerWrapper(
                     result_handler,
                     partial(
-                        create_worker,
+                        self.create_worker,
                         **self._get_create_worker_kwargs(
                             rank=rank,
                             local_rank=rank,
@@ -105,7 +104,7 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
         # Set up signal handlers to shutdown the executor cleanly
         # sometimes gc does not work well
 
-        self.driver_worker = self._create_worker(
+        self.driver_worker = self.create_worker(
             distributed_init_method=distributed_init_method)
         self._run_workers("init_device")
         self._run_workers("load_model",

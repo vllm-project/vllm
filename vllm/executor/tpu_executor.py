@@ -29,7 +29,7 @@ class TPUExecutor(ExecutorBase):
             self.model_config.dtype = torch.bfloat16
 
         # Instantiate the worker and load the model to the device.
-        self.driver_worker = self._create_worker()
+        self.driver_worker = self.create_worker()
         self.driver_worker.init_device()
         self.driver_worker.load_model()
 
@@ -51,7 +51,7 @@ class TPUExecutor(ExecutorBase):
             is_driver_worker=rank == 0,
         )
 
-    def _create_worker(
+    def create_worker(
         self,
         local_rank: int = 0,
         rank: int = 0,

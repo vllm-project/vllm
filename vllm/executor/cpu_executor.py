@@ -66,13 +66,6 @@ class CPUExecutor(ExecutorBase):
         self.parallel_config = _verify_and_get_parallel_config(
             self.parallel_config)
 
-        # Multiprocessing-based executor does not support multi-node setting.
-        # Since it only works for single node, we can use the loopback address
-        # 127.0.0.1 for communication.
-        ip = "127.0.0.1"
-        port = get_open_port()
-        self.distributed_init_method = get_distributed_init_method(ip, port)
-
         is_async = isinstance(self, CPUExecutorAsync)
 
         world_size = self.parallel_config.tensor_parallel_size
@@ -85,7 +78,7 @@ class CPUExecutor(ExecutorBase):
                 ProcessWorkerWrapper(
                     result_handler,
                     partial(
-                        self._create_worker,
+                        self.create_worker,
                         rank=rank,
                         local_rank=rank,
                     )) for rank in range(0, world_size)
@@ -94,7 +87,7 @@ class CPUExecutor(ExecutorBase):
             self.workers = self.workers[1:]
             self.driver_method_invoker = _async_driver_method_invoker
         else:
-            self.driver_worker = self._create_worker()
+            self.driver_worker = self.create_worker()
             self.driver_method_invoker = _driver_method_invoker
 
             if world_size != 1:
@@ -102,7 +95,7 @@ class CPUExecutor(ExecutorBase):
                     ProcessWorkerWrapper(
                         result_handler,
                         partial(
-                            self._create_worker,
+                            self.create_worker,
                             rank=rank,
                             local_rank=rank,
                         )) for rank in range(1, world_size)
@@ -122,11 +115,18 @@ class CPUExecutor(ExecutorBase):
         self._run_workers("init_device")
         self._run_workers("load_model")
 
-    def _create_worker(
+    def create_worker(
         self,
         local_rank: int = 0,
         rank: int = 0,
+        distributed_init_method: Optional[str] = None,
     ):
+        if distributed_init_method is None:
+          # Multiprocessing-based executor does not support multi-node setting.
+          # Since it only works for single node, we can use the loopback address
+          # 127.0.0.1 for communication.
+          self.distributed_init_method = get_distributed_init_method("127.0.0.1", get_open_port())
+
         worker_module_name = "vllm.worker.cpu_worker"
         worker_class_name = "CPUWorker"
 

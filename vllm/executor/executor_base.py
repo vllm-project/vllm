@@ -40,6 +40,15 @@ class ExecutorBase(ABC):
         pass
 
     @abstractmethod
+    def create_worker(self,
+                       local_rank: int = 0,
+                       rank: int = 0,
+                       distributed_init_method: Optional[str] = None):
+        """Creates the driver worker for the Executor.
+       """
+        raise NotImplementedError
+
+    @abstractmethod
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         """Determine the number of available blocks for the GPU KV cache and
         swappable CPU KV cache.
