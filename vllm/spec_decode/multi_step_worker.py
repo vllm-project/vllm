@@ -101,7 +101,7 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
                 model_outputs.append(model_output)
 
         filtered_model_outputs = self._filter_model_output(
-            model_outputs, indices_of_seq_with_bonus_tokens)
+            model_outputs, indices_of_seq_with_bonus_tokens, self.device)
         return filtered_model_outputs, True
 
     @staticmethod
@@ -169,7 +169,8 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
     @staticmethod
     def _filter_model_output(
             expanded_batch_outputs: List[SamplerOutput],
-            output_indices_to_retain: List[int]) -> List[SamplerOutput]:
+            output_indices_to_retain: List[int],
+            device: torch.device) -> List[SamplerOutput]:
         """
         Filters the model output to include only the specified sequence
         outputs. This method contracts the expanded batch output from the
@@ -186,26 +187,33 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
             List[SamplerOutput]: A list containing the filtered model 
             outputs for the specified indices.
         """
-        return [
-            SamplerOutput(
-                outputs=[
-                    expanded_batch_output.outputs[i]
-                    for i in output_indices_to_retain
-                ] if len(expanded_batch_output.outputs) > 0 else [],
-                sampled_token_probs=(
-                    expanded_batch_output.
-                    sampled_token_probs[output_indices_to_retain]
-                    if expanded_batch_output.sampled_token_probs is not None
-                    else None),
-                logprobs=(
-                    expanded_batch_output.logprobs[output_indices_to_retain]
-                    if expanded_batch_output.logprobs is not None else None),
-                sampled_token_ids=(expanded_batch_output.
-                                   sampled_token_ids[output_indices_to_retain]
-                                   if expanded_batch_output.sampled_token_ids
-                                   is not None else None))
-            for expanded_batch_output in expanded_batch_outputs
-        ]
+        def _filter_optional_tensor(tensor: torch.Tensor, indices: torch.Tensor) -> torch.Tensor:
+            return tensor.index_select(0, indices) if tensor is not None else None
+
+        if not expanded_batch_outputs:
+            return []
+
+        output_indices_to_retain_tensor = torch.tensor(output_indices_to_retain, device=device)
+
+        filtered_outputs = []
+        for expanded_batch_output in expanded_batch_outputs:
+            outputs = (
+                [expanded_batch_output.outputs[i] for i in output_indices_to_retain]
+                if expanded_batch_output.outputs else []
+            )
+
+            sampled_token_probs = _filter_optional_tensor(expanded_batch_output.sampled_token_probs, output_indices_to_retain_tensor)
+            logprobs = _filter_optional_tensor(expanded_batch_output.logprobs, output_indices_to_retain_tensor)
+            sampled_token_ids = _filter_optional_tensor(expanded_batch_output.sampled_token_ids, output_indices_to_retain_tensor)
+
+            filtered_outputs.append(SamplerOutput(
+                outputs=outputs,
+                sampled_token_probs=sampled_token_probs,
+                logprobs=logprobs,
+                sampled_token_ids=sampled_token_ids
+            ))
+
+        return filtered_outputs
 
     def get_spec_proposals(
         self,
