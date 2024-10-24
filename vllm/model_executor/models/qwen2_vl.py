@@ -61,6 +61,7 @@ from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalDataDict,
                              MultiModalInputs)
 from vllm.multimodal.base import MultiModalData
 from vllm.multimodal.image import cached_get_image_processor
+from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.sequence import IntermediateTensors, SequenceData
 from vllm.transformers_utils.config import uses_mrope
 from vllm.transformers_utils.processor import cached_get_processor
@@ -817,7 +818,7 @@ def input_processor_for_qwen2_vl(
     min_pixels: Optional[int] = None,
     max_pixels: Optional[int] = None,
 ) -> DecoderOnlyInputs:
-    multi_modal_data = inputs.get("multi_modal_data", None)
+    multi_modal_data = inputs.get("multi_modal_data")
     if multi_modal_data is None:
         return inputs
 
@@ -830,6 +831,7 @@ def input_processor_for_qwen2_vl(
     min_pixels = min_pixels if min_pixels else image_processor.min_pixels
     max_pixels = max_pixels if max_pixels else image_processor.max_pixels
 
+    model_config = ctx.model_config
     hf_config = ctx.get_hf_config(Qwen2VLConfig)
 
     # To avoid redundant processing of vision objects (resize, rescale, etc.),
@@ -845,14 +847,11 @@ def input_processor_for_qwen2_vl(
     #                       return_tensors="pt")
     #    prompt_token_ids = inputs["input_ids"][0].tolist()
 
-    prompt_token_ids = inputs.get("prompt_token_ids", None)
-    if prompt_token_ids is None:
-        prompt = inputs["prompt"]
-        prompt_token_ids = processor.tokenizer(
-            prompt,
-            padding=True,
-            return_tensors=None,
-        )["input_ids"]
+    tokenizer = cached_get_tokenizer(
+        model_config.tokenizer,
+        trust_remote_code=model_config.trust_remote_code)
+
+    prompt_token_ids = inputs["prompt_token_ids"]
 
     # Expand image pad tokens.
 
@@ -894,9 +893,13 @@ def input_processor_for_qwen2_vl(
                                               min_pixels=min_pixels,
                                               max_pixels=max_pixels)
 
+    prompt = inputs.get("prompt")
+    if prompt is None:
+        prompt = tokenizer.decode(prompt_token_ids)
+
     return token_inputs(
         prompt_token_ids=prompt_token_ids,
-        prompt=inputs["prompt"],
+        prompt=prompt,
         multi_modal_data=multi_modal_data,
     )
 
