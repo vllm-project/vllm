@@ -27,11 +27,13 @@ if TYPE_CHECKING:
     VLLM_USAGE_SOURCE: str = ""
     VLLM_CONFIGURE_LOGGING: int = 1
     VLLM_LOGGING_LEVEL: str = "INFO"
+    VLLM_LOGGING_PREFIX: str = ""
     VLLM_LOGGING_CONFIG_PATH: Optional[str] = None
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_ATTENTION_BACKEND: Optional[str] = None
     VLLM_USE_FLASHINFER_SAMPLER: bool = False
     VLLM_USE_FLASHINFER_REJECTION_SAMPLER: bool = False
+    VLLM_FLASHINFER_FORCE_TENSOR_CORES: bool = False
     VLLM_PP_LAYER_PARTITION: Optional[str] = None
     VLLM_CPU_KVCACHE_SPACE: int = 0
     VLLM_CPU_OMP_THREADS_BIND: str = ""
@@ -64,8 +66,10 @@ if TYPE_CHECKING:
     VLLM_USE_TRITON_AWQ: bool = False
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = False
-    VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1: bool = False
     VLLM_TORCH_COMPILE_LEVEL: int = 0
+    VLLM_CUSTOM_OPS: List[str] = []
+    VLLM_DISABLED_KERNELS: List[str] = []
+    VLLM_USE_V1: bool = False
 
 
 def get_default_cache_root():
@@ -205,7 +209,17 @@ environment_variables: Dict[str, Callable[[], Any]] = {
         os.environ.get("VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE", "1") != "0"),
     "VLLM_TORCH_COMPILE_LEVEL":
     lambda: int(os.environ.get("VLLM_TORCH_COMPILE_LEVEL", "0")),
-
+    # Fine-grained control over which custom ops to enable/disable.
+    # Use 'all' to enable all, 'none' to disable all.
+    # Also specify a list of custom op names to enable (prefixed with a '+'),
+    # or disable (prefixed with a '-').
+    # Examples:
+    # - 'all,-op1' to enable all except op1
+    # - 'none,+op1,+op2' to enable only op1 and op2
+    # By default, all custom ops are enabled when running without Inductor
+    # and disabled when running with Inductor (compile_level >= Inductor).
+    "VLLM_CUSTOM_OPS":
+    lambda: os.environ.get("VLLM_CUSTOM_OPS", "").replace(" ", "").split(","),
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id
     "LOCAL_RANK":
@@ -255,6 +269,10 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_LOGGING_LEVEL":
     lambda: os.getenv("VLLM_LOGGING_LEVEL", "INFO"),
 
+    # if set, VLLM_LOGGING_PREFIX will be prepended to all log messages
+    "VLLM_LOGGING_PREFIX":
+    lambda: os.getenv("VLLM_LOGGING_PREFIX", ""),
+
     # Trace function calls
     # If set to 1, vllm will trace function calls
     # Useful for debugging
@@ -274,6 +292,11 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # If set, vllm will use flashinfer sampler
     "VLLM_USE_FLASHINFER_SAMPLER":
     lambda: bool(int(os.getenv("VLLM_USE_FLASHINFER_SAMPLER", "0"))),
+
+    # If set, vllm will force flashinfer to use tensor cores;
+    # otherwise will use heuristic based on model architecture.
+    "VLLM_FLASHINFER_FORCE_TENSOR_CORES":
+    lambda: bool(int(os.getenv("VLLM_FLASHINFER_FORCE_TENSOR_CORES", "0"))),
 
     # Pipeline stage partition strategy
     "VLLM_PP_LAYER_PARTITION":
@@ -426,10 +449,17 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_SKIP_P2P_CHECK":
     lambda: os.getenv("VLLM_SKIP_P2P_CHECK", "0") == "1",
 
-    # If set, allowing the use of deprecated block manager V1
-    "VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1":
-    lambda: os.environ.get("VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1", "0"
-                           ) == "1",
+    # List of quantization kernels that should be disabled, used for testing
+    # and performance comparisons. Currently only affects MPLinearKernel
+    # selection
+    # (kernels: MacheteLinearKernel, MarlinLinearKernel, ExllamaLinearKernel)
+    "VLLM_DISABLED_KERNELS":
+    lambda: [] if "VLLM_DISABLED_KERNELS" not in os.environ else os.environ[
+        "VLLM_DISABLED_KERNELS"].split(","),
+
+    # If set, use the V1 code path.
+    "VLLM_USE_V1":
+    lambda: bool(int(os.getenv("VLLM_USE_V1", "0"))),
 }
 
 # end-env-vars-definition

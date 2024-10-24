@@ -142,7 +142,8 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.config = config
         self.multimodal_config = multimodal_config
 
-        self.vision_tower = SiglipVisionModel(config.vision_config)
+        self.vision_tower = SiglipVisionModel(config.vision_config,
+                                              quant_config)
         self.multi_modal_projector = PaliGemmaMultiModalProjector(
             vision_hidden_size=config.vision_config.hidden_size,
             projection_dim=config.vision_config.projection_dim)

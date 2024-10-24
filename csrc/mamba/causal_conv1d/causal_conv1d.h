@@ -13,6 +13,7 @@ struct ConvParamsBase {
     using index_t = uint32_t;
 
     int batch, dim, seqlen, width;
+    int64_t pad_slot_id;
     bool silu_activation;
 
     index_t x_batch_stride;
