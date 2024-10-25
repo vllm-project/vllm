@@ -2,6 +2,7 @@ import enum
 from typing import TYPE_CHECKING, List, Optional, Union
 
 from vllm.lora.request import LoRARequest
+from vllm.multimodal import MultiModalInputs
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import RequestMetrics
 
@@ -43,6 +44,12 @@ class Request:
         self.output_token_ids: List[int] = []
         self.output_text = ""
         self.num_computed_tokens = 0
+
+        # Raw multimodal data before the mm input mapper (e.g., PIL images).
+        self.mm_data = inputs.get("multi_modal_data")
+        self.mm_processor_kwargs = inputs.get("mm_processor_kwargs")
+        # Output of the mm input mapper (e.g., image tensors).
+        self.mm_inputs: Optional[MultiModalInputs] = None
 
     @property
     def num_tokens(self) -> int:
