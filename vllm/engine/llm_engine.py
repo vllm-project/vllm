@@ -245,11 +245,11 @@ class LLMEngine:
             "download_dir=%r, load_format=%s, tensor_parallel_size=%d, "
             "pipeline_parallel_size=%d, "
             "disable_custom_all_reduce=%s, quantization=%s, "
-            "enforce_eager=%s, kv_cache_dtype=%s, "
+            "enforce_eager=%s, kv_cache_dtype=%s, block_allocator=%s, "
             "quantization_param_path=%s, device_config=%s, "
             "decoding_config=%r, observability_config=%r, "
             "seed=%d, served_model_name=%s, "
-            "num_scheduler_steps=%d, chunked_prefill_enabled=%s "
+            "num_scheduler_steps=%d, chunked_prefill_enabled=%s, "
             "multi_step_stream_outputs=%s, enable_prefix_caching=%s, "
             "use_async_output_proc=%s, use_cached_outputs=%s, "
             "mm_processor_kwargs=%s)",
@@ -275,6 +275,7 @@ class LLMEngine:
             model_config.quantization,
             model_config.enforce_eager,
             cache_config.cache_dtype,
+            cache_config.block_allocator,
             model_config.quantization_param_path,
             device_config.device,
             decoding_config,

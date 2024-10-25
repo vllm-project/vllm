@@ -1072,7 +1072,7 @@ class Scheduler:
         blocks_to_copy.extend(swapped_in.blocks_to_copy)
         # NOTE(Kuntai): extend the copy blocks for CPU offloading
         blocks_to_copy.extend(
-            self.block_manager.block_allocator.get_and_reset_swaps())
+            self.block_manager.block_allocator.get_and_reset_swaps(time.time()))
 
         ignored_seq_groups = prefills.ignored_seq_groups
         ignored_seq_groups.extend(swapped_in.infeasible_seq_groups)
@@ -1166,7 +1166,7 @@ class Scheduler:
             blocks_to_swap_out=running_scheduled.blocks_to_swap_out,
             blocks_to_copy=running_scheduled.blocks_to_copy +
             swapped_in.blocks_to_copy +
-            self.block_manager.block_allocator.get_and_reset_swaps(),
+            self.block_manager.block_allocator.get_and_reset_swaps(time.time()),
             ignored_seq_groups=prefills.ignored_seq_groups +
             swapped_in.infeasible_seq_groups,
             num_lookahead_slots=running_scheduled.num_lookahead_slots,

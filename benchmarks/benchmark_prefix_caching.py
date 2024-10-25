@@ -134,7 +134,10 @@ def main(args):
               trust_remote_code=True,
               enforce_eager=True,
               tensor_parallel_size=args.tensor_parallel_size,
-              enable_prefix_caching=args.enable_prefix_caching)
+              enable_prefix_caching=args.enable_prefix_caching,
+              block_allocator=args.block_allocator,
+              preemption_mode="recompute",
+              swap_space=120)
 
     sampling_params = SamplingParams(temperature=0, max_tokens=args.output_len)
 
@@ -194,5 +197,16 @@ if __name__ == "__main__":
                         type=int,
                         default=0,
                         help='Random seed for reproducibility')
+    parser.add_argument('--block-allocator',
+                        type=str,
+                        default='CpuGpuBlockAllocator',
+                        choices=['CpuGpuBlockAllocator', 
+                                 'CpuOffloadingBlockAllocator'],
+                        help='The block allocator that vLLM uses. Currently'
+                        ' can be CpuGpuBlockAllocator (the default) and '
+                        'CpuOffloadingBlockAllocator (experimental) that '
+                        'supports offloading the KV cache to CPU . '
+                        'When using CpuOffloadingBlockAllocator, the '
+                        'preemption mode must be recompute.')
     args = parser.parse_args()
     main(args)
