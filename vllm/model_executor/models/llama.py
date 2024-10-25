@@ -383,11 +383,6 @@ class LlamaModel(nn.Module):
             tmp[step:] = W_q & 0b00001111
             return tmp
 
-        def rescale_hqq_wq(loaded_weight: torch.Tensor, param) -> torch.Tensor:
-            # TODO don't hardcode type
-            return unpack_4bit_u8(loaded_weight, dtype=torch.bfloat16).reshape(
-                (-1, param.shape[1])).to(torch.uint8)
-
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
@@ -429,8 +424,10 @@ class LlamaModel(nn.Module):
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 if self.is_hqq and name.endswith(".W_q"):
-                    weight_loader(param, rescale_hqq_wq(loaded_weight, param),
-                                  shard_id)
+                    weight_loader(
+                        param,
+                        unpack_4bit_u8(loaded_weight).reshape(
+                            -1, param.shape[1]), shard_id)
                 elif self.is_hqq and name.endswith((".scale", ".zero")):
                     weight_loader(param,
                                   loaded_weight.reshape(-1, param.shape[1]),
@@ -465,7 +462,10 @@ class LlamaModel(nn.Module):
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 if self.is_hqq and name.endswith(".W_q"):
-                    weight_loader(param, rescale_hqq_wq(loaded_weight, param))
+                    weight_loader(
+                        param,
+                        unpack_4bit_u8(loaded_weight).reshape(
+                            -1, param.shape[1]))
                 elif self.is_hqq and name.endswith((".scale", ".zero")):
                     weight_loader(param,
                                   loaded_weight.reshape(-1, param.shape[1]))
