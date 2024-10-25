@@ -10,6 +10,10 @@ from ....utils import multi_gpu_test
     "llava-hf/llava-v1.6-mistral-7b-hf",
     "facebook/chameleon-7b",
 ])
+@pytest.mark.skipif(
+    transformers.__version__.startswith("4.46.0") and model == "facebook/chameleon-7b",
+    reason="Model broken in HF, see huggingface/transformers#34379",
+)
 def test_models(hf_runner, vllm_runner, image_assets,
                 distributed_executor_backend, model) -> None:
 
