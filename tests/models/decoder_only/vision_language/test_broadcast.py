@@ -1,4 +1,5 @@
 import pytest
+import transformers
 
 from ....utils import multi_gpu_test
 
@@ -23,6 +24,9 @@ def test_models(hf_runner, vllm_runner, image_assets,
     elif model.startswith("llava-hf/llava-v1.6"):
         from .test_llava_next import models, run_test  # type: ignore[no-redef]
     elif model.startswith("facebook/chameleon"):
+        if transformers.__version__.startswith("4.46.0"):
+            pytest.skip("Model broken in HF, "
+                        "see huggingface/transformers#34379")
         from .test_chameleon import models, run_test  # type: ignore[no-redef]
     else:
         raise NotImplementedError(f"Unsupported model: {model}")
