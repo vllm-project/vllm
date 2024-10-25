@@ -74,8 +74,7 @@ class ipex_ops:
         assert kv_cache_dtype == "auto"
         num_heads = out.size(1)
         num_queries_per_tokens = num_heads // num_kv_heads
-        # todo: ipex will refactor namespace
-        torch.xpu.paged_attention_v1(  # type: ignore
+        ipex.llm.modules.PagedAttention.single_query_kv_attention(
             out,
             query.contiguous(),
             key_cache.view_as(value_cache),
@@ -117,22 +116,18 @@ class ipex_ops:
         assert kv_cache_dtype == "auto"
         num_heads = out.size(1)
         num_queries_per_tokens = num_heads // num_kv_heads
-        # todo: ipex will refactor namespace
-        torch.xpu.paged_attention_v2(  # type: ignore
+        ipex.llm.modules.PagedAttention.single_query_kv_attention(
             out,
-            exp_sum,
-            max_logits,
-            tmp_out,
             query.contiguous(),
             key_cache.view_as(value_cache),
             value_cache,
-            block_tables,
-            context_lens,
             num_queries_per_tokens,
             scale,
+            block_tables,
+            context_lens,
             block_size,
             max_context_len,
-            alibi_slopes,
+            alibi_slopes, 
         )
 
     @staticmethod
