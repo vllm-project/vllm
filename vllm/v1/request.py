@@ -48,7 +48,8 @@ class Request:
         # Raw multimodal data before the mm input mapper (e.g., PIL images).
         self.mm_data = inputs.get("multi_modal_data")
         self.mm_processor_kwargs = inputs.get("mm_processor_kwargs")
-        # Output of the mm input mapper (e.g., image tensors).
+        # Output of the mm input mapper (e.g., image tensors of shape
+        # [3, height, width]).
         self.mm_inputs: Optional[MultiModalInputs] = None
 
     @property
