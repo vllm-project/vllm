@@ -83,13 +83,13 @@ OpenAI-Compatible Server
 ------------------------
 
 vLLM can be deployed as a server that implements the OpenAI API protocol. This allows vLLM to be used as a drop-in replacement for applications using OpenAI API.
-By default, it starts the server at ``http://localhost:8000``. You can specify the address with ``--host`` and ``--port`` arguments. The server currently hosts one model at a time (e.g. ``facebook/opt-125m``) and implements endpoints such as `list models <https://platform.openai.com/docs/api-reference/models/list>`_, `create chat completion <https://platform.openai.com/docs/api-reference/chat/completions/create>`_, and `create completion <https://platform.openai.com/docs/api-reference/completions/create>`_ endpoints. 
+By default, it starts the server at ``http://localhost:8000``. You can specify the address with ``--host`` and ``--port`` arguments. The server currently hosts one model at a time and implements endpoints such as `list models <https://platform.openai.com/docs/api-reference/models/list>`_, `create chat completion <https://platform.openai.com/docs/api-reference/chat/completions/create>`_, and `create completion <https://platform.openai.com/docs/api-reference/completions/create>`_ endpoints. 
 
-Run the following command to start the vLLM server with Facebook's `OPT-125M <https://huggingface.co/facebook/opt-125m>`_ model:
+Run the following command to start the vLLM server with the `Qwen2.5-1.5B-Instruct <https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct>`_ model:
 
 .. code-block:: console
 
-    $ vllm serve facebook/opt-125m
+    $ vllm serve Qwen/Qwen2.5-1.5B-Instruct
 
 .. note::
 
@@ -113,7 +113,7 @@ Once your server is started, you can query the model with input prompts:
     $ curl http://localhost:8000/v1/completions \
     $     -H "Content-Type: application/json" \
     $     -d '{
-    $         "model": "facebook/opt-125m",
+    $         "model": "Qwen/Qwen2.5-1.5B-Instruct",
     $         "prompt": "San Francisco is a",
     $         "max_tokens": 7,
     $         "temperature": 0
@@ -132,7 +132,7 @@ Since this server is compatible with OpenAI API, you can use it as a drop-in rep
         api_key=openai_api_key,
         base_url=openai_api_base,
     )
-    completion = client.completions.create(model="facebook/opt-125m",
+    completion = client.completions.create(model="Qwen/Qwen2.5-1.5B-Instruct",
                                           prompt="San Francisco is a")
     print("Completion result:", completion)
 
@@ -150,7 +150,7 @@ You can use the `create chat completion <https://platform.openai.com/docs/api-re
     $ curl http://localhost:8000/v1/chat/completions \
     $     -H "Content-Type: application/json" \
     $     -d '{
-    $         "model": "facebook/opt-125m",
+    $         "model": "Qwen/Qwen2.5-1.5B-Instruct",
     $         "messages": [
     $             {"role": "system", "content": "You are a helpful assistant."},
     $             {"role": "user", "content": "Who won the world series in 2020?"}
@@ -172,7 +172,7 @@ Alternatively, you can use the `openai` python package:
     )
 
     chat_response = client.chat.completions.create(
-        model="facebook/opt-125m",
+        model="Qwen/Qwen2.5-1.5B-Instruct",
         messages=[
             {"role": "system", "content": "You are a helpful assistant."},
             {"role": "user", "content": "Tell me a joke."},
