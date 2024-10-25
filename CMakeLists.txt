@@ -507,7 +507,7 @@ else()
   FetchContent_Declare(
           vllm-flash-attn
           GIT_REPOSITORY https://github.com/vllm-project/flash-attention.git
-          GIT_TAG 013f0c4fc47e6574060879d9734c1df8c5c273bd
+          GIT_TAG 5259c586c403a4e4d8bf69973c159b40cc346fb9
           GIT_PROGRESS TRUE
   )
 endif()
