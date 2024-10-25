@@ -150,7 +150,13 @@ class KVCacheManager:
             A list of new block IDs if new blocks are allocated, or None
             if new blocks are required but cannot be allocated.
         """
+        num_required_blocks = cdiv(request.num_computed_tokens + num_tokens,
+                                   self.block_size)
+        req_block_ids = self.req_to_block_ids[request.request_id]
+
+        # Assign token IDs to already allocated blocks.
         new_token_ids = None
+        prev_block_id = None
         if self.enable_caching:
             if request.num_computed_tokens < request.num_prompt_tokens:
                 # (Chunked) Prefill.
@@ -165,12 +171,6 @@ class KVCacheManager:
                     num_computed_output_tokens:num_computed_output_tokens +
                     num_tokens]
 
-        num_required_blocks = cdiv(request.num_computed_tokens + num_tokens,
-                                   self.block_size)
-        req_block_ids = self.req_to_block_ids[request.request_id]
-
-        # Assign token IDs to already allocated blocks.
-        if self.enable_caching:
             last_full_block_idx = len(req_block_ids) - 1
             while (last_full_block_idx >= 0 and self.block_pool[
                     req_block_ids[last_full_block_idx]].block_hash is None):
@@ -182,6 +182,9 @@ class KVCacheManager:
                 block_ids=req_block_ids[last_full_block_idx + 1:],
                 token_ids=new_token_ids,
                 prev_block_id=prev_block_id)
+
+            new_token_ids = new_token_ids[token_id_idx:]
+            prev_block_id = req_block_ids[-1]
 
         if num_required_blocks <= len(req_block_ids):
             # No new block is needed. We caching is enabled,
@@ -199,12 +202,6 @@ class KVCacheManager:
         # Allocate new blocks and add token IDs to them if caching is enabled.
         num_new_blocks = min(num_new_blocks + self.num_preallocate_blocks,
                              self.num_free_blocks)
-        if self.enable_caching:
-            new_token_ids = new_token_ids[token_id_idx:]
-            prev_block_id = req_block_ids[-1]
-        else:
-            new_token_ids = None
-            prev_block_id = None
         new_blocks = self._get_new_blocks(num_new_blocks, new_token_ids,
                                           prev_block_id)
         new_block_ids = [blk.block_id for blk in new_blocks]
