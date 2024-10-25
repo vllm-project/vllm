@@ -336,9 +336,9 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         Returns:
             List[Tuple[int, int]]: A mapping of source to destination block IDs.
         """
-        mapping = self._swap_mapping.copy()
         self._swap_mapping.clear()
-        return list(mapping.items())
+        # return an empty list, to keep compatibility with previous behavior
+        return []
 
 
 class NullBlock(Block):
