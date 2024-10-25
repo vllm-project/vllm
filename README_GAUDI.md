@@ -282,6 +282,10 @@ Additionally, there are HPU PyTorch Bridge environment variables impacting vLLM 
 - `PT_HPU_LAZY_MODE`: if `0`, PyTorch Eager backend for Gaudi will be used, if `1` PyTorch Lazy backend for Gaudi will be used, `1` is default
 - `PT_HPU_ENABLE_LAZY_COLLECTIVES`: required to be `true` for tensor parallel inference with HPU Graphs
 
+# Quantization and FP8 model calibration process
+
+The FP8 model calibration procedure has been described as a part of [vllm-hpu-extention](https://github.com/HabanaAI/vllm-hpu-extension/tree/main/calibration/README.md) package.
+
 # Troubleshooting: Tweaking HPU Graphs
 
 If you experience device out-of-memory issues or want to attempt inference at higher batch sizes, try tweaking HPU Graphs by following the below:
