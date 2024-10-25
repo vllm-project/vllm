@@ -127,7 +127,7 @@ def main(args):
             fixed_output_len=args.output_len,
         )
     else:
-        print(f"Warning: --input-length-range is ignored")
+        print("Warning: --input-length-range is ignored")
         filtered_datasets = []
         for i in range(args.num_prompts):
             prompt = f"Task {i}: {PROMPT}"
