@@ -1906,9 +1906,8 @@ def _get_graph_batch_size(batch_size: int) -> int:
                 _BATCH_SIZE_ALIGNMENT * _BATCH_SIZE_ALIGNMENT)
 
 
-def _get_max_graph_batch_size(
-        max_num_seqs: int,
-        max_batch_size_to_capture: Optional[int]) -> int:
+def _get_max_graph_batch_size(max_num_seqs: int,
+                              max_batch_size_to_capture: Optional[int]) -> int:
     """
     max_num_seqs: Maximum number of sequences in a batch.
     _BATCH_SIZES_TO_CAPTURE: all the sizes that we want to capture.
