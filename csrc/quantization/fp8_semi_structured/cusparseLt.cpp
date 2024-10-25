@@ -119,7 +119,7 @@ std::map<cacheID, cusparseLtEntry> cusparseLt_cache;
 }  // namespace cusparseLt
 }  // namespace vllm
 
-vllm::cusparseLt::cusparseLtEntry entry;
+// vllm::cusparseLt::cusparseLtEntry entry;
 
 torch::Tensor cslt_compress_fp8_semi_structured(const torch::Tensor& input) {
   TORCH_CHECK(input.scalar_type() == at::ScalarType::Float8_e4m3fn,
@@ -172,7 +172,7 @@ vllm::cusparseLt::cacheID cslt_prepare_mm_fp8_semi_structured(const torch::Tenso
     id = vc::cusparseLt_cache.rbegin()->first + 1;
   }
 
-  // vc::cusparseLtEntry& entry = vc::cusparseLt_cache[id];
+  vc::cusparseLtEntry& entry = vc::cusparseLt_cache[id];
   // vc::cusparseLtEntry entry;
 
   float alpha = 1.0;
@@ -264,12 +264,12 @@ torch::Tensor cslt_mm_fp8_semi_structured_prepared(
   namespace vc = vllm::cusparseLt;
   TORCH_CHECK(vc::handle_initialized,
               "Call of matmul with unintialized matmul");
-  // TORCH_CHECK(id_tensor.numel() == 1, "ID has to be single valued");
-  // auto id = id_tensor.item<vc::cacheID>();
-  // if (vc::cusparseLt_cache.count(id) == 0) {
-  //   TORCH_CHECK(false, "cusparse matmul Id is not found");
-  // }
-  // const auto& entry = vc::cusparseLt_cache[id];
+  TORCH_CHECK(id_tensor.numel() == 1, "ID has to be single valued");
+  auto id = id_tensor.item<vc::cacheID>();
+  if (vc::cusparseLt_cache.count(id) == 0) {
+    TORCH_CHECK(false, "cusparse matmul Id is not found");
+  }
+  const auto& entry = vc::cusparseLt_cache[id];
 
   auto res_tensor_options =
       c10::TensorOptions().dtype(entry.out_dtype).device(entry.device);
@@ -287,14 +287,15 @@ torch::Tensor cslt_mm_fp8_semi_structured_prepared(
 }
 
 void cslt_fp8_semi_structured_destroy(const torch::Tensor& id_tensor) {
-  TORCH_CHECK(vllm::cusparseLt::handle_initialized,
+  namespace vc = vllm::cusparseLt;
+  TORCH_CHECK(vc::handle_initialized,
               "Call of destroy cusparseId with unintialized cusparseLt");
-  // TORCH_CHECK(id_tensor.numel() == 1, "ID has to be single valued");
-  // auto id = id_tensor.item<vc::cacheID>();
-  // if (vllm::cusparseLt::cusparseLt_cache.count(id) == 0) {
-  //   TORCH_CHECK(false, "cusparse matmul Id is not found");
-  // }
-  // auto& entry = vllm::cusparseLt::cusparseLt_cache[id];
+  TORCH_CHECK(id_tensor.numel() == 1, "ID has to be single valued");
+  auto id = id_tensor.item<vc::cacheID>();
+  if (vc::cusparseLt_cache.count(id) == 0) {
+    TORCH_CHECK(false, "cusparse matmul Id is not found");
+  }
+  auto& entry = vc::cusparseLt_cache[id];
 
   TORCH_CUDASPARSE_CHECK(
       cusparseLtMatDescriptorDestroy(&entry.sparse_input_descriptor));

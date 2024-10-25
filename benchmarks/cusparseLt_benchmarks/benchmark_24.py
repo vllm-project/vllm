@@ -93,15 +93,15 @@ def bench(m: int, k: int, n: int, label: str, sub_label: str,
     if use_fp8:
         a, b = make_rand_tensors(torch.float8_e4m3fn, m, n, k)
         # cutlass fp8
-        timers.append(
-            bench_fn(label, sub_label, "cutlass_fp8_fp8_matmul-w-scales",
-                     dense_matmul, a, b, torch.float8_e4m3fn))
+        # timers.append(
+        #     bench_fn(label, sub_label, "cutlass_fp8_fp8_matmul-w-scales",
+        #              dense_matmul, a, b, torch.float8_e4m3fn))
 
         # cusparseLt fp8
-        timers.append(
-            bench_fn(label, sub_label, "cusparseLt_fp8_fp8_2_4",
-                     semi_structured_sparse_dense_gemm,
-                     compress_to_torch_sparse_semi_structured_mat(a), b))
+        # timers.append(
+        #     bench_fn(label, sub_label, "cusparseLt_fp8_fp8_2_4",
+        #              semi_structured_sparse_dense_gemm,
+        #              compress_to_torch_sparse_semi_structured_mat(a), b))
         
         a_compressed = compress_to_torch_sparse_semi_structured_mat(a)
         handle = semi_structured_fp8_prepare_mm(a_compressed.packed, b)
