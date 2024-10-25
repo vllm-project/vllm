@@ -1,8 +1,11 @@
 from typing import List
 
+import pytest
+
 import vllm
 from vllm.assets.image import ImageAsset
 from vllm.lora.request import LoRARequest
+from vllm.utils import is_hip
 
 MODEL_PATH = "openbmb/MiniCPM-Llama3-V-2_5"
 
@@ -52,7 +55,7 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> List[str]:
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
     return generated_texts
 
-
+@pytest.mark.xfail(is_hip(), reason="MiniCPM-V dependency xformers incompatible with ROCm")
 def test_minicpmv_lora(minicpmv_lora_files):
     llm = vllm.LLM(
         MODEL_PATH,
@@ -62,7 +65,6 @@ def test_minicpmv_lora(minicpmv_lora_files):
         max_lora_rank=64,
         trust_remote_code=True,
     )
-
     output1 = do_sample(llm, minicpmv_lora_files, lora_id=1)
     for i in range(len(EXPECTED_OUTPUT)):
         assert EXPECTED_OUTPUT[i].startswith(output1[i])
