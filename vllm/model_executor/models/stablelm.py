@@ -62,7 +62,8 @@ class StablelmMLP(nn.Module):
             quant_config=quant_config)
         self.down_proj = RowParallelLinear(config.intermediate_size,
                                            config.hidden_size,
-                                           bias=False)
+                                           bias=False,
+                                           quant_config=quant_config)
         self.act_fn = SiluAndMul()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -203,6 +204,7 @@ class StableLMEpochModel(nn.Module):
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
             config.hidden_size,
+            quant_config=quant_config,
         )
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,

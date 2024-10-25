@@ -209,7 +209,8 @@ class Starcoder2Model(nn.Module):
 
         # TODO: consider padding_idx (currently removed)
         self.embed_tokens = VocabParallelEmbedding(config.vocab_size,
-                                                   config.hidden_size)
+                                                   config.hidden_size,
+                                                   quant_config=quant_config)
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: Starcoder2DecoderLayer(
