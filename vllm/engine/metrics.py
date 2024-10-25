@@ -137,19 +137,28 @@ class Metrics:
                 0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0,
                 40.0, 50.0, 60.0
             ])
-        self.histogram_execute_time_request = self._histogram_cls(
-            name="vllm:model_execute_time_seconds",
+        self.histogram_time_in_queue_request = self._histogram_cls(
+            name="vllm:time_in_queue_requests",
             documentation=
-            "Histogram of time spent in the model execute function in seconds.",
+            "Histogram of time the request spent in the queue in seconds.",
             labelnames=labelnames,
             buckets=[
                 0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0,
                 40.0, 50.0, 60.0
             ])
-        self.histogram_time_in_queue_request = self._histogram_cls(
-            name="vllm:time_in_queue_requests",
+        self.histogram_model_forward_time_request = self._histogram_cls(
+            name="vllm:model_forward_time_seconds",
             documentation=
-            "Histogram of time the request spent in the queue in seconds.",
+            "Histogram of time spent in the model forward pass in seconds.",
+            labelnames=labelnames,
+            buckets=[
+                0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0,
+                40.0, 50.0, 60.0
+            ])
+        self.histogram_model_execute_time_request = self._histogram_cls(
+            name="vllm:model_execute_time_seconds",
+            documentation=
+            "Histogram of time spent in the model execute function in seconds.",
             labelnames=labelnames,
             buckets=[
                 0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0,
@@ -507,10 +516,12 @@ class PrometheusStatLogger(StatLoggerBase):
         # Latency
         self._log_histogram(self.metrics.histogram_e2e_time_request,
                             stats.time_e2e_requests)
-        self._log_histogram(self.metrics.histogram_execute_time_request,
-                            stats.time_execute_requests)
         self._log_histogram(self.metrics.histogram_time_in_queue_request,
                             stats.time_in_queue_requests)
+        self._log_histogram(self.metrics.histogram_model_forward_time_request,
+                            stats.model_forward_time_requests)
+        self._log_histogram(self.metrics.histogram_model_execute_time_request,
+                            stats.model_execute_time_requests)
         # Metadata
         finished_reason_counter = CollectionsCounter(
             stats.finished_reason_requests)
