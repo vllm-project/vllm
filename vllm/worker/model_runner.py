@@ -1303,6 +1303,10 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         with set_compile_context(batch_size_capture_list):
             self.execute_model(model_input, kv_caches, intermediate_tensors)
         torch.cuda.synchronize()
+        # Cleanup
+        if self.lora_config:
+            assert self.lora_manager is not None
+            self.remove_all_loras(()
         return
 
     def remove_all_loras(self):

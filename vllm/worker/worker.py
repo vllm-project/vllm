@@ -270,9 +270,6 @@ class Worker(LocalOrDistributedWorkerBase):
             available_kv_cache_memory / (1024**3),
             self.cache_config.gpu_memory_utilization)
 
-        # Final cleanup
-        if self.model_runner.lora_manager:
-            self.model_runner.remove_all_loras()
         gc.collect()
 
         return num_gpu_blocks, num_cpu_blocks
