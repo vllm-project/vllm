@@ -226,9 +226,13 @@ class FusedMoE(torch.nn.Module):
         self.num_expert_group = num_expert_group
         self.topk_group = topk_group
         self.custom_routing_function = custom_routing_function
-        if current_platform.is_hpu():
-            from vllm_hpu_extension.ops import StaticFusedMOE
-            self.hpu_static_fused_moe = StaticFusedMOE(self.num_experts)
+        if is_hpu:
+            from vllm_hpu_extension.ops import DynamicFusedMOE, StaticFusedMOE
+
+            from vllm.model_executor.layers.quantization.inc import INCConfig
+            selected_fused_moe = (StaticFusedMOE if isinstance(
+                quant_config, INCConfig) else DynamicFusedMOE)
+            self.hpu_static_fused_moe = selected_fused_moe(self.num_experts)
 
         if quant_config is None:
             self.quant_method: Optional[QuantizeMethodBase] = (
@@ -321,8 +325,10 @@ class FusedMoE(torch.nn.Module):
         expert_data.copy_(loaded_weight)
 
         if is_hpu:
-            self.hpu_static_fused_moe.w13_list[expert_id].set_weight(
-                orig_exp_data)
+            from vllm_hpu_extension.ops import StaticFusedMOE
+            if isinstance(self.hpu_static_fused_moe, StaticFusedMOE):
+                self.hpu_static_fused_moe.w13_list[expert_id].set_weight(
+                    orig_exp_data)
 
     def _load_w2(self,
                  expert_data: torch.Tensor,
@@ -341,8 +347,10 @@ class FusedMoE(torch.nn.Module):
         # w2, down_proj: Load into only logical weight of w2.
         expert_data.copy_(loaded_weight)
         if is_hpu:
-            self.hpu_static_fused_moe.w2_list[expert_id].set_weight(
-                expert_data)
+            from vllm_hpu_extension.ops import StaticFusedMOE
+            if isinstance(self.hpu_static_fused_moe, StaticFusedMOE):
+                self.hpu_static_fused_moe.w2_list[expert_id].set_weight(
+                    expert_data)
 
     def _load_single_value(self, param: torch.nn.Parameter,
                            loaded_weight: torch.Tensor, expert_id: int):
