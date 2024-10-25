@@ -83,9 +83,11 @@ class BaseLogitsProcessor:
         # eg. Llama 3.2 Vision models have an `<|image|>` token with id 128256
         # but scores.shape == torch.Size([128256])
         # Using NumPy is faster for filtering token ids
-        allowed_tokens = np.array(allowed_tokens)
-        allowed_tokens = allowed_tokens[allowed_tokens < scores.shape[-1]]
-        mask[allowed_tokens] = 0
+        allowed_tokens = np.array(allowed_tokens, dtype=np.int64)
+        allowed_tokens = torch.tensor(allowed_tokens, device=scores.device)
+        allowed_tokens = allowed_tokens.masked_select(
+            allowed_tokens < scores.shape[-1])
+        mask.index_fill_(0, allowed_tokens, 0)
         scores.add_(mask)
         return scores
 
