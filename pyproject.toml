@@ -6,7 +6,7 @@ requires = [
     "packaging",
     "setuptools>=61",
     "setuptools-scm>=8.0",
-    "torch == 2.5.0 --extra-index-url https://download.pytorch.org/whl/cu121",
+    "torch == 2.5.0",
     "wheel",
     "jinja2",
 ]
