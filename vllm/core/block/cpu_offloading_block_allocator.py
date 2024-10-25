@@ -68,7 +68,7 @@ class CpuOffloadingBlockAllocator(CpuGpuBlockAllocator):
         """
         assert num_gpu_blocks < num_cpu_blocks, "CPU offloading block "\
             "allocator requires the allocated CPU memory capacity to be larger"\
-            "than GPU memory capacity."
+            " than GPU memory capacity."
         block_ids = list(range(num_gpu_blocks + num_cpu_blocks))
         gpu_block_ids = block_ids[:num_gpu_blocks]
         cpu_block_ids = block_ids[num_gpu_blocks:]
@@ -101,7 +101,7 @@ class CpuOffloadingBlockAllocator(CpuGpuBlockAllocator):
             & gpu_block_allocator.all_block_ids
         ), "cpu and gpu block allocators can't have intersection of block ids"
 
-        super.__init__(cpu_block_allocator, gpu_block_allocator)
+        super().__init__(cpu_block_allocator, gpu_block_allocator)
         
         """
         GPU block should only be in one of the following three status:
