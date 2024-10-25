@@ -134,6 +134,7 @@ class ModelConfig:
                  enforce_eager: Optional[bool] = None,
                  max_context_len_to_capture: Optional[int] = None,
                  max_seq_len_to_capture: Optional[int] = None,
+                 max_batch_size_to_capture: Optional[int] = None,
                  max_logprobs: int = 20,
                  disable_sliding_window: bool = False,
                  skip_tokenizer_init: bool = False,
@@ -165,6 +166,7 @@ class ModelConfig:
             raise ValueError("`max_context_len_to_capture` is deprecated. "
                              "Use `max_seq_len_to_capture` instead.")
         self.max_seq_len_to_capture = max_seq_len_to_capture
+        self.max_batch_size_to_capture = max_batch_size_to_capture
         self.max_logprobs = max_logprobs
         self.disable_sliding_window = disable_sliding_window
         self.skip_tokenizer_init = skip_tokenizer_init

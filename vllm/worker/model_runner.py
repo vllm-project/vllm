@@ -979,7 +979,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         self.block_size = cache_config.block_size
         self.max_seq_len_to_capture = self.model_config.max_seq_len_to_capture
         self.max_batchsize_to_capture = _get_max_graph_batch_size(
-            self.scheduler_config.max_num_seqs)
+            self.scheduler_config.max_num_seqs,
+            self.model_config.max_batch_size_to_capture)
 
         self.graph_runners: List[Dict[int, CUDAGraphRunner]] = [
             {} for _ in range(self.parallel_config.pipeline_parallel_size)
@@ -1905,7 +1906,9 @@ def _get_graph_batch_size(batch_size: int) -> int:
                 _BATCH_SIZE_ALIGNMENT * _BATCH_SIZE_ALIGNMENT)
 
 
-def _get_max_graph_batch_size(max_num_seqs: int) -> int:
+def _get_max_graph_batch_size(
+        max_num_seqs: int,
+        max_batch_size_to_capture: Optional[int]) -> int:
     """
     max_num_seqs: Maximum number of sequences in a batch.
     _BATCH_SIZES_TO_CAPTURE: all the sizes that we want to capture.
@@ -1917,7 +1920,10 @@ def _get_max_graph_batch_size(max_num_seqs: int) -> int:
     if not, it means the padded size is larger than the largest size in
     _BATCH_SIZES_TO_CAPTURE, return the largest size in _BATCH_SIZES_TO_CAPTURE.
     """
-    padded_size = _get_graph_batch_size(max_num_seqs)
+    if max_batch_size_to_capture is None:
+        max_batch_size_to_capture = max_num_seqs
+    max_batch_size_to_capture = min(max_batch_size_to_capture, max_num_seqs)
+    padded_size = _get_graph_batch_size(max_batch_size_to_capture)
     if padded_size in _BATCH_SIZES_TO_CAPTURE:
         return padded_size
     assert padded_size > _BATCH_SIZES_TO_CAPTURE[-1]
