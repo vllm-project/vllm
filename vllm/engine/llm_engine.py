@@ -1744,7 +1744,7 @@ class LLMEngine:
                             seq_group.metrics.time_in_queue)
                     if seq_group.metrics.model_forward_time is not None:
                         model_forward_time_requests.append(
-                            seq_group.metrics.model_forward_time)
+                            seq_group.metrics.model_forward_time / 1000)
                     if seq_group.metrics.model_execute_time is not None:
                         model_execute_time_requests.append(
                             seq_group.metrics.model_execute_time)
