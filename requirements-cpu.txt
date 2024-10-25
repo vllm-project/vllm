@@ -2,5 +2,5 @@
 -r requirements-common.txt
 
 # Dependencies for x86_64 CPUs
-torch == 2.5.0+cpu; platform_machine != "ppc64le"
-torchvision; platform_machine != "ppc64le"   # required for the image processor of phi3v, this must be updated alongside torch
+torch == 2.5.0+cpu --extra-index-url https://download.pytorch.org/whl/cu121; platform_machine != "ppc64le"
+torchvision --extra-index-url https://download.pytorch.org/whl/cu121; platform_machine != "ppc64le"   # required for the image processor of phi3v, this must be updated alongside torch
