@@ -128,7 +128,7 @@ class EngineArgs:
     enforce_eager: Optional[bool] = None
     max_context_len_to_capture: Optional[int] = None
     max_seq_len_to_capture: int = 8192
-    max_batch_size_to_capture: Optional[int] = None
+    max_batchsize_to_capture: Optional[int] = None
     disable_custom_all_reduce: bool = False
     tokenizer_pool_size: int = 0
     # Note: Specifying a tokenizer pool by passing a class
@@ -515,9 +515,9 @@ class EngineArgs:
                             'Additionally for encoder-decoder models, if the '
                             'sequence length of the encoder input is larger '
                             'than this, we fall back to the eager mode.')
-        parser.add_argument('--max-batch-size-to-capture',
+        parser.add_argument('--max-batchsize-to-capture',
                             type=int,
-                            default=EngineArgs.max_batch_size_to_capture,
+                            default=EngineArgs.max_batchsize_to_capture,
                             help='Maximum batch size covered by CUDA '
                             'graphs. When the batch size is larger than '
                             'this, we fall back to eager mode. ')
@@ -889,6 +889,7 @@ class EngineArgs:
             enforce_eager=self.enforce_eager,
             max_context_len_to_capture=self.max_context_len_to_capture,
             max_seq_len_to_capture=self.max_seq_len_to_capture,
+            max_batchsize_to_capture=self.max_batchsize_to_capture,
             max_logprobs=self.max_logprobs,
             disable_sliding_window=self.disable_sliding_window,
             skip_tokenizer_init=self.skip_tokenizer_init,
