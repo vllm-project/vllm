@@ -4,12 +4,20 @@ import sys
 import json
 import argparse
 from tqdm import tqdm
+import uvloop
+import time
 
 from vllm import LLM, SamplingParams
 from vllm import ModelRegistry
+from vllm.entrypoints.openai.api_server import build_async_engine_client_from_engine_args
+from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.utils import merge_async_iterators
+from vllm.inputs.data import TokensPrompt
+from vllm.engine.multiprocessing.client import MQLLMEngineClient
 
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from tt_metal.models.demos.t3000.llama2_70b.tt.llama_generation import TtLlamaModelForGeneration
+ModelRegistry.register_model("TTLlamaForCausalLM", TtLlamaModelForGeneration)
 
 
 def run_inference(
@@ -20,7 +28,21 @@ def run_inference(
     measure_perf=False,
     perf_prompt_len=None,
     greedy_sampling=False,  # Option to use greedy decoding instead of top-k/p
+    async_engine=False,
 ):
+    # LLM args
+    engine_kw_args = {
+        "model": "meta-llama/Meta-Llama-3.1-70B",
+        "block_size": 64,
+        "max_num_seqs": max_seqs_in_batch,
+        "max_model_len": 131072,
+        "disable_log_stats": False,
+        "max_num_batched_tokens": 131072,
+        "log_global_stats": True if measure_perf else False,
+        "num_scheduler_steps": 10,
+        "disable_async_output_proc": True,
+    }
+    
     # Generation args
     ignore_eos = True if measure_perf else False
 
@@ -29,18 +51,7 @@ def run_inference(
     else:
         sampling_params = SamplingParams(max_tokens=max_tokens, ignore_eos=ignore_eos, top_k=10, top_p=0.9, temperature=1.0)
 
-    # Create an LLM.
-    ModelRegistry.register_model("TTLlamaForCausalLM", TtLlamaModelForGeneration)
-    llm = LLM(
-        model="meta-llama/Meta-Llama-3.1-70B", 
-        block_size=64, 
-        max_num_seqs=max_seqs_in_batch, 
-        max_model_len=131072, 
-        disable_log_stats=False, 
-        max_num_batched_tokens=131072,
-        num_scheduler_steps=10,
-    )
-
+    # Prepare inputs
     if not measure_perf:
         # Load prompts from a JSON file
         with open(prompts_json, 'r') as file:
@@ -49,59 +60,67 @@ def run_inference(
         if num_repeat_prompts is not None:
             prompts = prompts * num_repeat_prompts
         print("Number of prompts:", len(prompts))
-
-        generate_tokens(llm, prompts, sampling_params, print_output=True)
     else:
-        print("Note: Ignoring prompts for performance measurement")
-        run_inference_perf(llm, sampling_params, max_seqs_in_batch, max_tokens, input_prompt_len=perf_prompt_len)
+        assert perf_prompt_len is not None, "perf_prompt_len is required to generate dummy prompts"
+        print("Measuring performance with dummy prompts of length", perf_prompt_len)
+        prompt_token_ids = [[0]*perf_prompt_len]*max_seqs_in_batch  # dummy prompts
+        sampling_params = sampling_params[:max_seqs_in_batch] if isinstance(sampling_params, list) else sampling_params
+
+        # Set an arbitrary max_tokens to simulate generating multiple tokens consecutively
+        print("Generating prompts with output length", max_tokens)
+        sampling_params.max_tokens = max_tokens
+
+        max_model_len = engine_kw_args["max_model_len"]
+        assert_str = f"prompt length ({perf_prompt_len}) + num generated tokens ({sampling_params.max_tokens}) will exceed max_model_len ({max_model_len})"
+        assert perf_prompt_len + sampling_params.max_tokens <= max_model_len, assert_str
+
+    # Create and run LLM
+    if not async_engine:
+        llm = LLM(**engine_kw_args)
+        if not measure_perf:
+            generate_tokens(llm, prompts, sampling_params, print_output=True)
+        else:
+            run_inference_perf(llm, prompt_token_ids, sampling_params)
+    else:
+        print("Using async engine")
+        engine_args = AsyncEngineArgs(**engine_kw_args)
+        async def _run_inference_async():
+            async with build_async_engine_client_from_engine_args(engine_args) as llm:
+                if not measure_perf:
+                    await generate_tokens_async(llm, prompts, sampling_params, print_output=True)
+                else:
+                    await run_inference_perf_async(llm, prompt_token_ids, sampling_params)
+        uvloop.run(_run_inference_async())
 
 
 def run_inference_perf(
     llm : LLM,
+    prompt_token_ids,
     sampling_params,
-    max_seqs_in_batch,
-    max_tokens,
-    prompts=None,
-    input_prompt_len=None,  # Used to generate dummy prompts if prompts is None
+    N_warmup=1,
+    N_inference=4,
 ):
-    assert llm.llm_engine.log_stats, "disable_log_stats=False is required for llm to use stat loggers"
-    if prompts is not None:
-        print("Measuring performance with given prompts")
-        prompts = prompts[:max_seqs_in_batch]  # Only run a single batch for performance measurement
-    else:
-        assert input_prompt_len is not None, "input_prompt_len is required to generate dummy prompts"
-        print("Measuring performance with dummy prompts of length", input_prompt_len)
-        prompt_token_ids = [[0]*input_prompt_len]*max_seqs_in_batch  # dummy prompts
-    sampling_params = sampling_params[:max_seqs_in_batch] if isinstance(sampling_params, list) else sampling_params
-
-    # Set an arbitrary max_tokens to simulate generating multiple tokens consecutively
-    print("Generating prompts with output length", max_tokens)
-    sampling_params.max_tokens = max_tokens
-
-    assert_str = f"prompt length ({input_prompt_len}) + num generated tokens ({sampling_params.max_tokens}) will exceed max_model_len ({llm.llm_engine.model_config.max_model_len})"
-    assert input_prompt_len + sampling_params.max_tokens <= llm.llm_engine.model_config.max_model_len, assert_str
-
-    # Compile run
-    print("Starting compile run")
-    generate_tokens(llm, prompts, sampling_params, prompt_token_ids, print_output=False)
-    print("Finished compile run")
-    llm.llm_engine.stat_loggers['global'].reset()  # Reset stats before inference run
-
-    # Inference runs
-    print("Starting inference runs")
-    N_warmup = 1
-    N_inference = 5
     for i in tqdm(range(N_inference), desc="Inference runs"):
-        if i == N_warmup:  # Reset stats after warmup
-            llm.llm_engine.stat_loggers['global'].reset()
-        generate_tokens(llm, prompts, sampling_params, prompt_token_ids, print_output=False)
-    print("Finished inference runs")
+        if i == N_warmup:
+            start_time = time.perf_counter()
+        generate_tokens(llm, None, sampling_params, prompt_token_ids, print_output=False)
+    avg_time = (time.perf_counter()-start_time) / (N_inference-N_warmup)
+    print(f"Average time taken per inference run: {avg_time:.2f} s")
 
-    # Collect stats
-    ttft = llm.llm_engine.stat_loggers['global'].time_to_first_token.avg / max_seqs_in_batch
-    tpot = llm.llm_engine.stat_loggers['global'].time_per_output_token.avg
-    print(f"Average time to first token per user: {ttft} s")
-    print(f"Average decode throughput: {1/tpot} t/s/u")
+
+async def run_inference_perf_async(
+    llm : LLM,
+    prompt_token_ids,
+    sampling_params,
+    N_warmup=1,
+    N_inference=4,
+):
+    for i in tqdm(range(N_inference), desc="Inference runs"):
+        if i == N_warmup:
+            start_time = time.perf_counter()
+        await generate_tokens_async(llm, None, sampling_params, prompt_token_ids, print_output=False)
+    avg_time = (time.perf_counter()-start_time) / (N_inference-N_warmup)
+    print(f"Average time taken per inference run: {avg_time:.2f} s")
 
 
 def generate_tokens(llm : LLM, prompts, sampling_params, prompt_token_ids=None, print_output=True):
@@ -116,6 +135,29 @@ def generate_tokens(llm : LLM, prompts, sampling_params, prompt_token_ids=None, 
             print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 
 
+async def generate_tokens_async(llm : MQLLMEngineClient, prompts, sampling_params, prompt_token_ids=None, print_output=True):
+    # async def _generate_tokens_async(llm, prompts, sampling_params, prompt_token_ids, print_output):
+    # Use tokenized prompts if provided
+    if prompt_token_ids is not None:
+        prompts = []
+        for single_prompt_token_ids in prompt_token_ids:
+            prompts.append(TokensPrompt(prompt_token_ids=single_prompt_token_ids))
+    
+    if not isinstance(sampling_params, list):
+        sampling_params = [sampling_params] * len(prompts)
+    
+    generators = []
+    for i, (prompt, sp) in enumerate(zip(prompts, sampling_params)):
+        generator = llm.generate(prompt, sp, request_id=f"test{i}")
+        generators.append(generator)
+    all_gens = merge_async_iterators(*generators)
+    async for i, res in all_gens:
+        prompt = res.prompt
+        generated_text = res.outputs[0].text
+        if print_output and res.finished:
+            print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--prompts_json", type=str, default="tt_metal/prompts.json", help="Path to JSON file containing prompts")
@@ -124,6 +166,7 @@ if __name__ == "__main__":
     parser.add_argument("--max_tokens", type=int, default=128, help="Length of outputs")
     parser.add_argument("--greedy_sampling", action="store_true", help="Use greedy decoding instead of top-k/p")
     parser.add_argument("--max_seqs_in_batch", type=int, default=32, help="Maximum batch size for inference")
+    parser.add_argument("--async_engine", action="store_true", help="Use async engine")
     args = parser.parse_args()
 
     run_inference(
@@ -132,5 +175,6 @@ if __name__ == "__main__":
         perf_prompt_len=args.perf_prompt_len,
         max_tokens=args.max_tokens,
         greedy_sampling=args.greedy_sampling,
-        max_seqs_in_batch=args.max_seqs_in_batch
+        max_seqs_in_batch=args.max_seqs_in_batch,
+        async_engine=args.async_engine,
     )

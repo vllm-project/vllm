@@ -117,7 +117,7 @@ class MQLLMEngine:
     @classmethod
     def from_vllm_config(cls, vllm_config: VllmConfig,
                          usage_context: UsageContext,
-                         disable_log_requests: bool, disable_log_stats: bool,
+                         disable_log_requests: bool, disable_log_stats: bool, log_global_stats: bool,
                          ipc_path: str) -> "MQLLMEngine":
         # Setup plugins for each process
         from vllm.plugins import load_general_plugins
@@ -133,6 +133,7 @@ class MQLLMEngine:
             use_async_sockets=use_async_sockets,
             log_requests=(not disable_log_requests),
             log_stats=(not disable_log_stats),
+            log_global_stats=log_global_stats,
         )
 
     @staticmethod
@@ -147,6 +148,7 @@ class MQLLMEngine:
             usage_context=usage_context,
             disable_log_requests=engine_args.disable_log_requests,
             disable_log_stats=engine_args.disable_log_stats,
+            log_global_stats=engine_args.log_global_stats,
         )
 
     def start(self):

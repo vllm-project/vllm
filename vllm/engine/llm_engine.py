@@ -212,6 +212,7 @@ class LLMEngine:
         vllm_config: VllmConfig,
         executor_class: Type[ExecutorBase],
         log_stats: bool,
+        log_global_stats: bool = False,  # if True and log_stats is True, log with GlobalStatLogger as well
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
         input_registry: InputRegistry = INPUT_REGISTRY,
@@ -379,9 +380,7 @@ class LLMEngine:
                 # before prometheus_client is imported.
                 # See https://prometheus.github.io/client_python/multiprocess/
                 from vllm.engine.metrics import (LoggingStatLogger,
-                                                 PrometheusStatLogger,
-                                                 GlobalStatLogger)
-
+                                                 PrometheusStatLogger)
                 self.stat_loggers = {
                     "logging":
                     LoggingStatLogger(
@@ -393,8 +392,10 @@ class LLMEngine:
                         labels=dict(
                             model_name=self.model_config.served_model_name),
                         vllm_config=vllm_config),
-                    "global": GlobalStatLogger(),
                 }
+                if log_global_stats:
+                    from vllm.engine.metrics import GlobalStatLogger
+                    self.stat_loggers["global"] = GlobalStatLogger()
                 self.stat_loggers["prometheus"].info("cache_config",
                                                      self.cache_config)
 
@@ -496,11 +497,13 @@ class LLMEngine:
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
         disable_log_stats: bool = False,
+        log_global_stats: bool = False,
     ) -> "LLMEngine":
         return cls(
             vllm_config=vllm_config,
             executor_class=cls._get_executor_cls(vllm_config),
             log_stats=(not disable_log_stats),
+            log_global_stats=log_global_stats,
             usage_context=usage_context,
             stat_loggers=stat_loggers,
         )
@@ -526,6 +529,7 @@ class LLMEngine:
             usage_context=usage_context,
             stat_loggers=stat_loggers,
             disable_log_stats=engine_args.disable_log_stats,
+            log_global_stats=engine_args.log_global_stats,
         )
 
     def __reduce__(self):
@@ -1182,6 +1186,12 @@ class LLMEngine:
         if finished_now:
             for scheduler in self.scheduler:
                 scheduler.free_finished_seq_groups()
+
+        # Log and reset global stats if there are no unfinished requests left
+        if not self.has_unfinished_requests():
+            if self.log_stats and 'global' in self.stat_loggers:
+                self.stat_loggers['global'].log_out()
+                self.stat_loggers['global'].reset()
 
         # For multi-step without streaming, don't create outputs each iteration
         if not is_last_step and not ctx.multi_step_stream_outputs:

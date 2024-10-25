@@ -1,6 +1,7 @@
 import dataclasses
+import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Type, Union
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Type, Union
 
 import torch
 import torch.nn.functional as F
@@ -45,6 +46,7 @@ class TTModelInput(ModelRunnerInputBase):
     tt_sampling_params: Optional[TTSamplingParams] = None
     is_first_multi_step: bool = True
     is_last_step: bool = True
+    async_callback: Optional[Callable] = None
 
     def as_broadcastable_tensor_dict(
             self) -> Dict[str, Union[int, torch.Tensor]]:
@@ -264,6 +266,7 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
         num_steps: int = 1,
     ) -> Optional[List[SamplerOutput]]:
         is_decode = model_input.prompt_lens is None
+        use_async_out_proc = model_input.async_callback is not None
         if not is_decode:
             assert num_steps == 1, "Num steps must be 1 for prefill"
 
@@ -296,17 +299,33 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                         input_tokens=new_input_tokens,
                         input_positions=new_input_positions
                     )
-        
+                    
+            if use_async_out_proc:
+                model_input.async_callback()  # trigger output processor
+
         sampler_outputs = []  # no outputs unless last step
         if model_input.is_last_step:  # always true if not using multi-step
             num_outputs = len(self.cached_step_outputs)
             for i in range(num_outputs):
                 next_token_ids = self.cached_step_outputs.pop(0)
+                # TODO: add read back from device once model can keep executing steps on device
                 sampler_output = self._make_sampler_output(
                     next_token_ids,
                     model_input.seq_groups
                 )
                 sampler_outputs.append(sampler_output)
+                if i < num_outputs - 1 and use_async_out_proc:
+                    ctx = model_input.async_callback.keywords["ctx"]
+                    ctx.append_output(
+                        outputs=[sampler_output],
+                        seq_group_metadata_list=ctx.seq_group_metadata_list,
+                        scheduler_outputs=ctx.scheduler_outputs,
+                        is_async=False,
+                        is_last_step=False,
+                        is_first_step_output=i == 0)
+                    model_input.async_callback()  # trigger output processor
+            if use_async_out_proc:
+                return [sampler_outputs[-1]]  # only return the last output for async output processor
         
         return sampler_outputs
     
