@@ -1742,12 +1742,12 @@ class LLMEngine:
                     if seq_group.metrics.time_in_queue is not None:
                         time_in_queue_requests.append(
                             seq_group.metrics.time_in_queue)
-                    if seq_group.metrics.model_execute_time is not None:
-                        model_execute_time_requests.append(
-                            seq_group.metrics.model_execute_time)
                     if seq_group.metrics.model_forward_time is not None:
                         model_forward_time_requests.append(
                             seq_group.metrics.model_forward_time)
+                    if seq_group.metrics.model_execute_time is not None:
+                        model_execute_time_requests.append(
+                            seq_group.metrics.model_execute_time)
                     # Metadata
                     num_prompt_tokens_requests.append(
                         len(seq_group.prompt_token_ids))
