@@ -12,15 +12,12 @@ throughput. Thanks Yifan for this idea.
 This implementation also allows vLLM to gracefully handle preemption by 
 recomputation.
 """
-from typing import Dict, FrozenSet, List, Optional, Tuple, Set, Deque
 from collections import deque
+from typing import Deque, Dict, List, Optional, Tuple
 
-from vllm.core.block.interfaces import (Block, BlockAllocator, BlockId,
-                                        DeviceAwareBlockAllocator)
-from vllm.core.block.naive_block import NaiveBlock, NaiveBlockAllocator
+from vllm.core.block.cpu_gpu_block_allocator import CpuGpuBlockAllocator
+from vllm.core.block.interfaces import Block, DeviceAwareBlockAllocator
 from vllm.core.block.prefix_caching_block import PrefixCachingBlockAllocator
-from vllm.core.block.cpu_gpu_block_allocator import CpuGpuBlockAllocator, \
-    NullBlock
 from vllm.utils import Device
 
 
@@ -37,6 +34,8 @@ class CpuOffloadingBlockAllocator(CpuGpuBlockAllocator):
     This implementation also allows vLLM to gracefully handle preemption by 
     recomputation.
     """
+
+    allocators: Dict[Device, PrefixCachingBlockAllocator]
 
     @staticmethod
     def create(
@@ -59,8 +58,8 @@ class CpuOffloadingBlockAllocator(CpuGpuBlockAllocator):
             block_size (int): The size of each block in number of tokens.
 
         Returns:
-            DeviceAwareBlockAllocator: A CpuOffloadingBlockAllocator instance with the
-                specified configuration.
+            DeviceAwareBlockAllocator: A CpuOffloadingBlockAllocator instance 
+                with the specified configuration.
 
         Notes:
             - The block IDs are assigned contiguously, with GPU block IDs coming
@@ -102,7 +101,11 @@ class CpuOffloadingBlockAllocator(CpuGpuBlockAllocator):
         ), "cpu and gpu block allocators can't have intersection of block ids"
 
         super().__init__(cpu_block_allocator, gpu_block_allocator)
-        
+        self._allocators: Dict[Device,
+                               PrefixCachingBlockAllocator] = {  # type: ignore
+                                   Device.CPU: cpu_block_allocator,
+                                   Device.GPU: gpu_block_allocator
+                               }
         """
         GPU block should only be in one of the following three status:
           uncached: allocated blocks that didn't hit any cache
@@ -112,7 +115,6 @@ class CpuOffloadingBlockAllocator(CpuGpuBlockAllocator):
         to specially handle cached blocks. So we only track uncached blocks
         """
         self._uncached_blocks: Deque[Block] = deque()
-
         """
         We probe CPU cache hit by trying to allocate a CPU 
         block and see if it is computed.
@@ -135,11 +137,14 @@ class CpuOffloadingBlockAllocator(CpuGpuBlockAllocator):
         Returns:
             Block: The newly allocated mutable block.
         """
-        assert device == Device.GPU, "Calls to CPU offloading block allocator should always use Device.GPU --- CPU offloading block allocator handles CPU offloading internally."
+        assert device == Device.GPU, "Calls to CPU offloading block allocator "\
+            "should always use Device.GPU --- CPU offloading block allocator "\
+            "handles CPU offloading internally."\
         # mark this block as uncached
+
         block = self._allocators[device].allocate_mutable_block(prev_block)
         self._uncached_blocks.append(block)
-        return block_id
+        return block
 
     def allocate_immutable_blocks(self, prev_block: Optional[Block],
                                   block_token_ids: List[List[int]],
@@ -159,7 +164,9 @@ class CpuOffloadingBlockAllocator(CpuGpuBlockAllocator):
                 containing the provided block token IDs.
         """
 
-        assert device == Device.GPU, "Calls to CPU offloading block allocator should always use Device.GPU --- CPU offloading block allocator handles CPU offloading internally."
+        assert device == Device.GPU, "Calls to CPU offloading block allocator "\
+            "should always use Device.GPU --- CPU offloading block allocator"\
+            "handles CPU offloading internally."
 
         # repeatedly call allocate_immutable_block
         # because it handles CPU-GPU offloading related logics.
@@ -193,12 +200,13 @@ class CpuOffloadingBlockAllocator(CpuGpuBlockAllocator):
             " should always use Device.GPU --- CPU offloading block allocator"\
             " handles CPU offloading internally."
 
-        # allocate a GPU block        
+        # allocate a GPU block
         block = self._allocators[device].allocate_immutable_block(
-            prev_block, block_token_ids)
+            prev_block, token_ids)
         block_id = block.block_id
+        assert block_id is not None
         block_computed = self._allocators[device].block_is_computed(block_id)
-        
+
         # deal with prefix caching, three cases in total:
         # 1. cache hit on GPU
         # 2. no cache hit on GPU but cache hit on CPU
@@ -208,18 +216,19 @@ class CpuOffloadingBlockAllocator(CpuGpuBlockAllocator):
             pass
         else:
             # check if we can hit cache on CPU by trying to allocate CPU block
-            cpu_block = self.allocator[Device.CPU].allocate_immutable_block(
-                prev_block, block_token_ids)
+            cpu_block = self._allocators[Device.CPU].allocate_immutable_block(
+                prev_block, token_ids)
             cpu_block_id = cpu_block.block_id
-            cpu_block_computed = self.allocator[Device.CPU].block_is_computed(
-                cpu_block_id
-            )
+            assert cpu_block_id is not None
+            cpu_block_computed = self._allocators[
+                Device.CPU].block_is_computed(cpu_block_id)
             if cpu_block_computed:
                 # CPU cache hit
                 # mark the GPU block as computed
-                self._allocator[Device.GPU].mark_blocks_as_computed([block_id])
+                self._allocators[Device.GPU].mark_blocks_as_computed(
+                    [block_id])
                 # copy the CPU cache to GPU
-                self._swap_mapping[cpu_block_id] = gpu_block_id
+                self._swap_mapping[cpu_block_id] = block_id
                 # and don't free this block until `get_and_reset_swap` is called
                 self._allocated_cpu_blocks.append(cpu_block)
             else:
@@ -227,15 +236,15 @@ class CpuOffloadingBlockAllocator(CpuGpuBlockAllocator):
                 # mark the GPU block as uncached
                 self._uncached_blocks.append(block)
                 # and free cpu block
-                self.allocator[Device.CPU].free(cpu_block)
+                self._allocators[Device.CPU].free(cpu_block)
 
         return block
 
     def swap(self, blocks: List[Block], src_device: Device,
              dst_device: Device) -> Dict[int, int]:
-        
-            raise NotImplementedError("CPU offloading block allocator only "
-                                      "support preemption by recomputation.")
+
+        raise NotImplementedError("CPU offloading block allocator only "
+                                  "support preemption by recomputation.")
 
     def get_and_reset_swaps(self, now: float) -> List[Tuple[int, int]]:
         """Returns and clears the mapping of source to destination block IDs.
@@ -254,55 +263,55 @@ class CpuOffloadingBlockAllocator(CpuGpuBlockAllocator):
         Returns:
             List[Tuple[int, int]]: A mapping of source to destination block IDs.
         """
-        
+
         allocator = self._allocators[Device.GPU]
-        cpu_allocator = self._allocator[Device.CPU]
-        
+        cpu_allocator = self._allocators[Device.CPU]
+
         new_uncached_blocks: Deque[Block] = deque()
-        
+
         while self._uncached_blocks:
             block = self._uncached_blocks.pop()
             block_id = block.block_id
-            
+
             # check if this block is freed
             if block_id is None:
                 # this block is already freed, no longer need to copy it to CPU
                 continue
-            
+
             refcount = allocator._refcounter.get(block_id)
             assert refcount > 0, "A freed block should have block_id None"
-            
+
             # check if this block is computed
             computed = allocator.block_is_computed(block_id)
-            if computed: # This block is computed, copy it to CPU
+            if computed:  # This block is computed, copy it to CPU
                 # allocate a block on CPU
                 cpu_block = cpu_allocator.allocate_immutable_block(
-                    prev_block = block._prev_block,
-                    token_ids = block._token_ids
-                )
+                    prev_block=block.prev_block, token_ids=block.token_ids)
                 self._allocated_cpu_blocks.append(cpu_block)
-                
+
                 # copy the GPU block to CPU
+                assert cpu_block.block_id is not None
                 self._swap_mapping[block_id] = cpu_block.block_id
-                
+
                 continue
-            
+
             # this block is neither freed nor computed
             # keep marking it as uncached
             new_uncached_blocks.append(block)
-            
+
         # update uncached blocks
         self._uncached_blocks = new_uncached_blocks
-                
+
         # iterate over allocated CPU blocks, update access time and free them
         # need to update access time so that CPU evictor can work
         while self._allocated_cpu_blocks:
             cpu_block = self._allocated_cpu_blocks.pop()
+            assert cpu_block.block_id is not None
             # update the access time
             cpu_allocator.mark_blocks_as_accessed([cpu_block.block_id], now)
             # free the block
             cpu_allocator.free(cpu_block)
-            
+
         # return the mapping
         mapping = self._swap_mapping.copy()
         self._swap_mapping.clear()

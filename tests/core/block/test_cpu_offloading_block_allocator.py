@@ -1,6 +1,7 @@
 import pytest
 
-from vllm.core.block.cpu_offloading_block_allocator import CpuOffloadingBlockAllocator
+from vllm.core.block.cpu_offloading_block_allocator import (
+    CpuOffloadingBlockAllocator)
 from vllm.utils import Device, chunk_list
 
 
