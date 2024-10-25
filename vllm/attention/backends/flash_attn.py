@@ -211,6 +211,12 @@ class FlashAttentionMetadata(AttentionMetadata):
             block_tables=self.block_tables[self.num_prefills:],
             use_cuda_graph=self.use_cuda_graph,
         )
+        # Batch may be composed of prefill|decodes, adjust query start indices
+        # to refer to the start of decodes when the two are split apart.
+        # E.g. in tokens:[3 prefills|6 decodes], query_start_loc=[3,9] => [0,6].
+        if self._cached_decode_metadata.query_start_loc is not None:
+            qs = self._cached_decode_metadata.query_start_loc
+            self._cached_decode_metadata.query_start_loc = qs - qs[0]
         return self._cached_decode_metadata
 
     def advance_step(self,
@@ -618,8 +624,6 @@ def unified_flash_attention(
     assert current_metadata is not None
     assert isinstance(current_metadata, FlashAttentionMetadata)
     attn_metadata: FlashAttentionMetadata = current_metadata
-    assert (attn_metadata.prefill_metadata is not None
-            or attn_metadata.decode_metadata is not None)
 
     num_tokens, hidden_size = query.shape
     # Reshape the query, key, and value tensors.
@@ -651,31 +655,6 @@ def unified_flash_attention(
                 f"key : {key.shape} : #prefill tokens {num_prefill_tokens} : #decode tokens {num_decode_tokens}" # noqa
     assert value.shape[0] == num_prefill_tokens + num_decode_tokens, \
                 f"value : {value.shape} : #prefill toks {num_prefill_tokens} : #decode toks {num_decode_tokens}" # noqa
-
-    # Batch with mixed prefills and decodes (`enable_chunked_prefill` on), do a
-    # single kernel call for efficiency.
-    if (prefill_meta := attn_metadata.prefill_metadata) and (
-            decode_meta := attn_metadata.decode_metadata):
-        assert (prefill_meta.max_prefill_seq_len
-                and decode_meta.max_decode_query_len)
-        output = flash_attn_varlen_func(
-            q=query,
-            k=key_cache,
-            v=value_cache,
-            # Use cached props to avoid multiple instantiations across layers.
-            cu_seqlens_q=attn_metadata.query_start_loc,
-            cu_seqlens_k=attn_metadata.seq_start_loc,
-            max_seqlen_q=max(prefill_meta.max_prefill_seq_len,
-                             decode_meta.max_decode_query_len),
-            max_seqlen_k=max(prefill_meta.max_prefill_seq_len,
-                             decode_meta.max_decode_seq_len),
-            softmax_scale=softmax_scale,
-            causal=True,
-            alibi_slopes=alibi_slopes,
-            softcap=logits_soft_cap,
-            block_table=attn_metadata.block_tables,
-        )
-        return output.view(num_tokens, hidden_size)
 
     # Query for decode. KV is not needed because it is already cached.
     decode_query = query[num_prefill_tokens:]
@@ -730,13 +709,15 @@ def unified_flash_attention(
                 block_table=prefill_meta.block_tables,
                 softcap=logits_soft_cap,
             )
-        return prefill_output.view(num_prefill_tokens, hidden_size)
 
     if decode_meta := attn_metadata.decode_metadata:
         # Decoding run.
         # Use flash_attn_varlen_func kernel for speculative decoding
         # because different queries might have different lengths.
+        # print(f"{decode_query.shape=}")
+
         assert decode_meta.max_decode_query_len is not None
+        # use only for actual varlen decoding
         if decode_meta.max_decode_query_len > 1:
             decode_output = flash_attn_varlen_func(
                 q=decode_query,
@@ -767,7 +748,20 @@ def unified_flash_attention(
                 alibi_slopes=alibi_slopes,
                 softcap=logits_soft_cap,
             ).squeeze(1)
+
+    if prefill_output is None:
+        assert decode_output is not None
         return decode_output.view(num_decode_tokens, hidden_size)
+    if decode_output is None:
+        assert prefill_output is not None
+        return prefill_output.view(num_prefill_tokens, hidden_size)
+
+    # Chunked prefill does not work with speculative decoding.
+    # Therefore, the query length for decode should be 1 in chunked prefill.
+    assert decode_meta is not None
+    decode_output = decode_output.squeeze(1)
+    output = torch.cat([prefill_output, decode_output], dim=0)
+    return output.view(num_tokens, hidden_size)
 
 
 @unified_flash_attention.register_fake
