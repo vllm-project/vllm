@@ -1306,7 +1306,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         # Cleanup
         if self.lora_config:
             assert self.lora_manager is not None
-            self.remove_all_loras(()
+            self.remove_all_loras()
         return
 
     def remove_all_loras(self):
