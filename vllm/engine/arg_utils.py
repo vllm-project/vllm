@@ -115,6 +115,7 @@ class EngineArgs:
     max_num_seqs: int = 256
     max_logprobs: int = 20  # Default value for OpenAI Chat Completions API
     disable_log_stats: bool = False
+    log_global_stats: bool = False
     revision: Optional[str] = None
     code_revision: Optional[str] = None
     rope_scaling: Optional[dict] = None
@@ -443,6 +444,9 @@ class EngineArgs:
         parser.add_argument('--disable-log-stats',
                             action='store_true',
                             help='Disable logging statistics.')
+        parser.add_argument('--log-global-stats',
+                            action='store_true',
+                            help='Use GlobalStatLogger when log stats is enabled.')
         # Quantization settings.
         parser.add_argument('--quantization',
                             '-q',

@@ -143,6 +143,7 @@ class MQLLMEngine:
             executor_class=executor_class,
             log_requests=not engine_args.disable_log_requests,
             log_stats=not engine_args.disable_log_stats,
+            log_global_stats=engine_args.log_global_stats,
             usage_context=usage_context)
 
     def start(self):
