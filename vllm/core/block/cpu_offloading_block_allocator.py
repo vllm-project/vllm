@@ -290,7 +290,11 @@ class CpuOffloadingBlockAllocator(CpuGpuBlockAllocator):
                 # allocate a block on CPU
                 cpu_block = cpu_allocator.allocate_immutable_block(
                     prev_block=block.prev_block, token_ids=block.token_ids)
+                assert cpu_block.block_id is not None
                 self._allocated_cpu_blocks.append(cpu_block)
+
+                # mark CPU block as computed
+                cpu_allocator.mark_blocks_as_computed([cpu_block.block_id])
 
                 # copy the GPU block to CPU
                 assert cpu_block.block_id is not None
