@@ -543,6 +543,7 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             self.lm_head = PPMissingLayer()
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
+        self._pooler = Pooler(pooling_type=PoolingType.STEP, normalize=False)
 
     def forward(
         self,
@@ -564,6 +565,14 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
+
+    def pooler(
+        self,
+        hidden_states: torch.Tensor,
+        pooling_metadata: PoolingMetadata,
+    ) -> Optional[PoolerOutput]:
+        logits = self.compute_logits(hidden_states, None)
+        return self._pooler(logits, pooling_metadata)
 
     def sample(self, logits: torch.Tensor,
                sampling_metadata: SamplingMetadata) -> Optional[SamplerOutput]:

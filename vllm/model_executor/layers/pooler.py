@@ -1,3 +1,4 @@
+import os
 from enum import IntEnum
 
 import torch
@@ -13,6 +14,7 @@ class PoolingType(IntEnum):
     LAST = 0
     ALL = 1
     CLS = 2
+    STEP = 3
 
 
 class Pooler(nn.Module):
@@ -37,6 +39,9 @@ class Pooler(nn.Module):
         self.pooling_type = pooling_type
         self.normalize = normalize
         self.softmax = softmax
+        returned_token_ids = os.environ.get('RETURNED_TOKEN_IDS', '648,387')
+        self.returned_token_ids = list(map(int, returned_token_ids.split(",")))
+        self.step_tag_id = int(os.environ.get('STEP_TOKEN_ID', -1))
 
     def forward(
         self,
@@ -61,6 +66,20 @@ class Pooler(nn.Module):
             pooled_data = []
             for prompt_len in prompt_lens:
                 pooled_data.append(hidden_states[offset:offset + prompt_len])
+                offset += prompt_len
+        elif self.pooling_type == PoolingType.STEP:
+            logits = hidden_states[:, self.returned_token_ids].softmax(dim=-1)
+            offset = 0
+            pooled_data = []
+            for prompt_len, seq_data_i in zip(
+                    prompt_lens, pooling_metadata.seq_data.values()):
+                if self.step_tag_id == -1:
+                    pooled_data.append(logits[offset:offset + prompt_len])
+                else:
+                    step_idxs = torch.tensor(
+                        seq_data_i.prompt_token_ids) == self.step_tag_id
+                    pooled_data.append(logits[offset:offset +
+                                              prompt_len][step_idxs])
                 offset += prompt_len
         else:
             raise ValueError(f"Invalid pooling type: {self.pooling_type}")
