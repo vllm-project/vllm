@@ -981,17 +981,9 @@ class EngineArgs:
 
         # Use dynamic forward patch if draft worker is on CPU
         if self.cpu_draft_worker:
-            try:
-                import intel_extension_for_pytorch as ipex
-                assert hasattr(ipex.llm, "modules")
-                os.environ['VLLM_DYNAMIC_FORWARD'] = "1"
-            except ImportError:
-                logger.warning(
-                    "No ipex found, disable cpu_draft_worker, "
-                    "please pip install intel_extension_for_pytorch "
-                    "for cpu draft worker")
-                self.cpu_draft_worker = False
-                os.environ['VLLM_DYNAMIC_FORWARD'] = "0"
+            import intel_extension_for_pytorch as ipex
+            assert hasattr(ipex.llm, "modules")
+            os.environ['VLLM_DYNAMIC_FORWARD'] = "1"
         else:
             os.environ['VLLM_DYNAMIC_FORWARD'] = "0"
 
