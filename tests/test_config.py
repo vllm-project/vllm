@@ -1,6 +1,7 @@
 import pytest
 
 from vllm.config import ModelConfig
+from vllm.model_executor.layers.pooler import PoolingConfig, PoolingType
 
 
 @pytest.mark.parametrize(("model_id", "expected_task"), [
@@ -100,6 +101,45 @@ def test_get_sliding_window():
 
     mistral_model_config.hf_config.sliding_window = TEST_SLIDING_WINDOW
     assert mistral_model_config.get_sliding_window() == TEST_SLIDING_WINDOW
+
+
+def test_get_pooling_config():
+    model_id = "sentence-transformers/all-MiniLM-L12-v2"
+    minilm_model_config = ModelConfig(
+        model_id,
+        task="auto",
+        tokenizer=model_id,
+        tokenizer_mode="auto",
+        trust_remote_code=False,
+        seed=0,
+        dtype="float16",
+        revision=None,
+    )
+
+    minilm_pooling_config = minilm_model_config.get_pooling_config()
+
+    assert isinstance(minilm_model_config.pooling_config, PoolingConfig)
+    assert minilm_pooling_config.normalize
+    assert isinstance(minilm_pooling_config.pooling_type, PoolingType)
+    assert minilm_pooling_config.pooling_type == PoolingType.MEAN
+
+
+def test_get_bert_tokenization_sentence_transformer_config():
+    bge_model_config = ModelConfig(
+        model="BAAI/bge-base-en-v1.5",
+        task="auto",
+        tokenizer="BAAI/bge-base-en-v1.5",
+        tokenizer_mode="auto",
+        trust_remote_code=False,
+        seed=0,
+        dtype="float16",
+        revision=None,
+    )
+
+    bert_bge_model_config = bge_model_config._get_bert_config()
+
+    assert bert_bge_model_config["max_seq_length"] == 512
+    assert bert_bge_model_config["do_lower_case"]
 
 
 def test_rope_customization():

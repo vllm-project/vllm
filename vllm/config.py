@@ -9,13 +9,15 @@ from transformers import PretrainedConfig
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.model_executor.layers.pooler import PoolingConfig
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.model_executor.models import ModelRegistry
 from vllm.platforms import current_platform
 from vllm.tracing import is_otel_available, otel_import_error_traceback
-from vllm.transformers_utils.config import (ConfigFormat, get_config,
-                                            get_hf_image_processor_config,
-                                            get_hf_text_config)
+from vllm.transformers_utils.config import (
+    ConfigFormat, get_config, get_hf_image_processor_config,
+    get_hf_text_config, get_pooling_config,
+    get_sentence_transformer_tokenizer_config)
 from vllm.utils import (GiB_bytes, cuda_device_count_stateless, get_cpu_memory,
                         is_hip, is_openvino, print_warning_once)
 
@@ -110,6 +112,10 @@ class ModelConfig:
             can not be gathered from the vllm arguments. 
         config_format: The config format which shall be loaded.
             Defaults to 'auto' which defaults to 'hf'.
+        pooling_config:  pooling and normalize config from the model - 
+            only applies to sentence-transformers models. 
+        bert_config: tokenizationconfiguration dictionary for a given 
+            Sentence Transformer BERT model.
         mm_processor_kwargs: Arguments to be forwarded to the model's processor
             for multi-modal data, e.g., image processor.
     """
@@ -173,6 +179,8 @@ class ModelConfig:
                                     code_revision, rope_scaling, rope_theta,
                                     config_format)
         self.hf_text_config = get_hf_text_config(self.hf_config)
+        self.pooling_config = self.get_pooling_config()
+        self.bert_config = self._get_bert_config()
         self.hf_image_processor_config = get_hf_image_processor_config(
             self.model, revision)
         self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
@@ -205,7 +213,8 @@ class ModelConfig:
             max_model_len=max_model_len,
             disable_sliding_window=self.disable_sliding_window,
             sliding_window_len=self.get_hf_config_sliding_window(),
-            spec_target_max_model_len=spec_target_max_model_len)
+            spec_target_max_model_len=spec_target_max_model_len,
+            bert_config=self.bert_config)
         self.served_model_name = get_served_model_name(model,
                                                        served_model_name)
         self.multimodal_config = self._init_multimodal_config(
@@ -241,6 +250,10 @@ class ModelConfig:
                              "multimodal models.")
 
         return None
+
+    def _get_bert_config(self):
+        return get_sentence_transformer_tokenizer_config(
+            self.model, self.revision)
 
     def _init_attention_free(self) -> bool:
         architectures = getattr(self.hf_config, "architectures", [])
@@ -404,6 +417,13 @@ class ModelConfig:
                 "CUDA graph is not supported on BitAndBytes 8bit yet, "
                 "fallback to the eager mode.")
             self.enforce_eager = True
+
+    def get_pooling_config(self) -> Optional[PoolingConfig]:
+        pooling_config = get_pooling_config(self.model, self.revision)
+        if pooling_config is not None:
+            return PoolingConfig(pooling_config["pooling_type"],
+                                 pooling_config["normalize"])
+        return None
 
     def verify_async_output_proc(self, parallel_config, speculative_config,
                                  device_config) -> None:
@@ -1715,6 +1735,7 @@ def _get_and_verify_max_len(
     disable_sliding_window: bool,
     sliding_window_len: Optional[Union[int, List[Optional[int]]]],
     spec_target_max_model_len: Optional[int] = None,
+    bert_config: Optional[Any] = None,
 ) -> int:
     """Get and verify the model's maximum length."""
     derived_max_model_len = float("inf")
@@ -1734,6 +1755,7 @@ def _get_and_verify_max_len(
         "max_seq_length",
         "seq_len",
     ]
+
     # Choose the smallest "max_length" from the possible keys.
     max_len_key = None
     for key in possible_keys:
@@ -1797,6 +1819,9 @@ def _get_and_verify_max_len(
                     "original_max_position_embeddings"]
             derived_max_model_len *= scaling_factor
 
+    if bert_config and "max_seq_length" in bert_config:
+        derived_max_model_len = bert_config["max_seq_length"]
+
     # If the user specified a max length, make sure it is smaller than the
     # derived length from the HF model config.
     if max_model_len is None:
@@ -1829,6 +1854,7 @@ def _get_and_verify_max_len(
                 raise ValueError(
                     f"{msg} To allow overriding this maximum, set "
                     "the env var VLLM_ALLOW_LONG_MAX_MODEL_LEN=1")
+
     return int(max_model_len)
 
 
