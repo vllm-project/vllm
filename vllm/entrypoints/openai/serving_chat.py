@@ -384,7 +384,7 @@ class OpenAIServingChat(OpenAIServing):
                     # Send response to echo the input portion of the
                     # last message
                     if request.echo or request.continue_final_message:
-                        last_msg_content: str = ""
+                        last_msg_content: Union[str, List[Dict[str, str]]] = ""
                         if conversation and "content" in conversation[
                                 -1] and conversation[-1].get("role") == role:
                             last_msg_content = conversation[-1]["content"] or ""
@@ -724,10 +724,13 @@ class OpenAIServingChat(OpenAIServing):
             choices.append(choice_data)
 
         if request.echo or request.continue_final_message:
-            last_msg_content = ""
+            last_msg_content: Union[str, List[Dict[str, str]]] = ""
             if conversation and "content" in conversation[-1] and conversation[
                     -1].get("role") == role:
                 last_msg_content = conversation[-1]["content"] or ""
+            if isinstance(last_msg_content, list):
+                last_msg_content = "\n".join(msg['text']
+                                             for msg in last_msg_content)
 
             for choice in choices:
                 full_message = last_msg_content + (choice.message.content
