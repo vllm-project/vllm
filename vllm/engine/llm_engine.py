@@ -1945,11 +1945,14 @@ class LLMEngine:
         # that are greater than the max token id before running the model.
         # However, these token ids will later crash a cuda kernel at runtime
         # with an index out of bounds error. This will crash the entire engine.
-        tokenizer = self.get_tokenizer(lora_request)
-        max_input_id = max(prompt_ids)
-        if max_input_id > tokenizer.max_token_id:
-            raise ValueError(
-                "Token id {} is out of vocabulary".format(max_input_id))
+        if self.tokenizer is not None:
+            # If the engine is run with --skip-tokenizer-init then we have no
+            # tokenizer to check
+            tokenizer = self.get_tokenizer(lora_request)
+            max_input_id = max(prompt_ids)
+            if max_input_id > tokenizer.max_token_id:
+                raise ValueError(
+                    "Token id {} is out of vocabulary".format(max_input_id))
 
         if self.model_config.is_multimodal_model:
             max_prompt_len = self.model_config.max_model_len
