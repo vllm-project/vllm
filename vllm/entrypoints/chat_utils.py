@@ -183,7 +183,7 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
             if model_type.startswith("llava"):
                 return self._cached_token_str(self._tokenizer,
                                               hf_config.image_token_index)
-            if model_type in ("chameleon", "internvl_chat", "NVLM_D"):
+            if model_type in ("chameleon", "internvl_chat", "NVLM_D", "h2ovl_chat"):
                 return "<image>"
             if model_type == "mllama":
                 return "<|image|>"
