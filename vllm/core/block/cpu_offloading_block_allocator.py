@@ -1,26 +1,41 @@
-from typing import Dict, FrozenSet, List, Optional, Tuple, Set
+"""This file implement a block allocator that supports CPU KV cache offloading
+
+The key idea of this implementation is to maintain those allocated blocks 
+that didn't hit the cache, and constantly copy them into CPU after each 
+scheduler step.
+
+This idea is borrowed from ConServe
+(paper link: https://arxiv.org/abs/2410.01228), based on the assumption 
+that the CPU-GPU bandwidth is much higher than GPU KV cache generation 
+throughput. Thanks Yifan for this idea.
+
+This implementation also allows vLLM to gracefully handle preemption by 
+recomputation.
+"""
+from typing import Dict, FrozenSet, List, Optional, Tuple, Set, Deque
+from collections import deque
 
 from vllm.core.block.interfaces import (Block, BlockAllocator, BlockId,
                                         DeviceAwareBlockAllocator)
 from vllm.core.block.naive_block import NaiveBlock, NaiveBlockAllocator
 from vllm.core.block.prefix_caching_block import PrefixCachingBlockAllocator
-from vllm.core.block.cpu_gpu_block_allocator import CpuGpuBlockAllocator
+from vllm.core.block.cpu_gpu_block_allocator import CpuGpuBlockAllocator, \
+    NullBlock
 from vllm.utils import Device
 
 
 class CpuOffloadingBlockAllocator(CpuGpuBlockAllocator):
     """A block allocator that supports CPU KV cache offloading
 
-    This class extends the `CpuGpuBlockAllocator` so that the CPU can be used for prefix caching.
+    This class extends the `CpuGpuBlockAllocator` so that the CPU can be used 
+    for prefix caching.
+    
+    It will internally maintain uncached blocks, and trying to copy uncached
+    blocks into CPU upon the end of scheduler step (i.e. calling 
+    `get_and_reset_swaps`).
 
-    The key idea of this implementation is borrowed from ConServe
-    (paper link: https://arxiv.org/abs/2410.01228), which constantly copy
-    the KV cache of allocated GPU blocks to CPU if those blocks are full, 
-    based on the assumption that the PCIe bandwidth is much higher than 
-    the KV caches generation throughput.
-
-    This implementation allows vLLM to gracefully handle preemption by 
-    doing recomputation at scheduler side, and then prefix cache hit on CPU.
+    This implementation also allows vLLM to gracefully handle preemption by 
+    recomputation.
     """
 
     @staticmethod
@@ -30,13 +45,8 @@ class CpuOffloadingBlockAllocator(CpuGpuBlockAllocator):
         num_cpu_blocks: int,
         block_size: int,
     ) -> DeviceAwareBlockAllocator:
-        """Creates a CpuGpuBlockAllocator instance with the specified
-        configuration.
-
-        This static method creates and returns a CpuGpuBlockAllocator instance
-        based on the provided parameters. It initializes the CPU and GPU block
-        allocators with the specified number of blocks, block size, and
-        allocator type.
+        """Initiate CpuOffloadingBlockAllocator. Similar to 
+        CpuGpuBlockAllocator.create() but only support prefix caching
 
         Args:
             allocator_type (str): The type of block allocator to use for CPU
@@ -49,18 +59,22 @@ class CpuOffloadingBlockAllocator(CpuGpuBlockAllocator):
             block_size (int): The size of each block in number of tokens.
 
         Returns:
-            DeviceAwareBlockAllocator: A CpuGpuBlockAllocator instance with the
+            DeviceAwareBlockAllocator: A CpuOffloadingBlockAllocator instance with the
                 specified configuration.
 
         Notes:
             - The block IDs are assigned contiguously, with GPU block IDs coming
                 before CPU block IDs.
         """
+        assert num_gpu_blocks < num_cpu_blocks, "CPU offloading block "\
+            "allocator requires the allocated CPU memory capacity to be larger"\
+            "than GPU memory capacity."
         block_ids = list(range(num_gpu_blocks + num_cpu_blocks))
         gpu_block_ids = block_ids[:num_gpu_blocks]
         cpu_block_ids = block_ids[num_gpu_blocks:]
 
-        assert allocator_type == "prefix_caching", "CpuOffloadingBlockAllocator should be only used together with prefix caching."
+        assert allocator_type == "prefix_caching", "CpuOffloadingBlock"\
+            "Allocator should be only used together with prefix caching."
 
         # prefix caching block is now the default.
         gpu_allocator = PrefixCachingBlockAllocator(
@@ -80,21 +94,34 @@ class CpuOffloadingBlockAllocator(CpuGpuBlockAllocator):
             gpu_block_allocator=gpu_allocator,
         )
 
-    def __init__(self, cpu_block_allocator: BlockAllocator,
-                 gpu_block_allocator: BlockAllocator):
+    def __init__(self, cpu_block_allocator: PrefixCachingBlockAllocator,
+                 gpu_block_allocator: PrefixCachingBlockAllocator):
         assert not (
             cpu_block_allocator.all_block_ids
             & gpu_block_allocator.all_block_ids
         ), "cpu and gpu block allocators can't have intersection of block ids"
 
         super.__init__(cpu_block_allocator, gpu_block_allocator)
+        
+        """
+        GPU block should only be in one of the following three status:
+          uncached: allocated blocks that didn't hit any cache
+          cached: allocated blocks that hit the cache, either in GPU or in CPU
+          free: the blocks are not allocated by block allocator
+        block allocator will automatically track free blocks, and we don't need
+        to specially handle cached blocks. So we only track uncached blocks
+        """
+        self._uncached_blocks: Deque[Block] = deque()
 
-        self._uncopied: Set[int] = set()
-        self._copied: Set[int] = set()
-        self._free: Set[int] = set(gpu_block_allocator.all_block_ids)
-        self._cpu: Set[int] = set(cpu_block_allocator.all_block_ids)
-
-        self._cpu_blocks_allocated: Deque[int] = deque()
+        """
+        We probe CPU cache hit by trying to allocate a CPU 
+        block and see if it is computed.
+        If we hit the CPU cache, we cannot free this CPU block until the end 
+        of scheduler step, in order to avoid the CPU cache being overwritten.
+        so we track the cpu blocks we allocated, and free it after scheduler
+        step (i.e. calling `get_and_reset_swaps`).
+        """
+        self._allocated_cpu_blocks: Deque[Block] = deque()
 
     def allocate_mutable_block(self, prev_block: Optional[Block],
                                device: Device) -> Block:
@@ -109,12 +136,9 @@ class CpuOffloadingBlockAllocator(CpuGpuBlockAllocator):
             Block: The newly allocated mutable block.
         """
         assert device == Device.GPU, "Calls to CPU offloading block allocator should always use Device.GPU --- CPU offloading block allocator handles CPU offloading internally."
+        # mark this block as uncached
         block = self._allocators[device].allocate_mutable_block(prev_block)
-        # a mutable block needs to be allocated from free blocks
-        assert block_id in self._free
-        # move block status from free to using
-        self._free.remove(block_id)
-        self._using.add(block_id)
+        self._uncached_blocks.append(block)
         return block_id
 
     def allocate_immutable_blocks(self, prev_block: Optional[Block],
@@ -165,231 +189,121 @@ class CpuOffloadingBlockAllocator(CpuGpuBlockAllocator):
                 token IDs.
         """
 
-        assert device == Device.GPU, "Calls to CPU offloading block allocator should always use Device.GPU --- CPU offloading block allocator handles CPU offloading internally."
+        assert device == Device.GPU, "Calls to CPU offloading block allocator"\
+            " should always use Device.GPU --- CPU offloading block allocator"\
+            " handles CPU offloading internally."
 
         # allocate a GPU block        
         block = self._allocators[device].allocate_immutable_block(
             prev_block, block_token_ids)
         block_id = block.block_id
+        block_computed = self._allocators[device].block_is_computed(block_id)
         
         # deal with prefix caching, three cases in total:
         # 1. cache hit on GPU
         # 2. no cache hit on GPU but cache hit on CPU
         # 3. no cache hit
-        if block.computed:
-            # prefix hit on GPU
-            # mark the block as copied
-            assert block_id in self._free or block_id in self._copied, "Internal implementation error: a caching GPU block block is neither copied nor free. This should never happen."
-            if block_id in self._free:
-                self._free.remove(block_id)
-                self._copied.add(block_id)
+        if block_computed:
+            # cache hit on GPU, no need to put it into uncached blocks
+            pass
         else:
-            # The GPU block must be a free block.
-            assert block_id in self._free, "Internal implementation error: a non-caching GPU block is not free. This should never happen."
-            
-            # check if we can hit cache on CPU
-            cpu_block = self.allocator[Device.CPU].allocate_immutable_block(prev_block, block_token_ids)
+            # check if we can hit cache on CPU by trying to allocate CPU block
+            cpu_block = self.allocator[Device.CPU].allocate_immutable_block(
+                prev_block, block_token_ids)
             cpu_block_id = cpu_block.block_id
-            if cpu_block.computed:
+            cpu_block_computed = self.allocator[Device.CPU].block_is_computed(
+                cpu_block_id
+            )
+            if cpu_block_computed:
                 # CPU cache hit
-                # mark the GPU block as copied, copy the KV cache to CPU, and temporarily hold this cpu block to protect its data
-                block.computed = True
-                self._free.remove(block_id)
-                self._copied.add(block_id)
+                # mark the GPU block as computed
+                self._allocator[Device.GPU].mark_blocks_as_computed([block_id])
+                # copy the CPU cache to GPU
                 self._swap_mapping[cpu_block_id] = gpu_block_id
-                self._cpu_blocks_allocated.append(cpu_block_id)
+                # and don't free this block until `get_and_reset_swap` is called
+                self._allocated_cpu_blocks.append(cpu_block)
             else:
                 # No cache hit
-                # mark the GPU block as uncopied, and free cpu block
-                self._free.remove(block_id)
-                self._uncopied.add(block_id)
+                # mark the GPU block as uncached
+                self._uncached_blocks.append(block)
+                # and free cpu block
                 self.allocator[Device.CPU].free(cpu_block)
 
         return block
 
-    def free(self, block: Block) -> None:
-        """Frees the memory occupied by the given block.
-
-        Args:
-            block (Block): The block to be freed.
-        """
-        # Null block should never be freed
-        if isinstance(block, NullBlock):
-            return
-        block_id = block.block_id
-        assert block_id is not None
-        allocator = self._block_ids_to_allocator[block_id]\
-        allocator.free(block)
-
-    def get_num_free_blocks(self, device: Device) -> int:
-        """Returns the number of free blocks available on the specified device.
-
-        Args:
-            device (Device): The device for which to query the number of free
-                blocks. AssertionError is raised if None is passed.
-
-        Returns:
-            int: The number of free blocks available on the specified device.
-        """
-        assert self._allocators[device].get_num_free_blocks() == len(self._free)
-        return self._allocators[device].get_num_free_blocks()
-
     def swap(self, blocks: List[Block], src_device: Device,
              dst_device: Device) -> Dict[int, int]:
-        """Execute the swap for the given blocks from source_device
-        on to dest_device, save the current swap mapping and append 
-        them to the accumulated `self._swap_mapping` for each 
-        scheduling move.
-
-        Args:
-            blocks: List of blocks to be swapped.
-            src_device (Device): Device to swap the 'blocks' from.
-            dst_device (Device): Device to swap the 'blocks' to.
         
-        Returns:
-            Dict[int, int]: Swap mapping from source_device
-                on to dest_device.
-        """
-        src_block_ids = [block.block_id for block in blocks]
-        self._allocators[src_device].swap_out(blocks)
-        self._allocators[dst_device].swap_in(blocks)
-        dst_block_ids = [block.block_id for block in blocks]
+            raise NotImplementedError("CPU offloading block allocator only "
+                                      "support preemption by recomputation.")
 
-        current_swap_mapping: Dict[int, int] = {}
-        for src_block_id, dst_block_id in zip(src_block_ids, dst_block_ids):
-            if src_block_id is not None and dst_block_id is not None:
-                self._swap_mapping[src_block_id] = dst_block_id
-                current_swap_mapping[src_block_id] = dst_block_id
-        return current_swap_mapping
-
-    def get_num_full_blocks_touched(self, blocks: List[Block],
-                                    device: Device) -> int:
-        """Returns the number of full blocks that will be touched by
-        swapping in/out the given blocks on to the 'device'.
-
-        Args:
-            blocks: List of blocks to be swapped.
-            device (Device): Device to swap the 'blocks' on.
-
-        Returns:
-            int: the number of full blocks that will be touched by
-                swapping in/out the given blocks on to the 'device'.
-                Non full blocks are ignored when deciding the number
-                of blocks to touch.
-        """
-        return self._allocators[device].get_num_full_blocks_touched(blocks)
-
-    def mark_blocks_as_accessed(self, block_ids: List[int],
-                                now: float) -> None:
-        """Mark blocks as accessed, only use for prefix caching."""
-        # Prefix caching only supported on GPU.
-        device = Device.GPU
-        return self._allocators[device].mark_blocks_as_accessed(block_ids, now)
-
-    def mark_blocks_as_computed(self, block_ids: List[int]) -> None:
-        """Mark blocks as accessed, only use for prefix caching."""
-        # Prefix caching only supported on GPU.
-        device = Device.GPU
-        return self._allocators[device].mark_blocks_as_computed(block_ids)
-
-    def get_computed_block_ids(self, prev_computed_block_ids: List[int],
-                               block_ids: List[int],
-                               skip_last_block_id: bool) -> List[int]:
-        # Prefix caching only supported on GPU.
-        device = Device.GPU
-        return self._allocators[device].get_computed_block_ids(
-            prev_computed_block_ids, block_ids, skip_last_block_id)
-
-    def get_common_computed_block_ids(
-            self, computed_seq_block_ids: List[List[int]]) -> List[int]:
-        # Prefix caching only supported on GPU.
-        device = Device.GPU
-        return self._allocators[device].get_common_computed_block_ids(
-            computed_seq_block_ids)
-
-    @property
-    def all_block_ids(self) -> FrozenSet[int]:
-        return frozenset(self._block_ids_to_allocator.keys())
-
-    def get_prefix_cache_hit_rate(self, device: Device) -> float:
-        """Prefix cache hit rate. -1 means not supported or disabled."""
-        assert device in self._allocators
-        return self._allocators[device].get_prefix_cache_hit_rate()
-
-    def get_and_reset_swaps(self) -> List[Tuple[int, int]]:
+    def get_and_reset_swaps(self, now: float) -> List[Tuple[int, int]]:
         """Returns and clears the mapping of source to destination block IDs.
-        Will be called after every swapping operations for now, and after every
-        schedule when BlockManagerV2 become default. Currently not useful.
-
+        Will be called right before scheduler step finishes.
+        
+        This function will do the following things:
+            1. Iterate over uncached blocks and see if we can copy it to CPU
+            2. Update all allocated CPU block time stamp
+            3. Free CPU blocks
+            4. Return and clear all swapping status
+            
+        Args:
+            now (float): The time stamp used to update CPU access time, so 
+            that CPU evictor can work.
+        
         Returns:
             List[Tuple[int, int]]: A mapping of source to destination block IDs.
         """
+        
+        allocator = self._allocators[Device.GPU]
+        cpu_allocator = self._allocator[Device.CPU]
+        
+        new_uncached_blocks: Deque[Block] = deque()
+        
+        while self._uncached_blocks:
+            block = self._uncached_blocks.pop()
+            block_id = block.block_id
+            
+            # check if this block is freed
+            if block_id is None:
+                # this block is already freed, no longer need to copy it to CPU
+                continue
+            
+            refcount = allocator._refcounter.get(block_id)
+            assert refcount > 0, "A freed block should have block_id None"
+            
+            # check if this block is computed
+            computed = allocator.block_is_computed(block_id)
+            if computed: # This block is computed, copy it to CPU
+                # allocate a block on CPU
+                cpu_block = cpu_allocator.allocate_immutable_block(
+                    prev_block = block._prev_block,
+                    token_ids = block._token_ids
+                )
+                self._allocated_cpu_blocks.append(cpu_block)
+                
+                # copy the GPU block to CPU
+                self._swap_mapping[block_id] = cpu_block.block_id
+                
+                continue
+            
+            # this block is neither freed nor computed
+            # keep marking it as uncached
+            new_uncached_blocks.append(block)
+            
+        # update uncached blocks
+        self._uncached_blocks = new_uncached_blocks
+                
+        # iterate over allocated CPU blocks, update access time and free them
+        # need to update access time so that CPU evictor can work
+        while self._allocated_cpu_blocks:
+            cpu_block = self._allocated_cpu_blocks.pop()
+            # update the access time
+            cpu_allocator.mark_blocks_as_accessed([cpu_block.block_id], now)
+            # free the block
+            cpu_allocator.free(cpu_block)
+            
+        # return the mapping
         mapping = self._swap_mapping.copy()
         self._swap_mapping.clear()
         return list(mapping.items())
-
-
-class NullBlock(Block):
-    """
-    Null blocks are used as a placeholders for KV cache blocks that have
-    been dropped due to sliding window.
-    This implementation just wraps an ordinary block and prevents it from
-    being modified. It also allows for testing if a block is NullBlock
-    via isinstance().
-    """
-
-    def __init__(self, proxy: Block):
-        super().__init__()
-        self._proxy = proxy
-
-    def append_token_ids(self, token_ids: List[BlockId]):
-        raise ValueError("null block should not be modified")
-
-    @property
-    def block_id(self):
-        return self._proxy.block_id
-
-    @block_id.setter
-    def block_id(self, value: Optional[BlockId]):
-        raise ValueError("null block should not be modified")
-
-    @property
-    def token_ids(self) -> List[BlockId]:
-        return self._proxy.token_ids
-
-    @property
-    def num_tokens_total(self) -> int:
-        raise NotImplementedError(
-            "num_tokens_total is not used for null block")
-
-    @property
-    def num_empty_slots(self) -> BlockId:
-        return self._proxy.num_empty_slots
-
-    @property
-    def is_full(self):
-        return self._proxy.is_full
-
-    @property
-    def prev_block(self):
-        return self._proxy.prev_block
-
-    @property
-    def computed(self):
-        return self._proxy.computed
-
-    @computed.setter
-    def computed(self, value):
-        self._proxy.computed = value
-
-    @property
-    def last_accessed(self) -> float:
-        return self._proxy.last_accessed
-
-    @last_accessed.setter
-    def last_accessed(self, last_accessed_ts: float):
-        self._proxy.last_accessed = last_accessed_ts
-
-    @property
-    def content_hash(self):
-        return self._proxy.content_hash
