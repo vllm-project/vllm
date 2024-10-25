@@ -102,7 +102,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         the base-class constructor.
         '''
 
-        self._maybe_force_supported_attention_backend()
+        #self._maybe_force_supported_attention_backend()
 
         super().__init__(
             model_config,
@@ -514,6 +514,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         encoder_seq_start_loc = torch.zeros(encoder_seq_lens_tensor.shape[0] +
                                             1,
                                             dtype=torch.int32,
+                                            dtype=torch.int32,
                                             device=self.device)
         torch.cumsum(encoder_seq_lens_tensor,
                      dim=0,
@@ -528,6 +529,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
             attn_metadata.encoder_seq_lens,
             attn_metadata.encoder_seq_lens_tensor,
             attn_metadata.max_encoder_seq_len,
+            attn_metadata.encoder_seq_start_loc,
             attn_metadata.cross_slot_mapping,
             attn_metadata.cross_block_tables,
         ) = (
@@ -535,6 +537,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
             encoder_seq_lens,
             encoder_seq_lens_tensor,
             max_encoder_seq_len,
+            encoder_seq_start_loc,
             cross_slot_mapping_tensor,
             cross_block_tables,
         )
