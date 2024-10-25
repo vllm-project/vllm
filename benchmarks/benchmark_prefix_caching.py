@@ -127,15 +127,20 @@ def main(args):
             fixed_output_len=args.output_len,
         )
     else:
-        prompt_len = len(tokenizer(PROMPT).input_ids)
-        filtered_datasets = [(PROMPT, prompt_len, args.output_len)
-                             ] * args.num_prompts
+        print(f"Warning: --input-length-range is ignored")
+        filtered_datasets = []
+        for i in range(args.num_prompts):
+            prompt = f"Task {i}: {PROMPT}"
+            prompt_len = len(tokenizer(prompt).input_ids)
+            filtered_datasets.append((prompt, prompt_len, args.output_len))
 
     engine_args = EngineArgs.from_cli_args(args)
 
     llm = LLM(**dataclasses.asdict(engine_args))
 
-    sampling_params = SamplingParams(temperature=0, max_tokens=args.output_len)
+    sampling_params = SamplingParams(temperature=0,
+                                     max_tokens=args.output_len,
+                                     ignore_eos=args.ignore_eos)
 
     print("Testing filtered datasets")
     prompts = repeat_and_sort_requests(filtered_datasets,
@@ -182,6 +187,10 @@ if __name__ == "__main__":
                         default='128:256',
                         help='Range of input lengths for sampling prompts,'
                         'specified as "min:max" (e.g., "128:256").')
+    parser.add_argument(
+        "--ignore-eos",
+        action="store_true",
+        help="Set ignore_eos flag when sending the benchmark request.")
 
     parser = EngineArgs.add_cli_args(parser)
     args = parser.parse_args()
