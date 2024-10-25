@@ -15,7 +15,7 @@ from transformers import (AutoModelForCausalLM, AutoTokenizer,
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.entrypoints.openai.api_server import (
     build_async_engine_client_from_engine_args)
-from vllm.inputs import SingletonPrompt
+from vllm.inputs import TextPrompt
 from vllm.multimodal import MultiModalDataDict
 from vllm.sampling_params import BeamSearchParams
 from vllm.utils import FlexibleArgumentParser, merge_async_iterators
@@ -95,10 +95,10 @@ def run_vllm(
     llm = LLM(**dataclasses.asdict(engine_args))
 
     # Add the requests to the engine.
-    prompts: List[SingletonPrompt] = []
+    prompts: List[TextPrompt] = []
     sampling_params: List[SamplingParams] = []
     for request in requests:
-        prompts.append(request.prompt)
+        prompts.append(TextPrompt(prompt=request.prompt))
         sampling_params.append(
             SamplingParams(
                 n=n,
@@ -144,10 +144,10 @@ async def run_vllm_async(
             engine_args, disable_frontend_multiprocessing) as llm:
 
         # Add the requests to the engine.
-        prompts: List[SingletonPrompt] = []
+        prompts: List[TextPrompt] = []
         sampling_params: List[SamplingParams] = []
         for request in requests:
-            prompts.append(request.prompt)
+            prompts.append(TextPrompt(prompt=request.prompt))
             sampling_params.append(
                 SamplingParams(
                     n=n,
