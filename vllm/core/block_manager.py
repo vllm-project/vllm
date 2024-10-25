@@ -5,6 +5,8 @@ from typing import Tuple
 
 from vllm.core.block.block_table import BlockTable
 from vllm.core.block.cpu_gpu_block_allocator import CpuGpuBlockAllocator
+from vllm.core.block.cpu_offloading_block_allocator \
+    import CpuOffloadingBlockAllocator
 from vllm.core.block.interfaces import Block
 from vllm.core.block.prefix_caching_block import (ComputedBlocksTracker,
                                                   LastAccessBlocksTracker)
@@ -15,6 +17,12 @@ from vllm.utils import Device
 
 SeqId = int
 EncoderSeqId = str
+
+
+block_allocator_creator = {
+    "CpuGpuBlockAllocator": CpuGpuBlockAllocator.create,
+    "CpuOffloadingBlockAllocator": CpuOffloadingBlockAllocator.create,
+}
 
 
 class SelfAttnBlockSpaceManager(BlockSpaceManager):
@@ -65,6 +73,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         watermark: float = 0.01,
         sliding_window: Optional[int] = None,
         enable_caching: bool = False,
+        block_allocator: str = "CpuGpuBlockAllocator",
     ) -> None:
         self.block_size = block_size
         self.num_total_gpu_blocks = num_gpu_blocks
@@ -90,7 +99,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
 
         self.watermark_blocks = int(watermark * num_gpu_blocks)
 
-        self.block_allocator = CpuGpuBlockAllocator.create(
+        self.block_allocator = block_allocator_creator[block_allocator](
             allocator_type="prefix_caching" if enable_caching else "naive",
             num_gpu_blocks=num_gpu_blocks,
             num_cpu_blocks=num_cpu_blocks,

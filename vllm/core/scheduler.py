@@ -334,7 +334,8 @@ class Scheduler:
             num_gpu_blocks=num_gpu_blocks,
             num_cpu_blocks=num_cpu_blocks,
             sliding_window=self.cache_config.sliding_window,
-            enable_caching=self.cache_config.enable_prefix_caching)
+            enable_caching=self.cache_config.enable_prefix_caching,
+            block_allocator=self.cache_config.block_allocator)
 
         # Sequence groups in the WAITING state.
         # Contain new prefill or preempted requests.
