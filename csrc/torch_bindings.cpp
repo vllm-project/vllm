@@ -319,11 +319,11 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   ops.def(
       "cslt_prepare_mm_fp8_semi_structured(Tensor! compressed_A, Tensor! "
-      "denseB) -> int");
+      "denseB, Tensor!? bias, bool transpose_result) -> int");
   ops.impl("cslt_prepare_mm_fp8_semi_structured", torch::kCUDA,
            &cslt_prepare_mm_fp8_semi_structured);
 
-  ops.def("cslt_mm_fp8_semi_structured_prepared(int cacheId) -> Tensor");
+  ops.def("cslt_mm_fp8_semi_structured_prepared(Tensor cacheId) -> Tensor");
   ops.impl("cslt_mm_fp8_semi_structured_prepared", torch::kCUDA,
            &cslt_mm_fp8_semi_structured_prepared);
 

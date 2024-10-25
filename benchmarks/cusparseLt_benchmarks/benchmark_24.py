@@ -13,6 +13,7 @@ from weight_shapes import WEIGHT_SHAPES
 from vllm.model_executor.layers.sparsity.utils.cusparse_2_4_utils import (
     compress_to_torch_sparse_semi_structured_mat, dense_matmul, get_random_mat,
     is_semi_structured_supported, semi_structured_sparse_dense_gemm)
+from vllm._custom_ops import (semi_structured_fp8_prepare_mm, semi_structured_fp8_mm_prepared)
 from vllm.utils import FlexibleArgumentParser
 
 DEFAULT_MODELS = list(WEIGHT_SHAPES.keys())
@@ -79,15 +80,15 @@ def bench(m: int, k: int, n: int, label: str, sub_label: str,
 
     a, b = make_rand_tensors(torch.int8, m, n, k)
     # cutlass i8
-    timers.append(
-        bench_fn(label, sub_label, "cutlass_i8_i8_matmul-w-scales",
-                 dense_matmul, a, b, torch.int8))
+    # timers.append(
+    #     bench_fn(label, sub_label, "cutlass_i8_i8_matmul-w-scales",
+    #              dense_matmul, a, b, torch.int8))
 
     # cusparseLt i8
-    timers.append(
-        bench_fn(label, sub_label, "cusparseLt_i8_i8_2_4",
-                 semi_structured_sparse_dense_gemm,
-                 compress_to_torch_sparse_semi_structured_mat(a), b))
+    # timers.append(
+    #     bench_fn(label, sub_label, "cusparseLt_i8_i8_2_4",
+    #              semi_structured_sparse_dense_gemm,
+    #              compress_to_torch_sparse_semi_structured_mat(a), b))
 
     if use_fp8:
         a, b = make_rand_tensors(torch.float8_e4m3fn, m, n, k)
@@ -101,6 +102,13 @@ def bench(m: int, k: int, n: int, label: str, sub_label: str,
             bench_fn(label, sub_label, "cusparseLt_fp8_fp8_2_4",
                      semi_structured_sparse_dense_gemm,
                      compress_to_torch_sparse_semi_structured_mat(a), b))
+        
+        a_compressed = compress_to_torch_sparse_semi_structured_mat(a)
+        handle = semi_structured_fp8_prepare_mm(a_compressed.packed, b)
+        timers.append(
+            bench_fn(label, sub_label, "cusparseLt_fp8_fp8_2_4_prepared",
+                     semi_structured_fp8_mm_prepared,
+                     torch.tensor([handle], dtype=torch.int64, device='cuda')))
 
     return timers
 
@@ -114,9 +122,6 @@ def print_timers(timers: Iterable[TMeasurement]):
 def run(MKNs: Iterable[Tuple[int, int, int]],
         use_fp8: bool) -> Iterable[TMeasurement]:
     results = []
-    # MKNs = [(2048, 8192, 14336)]
-    # MKNs = [(32, 11008, 4096)]
-    MKNs = [(2048, 11008, 14336)]
     for m, k, n in MKNs:
         timers = bench(m, k, n, "gemm", f"MKN=({m}x{k}x{n})", use_fp8)
         print_timers(timers)
@@ -181,8 +186,8 @@ def run_model_bench(args):
     for d in model_bench_data:
         all_data.extend(d)
     # pickle all data
-    with open(f"model_bench-{timestamp}.pkl", "wb") as f:
-        pkl.dump(all_data, f)
+    # with open(f"model_bench-{timestamp}.pkl", "wb") as f:
+    #     pkl.dump(all_data, f)
 
 
 if __name__ == '__main__':
