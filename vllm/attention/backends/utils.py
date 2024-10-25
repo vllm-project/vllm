@@ -466,11 +466,16 @@ def get_query_key_seq_metadata(
     if attn_type == AttentionType.DECODER.value:
         # Decoder self-attention
         # Choose max_seq_len based on whether we are in prompt_run
+        print('is_prompt ' + str(is_prompt))
+        #print('attn_metadata ' + str(attn_metadata))
         if is_prompt:
             max_seq_len = attn_metadata.max_prefill_seq_len
         else:
             max_seq_len = attn_metadata.max_decode_seq_len
-        print('attn_metadata.seq_start_loc ' + str(attn_metadata.seq_start_loc))
+        #if attn_metadata.seq_start_loc is None:
+        #    print('attn_metadata.seq_start_loc is None')
+        #else:
+        #    print('attn_metadata.seq_start_loc ' + str(attn_metadata.seq_start_loc))
         #print('attn_metadata.encoder_seq_start_loc ' + str(attn_metadata.encoder_seq_start_loc))
         print('attn_metadata.max_decode_seq_len ' + str(attn_metadata.max_decode_seq_len))
         print('attn_metadata.max_prefill_seq_len ' + str(attn_metadata.max_prefill_seq_len))

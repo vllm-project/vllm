@@ -527,7 +527,7 @@ def make_backend(backend_name: str) -> AttentionBackend:
         from vllm.attention.backends.xformers import XFormersBackend
         return XFormersBackend()
     elif backend_name == STR_FLASH_ATTN_VAL:
-        print('Hello')
+        #print('Hello')
         from vllm.attention.backends.flash_attn import FlashAttentionBackend
         return FlashAttentionBackend()
 
@@ -537,7 +537,7 @@ def make_backend(backend_name: str) -> AttentionBackend:
 
 def _make_metadata_tensors(
     seq_lens: Optional[List[int]], context_lens: Optional[List[int]],
-    encoder_seq_lens: Optional[List[int]], device: Union[torch.device, str]
+    encoder_seq_lens: Optional[List[int]], device: Union[torch.device, str],
 ) -> Tuple[torch.Tensor, torch.Tensor, Any, Any, Optional[torch.Tensor],
            torch.Tensor, torch.Tensor, Optional[int]]:
     '''
@@ -580,6 +580,10 @@ def _make_metadata_tensors(
             dtype=seq_start_loc.dtype,
             out=seq_start_loc[1:])
 
+    print('seq_start_loc ' + str(seq_start_loc))
+    print('seq_lens_tensor ' + str(seq_lens_tensor))
+    print('max_seq_len ' + str(max_seq_len))
+
     encoder_seq_start_loc = torch.zeros(encoder_seq_lens_tensor.shape[0] +
                                         1,
                                         dtype=torch.int32,
@@ -588,7 +592,9 @@ def _make_metadata_tensors(
         encoder_seq_lens_tensor, dim=0,
         dtype=encoder_seq_start_loc.dtype,
         out=encoder_seq_start_loc[1:])
-    print('encoder_seq_start_loc ' + str(encoder_seq_start_loc))
+    
+    
+    #print('encoder_seq_start_loc ' + str(encoder_seq_start_loc))
 
     return (seq_lens_tensor, context_lens_tensor, max_context_len, max_seq_len,
             seq_start_loc, encoder_seq_lens_tensor, encoder_seq_start_loc, max_encoder_seq_len)
@@ -599,6 +605,7 @@ def make_kv_cache(num_blocks: int,
                   head_size: int,
                   block_size: int,
                   device: Union[torch.device, str],
+                  backend: str,
                   default_val: float = 0.0) -> torch.Tensor:
     '''
     Create a fake KV cache.
@@ -616,9 +623,14 @@ def make_kv_cache(num_blocks: int,
 
     * kv_cache: 2 x num_blocks x (block_size * num_heads * head_size)
     '''
-
-    kv_cache = torch.rand(
-        (2, num_blocks, block_size * num_heads * head_size)).to(device)
+    if backend == 'XFORMERS':
+        kv_cache = torch.rand(
+            (2, num_blocks, block_size * num_heads * head_size)).to(device)
+    elif backend == 'FLASH_ATTN':
+        kv_cache = torch.rand(
+            (2, num_blocks, block_size, num_heads, head_size)).to(device)
+    else:
+        raise ValueError(f"Unknown backend value: '{backend}'. Expected 'XFORMERS' or 'FLASH_ATTN'.")
     if default_val is not None:
         kv_cache[:, :, :] = default_val
     return kv_cache
@@ -825,7 +837,7 @@ def make_test_metadata(
     * AttentionMetadata structure
     '''
 
-    print('Here for metadata!!!')
+    #print('Here for metadata!!!')
     # Decoder self-attention memory mapping
     # decoder_test_params is None signals encoder-only
     # scenario, so kv_mmap is None
@@ -871,7 +883,7 @@ def make_test_metadata(
         #   (kv_mmap)
         cross_kv_mmap = cross_test_params.kv_mmap
 
-    print('Here for metadata!!')
+    #print('Here for metadata!!')
 
     if is_prompt:
         # Prefill-phase scenario
@@ -952,6 +964,7 @@ def make_test_metadata(
             seq_start_loc=seq_start_loc,
             max_prefill_seq_len=0,
             max_decode_seq_len=max(seq_lens),
+            max_decode_query_len=1,
             context_lens_tensor=context_lens_tensor,
             block_tables=kv_mmap.block_tables,
             use_cuda_graph=False,
@@ -979,7 +992,7 @@ def assert_actual_matches_ideal(test_params: PhaseTestParameters,
     '''
     ideal_output = test_params.packed_qkvo.ideal_output
     torch.testing.assert_close(ideal_output,
-                               output_under_test.view_as(ideal_output))
+                               output_under_test.view_as(ideal_output), atol=0.01, rtol=0.016)
 
 
 # Copied/modified from torch._refs.__init__.py

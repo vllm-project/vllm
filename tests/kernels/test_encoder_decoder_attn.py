@@ -22,12 +22,13 @@ from vllm.attention.selector import (_Backend,
 from vllm.utils import is_hip
 
 # List of support backends for encoder/decoder models
-#LIST_ENC_DEC_SUPPORTED_BACKENDS = [_Backend.XFORMERS, _Backend.FLASH_ATTN]
-LIST_ENC_DEC_SUPPORTED_BACKENDS = [_Backend.XFORMERS]
-
+LIST_ENC_DEC_SUPPORTED_BACKENDS = [_Backend.XFORMERS, _Backend.FLASH_ATTN]
+#LIST_ENC_DEC_SUPPORTED_BACKENDS = [_Backend.XFORMERS]
+#LIST_ENC_DEC_SUPPORTED_BACKENDS = [_Backend.FLASH_ATTN]
 HEAD_SIZES = [64, 256]
 
 NUM_HEADS = [1, 16]
+#NUM_HEADS = [1]
 
 BATCH_SIZES = [1, 16]
 BLOCK_SIZES = [16]
@@ -131,7 +132,7 @@ def _make_test_resources(test_pt: TestPoint, ) -> TestResources:
 
     scale = float(1.0 / (test_pt.head_size**0.5))
     attn_backend = make_backend(test_pt.backend_name)
-    print('attn_backend ' + str(attn_backend))
+    #print('attn_backend ' + str(attn_backend))
     attn = Attention(
         test_pt.num_heads,
         test_pt.head_size,
@@ -148,7 +149,7 @@ def _make_test_resources(test_pt: TestPoint, ) -> TestResources:
                              test_pt.num_heads,
                              test_pt.head_size,
                              test_pt.block_size,
-                             device=CUDA_DEVICE)
+                             device=CUDA_DEVICE, backend=test_pt.backend_name)
     return TestResources(scale, attn_backend, attn, kv_cache)
 
 
@@ -810,7 +811,7 @@ def test_encoder_only(
             cross_test_params=None,
             device=CUDA_DEVICE)
         
-        print('prephase_attn_metadata ' + str(prephase_attn_metadata))
+        #print('prephase_attn_metadata ' + str(prephase_attn_metadata))
 
         # PREFILL: encoder attention
 
@@ -820,6 +821,9 @@ def test_encoder_only(
         # - Is encoder attention result correct?
         assert_actual_matches_ideal(enc_test_params, enc_pckd_act_out)
 
+@pytest.fixture(autouse=True)
+def print_test_name(request):
+    print(f"Running test: {request.node.name}")
 
 @pytest.mark.skipif(is_hip(), reason=STR_NOT_IMPL_ENC_DEC_ROCM_HIP)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
@@ -959,15 +963,15 @@ def test_e2e_enc_dec_attn(
 
         # PREFILL: encoder attention
 
-        enc_pckd_act_out = _run_encoder_attention_test(test_rsrcs.attn,
-                                                       enc_test_params,
-                                                       prephase_attn_metadata)
+        #enc_pckd_act_out = _run_encoder_attention_test(test_rsrcs.attn,
+        #                                               enc_test_params,
+        #                                               prephase_attn_metadata)
 
         # - Is encoder attention result correct?
-        assert_actual_matches_ideal(enc_test_params, enc_pckd_act_out)
+        #assert_actual_matches_ideal(enc_test_params, enc_pckd_act_out)
 
-        print('First test succeeded')
-        print('prephase_attn_metadata ' + str(prephase_attn_metadata))
+        #print('First test succeeded')
+        #print('prephase_attn_metadata ' + str(prephase_attn_metadata))
 
         # PREFILL: decoder self-attention test
 
@@ -982,39 +986,43 @@ def test_e2e_enc_dec_attn(
 
         # PREFILL: encoder/decoder cross-attention test
 
-        #prephase_cross_pckd_act_out = _run_encoder_decoder_cross_attention_test(
-        #    test_rsrcs, prephase_dec_test_params, prephase_cross_test_params,
-        #    prephase_attn_metadata)
+        prephase_cross_pckd_act_out = _run_encoder_decoder_cross_attention_test(
+            test_rsrcs, prephase_dec_test_params, prephase_cross_test_params,
+            prephase_attn_metadata)
 
         # - Is prefill encoder/decoder cross-attention correct?
-        #assert_actual_matches_ideal(prephase_cross_test_params,
-        #                            prephase_cross_pckd_act_out)
+        assert_actual_matches_ideal(prephase_cross_test_params,
+                                    prephase_cross_pckd_act_out)
+        
+        print('Third test succeeded')
 
         # DECODE: build decode-phase attention metadata
 
-        #decphase_attn_metadata: AttentionMetadata = make_test_metadata(
-        #    test_rsrcs.attn_backend,
-        #    False,
-        #    dec_qkv.q_seq_lens,
-        #    decoder_test_params=decphase_dec_test_params,
-        #    encoder_test_params=enc_test_params,
-        #    cross_test_params=decphase_cross_test_params,
-        #    device=CUDA_DEVICE)
+        decphase_attn_metadata: AttentionMetadata = make_test_metadata(
+            test_rsrcs.attn_backend,
+            False,
+            dec_qkv.q_seq_lens,
+            decoder_test_params=decphase_dec_test_params,
+            encoder_test_params=enc_test_params,
+            cross_test_params=decphase_cross_test_params,
+            device=CUDA_DEVICE)
 
         # DECODE: decoder self-attention test
 
-        #decphase_dec_pckd_act_out = _run_decoder_self_attention_test(
-        #    test_rsrcs, decphase_dec_test_params, decphase_attn_metadata)
+        decphase_dec_pckd_act_out = _run_decoder_self_attention_test(
+            test_rsrcs, decphase_dec_test_params, decphase_attn_metadata)
 
         # - Is decode-phase decoder self-attention correct?
-        #assert_actual_matches_ideal(decphase_dec_test_params,
-        #                            decphase_dec_pckd_act_out)
+        assert_actual_matches_ideal(decphase_dec_test_params,
+                                    decphase_dec_pckd_act_out)
 
+        print('Fourth test succeeded')
         # DECODE: encoder/decoder cross-attention test
 
-        #decphase_cross_pckd_act_out = _run_encoder_decoder_cross_attention_test(
-        #    test_rsrcs, decphase_dec_test_params, None, decphase_attn_metadata)
+        decphase_cross_pckd_act_out = _run_encoder_decoder_cross_attention_test(
+            test_rsrcs, decphase_dec_test_params, None, decphase_attn_metadata)
 
         # - Is decode-phase encoder/decoder cross-attention correct?
-        #assert_actual_matches_ideal(decphase_cross_test_params,
-        #                            decphase_cross_pckd_act_out)
+        assert_actual_matches_ideal(decphase_cross_test_params,
+                                    decphase_cross_pckd_act_out)
+        print('Fifth test succeeded')

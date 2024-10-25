@@ -723,6 +723,8 @@ def unified_flash_attention(
     attn_metadata: FlashAttentionMetadata = current_metadata
 
     print('query.shape ' + str(query.shape))
+    print('num_heads ' + str(num_heads))
+    print('num_kv_heads ' + str(num_kv_heads))
     #num_tokens, hidden_size = query.shape
 
     # Reshape the query, key, and value tensors.
@@ -737,16 +739,18 @@ def unified_flash_attention(
         key_cache = kv_cache[0]
         value_cache = kv_cache[1]
 
-        if attn_type == 1:
+        if attn_type == 4:
             # Update cross-attention KV cache (prefill-only)
             # During cross-attention decode, key & value will be None,
             # preventing this IF-statement branch from running
             updated_slot_mapping = attn_metadata.cross_slot_mapping
         else:
             # Update self-attention KV cache (prefill/decode)
+            print('I am here!!!')
             updated_slot_mapping = attn_metadata.slot_mapping
 
         print('Hello calling reshape_and_cache_flash')
+        print('updated_slot_mapping ' + str(updated_slot_mapping))
 
         # Reshape the input keys and values and store them in the cache.
         # If kv_cache is not provided, the new key and value tensors are
@@ -832,7 +836,8 @@ def unified_flash_attention(
             #print('max_prefill_seq_len ' + str(max_prefill_seq_len))
             causal = True
             if (attn_type == AttentionType.ENCODER.value or \
-                attn_type == AttentionType.ENCODER_ONLY.value) :
+                attn_type == AttentionType.ENCODER_ONLY.value or \
+                attn_type ==  AttentionType.ENCODER_DECODER.value) :
                 causal = False
             print('k_seq_len ' + str(k_seq_len))
             #print('q_seq_start_loc ' + str(q_seq_start_loc))
@@ -905,6 +910,8 @@ def unified_flash_attention(
         else:
             # Use flash_attn_with_kvcache for normal decoding.
             print('Running here!!!')
+            print('decode_meta.block_tables.shape ' + str(decode_meta.block_tables.shape))
+            print('key_cache.shape ' + str(key_cache.shape))
             decode_output = flash_attn_with_kvcache(
                 q=decode_query.unsqueeze(1),
                 k_cache=key_cache,
