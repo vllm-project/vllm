@@ -2,6 +2,7 @@ import pytest
 import torch
 from compressed_tensors.quantization import FP8_DTYPE
 
+import vllm.envs as envs
 from vllm._custom_ops import cutlass_scaled_mm, scaled_fp8_quant
 from vllm.compilation.fusion import (FusionPass, find_auto_fn,
                                      find_auto_fn_maybe)
@@ -50,6 +51,8 @@ fusion_pass = FusionPass()
 @pytest.mark.parametrize("hidden_size", [64, 3392, 4096])
 @pytest.mark.parametrize("num_tokens", [7, 256, 533, 2048, 2049])
 @pytest.mark.parametrize("eps", [1e-5, 1e-6])
+@pytest.mark.skipif(envs.VLLM_TARGET_DEVICE != "cuda",
+                    reason="Only test on CUDA")
 def test_fusion_rmsnorm_quant(dtype, hidden_size, num_tokens, eps):
     torch.set_default_device("cuda")
     torch.set_default_dtype(torch.float16)
