@@ -828,8 +828,7 @@ class Scheduler:
                                          num_running_seqs)
 
                 #Preempt out the victim sequence group
-                self._preempt(vseq_group, blocks_to_swap_out,
-                              PreemptionMode.RECOMPUTE)
+                self._preempt(vseq_group, blocks_to_swap_out)
                 waiting_queue.appendleft(vseq_group)
                 force_preemption_count += 1
             #Put the sequence back into the waiting queue
@@ -1454,8 +1453,7 @@ class Scheduler:
     def _preempt(
         self,
         seq_group: SequenceGroup,
-        blocks_to_swap_out: List[Tuple[int, int]],
-        preemption_mode: Optional[PreemptionMode] = None,
+        blocks_to_swap_out: List[Tuple[int, int]]
     ) -> PreemptionMode:
         # If preemption mode is not specified, we determine the mode as follows:
         # We use recomputation by default since it incurs lower overhead than
