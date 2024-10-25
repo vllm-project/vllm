@@ -7,7 +7,7 @@
 #include "cuda_compat.h"
 #include "dispatch_utils.h"
 
-#ifndef USE_ROCM
+#if defined(USE_CUDA_FP8_FORMAT)
   #include <cub/util_type.cuh>
   #include <cub/cub.cuh>
 #else
@@ -15,7 +15,7 @@
   #include <hipcub/hipcub.hpp>
 #endif
 
-#ifndef USE_ROCM
+#if defined(USE_CUDA_FP8_FORMAT)
 using FP8_TYPE = c10::Float8_e4m3fn;
 C10_HOST_DEVICE constexpr auto FP8_E4M3_MAX =
     std::numeric_limits<FP8_TYPE>::max();
@@ -50,7 +50,7 @@ __device__ __forceinline__ FP8_TYPE scaled_fp8_conversion(float const val,
   }
 
   float r = fmax(-FP8_E4M3_MAX, fmin(x, FP8_E4M3_MAX));
-#ifndef USE_ROCM
+#if defined(USE_CUDA_FP8_FORMAT)
   return static_cast<c10::Float8_e4m3fn>(r);
 #else
   // Use hardware cvt instruction for fp8 on rocm

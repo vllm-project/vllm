@@ -37,7 +37,7 @@ set(PYTHON_SUPPORTED_VERSIONS "3.8" "3.9" "3.10" "3.11" "3.12")
 set(CUDA_SUPPORTED_ARCHS "7.0;7.5;8.0;8.6;8.9;9.0")
 
 # Supported AMD GPU architectures.
-set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx940;gfx941;gfx942;gfx1030;gfx1100;gfx1101")
+set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx940;gfx941;gfx942;gfx1030;gfx1100;gfx1101;gfx1200")
 
 #
 # Supported/expected torch versions for CUDA/ROCm.
@@ -171,6 +171,20 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-unused-result")
 # The final set of arches is stored in `VLLM_GPU_FLAGS`.
 #
 get_torch_gpu_compiler_flags(VLLM_GPU_FLAGS ${VLLM_GPU_LANG})
+
+#
+# Get supported FP8 format based on GPU arches
+#
+get_supported_fp8_format(FP8_FORMAT ${VLLM_GPU_LANG} "${VLLM_GPU_ARCHES}")
+if(${FP8_FORMAT} STREQUAL "E4M3FN")
+  message(STATUS "FP8 format: E4M3FN")
+  list(APPEND VLLM_GPU_FLAGS "-DUSE_CUDA_FP8_FORMAT")
+elseif(${FP8_FORMAT} STREQUAL "E4M3FNUZ")
+  message(STATUS "FP8 format: E4M3FNUZ")
+  list(APPEND VLLM_GPU_FLAGS "-DUSE_HIP_FP8_FORMAT")
+elseif(${FP8_FORMAT} STREQUAL "CONFLICT")
+  message(FATAL_ERROR "Target architectures support different types of FP8 formats!")
+endif()
 
 #
 # Set nvcc parallelism.
