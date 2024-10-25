@@ -35,12 +35,7 @@ def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:
         tokenizer.all_special_tokens_extended)
     tokenizer_all_special_tokens = set(tokenizer.all_special_tokens)
     tokenizer_len = len(tokenizer)
-    if hasattr(tokenizer, 'vocab'):
-        max_token_id = max(tokenizer.vocab.values())
-    else:
-        # Only mistral tokenizers should get here, but they usually aren't
-        # cached
-        max_token_id = max(tokenizer._vocab.values())
+    max_token_id = max(tokenizer.get_vocab().values())
 
     class CachedTokenizer(tokenizer.__class__):  # type: ignore
 
