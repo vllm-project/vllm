@@ -1755,7 +1755,6 @@ def _get_and_verify_max_len(
         "max_seq_length",
         "seq_len",
     ]
-
     # Choose the smallest "max_length" from the possible keys.
     max_len_key = None
     for key in possible_keys:
@@ -1854,7 +1853,6 @@ def _get_and_verify_max_len(
                 raise ValueError(
                     f"{msg} To allow overriding this maximum, set "
                     "the env var VLLM_ALLOW_LONG_MAX_MODEL_LEN=1")
-
     return int(max_model_len)
 
 
