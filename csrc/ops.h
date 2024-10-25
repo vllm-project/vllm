@@ -231,6 +231,6 @@ int64_t cslt_prepare_mm_fp8_semi_structured(const torch::Tensor& compressed_A,
 
 torch::Tensor cslt_mm_fp8_semi_structured_prepared(const torch::Tensor& id);
 
-void cslt_fp8_semi_structured_destroy(int64_t id);
+void cslt_fp8_semi_structured_destroy(const torch::Tensor& id_tensor);
 
 #endif

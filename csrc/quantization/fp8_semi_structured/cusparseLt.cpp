@@ -286,12 +286,14 @@ torch::Tensor cslt_mm_fp8_semi_structured_prepared(
   return res;
 }
 
-void cslt_fp8_semi_structured_destroy(vllm::cusparseLt::cacheID id) {
+void cslt_fp8_semi_structured_destroy(const torch::Tensor& id_tensor) {
   TORCH_CHECK(vllm::cusparseLt::handle_initialized,
               "Call of destroy cusparseId with unintialized cusparseLt");
-  if (vllm::cusparseLt::cusparseLt_cache.count(id) == 0) {
-    TORCH_CHECK(false, "cusparse matmul Id is not found");
-  }
+  // TORCH_CHECK(id_tensor.numel() == 1, "ID has to be single valued");
+  // auto id = id_tensor.item<vc::cacheID>();
+  // if (vllm::cusparseLt::cusparseLt_cache.count(id) == 0) {
+  //   TORCH_CHECK(false, "cusparse matmul Id is not found");
+  // }
   // auto& entry = vllm::cusparseLt::cusparseLt_cache[id];
 
   TORCH_CUDASPARSE_CHECK(

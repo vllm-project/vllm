@@ -327,7 +327,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("cslt_mm_fp8_semi_structured_prepared", torch::kCUDA,
            &cslt_mm_fp8_semi_structured_prepared);
 
-  ops.def("cslt_fp8_semi_structured_destroy(int cacheId) -> ()");
+  ops.def("cslt_fp8_semi_structured_destroy(Tensor cacheId) -> ()");
   ops.impl("cslt_fp8_semi_structured_destroy", torch::kCUDA,
            &cslt_fp8_semi_structured_destroy);
 #endif
