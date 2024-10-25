@@ -182,11 +182,20 @@ class HQQMarlinMethod(LinearMethodBase):
                                     GPTQ_MARLIN_MIN_THREAD_N,
                                     GPTQ_MARLIN_MAX_PARALLEL)
 
+        scales = layer.marlin_scales
+        zeros = layer.marlin_zeros
+        orig_type = x.dtype
+
+        if orig_type != torch.float16:
+            x = x.to(torch.float16)
+            scales = scales.to(torch.float16)
+            zeros = zeros.to(torch.float16)
+
         marlin_out = ops.gptq_marlin_gemm(
             x,
             layer.marlin_qweight,
-            layer.marlin_scales,
-            layer.marlin_zeros,
+            scales,
+            zeros,
             layer.g_idx,
             layer.g_idx_sort_indices,
             workspace.scratch,
@@ -203,4 +212,7 @@ class HQQMarlinMethod(LinearMethodBase):
         if bias is not None:
             marlin_out.add_(bias)
 
-        return marlin_out
+        if orig_type != torch.float16:
+            return marlin_out.to(orig_type)
+        else:
+            return marlin_out

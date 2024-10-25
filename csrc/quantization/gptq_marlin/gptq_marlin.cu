@@ -1774,17 +1774,19 @@ __global__ void Marlin(
              has_act_order == HAS_ACT_ORDER && has_zp == HAS_ZP &&             \
              group_blocks == GROUP_BLOCKS && num_threads == NUM_THREADS &&     \
              is_zp_float == IS_ZP_FLOAT) {                                     \
-      cudaFuncSetAttribute(                                                    \
-          Marlin<scalar_t, W_TYPE.id(), NUM_THREADS, THREAD_M_BLOCKS,          \
-                 THREAD_N_BLOCKS, THREAD_K_BLOCKS, pipe_stages, HAS_ACT_ORDER, \
-                 HAS_ZP, GROUP_BLOCKS, IS_ZP_FLOAT>,                           \
-          cudaFuncAttributeMaxDynamicSharedMemorySize, max_shared_mem);        \
-      Marlin<scalar_t, W_TYPE.id(), NUM_THREADS, THREAD_M_BLOCKS,              \
-             THREAD_N_BLOCKS, THREAD_K_BLOCKS, pipe_stages, HAS_ACT_ORDER,     \
-             HAS_ZP, GROUP_BLOCKS, IS_ZP_FLOAT>                                \
-          <<<blocks, NUM_THREADS, max_shared_mem, stream>>>(                   \
-              A_ptr, B_ptr, C_ptr, C_tmp_ptr, s_ptr, zp_ptr, g_idx_ptr,        \
-              num_groups, prob_m, prob_n, prob_k, locks, use_fp32_reduce);     \
+      if constexpr (!IS_ZP_FLOAT || std::is_same<scalar_t, half>::value) {     \
+        cudaFuncSetAttribute(                                                  \
+            Marlin<scalar_t, W_TYPE.id(), NUM_THREADS, THREAD_M_BLOCKS,        \
+                   THREAD_N_BLOCKS, THREAD_K_BLOCKS, pipe_stages,              \
+                   HAS_ACT_ORDER, HAS_ZP, GROUP_BLOCKS, IS_ZP_FLOAT>,          \
+            cudaFuncAttributeMaxDynamicSharedMemorySize, max_shared_mem);      \
+        Marlin<scalar_t, W_TYPE.id(), NUM_THREADS, THREAD_M_BLOCKS,            \
+               THREAD_N_BLOCKS, THREAD_K_BLOCKS, pipe_stages, HAS_ACT_ORDER,   \
+               HAS_ZP, GROUP_BLOCKS, IS_ZP_FLOAT>                              \
+            <<<blocks, NUM_THREADS, max_shared_mem, stream>>>(                 \
+                A_ptr, B_ptr, C_ptr, C_tmp_ptr, s_ptr, zp_ptr, g_idx_ptr,      \
+                num_groups, prob_m, prob_n, prob_k, locks, use_fp32_reduce);   \
+      }                                                                        \
     }
 
 typedef struct {
@@ -2271,6 +2273,12 @@ torch::Tensor gptq_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
         b_q_type == vllm::kU4B8 || b_q_type == vllm::kU8B128,
         "b_q_type must be uint4b8 or uint8b128 when has_zp = False. Got = ",
         b_q_type.str());
+  }
+
+  if (has_zp && is_zp_float) {
+    TORCH_CHECK(a.scalar_type() == at::ScalarType::Half,
+                "Computation type must be float16 (half) when using float zero "
+                "points.");
   }
 
   int pack_factor = 32 / b_q_type.size_bits();
