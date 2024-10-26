@@ -121,7 +121,10 @@ def _support_torch_compile(cls: type,
     # take care of method resolution order
     # make sure super().__init__ is called on the base class
     #  other than TorchCompileWrapperWithCustomDispatcher
-    cls.__bases__ = cls.__bases__ + (TorchCompileWrapperWithCustomDispatcher, )
+    if TorchCompileWrapperWithCustomDispatcher not in cls.__bases__:
+        # support decorating multiple times
+        cls.__bases__ = cls.__bases__ + (
+            TorchCompileWrapperWithCustomDispatcher, )
 
     old_init = cls.__init__  # type: ignore
 

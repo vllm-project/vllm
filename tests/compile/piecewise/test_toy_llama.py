@@ -10,14 +10,15 @@ from torch import nn
 
 @torch.library.custom_op("silly::attention", mutates_args=["out"])
 def silly_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
-                    out: torch.Tensor):
+                    out: torch.Tensor) -> None:
     out.copy_(q)
     out += k
     out += v
 
 
 @silly_attention.register_fake
-def _(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, out: torch.Tensor):
+def _(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
+      out: torch.Tensor) -> None:
     return
 
 
@@ -166,8 +167,7 @@ def run_model(use_compile: bool, split_attn: bool = False) -> torch.Tensor:
     from vllm.compilation.compile_context import set_compile_context
     from vllm.compilation.decorators import support_torch_compile
     cls = LlamaModel
-    if use_compile and not split_attn:
-        # can only decorate once
+    if use_compile:
         cls = support_torch_compile(LlamaModel)
     model = cls().eval().cuda()
 
