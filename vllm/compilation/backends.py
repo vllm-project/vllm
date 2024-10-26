@@ -181,41 +181,89 @@ def vllm_backend(
     context = copy.deepcopy(context) if context is not None else []
     sizes_to_specialize: List[int] = context
 
+    # split graph by attention
+    subgraph_id = 0
+    node_to_subgraph_id = {}
+    attention_graphs = []
+    for node in graph.graph.nodes:
+        if node.op in ("output", "placeholder"):
+            continue
+        if node.op == 'call_function' and node.target in [
+                torch.ops.vllm.unified_flash_attention
+        ]:
+            subgraph_id += 1
+            node_to_subgraph_id[node] = subgraph_id
+            attention_graphs.append(subgraph_id)
+            subgraph_id += 1
+        else:
+            node_to_subgraph_id[node] = subgraph_id
+
+    split_gm = torch.fx.passes.split_module.split_module(
+        graph, None, lambda node: node_to_subgraph_id[node])
+
+    for (name, module) in list(split_gm.named_modules()):
+        if name == "":
+            # stitching module
+            continue
+        graph_id = int(name.replace("submod_", ""))
+        if graph_id not in attention_graphs:
+            setattr(
+                split_gm, name,
+                piecewise_backend(module, sizes_to_specialize,
+                                  additional_inductor_config))
+
+    # trigger the first compilation
+    split_gm(*example_inputs)
+
+    return split_gm.forward
+
+
+def piecewise_backend(graph, sizes_to_specialize, additional_inductor_config):
+
     # flags for all the seen shapes, whether we need to specialize
     runtime_shapes_to_compile_flags: Dict[Tuple[int, ...], bool] = {}
 
     # if we need to specialize, the compiled graph for that shape
     runtime_shapes_to_compiled_graph: Dict[Tuple[int, ...], Callable] = {}
 
-    # this is the first compilation, we will compile a graph with
-    # dynamic shape, as the caller will mark first dimension as dynamic
-    logger.info("Compiling a graph for general shapes")
-    graph_for_symbolic_shape = wrap_inductor(graph, example_inputs,
-                                             additional_inductor_config)
+    sym_shape_indices: List[int] = []
 
-    # TODO: Dynamo does not pass all dynamic shapes.
-    # Need to investigate why. It works now because all the dynamic
-    # shapes have the same value, and either of them can be used.
-    sym_shape_indices = [
-        i for i, x in enumerate(example_inputs) if isinstance(x, torch.SymInt)
-    ]
-
+    compile_run = True
     first_run = True
+    graph_for_symbolic_shape: Callable = None  # type: ignore
 
-    # this is the function we return to Dynamo to run finally
+    # this is the function we return to run finally
     def compiled_graph_wrapper(*args):
+        nonlocal first_run, compile_run
+        nonlocal runtime_shapes_to_compile_flags
+        nonlocal runtime_shapes_to_compiled_graph
+        nonlocal graph_for_symbolic_shape
+        nonlocal sym_shape_indices
+
+        if compile_run:
+            compile_run = False
+
+            # this is the first compilation, we will compile a graph with
+            # dynamic shape, as the caller will mark first dimension as dynamic
+            logger.info("Compiling a graph for general shapes")
+            graph_for_symbolic_shape = wrap_inductor(
+                graph, args, additional_inductor_config)
+
+            # TODO: Dynamo does not pass all dynamic shapes.
+            # Need to investigate why. It works now because all the dynamic
+            # shapes have the same value, and either of them can be used.
+            sym_shape_indices = [
+                i for i, x in enumerate(args) if isinstance(x, torch.SymInt)
+            ]
+
+            return graph(*args)
+
+        if first_run:
+            first_run = False
+            return graph_for_symbolic_shape(*args)
 
         runtime_shapes: Tuple[int,
                               ...] = tuple(args[i] for i in sym_shape_indices)
-
-        nonlocal first_run
-        nonlocal runtime_shapes_to_compile_flags
-        nonlocal runtime_shapes_to_compiled_graph
-
-        if first_run:
-            # the first compilation is for profiling, we directly run it
-            first_run = False
-            return graph_for_symbolic_shape(*args)
 
         if runtime_shapes not in runtime_shapes_to_compile_flags:
             # we haven't seen this shape before
