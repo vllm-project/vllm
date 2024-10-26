@@ -2,9 +2,9 @@
 
 Run `pytest tests/kernels/test_scaled_mm_triton.py`.
 """
+import importlib
 from typing import Optional, Type
 
-import importlib
 import pytest
 import torch
 
