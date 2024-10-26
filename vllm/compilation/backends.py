@@ -201,6 +201,8 @@ def vllm_backend(
     split_gm = torch.fx.passes.split_module.split_module(
         graph, None, lambda node: node_to_subgraph_id[node])
 
+    graph_pool = torch.cuda.graph_pool_handle()
+
     for (name, module) in list(split_gm.named_modules()):
         if name == "":
             # stitching module
@@ -212,7 +214,8 @@ def vllm_backend(
         if graph_id not in attention_graphs:
             # cannot setattr to a module, so we need to set it to the dict
             split_gm.__dict__[name] = piecewise_backend(
-                module, sizes_to_specialize, additional_inductor_config)
+                module, sizes_to_specialize, additional_inductor_config,
+                graph_pool)
 
     # trigger the first compilation
     logger.info("Compiling a graph for general shapes")
@@ -235,13 +238,14 @@ def vllm_backend(
     return forward
 
 
-def piecewise_backend(graph, sizes_to_specialize, additional_inductor_config):
+def piecewise_backend(graph, sizes_to_specialize, additional_inductor_config,
+                      graph_pool):
 
     # flags for all the seen shapes, whether we need to specialize
     runtime_shapes_to_compile_flags: Dict[Tuple[int, ...], bool] = {}
 
     # if we need to specialize, the compiled graph for that shape
-    runtime_shapes_to_compiled_graph: Dict[Tuple[int, ...], Callable] = {}
+    runtime_shapes_to_compiled_graph: Dict[Tuple[int, ...], Tuple] = {}
 
     sym_shape_indices: List[int] = []
 
@@ -298,10 +302,17 @@ def piecewise_backend(graph, sizes_to_specialize, additional_inductor_config):
         if runtime_shapes not in runtime_shapes_to_compiled_graph:
             # we need to specialize for this shape, and we haven't compiled
             # compile the graph for this shape
-            runtime_shapes_to_compiled_graph[runtime_shapes] = wrap_inductor(
-                graph, args, additional_inductor_config)
+            compiled_graph = wrap_inductor(graph, args,
+                                           additional_inductor_config)
+            cudagraph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(cudagraph, pool=graph_pool):
+                output = compiled_graph(*args)
+            runtime_shapes_to_compiled_graph[runtime_shapes] = (cudagraph,
+                                                                output)
 
-        return runtime_shapes_to_compiled_graph[runtime_shapes](*args)
+        (cudagraph, output) = runtime_shapes_to_compiled_graph[runtime_shapes]
+        cudagraph.replay()
+        return output
 
     return compiled_graph_wrapper
 
