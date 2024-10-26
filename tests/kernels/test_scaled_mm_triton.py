@@ -7,10 +7,10 @@ from typing import Optional, Type
 import pytest
 import torch
 
-# yapf: disable
-from vllm.model_executor.layers.quantization.compressed_tensors.scaled_mm_triton import ( # noqa: F401
-        scaled_mm_triton) # noqa: F401
-# yapf: enable
+# isort: off
+from vllm.model_executor.layers.quantization.compressed_tensors.\
+        scaled_mm_triton import (scaled_mm_triton)
+# isort: on
 from vllm.utils import seed_everything
 
 device = "cuda"
