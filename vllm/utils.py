@@ -1488,3 +1488,12 @@ class LazyDict(Mapping, Generic[T]):
 
     def __len__(self):
         return len(self._factory)
+
+
+def combine_fx_passes(passes: List[Callable]) -> Callable:
+
+    def combined_fx(graph) -> None:
+        for fx in passes:
+            fx(graph)
+
+    return combined_fx

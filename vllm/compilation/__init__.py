@@ -62,6 +62,23 @@ class CompilationConfig(BaseModel):
             raise ValueError(
                 f"Unknown inductor_specialize: {self.inductor_specialize}")
 
+        for k, v in self.inductor_passes.items():
+            # resolve function from qualified name
+            names = v.split(".")
+            module = ".".join(names[:-1])
+            func_name = names[-1]
+            func = __import__(module).__dict__[func_name]
+            self.inductor_compile_config[k] = func
+
+        if "post_grad_custom_post_pass" in self.inductor_compile_config:
+            from vllm.compilation.backends import fix_functionalization
+            from vllm.utils import combine_fx_passes
+            self.inductor_compile_config[
+                "post_grad_custom_post_pass"] = combine_fx_passes(
+                    fix_functionalization,
+                    self.inductor_compile_config["post_grad_custom_post_pass"],
+                )
+
     @staticmethod
     def default_config() -> "CompilationConfig":
         config_path = envs.VLLM_TORCH_COMPILE_CONFIG
