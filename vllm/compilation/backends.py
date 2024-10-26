@@ -198,8 +198,15 @@ def vllm_backend(
         else:
             node_to_subgraph_id[node] = subgraph_id
 
+    # `keep_original_order` is important!
+    # otherwise pytorch might reorder the nodes and
+    # the semantics of the graph will change when we
+    # have mutations in the graph
     split_gm = torch.fx.passes.split_module.split_module(
-        graph, None, lambda node: node_to_subgraph_id[node])
+        graph,
+        None,
+        lambda node: node_to_subgraph_id[node],
+        keep_original_order=True)
 
     graph_pool = torch.cuda.graph_pool_handle()
 
