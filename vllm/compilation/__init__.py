@@ -1,3 +1,4 @@
+import json
 from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field
@@ -39,5 +40,7 @@ class CompilationConfig(BaseModel):
     def default_config() -> "CompilationConfig":
         config_path = envs.VLLM_TORCH_COMPILE_CONFIG
         if config_path is not None:
-            return CompilationConfig.parse_file(config_path)
+            with open(config_path) as json_file:
+                data = json.load(json_file)
+                return CompilationConfig.model_validate_json(data)
         return CompilationConfig()
