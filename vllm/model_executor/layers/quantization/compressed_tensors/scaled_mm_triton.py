@@ -205,4 +205,3 @@ def scaled_mm_triton(input: torch.Tensor,
                            BLOCK_SIZE_SCALE_B=block_size_sb)
 
     return result.to(out_dtype)
-
