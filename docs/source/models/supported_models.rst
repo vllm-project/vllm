@@ -361,6 +361,28 @@ Reward Modeling
 .. note::
     As an interim measure, these models are supported via Embeddings API. See `this RFC <https://github.com/vllm-project/vllm/issues/8967>`_ for upcoming changes.
 
+Classification
+---------------
+
+.. list-table::
+  :widths: 25 25 50 5 5
+  :header-rows: 1
+
+  * - Architecture
+    - Models
+    - Example HF Models
+    - :ref:`LoRA <lora>`
+    - :ref:`PP <distributed_serving>`
+  * - :code:`Qwen2ForSequenceClassification`
+    - Qwen2-based
+    - :code:`jason9693/Qwen2.5-1.5B-apeach`, etc.
+    - 
+    - ✅︎
+
+.. note::
+    As an interim measure, these models are supported via Embeddings API. It will be supported via Classification API in the future (no reference APIs exist now).
+
+
 Multimodal Language Models
 ^^^^^^^^^^^^^^^^^^^^^^^^^^
 
