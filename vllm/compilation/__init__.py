@@ -2,6 +2,8 @@ from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
+import vllm.envs as envs
+
 
 class CompilationConfig(BaseModel):
     """
@@ -28,7 +30,14 @@ class CompilationConfig(BaseModel):
     """
     use_inductor: bool = False
     inductor_compile_sizes: Optional[List[int]] = None
-    inductor_compile_config: Optional[Dict] = None
+    inductor_compile_config: Dict = Field(default_factory=dict)
     inductor_passes: Dict[str, str] = Field(default_factory=dict)
     cudagraph_capture_sizes: Optional[List[int]] = None
     cudagraph_warmup_times: int = 0
+
+    @staticmethod
+    def default_config() -> "CompilationConfig":
+        config_path = envs.VLLM_TORCH_COMPILE_CONFIG
+        if config_path is not None:
+            return CompilationConfig.parse_file(config_path)
+        return CompilationConfig()

@@ -387,8 +387,7 @@ def select_default_backend(level: int) -> Union[str, Callable]:
         CompilationLevel.INDUCTOR, CompilationLevel.INDUCTOR_MAX_AUTOTUNE
     ], f"Invalid level {level}"
 
-    from vllm.compilation.backends import vllm_backend
-    compilation_configs = ... # get from json file
+    compilation_configs = CompilationConfig.default_config()
     additional_configs = compilation_configs.inductor_compile_config
 
     context = get_compile_context()

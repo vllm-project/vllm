@@ -1,5 +1,5 @@
 import logging
-from typing import Callable, Dict, List, Optional, Union
+from typing import Callable, List, Optional, Union
 
 import vllm.envs as envs
 
@@ -42,6 +42,7 @@ def set_torch_compile_backend(backend: Union[Callable, str]):
 
 def get_torch_compile_backend() -> Optional[Union[Callable, str]]:
     return _torch_compile_backend
+
 
 _attention_ops: List[str] = [
     "vllm.unified_flash_attention",
