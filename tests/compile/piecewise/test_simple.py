@@ -1,3 +1,7 @@
+"""
+Test the piecewise compilation with a simple model so that we
+can exactly calculate the expected output and side effects.
+"""
 import os
 
 import torch
