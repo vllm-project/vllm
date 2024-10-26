@@ -77,7 +77,9 @@ class Qwen2ForSequenceClassification(nn.Module):
         self.score = RowParallelLinear(config.hidden_size,
                                        config.num_labels,
                                        quant_config=quant_config)
-        self._pooler = Pooler(pooling_type=PoolingType.LAST, normalize=False)
+        self._pooler = Pooler(pooling_type=PoolingType.LAST,
+                              normalize=False,
+                              softmax=True)
 
     def forward(
         self,
@@ -97,8 +99,7 @@ class Qwen2ForSequenceClassification(nn.Module):
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
     ) -> Optional[PoolerOutput]:
-        pooled = self._pooler(hidden_states, pooling_metadata)
-        return nn.functional.softmax(pooled, dim=-1)
+        return self._pooler(hidden_states, pooling_metadata)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(self,
