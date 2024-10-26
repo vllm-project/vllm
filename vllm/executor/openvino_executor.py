@@ -10,19 +10,12 @@ from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.platforms import current_platform
 from vllm.sequence import ExecuteModelRequest
 from vllm.utils import (GiB_bytes, get_distributed_init_method, get_ip,
                         get_open_port, make_async)
 
 logger = init_logger(__name__)
-
-
-def is_openvino_cpu() -> bool:
-    return "CPU" in envs.VLLM_OPENVINO_DEVICE
-
-
-def is_openvino_gpu() -> bool:
-    return "GPU" in envs.VLLM_OPENVINO_DEVICE
 
 
 class OpenVINOExecutor(ExecutorBase):
@@ -32,7 +25,8 @@ class OpenVINOExecutor(ExecutorBase):
     def _init_executor(self) -> None:
         assert self.device_config.device_type == "openvino"
         assert self.lora_config is None, "OpenVINO backend doesn't support LoRA"
-        assert is_openvino_cpu() or is_openvino_gpu(), \
+        assert current_platform.is_openvino_cpu() or \
+            current_platform.is_openvino_gpu(), \
             "OpenVINO backend supports only CPU and GPU devices"
 
         self.ov_core = ov.Core()
@@ -163,7 +157,7 @@ def _verify_and_get_model_config(config: ModelConfig) -> ModelConfig:
 def _verify_and_get_cache_config(ov_core: ov.Core,
                                  config: CacheConfig) -> CacheConfig:
     if envs.VLLM_OPENVINO_CPU_KV_CACHE_PRECISION == "u8":
-        if not is_openvino_cpu():
+        if not current_platform.is_openvino_cpu():
             logger.info("VLLM_OPENVINO_CPU_KV_CACHE_PRECISION is"
                         "ignored for GPU, f16 data type will be used.")
             config.cache_dtype = ov.Type.f16
@@ -172,7 +166,7 @@ def _verify_and_get_cache_config(ov_core: ov.Core,
                         "VLLM_OPENVINO_CPU_KV_CACHE_PRECISION env var.")
             config.cache_dtype = ov.Type.u8
     else:
-        if is_openvino_cpu():
+        if current_platform.is_openvino_cpu():
             ov_device = envs.VLLM_OPENVINO_DEVICE
             inference_precision = ov_core.get_property(
                 ov_device, hints.inference_precision)
@@ -183,7 +177,7 @@ def _verify_and_get_cache_config(ov_core: ov.Core,
         else:
             config.cache_dtype = ov.Type.f16
 
-    if is_openvino_cpu():
+    if current_platform.is_openvino_cpu():
         if config.block_size != 32:
             logger.info(
                 f"OpenVINO CPU optimal block size is 32, overriding currently set {config.block_size}"  # noqa: G004, E501
@@ -198,7 +192,7 @@ def _verify_and_get_cache_config(ov_core: ov.Core,
 
     kv_cache_space = envs.VLLM_OPENVINO_KVCACHE_SPACE
     if kv_cache_space >= 0:
-        if kv_cache_space == 0 and is_openvino_cpu():
+        if kv_cache_space == 0 and current_platform.is_openvino_cpu():
             config.openvino_kvcache_space_bytes = 4 * GiB_bytes  # type: ignore
             logger.warning(
                 "Environment variable VLLM_OPENVINO_KVCACHE_SPACE (GB) "
