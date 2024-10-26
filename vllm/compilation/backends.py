@@ -169,6 +169,9 @@ def wrap_inductor(graph, example_inputs, additional_inductor_config):
             "post_grad_custom_post_pass is already set in the config. "
             "Overwriting it with the fix_functionalization")
     current_config['post_grad_custom_post_pass'] = fix_functionalization
+    # inductor can inplace modify the graph, so we need to copy it
+    # see https://github.com/pytorch/pytorch/issues/138980
+    graph = copy.deepcopy(graph)
     return compile_fx(graph, example_inputs, config_patches=current_config)
 
 
