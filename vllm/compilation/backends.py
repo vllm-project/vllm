@@ -217,22 +217,20 @@ def vllm_backend(graph, example_inputs) -> Callable:
             lambda node: node_to_subgraph_id[node],
             keep_original_order=True)
 
+        logger.debug("%s", lazy_format_graph_code("stiching module", split_gm))
+
         # sort the names to make sure the order is deterministic
         names = [name for (name, module) in split_gm.named_modules()]
         names.sort()
 
         is_first_graph = True
         for name in names:
-            module = getattr(split_gm, name) if name else split_gm
+            if "." in name or name == "":
+                # recursive child module or the root module
+                continue
 
-            if name == "":
-                # stitching module
-                logger.debug("%s",
-                             lazy_format_graph_code("stiching module", module))
-                continue
-            if "." in name:
-                # recursive child module
-                continue
+            module = getattr(split_gm, name)
+
             graph_id = int(name.replace("submod_", ""))
             if graph_id not in attention_graphs:
                 # cannot setattr to a module, so we need to set it to the dict
