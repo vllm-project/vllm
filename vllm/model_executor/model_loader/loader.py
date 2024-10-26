@@ -905,7 +905,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             "bitsandbytes"
         }
         suffix = weight_name.split(".")[-1]
-        return any((q_suffix in suffix for q_suffix in quantized_suffix))
+        return any(q_suffix in suffix for q_suffix in quantized_suffix)
 
     def _quantized_8bit_generator(self, hf_weights_files, use_safetensors,
                                   quant_state_dict) -> Generator:

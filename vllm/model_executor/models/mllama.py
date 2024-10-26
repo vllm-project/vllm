@@ -327,7 +327,8 @@ class MllamaVisionSdpaAttention(nn.Module):
 
     def __init__(self,
                  config: config_mllama.MllamaVisionConfig,
-                 quant_config: Optional[QuantizationConfig] = None):
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = ""):
         super().__init__()
 
         model_parallel_size = get_tensor_model_parallel_world_size()
@@ -344,6 +345,7 @@ class MllamaVisionSdpaAttention(nn.Module):
             self.num_heads,
             bias=False,
             quant_config=quant_config,
+            prefix=f"{prefix}.qkv_proj",
         )
         self.o_proj = RowParallelLinear(
             self.num_heads * self.head_dim,
@@ -351,6 +353,7 @@ class MllamaVisionSdpaAttention(nn.Module):
             bias=False,
             input_is_parallel=True,
             quant_config=quant_config,
+            prefix=f"{prefix}.o_proj",
         )
 
     def forward(
@@ -1005,6 +1008,7 @@ class MllamaForCausalLM(nn.Module):
             org_num_embeddings=config.vocab_size,
             padding_size=DEFAULT_VOCAB_PADDING_SIZE,
             quant_config=quant_config,
+            prefix=f"{prefix}.lm_head",
         )
 
     def forward(
@@ -1076,7 +1080,8 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
         self.image_size = config.vision_config.image_size
 
         self.vision_model = MllamaVisionModel(config.vision_config,
-                                              quant_config)
+                                              quant_config,
+                                              prefix="vision_model")
         self.language_model = MllamaForCausalLM(
             config.text_config,
             cache_config=cache_config,
@@ -1089,6 +1094,7 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
             bias=True,
             quant_config=quant_config,
             gather_output=True,
+            prefix="multi_modal_projector",
         )
         self.logits_processor = LogitsProcessor(config.output_hidden_states,
                                                 config.text_config.vocab_size)
