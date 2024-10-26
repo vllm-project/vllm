@@ -1,9 +1,10 @@
 # coding=utf-8
 # Adapted from
 # https://huggingface.co/Qwen/Qwen2.5-Math-RM-72B/blob/main/modeling_qwen2_rm.py
+# Copyright 2024 Kakao Corp(Kanana-X Team).
 # Copyright 2024 The Qwen team.
 # Copyright 2023 The vLLM team.
-"""Inference-only Qwen2-RM model compatible with HuggingFace weights."""
+"""Inference-only Qwen2-Classification model compatible with HuggingFace weights."""
 from typing import Iterable, List, Optional, Tuple
 
 import torch
@@ -21,17 +22,6 @@ from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.sequence import IntermediateTensors, PoolerOutput
 
 from .utils import AutoWeightsLoader
-
-
-class ReLU(nn.Module):
-
-    def __init__(self):
-        super().__init__()
-        self.activation = nn.ReLU()
-
-    def forward(self, input):
-        input, _ = input
-        return self.activation(input)
 
 
 class Qwen2ForSequenceClassification(nn.Module):
