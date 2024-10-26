@@ -8,15 +8,13 @@ Run `pytest tests/models/test_models.py`.
 import pytest
 import torch
 
-from ...utils import check_logprobs_close, check_outputs_equal
-
 CLASSIFICATION_MODELS = [
     "jason9693/Qwen2.5-1.5B-apeach"
 ]
 
 
 @pytest.mark.parametrize("model", CLASSIFICATION_MODELS)
-@pytest.mark.parametrize("dtype", ["bfloat16"])
+@pytest.mark.parametrize("dtype", ["float"])
 def test_classification_models(
     hf_runner,
     vllm_runner,
