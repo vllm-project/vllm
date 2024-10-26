@@ -343,6 +343,17 @@ class HfRunner:
 
         return all_inputs
 
+    def classify(self, prompts: List[str]) -> List[str]:
+        # output is final logits
+        all_inputs = self.get_inputs(prompts)
+        outputs = []
+        for inputs in all_inputs:
+            output = self.model(**self.wrap_device(inputs))
+            logits = output.logits.softmax(dim=-1)[0].tolist()
+            outputs.append(logits)
+
+        return outputs
+
     def generate(
         self,
         prompts: List[str],
@@ -687,6 +698,14 @@ class VllmRunner:
                     inputs[i]["multi_modal_data"] = {"audio": audio}
 
         return inputs
+
+    def classify(self, prompts: List[str]) -> List[str]:
+        req_outputs = self.model.encode(prompts)
+        outputs = []
+        for req_output in req_outputs:
+            embedding = req_output.outputs.embedding
+            outputs.append(embedding)
+        return outputs
 
     def generate(
         self,

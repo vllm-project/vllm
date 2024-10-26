@@ -28,11 +28,15 @@ class Pooler(nn.Module):
         normalize: Whether to normalize the pooled data.
     """
 
-    def __init__(self, pooling_type: PoolingType, normalize: bool):
+    def __init__(self,
+                 pooling_type: PoolingType,
+                 normalize: bool,
+                 softmax: bool = False):
         super().__init__()
 
         self.pooling_type = pooling_type
         self.normalize = normalize
+        self.softmax = softmax
 
     def forward(
         self,
@@ -63,6 +67,9 @@ class Pooler(nn.Module):
 
         if self.normalize:
             pooled_data = nn.functional.normalize(pooled_data, p=2, dim=1)
+
+        if self.softmax:
+            pooled_data = nn.functional.softmax(pooled_data, dim=-1)
 
         pooled_outputs = [
             EmbeddingSequenceGroupOutput(data.tolist()) for data in pooled_data
