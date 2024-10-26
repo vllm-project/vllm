@@ -173,7 +173,6 @@ class EmbeddingModelRunner(
         finished_requests_ids: Optional[List[str]] = None
     ) -> ModelInputForGPUWithPoolingMetadata:
         assert seq_group_metadata_list is not None
-        print(f"seq_group_metadata_list: {seq_group_metadata_list}")
         model_input = self._prepare_model_input_tensors(
             seq_group_metadata_list, finished_requests_ids)
         # Prepare PoolingMetadata.

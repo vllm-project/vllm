@@ -349,11 +349,6 @@ class FlashAttentionMetadataBuilder(
                 else:
                     block_table = block_tables[seq_id][
                         -curr_sliding_window_block:]
-
-            print(f"prefix cache hit: {prefix_cache_hit}")
-            print(f"chunked prefill enabled: {chunked_prefill_enabled}")
-            print(f"prompt: {is_prompt}")
-            print(f"block table: {block_table}")
             self.block_tables.append(block_table)
 
             # Compute slot mapping.
@@ -405,7 +400,6 @@ class FlashAttentionMetadataBuilder(
             for inter_data in self.input_builder.inter_data_list
         ])
         for inter_data in self.input_builder.inter_data_list:
-            print(f"inter_data: {inter_data}")
             self._add_seq_group(inter_data,
                                 self.input_builder.chunked_prefill_enabled,
                                 prefix_cache_hit)
@@ -431,9 +425,6 @@ class FlashAttentionMetadataBuilder(
             block_tables = self._get_graph_runner_block_tables(
                 num_seqs, self.block_tables)
         else:
-            print(f"block tables: {self.block_tables}")
-            # if self.block_tables[0] is None:
-            #     self.block_tables = [list() for _ in range(num_seqs)]
             block_tables = make_tensor_with_pad(
                 self.block_tables,
                 pad=0,
