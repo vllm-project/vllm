@@ -10,7 +10,7 @@ import vllm.envs as envs
 from vllm.attention.backends.abstract import AttentionBackend
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import STR_BACKEND_ENV_VAR, is_hip, is_openvino
+from vllm.utils import STR_BACKEND_ENV_VAR, is_hip
 
 logger = init_logger(__name__)
 
@@ -193,7 +193,7 @@ def which_attn_to_use(
             logger.info("Cannot use %s backend on CPU.", selected_backend)
         return _Backend.TORCH_SDPA
 
-    if is_openvino():
+    if current_platform.is_openvino():
         if selected_backend != _Backend.OPENVINO:
             logger.info("Cannot use %s backend on OpenVINO.", selected_backend)
         return _Backend.OPENVINO
