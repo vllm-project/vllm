@@ -8,7 +8,7 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.quantization.compressed_tensors.\
-        scaled_mm_triton import (scaled_mm_triton)
+        scaled_mm_triton import scaled_mm_triton
 from vllm.utils import seed_everything
 
 device = "cuda"
