@@ -139,10 +139,11 @@ class LlamaModel(nn.Module):
         return hidden_states
 
 
-def run_model():
+@torch.inference_mode
+def run_model(use_compile: bool):
     from vllm.compilation.compile_context import set_compile_context
     from vllm.compilation.decorators import support_torch_compile
-    cls = support_torch_compile(LlamaModel)
+    cls = support_torch_compile(LlamaModel) if use_compile else LlamaModel
     model = cls().eval().cuda()
 
     B = 16  # max batch size
@@ -173,9 +174,9 @@ def test_toy_llama():
     outputs = []
     for level in levels:
         os.environ["VLLM_TORCH_COMPILE_CONFIG"] = config
-        os.environ["VLLM_TORCH_COMPILE_LEVEL"] = str(
-            CompilationLevel.PIECEWISE)
-        output = run_model()
+        os.environ["VLLM_TORCH_COMPILE_LEVEL"] = str(level)
+        output = run_model(
+            use_compile=level == CompilationLevel.NO_COMPILATION)
         outputs.append(output)
 
     assert torch.allclose(outputs[0], outputs[1])
