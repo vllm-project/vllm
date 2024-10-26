@@ -7,10 +7,9 @@ Run `pytest tests/models/test_models.py`.
 """
 import pytest
 import torch
+from transformers import AutoModelForSequenceClassification
 
-CLASSIFICATION_MODELS = [
-    "jason9693/Qwen2.5-1.5B-apeach"
-]
+CLASSIFICATION_MODELS = ["jason9693/Qwen2.5-1.5B-apeach"]
 
 
 @pytest.mark.parametrize("model", CLASSIFICATION_MODELS)
@@ -22,7 +21,9 @@ def test_classification_models(
     model: str,
     dtype: str,
 ) -> None:
-    with hf_runner(model, dtype=dtype) as hf_model:
+    with hf_runner(model,
+                   dtype=dtype,
+                   auto_cls=AutoModelForSequenceClassification) as hf_model:
         hf_outputs = hf_model.classify(example_prompts)
 
     with vllm_runner(model, dtype=dtype) as vllm_model:

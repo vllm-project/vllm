@@ -349,7 +349,7 @@ class FlashAttentionMetadataBuilder(
                 else:
                     block_table = block_tables[seq_id][
                         -curr_sliding_window_block:]
-            
+
             print(f"prefix cache hit: {prefix_cache_hit}")
             print(f"chunked prefill enabled: {chunked_prefill_enabled}")
             print(f"prompt: {is_prompt}")

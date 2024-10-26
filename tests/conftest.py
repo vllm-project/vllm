@@ -14,9 +14,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from huggingface_hub import snapshot_download
 from PIL import Image
-from transformers import (AutoModelForCausalLM,
-                          AutoModelForSequenceClassification, AutoTokenizer,
-                          AutoConfig, BatchEncoding, BatchFeature)
+from transformers import (AutoModelForCausalLM, AutoTokenizer, BatchEncoding,
+                          BatchFeature)
 from transformers.models.auto.auto_factory import _BaseAutoModelClass
 
 from tests.models.utils import (TokensTextLogprobs,
@@ -278,16 +277,6 @@ class HfRunner:
                 ).to(dtype=torch_dtype))
         else:
             model_kwargs = model_kwargs if model_kwargs is not None else {}
-            config = AutoConfig.from_pretrained(
-                model_name,
-                torch_dtype=torch_dtype,
-                trust_remote_code=True,
-            )
-            arch = config.architectures
-            if len(arch) > 0:
-                cls_type = arch[0].split("For")[-1]
-                auto_cls = eval(f"AutoModelFor{cls_type}")
-
             self.model = self.wrap_device(
                 auto_cls.from_pretrained(
                     model_name,
