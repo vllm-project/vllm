@@ -229,6 +229,7 @@ steps:
   - tests/compile
   commands:
   - pytest -v -s compile/test_basic_correctness.py
+  - pytest -v -s compile/piecewise
 
 - label: "PyTorch Fullgraph Test" # 18min
   source_file_dependencies:
