@@ -1,6 +1,6 @@
 import copy
 import json
-from typing import Dict, List
+from typing import Any, Dict, List
 
 from pydantic import BaseModel, Field, PrivateAttr
 
@@ -43,7 +43,7 @@ class CompilationConfig(BaseModel):
     cudagraph_capture_sizes: List[int] = PrivateAttr
     inductor_compile_sizes: List[int] = PrivateAttr
 
-    def model_post_init(self):
+    def model_post_init(self, __context: Any) -> None:
         context = get_compile_context()
         context = copy.deepcopy(context) if context is not None else []
         sizes_to_specialize: List[int] = context
