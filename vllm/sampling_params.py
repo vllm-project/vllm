@@ -320,7 +320,7 @@ class SamplingParams(
         else:
             self.stop_token_ids = list(self.stop_token_ids)
 
-        if bad_words is None:
+        if self.bad_words is None:
             self.bad_words = []
         else:
             self.bad_words = list(self.bad_words)
