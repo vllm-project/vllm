@@ -1,5 +1,5 @@
 import logging
-from typing import Callable, Dict, Optional, Union
+from typing import Callable, Dict, List, Optional, Union
 
 import vllm.envs as envs
 
@@ -54,3 +54,18 @@ def set_inductor_additional_configs(configs: Dict):
 
 def get_inductor_additional_configs() -> Dict:
     return _inductor_additional_configs
+
+
+_attention_ops: List[str] = [
+    "vllm.unified_flash_attention",
+    "vllm.unified_flash_infer",
+]
+
+
+def set_attention_ops(ops: List[str]):
+    global _attention_ops
+    _attention_ops = ops
+
+
+def get_attention_ops() -> List[str]:
+    return _attention_ops

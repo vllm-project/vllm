@@ -181,6 +181,9 @@ def vllm_backend(
     context = copy.deepcopy(context) if context is not None else []
     sizes_to_specialize: List[int] = context
 
+    from vllm.plugins import get_attention_ops
+    attention_ops = get_attention_ops()
+
     # split graph by attention
     subgraph_id = 0
     node_to_subgraph_id = {}
@@ -188,9 +191,7 @@ def vllm_backend(
     for node in graph.graph.nodes:
         if node.op in ("output", "placeholder"):
             continue
-        if node.op == 'call_function' and node.target in [
-                torch.ops.vllm.unified_flash_attention
-        ]:
+        if node.op == 'call_function' and str(node.target) in attention_ops:
             subgraph_id += 1
             node_to_subgraph_id[node] = subgraph_id
             attention_graphs.append(subgraph_id)
