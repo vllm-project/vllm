@@ -44,16 +44,16 @@ def get_torch_compile_backend() -> Optional[Union[Callable, str]]:
     return _torch_compile_backend
 
 
-_attention_ops: List[str] = [
-    "vllm.unified_flash_attention",
-    "vllm.unified_flash_infer",
+_non_cudagraph_ops: List[str] = [
+    # "vllm.unified_flash_attention",
+    # "vllm.unified_flash_infer",
 ]
 
 
-def set_attention_ops(ops: List[str]):
-    global _attention_ops
-    _attention_ops = ops
+def set_non_cudagraph_ops(ops: List[str]):
+    global _non_cudagraph_ops
+    _non_cudagraph_ops = ops
 
 
-def get_attention_ops() -> List[str]:
-    return _attention_ops
+def get_non_cudagraph_ops() -> List[str]:
+    return _non_cudagraph_ops

@@ -179,19 +179,20 @@ def wrap_inductor(graph, example_inputs, additional_inductor_config):
 def vllm_backend(graph, example_inputs,
                  compilation_configs: CompilationConfig) -> Callable:
 
-    from vllm.plugins import get_attention_ops
-    attention_ops = get_attention_ops()
+    from vllm.plugins import get_non_cudagraph_ops
+    non_cudagraph_ops = get_non_cudagraph_ops()
 
     from torch._dynamo.utils import lazy_format_graph_code
 
-    # split graph by attention
+    # split graph by non_cudagraph_ops
     subgraph_id = 0
     node_to_subgraph_id = {}
     attention_graphs = []
     for node in graph.graph.nodes:
         if node.op in ("output", "placeholder"):
             continue
-        if node.op == 'call_function' and str(node.target) in attention_ops:
+        if node.op == 'call_function' and str(
+                node.target) in non_cudagraph_ops:
             subgraph_id += 1
             node_to_subgraph_id[node] = subgraph_id
             attention_graphs.append(subgraph_id)
