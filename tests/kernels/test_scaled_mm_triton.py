@@ -8,8 +8,8 @@ import pytest
 import torch
 
 # isort: off
-from vllm.model_executor.layers.quantization.compressed_tensors.\
-        scaled_mm_triton import (scaled_mm_triton)
+from vllm.model_executor.layers.quantization.compressed_tensors.\ # noqa
+        scaled_mm_triton import (scaled_mm_triton) # noqa
 # isort: on
 from vllm.utils import seed_everything
 
