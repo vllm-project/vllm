@@ -35,7 +35,7 @@ from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs,
                          EncoderDecoderInputs, InputRegistry, PromptType)
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
-from vllm.logits_process import get_logits_processors
+from vllm.logits_process import get_bad_words_logits_processors
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.guided_decoding import (
     get_local_guided_decoding_logits_processor)
@@ -1998,28 +1998,9 @@ class LLMEngine:
             sampling_params.allowed_token_ids = None
 
         if len(sampling_params.bad_words) > 0:
-            bad_words_ids: List[List[int]] = list()
             tokenizer = self.get_tokenizer(lora_request)
-
-            for bad_word in sampling_params.bad_words:
-                # To prohibit words both at the beginning
-                # and in the middle of text
-                # (related to add_prefix_space tokenizer parameter)
-                for add_prefix_space in [False, True]:
-                    prefix = " " if add_prefix_space else ""
-                    inputs = {"prompt": prefix + bad_word.lstrip()}
-                    prompt_token_ids = tokenizer.encode(
-                        text=inputs["prompt"], add_special_tokens=False)
-
-                    # If no space at the beginning
-                    # or if prefix space produces a new word token
-                    if (not add_prefix_space) or (
-                            add_prefix_space
-                            and prompt_token_ids[0] != bad_words_ids[-1][0] and
-                            len(prompt_token_ids) == len(bad_words_ids[-1])):
-                        bad_words_ids.append(prompt_token_ids)
-
-            processors = get_logits_processors(bad_words_ids=bad_words_ids)
+            processors = get_bad_words_logits_processors(
+                bad_words=sampling_params.bad_words, tokenizer=tokenizer)
             logits_processors.extend(processors)
 
         if logits_processors:

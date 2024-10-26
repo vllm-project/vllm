@@ -2,6 +2,9 @@ from typing import Callable, List, Tuple, Union
 
 import torch
 
+from vllm.transformers_utils.tokenizer import AnyTokenizer
+
+
 LogitsProcessor = Union[Callable[[List[int], torch.Tensor], torch.Tensor],
                         Callable[[List[int], List[int], torch.Tensor],
                                  torch.Tensor]]
@@ -12,8 +15,29 @@ first argument, and returns a modified tensor of logits
 to sample from."""
 
 
-def get_logits_processors(
-        bad_words_ids: List[List[int]]) -> List[LogitsProcessor]:
+def get_bad_words_logits_processors(
+        bad_words: List[str],
+        tokenizer: AnyTokenizer) -> List[LogitsProcessor]:
+    bad_words_ids: List[List[int]] = list()
+
+    for bad_word in bad_words:
+        # To prohibit words both at the beginning
+        # and in the middle of text
+        # (related to add_prefix_space tokenizer parameter)
+        for add_prefix_space in [False, True]:
+            prefix = " " if add_prefix_space else ""
+            inputs = {"prompt": prefix + bad_word.lstrip()}
+            prompt_token_ids = tokenizer.encode(
+                text=inputs["prompt"], add_special_tokens=False)
+
+            # If no space at the beginning
+            # or if prefix space produces a new word token
+            if (not add_prefix_space) or (
+                    add_prefix_space
+                    and prompt_token_ids[0] != bad_words_ids[-1][0] and
+                    len(prompt_token_ids) == len(bad_words_ids[-1])):
+                bad_words_ids.append(prompt_token_ids)
+
     return [NoBadWordsLogitsProcessor(bad_words_ids=bad_words_ids)]
 
 
