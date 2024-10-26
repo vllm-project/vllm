@@ -7,8 +7,6 @@ from typing import Optional, Type
 import pytest
 import torch
 
-from vllm.model_executor.layers.quantization.compressed_tensors.\
-        scaled_mm_triton import scaled_mm_triton
 from vllm.utils import seed_everything
 
 device = "cuda"
@@ -77,6 +75,8 @@ def test_scaled_mm(M, N, K, in_dtype, out_dtype, use_scalar_scale_a,
     if use_bias:
         bias = torch.rand((N, ), device=device, dtype=out_dtype)
 
+    from vllm.model_executor.layers.quantization.compressed_tensors.\
+        scaled_mm_triton import scaled_mm_triton
     c_check = scaled_mm_triton(a, b, scale_a, scale_b, out_dtype, bias)
 
     a_cpu = a.cpu()
