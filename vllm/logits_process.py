@@ -12,6 +12,11 @@ first argument, and returns a modified tensor of logits
 to sample from."""
 
 
+def get_logits_processors(
+        bad_words_ids: List[List[int]]) -> List[LogitsProcessor]:
+    return [NoBadWordsLogitsProcessor(bad_words_ids=bad_words_ids)]
+
+
 class NoBadWordsLogitsProcessor:
     _SMALLEST_LOGIT = float("-inf")
     _NEUTRAL_LOGIT = 0.0

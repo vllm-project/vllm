@@ -26,7 +26,7 @@ from vllm.engine.output_processor.interfaces import (
     SequenceGroupOutputProcessor)
 from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.engine.output_processor.util import create_output_by_sequence_group
-from vllm.entrypoints.openai.logits_processors import get_logits_processors
+from vllm.entrypoints.openai.logits_processors import get_openai_logits_processors
 from vllm.executor.executor_base import ExecutorBase
 from vllm.executor.gpu_executor import GPUExecutor
 from vllm.executor.ray_utils import initialize_ray_cluster
@@ -34,7 +34,7 @@ from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs,
                          EncoderDecoderInputs, InputRegistry, PromptType)
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
-from vllm.logits_process import NoBadWordsLogitsProcessor
+from vllm.logits_process import get_logits_processors
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.guided_decoding import (
     get_local_guided_decoding_logits_processor)
@@ -169,9 +169,6 @@ class LLMEngine:
 
     DO_VALIDATE_OUTPUT: ClassVar[bool] = False
     """A flag to toggle whether to validate the type of request output."""
-
-    INCORRECT_PARAMS_TYPE_MSG = ("Either SamplingParams "
-                                 "or PoolingParams must be provided.")
 
     @classmethod
     @contextmanager
@@ -711,7 +708,8 @@ class LLMEngine:
                 encoder_seq=encoder_seq,
                 priority=priority)
         else:
-            raise ValueError(self.INCORRECT_PARAMS_TYPE_MSG)
+            raise ValueError(
+                "Either SamplingParams or PoolingParams must be provided.")
 
         # Add the sequence group to the scheduler with least unfinished seqs.
         costs = [
@@ -1988,7 +1986,7 @@ class LLMEngine:
         if (sampling_params.logit_bias or sampling_params.allowed_token_ids):
             tokenizer = self.get_tokenizer(lora_request=lora_request)
 
-            processors = get_logits_processors(
+            processors = get_openai_logits_processors(
                 logit_bias=sampling_params.logit_bias,
                 allowed_token_ids=sampling_params.allowed_token_ids,
                 tokenizer=tokenizer)
@@ -2020,9 +2018,8 @@ class LLMEngine:
                             len(prompt_token_ids) == len(bad_words_ids[-1])):
                         bad_words_ids.append(prompt_token_ids)
 
-            no_bad_words_processor = NoBadWordsLogitsProcessor(
-                bad_words_ids=bad_words_ids)
-            logits_processors.append(no_bad_words_processor)
+            processors = get_logits_processors(bad_words_ids=bad_words_ids)
+            logits_processors.extend(processors)
 
         if logits_processors:
             if sampling_params.logits_processors is None:
