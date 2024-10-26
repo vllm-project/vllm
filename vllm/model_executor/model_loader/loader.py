@@ -899,6 +899,14 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         return self._unquantized_generator(hf_weights_files, use_safetensors,
                                            quant_state_dict), quant_state_dict
 
+    def _is_quantized_weight_name(self, weight_name: str):
+        quantized_suffix = {
+            "absmax", "quant_map", "nested_absmax", "nested_quant_map",
+            "bitsandbytes"
+        }
+        suffix = weight_name.split(".")[-1]
+        return any((q_suffix in suffix for q_suffix in quantized_suffix))
+
     def _quantized_8bit_generator(self, hf_weights_files, use_safetensors,
                                   quant_state_dict) -> Generator:
         for weight_name, weight_tensor in self._hf_weight_iter(
@@ -932,7 +940,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                                                use_safetensors)
         temp_state_dict = {}
         for weight_name, weight_tensor in weight_iterator:
-            if weight_name.endswith((".weight", ".bias")):
+            if not self._is_quantized_weight_name(weight_name):
                 continue
             # bitsandbytes library requires
             # weight.quant_state.bitsandbytes__* in CPU
@@ -956,9 +964,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         for weight_name, weight_tensor in self._hf_weight_iter(
                 hf_weights_files, use_safetensors):
 
-            # if not weight_name.endswith((".weight", ".bias")):
-            # FIXME(Isotr0py): Fix this patch
-            if not weight_name.endswith((".weight", ".bias", ".embedding", ".gate", ".gate_attn", ".gate_ffn", ".class_embedding", ".cross_attn_attn_gate", ".cross_attn_mlp_gate")):
+            if self._is_quantized_weight_name(weight_name):
                 continue
 
             if (f"{weight_name}.quant_state.bitsandbytes__nf4" \
