@@ -8,15 +8,17 @@ import torch
 from torch import nn
 
 
-@torch.library.custom_op("silly::attention", mutates_args=[])
-def silly_attention(q: torch.Tensor, k: torch.Tensor,
-                    v: torch.Tensor) -> torch.Tensor:
-    return q + k + v
+@torch.library.custom_op("silly::attention", mutates_args=["out"])
+def silly_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
+                    out: torch.Tensor):
+    out.copy_(q)
+    out += k
+    out += v
 
 
 @silly_attention.register_fake
-def _(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
-    return torch.empty_like(q)
+def _(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, out: torch.Tensor):
+    return
 
 
 H = 128  # hidden size
@@ -77,7 +79,8 @@ class LlamaAttention(nn.Module):
         # silly positional encoding
         q = q + positions.unsqueeze(1)
         k = k + positions.unsqueeze(1)
-        attn_output = torch.ops.silly.attention(q, k, v)
+        attn_output = torch.empty_like(q)
+        torch.ops.silly.attention(q, k, v, attn_output)
         output = self.o_proj(attn_output)
         return output
 
