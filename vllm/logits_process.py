@@ -25,13 +25,13 @@ def get_bad_words_logits_processors(
         # (related to add_prefix_space tokenizer parameter)
         for add_prefix_space in [False, True]:
             prefix = " " if add_prefix_space else ""
-            inputs = {"prompt": prefix + bad_word.lstrip()}
+            prompt = prefix + bad_word.lstrip()
 
             if isinstance(tokenizer, MistralTokenizer):
                 # Mistral tokenizers should not add special tokens
-                prompt_token_ids = tokenizer.encode(prompt=inputs["prompt"])
+                prompt_token_ids = tokenizer.encode(prompt=prompt)
             else:
-                prompt_token_ids = tokenizer.encode(text=inputs["prompt"],
+                prompt_token_ids = tokenizer.encode(text=prompt,
                                                     add_special_tokens=False)
 
             # If no space at the beginning
