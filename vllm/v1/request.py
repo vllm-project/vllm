@@ -41,7 +41,6 @@ class Request:
         self.prompt_token_ids = inputs["prompt_token_ids"]
         self.num_prompt_tokens = len(self.prompt_token_ids)
         self.output_token_ids: List[int] = []
-        self.output_text = ""
         self.num_computed_tokens = 0
 
     @property

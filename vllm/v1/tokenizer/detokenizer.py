@@ -1,171 +1,188 @@
 import multiprocessing
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 
 import msgspec
 import zmq
 from msgspec import msgpack
 
+from vllm.logger import init_logger
+from vllm.outputs import CompletionOutput, RequestOutput
+from vllm.sampling_params import RequestOutputKind
 from vllm.transformers_utils.detokenizer_utils import (
     convert_prompt_ids_to_tokens, detokenize_incrementally)
 from vllm.transformers_utils.tokenizer import get_tokenizer
-from vllm.utils import get_open_port
+
+IPC_PATH_INPUT = "/tmp/prototype-input"
+IPC_PATH_NEW_REQUEST = "/tmp/prototype-new_request"
+IPC_POLLING_TIMEOUT_MS = 5000
+
+logger = init_logger(__name__)
+
+
+class DetokenizerNewRequest(msgspec.Struct):
+
+    request_id: str
+    prompt: Optional[str]
+    prompt_token_ids: List[int]
+    skip_special_tokens: bool
+    spaces_between_special_tokens: bool
+    output_kind: RequestOutputKind
+
+
+@dataclass
+class DetokenizerInputData:
+
+    request_id: str
+    new_token_ids: List[int]
+    finished: List[bool]
+    finish_reason: Optional[str] = None
+    stop_reason: Union[int, str, None] = None
 
 
 class DetokenizerInputs(msgspec.Struct):
 
     # [num_reqs]
-    req_ids: List[str]
-    # A request's prompt token ids is sent to the detokenizer only when
-    # the request is first detokenized. Otherwise, an empty list is sent.
-    prompt_token_ids: List[List[int]]
-    new_token_ids: List[List[int]]
-    skip_special_tokens: List[bool]
-    spaces_between_special_tokens: List[bool]
-
-    # [num_free_reqs]
-    free_req_ids: List[str]
+    data: List[DetokenizerInputData]
 
 
-class DetokenizerOutputs(msgspec.Struct):
+@dataclass
+class DetokenizerRequestState:
 
-    # [num_reqs]
-    req_ids: List[str]
-    detokenized_texts: List[str]
-    # NOTE(woosuk): The number of the output token ids of each request
-    # at the time of detokenization. The detokenizer returns this to the engine
-    # because the request state (including the output token ids) is
-    # asynchronously updated in the engine, while RequestOutput requires the
-    # output token ids to be consistent with the detokenized text.
-    num_output_token_ids: List[int]
+    # Generated text
+    output_text: str
+
+    # Prompt information
+    prompt: Optional[str]
+    num_prompt_tokens: int
+
+    # Prompt/generation tokens
+    tokens: List[str]
+    token_ids: List[int]
+
+    # Metadata for incremental detokenization
+    prefix_offset: int
+    read_offset: int
+
+    # Parameters for detokenization
+    skip_special_tokens: bool
+    spaces_between_special_tokens: bool
+    output_kind: RequestOutputKind
+
+    @classmethod
+    def from_new_request(cls, tokenizer, new_request: DetokenizerNewRequest):
+        tokens, prefix_offset, read_offset = convert_prompt_ids_to_tokens(
+            tokenizer=tokenizer,
+            prompt_ids=new_request.prompt_token_ids,
+            skip_special_tokens=new_request.skip_special_tokens,
+        )
+
+        return cls(
+            req_id=new_request.request_id,
+            output_text="",
+            prompt=new_request.prompt,
+            num_prompt_tokens=len(new_request.prompt_token_ids),
+            tokens=tokens,
+            token_ids=new_request.prompt_token_ids,
+            prefix_offset=prefix_offset,
+            read_offset=read_offset,
+            skip_special_tokens=new_request.skip_special_tokens,
+            spaces_between_special_tokens=new_request.
+            spaces_between_special_tokens,
+            output_kind=new_request.output_kind,
+        )
 
 
 class Detokenizer:
 
-    def __init__(self, tokenizer_name: str):
+    def __init__(self, tokenizer_name: str, output_socket_path: str):
         # FIXME(woosuk): Currently, the detokenizer is just a hacky prototype.
         # For example, it does not terminate properly. We need to improve this.
-        self.push_port = get_open_port()
-        self.pull_port = get_open_port()
-        self.detokenizer = DetokenizerProc(tokenizer_name, self.push_port,
-                                           self.pull_port)
+
+        # Serialization protocol.
+        self.msgpack_encoder = msgpack.Encoder()
+
+        # Setup IPC to the Detokenizer background process.
+        self.zmq_context = zmq.Context()
+        self.new_request_socket = self.zmq_context.socket(zmq.PULL)
+        self.new_request_socket.bind(f"icp://{IPC_PATH_NEW_REQUEST}")
+        self.input_socket = self.zmq_context.socket(zmq.PULL)
+        self.input_socket.bind(f"icp://{IPC_PATH_INPUT}")
+
+        # Start the background process.
+        self.detokenizer = DetokenizerProc(tokenizer_name, output_socket_path)
         self.detokenizer.start()
 
-        self.zmq_context = zmq.Context()
-        self.push_socket = self.zmq_context.socket(zmq.PUSH)
-        self.push_socket.connect(f"tcp://localhost:{self.push_port}")
-        self.pull_socket = self.zmq_context.socket(zmq.PULL)
-        self.pull_socket.connect(f"tcp://localhost:{self.pull_port}")
-        self.poller = zmq.Poller()
-        self.poller.register(self.pull_socket, zmq.POLLIN)
-        self.msgpack_encoder = msgpack.Encoder()
-        self.msgpack_decoder = msgpack.Decoder(DetokenizerOutputs)
+    def add_request(self, new_request: DetokenizerNewRequest):
+        self.new_request_socket.send(self.msgpack_encoder.encode(new_request),
+                                     flags=zmq.NOBLOCK)
 
     def send(self, inputs: DetokenizerInputs) -> None:
-        self.push_socket.send(self.msgpack_encoder.encode(inputs),
-                              flags=zmq.NOBLOCK)
-
-    def recv(self) -> Optional[DetokenizerOutputs]:
-        socks = dict(self.poller.poll(timeout=0))
-        if self.pull_socket in socks and socks[self.pull_socket] == zmq.POLLIN:
-            msg = self.pull_socket.recv()
-            return self.msgpack_decoder.decode(msg)
-        return None
+        self.input_socket.send(self.msgpack_encoder.encode(inputs),
+                               flags=zmq.NOBLOCK)
 
     def terminate(self) -> None:
-        self.push_socket.send(b"", flags=zmq.NOBLOCK)
+        self.input_socket.send(b"", flags=zmq.NOBLOCK)
         self.detokenizer.join()
+        logger.info("Detokenizer shutdown is complete.")
 
 
 class DetokenizerProc(multiprocessing.Process):
 
-    def __init__(
-        self,
-        tokenizer_name: str,
-        pull_port: int,
-        push_port: int,
-    ):
+    def __init__(self, tokenizer_name: str, output_socket_path: str):
         super().__init__()
         self.tokenizer_name = tokenizer_name
-        # NOTE: The pull_port of the detokenizer should be the same as the
-        # push_port of the engine. Vice versa.
-        self.pull_port = pull_port
-        self.push_port = push_port
+        self.output_socket_path = output_socket_path
+
+        # Cache the request output and update it incrementally to avoid
+        # creating a new RequestOutput every step.
+        # Request id -> RequestOutput
+        self.request_outputs: Dict[str, RequestOutput] = {}
+
+        # Request id -> DetokenizerRequestState
+        self.request_states: Dict[str, DetokenizerRequestState] = {}
 
     def run(self):
-        # Initialize these objects after the process is forked since they are
-        # not picklable.
+        # Initialize these objects after the process is forked since they
+        # are not picklable.
         self.msgpack_encoder = msgpack.Encoder()
-        self.msgpack_decoder = msgpack.Decoder(DetokenizerInputs)
+        self.msgpack_new_request_decoder = msgpack.Decoder(
+            DetokenizerNewRequest)
+        self.msgpack_input_decoder = msgpack.Decoder(DetokenizerInputs)
         self.tokenizer = get_tokenizer(self.tokenizer_name)
-        # req_id -> RequestState
-        self.request_states: Dict[str, RequestState] = {}
 
+        # Ipc objects.
         self.zmq_context = zmq.Context()
-        self.pull_socket = self.zmq_context.socket(zmq.PULL)
-        self.pull_socket.bind(f"tcp://*:{self.pull_port}")
-        self.push_socket = self.zmq_context.socket(zmq.PUSH)
-        self.push_socket.bind(f"tcp://*:{self.push_port}")
+        self.poller = zmq.Poller()
 
-        while True:
-            message = self.pull_socket.recv()
-            if message == b"":
-                # Terminate signal.
-                break
-            inputs = self.msgpack_decoder.decode(message)
+        # Gets new requests from the LLMEngine.
+        self.new_request_socket = self.zmq_context.socket(zmq.PULL)
+        self.new_request_socket.connect(f"{IPC_PATH_NEW_REQUEST}")
+        self.poller.register(self.new_request_socket, zmq.POLLIN)
 
-            for req_id in inputs.free_req_ids:
-                self.free(req_id)
+        # Gets new input from the LLMEngine.
+        self.input_socket = self.zmq_context.socket(zmq.PULL)
+        self.input_socket.connect(f"{IPC_PATH_INPUT}")
+        self.poller.register(self.input_socket, zmq.POLLIN)
 
-            detokenized_texts: List[str] = []
-            num_output_token_ids: List[int] = []
-            num_reqs = len(inputs.req_ids)
-            for i in range(num_reqs):
-                req_id = inputs.req_ids[i]
-                if req_id not in self.request_states:
-                    self.add_request(
-                        request_id=req_id,
-                        prompt_token_ids=inputs.prompt_token_ids[i],
-                        skip_special_tokens=inputs.skip_special_tokens[i],
-                        spaces_between_special_tokens=inputs.
-                        spaces_between_special_tokens[i],
-                    )
-                new_str = self.detokenize(req_id, inputs.new_token_ids[i])
-                detokenized_texts.append(new_str)
-                req_state = self.request_states[req_id]
-                num_output_token_ids.append(
-                    len(req_state.token_ids) - req_state.num_prompt_tokens)
+        # Sends RequestOutputs to the EngineClient.
+        self.output_socket = self.zmq_context.socket(zmq.PUSH)
+        self.output_socket.bind(self.output_socket_path)
 
-            detokenized = DetokenizerOutputs(
-                req_ids=inputs.req_ids,
-                detokenized_texts=detokenized_texts,
-                num_output_token_ids=num_output_token_ids,
-            )
-            self.push_socket.send(self.msgpack_encoder.encode(detokenized),
-                                  flags=zmq.NOBLOCK)
+        # Busy loop.
+        self._should_terminate = False
+        while not self._should_terminate:
+            events = dict(self.poller.poll(timeout=IPC_POLLING_TIMEOUT_MS))
+            if len(events) == 0:
+                logger.debug("Detokenizer is waiting for work.")
 
-    def add_request(
-        self,
-        request_id: str,
-        prompt_token_ids: List[int],
-        skip_special_tokens: bool,
-        spaces_between_special_tokens: bool,
-    ) -> None:
-        tokens, prefix_offset, read_offset = convert_prompt_ids_to_tokens(
-            tokenizer=self.tokenizer,
-            prompt_ids=prompt_token_ids,
-            skip_special_tokens=skip_special_tokens,
-        )
-        self.request_states[request_id] = RequestState(
-            req_id=request_id,
-            token_ids=prompt_token_ids,
-            tokens=tokens,
-            num_prompt_tokens=len(prompt_token_ids),
-            prefix_offset=prefix_offset,
-            read_offset=read_offset,
-            skip_special_tokens=skip_special_tokens,
-            spaces_between_special_tokens=spaces_between_special_tokens,
-        )
+            if self.new_request_socket in events:
+                assert events[self.new_request_socket] == zmq.POLLIN
+                self._handle_new_request()
+
+            if self.input_socket in events:
+                assert events[self.input_socket] == zmq.POLLIN
+                self._handle_new_input()
 
     def free(self, request_id: str) -> None:
         del self.request_states[request_id]
@@ -196,20 +213,105 @@ class DetokenizerProc(multiprocessing.Process):
             decoded_text += new_decoded_token_text
         return decoded_text
 
+    def _make_request_output(
+        self,
+        request_id: str,
+        new_output_text: str,
+        finished: bool,
+        finish_reason: Optional[str],
+        stop_reason: Optional[str],
+    ) -> RequestOutput:
+        assert request_id in self.request_states
+        request_state = self.request_states[request_id]
 
-@dataclass
-class RequestState:
+        # Get cached RequestOutput or make it.
+        req_output = self.request_outputs.get(request_id)
+        if req_output is None:
+            # TODO: Support `n` > 1.
+            completion_output = CompletionOutput(
+                index=0,
+                text="",
+                token_ids=[],
+                cumulative_logprob=None,
+                logprobs=None,  # TODO
+                finish_reason=None,
+                stop_reason=None,
+                lora_request=None,
+            )
+            req_output = RequestOutput(
+                request_id=request_id,
+                prompt=request_state.prompt,
+                prompt_token_ids=request_state.prompt_token_ids,
+                prompt_logprobs=None,  # TODO
+                outputs=[completion_output],
+                finished=False,
+                metrics=None,
+                lora_request=None,
+                encoder_prompt=None,
+                encoder_prompt_token_ids=None,
+            )
+            self.request_outputs[request_id] = req_output
 
-    req_id: str
+        completion_output = req_output.outputs[0]
+        if request_state.output_kind == RequestOutputKind.CUMULATIVE:
+            completion_output.text += new_output_text
+            completion_output.token_ids = request_state.token_ids
+        elif request_state.output_kind == RequestOutputKind.DELTA:
+            completion_output.text = new_output_text
+            num_prev_tokens = len(completion_output.token_ids)
+            completion_output.token_ids = request_state.token_ids[
+                num_prev_tokens:]
+        elif request_state.output_kind == RequestOutputKind.FINAL_ONLY:
+            if finished:
+                completion_output.text = request_state.output_text
+                completion_output.token_ids = request_state.token_ids
+            else:
+                completion_output.text = ""
+                completion_output.token_ids = []
 
-    token_ids: List[int]
-    tokens: List[str]
-    num_prompt_tokens: int
+        if finished:
+            completion_output.finish_reason = finish_reason
+            completion_output.stop_reason = stop_reason
+            req_output.finished = finished
+        return req_output
 
-    prefix_offset: int
-    read_offset: int
+    def _handle_new_request(self):
+        # TODO(robertgshaw2): this should be nonblocking
+        message = self.new_request_socket.recv()
+        if message == b"" or self._should_terminate:
+            # Terminate signal.
+            self._should_terminate = True
+            return
 
-    skip_special_tokens: bool
-    spaces_between_special_tokens: bool
+        # Deserialize.
+        new_request = self.msgpack_new_request_decoder.decode(message)
 
-    output_text: str = ""
+        # Add to request_state tracker.
+        request_id = new_request.request_id
+        request_state = DetokenizerRequestState.from_new_request(
+            self.tokenizer, new_request)
+        self.request_states[request_id] = request_state
+
+    def _handle_new_input(self):
+        # TODO(robertgshaw2): this should be nonblocking
+        message = self.input_socket.recv()
+        if message == b"" or self._should_terminate:
+            self._should_terminate = True
+            return
+
+        # Deserialize.
+        inputs = self.msgpack_input_decoder.decode(message).data
+
+        # Update request states and create RequestOutput objects.
+        request_outputs = [
+            self._make_request_output(
+                request_id=input.request_id,
+                new_output_text=self.detokenize(input.request_id,
+                                                input.new_token_ids),
+                finished=input.finished,
+                finish_reason=input.finish_reason,
+                stop_reason=input.stop_reason,
+            ) for input in inputs
+        ]
+
+        self.send_request_output(request_outputs)
