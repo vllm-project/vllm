@@ -325,7 +325,9 @@ class MllamaPrecomputedPositionEmbedding(nn.Module):
 # TODO: support other attention backends for attention in vision model
 class MllamaVisionSdpaAttention(nn.Module):
 
-    def __init__(self, config: config_mllama.MllamaVisionConfig):
+    def __init__(self,
+                 config: config_mllama.MllamaVisionConfig,
+                 quant_config: Optional[QuantizationConfig] = None):
         super().__init__()
 
         model_parallel_size = get_tensor_model_parallel_world_size()
@@ -341,12 +343,14 @@ class MllamaVisionSdpaAttention(nn.Module):
             self.head_dim,
             self.num_heads,
             bias=False,
+            quant_config=quant_config,
         )
         self.o_proj = RowParallelLinear(
             self.num_heads * self.head_dim,
             self.embed_dim,
             bias=False,
             input_is_parallel=True,
+            quant_config=quant_config,
         )
 
     def forward(
@@ -393,7 +397,8 @@ class MllamaVisionEncoderLayer(nn.Module):
         self.is_gated = is_gated
         self.intermediate_size = config.intermediate_size
 
-        self.self_attn = MllamaVisionSdpaAttention(config)
+        self.self_attn = MllamaVisionSdpaAttention(config,
+                                                   quant_config=quant_config)
         self.mlp = CLIPMLP(config,
                            quant_config=quant_config,
                            prefix=f"{prefix}.mlp")
@@ -795,19 +800,17 @@ class MllamaTextCrossAttention(nn.Module):
         kv_len = k.shape[0]
         q = q.transpose(0, 1).view(self.num_local_key_value_heads,
                                    self.num_key_value_groups, q_len,
-                                   self.head_dim).contiguous()
+                                   self.head_dim)
         k = k.transpose(0,
                         1)[:,
                            None, :, :].expand(self.num_local_key_value_heads,
                                               self.num_key_value_groups,
-                                              kv_len,
-                                              self.head_dim).contiguous()
+                                              kv_len, self.head_dim)
         v = v.transpose(0,
                         1)[:,
                            None, :, :].expand(self.num_local_key_value_heads,
                                               self.num_key_value_groups,
-                                              kv_len,
-                                              self.head_dim).contiguous()
+                                              kv_len, self.head_dim)
         attention_mask = attention_mask.view(1, 1, q_len, kv_len)
         output = F.scaled_dot_product_attention(q,
                                                 k,
@@ -1037,6 +1040,26 @@ class MllamaForCausalLM(nn.Module):
 @INPUT_REGISTRY.register_dummy_encoder_data(dummy_encoder_data_for_mllama)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_mllama)
 class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
+    # BitandBytes specific attributes
+    default_bitsandbytes_target_modules = [
+        ".gate_proj.",
+        ".down_proj.",
+        ".up_proj.",
+        ".q_proj.",
+        ".k_proj.",
+        ".v_proj.",
+        ".o_proj.",
+    ]
+    # in TP, these weights are partitioned along the column dimension (dim=-1)
+    column_parallel_weights_modules = [".down_proj.", ".o_proj."]
+    bitsandbytes_stacked_params_mapping = {
+        # shard_name, weight_name, index
+        "q_proj": ("qkv_proj", 0),
+        "k_proj": ("qkv_proj", 1),
+        "v_proj": ("qkv_proj", 2),
+        "gate_proj": ("gate_up_proj", 0),
+        "up_proj": ("gate_up_proj", 1),
+    }
 
     def __init__(self,
                  config: config_mllama.MllamaConfig,
@@ -1053,18 +1076,19 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
         self.image_size = config.vision_config.image_size
 
         self.vision_model = MllamaVisionModel(config.vision_config,
-                                              quant_config,
-                                              prefix="vision_model")
+                                              quant_config)
         self.language_model = MllamaForCausalLM(
             config.text_config,
             cache_config=cache_config,
             quant_config=quant_config,
             prefix="language_model",
         )
-        self.multi_modal_projector = nn.Linear(
+        self.multi_modal_projector = ColumnParallelLinear(
             config.vision_config.vision_output_dim,
             config.text_config.hidden_size,
             bias=True,
+            quant_config=quant_config,
+            gather_output=True,
         )
         self.logits_processor = LogitsProcessor(config.output_hidden_states,
                                                 config.text_config.vocab_size)
@@ -1128,7 +1152,7 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
                 raise ValueError("No images provided.")
             max_num_tiles = max(
                 max([len(x) for x in y[0]]) for y in pixel_values)
-            device = self.multi_modal_projector.weight.device
+            device = next(self.multi_modal_projector.parameters()).device
             bsz = len(pixel_values)
             out_num_tiles = []
             out_images = torch.zeros(
@@ -1204,7 +1228,7 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
         cross_attention_states = self.vision_model(pixel_values,
                                                    aspect_ratio_ids,
                                                    aspect_ratio_mask)
-        cross_attention_states = self.multi_modal_projector(
+        cross_attention_states, _ = self.multi_modal_projector(
             cross_attention_states)
 
         bsz, _, _, _, image_token_dim = tuple(cross_attention_states.shape)
