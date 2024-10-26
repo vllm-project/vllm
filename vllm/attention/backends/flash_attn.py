@@ -425,6 +425,9 @@ class FlashAttentionMetadataBuilder(
             block_tables = self._get_graph_runner_block_tables(
                 num_seqs, self.block_tables)
         else:
+            print(f"block tables: {self.block_tables}")
+            if self.block_tables[0] is None:
+                self.block_tables = [list() for _ in range(num_seqs)]
             block_tables = make_tensor_with_pad(
                 self.block_tables,
                 pad=0,

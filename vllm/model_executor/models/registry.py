@@ -96,6 +96,7 @@ _EMBEDDING_MODELS = {
     "Gemma2Model": ("gemma2", "Gemma2EmbeddingModel"),
     "MistralModel": ("llama", "LlamaEmbeddingModel"),
     "Qwen2ForRewardModel": ("qwen2_rm", "Qwen2ForRewardModel"),
+    "Qwen2ForSequenceClassification": ("qwen2_cls", "Qwen2ForSequenceClassification"),
     # [Multimodal]
     "LlavaNextForConditionalGeneration": ("llava_next", "LlavaNextForConditionalGeneration"),  # noqa: E501
     "Phi3VForCausalLM": ("phi3v", "Phi3VForCausalLM"),
