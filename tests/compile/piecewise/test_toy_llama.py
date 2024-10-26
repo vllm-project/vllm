@@ -39,8 +39,8 @@ class LlamaMLP(nn.Module):
             bias=False,
         )
 
-        self.gate_up_proj.weight.data.fill_(0.1)
-        self.down_proj.weight.data.fill_(0.1)
+        self.gate_up_proj.weight.data.fill_(0.0)
+        self.down_proj.weight.data.fill_(0.0)
 
     def forward(self, x):
         x = self.gate_up_proj(x)
@@ -64,8 +64,8 @@ class LlamaAttention(nn.Module):
             out_features=H,
         )
 
-        self.qkv_proj.weight.data.fill_(0.1)
-        self.o_proj.weight.data.fill_(0.1)
+        self.qkv_proj.weight.data.fill_(0.0)
+        self.o_proj.weight.data.fill_(0.0)
 
     def forward(
         self,
@@ -125,7 +125,7 @@ class LlamaModel(nn.Module):
         )
         self.layers = nn.ModuleList([LlamaDecoderLayer() for _ in range(2)])
 
-        self.embed_tokens.weight.data.fill_(0.1)
+        self.embed_tokens.weight.data.fill_(0.0)
 
     def forward(
         self,
@@ -176,7 +176,7 @@ def test_toy_llama():
         os.environ["VLLM_TORCH_COMPILE_CONFIG"] = config
         os.environ["VLLM_TORCH_COMPILE_LEVEL"] = str(level)
         output = run_model(
-            use_compile=level == CompilationLevel.NO_COMPILATION)
+            use_compile=level != CompilationLevel.NO_COMPILATION)
         outputs.append(output)
 
     assert torch.allclose(outputs[0], outputs[1])
