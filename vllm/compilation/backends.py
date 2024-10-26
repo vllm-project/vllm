@@ -336,7 +336,8 @@ def piecewise_backend(graph,
 
         if runtime_shapes not in runtime_shapes_to_compiled_entry:
             # the first time we see this shape, we need to compile the graph
-            if compilation_configs.use_inductor:
+            if compilation_configs.use_inductor and runtime_shapes[
+                    0] in compilation_configs.inductor_compile_sizes:
                 if is_first_graph:
                     logger.info("Compiling a graph for shape %s",
                                 runtime_shapes)
