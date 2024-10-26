@@ -147,23 +147,17 @@ class Metrics:
                 40.0, 50.0, 60.0
             ])
         self.histogram_model_forward_time_request = self._histogram_cls(
-            name="vllm:model_forward_time_seconds",
+            name="vllm:model_forward_time_milliseconds",
             documentation=
-            "Histogram of time spent in the model forward pass in seconds.",
+            "Histogram of time spent in the model forward pass in ms.",
             labelnames=labelnames,
-            buckets=[
-                0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0,
-                40.0, 50.0, 60.0
-            ])
+            buckets=build_1_2_3_5_8_buckets(3000))
         self.histogram_model_execute_time_request = self._histogram_cls(
-            name="vllm:model_execute_time_seconds",
+            name="vllm:model_execute_time_milliseconds",
             documentation=
-            "Histogram of time spent in the model execute function in seconds.",
+            "Histogram of time spent in the model execute function in ms.",
             labelnames=labelnames,
-            buckets=[
-                0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0,
-                40.0, 50.0, 60.0
-            ])
+            buckets=build_1_2_3_5_8_buckets(3000))
         #   Metadata
         self.histogram_num_prompt_tokens_request = self._histogram_cls(
             name="vllm:request_prompt_tokens",
@@ -329,16 +323,12 @@ class RayMetrics(Metrics):
         pass
 
 
-def build_1_2_5_buckets(max_value: int) -> List[int]:
+def build_buckets(mantissa_lst: List[int], max_value: int) -> List[int]:
     """
-    Builds a list of buckets with increasing powers of 10 multiplied by 
-    mantissa values (1, 2, 5) until the value exceeds the specified maximum.
+    Builds a list of buckets with increasing powers of 10 multiplied by
+    mantissa values until the value exceeds the specified maximum.
 
-    Example:
-    >>> build_1_2_5_buckets(100)
-    [1, 2, 5, 10, 20, 50, 100]
     """
-    mantissa_lst = [1, 2, 5]
     exponent = 0
     buckets: List[int] = []
     while True:
@@ -349,6 +339,24 @@ def build_1_2_5_buckets(max_value: int) -> List[int]:
             else:
                 return buckets
         exponent += 1
+
+
+def build_1_2_5_buckets(max_value: int) -> List[int]:
+    """
+    Example:
+    >>> build_1_2_5_buckets(100)
+    [1, 2, 5, 10, 20, 50, 100]
+    """
+    return build_buckets([1, 2, 5], max_value)
+
+
+def build_1_2_3_5_8_buckets(max_value: int) -> List[int]:
+    """
+    Example:
+    >>> build_1_2_3_5_8_buckets(100)
+    [1, 2, 3, 5, 8, 10, 20, 30, 50, 80, 100]
+    """
+    return build_buckets([1, 2, 3, 5, 8], max_value)
 
 
 def local_interval_elapsed(now: float, last_log: float,
