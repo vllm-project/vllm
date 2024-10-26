@@ -345,8 +345,8 @@ def piecewise_backend(graph,
                     graph, args, compilation_configs.inductor_compile_config)
             else:
                 runnable = graph
-            use_cudagraph = runtime_shapes[
-                0] in compilation_configs.cudagraph_capture_sizes
+            use_cudagraph = compilation_configs.use_cudagraph and \
+                runtime_shapes[0] in compilation_configs.cudagraph_capture_sizes # noqa
             entry = Entry(
                 runnable=runnable,
                 use_cudagraph=use_cudagraph,

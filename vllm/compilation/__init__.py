@@ -14,6 +14,10 @@ class CompilationConfig(BaseModel):
     Configuration for compilation.
     It has two parts:
     - CudaGraph capture:
+        - use_cudagraph: whether to use cudagraph.
+            - False: cudagraph inside compilation is not used.
+            - True: cudagraph inside compilation is used. It requires
+                that all input buffers have fixed addresses.
         - cudagraph_warmup_times: warmup times for cudagraph.
         NOTE: `cudagraph_capture_sizes` is always inferred from
         compilation context.
@@ -37,6 +41,8 @@ class CompilationConfig(BaseModel):
     inductor_specialize: str = "none"  # "none", "cudagraph"
     inductor_compile_config: Dict = Field(default_factory=dict)
     inductor_passes: Dict[str, str] = Field(default_factory=dict)
+
+    use_cudagraph: bool = False
     cudagraph_warmup_times: int = 0
 
     # not configurable, computed after init
