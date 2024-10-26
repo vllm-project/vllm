@@ -434,7 +434,7 @@ class _AsyncLLMEngine(LLMEngine):
                 default_guided_backend=self.decoding_config.
                 guided_decoding_backend)
 
-        elif params.bad_words is not None:
+        elif len(params.bad_words) > 0:
             bad_words_ids: List[List[int]] = list()
             tokenizer = self.get_tokenizer_group().get_lora_tokenizer(
                 lora_request)

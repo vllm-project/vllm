@@ -295,26 +295,36 @@ class SamplingParams(
                     f"got n={self.n} and best_of={self.best_of}.")
             self._real_n = self.n
             self.n = self.best_of
+
         if 0 < self.temperature < _MAX_TEMP:
             logger.warning(
                 "temperature %s is less than %s, which may cause numerical "
                 "errors nan or inf in tensors. We have maxed it out to %s.",
                 self.temperature, _MAX_TEMP, _MAX_TEMP)
             self.temperature = max(self.temperature, _MAX_TEMP)
+
         if self.seed == -1:
             self.seed = None
         else:
             self.seed = self.seed
+
         if self.stop is None:
             self.stop = []
         elif isinstance(self.stop, str):
             self.stop = [self.stop]
         else:
             self.stop = list(self.stop)
+
         if self.stop_token_ids is None:
             self.stop_token_ids = []
         else:
             self.stop_token_ids = list(self.stop_token_ids)
+
+        if bad_words is None:
+            self.bad_words = []
+        else:
+            self.bad_words = list(self.bad_words)
+
         self.logprobs = 1 if self.logprobs is True else self.logprobs
         self.prompt_logprobs = (1 if self.prompt_logprobs is True else
                                 self.prompt_logprobs)
@@ -475,6 +485,7 @@ class SamplingParams(
             f"seed={self.seed}, "
             f"stop={self.stop}, "
             f"stop_token_ids={self.stop_token_ids}, "
+            f"bad_words={self.bad_words}, "
             f"include_stop_str_in_output={self.include_stop_str_in_output}, "
             f"ignore_eos={self.ignore_eos}, "
             f"max_tokens={self.max_tokens}, "
