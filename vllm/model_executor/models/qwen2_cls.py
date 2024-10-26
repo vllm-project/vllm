@@ -85,12 +85,13 @@ class Qwen2ForSequenceClassification(nn.Module):
         self.lora_config = lora_config
 
         self.quant_config = quant_config
+        print(f"config: {config}\ncache_config: {cache_config}\nquant_config: {quant_config}")
         self.model = Qwen2Model(config, cache_config, quant_config)
 
-        self.score = ColumnParallelLinear(config.hidden_size,
+        self.score = RowParallelLinear(config.hidden_size,
                                  config.num_labels,
                                  quant_config=quant_config)
-        self._pooler = Pooler(pooling_type=PoolingType.ALL, normalize=False)
+        self._pooler = Pooler(pooling_type=PoolingType.LAST, normalize=False, softmax=True)
 
     def forward(
         self,
@@ -100,10 +101,11 @@ class Qwen2ForSequenceClassification(nn.Module):
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> torch.Tensor:
+        print(f"{input_ids}\n{positions}\n{kv_caches}\n{attn_metadata}\n{intermediate_tensors}")
         hidden_states = self.model(input_ids, positions, kv_caches,
                                    attn_metadata, intermediate_tensors)
-        hidden_states = hidden_states[0]
         logits, _ = self.score(hidden_states)
+        print(logits)
         return logits
 
     def pooler(
@@ -135,6 +137,7 @@ class Qwen2ForSequenceClassification(nn.Module):
                 name = name.replace(weight_name, param_name)
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
+                    print(f"bias is ignored: {name}")
                     continue
                 if is_pp_missing_parameter(name, self):
                     continue
@@ -145,6 +148,7 @@ class Qwen2ForSequenceClassification(nn.Module):
             else:
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
+                    print(f"bias is ignored: {name}")
                     continue
                 # Remapping the name of FP8 kv-scale.
                 name = maybe_remap_kv_scale_name(name, params_dict)
