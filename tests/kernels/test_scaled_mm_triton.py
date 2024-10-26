@@ -8,8 +8,8 @@ import pytest
 import torch
 
 # yapf: disable
-from vllm.model_executor.layers.quantization.compressed_tensors.scaled_mm_triton import (
-    scaled_mm_triton)
+from vllm.model_executor.layers.quantization.compressed_tensors.scaled_mm_triton import ( # noqa: F401
+        scaled_mm_triton) # noqa: F401
 # yapf: enable
 from vllm.utils import seed_everything
 
