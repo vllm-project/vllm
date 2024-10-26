@@ -184,6 +184,8 @@ def vllm_backend(
     from vllm.plugins import get_attention_ops
     attention_ops = get_attention_ops()
 
+    from torch._dynamo.utils import lazy_format_graph_code
+
     # split graph by attention
     subgraph_id = 0
     node_to_subgraph_id = {}
@@ -214,6 +216,8 @@ def vllm_backend(
     for (name, module) in list(split_gm.named_modules()):
         if name == "":
             # stitching module
+            logger.debug("%s", lazy_format_graph_code("stiching module",
+                                                      module))
             continue
         if "." in name:
             # recursive child module
