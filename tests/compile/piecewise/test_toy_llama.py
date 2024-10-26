@@ -143,10 +143,32 @@ class LlamaModel(nn.Module):
 
 
 @torch.inference_mode
-def run_model(use_compile: bool):
+def run_model(use_compile: bool, split_attn: bool = False) -> torch.Tensor:
+
+    import os
+    directory = os.path.dirname(__file__)
+    config = os.path.join(directory, "compilation_config.json")
+    os.environ["VLLM_TORCH_COMPILE_CONFIG"] = config
+
+    from vllm.compilation.levels import CompilationLevel
+
+    if use_compile:
+        os.environ["VLLM_TORCH_COMPILE_LEVEL"] = str(
+            CompilationLevel.PIECEWISE)
+    else:
+        os.environ["VLLM_TORCH_COMPILE_LEVEL"] = str(
+            CompilationLevel.NO_COMPILATION)
+
+    if use_compile and split_attn:
+        from vllm.plugins import set_non_cudagraph_ops
+        set_non_cudagraph_ops(["silly.attention"])
+
     from vllm.compilation.compile_context import set_compile_context
     from vllm.compilation.decorators import support_torch_compile
-    cls = support_torch_compile(LlamaModel) if use_compile else LlamaModel
+    cls = LlamaModel
+    if use_compile and not split_attn:
+        # can only decorate once
+        cls = support_torch_compile(LlamaModel)
     model = cls().eval().cuda()
 
     B = 16  # max batch size
@@ -167,19 +189,10 @@ def run_model(use_compile: bool):
 def test_toy_llama():
     # compare output with and without piecewise compilation
 
-    from vllm.compilation.levels import CompilationLevel
-    levels = [CompilationLevel.NO_COMPILATION, CompilationLevel.PIECEWISE]
-
-    import os
-    directory = os.path.dirname(__file__)
-    config = os.path.join(directory, "compilation_config.json")
-
     outputs = []
-    for level in levels:
-        os.environ["VLLM_TORCH_COMPILE_CONFIG"] = config
-        os.environ["VLLM_TORCH_COMPILE_LEVEL"] = str(level)
-        output = run_model(
-            use_compile=level != CompilationLevel.NO_COMPILATION)
-        outputs.append(output)
+    outputs.append(run_model(use_compile=False))
+    outputs.append(run_model(use_compile=True))
+    outputs.append(run_model(use_compile=True, split_attn=True))
 
-    assert torch.allclose(outputs[0], outputs[1])
+    for i in range(1, len(outputs)):
+        assert torch.allclose(outputs[0], outputs[i])
