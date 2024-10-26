@@ -1,10 +1,10 @@
 # coding=utf-8
 # Adapted from
 # https://huggingface.co/Qwen/Qwen2.5-Math-RM-72B/blob/main/modeling_qwen2_rm.py
-# Copyright 2024 Kakao Corp(Kanana-X Team).
+# Copyright 2024 Kakao Corp. (Kanana-X Team)
 # Copyright 2024 The Qwen team.
 # Copyright 2023 The vLLM team.
-"""Inference-only Qwen2-Classification model compatible with HuggingFace weights."""
+"""Inference-only Qwen2-Classification model compatible with HF weights."""
 from typing import Iterable, List, Optional, Tuple
 
 import torch
