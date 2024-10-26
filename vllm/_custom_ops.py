@@ -486,6 +486,12 @@ def cutlass_scaled_mm(a: torch.Tensor,
 
     m = a.shape[0]
     n = b.shape[1]
+
+    if vllm.utils.is_hip():
+        from vllm.model_executor.layers.quantization.compressed_tensors.\
+                scaled_mm_triton import scaled_mm_triton
+        return scaled_mm_triton(a, b, scale_a, scale_b, out_dtype, bias)
+
     out = torch.empty((m, n), dtype=out_dtype, device=a.device)
 
     torch.ops._C.cutlass_scaled_mm(out, a, b, scale_a, scale_b, bias)
@@ -723,8 +729,8 @@ def scaled_int8_quant(
     if scale is not None:
         # static-per-tensor quantization.
         assert symmetric == (
-            azp is
-            None), "azp must only be provided for asymmetric quantization."
+            azp
+            is None), "azp must only be provided for asymmetric quantization."
         torch.ops._C.static_scaled_int8_quant(output, input, scale, azp)
         return output, scale, None
 
