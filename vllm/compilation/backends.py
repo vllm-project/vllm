@@ -388,8 +388,7 @@ def select_default_backend(level: int) -> Union[str, Callable]:
     ], f"Invalid level {level}"
 
     from vllm.compilation.backends import vllm_backend
-    from vllm.plugins import get_torch_compile_config
-    compilation_configs = get_torch_compile_config()
+    compilation_configs = ... # get from json file
     additional_configs = compilation_configs.inductor_compile_config
 
     context = get_compile_context()
