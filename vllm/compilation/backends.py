@@ -204,37 +204,45 @@ def vllm_backend(
         else:
             node_to_subgraph_id[node] = subgraph_id
 
-    # `keep_original_order` is important!
-    # otherwise pytorch might reorder the nodes and
-    # the semantics of the graph will change when we
-    # have mutations in the graph
-    split_gm = torch.fx.passes.split_module.split_module(
-        graph,
-        None,
-        lambda node: node_to_subgraph_id[node],
-        keep_original_order=True)
-
     graph_pool = torch.cuda.graph_pool_handle()
+    final_graph: Callable = None  # type: ignore
 
-    for (name, module) in list(split_gm.named_modules()):
-        if name == "":
-            # stitching module
-            logger.debug("%s", lazy_format_graph_code("stiching module",
-                                                      module))
-            continue
-        if "." in name:
-            # recursive child module
-            continue
-        graph_id = int(name.replace("submod_", ""))
-        if graph_id not in attention_graphs:
-            # cannot setattr to a module, so we need to set it to the dict
-            split_gm.__dict__[name] = piecewise_backend(
-                module, sizes_to_specialize, additional_inductor_config,
-                graph_pool)
+    if subgraph_id != 0:
+        # `keep_original_order` is important!
+        # otherwise pytorch might reorder the nodes and
+        # the semantics of the graph will change when we
+        # have mutations in the graph
+        split_gm = torch.fx.passes.split_module.split_module(
+            graph,
+            None,
+            lambda node: node_to_subgraph_id[node],
+            keep_original_order=True)
+
+        for (name, module) in list(split_gm.named_modules()):
+            if name == "":
+                # stitching module
+                logger.debug("%s",
+                             lazy_format_graph_code("stiching module", module))
+                continue
+            if "." in name:
+                # recursive child module
+                continue
+            graph_id = int(name.replace("submod_", ""))
+            if graph_id not in attention_graphs:
+                # cannot setattr to a module, so we need to set it to the dict
+                split_gm.__dict__[name] = piecewise_backend(
+                    module, sizes_to_specialize, additional_inductor_config,
+                    graph_pool)
+
+        final_graph = split_gm
+
+    else:
+        final_graph = piecewise_backend(graph, sizes_to_specialize,
+                                        additional_inductor_config, graph_pool)
 
     # trigger the first compilation
     logger.info("Compiling a graph for general shapes")
-    split_gm(*example_inputs)
+    final_graph(*example_inputs)
 
     sym_shape_indices = [
         i for i, x in enumerate(example_inputs) if isinstance(x, torch.SymInt)
@@ -248,7 +256,7 @@ def vllm_backend(
             logger.info("Compiling a graph for shapes %s", shape)
             seen_shapes.add(shape)
 
-        return split_gm(*args)
+        return final_graph(*args)
 
     return forward
 
