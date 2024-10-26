@@ -61,6 +61,10 @@ def test_simple_piecewise_compile():
 
     model = SillyModel()
 
+    directory = os.path.dirname(__file__)
+    config = os.path.join(directory, "compilation_config.json")
+    os.environ["VLLM_TORCH_COMPILE_CONFIG"] = config
+
     input_buffer = torch.randn(100).cuda()
 
     with set_compile_context([1, 2]):
