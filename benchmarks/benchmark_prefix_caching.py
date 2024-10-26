@@ -197,16 +197,16 @@ if __name__ == "__main__":
                         type=int,
                         default=0,
                         help='Random seed for reproducibility')
-    parser.add_argument('--block-allocator',
-                        type=str,
-                        default='CpuGpuBlockAllocator',
-                        choices=['CpuGpuBlockAllocator', 
-                                 'CpuOffloadingBlockAllocator'],
-                        help='The block allocator that vLLM uses. Currently'
-                        ' can be CpuGpuBlockAllocator (the default) and '
-                        'CpuOffloadingBlockAllocator (experimental) that '
-                        'supports offloading the KV cache to CPU . '
-                        'When using CpuOffloadingBlockAllocator, the '
-                        'preemption mode must be recompute.')
+    parser.add_argument(
+        '--block-allocator',
+        type=str,
+        default='CpuGpuBlockAllocator',
+        choices=['CpuGpuBlockAllocator', 'CpuOffloadingBlockAllocator'],
+        help='The block allocator that vLLM uses. Currently'
+        ' can be CpuGpuBlockAllocator (the default) and '
+        'CpuOffloadingBlockAllocator (experimental) that '
+        'supports offloading the KV cache to CPU . '
+        'When using CpuOffloadingBlockAllocator, the '
+        'preemption mode must be recompute.')
     args = parser.parse_args()
     main(args)

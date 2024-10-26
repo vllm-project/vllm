@@ -28,7 +28,7 @@ def test_allocate_mutable_block(num_cpu_blocks: int, num_gpu_blocks: int,
     assert allocator.get_num_free_blocks(Device.CPU) == num_cpu_blocks
     assert allocator.get_num_free_blocks(Device.GPU) == 0
     assert len(allocator._uncached_blocks) == num_gpu_blocks
-    
+
     mapping = allocator.get_and_reset_swaps(0.0)
     assert not mapping
     assert len(allocator._uncached_blocks) == num_gpu_blocks
@@ -36,11 +36,10 @@ def test_allocate_mutable_block(num_cpu_blocks: int, num_gpu_blocks: int,
     _ = [allocator.free(block) for block in gpu_blocks]
     assert allocator.get_num_free_blocks(Device.CPU) == num_cpu_blocks
     assert allocator.get_num_free_blocks(Device.GPU) == num_gpu_blocks
-    
+
     mapping = allocator.get_and_reset_swaps(1.0)
     assert not mapping
     assert len(allocator._uncached_blocks) == 0
-    
 
 
 @pytest.mark.parametrize("num_cpu_blocks", [1024])
@@ -62,11 +61,8 @@ def test_allocate_immutable_block(num_cpu_blocks: int, num_gpu_blocks: int,
         chunk_list(unique_token_ids[:num_gpu_blocks * block_size], block_size))
     gpu_token_ids2 = list(
         chunk_list(
-            unique_token_ids[
-                num_gpu_blocks * block_size : 2 * num_gpu_blocks * block_size], 
-            block_size
-        )
-    )
+            unique_token_ids[num_gpu_blocks * block_size:2 * num_gpu_blocks *
+                             block_size], block_size))
 
     gpu_blocks = [
         allocator.allocate_immutable_block(prev_block=None,
@@ -74,28 +70,28 @@ def test_allocate_immutable_block(num_cpu_blocks: int, num_gpu_blocks: int,
                                            device=Device.GPU)
         for token_ids in gpu_token_ids
     ]
-    
+
     assert allocator.get_num_free_blocks(Device.CPU) == num_cpu_blocks
     assert allocator.get_num_free_blocks(Device.GPU) == 0
     assert len(allocator._uncached_blocks) == num_gpu_blocks
-    
+
     mapping = allocator.get_and_reset_swaps(0.0)
     assert not mapping
     assert len(allocator._uncached_blocks) == num_gpu_blocks
-    
+
     allocator.mark_blocks_as_computed([block.block_id for block in gpu_blocks])
     mapping = allocator.get_and_reset_swaps(1.0)
     assert len(mapping) == num_gpu_blocks
     assert len(allocator._uncached_blocks) == 0
-    
+
     _ = [allocator.free(block) for block in gpu_blocks]
     assert allocator.get_num_free_blocks(Device.CPU) == num_cpu_blocks
     assert allocator.get_num_free_blocks(Device.GPU) == num_gpu_blocks
-    
+
     mapping = allocator.get_and_reset_swaps(1.0)
     assert len(mapping) == 0
     assert len(allocator._uncached_blocks) == 0
-    
+
     # allocate another gpu sequence to flush out the GPU cache
     gpu_blocks = [
         allocator.allocate_immutable_block(prev_block=None,
@@ -103,21 +99,21 @@ def test_allocate_immutable_block(num_cpu_blocks: int, num_gpu_blocks: int,
                                            device=Device.GPU)
         for token_ids in gpu_token_ids2
     ]
-    
+
     assert allocator.get_num_free_blocks(Device.CPU) == num_cpu_blocks
     assert allocator.get_num_free_blocks(Device.GPU) == 0
-    assert all([not allocator._allocators[Device.GPU].block_is_computed(
-        block.block_id
-    ) for block in gpu_blocks])
-    
+    assert all([
+        not allocator._allocators[Device.GPU].block_is_computed(block.block_id)
+        for block in gpu_blocks
+    ])
+
     _ = [allocator.free(block) for block in gpu_blocks]
     assert allocator.get_num_free_blocks(Device.GPU) == num_gpu_blocks
-    
+
     mapping = allocator.get_and_reset_swaps(2.0)
     assert len(mapping) == 0
     assert len(allocator._uncached_blocks) == 0
-    
-    
+
     # allocate original gpu sequence. It should hit CPU cache.
     gpu_blocks = [
         allocator.allocate_immutable_block(prev_block=None,
@@ -125,13 +121,14 @@ def test_allocate_immutable_block(num_cpu_blocks: int, num_gpu_blocks: int,
                                            device=Device.GPU)
         for token_ids in gpu_token_ids
     ]
-    
+
     delta = num_cpu_blocks - num_gpu_blocks
     assert allocator.get_num_free_blocks(Device.CPU) == delta
     assert allocator.get_num_free_blocks(Device.GPU) == 0
-    assert all([allocator._allocators[Device.GPU].block_is_computed(
-        block.block_id
-    ) for block in gpu_blocks])
-    
+    assert all([
+        allocator._allocators[Device.GPU].block_is_computed(block.block_id)
+        for block in gpu_blocks
+    ])
+
     mapping = allocator.get_and_reset_swaps(3.0)
     assert allocator.get_num_free_blocks(Device.CPU) == num_cpu_blocks

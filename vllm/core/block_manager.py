@@ -5,8 +5,8 @@ from typing import Tuple
 
 from vllm.core.block.block_table import BlockTable
 from vllm.core.block.cpu_gpu_block_allocator import CpuGpuBlockAllocator
-from vllm.core.block.cpu_offloading_block_allocator \
-    import CpuOffloadingBlockAllocator
+from vllm.core.block.cpu_offloading_block_allocator import (
+    CpuOffloadingBlockAllocator)
 from vllm.core.block.interfaces import Block
 from vllm.core.block.prefix_caching_block import (ComputedBlocksTracker,
                                                   LastAccessBlocksTracker)
@@ -17,7 +17,6 @@ from vllm.utils import Device
 
 SeqId = int
 EncoderSeqId = str
-
 
 block_allocator_creator = {
     "CpuGpuBlockAllocator": CpuGpuBlockAllocator.create,

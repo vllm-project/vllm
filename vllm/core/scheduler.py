@@ -1070,14 +1070,13 @@ class Scheduler:
 
         blocks_to_copy = running_scheduled.blocks_to_copy
         blocks_to_copy.extend(swapped_in.blocks_to_copy)
-        
+
         blocks_to_swap_in = swapped_in.blocks_to_swap_in
         blocks_to_swap_out = running_scheduled.blocks_to_swap_out
-        
+
         # NOTE(Kuntai): extend the swapping list for CPU offloading
         block_allocator = self.block_manager.block_allocator
-        mapping = block_allocator.get_and_reset_swaps(
-            time.time())
+        mapping = block_allocator.get_and_reset_swaps(time.time())
         for src, dst in mapping:
             # only two possible cases: CPU -> GPU, or GPU -> CPU
             if src in block_allocator._allocators[Device.GPU].all_block_ids:
@@ -1086,7 +1085,6 @@ class Scheduler:
             else:
                 # swap in
                 blocks_to_swap_in.extend((src, dst))
-                
 
         ignored_seq_groups = prefills.ignored_seq_groups
         ignored_seq_groups.extend(swapped_in.infeasible_seq_groups)
@@ -1166,17 +1164,16 @@ class Scheduler:
 
         # Update swapped requests.
         self.swapped.extend(running_scheduled.swapped_out)
-        
+
         blocks_to_copy = running_scheduled.blocks_to_copy
         blocks_to_copy.extend(swapped_in.blocks_to_copy)
-        
+
         blocks_to_swap_in = swapped_in.blocks_to_swap_in
         blocks_to_swap_out = running_scheduled.blocks_to_swap_out
-        
+
         # NOTE(Kuntai): extend the swapping list for CPU offloading
         block_allocator = self.block_manager.block_allocator
-        mapping = block_allocator.get_and_reset_swaps(
-            time.time())
+        mapping = block_allocator.get_and_reset_swaps(time.time())
         for src, dst in mapping:
             # only two possible cases: CPU -> GPU, or GPU -> CPU
             if src in block_allocator._allocators[Device.GPU].all_block_ids:
@@ -1185,7 +1182,7 @@ class Scheduler:
             else:
                 # swap in
                 blocks_to_swap_in.extend((src, dst))
-                
+
         return SchedulerOutputs(
             scheduled_seq_groups=(prefills.seq_groups +
                                   running_scheduled.prefill_seq_groups +

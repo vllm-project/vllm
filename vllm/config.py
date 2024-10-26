@@ -684,13 +684,11 @@ class CacheConfig:
                 f"{self.gpu_memory_utilization}.")
 
         if self.block_allocator not in [
-            "CpuGpuBlockAllocator",
-            "CpuOffloadingBlockAllocator"
+                "CpuGpuBlockAllocator", "CpuOffloadingBlockAllocator"
         ]:
             raise ValueError(
                 "Only CpuGpuBlockAllocator and CpuOffloadingBlockAllocator is "
-                "supported. Got %s." % self.block_allocator
-            )
+                "supported. Got %s." % self.block_allocator)
 
     def _verify_cache_dtype(self) -> None:
         if self.cache_dtype == "auto":
