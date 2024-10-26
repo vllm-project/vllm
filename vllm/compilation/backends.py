@@ -245,8 +245,7 @@ def vllm_backend(
             logger.info("Compiling a graph for shapes %s", shape)
             seen_shapes.add(shape)
 
-        # FIXME: it seems pytorch always returns a tuple
-        return split_gm(*args)[0]
+        return split_gm(*args)
 
     return forward
 
