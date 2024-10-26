@@ -1,8 +1,8 @@
+from typing import Optional, Type
+
 import torch
 import triton
 import triton.language as tl
-
-from typing import Optional, Type
 
 
 # This function handles some cases that can cause certain failure, e.g.
