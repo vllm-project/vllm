@@ -323,8 +323,6 @@ def piecewise_backend(graph,
             # TODO: investigate if any model needs to specialize
             # beyond the first dimension
 
-            assert compilation_configs.inductor_compile_sizes is not None
-            assert compilation_configs.cudagraph_capture_sizes is not None
             runtime_shapes_to_compile_flags[runtime_shapes] = runtime_shapes[
                 0] in compilation_configs.inductor_compile_sizes or \
                 runtime_shapes[0] in compilation_configs.cudagraph_capture_sizes
@@ -343,7 +341,6 @@ def piecewise_backend(graph,
                     graph, args, compilation_configs.inductor_compile_config)
             else:
                 runnable = graph
-            assert compilation_configs.cudagraph_capture_sizes is not None
             use_cudagraph = runtime_shapes[
                 0] in compilation_configs.cudagraph_capture_sizes
             entry = Entry(
