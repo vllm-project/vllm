@@ -14,8 +14,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from huggingface_hub import snapshot_download
 from PIL import Image
-from transformers import (AutoModelForCausalLM, AutoModelForSequenceClassification, AutoTokenizer, AutoConfig, BatchEncoding,
-                          BatchFeature)
+from transformers import (AutoModelForCausalLM,
+                          AutoModelForSequenceClassification, AutoTokenizer,
+                          AutoConfig, BatchEncoding, BatchFeature)
 from transformers.models.auto.auto_factory import _BaseAutoModelClass
 
 from tests.models.utils import (TokensTextLogprobs,
@@ -282,11 +283,11 @@ class HfRunner:
                 torch_dtype=torch_dtype,
                 trust_remote_code=True,
             )
-            arch = config.architectures 
+            arch = config.architectures
             if len(arch) > 0:
                 cls_type = arch[0].split("For")[-1]
                 auto_cls = eval(f"AutoModelFor{cls_type}")
-            
+
             self.model = self.wrap_device(
                 auto_cls.from_pretrained(
                     model_name,
@@ -357,13 +358,12 @@ class HfRunner:
         # output is final logits
         all_inputs = self.get_inputs(prompts)
         outputs = []
-        print(f"model: {self.model}")
         for inputs in all_inputs:
             output = self.model(**self.wrap_device(inputs))
             logits = output.logits.softmax(dim=-1)[0].tolist()
             outputs.append(logits)
 
-        return outputs 
+        return outputs
 
     def generate(
         self,
@@ -709,7 +709,7 @@ class VllmRunner:
                     inputs[i]["multi_modal_data"] = {"audio": audio}
 
         return inputs
-    
+
     def classify(self, prompts: List[str]) -> List[str]:
         req_outputs = self.model.encode(prompts)
         outputs = []

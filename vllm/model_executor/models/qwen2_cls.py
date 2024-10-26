@@ -12,8 +12,7 @@ from transformers import Qwen2Config
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig
-from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               RowParallelLinear)
+from vllm.model_executor.layers.linear import RowParallelLinear
 from vllm.model_executor.layers.pooler import Pooler, PoolingType
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
@@ -88,9 +87,9 @@ class Qwen2ForSequenceClassification(nn.Module):
         self.model = Qwen2Model(config, cache_config, quant_config)
 
         self.score = RowParallelLinear(config.hidden_size,
-                                 config.num_labels,
-                                 quant_config=quant_config)
-        self._pooler = Pooler(pooling_type=PoolingType.LAST, normalize=False, softmax=True)
+                                       config.num_labels,
+                                       quant_config=quant_config)
+        self._pooler = Pooler(pooling_type=PoolingType.LAST, normalize=False)
 
     def forward(
         self,
@@ -110,7 +109,8 @@ class Qwen2ForSequenceClassification(nn.Module):
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
     ) -> Optional[PoolerOutput]:
-        return self._pooler(hidden_states, pooling_metadata)
+        pooled = self._pooler(hidden_states, pooling_metadata)
+        return nn.functional.softmax(pooled, dim=-1)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         stacked_params_mapping = [
