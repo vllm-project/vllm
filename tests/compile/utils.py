@@ -73,7 +73,7 @@ def check_full_graph_support(model,
     # much memory.
     quantization = model_kwargs.get("quantization")
     if ((quantization == "fp8" or model == "meta-llama/Meta-Llama-3-8B")
-            and optimization_level >= CompilationLevel.INDUCTOR):
+            and optimization_level >= CompilationLevel.PIECEWISE):
         return
 
     prompts = [

@@ -1,9 +1,12 @@
+import copy
 import json
 from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
 import vllm.envs as envs
+
+from .compile_context import get_compile_context
 
 
 class CompilationConfig(BaseModel):
@@ -42,5 +45,18 @@ class CompilationConfig(BaseModel):
         if config_path is not None:
             with open(config_path) as json_file:
                 data = json.load(json_file)
-                return CompilationConfig.model_validate_json(data)
-        return CompilationConfig()
+                config = CompilationConfig.model_validate_json(data)
+        else:
+            config = CompilationConfig()
+
+        context = get_compile_context()
+        context = copy.deepcopy(context) if context is not None else []
+        sizes_to_specialize: List[int] = context
+
+        if config.cudagraph_capture_sizes is None:
+            config.cudagraph_capture_sizes = sizes_to_specialize
+
+        if config.inductor_compile_sizes is None:
+            config.inductor_compile_sizes = sizes_to_specialize
+
+        return config

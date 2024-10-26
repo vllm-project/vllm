@@ -9,7 +9,6 @@ import torch.fx as fx
 from vllm.logger import init_logger
 
 from . import CompilationConfig
-from .compile_context import get_compile_context
 from .levels import CompilationLevel
 
 logger = init_logger(__name__)
@@ -383,30 +382,9 @@ def select_default_backend(level: int) -> Union[str, Callable]:
     if level in [CompilationLevel.DYNAMO_AS_IS, CompilationLevel.DYNAMO_ONCE]:
         backend_str = "eager"
         return backend_str
-    assert level in [
-        CompilationLevel.INDUCTOR, CompilationLevel.INDUCTOR_MAX_AUTOTUNE
-    ], f"Invalid level {level}"
+    assert level == CompilationLevel.PIECEWISE
 
     compilation_configs = CompilationConfig.default_config()
-    additional_configs = compilation_configs.inductor_compile_config
-
-    context = get_compile_context()
-    context = copy.deepcopy(context) if context is not None else []
-    sizes_to_specialize: List[int] = context
-
-    if compilation_configs.cudagraph_capture_sizes is None:
-        compilation_configs.cudagraph_capture_sizes = sizes_to_specialize
-
-    if compilation_configs.inductor_compile_sizes is None:
-        compilation_configs.inductor_compile_sizes = sizes_to_specialize
-
-    if level == CompilationLevel.INDUCTOR_MAX_AUTOTUNE:
-        if "max_autotune" in additional_configs and not additional_configs[
-                "max_autotune"]:
-            logger.warning(
-                "max_autotune is disabled, but is overridden by level %s",
-                CompilationLevel.INDUCTOR_MAX_AUTOTUNE)
-        additional_configs['max_autotune'] = True
 
     from functools import partial
     backend = partial(vllm_backend, compilation_configs=compilation_configs)
