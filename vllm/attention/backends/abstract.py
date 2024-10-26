@@ -20,7 +20,6 @@ class AttentionType(Enum):
     ENCODER_DECODER = auto()  # Attention between dec. Q and enc. K/V
 
 
-
 class AttentionBackend(ABC):
     """Abstract class for attention backends."""
 

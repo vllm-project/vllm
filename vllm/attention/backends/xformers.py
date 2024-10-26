@@ -12,7 +12,10 @@ from xformers.ops.fmha.attn_bias import (AttentionBias,
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
 from vllm.attention.backends.utils import (CommonAttentionState,
-                                           CommonMetadataBuilder)
+                                           CommonMetadataBuilder,
+                                           is_all_encoder_attn_metadata_set,
+                                           is_all_cross_attn_metadata_set,
+                                           get_seq_len_block_table_args)
 from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
 from vllm.logger import init_logger
@@ -167,9 +170,7 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
         '''
         All attention metadata required for encoder attention is set.
         '''
-        return ((self.encoder_seq_lens is not None)
-                and (self.encoder_seq_lens_tensor is not None)
-                and (self.max_encoder_seq_len is not None))
+        return is_all_encoder_attn_metadata_set(self)
 
     @property
     def is_all_cross_attn_metadata_set(self):
@@ -178,9 +179,7 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
 
         Superset of encoder attention required metadata.
         '''
-        return (self.is_all_encoder_attn_metadata_set
-                and (self.cross_slot_mapping is not None)
-                and (self.cross_block_tables is not None))
+        return is_all_cross_attn_metadata_set(self)
 
     @property
     def prefill_metadata(self) -> Optional["XFormersMetadata"]:
@@ -356,28 +355,7 @@ def _get_seq_len_block_table_args(
     * Appropriate max sequence-length scalar
     * Appropriate block tables (or None)
     '''
-
-    if attn_type == AttentionType.DECODER:
-        # Decoder self-attention
-        # Choose max_seq_len based on whether we are in prompt_run
-        if is_prompt:
-            max_seq_len = attn_metadata.max_prefill_seq_len
-        else:
-            max_seq_len = attn_metadata.max_decode_seq_len
-        return (attn_metadata.seq_lens_tensor, max_seq_len,
-                attn_metadata.block_tables)
-    elif attn_type == AttentionType.ENCODER_DECODER:
-        # Enc/dec cross-attention KVs match encoder sequence length;
-        # cross-attention utilizes special "cross" block tables
-        return (attn_metadata.encoder_seq_lens_tensor,
-                attn_metadata.max_encoder_seq_len,
-                attn_metadata.cross_block_tables)
-    elif attn_type == AttentionType.ENCODER:
-        # No block tables associated with encoder attention
-        return (attn_metadata.encoder_seq_lens_tensor,
-                attn_metadata.max_encoder_seq_len, None)
-    else:
-        raise AttributeError(f"Invalid attention type {str(attn_type)}")
+    return get_seq_len_block_table_args(attn_metadata, is_prompt, attn_type)
 
 
 class XFormersMetadataBuilder(CommonMetadataBuilder[XFormersMetadata]):

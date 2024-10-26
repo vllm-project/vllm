@@ -104,7 +104,7 @@ def get_attn_backend(
         from vllm.attention.backends.blocksparse_attn import (
             BlocksparseFlashAttentionBackend)
         return BlocksparseFlashAttentionBackend
-    
+
     print('In get_attn_backend2')
     backend = which_attn_to_use(head_size, sliding_window, dtype,
                                 kv_cache_dtype, block_size, is_attention_free)

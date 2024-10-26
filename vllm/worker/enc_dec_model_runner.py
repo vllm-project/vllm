@@ -514,7 +514,6 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         encoder_seq_start_loc = torch.zeros(encoder_seq_lens_tensor.shape[0] +
                                             1,
                                             dtype=torch.int32,
-                                            dtype=torch.int32,
                                             device=self.device)
         torch.cumsum(encoder_seq_lens_tensor,
                      dim=0,

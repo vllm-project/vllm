@@ -316,8 +316,8 @@ class CommonAttentionState(AttentionState):
             use_cuda_graph=True,
         )
         #if is_encoder_decoder_model:
-            # The encoder decoder model works only with XFormers backend.
-            # Assert the same.
+        # The encoder decoder model works only with XFormers backend.
+        # Assert the same.
         #    assert self.runner.attn_backend.get_name() == "xformers", \
         #    f"Expected attn_backend name to be 'xformers', but "\
         #    f" got '{self.runner.attn_backend.get_name()}'"
@@ -339,11 +339,11 @@ class CommonAttentionState(AttentionState):
             "block_tables": attn_metadata.decode_metadata.block_tables,
         }
         #if is_encoder_decoder_model:
-            # The encoder decoder model works only with XFormers backend.
-            # Assert the same.
-            #assert self.runner.attn_backend.get_name() == "xformers", \
-            #f"Expected attn_backend name to be 'xformers', but "\
-            #f" got '{self.runner.attn_backend.get_name()}'"
+        # The encoder decoder model works only with XFormers backend.
+        # Assert the same.
+        #assert self.runner.attn_backend.get_name() == "xformers", \
+        #f"Expected attn_backend name to be 'xformers', but "\
+        #f" got '{self.runner.attn_backend.get_name()}'"
         self._add_additonal_input_buffers_for_enc_dec_model(
             attn_metadata=attn_metadata, input_buffers=input_buffers)
         return input_buffers
@@ -358,13 +358,13 @@ class CommonAttentionState(AttentionState):
         input_buffers["block_tables"].copy_(
             attn_metadata.decode_metadata.block_tables, non_blocking=True)
         #if is_encoder_decoder_model:
-            # The encoder decoder model works only with XFormers backend.
-            # Assert the same.
-            #assert self.runner.attn_backend.get_name() == "xformers", \
-            #f"Expected attn_backend name to be 'xformers', but "\
-            #f" got '{self.runner.attn_backend.get_name()}'"
-        self._prepare_input_buffers_for_enc_dec_model(
-            attn_metadata, input_buffers)
+        # The encoder decoder model works only with XFormers backend.
+        # Assert the same.
+        #assert self.runner.attn_backend.get_name() == "xformers", \
+        #f"Expected attn_backend name to be 'xformers', but "\
+        #f" got '{self.runner.attn_backend.get_name()}'"
+        self._prepare_input_buffers_for_enc_dec_model(attn_metadata,
+                                                      input_buffers)
 
     def begin_forward(self, model_input) -> None:
         return
@@ -437,84 +437,25 @@ class CommonAttentionState(AttentionState):
             attn_metadata.decode_metadata.cross_block_tables,
             non_blocking=True)
 
-def get_query_key_seq_metadata(
-    attn_metadata,
-    is_prompt: bool,
-    attn_type: AttentionType,
-) -> tuple:
+
+def is_all_encoder_attn_metadata_set(attn_metadata):
     '''
-    The particular choice of sequence-length- and block-table-related
-    attributes which should be extracted from attn_metadata is dependent
-    on the type of attention operation.
-
-    Decoder attn -> select entirely decoder self-attention-related fields
-    Encoder/decoder cross-attn -> select encoder sequence lengths & 
-                                  cross-attn block-tables fields
-    Encoder attn -> select encoder sequence lengths fields & no block tables
-    
-    Arguments:
-
-    * attn_metadata: Attention metadata structure associated with attention op
-    * is_prompt: True if prefill, False otherwise
-    * attn_type: encoder attention, decoder self-attention,
-                 encoder/decoder cross-attention
-
-    Returns:
-
-    * Appropriate sequence-lengths tensor
-    * Appropriate max sequence-length scalar
-    * Appropriate block tables (or None)
+    All attention metadata required for encoder attention is set.
     '''
-    print('Hello456')
-    if attn_type == AttentionType.DECODER.value:
-        # Decoder self-attention
-        # Choose max_seq_len based on whether we are in prompt_run
-        print('is_prompt ' + str(is_prompt))
-        #print('attn_metadata ' + str(attn_metadata))
-        if is_prompt:
-            max_seq_len = attn_metadata.max_prefill_seq_len
-        else:
-            max_seq_len = attn_metadata.max_decode_seq_len
-        #if attn_metadata.seq_start_loc is None:
-        #    print('attn_metadata.seq_start_loc is None')
-        #else:
-        #    print('attn_metadata.seq_start_loc ' + str(attn_metadata.seq_start_loc))
-        #print('attn_metadata.encoder_seq_start_loc ' + str(attn_metadata.encoder_seq_start_loc))
-        print('attn_metadata.max_decode_seq_len ' + str(attn_metadata.max_decode_seq_len))
-        print('attn_metadata.max_prefill_seq_len ' + str(attn_metadata.max_prefill_seq_len))
-        #print('attn_metadata.max_encoder_seq_len ' + str(attn_metadata.max_encoder_seq_len))
+    return ((attn_metadata.encoder_seq_lens is not None)
+            and (attn_metadata.encoder_seq_lens_tensor is not None)
+            and (attn_metadata.max_encoder_seq_len is not None))
 
-        return (attn_metadata.seq_start_loc, max_seq_len,
-                attn_metadata.seq_start_loc, max_seq_len)
-        
-    elif attn_type == AttentionType.ENCODER_DECODER.value:
-        # Enc/dec cross-attention KVs match encoder sequence length;
-        # cross-attention utilizes special "cross" block tables
-        print('attn_metadata.seq_start_loc ' + str(attn_metadata.seq_start_loc))
-        print('attn_metadata.encoder_seq_start_loc ' + str(attn_metadata.encoder_seq_start_loc))
-        print('attn_metadata.max_decode_seq_len ' + str(attn_metadata.max_decode_seq_len))
-        print('attn_metadata.max_prefill_seq_len ' + str(attn_metadata.max_prefill_seq_len))
-        print('attn_metadata.max_encoder_seq_len ' + str(attn_metadata.max_encoder_seq_len))
-        return (attn_metadata.seq_start_loc,
-                max(attn_metadata.max_decode_seq_len, attn_metadata.max_prefill_seq_len),
-                attn_metadata.encoder_seq_start_loc,
-                attn_metadata.max_encoder_seq_len)
-    elif attn_type == AttentionType.ENCODER.value:
-        # No block tables associated with encoder attention
-        return (attn_metadata.encoder_seq_start_loc,
-                attn_metadata.max_encoder_seq_len,
-                attn_metadata.encoder_seq_start_loc,
-                attn_metadata.max_encoder_seq_len)
-    elif attn_type == AttentionType.ENCODER_ONLY.value:
-        assert is_prompt, "Should not have decode for encoder only model."
 
-        # No block tables associated with encoder attention
-        return (attn_metadata.seq_start_loc,
-                attn_metadata.max_prefill_seq_len,
-                attn_metadata.seq_start_loc,
-                attn_metadata.max_prefill_seq_len)
-    else:
-        raise AttributeError(f"Invalid attention type {str(attn_type)}")
+def is_all_cross_attn_metadata_set(attn_metadata):
+    '''
+    All attention metadata required for enc/dec cross-attention is set.
+
+    Superset of encoder attention required metadata.
+    '''
+    return (attn_metadata.is_all_encoder_attn_metadata_set
+            and (attn_metadata.cross_slot_mapping is not None)
+            and (attn_metadata.cross_block_tables is not None))
 
 
 def get_seq_len_block_table_args(
@@ -546,32 +487,24 @@ def get_seq_len_block_table_args(
     * Appropriate block tables (or None)
     '''
 
-    if attn_type == AttentionType.DECODER.value:
+    if attn_type == AttentionType.DECODER:
         # Decoder self-attention
         # Choose max_seq_len based on whether we are in prompt_run
         if is_prompt:
             max_seq_len = attn_metadata.max_prefill_seq_len
         else:
             max_seq_len = attn_metadata.max_decode_seq_len
-        return (attn_metadata.seq_lens_tensor, attn_metadata.seq_start_loc,
-                max_seq_len, attn_metadata.block_tables)
-    elif attn_type == AttentionType.ENCODER_DECODER.value:
+        return (attn_metadata.seq_lens_tensor, max_seq_len,
+                attn_metadata.block_tables)
+    elif attn_type == AttentionType.ENCODER_DECODER:
         # Enc/dec cross-attention KVs match encoder sequence length;
         # cross-attention utilizes special "cross" block tables
         return (attn_metadata.encoder_seq_lens_tensor,
-                attn_metadata.encoder_seq_start_loc,
                 attn_metadata.max_encoder_seq_len,
                 attn_metadata.cross_block_tables)
-    elif attn_type == AttentionType.ENCODER.value:
+    elif attn_type == AttentionType.ENCODER:
         # No block tables associated with encoder attention
         return (attn_metadata.encoder_seq_lens_tensor,
-                attn_metadata.encoder_seq_start_loc,
                 attn_metadata.max_encoder_seq_len, None)
-    elif attn_type == AttentionType.ENCODER_ONLY.value:
-        assert is_prompt, "Should not have decode for encoder only model."
-
-        # No block tables associated with encoder attention
-        return (attn_metadata.seq_lens_tensor, attn_metadata.seq_start_loc,
-                attn_metadata.max_prefill_seq_len, None)
     else:
         raise AttributeError(f"Invalid attention type {str(attn_type)}")

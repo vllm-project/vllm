@@ -13,8 +13,8 @@ from torch._prims_common import TensorLikeType
 
 from vllm.attention import AttentionBackend, AttentionMetadata, AttentionType
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.utils import (STR_BACKEND_ENV_VAR, STR_XFORMERS_ATTN_VAL, STR_FLASH_ATTN_VAL,
-                        make_tensor_with_pad)
+from vllm.utils import (STR_BACKEND_ENV_VAR, STR_XFORMERS_ATTN_VAL,
+                        STR_FLASH_ATTN_VAL, make_tensor_with_pad)
 
 # For now, disable "test_aot_dispatch_dynamic" since there are some
 # bugs related to this test in PyTorch 2.4.
@@ -536,8 +536,10 @@ def make_backend(backend_name: str) -> AttentionBackend:
 
 
 def _make_metadata_tensors(
-    seq_lens: Optional[List[int]], context_lens: Optional[List[int]],
-    encoder_seq_lens: Optional[List[int]], device: Union[torch.device, str],
+    seq_lens: Optional[List[int]],
+    context_lens: Optional[List[int]],
+    encoder_seq_lens: Optional[List[int]],
+    device: Union[torch.device, str],
 ) -> Tuple[torch.Tensor, torch.Tensor, Any, Any, Optional[torch.Tensor],
            torch.Tensor, torch.Tensor, Optional[int]]:
     '''
@@ -567,37 +569,35 @@ def _make_metadata_tensors(
     encoder_seq_lens_tensor = maybe_make_int_tensor(encoder_seq_lens, device)
     max_encoder_seq_len = (None if encoder_seq_lens is None else
                            max(encoder_seq_lens))
-    
+
     seq_start_loc = None
 
     if seq_lens_tensor is not None:
-        seq_start_loc = torch.zeros(seq_lens_tensor.shape[0] +
-                                    1,
+        seq_start_loc = torch.zeros(seq_lens_tensor.shape[0] + 1,
                                     dtype=torch.int32,
                                     device=seq_lens_tensor.device)
-        torch.cumsum(
-            seq_lens_tensor, dim=0,
-            dtype=seq_start_loc.dtype,
-            out=seq_start_loc[1:])
+        torch.cumsum(seq_lens_tensor,
+                     dim=0,
+                     dtype=seq_start_loc.dtype,
+                     out=seq_start_loc[1:])
 
     print('seq_start_loc ' + str(seq_start_loc))
     print('seq_lens_tensor ' + str(seq_lens_tensor))
     print('max_seq_len ' + str(max_seq_len))
 
-    encoder_seq_start_loc = torch.zeros(encoder_seq_lens_tensor.shape[0] +
-                                        1,
+    encoder_seq_start_loc = torch.zeros(encoder_seq_lens_tensor.shape[0] + 1,
                                         dtype=torch.int32,
                                         device=encoder_seq_lens_tensor.device)
-    torch.cumsum(
-        encoder_seq_lens_tensor, dim=0,
-        dtype=encoder_seq_start_loc.dtype,
-        out=encoder_seq_start_loc[1:])
-    
-    
+    torch.cumsum(encoder_seq_lens_tensor,
+                 dim=0,
+                 dtype=encoder_seq_start_loc.dtype,
+                 out=encoder_seq_start_loc[1:])
+
     #print('encoder_seq_start_loc ' + str(encoder_seq_start_loc))
 
     return (seq_lens_tensor, context_lens_tensor, max_context_len, max_seq_len,
-            seq_start_loc, encoder_seq_lens_tensor, encoder_seq_start_loc, max_encoder_seq_len)
+            seq_start_loc, encoder_seq_lens_tensor, encoder_seq_start_loc,
+            max_encoder_seq_len)
 
 
 def make_kv_cache(num_blocks: int,
@@ -630,7 +630,9 @@ def make_kv_cache(num_blocks: int,
         kv_cache = torch.rand(
             (2, num_blocks, block_size, num_heads, head_size)).to(device)
     else:
-        raise ValueError(f"Unknown backend value: '{backend}'. Expected 'XFORMERS' or 'FLASH_ATTN'.")
+        raise ValueError(
+            f"Unknown backend value: '{backend}'. Expected 'XFORMERS' or 'FLASH_ATTN'."
+        )
     if default_val is not None:
         kv_cache[:, :, :] = default_val
     return kv_cache
@@ -992,7 +994,9 @@ def assert_actual_matches_ideal(test_params: PhaseTestParameters,
     '''
     ideal_output = test_params.packed_qkvo.ideal_output
     torch.testing.assert_close(ideal_output,
-                               output_under_test.view_as(ideal_output), atol=0.01, rtol=0.016)
+                               output_under_test.view_as(ideal_output),
+                               atol=0.01,
+                               rtol=0.016)
 
 
 # Copied/modified from torch._refs.__init__.py

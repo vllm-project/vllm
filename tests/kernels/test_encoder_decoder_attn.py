@@ -149,7 +149,8 @@ def _make_test_resources(test_pt: TestPoint, ) -> TestResources:
                              test_pt.num_heads,
                              test_pt.head_size,
                              test_pt.block_size,
-                             device=CUDA_DEVICE, backend=test_pt.backend_name)
+                             device=CUDA_DEVICE,
+                             backend=test_pt.backend_name)
     return TestResources(scale, attn_backend, attn, kv_cache)
 
 
@@ -596,6 +597,7 @@ def _run_encoder_attention_test(
     attn: Attention,
     encoder_test_params: PhaseTestParameters,
     attn_metadata: AttentionMetadata,
+    test_pt: TestPoint,
 ) -> torch.Tensor:
     '''
     Run encoder attention.
@@ -624,12 +626,12 @@ def _run_encoder_attention_test(
     packed_qkv = encoder_test_params.packed_qkvo.packed_qkv
     assert packed_qkv is not None
     with set_forward_context(attn_metadata):
-        return attn.forward(packed_qkv.query,
+        return attn.forward(packed_qkv.query.view(-1, test_pt.num_heads * test_pt.head_size),
                             packed_qkv.key,
                             packed_qkv.value,
                             torch.tensor([],
-                                        dtype=torch.float32,
-                                        device=packed_qkv.query.device),
+                                         dtype=torch.float32,
+                                         device=packed_qkv.query.device),
                             attn_metadata,
                             attn_type=attn_type)
 
@@ -810,20 +812,22 @@ def test_encoder_only(
             encoder_test_params=enc_test_params,
             cross_test_params=None,
             device=CUDA_DEVICE)
-        
+
         #print('prephase_attn_metadata ' + str(prephase_attn_metadata))
 
         # PREFILL: encoder attention
 
         enc_pckd_act_out: torch.Tensor = (_run_encoder_attention_test(
-            test_rsrcs.attn, enc_test_params, prephase_attn_metadata))
+            test_rsrcs.attn, enc_test_params, prephase_attn_metadata, test_pt=test_pt))
 
         # - Is encoder attention result correct?
         assert_actual_matches_ideal(enc_test_params, enc_pckd_act_out)
 
+
 @pytest.fixture(autouse=True)
 def print_test_name(request):
     print(f"Running test: {request.node.name}")
+
 
 @pytest.mark.skipif(is_hip(), reason=STR_NOT_IMPL_ENC_DEC_ROCM_HIP)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
@@ -993,7 +997,7 @@ def test_e2e_enc_dec_attn(
         # - Is prefill encoder/decoder cross-attention correct?
         assert_actual_matches_ideal(prephase_cross_test_params,
                                     prephase_cross_pckd_act_out)
-        
+
         print('Third test succeeded')
 
         # DECODE: build decode-phase attention metadata
