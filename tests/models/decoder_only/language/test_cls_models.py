@@ -3,7 +3,7 @@
 This test only tests small models. Big models such as 7B should be tested from
 test_big_models.py because it could use a larger instance to run tests.
 
-Run `pytest tests/models/test_models.py`.
+Run `pytest tests/models/test_cls_models.py`.
 """
 import pytest
 import torch
