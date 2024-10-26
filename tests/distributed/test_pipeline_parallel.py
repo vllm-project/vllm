@@ -145,7 +145,7 @@ TEXT_GENERATION_MODELS = {
     # Uses Llama
     # "internlm/internlm-chat-7b": PPTestSettings.fast(),
     "internlm/internlm2-chat-7b": PPTestSettings.fast(trust_remote_code=True),
-    "core42/jais-13b-chat": PPTestSettings.fast(),
+    "inceptionai/jais-13b-chat": PPTestSettings.fast(),
     # TODO: Implement PP
     # "ai21labs/AI21-Jamba-1.5-Mini": PPTestSettings.fast(),
     "meta-llama/Meta-Llama-3-8B": PPTestSettings.detailed(),
@@ -171,7 +171,8 @@ TEXT_GENERATION_MODELS = {
     "stabilityai/stablelm-3b-4e1t": PPTestSettings.fast(),
     "bigcode/starcoder2-3b": PPTestSettings.fast(),
     "upstage/solar-pro-preview-instruct": PPTestSettings.fast(tp_base=2),
-    # FIXME: Cannot load tokenizer in latest transformers version
+    # FIXME: Cannot load tokenizer in latest transformers version.
+    # Need to use tokenizer from `meta-llama/Llama-2-7b-chat-hf`
     # "xverse/XVERSE-7B-Chat": PPTestSettings.fast(trust_remote_code=True),
     # [Encoder-only]
     # TODO: Implement PP

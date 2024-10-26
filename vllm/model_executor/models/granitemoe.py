@@ -324,6 +324,7 @@ class GraniteMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         "o_proj",
         "embed_tokens",
         "lm_head",
+        "layer",
     ]
     embedding_modules = {
         "embed_tokens": "input_embeddings",
