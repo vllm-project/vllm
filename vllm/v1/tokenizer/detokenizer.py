@@ -1,4 +1,5 @@
 import multiprocessing
+import pickle
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Union
 
@@ -13,7 +14,7 @@ from vllm.transformers_utils.detokenizer_utils import (
     convert_prompt_ids_to_tokens, detokenize_incrementally)
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
-IPC_PATH_INPUT = "/tmp/prototype-input"
+IPC_PATH_NEW_TOKENS = "/tmp/prototype-new_tokens"
 IPC_PATH_NEW_REQUEST = "/tmp/prototype-new_request"
 IPC_POLLING_TIMEOUT_MS = 5000
 
@@ -106,8 +107,8 @@ class Detokenizer:
         self.zmq_context = zmq.Context()
         self.new_request_socket = self.zmq_context.socket(zmq.PULL)
         self.new_request_socket.bind(f"icp://{IPC_PATH_NEW_REQUEST}")
-        self.input_socket = self.zmq_context.socket(zmq.PULL)
-        self.input_socket.bind(f"icp://{IPC_PATH_INPUT}")
+        self.new_tokens_socket = self.zmq_context.socket(zmq.PULL)
+        self.new_tokens_socket.bind(f"icp://{IPC_PATH_NEW_TOKENS}")
 
         # Start the background process.
         self.detokenizer = DetokenizerProc(tokenizer_name, output_socket_path)
@@ -118,13 +119,14 @@ class Detokenizer:
                                      flags=zmq.NOBLOCK)
 
     def send(self, inputs: DetokenizerInputs) -> None:
-        self.input_socket.send(self.msgpack_encoder.encode(inputs),
-                               flags=zmq.NOBLOCK)
+        self.new_tokens_socket.send(self.msgpack_encoder.encode(inputs),
+                                    flags=zmq.NOBLOCK)
 
     def terminate(self) -> None:
-        self.input_socket.send(b"", flags=zmq.NOBLOCK)
+        self.new_tokens_socket.send(b"", flags=zmq.NOBLOCK)
         self.detokenizer.join()
         logger.info("Detokenizer shutdown is complete.")
+        # TODO(robertshaw2): this should shut down the
 
 
 class DetokenizerProc(multiprocessing.Process):
@@ -152,6 +154,7 @@ class DetokenizerProc(multiprocessing.Process):
         self.tokenizer = get_tokenizer(self.tokenizer_name)
 
         # Ipc objects.
+        # TODO(robertgshaw2): we need some cleanup for pyzmq objects.
         self.zmq_context = zmq.Context()
         self.poller = zmq.Poller()
 
@@ -161,15 +164,15 @@ class DetokenizerProc(multiprocessing.Process):
         self.poller.register(self.new_request_socket, zmq.POLLIN)
 
         # Gets new input from the LLMEngine.
-        self.input_socket = self.zmq_context.socket(zmq.PULL)
-        self.input_socket.connect(f"{IPC_PATH_INPUT}")
-        self.poller.register(self.input_socket, zmq.POLLIN)
+        self.new_tokens_socket = self.zmq_context.socket(zmq.PULL)
+        self.new_tokens_socket.connect(f"{IPC_PATH_NEW_TOKENS}")
+        self.poller.register(self.new_tokens_socket, zmq.POLLIN)
 
         # Sends RequestOutputs to the EngineClient.
         self.output_socket = self.zmq_context.socket(zmq.PUSH)
         self.output_socket.bind(self.output_socket_path)
 
-        # Busy loop.
+        # Busy loop handling new_requests and new_tokens from LLMEngine
         self._should_terminate = False
         while not self._should_terminate:
             events = dict(self.poller.poll(timeout=IPC_POLLING_TIMEOUT_MS))
@@ -180,14 +183,16 @@ class DetokenizerProc(multiprocessing.Process):
                 assert events[self.new_request_socket] == zmq.POLLIN
                 self._handle_new_request()
 
-            if self.input_socket in events:
-                assert events[self.input_socket] == zmq.POLLIN
-                self._handle_new_input()
+            if self.new_tokens_socket in events:
+                assert events[self.new_tokens_socket] == zmq.POLLIN
+                self._handle_new_tokens()
 
-    def free(self, request_id: str) -> None:
+    def _free(self, request_id: str) -> None:
         del self.request_states[request_id]
 
-    def detokenize(self, request_id: str, new_token_ids: List[int]) -> str:
+    def _detokenize(self, request_id: str, new_token_ids: List[int]) -> str:
+        """Update RequestState for the request_id based on new_token_ids"""
+
         # TODO(woosuk): This method becomes very inefficient when the number of
         # new_token_ids is more than 1. We need to optimize this.
         req_state = self.request_states[request_id]
@@ -213,6 +218,66 @@ class DetokenizerProc(multiprocessing.Process):
             decoded_text += new_decoded_token_text
         return decoded_text
 
+    def _handle_new_request(self) -> None:
+        """Handle new request from LLMEngine by adding to RequestState"""
+
+        # TODO(robertgshaw2): this should be nonblocking
+        message = self.new_request_socket.recv()
+        if message == b"" or self._should_terminate:
+            # Terminate signal.
+            self._should_terminate = True
+            return
+
+        # Deserialize.
+        new_request = self.msgpack_new_request_decoder.decode(message)
+
+        # Add to request_state tracker.
+        request_id = new_request.request_id
+        request_state = DetokenizerRequestState.from_new_request(
+            self.tokenizer, new_request)
+        self.request_states[request_id] = request_state
+
+    def _handle_new_tokens(self) -> None:
+        """
+        Handle new tokens input sent from the LLMEngine, in 3 steps:
+            - Parse message from socket into DetokenizerInput
+            - Detokenize and update RequestState for the request_id
+            - Make RequestOutput and send to the EngineClient
+        """
+
+        # TODO(robertgshaw2): this should be nonblocking
+        message = self.new_tokens_socket.recv()
+        if message == b"" or self._should_terminate:
+            self._should_terminate = True
+            return
+
+        # Deserialize.
+        inputs = self.msgpack_input_decoder.decode(message).data
+
+        # Update request states and create RequestOutput objects.
+        request_outputs: List[RequestOutput] = []
+        for input in inputs:
+
+            # Detokenize and update Detokenizer state.
+            new_text = self._detokenize(input.request_id, input.new_token_ids)
+
+            # Build RequestObject object to be sent to EngineClient.
+            request_output = self._make_request_output(
+                request_id=input.request_id,
+                new_output_text=new_text,
+                finished=input.finished,
+                finish_reason=input.finish_reason,
+                stop_reason=input.stop_reason,
+            )
+            request_outputs.append(request_output)
+
+            # Free completed requests.
+            if input.finished:
+                self._free(input.request_id)
+
+        # Send RequestOutputs to EngineClient.
+        self._send_request_output(request_outputs)
+
     def _make_request_output(
         self,
         request_id: str,
@@ -221,6 +286,8 @@ class DetokenizerProc(multiprocessing.Process):
         finish_reason: Optional[str],
         stop_reason: Optional[str],
     ) -> RequestOutput:
+        """Build a RequestOutput from the DetokenizerInputData."""
+
         assert request_id in self.request_states
         request_state = self.request_states[request_id]
 
@@ -273,45 +340,10 @@ class DetokenizerProc(multiprocessing.Process):
             completion_output.finish_reason = finish_reason
             completion_output.stop_reason = stop_reason
             req_output.finished = finished
+
         return req_output
 
-    def _handle_new_request(self):
-        # TODO(robertgshaw2): this should be nonblocking
-        message = self.new_request_socket.recv()
-        if message == b"" or self._should_terminate:
-            # Terminate signal.
-            self._should_terminate = True
-            return
-
-        # Deserialize.
-        new_request = self.msgpack_new_request_decoder.decode(message)
-
-        # Add to request_state tracker.
-        request_id = new_request.request_id
-        request_state = DetokenizerRequestState.from_new_request(
-            self.tokenizer, new_request)
-        self.request_states[request_id] = request_state
-
-    def _handle_new_input(self):
-        # TODO(robertgshaw2): this should be nonblocking
-        message = self.input_socket.recv()
-        if message == b"" or self._should_terminate:
-            self._should_terminate = True
-            return
-
-        # Deserialize.
-        inputs = self.msgpack_input_decoder.decode(message).data
-
-        # Update request states and create RequestOutput objects.
-        request_outputs = [
-            self._make_request_output(
-                request_id=input.request_id,
-                new_output_text=self.detokenize(input.request_id,
-                                                input.new_token_ids),
-                finished=input.finished,
-                finish_reason=input.finish_reason,
-                stop_reason=input.stop_reason,
-            ) for input in inputs
-        ]
-
-        self.send_request_output(request_outputs)
+    def _send_request_output(self, request_outputs: List[RequestOutput]):
+        """Send List of RequestOutput to RPCClient."""
+        output_bytes = pickle.dumps(request_outputs)
+        self.output_socket.send_multipart((output_bytes, ), copy=False)
