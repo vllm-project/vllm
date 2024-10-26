@@ -10,7 +10,7 @@ from pydantic import BaseModel
 from typing_extensions import Annotated
 
 from vllm.logger import init_logger
-from vllm.logits_process import LogitsProcessor, NoBadWordsLogitsProcessor
+from vllm.logits_process import LogitsProcessor
 
 logger = init_logger(__name__)
 
