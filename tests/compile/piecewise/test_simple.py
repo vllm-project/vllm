@@ -11,6 +11,7 @@ global_counter = 0
 
 @torch.library.custom_op("silly::attention", mutates_args=["out"])
 def silly_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, out: torch.Tensor) -> None:
+    global global_counter
     global_counter += 1
     print(f"{global_counter=}")
     out.copy_(q)
