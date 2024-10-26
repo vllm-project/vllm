@@ -51,7 +51,7 @@ def test_scaled_mm(M, N, K, in_dtype, out_dtype, use_scalar_scale_a,
     # testing function, and another function, e.g. golden function, can
     # produce a non-inf value while the other produces an inf value, and
     # will cause assert_close/allclose to fail, even though if overflow
-    # wouldn't have occured, the values would have been "close."
+    # wouldn't have occurred, the values would have been "close."
     #
     # So, the values here are kept small enough to avoid this situation.
     if is_floating_point_type(in_dtype):
