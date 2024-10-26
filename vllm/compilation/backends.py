@@ -1,12 +1,14 @@
 import copy
+import dataclasses
 import operator
-from typing import Callable, Dict, List, Optional, Set, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
 import torch.fx as fx
 
 from vllm.logger import init_logger
 
+from . import CompilationConfig
 from .compile_context import get_compile_context
 from .levels import CompilationLevel
 
@@ -175,14 +177,8 @@ def wrap_inductor(graph, example_inputs, additional_inductor_config):
     return compile_fx(graph, example_inputs, config_patches=current_config)
 
 
-def vllm_backend(
-        graph,
-        example_inputs,
-        additional_inductor_config: Optional[Dict] = None) -> Callable:
-
-    context = get_compile_context()
-    context = copy.deepcopy(context) if context is not None else []
-    sizes_to_specialize: List[int] = context
+def vllm_backend(graph, example_inputs,
+                 compilation_configs: CompilationConfig) -> Callable:
 
     from vllm.plugins import get_attention_ops
     attention_ops = get_attention_ops()
@@ -218,7 +214,12 @@ def vllm_backend(
             lambda node: node_to_subgraph_id[node],
             keep_original_order=True)
 
-        for (name, module) in list(split_gm.named_modules()):
+        names = [name for (name, module) in split_gm.named_modules()]
+        names.sort()
+
+        is_first_graph = True
+        for name in names:
+            module = getattr(split_gm, name)
             if name == "":
                 # stitching module
                 logger.debug("%s",
@@ -231,44 +232,43 @@ def vllm_backend(
             if graph_id not in attention_graphs:
                 # cannot setattr to a module, so we need to set it to the dict
                 split_gm.__dict__[name] = piecewise_backend(
-                    module, sizes_to_specialize, additional_inductor_config,
-                    graph_pool)
+                    module, compilation_configs, graph_pool, is_first_graph)
+                is_first_graph = False
 
         final_graph = split_gm
 
     else:
-        final_graph = piecewise_backend(graph, sizes_to_specialize,
-                                        additional_inductor_config, graph_pool)
+        final_graph = piecewise_backend(graph,
+                                        compilation_configs,
+                                        graph_pool,
+                                        is_first_graph=True)
 
     # trigger the first compilation
-    logger.info("Compiling a graph for general shapes")
     final_graph(*example_inputs)
 
-    sym_shape_indices = [
-        i for i, x in enumerate(example_inputs) if isinstance(x, torch.SymInt)
-    ]
-
-    seen_shapes: Set[Tuple[int, ...]] = set()
-
-    def forward(*args):
-        shape = tuple(args[i] for i in sym_shape_indices)
-        if shape[0] in sizes_to_specialize and shape not in seen_shapes:
-            logger.info("Compiling a graph for shapes %s", shape)
-            seen_shapes.add(shape)
-
-        return final_graph(*args)
-
-    return forward
+    return final_graph
 
 
-def piecewise_backend(graph, sizes_to_specialize, additional_inductor_config,
-                      graph_pool):
+@dataclasses.dataclass
+class Entry:
+    runnable: Callable
+    use_cudagraph: bool
+    target_warmup_times: int
+    current_warmup_times: int = 0
+    cudagraph: Optional[torch.cuda.CUDAGraph] = None
+    output: Optional[Any] = None
+
+
+def piecewise_backend(graph,
+                      compilation_configs: CompilationConfig,
+                      graph_pool,
+                      is_first_graph=False) -> Callable:
 
     # flags for all the seen shapes, whether we need to specialize
     runtime_shapes_to_compile_flags: Dict[Tuple[int, ...], bool] = {}
 
     # if we need to specialize, the compiled graph for that shape
-    runtime_shapes_to_compiled_graph: Dict[Tuple[int, ...], Tuple] = {}
+    runtime_shapes_to_compiled_entry: Dict[Tuple[int, ...], Entry] = {}
 
     sym_shape_indices: List[int] = []
 
@@ -280,7 +280,7 @@ def piecewise_backend(graph, sizes_to_specialize, additional_inductor_config,
     def compiled_graph_wrapper(*args):
         nonlocal first_run, compile_run
         nonlocal runtime_shapes_to_compile_flags
-        nonlocal runtime_shapes_to_compiled_graph
+        nonlocal runtime_shapes_to_compiled_entry
         nonlocal graph_for_symbolic_shape
         nonlocal sym_shape_indices
 
@@ -290,8 +290,13 @@ def piecewise_backend(graph, sizes_to_specialize, additional_inductor_config,
             # this is the first compilation, we will compile a graph with
             # dynamic shape, as the caller will mark first dimension as dynamic
 
-            graph_for_symbolic_shape = wrap_inductor(
-                graph, args, additional_inductor_config)
+            if compilation_configs.use_inductor:
+                if is_first_graph:
+                    logger.info("Compiling a graph for general shape")
+                graph_for_symbolic_shape = wrap_inductor(
+                    graph, args, compilation_configs.inductor_compile_config)
+            else:
+                graph_for_symbolic_shape = graph
 
             # TODO: Dynamo does not pass all dynamic shapes.
             # Need to investigate why. It works now because all the dynamic
@@ -315,27 +320,61 @@ def piecewise_backend(graph, sizes_to_specialize, additional_inductor_config,
             # we only specialize for the first dimension.
             # TODO: investigate if any model needs to specialize
             # beyond the first dimension
+
+            assert compilation_configs.inductor_compile_sizes is not None
+            assert compilation_configs.cudagraph_capture_sizes is not None
             runtime_shapes_to_compile_flags[runtime_shapes] = runtime_shapes[
-                0] in sizes_to_specialize
+                0] in compilation_configs.inductor_compile_sizes or \
+                runtime_shapes[0] in compilation_configs.cudagraph_capture_sizes
 
         if not runtime_shapes_to_compile_flags[runtime_shapes]:
             # we don't need to specialize for this shape
             return graph_for_symbolic_shape(*args)
 
-        if runtime_shapes not in runtime_shapes_to_compiled_graph:
-            # we need to specialize for this shape, and we haven't compiled
-            # compile the graph for this shape
-            compiled_graph = wrap_inductor(graph, args,
-                                           additional_inductor_config)
+        if runtime_shapes not in runtime_shapes_to_compiled_entry:
+            # the first time we see this shape, we need to compile the graph
+            if compilation_configs.use_inductor:
+                if is_first_graph:
+                    logger.info("Compiling a graph for shape %s",
+                                runtime_shapes)
+                runnable = wrap_inductor(
+                    graph, args, compilation_configs.inductor_compile_config)
+            else:
+                runnable = graph
+            assert compilation_configs.cudagraph_capture_sizes is not None
+            use_cudagraph = runtime_shapes[
+                0] in compilation_configs.cudagraph_capture_sizes
+            entry = Entry(
+                runnable=runnable,
+                use_cudagraph=use_cudagraph,
+                target_warmup_times=compilation_configs.cudagraph_warmup_times)
+            runtime_shapes_to_compiled_entry[runtime_shapes] = entry
+        else:
+            entry = runtime_shapes_to_compiled_entry[runtime_shapes]
+
+        if not entry.use_cudagraph:
+            return entry.runnable(*args)
+
+        if entry.current_warmup_times < entry.target_warmup_times:
+            entry.current_warmup_times += 1
+            if is_first_graph:
+                logger.debug("Warming up %s/%s for shape %s",
+                             entry.current_warmup_times,
+                             entry.target_warmup_times, runtime_shapes)
+            return entry.runnable(*args)
+
+        if entry.cudagraph is None:
+            if is_first_graph:
+                logger.info("Capturing a cudagraph for shape %s",
+                            runtime_shapes)
             cudagraph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(cudagraph, pool=graph_pool):
-                output = compiled_graph(*args)
-            runtime_shapes_to_compiled_graph[runtime_shapes] = (cudagraph,
-                                                                output)
+                # TODO: make `entry.output` a weakref of the Tensor
+                entry.output = entry.runnable(*args)
+            entry.cudagraph = cudagraph
 
-        (cudagraph, output) = runtime_shapes_to_compiled_graph[runtime_shapes]
-        cudagraph.replay()
-        return output
+        entry.cudagraph.replay()
+        return entry.output
 
     return compiled_graph_wrapper
 
@@ -349,8 +388,19 @@ def select_default_backend(level: int) -> Union[str, Callable]:
     ], f"Invalid level {level}"
 
     from vllm.compilation.backends import vllm_backend
-    from vllm.plugins import get_inductor_additional_configs
-    additional_configs = get_inductor_additional_configs()
+    from vllm.plugins import get_torch_compile_config
+    compilation_configs = get_torch_compile_config()
+    additional_configs = compilation_configs.inductor_compile_config
+
+    context = get_compile_context()
+    context = copy.deepcopy(context) if context is not None else []
+    sizes_to_specialize: List[int] = context
+
+    if compilation_configs.cudagraph_capture_sizes is None:
+        compilation_configs.cudagraph_capture_sizes = sizes_to_specialize
+
+    if compilation_configs.inductor_compile_sizes is None:
+        compilation_configs.inductor_compile_sizes = sizes_to_specialize
 
     if level == CompilationLevel.INDUCTOR_MAX_AUTOTUNE:
         if "max_autotune" in additional_configs and not additional_configs[
@@ -361,7 +411,6 @@ def select_default_backend(level: int) -> Union[str, Callable]:
         additional_configs['max_autotune'] = True
 
     from functools import partial
-    backend = partial(vllm_backend,
-                      additional_inductor_config=additional_configs)
+    backend = partial(vllm_backend, compilation_configs=compilation_configs)
 
     return backend
