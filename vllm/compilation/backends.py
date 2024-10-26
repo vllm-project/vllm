@@ -1,6 +1,6 @@
 import copy
 import operator
-from typing import Callable, Dict, List, Optional, Tuple, Union
+from typing import Callable, Dict, List, Optional, Set, Tuple, Union
 
 import torch
 import torch.fx as fx
@@ -205,17 +205,34 @@ def vllm_backend(
         if name == "":
             # stitching module
             continue
+        if "." in name:
+            # recursive child module
+            continue
         graph_id = int(name.replace("submod_", ""))
         if graph_id not in attention_graphs:
-            setattr(
-                split_gm, name,
-                piecewise_backend(module, sizes_to_specialize,
-                                  additional_inductor_config))
+            # cannot setattr to a module, so we need to set it to the dict
+            split_gm.__dict__[name] = piecewise_backend(
+                module, sizes_to_specialize, additional_inductor_config)
 
     # trigger the first compilation
+    logger.info("Compiling a graph for general shapes")
     split_gm(*example_inputs)
 
-    return split_gm.forward
+    sym_shape_indices = [
+        i for i, x in enumerate(example_inputs) if isinstance(x, torch.SymInt)
+    ]
+
+    seen_shapes: Set[Tuple[int, ...]] = set()
+
+    def forward(*args):
+        shape = tuple(args[i] for i in sym_shape_indices)
+        if shape[0] in sizes_to_specialize and shape not in seen_shapes:
+            logger.info("Compiling a graph for shapes %s", shape)
+            seen_shapes.add(shape)
+
+        return split_gm(*args)
+
+    return forward
 
 
 def piecewise_backend(graph, sizes_to_specialize, additional_inductor_config):
@@ -245,7 +262,7 @@ def piecewise_backend(graph, sizes_to_specialize, additional_inductor_config):
 
             # this is the first compilation, we will compile a graph with
             # dynamic shape, as the caller will mark first dimension as dynamic
-            logger.info("Compiling a graph for general shapes")
+
             graph_for_symbolic_shape = wrap_inductor(
                 graph, args, additional_inductor_config)
 
@@ -281,7 +298,6 @@ def piecewise_backend(graph, sizes_to_specialize, additional_inductor_config):
         if runtime_shapes not in runtime_shapes_to_compiled_graph:
             # we need to specialize for this shape, and we haven't compiled
             # compile the graph for this shape
-            logger.info("Compiling a graph for shapes %s", runtime_shapes)
             runtime_shapes_to_compiled_graph[runtime_shapes] = wrap_inductor(
                 graph, args, additional_inductor_config)
 
