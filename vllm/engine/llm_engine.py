@@ -748,8 +748,8 @@ class LLMEngine:
                 for add_prefix_space in [False, True]:
                     prefix = " " if add_prefix_space else ""
                     inputs = {"prompt": prefix + bad_word.lstrip()}
-                    prompt_token_ids = tokenizer.encode(text=inputs["prompt"],
-                                                        add_special_tokens=False)
+                    prompt_token_ids = tokenizer.encode(
+                        text=inputs["prompt"], add_special_tokens=False)
 
                     # If no space at the beginning
                     # or if prefix space produces a new word token
