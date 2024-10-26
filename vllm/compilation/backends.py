@@ -214,12 +214,14 @@ def vllm_backend(graph, example_inputs,
             lambda node: node_to_subgraph_id[node],
             keep_original_order=True)
 
+        # sort the names to make sure the order is deterministic
         names = [name for (name, module) in split_gm.named_modules()]
         names.sort()
 
         is_first_graph = True
         for name in names:
-            module = getattr(split_gm, name)
+            module = getattr(split_gm, name) if name else split_gm
+
             if name == "":
                 # stitching module
                 logger.debug("%s",
