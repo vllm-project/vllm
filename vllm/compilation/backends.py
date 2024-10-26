@@ -176,8 +176,11 @@ def wrap_inductor(graph, example_inputs, additional_inductor_config):
     return compile_fx(graph, example_inputs, config_patches=current_config)
 
 
-def vllm_backend(graph, example_inputs,
-                 compilation_configs: CompilationConfig) -> Callable:
+def vllm_backend(graph, example_inputs) -> Callable:
+
+    # config is read when we first compile the graph
+    # (i.e. when this backend is first called)
+    compilation_configs = CompilationConfig.default_config()
 
     from vllm.plugins import get_non_cudagraph_ops
     non_cudagraph_ops = get_non_cudagraph_ops()
@@ -384,9 +387,4 @@ def select_default_backend(level: int) -> Union[str, Callable]:
         return backend_str
     assert level == CompilationLevel.PIECEWISE
 
-    compilation_configs = CompilationConfig.default_config()
-
-    from functools import partial
-    backend = partial(vllm_backend, compilation_configs=compilation_configs)
-
-    return backend
+    return vllm_backend
