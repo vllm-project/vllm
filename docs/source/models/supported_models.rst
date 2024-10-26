@@ -380,7 +380,7 @@ Classification
     - ✅︎
 
 .. note::
-    As an interim measure, these models are supported via Embeddings API. See `this RFC <https://github.com/vllm-project/vllm/issues/8967>`_ for upcoming changes.
+    As an interim measure, these models are supported via Embeddings API. It will be supported via Classification API in the future (no reference APIs exist now).
 
 
 Multimodal Language Models
