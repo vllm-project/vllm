@@ -4,13 +4,10 @@ Run `pytest tests/kernels/test_scaled_mm_triton.py`.
 """
 from typing import Optional, Type
 
+import importlib
 import pytest
 import torch
 
-# isort: off
-from vllm.model_executor.layers.quantization.compressed_tensors.\ # noqa
-        scaled_mm_triton import (scaled_mm_triton) # noqa
-# isort: on
 from vllm.utils import seed_everything
 
 device = "cuda"
@@ -78,6 +75,11 @@ def test_scaled_mm(M, N, K, in_dtype, out_dtype, use_scalar_scale_a,
     bias = None
     if use_bias:
         bias = torch.rand((N, ), device=device, dtype=out_dtype)
+
+    scaled_mm_triton_module = importlib.import_module(
+        "vllm.model_executor.layers.quantization.compressed_tensors."
+        "scaled_mm_triton")
+    scaled_mm_triton = getattr(scaled_mm_triton_module, "scaled_mm_triton")
 
     c_check = scaled_mm_triton(a, b, scale_a, scale_b, out_dtype, bias)
 
