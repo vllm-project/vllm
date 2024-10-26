@@ -956,7 +956,9 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         for weight_name, weight_tensor in self._hf_weight_iter(
                 hf_weights_files, use_safetensors):
 
-            if not weight_name.endswith((".weight", ".bias")):
+            # if not weight_name.endswith((".weight", ".bias")):
+            # FIXME(Isotr0py): Fix this patch
+            if not weight_name.endswith((".weight", ".bias", ".embedding", ".gate", ".gate_attn", ".gate_ffn", ".class_embedding", ".cross_attn_attn_gate", ".cross_attn_mlp_gate")):
                 continue
 
             if (f"{weight_name}.quant_state.bitsandbytes__nf4" \
