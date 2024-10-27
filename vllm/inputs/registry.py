@@ -9,9 +9,10 @@ from transformers import PretrainedConfig
 from typing_extensions import TypeVar
 
 from vllm.logger import init_logger
-from vllm.utils import get_allowed_kwarg_only_overrides, print_warning_once
+from vllm.utils import (get_allowed_kwarg_only_overrides, print_warning_once,
+                        resolve_mm_processor_kwargs)
 
-from .data import LLMInputs
+from .data import DecoderOnlyInputs
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -99,7 +100,7 @@ class _MultiModalCounts(UserDict):
             raise KeyError(msg) from exc
 
 
-InputProcessor = Callable[[InputContext, LLMInputs], LLMInputs]
+InputProcessor = Callable[[InputContext, DecoderOnlyInputs], DecoderOnlyInputs]
 """Preprocess the inputs to the model."""
 
 
@@ -133,7 +134,7 @@ class InputRegistry:
         # Avoid circular import
         from vllm.sequence import SequenceData
 
-        dummy_seq_data = SequenceData.from_token_counts((0, seq_len))
+        dummy_seq_data = SequenceData.from_prompt_token_counts((0, seq_len))
         dummy_multi_modal_data = None
 
         return dummy_seq_data, dummy_multi_modal_data
@@ -185,16 +186,8 @@ class InputRegistry:
         return wrapper
 
     def _get_dummy_encoder_data_factory(self, model_cls: Type[nn.Module]):
-        if model_cls in self._dummy_encoder_factories_by_model_type:
-            dummy_factory = self._dummy_encoder_factories_by_model_type[
-                model_cls]
-        else:
-            logger.warning(
-                "No dummy encoder data factory registered to %s. "
-                "Using the dummy data factory for the model instead.",
-                model_cls)
-            dummy_factory = self._get_dummy_data_factory(model_cls)
-        return dummy_factory
+        return self._dummy_encoder_factories_by_model_type \
+            .get(model_cls, self._default_dummy_data_factory)
 
     def dummy_data_for_profiling(
         self,
@@ -252,8 +245,11 @@ class InputRegistry:
 
         return seq_data, mm_data
 
-    def _default_input_processor(self, ctx: InputContext,
-                                 inputs: LLMInputs) -> LLMInputs:
+    def _default_input_processor(
+        self,
+        ctx: InputContext,
+        inputs: DecoderOnlyInputs,
+    ) -> DecoderOnlyInputs:
         """The default input processor is a no-op."""
         return inputs
 
@@ -286,7 +282,7 @@ class InputRegistry:
             .get(model_cls, self._default_input_processor)
 
     def process_input(self, model_config: "ModelConfig",
-                      inputs: LLMInputs) -> LLMInputs:
+                      inputs: DecoderOnlyInputs) -> DecoderOnlyInputs:
         """
         Apply an input processor to an instance of model inputs.
 
@@ -301,8 +297,14 @@ class InputRegistry:
         model_cls, _ = get_model_architecture(model_config)
         processor = self._get_model_input_processor(model_cls)
 
-        mm_processor_kwargs = get_allowed_kwarg_only_overrides(
-            processor, overrides=model_config.mm_processor_kwargs)
+        # Handle multimodal processor kwargs with priority:
+        #     Inference kwargs -> Init kwargs -> {}
+        # If it's empty, it'll fall back to the default kwarg values
+        mm_processor_kwargs = resolve_mm_processor_kwargs(
+            model_config.mm_processor_kwargs,
+            inputs.get("mm_processor_kwargs"),
+            processor,
+        )
 
         return processor(InputContext(model_config), inputs,
                          **mm_processor_kwargs)

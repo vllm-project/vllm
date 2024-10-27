@@ -1,6 +1,6 @@
 """
-This example shows how to use vLLM for running offline inference 
-with the correct prompt format on vision language models.
+This example shows how to use vLLM for running offline inference with
+the correct prompt format on vision language models for text generation.
 
 For most models, the prompt format should follow corresponding examples
 on HuggingFace model repository.
@@ -12,20 +12,24 @@ from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
 from vllm.utils import FlexibleArgumentParser
 
+# NOTE: The default `max_num_seqs` and `max_model_len` may result in OOM on
+# lower-end GPUs.
+# Unless specified, these settings have been tested to work on a single L4.
+
 
 # LLaVA-1.5
-def run_llava(question, modality):
+def run_llava(question: str, modality: str):
     assert modality == "image"
 
     prompt = f"USER: <image>\n{question}\nASSISTANT:"
 
-    llm = LLM(model="llava-hf/llava-1.5-7b-hf")
+    llm = LLM(model="llava-hf/llava-1.5-7b-hf", max_model_len=4096)
     stop_token_ids = None
     return llm, prompt, stop_token_ids
 
 
 # LLaVA-1.6/LLaVA-NeXT
-def run_llava_next(question, modality):
+def run_llava_next(question: str, modality: str):
     assert modality == "image"
 
     prompt = f"[INST] <image>\n{question} [/INST]"
@@ -36,7 +40,7 @@ def run_llava_next(question, modality):
 
 # LlaVA-NeXT-Video
 # Currently only support for video input
-def run_llava_next_video(question, modality):
+def run_llava_next_video(question: str, modality: str):
     assert modality == "video"
 
     prompt = f"USER: <video>\n{question} ASSISTANT:"
@@ -46,7 +50,7 @@ def run_llava_next_video(question, modality):
 
 
 # LLaVA-OneVision
-def run_llava_onevision(question, modality):
+def run_llava_onevision(question: str, modality: str):
 
     if modality == "video":
         prompt = f"<|im_start|>user <video>\n{question}<|im_end|> \
@@ -57,23 +61,23 @@ def run_llava_onevision(question, modality):
         <|im_start|>assistant\n"
 
     llm = LLM(model="llava-hf/llava-onevision-qwen2-7b-ov-hf",
-              max_model_len=32768)
+              max_model_len=16384)
     stop_token_ids = None
     return llm, prompt, stop_token_ids
 
 
 # Fuyu
-def run_fuyu(question, modality):
+def run_fuyu(question: str, modality: str):
     assert modality == "image"
 
     prompt = f"{question}\n"
-    llm = LLM(model="adept/fuyu-8b")
+    llm = LLM(model="adept/fuyu-8b", max_model_len=2048, max_num_seqs=2)
     stop_token_ids = None
     return llm, prompt, stop_token_ids
 
 
 # Phi-3-Vision
-def run_phi3v(question, modality):
+def run_phi3v(question: str, modality: str):
     assert modality == "image"
 
     prompt = f"<|user|>\n<|image_1|>\n{question}<|end|>\n<|assistant|>\n"  # noqa: E501
@@ -99,7 +103,9 @@ def run_phi3v(question, modality):
     llm = LLM(
         model="microsoft/Phi-3-vision-128k-instruct",
         trust_remote_code=True,
-        max_num_seqs=5,
+        max_model_len=4096,
+        max_num_seqs=2,
+        # Note - mm_processor_kwargs can also be passed to generate/chat calls
         mm_processor_kwargs={"num_crops": 16},
     )
     stop_token_ids = None
@@ -107,7 +113,7 @@ def run_phi3v(question, modality):
 
 
 # PaliGemma
-def run_paligemma(question, modality):
+def run_paligemma(question: str, modality: str):
     assert modality == "image"
 
     # PaliGemma has special prompt format for VQA
@@ -118,17 +124,17 @@ def run_paligemma(question, modality):
 
 
 # Chameleon
-def run_chameleon(question, modality):
+def run_chameleon(question: str, modality: str):
     assert modality == "image"
 
     prompt = f"{question}<image>"
-    llm = LLM(model="facebook/chameleon-7b")
+    llm = LLM(model="facebook/chameleon-7b", max_model_len=4096)
     stop_token_ids = None
     return llm, prompt, stop_token_ids
 
 
 # MiniCPM-V
-def run_minicpmv(question, modality):
+def run_minicpmv(question: str, modality: str):
     assert modality == "image"
 
     # 2.0
@@ -145,6 +151,8 @@ def run_minicpmv(question, modality):
                                               trust_remote_code=True)
     llm = LLM(
         model=model_name,
+        max_model_len=4096,
+        max_num_seqs=2,
         trust_remote_code=True,
     )
     # NOTE The stop_token_ids are different for various versions of MiniCPM-V
@@ -169,7 +177,7 @@ def run_minicpmv(question, modality):
 
 
 # InternVL
-def run_internvl(question, modality):
+def run_internvl(question: str, modality: str):
     assert modality == "image"
 
     model_name = "OpenGVLab/InternVL2-2B"
@@ -177,7 +185,7 @@ def run_internvl(question, modality):
     llm = LLM(
         model=model_name,
         trust_remote_code=True,
-        max_num_seqs=5,
+        max_model_len=4096,
     )
 
     tokenizer = AutoTokenizer.from_pretrained(model_name,
@@ -196,8 +204,32 @@ def run_internvl(question, modality):
     return llm, prompt, stop_token_ids
 
 
+# NVLM-D
+def run_nvlm_d(question: str, modality: str):
+    assert modality == "image"
+
+    model_name = "nvidia/NVLM-D-72B"
+
+    # Adjust this as necessary to fit in GPU
+    llm = LLM(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=4096,
+        tensor_parallel_size=4,
+    )
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name,
+                                              trust_remote_code=True)
+    messages = [{'role': 'user', 'content': f"<image>\n{question}"}]
+    prompt = tokenizer.apply_chat_template(messages,
+                                           tokenize=False,
+                                           add_generation_prompt=True)
+    stop_token_ids = None
+    return llm, prompt, stop_token_ids
+
+
 # BLIP-2
-def run_blip2(question, modality):
+def run_blip2(question: str, modality: str):
     assert modality == "image"
 
     # BLIP-2 prompt format is inaccurate on HuggingFace model repository.
@@ -209,13 +241,14 @@ def run_blip2(question, modality):
 
 
 # Qwen
-def run_qwen_vl(question, modality):
+def run_qwen_vl(question: str, modality: str):
     assert modality == "image"
 
     llm = LLM(
         model="Qwen/Qwen-VL",
         trust_remote_code=True,
-        max_num_seqs=5,
+        max_model_len=1024,
+        max_num_seqs=2,
     )
 
     prompt = f"{question}Picture 1: <img></img>\n"
@@ -224,14 +257,21 @@ def run_qwen_vl(question, modality):
 
 
 # Qwen2-VL
-def run_qwen2_vl(question, modality):
+def run_qwen2_vl(question: str, modality: str):
     assert modality == "image"
 
     model_name = "Qwen/Qwen2-VL-7B-Instruct"
 
+    # Tested on L40
     llm = LLM(
         model=model_name,
+        max_model_len=8192,
         max_num_seqs=5,
+        # Note - mm_processor_kwargs can also be passed to generate/chat calls
+        mm_processor_kwargs={
+            "min_pixels": 28 * 28,
+            "max_pixels": 1280 * 28 * 28,
+        },
     )
 
     prompt = ("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
@@ -242,8 +282,24 @@ def run_qwen2_vl(question, modality):
     return llm, prompt, stop_token_ids
 
 
-# LLama
-def run_mllama(question, modality):
+# Pixtral HF-format
+def run_pixtral_hf(question: str, modality: str):
+    assert modality == "image"
+
+    model_name = "mistral-community/pixtral-12b"
+
+    llm = LLM(
+        model=model_name,
+        max_model_len=8192,
+    )
+
+    prompt = f"<s>[INST]{question}\n[IMG][/INST]"
+    stop_token_ids = None
+    return llm, prompt, stop_token_ids
+
+
+# LLama 3.2
+def run_mllama(question: str, modality: str):
     assert modality == "image"
 
     model_name = "meta-llama/Llama-3.2-11B-Vision-Instruct"
@@ -252,16 +308,48 @@ def run_mllama(question, modality):
     # max_model_len (131072) for this model may cause OOM.
     # You may lower either to run this example on lower-end GPUs.
 
-    # The configuration below has been confirmed to launch on a
-    # single H100 GPU.
+    # The configuration below has been confirmed to launch on a single L40 GPU.
     llm = LLM(
         model=model_name,
+        max_model_len=4096,
         max_num_seqs=16,
         enforce_eager=True,
     )
 
     prompt = f"<|image|><|begin_of_text|>{question}"
     stop_token_ids = None
+    return llm, prompt, stop_token_ids
+
+
+# Molmo
+def run_molmo(question, modality):
+    assert modality == "image"
+
+    model_name = "allenai/Molmo-7B-D-0924"
+
+    llm = LLM(
+        model=model_name,
+        trust_remote_code=True,
+        dtype="bfloat16",
+    )
+
+    prompt = question
+    stop_token_ids = None
+    return llm, prompt, stop_token_ids
+
+
+# GLM-4v
+def run_glm4v(question: str, modality: str):
+    assert modality == "image"
+    model_name = "THUDM/glm-4v-9b"
+
+    llm = LLM(model=model_name,
+              max_model_len=2048,
+              max_num_seqs=2,
+              trust_remote_code=True,
+              enforce_eager=True)
+    prompt = question
+    stop_token_ids = [151329, 151336, 151338]
     return llm, prompt, stop_token_ids
 
 
@@ -277,9 +365,13 @@ model_example_map = {
     "minicpmv": run_minicpmv,
     "blip-2": run_blip2,
     "internvl_chat": run_internvl,
+    "NVLM_D": run_nvlm_d,
     "qwen_vl": run_qwen_vl,
     "qwen2_vl": run_qwen2_vl,
+    "pixtral_hf": run_pixtral_hf,
     "mllama": run_mllama,
+    "molmo": run_molmo,
+    "glm4v": run_glm4v,
 }
 
 
@@ -363,7 +455,7 @@ def main(args):
 if __name__ == "__main__":
     parser = FlexibleArgumentParser(
         description='Demo on using vLLM for offline inference with '
-        'vision language models')
+        'vision language models for text generation')
     parser.add_argument('--model-type',
                         '-m',
                         type=str,

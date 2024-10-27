@@ -186,6 +186,9 @@ class BlocksparseFlashAttentionMetadata(AttentionMetadata):
     # TODO(woosuk): Move `use_cuda_graph` out since it's unrelated to attention.
     use_cuda_graph: bool
 
+    # Max number of query tokens for among request in the batch.
+    max_decode_query_len: Optional[int] = None
+
     _cached_prefill_metadata: Optional[
         "BlocksparseFlashAttentionMetadata"] = None
     _cached_decode_metadata: Optional[

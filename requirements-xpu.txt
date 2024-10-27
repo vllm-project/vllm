@@ -1,9 +1,13 @@
 # Common dependencies
 -r requirements-common.txt
 
-setuptools < 70.0.0 # IPEX's torch have some dependency. to be removed.
-
 ray >= 2.9
+cmake>=3.26
+ninja
+packaging
+setuptools-scm>=8
+wheel
+jinja2
 # Following pkgs retrieved from https://pytorch-extension.intel.com/release-whl/stable/xpu/us/
 torch == 2.3.1+cxx11.abi
 intel-extension-for-pytorch == 2.3.110+xpu

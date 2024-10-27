@@ -1,6 +1,7 @@
 import sys
 
 from vllm import LLM, SamplingParams
+from vllm.distributed import cleanup_dist_env_and_memory
 
 
 def test_lazy_outlines(sample_regex):
@@ -14,6 +15,7 @@ def test_lazy_outlines(sample_regex):
     ]
     sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
+    # Create an LLM without guided decoding as a baseline.
     llm = LLM(model="facebook/opt-125m",
               enforce_eager=True,
               gpu_memory_utilization=0.3)
@@ -26,10 +28,15 @@ def test_lazy_outlines(sample_regex):
     # make sure outlines is not imported
     assert 'outlines' not in sys.modules
 
+    # Destroy the LLM object and free up the GPU memory.
+    del llm
+    cleanup_dist_env_and_memory()
+
+    # Create an LLM with guided decoding enabled.
     llm = LLM(model="facebook/opt-125m",
               enforce_eager=True,
               guided_decoding_backend="lm-format-enforcer",
-              gpu_memory_utilization=0.3)
+              gpu_memory_utilization=0.6)
     sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
     outputs = llm.generate(
         prompts=[

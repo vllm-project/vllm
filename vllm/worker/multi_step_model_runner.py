@@ -29,8 +29,8 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-MULTI_STEP_ATTENTION_BACKENDS = ["flash-attn", "rocm-flash-attn", "flashinfer"]
-MULTI_STEP_CHUNKED_PREFILL_ATTENTION_BACKENDS = ["flash-attn"]
+MULTI_STEP_ATTENTION_BACKENDS = ["FLASH_ATTN", "ROCM_FLASH", "FLASHINFER"]
+MULTI_STEP_CHUNKED_PREFILL_ATTENTION_BACKENDS = ["FLASH_ATTN"]
 
 def _get_supported_attention_backends(chunked_prefill_enabled: bool) \
     -> List[str]:
@@ -326,7 +326,14 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
         self.is_multi_step = self.scheduler_config.is_multi_step
         self.pinned_sampled_token_ids: Optional[torch.Tensor] = None
 
-        self.pythonization_cache = PythonizationCache()
+        # Using the PythonizationCache in Pipeline-Parallel clobbers the
+        # SequenceOutput and CompletionSequenceGroupOutput object.
+        # When cache-reset happens at the last step of a multi-step
+        # execution, there may be other on-going single-step/multi-step
+        # executions. The current caching implementation does not check
+        # for this.
+        self.pythonization_cache = PythonizationCache() \
+            if self.parallel_config.pipeline_parallel_size == 1 else None
 
     @functools.cached_property
     def _copy_stream(self):
@@ -577,7 +584,8 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
         if model_input.is_last_step:
             outputs = self._final_process_outputs(
                 model_input, model_input.base_output_proc_callback)
-            self.pythonization_cache.reset()
+            if self.pythonization_cache:
+                self.pythonization_cache.reset()
             return outputs
 
         # should be [SamplerOutput]
@@ -808,6 +816,9 @@ def _pythonize_sampler_output(
 
     for sgdx, (seq_group,
                sample_result) in enumerate(zip(seq_groups, samples_list)):
+        # Reminder: Please update docs/source/serving/compatibility_matrix.rst
+        # If the feature combo become valid
+        # (Check for Guided Decoding)
         if seq_group.sampling_params.logits_processors:
             assert len(seq_group.sampling_params.logits_processors) == 0, (
                 "Logits Processors are not supported in multi-step decoding")

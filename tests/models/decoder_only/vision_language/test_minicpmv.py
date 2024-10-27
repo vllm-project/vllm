@@ -32,8 +32,8 @@ HF_MULTIIMAGE_IMAGE_PROMPT = \
 models = ["openbmb/MiniCPM-Llama3-V-2_5"]
 
 
-def _wrap_inputs(hf_inputs: BatchEncoding) -> BatchEncoding:
-    return BatchEncoding({"model_inputs": hf_inputs})
+def _wrap_inputs(hf_inputs: BatchEncoding):
+    return {"model_inputs": hf_inputs}
 
 
 def trunc_hf_output(hf_output: Tuple[List[int], str,
@@ -79,7 +79,7 @@ def run_test(
     # max_model_len should be greater than image_feature_size
     with vllm_runner(model,
                      max_model_len=4096,
-                     max_num_seqs=1,
+                     max_num_seqs=2,
                      dtype=dtype,
                      limit_mm_per_prompt={"image": mm_limit},
                      tensor_parallel_size=tensor_parallel_size,

@@ -83,7 +83,8 @@ class OpenAIServingEmbedding(OpenAIServing):
                          lora_modules=None,
                          prompt_adapters=None,
                          request_logger=request_logger)
-        self._enabled = self._check_embedding_mode(model_config.embedding_mode)
+        self._enabled = self._check_embedding_mode(
+            model_config.task == "embedding")
 
     async def create_embedding(
         self,
@@ -110,6 +111,17 @@ class OpenAIServingEmbedding(OpenAIServing):
         request_id = f"embd-{random_uuid()}"
         created_time = int(time.monotonic())
 
+        truncate_prompt_tokens = None
+
+        if request.truncate_prompt_tokens is not None:
+            if request.truncate_prompt_tokens <= self.max_model_len:
+                truncate_prompt_tokens = request.truncate_prompt_tokens
+            else:
+                return self.create_error_response(
+                    "truncate_prompt_tokens value is "
+                    "greater than max_model_len."
+                    " Please, select a smaller truncation size.")
+
         # Schedule the request and get the result generator.
         generators: List[AsyncGenerator[EmbeddingRequestOutput, None]] = []
         try:
@@ -123,11 +135,9 @@ class OpenAIServingEmbedding(OpenAIServing):
             pooling_params = request.to_pooling_params()
 
             prompts = list(
-                self._tokenize_prompt_input_or_inputs(
-                    request,
-                    tokenizer,
-                    request.input,
-                ))
+                self._tokenize_prompt_input_or_inputs(request, tokenizer,
+                                                      request.input,
+                                                      truncate_prompt_tokens))
 
             for i, prompt_inputs in enumerate(prompts):
                 request_id_item = f"{request_id}-{i}"
@@ -148,6 +158,7 @@ class OpenAIServingEmbedding(OpenAIServing):
                     pooling_params,
                     request_id_item,
                     lora_request=lora_request,
+                    priority=request.priority,
                 )
 
                 generators.append(generator)

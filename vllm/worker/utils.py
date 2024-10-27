@@ -13,6 +13,9 @@ def assert_enc_dec_mr_supported_scenario(
     a supported scenario.
     '''
 
+    # Reminder: Please update docs/source/serving/compatibility_matrix.rst
+    # If the feature combo become valid
+
     if enc_dec_mr.cache_config.enable_prefix_caching:
         raise NotImplementedError(
             STR_NOT_IMPL_ENC_DEC_ERR_STRS['STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE'])

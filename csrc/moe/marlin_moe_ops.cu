@@ -25,9 +25,12 @@
 
 #include <iostream>
 
+#include "core/exception.hpp"
 #include "core/scalar_type.hpp"
+#include "core/registration.h"
 #include "marlin_kernels/marlin_moe_kernel_ku4b8.h"
 #include "marlin_kernels/marlin_moe_kernel_ku8b128.h"
+#include "marlin_kernels/marlin_moe_kernel_ku4.h"
 
 template <typename T>
 inline std::string str(T x) {
@@ -155,6 +158,7 @@ thread_config_t small_batch_thread_configs[] = {
     {128, 64, 128},   // Reduce N 2X, same K
     {64, 256, 256},   // Reduce K 2X, increase N 2X
     {64, 128, 128},   // Reduce K 2X, same N
+    {64, 64, 128},    // Reduce both 2X
 };
 
 thread_config_t large_batch_thread_configs[] = {
@@ -165,6 +169,7 @@ thread_config_t large_batch_thread_configs[] = {
     {128, 128, 256},  // Reduce N 2X, increase K 2X
     {64, 128, 128},   // Reduce N 2X, same K
     {128, 64, 128},   // Reduce N 4X, increase K 2X
+    {64, 64, 128},    // Reduce N 4X, same K
 };
 
 int get_scales_cache_size(thread_config_t const& th_config, int prob_m,
@@ -189,7 +194,7 @@ int get_scales_cache_size(thread_config_t const& th_config, int prob_m,
     int load_groups =
         tb_groups * STAGES * 2;          // Chunk size is 2x pipeline over dim K
     load_groups = max(load_groups, 32);  // We load at least 32 scale groups
-    return load_groups * tb_n * 2;
+    return load_groups * tb_n * 4;
 
   } else {
     int tb_scales = tb_groups * tb_n * 2;
@@ -310,27 +315,28 @@ exec_config_t determine_thread_config(int prob_m, int prob_n, int prob_k,
   return exec_config_t{0, {-1, -1, -1}};
 }
 
-#define CALL_MOE_KERNEL_FUNCTION(KERNEL_FUNCTION)                              \
-  else if (KERNEL_FUNCTION(q_type, thread_n_blocks, thread_k_blocks,           \
-                           has_act_order, group_blocks, num_threads, blocks,   \
-                           max_shared_mem, stream, A_ptr, B_ptr, C_ptr,        \
-                           sorted_ids_ptr, topk_weights_ptr, s_ptr, g_idx_ptr, \
-                           expert_offsets_ptr, num_groups, expert_idx,         \
-                           num_experts, topk, prob_m, prob_n, prob_k, tot_m,   \
-                           locks, replicate_input, apply_weights, m_block,     \
-                           max_par, exec_cfg.max_m_blocks)) {                  \
+#define CALL_MOE_KERNEL_FUNCTION(KERNEL_FUNCTION)                             \
+  else if (KERNEL_FUNCTION(                                                   \
+               q_type, thread_n_blocks, thread_k_blocks, has_act_order,       \
+               group_blocks, num_threads, blocks, max_shared_mem, stream,     \
+               A_ptr, B_ptr, C_ptr, sorted_ids_ptr, topk_weights_ptr, s_ptr,  \
+               zp_ptr, g_idx_ptr, expert_offsets_ptr, num_groups, expert_idx, \
+               num_experts, topk, prob_m, prob_n, prob_k, tot_m, locks,       \
+               replicate_input, apply_weights, m_block, max_par,              \
+               exec_cfg.max_m_blocks)) {                                      \
   }
 
 void marlin_mm_moe(const void* A, const void* B, void* C,
                    const void* sorted_ids, const void* topk_weights,
-                   const void* topk_ids, const void* s, const void* g_idx,
-                   const void* perm, void* a_tmp, void* expert_offsets,
-                   int prob_m, int prob_n, int prob_k, void* workspace,
-                   vllm::ScalarType const& q_type, bool has_act_order,
-                   bool is_k_full, int num_groups, int group_size,
-                   int num_experts, int topk, int moe_block_size, int dev,
-                   cudaStream_t stream, int thread_k, int thread_n, int sms,
-                   int max_par, bool replicate_input, bool apply_weights) {
+                   const void* topk_ids, const void* s, void* zp,
+                   const void* g_idx, const void* perm, void* a_tmp,
+                   void* expert_offsets, int prob_m, int prob_n, int prob_k,
+                   void* workspace, vllm::ScalarType const& q_type,
+                   bool has_act_order, bool is_k_full, bool has_zp,
+                   int num_groups, int group_size, int num_experts, int topk,
+                   int moe_block_size, int dev, cudaStream_t stream,
+                   int thread_k, int thread_n, int sms, int max_par,
+                   bool replicate_input, bool apply_weights) {
   TORCH_CHECK(prob_m > 0 && prob_n > 0 && prob_k > 0, "Invalid MNK = [", prob_m,
               ", ", prob_n, ", ", prob_k, "]");
 
@@ -433,11 +439,9 @@ void marlin_mm_moe(const void* A, const void* B, void* C,
     int4* C_ptr = (int4*)C;
     const float* topk_weights_ptr = (const float*)topk_weights;
     const int* sorted_ids_ptr = (const int*)sorted_ids;
-    const int4* s_ptr =
-        (const int4*)s +
-        (((group_size == -1 || group_size == 0) ? 1 : prob_k / group_size) *
-         prob_n / 8) *
-            expert_idx;
+    const int4* s_ptr = (const int4*)s + num_groups * prob_n / 8 * expert_idx;
+    const int4* zp_ptr =
+        (const int4*)zp + num_groups * prob_n / (pack_factor * 4) * expert_idx;
     const int* g_idx_ptr = (const int*)g_idx + prob_k * expert_idx;
     const int* perm_ptr = (const int*)perm + prob_k * expert_idx;
     int* locks = (int*)workspace;
@@ -458,6 +462,7 @@ void marlin_mm_moe(const void* A, const void* B, void* C,
       }
       CALL_MOE_KERNEL_FUNCTION(call_marlin_moe_kernel_ku4b8)
       CALL_MOE_KERNEL_FUNCTION(call_marlin_moe_kernel_ku8b128)
+      CALL_MOE_KERNEL_FUNCTION(call_marlin_moe_kernel_ku4)
       else {
         TORCH_CHECK(false, "Unsupported shapes: MNK = [" + str(prob_m) + ", " +
                                str(prob_n) + ", " + str(prob_k) + "]" +
@@ -477,15 +482,24 @@ torch::Tensor marlin_gemm_moe(
     const torch::Tensor& a, const torch::Tensor& b_q_weights,
     const torch::Tensor& sorted_ids, const torch::Tensor& topk_weights,
     const torch::Tensor& topk_ids, const torch::Tensor& b_scales,
-    const torch::Tensor& g_idx, const torch::Tensor& perm,
-    torch::Tensor& workspace, vllm::ScalarTypeTorchPtr const& b_q_type,
-    int64_t size_m, int64_t size_n, int64_t size_k, bool is_k_full,
-    int64_t num_experts, int64_t topk, int64_t moe_block_size,
-    bool replicate_input, bool apply_weights) {
-  TORCH_CHECK(*b_q_type == vllm::kU4B8 || *b_q_type == vllm::kU8B128,
-              "b_q_type must be uint4b8 or uint8b128. Got = ", b_q_type->str());
+    torch::Tensor& b_zeros, const torch::Tensor& g_idx,
+    const torch::Tensor& perm, torch::Tensor& workspace,
+    vllm::ScalarTypeId const b_q_type_id, int64_t size_m, int64_t size_n,
+    int64_t size_k, bool is_k_full, int64_t num_experts, int64_t topk,
+    int64_t moe_block_size, bool replicate_input, bool apply_weights) {
+  vllm::ScalarType const b_q_type = vllm::ScalarType::from_id(b_q_type_id);
+  bool has_zp = b_zeros.size(1) != 0;
+  if (has_zp) {
+    TORCH_CHECK(
+        b_q_type == vllm::kU4,
+        "b_q_type must be u4 when has_zp = True. Got = ", b_q_type.str());
+  } else {
+    TORCH_CHECK(
+        b_q_type == vllm::kU4B8 || b_q_type == vllm::kU8B128,
+        "b_q_type must be uint4b8 or uint8b128. Got = ", b_q_type.str());
+  }
 
-  int pack_factor = 32 / b_q_type->size_bits();
+  int pack_factor = 32 / b_q_type.size_bits();
 
   int max_par = 4;
 
@@ -521,6 +535,9 @@ torch::Tensor marlin_gemm_moe(
               " is not size_n = ", size_n);
   num_groups = b_scales.size(1);
 
+  TORCH_CHECK(VLLM_IMPLIES(!is_k_full, has_act_order),
+              "if is_k_full is false, has_act_order must be true");
+
   if (has_act_order) {
     if (is_k_full) {
       TORCH_CHECK(num_groups > 1, "For act_order, num_groups must be > 1");
@@ -542,13 +559,30 @@ torch::Tensor marlin_gemm_moe(
     }
   }
 
+  // Verify b_zeros
+  if (has_zp) {
+    int rank = b_zeros.sizes().size();
+    TORCH_CHECK(rank == 3, "b_zeros rank = ", rank, " is not 3");
+    TORCH_CHECK(b_zeros.size(1) == num_groups,
+                "b_zeros dim 1 = ", b_zeros.size(1),
+                " is not num_groups = ", num_groups);
+    TORCH_CHECK(b_zeros.size(2) == size_n / pack_factor,
+                "b_zeros dim 2 = ", b_zeros.size(2),
+                " is not size_n / pack_factor = ", size_n / pack_factor);
+  }
+
   marlin_moe::marlin_mm_moe(
       a.data_ptr(), b_q_weights.data_ptr(), c.data_ptr(), sorted_ids.data_ptr(),
       topk_weights.data_ptr(), topk_ids.data_ptr(), b_scales.data_ptr(),
-      g_idx.data_ptr(), perm.data_ptr(), a_tmp.data_ptr(),
+      b_zeros.data_ptr(), g_idx.data_ptr(), perm.data_ptr(), a_tmp.data_ptr(),
       expert_offsets.data_ptr(), size_m, size_n, size_k, workspace.data_ptr(),
-      *b_q_type, has_act_order, is_k_full, num_groups, group_size, num_experts,
-      topk, moe_block_size, dev, at::cuda::getCurrentCUDAStream(dev), thread_k,
-      thread_n, sms, max_par, replicate_input, apply_weights);
+      b_q_type, has_act_order, is_k_full, has_zp, num_groups, group_size,
+      num_experts, topk, moe_block_size, dev,
+      at::cuda::getCurrentCUDAStream(dev), thread_k, thread_n, sms, max_par,
+      replicate_input, apply_weights);
   return c;
+}
+
+TORCH_LIBRARY_IMPL_EXPAND(TORCH_EXTENSION_NAME, CUDA, m) {
+  m.impl("marlin_gemm_moe", &marlin_gemm_moe);
 }

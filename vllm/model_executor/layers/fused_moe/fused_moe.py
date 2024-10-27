@@ -320,6 +320,9 @@ def get_moe_configs(E: int, N: int,
 
     # If no optimized configuration is available, we will use the default
     # configuration
+    logger.warning(
+        ("Using default MoE config. Performance might be sub-optimal! "
+         "Config file not found at %s"), config_file_path)
     return None
 
 
@@ -586,9 +589,8 @@ def fused_experts(hidden_states: torch.Tensor,
                                 use_fp8_w8a8=use_fp8_w8a8,
                                 use_int8_w8a16=use_int8_w8a16)
 
-        torch.sum(intermediate_cache3.view(*intermediate_cache3.shape),
-                  dim=1,
-                  out=out_hidden_states[begin_chunk_idx:end_chunk_idx])
+        ops.moe_sum(intermediate_cache3.view(*intermediate_cache3.shape),
+                    out_hidden_states[begin_chunk_idx:end_chunk_idx])
     return out_hidden_states
 
 

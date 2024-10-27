@@ -5,7 +5,7 @@ import pytest
 import torch
 from PIL.Image import Image
 
-from vllm.inputs import InputContext, LLMInputs
+from vllm.inputs import InputContext, token_inputs
 from vllm.multimodal.base import MultiModalInputs
 from vllm.multimodal.utils import cached_get_tokenizer, rescale_image_size
 
@@ -71,12 +71,12 @@ def test_input_processor_valid_mm_data(input_processor_for_qwen,
     """Happy cases for image inputs to Qwen's multimodal input processor."""
     prompt = "".join(
         [f"Picture {num}: <img></img>\n" for num in range(1, num_images + 1)])
-    inputs = LLMInputs(
+    inputs = token_inputs(
         prompt=prompt,
         # When processing multimodal data for a multimodal model, the qwen
         # input processor will overwrite the provided prompt_token_ids with
         # the image prompts
-        prompt_token_ids=None,
+        prompt_token_ids=[],
         multi_modal_data={"image": torch.rand(num_images, TOKS_PER_IMG, 4096)},
     )
     proc_inputs = input_processor_for_qwen(qwen_vl_context, inputs)
@@ -134,9 +134,9 @@ def test_input_processor_invalid_mm_data(input_processor_for_qwen,
                                      trust_remote_code=True)
     prompt = "Picture 1: <img></img>\n"
     prompt_token_ids = tokenizer.encode(prompt)
-    inputs = LLMInputs(prompt=prompt,
-                       prompt_token_ids=prompt_token_ids,
-                       multi_modal_data=mm_data)
+    inputs = token_inputs(prompt=prompt,
+                          prompt_token_ids=prompt_token_ids,
+                          multi_modal_data=mm_data)
     # Should fail since we have too many or too few dimensions for embeddings
     with pytest.raises(ValueError):
         input_processor_for_qwen(qwen_vl_context, inputs)
@@ -221,7 +221,7 @@ def run_test(
     # Qwen encodes each image into a fixed content size of 256
     with vllm_runner(model,
                      max_model_len=1024,
-                     max_num_seqs=1,
+                     max_num_seqs=2,
                      dtype=dtype,
                      limit_mm_per_prompt={"image": mm_limit},
                      tensor_parallel_size=tensor_parallel_size,
