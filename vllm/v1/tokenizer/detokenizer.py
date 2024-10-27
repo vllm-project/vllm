@@ -1,12 +1,12 @@
 import multiprocessing
 import pickle
+import uuid
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Union
 
 import msgspec
 import zmq
 from msgspec import msgpack
-import uuid
 
 from vllm.logger import init_logger
 from vllm.outputs import CompletionOutput, RequestOutput
@@ -183,6 +183,8 @@ class DetokenizerProc(multiprocessing.Process):
         self.poller.register(self.new_tokens_socket, zmq.POLLIN)
 
         # Sends RequestOutputs to the EngineClient.
+        # TODO(robertgshaw2): this currently uses the same path as
+        # the MQLLMEngine output socket. This may or may not be okay.
         self.output_socket = self.zmq_context.socket(zmq.PUSH)
         self.output_socket.connect(self.output_socket_path)
 
