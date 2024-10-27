@@ -317,7 +317,7 @@ def gptq_marlin_24_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
                                             size_n, size_k)
 
 
-# quant_llm
+# fp_eXmY
 def fp_eXmY_linear_forward_cuda(
     EXPONENT: int,
     MANTISSA: int,

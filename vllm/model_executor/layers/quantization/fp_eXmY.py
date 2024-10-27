@@ -9,7 +9,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
-from vllm.model_executor.layers.quantization.utils.quant_llm_utils import (
+from vllm.model_executor.layers.quantization.utils.fp_eXmY_utils import (
     _SPLIT_K_MAP, from_scaled_tc_fpx, to_scaled_tc_fpx)
 from vllm.model_executor.utils import set_weight_attrs
 
@@ -27,8 +27,8 @@ DEFAULT_FP_EXMY_EXP_BITS = {
 }
 
 
-class QuantLLMFPConfig(QuantizationConfig):
-    """Config for QuantLLM FP quantizer. It supports fp4,
+class FP_eXmYConfig(QuantizationConfig):
+    """Config for FP_eXmY quantizer. It supports fp4,
     fp5, fp6, fp7.
     
     Reference: https://arxiv.org/abs/2401.14112
@@ -56,27 +56,32 @@ class QuantLLMFPConfig(QuantizationConfig):
                 "weight-only quantization are supported for fp_eXmY "
                 f"quantization, but got {self.weight_bits} bits.")
 
+        if self.exponent_bits not in range(7):
+            raise ValueError(
+                "Exponent bits should be between 0 and 6, but got "
+                f"{self.exponent_bits}.")
+
         if get_tensor_model_parallel_rank() == 0:
             logger.info("Loading model in FP%s_E%sM%s format.",
                         self.weight_bits, self.exponent_bits,
                         self.mantissa_bits)
 
     def __repr__(self) -> str:
-        return (f"QuantLLMFPConfig(weight_bits={self.weight_bits}), "
+        return (f"FP_eXmYConfig(weight_bits={self.weight_bits}), "
                 f"exponent_bits={self.exponent_bits}")
 
     @classmethod
     def get_name(cls) -> str:
-        return "QuantLLMFP"
+        return "FP_eXmY"
 
     @classmethod
-    def from_config(cls, config: Dict[str, Any]) -> "QuantLLMFPConfig":
+    def from_config(cls, config: Dict[str, Any]) -> "FP_eXmYConfig":
         weight_bits = cls.get_from_keys(config, ["bits"])
         exp_bits = cls.get_from_keys(config, ["exp_bits"])
         return cls(weight_bits=weight_bits, exp_bits=exp_bits)
 
-    def get_linear_method(self) -> "QuantLLMFPLinearMethod":
-        return QuantLLMFPLinearMethod(self)
+    def get_linear_method(self) -> "FP_eXmYLinearMethod":
+        return FP_eXmYLinearMethod(self)
 
     def get_scaled_act_names(self) -> List[str]:
         return []
@@ -94,19 +99,19 @@ class QuantLLMFPConfig(QuantizationConfig):
         return []
 
     def get_quant_method(self, layer: torch.nn.Module,
-                         prefix: str) -> Optional["QuantLLMFPLinearMethod"]:
+                         prefix: str) -> Optional["FP_eXmYLinearMethod"]:
         if isinstance(layer, LinearBase):
-            return QuantLLMFPLinearMethod(self)
+            return FP_eXmYLinearMethod(self)
         return None
 
 
-class QuantLLMFPLinearMethod(LinearMethodBase):
-    """Linear method for QuantLLMFP quantizer.
+class FP_eXmYLinearMethod(LinearMethodBase):
+    """Linear method for FP_eXmY quantizer.
     Args:
-        quant_config: the QuantLLMFP quantization config.
+        quant_config: the FP_eXmY quantization config.
     """
 
-    def __init__(self, quant_config: QuantLLMFPConfig):
+    def __init__(self, quant_config: FP_eXmYConfig):
         self.quant_config = quant_config
         self.weight = None
 
@@ -122,7 +127,7 @@ class QuantLLMFPLinearMethod(LinearMethodBase):
         del output_size
         del input_size
         output_size_per_partition = sum(output_partition_sizes)
-        weight = QuantLLMFPParameter(
+        weight = FP_eXmYParameter(
             torch.Size((output_size_per_partition, input_size_per_partition)),
             params_dtype=params_dtype,
             quant_config=self.quant_config,
@@ -168,15 +173,15 @@ class QuantLLMFPLinearMethod(LinearMethodBase):
                 splitK) + bias
 
 
-class QuantLLMFPParameter(nn.Parameter):
+class FP_eXmYParameter(nn.Parameter):
     """
-    QuantLLMFP quantized parameter class that implements fp5/fp6/fp7
+    FP_eXmY quantized parameter class that implements fp5/fp6/fp7
     quantization. Weights are stored in quantized form on
     GPUs, and can be directly applied to float16 activations.
     """
 
     def __new__(cls, orig_shape: torch.Size, params_dtype: torch.dtype,
-                quant_config: QuantLLMFPConfig):
+                quant_config: FP_eXmYConfig):
 
         data = torch.empty(torch.Size(
             (orig_shape[0], orig_shape[1] * quant_config.weight_bits // 8)),

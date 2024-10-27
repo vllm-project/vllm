@@ -249,7 +249,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "SymInt size_k) -> Tensor");
   // conditionally compiled so impl registration is in source file
 
-  // Quant_LLM kernel for quantization to custom
+  // FP_eXmY kernel for quantization to custom
   // irregular bit-widths.
   ops.def(
       "fp_eXmY_linear_forward_cuda(int EXPONENT, int MANTISSA,"
