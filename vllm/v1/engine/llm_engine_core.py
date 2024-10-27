@@ -38,7 +38,6 @@ class LLMEngineCore(multiprocessing.Process):
         observability_config: Optional[ObservabilityConfig],
         prompt_adapter_config: Optional[PromptAdapterConfig],
     ):
-
         self.input_path = input_path
         self.output_path = output_path
         self.executor_class = executor_class
@@ -58,14 +57,15 @@ class LLMEngineCore(multiprocessing.Process):
         self.msgpack_encoder = msgspec.msgpack.Encoder()
         self.ctx = zmq.Context()  # type: ignore[attr-defined]
 
-        # Get input (new Requests) from the LLMEngine.
+        # Get EngineCoreRequests from the LLMEngine.
         self.input_socket = self.ctx.socket(zmq.constants.PULL)
         self.input_socket.connect(self.input_path)
 
-        # Send output (EngineCoreOutput) to the LLMEngine.
+        # Send EngineCoreOutput to the LLMEngine.
         self.output_socket = self.ctx.socket(zmq.constants.PUSH)
         self.output_socket.connect(self.output_path)
 
+        # Setup Model.
         self.model_executor = self.executor_class(
             model_config=self.model_config,
             cache_config=self.cache_config,
@@ -79,17 +79,19 @@ class LLMEngineCore(multiprocessing.Process):
             observability_config=self.observability_config,
         )
 
+        # Setup KV Caches.
+        # NOTE: the cache_config isn updated with the numbers of GPU and CPU
+        # blocks, which are profiled in the distributed executor.
         self._initialize_kv_caches()
 
-        # NOTE: the cache_config here have been updated with the numbers of
-        # GPU and CPU blocks, which are profiled in the distributed executor.
+        # Setup Scheduler.
         self.scheduler = Scheduler(self.scheduler_config, self.cache_config,
                                    self.lora_config)
 
-        # TODO: add heartbeat thread.
-
-        # Run core loop.
+        # Kickoff the busy loop.
         self._run_busy_loop()
+
+        # TODO: add heartbeat thread.
 
     def _initialize_kv_caches(self) -> None:
         num_gpu_blocks, _ = self.model_executor.determine_num_available_blocks(
@@ -124,6 +126,18 @@ class LLMEngineCore(multiprocessing.Process):
         # Send outputs back to the LLMEngine.
         self._send_outputs(outputs)
 
+    def _step(self) -> Optional[List[EngineCoreOutputs]]:
+        """Schedule, execute, and make output."""
+
+        if not self.scheduler.has_unfinished_requests():
+            return None
+
+        scheduler_output = self.scheduler.schedule()
+        output = self.model_executor.execute_model(scheduler_output)
+        engine_core_outputs = self.scheduler.update_from_output(
+            scheduler_output, output)
+        return engine_core_outputs
+
     def _handle_new_input(self):
         """Handle new input from the LLMEngine."""
         try:
@@ -142,18 +156,6 @@ class LLMEngineCore(multiprocessing.Process):
             # TODO: handle gracefully
             raise e
 
-    def _step(self) -> Optional[List[EngineCoreOutputs]]:
-        """Schedule, execute, and make output."""
-
-        if not self.scheduler.has_unfinished_requests():
-            return None
-
-        scheduler_output = self.scheduler.schedule()
-        output = self.model_executor.execute_model(scheduler_output)
-        engine_core_outputs = self.scheduler.update_from_output(
-            scheduler_output, output)
-        return engine_core_outputs
-
     def _send_outputs(
             self,
             engine_core_outputs: Optional[List[EngineCoreOutput]]) -> None:
@@ -162,9 +164,8 @@ class LLMEngineCore(multiprocessing.Process):
         if engine_core_outputs is None:
             return
 
-        outputs_serialized = self.msgpack_encoder.encode(
-            EngineCoreOutputs(data=engine_core_outputs))
-
+        outputs = EngineCoreOutputs(data=engine_core_outputs)
+        outputs_serialized = self.msgpack_encoder.encode(outputs)
         self.output_socket.send_multipart((outputs_serialized, ),
                                           copy=False,
                                           flags=zmq.NOBLOCK)

@@ -1,5 +1,6 @@
 import time
-from typing import Any, Dict, List, Mapping, Optional, Tuple, Type, Union
+from typing import (Any, Dict, Iterable, List, Mapping, Optional, Tuple, Type,
+                    Union)
 
 import msgspec
 import zmq
@@ -152,16 +153,18 @@ class LLMEngine:
 
         self.ctx = zmq.Context()  # type: ignore[attr-defined]
 
-        self.from_core_ipc_path = get_open_zmq_ipc_path()
         self.to_core_ipc_path = get_open_zmq_ipc_path()
 
         # Get output (EngineCoreOutput) from LLMEngineCore.
+        self.from_core_ipc_path = get_open_zmq_ipc_path()
         self.from_core = self.ctx.socket(zmq.constants.PULL)
         self.from_core.bind(self.from_core_ipc_path)
 
         # Send input (new Requests) to LLMEngineCore.
         self.to_core = self.ctx.socket(zmq.constants.PUSH)
         self.to_core.bind(self.to_core_ipc_path)
+
+        # TODO: startup engine core.
 
     @classmethod
     def from_engine_args(
@@ -247,6 +250,28 @@ class LLMEngine:
                                     copy=False,
                                     flags=zmq.NOBLOCK)
 
+    def step(self) -> List[RequestOutput]:
+        # NOTE: This method returns an empty list if the EngineCore
+        # step is running. This is not the end of the generation process.
+        if self.from_core.poll(timeout=0) != 0:
+            frames = self.from_core.recv_multipart(copy=False)
+            engine_core_outputs = self.decoder(frames[0].buffer).outputs
+            request_outputs = self.detokenizer.step(engine_core_outputs)
+            return request_outputs
+
+        return []
+
+    def abort_request(self, request_id: Union[str, Iterable[str]]) -> None:
+        # TODO: send to EngineCore
+        # TODO: send to Deoktenizer
+        pass
+
+    def check_health(self) -> None:
+        if self.tokenizer:
+            self.tokenizer.check_health()
+        # self.model_executor.check_health()
+        # TODO: send health check to EngineCore.
+
     def _make_requests(
         self,
         request_id: str,
@@ -257,6 +282,7 @@ class LLMEngine:
         prompt_adapter_request: Optional[PromptAdapterRequest] = None
     ) -> Tuple[DetokenizerRequest, EngineCoreRequest]:
 
+        # Process inputs.
         preprocessed_inputs = self.input_preprocessor.preprocess(
             prompt,
             request_id=request_id,
@@ -272,7 +298,7 @@ class LLMEngine:
         sampling_params.update_from_generation_config(
             self.generation_config_fields, eos_token_id)
 
-        # Make input to Detokenizer
+        # Make Request for Detokenizer.
         detokenizer_request = DetokenizerRequest(
             request_id, processed_inputs.prompt,
             processed_inputs.prompt_token_ids,
@@ -280,27 +306,12 @@ class LLMEngine:
             sampling_params.spaces_between_special_tokens,
             sampling_params.output_kind)
 
-        # Make input to EngineCore
+        # Make Request for EngineCore.
         engine_core_request = EngineCoreRequest(request_id, processed_inputs,
                                                 sampling_params, eos_token_id,
                                                 arrival_time, lora_request)
 
         return detokenizer_request, engine_core_request
-
-    def step(self) -> List[RequestOutput]:
-        if self.from_core.poll(timeout=0) != 0:
-            frames = self.from_core.recv_multipart(copy=False)
-            engine_core_outputs = self.decoder(frames[0].buffer).outputs
-            request_outputs = self.detokenizer.step(engine_core_outputs)
-            return request_outputs
-
-        return []
-
-    def check_health(self) -> None:
-        if self.tokenizer:
-            self.tokenizer.check_health()
-        # self.model_executor.check_health()
-        # TODO: send health check to EngineCore.
 
     def _validate_model_inputs(self, inputs: Union[DecoderOnlyInputs,
                                                    EncoderDecoderLLMInputs]):
