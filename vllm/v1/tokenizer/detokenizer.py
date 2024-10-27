@@ -45,57 +45,6 @@ class DetokenizerInputs(msgspec.Struct):
     data: List[DetokenizerInputData]
 
 
-@dataclass
-class DetokenizerRequestState:
-
-    # Generated text
-    output_text: str
-
-    # Prompt information
-    prompt: Optional[str]
-    num_prompt_tokens: int
-
-    # Prompt/generation tokens
-    tokens: List[str]
-    token_ids: List[int]
-
-    # Metadata for incremental detokenization
-    prefix_offset: int
-    read_offset: int
-
-    # Parameters for detokenization
-    skip_special_tokens: bool
-    spaces_between_special_tokens: bool
-    output_kind: RequestOutputKind
-
-    @property
-    def prompt_token_ids(self) -> List[int]:
-        assert len(self.token_ids) >= self.num_prompt_tokens
-        return self.token_ids[:self.num_prompt_tokens]
-
-    @classmethod
-    def from_new_request(cls, tokenizer, new_request: DetokenizerNewRequest):
-        tokens, prefix_offset, read_offset = convert_prompt_ids_to_tokens(
-            tokenizer=tokenizer,
-            prompt_ids=new_request.prompt_token_ids,
-            skip_special_tokens=new_request.skip_special_tokens,
-        )
-
-        return cls(
-            output_text="",
-            prompt=new_request.prompt,
-            num_prompt_tokens=len(new_request.prompt_token_ids),
-            tokens=tokens,
-            token_ids=new_request.prompt_token_ids,
-            prefix_offset=prefix_offset,
-            read_offset=read_offset,
-            skip_special_tokens=new_request.skip_special_tokens,
-            spaces_between_special_tokens=new_request.
-            spaces_between_special_tokens,
-            output_kind=new_request.output_kind,
-        )
-
-
 class Detokenizer:
 
     def __init__(self, tokenizer_name: str, output_socket_path: str):
@@ -362,3 +311,54 @@ class DetokenizerProc(multiprocessing.Process):
         """Send List of RequestOutput to RPCClient."""
         output_bytes = pickle.dumps(request_outputs)
         self.output_socket.send_multipart((output_bytes, ), copy=False)
+
+
+@dataclass
+class DetokenizerRequestState:
+
+    # Generated text
+    output_text: str
+
+    # Prompt information
+    prompt: Optional[str]
+    num_prompt_tokens: int
+
+    # Prompt/generation tokens
+    tokens: List[str]
+    token_ids: List[int]
+
+    # Metadata for incremental detokenization
+    prefix_offset: int
+    read_offset: int
+
+    # Parameters for detokenization
+    skip_special_tokens: bool
+    spaces_between_special_tokens: bool
+    output_kind: RequestOutputKind
+
+    @property
+    def prompt_token_ids(self) -> List[int]:
+        assert len(self.token_ids) >= self.num_prompt_tokens
+        return self.token_ids[:self.num_prompt_tokens]
+
+    @classmethod
+    def from_new_request(cls, tokenizer, new_request: DetokenizerNewRequest):
+        tokens, prefix_offset, read_offset = convert_prompt_ids_to_tokens(
+            tokenizer=tokenizer,
+            prompt_ids=new_request.prompt_token_ids,
+            skip_special_tokens=new_request.skip_special_tokens,
+        )
+
+        return cls(
+            output_text="",
+            prompt=new_request.prompt,
+            num_prompt_tokens=len(new_request.prompt_token_ids),
+            tokens=tokens,
+            token_ids=new_request.prompt_token_ids,
+            prefix_offset=prefix_offset,
+            read_offset=read_offset,
+            skip_special_tokens=new_request.skip_special_tokens,
+            spaces_between_special_tokens=new_request.
+            spaces_between_special_tokens,
+            output_kind=new_request.output_kind,
+        )

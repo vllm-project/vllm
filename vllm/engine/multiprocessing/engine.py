@@ -235,7 +235,7 @@ class MQLLMEngine:
             # Send request outputs (if async, done in engine_step callback).
             if not self.use_async_sockets:
 
-                # In V1 Engine, Detokenizer sends the outputs back.
+                # In V1 Engine, Detokenizer sends the outputs to EngineClient.
                 # note: if request_outputs=None, self._send-outputs is a no-op.
                 if VLLM_USE_V1:
                     assert request_outputs is None
