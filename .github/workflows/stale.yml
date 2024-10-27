@@ -10,6 +10,7 @@ jobs:
     permissions:
       issues: write
       pull-requests: write
+      actions: write
     runs-on: ubuntu-latest
     steps:
       - uses: actions/stale@28ca1036281a5e5922ead5184a1bbf96e5fc984e # v9.0.0
