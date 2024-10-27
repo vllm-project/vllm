@@ -163,6 +163,11 @@ def _support_torch_compile(cls: type,
         # compiled function and let torch.compile handle the dispatching,
         # with the overhead of guard evaluation and recompilation.
         if len(self.compiled_codes) < 1 or not self.use_custom_dispatcher:
+            # it seems Dynamo reuse the compilation across instances,
+            # while we need to make sure the compiled code is not reused.
+            # we need to control all the compilation of the model.
+            torch._dynamo.eval_frame.remove_from_cache(
+                self.original_code_object)
             return self.compiled_callable(*args, **kwargs)
 
         # usually, capturing the model once is enough, and then we can
