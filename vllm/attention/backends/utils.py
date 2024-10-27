@@ -315,7 +315,7 @@ class CommonAttentionState(AttentionState):
             block_tables=self._graph_block_tables[:batch_size],
             use_cuda_graph=True,
         )
-        #if is_encoder_decoder_model:
+        if is_encoder_decoder_model:
         # The encoder decoder model works only with XFormers backend.
         # Assert the same.
         #    assert self.runner.attn_backend.get_name() == "xformers", \
@@ -324,8 +324,8 @@ class CommonAttentionState(AttentionState):
         #    self._update_captured_metadata_for_enc_dec_model(
         #        batch_size=batch_size, attn_metadata=attn_metadata)
 
-        self._update_captured_metadata_for_enc_dec_model(
-            batch_size=batch_size, attn_metadata=attn_metadata)
+            self._update_captured_metadata_for_enc_dec_model(
+                batch_size=batch_size, attn_metadata=attn_metadata)
 
         return attn_metadata
 
@@ -338,14 +338,14 @@ class CommonAttentionState(AttentionState):
             "seq_lens_tensor": attn_metadata.decode_metadata.seq_lens_tensor,
             "block_tables": attn_metadata.decode_metadata.block_tables,
         }
-        #if is_encoder_decoder_model:
+        if is_encoder_decoder_model:
         # The encoder decoder model works only with XFormers backend.
         # Assert the same.
         #assert self.runner.attn_backend.get_name() == "xformers", \
         #f"Expected attn_backend name to be 'xformers', but "\
         #f" got '{self.runner.attn_backend.get_name()}'"
-        self._add_additonal_input_buffers_for_enc_dec_model(
-            attn_metadata=attn_metadata, input_buffers=input_buffers)
+            self._add_additonal_input_buffers_for_enc_dec_model(
+                attn_metadata=attn_metadata, input_buffers=input_buffers)
         return input_buffers
 
     def prepare_graph_input_buffers(
@@ -357,14 +357,14 @@ class CommonAttentionState(AttentionState):
             attn_metadata.decode_metadata.seq_lens_tensor, non_blocking=True)
         input_buffers["block_tables"].copy_(
             attn_metadata.decode_metadata.block_tables, non_blocking=True)
-        #if is_encoder_decoder_model:
+        if is_encoder_decoder_model:
         # The encoder decoder model works only with XFormers backend.
         # Assert the same.
         #assert self.runner.attn_backend.get_name() == "xformers", \
         #f"Expected attn_backend name to be 'xformers', but "\
         #f" got '{self.runner.attn_backend.get_name()}'"
-        self._prepare_input_buffers_for_enc_dec_model(attn_metadata,
-                                                      input_buffers)
+            self._prepare_input_buffers_for_enc_dec_model(attn_metadata,
+                                                        input_buffers)
 
     def begin_forward(self, model_input) -> None:
         return

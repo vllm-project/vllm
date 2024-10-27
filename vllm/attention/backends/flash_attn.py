@@ -798,17 +798,20 @@ def unified_flash_attention(
                 k_scale,
                 v_scale,
             )
-
+    
+    
     if attn_type == AttentionType.ENCODER:
         # Encoder attention - chunked prefill is not applicable;
         # derive token-count from query shape & and treat them
         # as 100% prefill tokens
         assert attn_metadata.num_encoder_tokens is not None
         num_prefill_tokens = attn_metadata.num_encoder_tokens
+        num_encoder_tokens = attn_metadata.num_encoder_tokens
         num_decode_tokens = 0
     elif attn_type == AttentionType.DECODER:
         # Decoder self-attention supports chunked prefill.
         num_prefill_tokens = attn_metadata.num_prefill_tokens
+        num_encoder_tokens = attn_metadata.num_prefill_tokens
         num_decode_tokens = attn_metadata.num_decode_tokens
         # Only enforce this shape-constraint for decoder
         # self-attention
@@ -818,22 +821,33 @@ def unified_flash_attention(
         # Encoder/decoder cross-attention requires no chunked
         # prefill (100% prefill or 100% decode tokens, no mix)
         num_prefill_tokens = attn_metadata.num_prefill_tokens
+        if attn_metadata.num_encoder_tokens is not None:
+            num_encoder_tokens = attn_metadata.num_encoder_tokens
+        else:
+            num_encoder_tokens = attn_metadata.num_prefill_tokens
         num_decode_tokens = attn_metadata.num_decode_tokens
-
-    #print('key.shape[0] ' + str(key.shape[0]))
-    #assert key.shape[0] == num_prefill_tokens + num_decode_tokens, \
-    #            f"key : {key.shape} : #prefill tokens {num_prefill_tokens} : #decode tokens {num_decode_tokens}" # noqa
-    #print('Hell224!!')
-    #assert value.shape[0] == num_prefill_tokens + num_decode_tokens, \
-    #            f"value : {value.shape} : #prefill toks {num_prefill_tokens} : #decode toks {num_decode_tokens}" # noqa
-    #print('Hell225!!')
     # Query for decode. KV is not needed because it is already cached.
     decode_query = query[num_prefill_tokens:]
     # QKV for prefill.
     query = query[:num_prefill_tokens]
     if (key is not None) and (value is not None):
-        key = key[:num_prefill_tokens]
-        value = value[:num_prefill_tokens]
+        #print('key.shape[0] ' + str(key.shape[0]))
+        #assert key.shape[0] == num_prefill_tokens + num_decode_tokens, \
+        #            f"key : {key.shape} : #prefill tokens {num_prefill_tokens} : #decode tokens {num_decode_tokens}" # noqa
+        #print('Hell224!!')
+        #assert value.shape[0] == num_prefill_tokens + num_decode_tokens, \
+        #            f"value : {value.shape} : #prefill toks {num_prefill_tokens} : #decode toks {num_decode_tokens}" # noqa
+        #print('Hell225!!')
+        #if attn_type == AttentionType.ENCODER_DECODER:
+        #    key = key
+        #    value = value
+        #else:            
+        #    key = key[:num_prefill_tokens]
+        #    value = value[:num_prefill_tokens]
+        key = key[:num_encoder_tokens]
+        value = value[:num_encoder_tokens]
+        print('key11.shape() ' + str(key.shape))
+        print('value11.shape() ' + str(value.shape))
 
     assert query.shape[0] == num_prefill_tokens
     assert decode_query.shape[0] == num_decode_tokens
@@ -916,6 +930,11 @@ def unified_flash_attention(
                 _,
                 block_tables_arg,
             ) = get_seq_len_block_table_args(decode_meta, False, attn_type)
+            causal = True
+            if (attn_type == AttentionType.ENCODER or \
+                attn_type == AttentionType.ENCODER_ONLY or \
+                attn_type ==  AttentionType.ENCODER_DECODER) :
+                causal = False
 
             decode_output = flash_attn_with_kvcache(
                 q=decode_query.unsqueeze(1),
@@ -924,7 +943,7 @@ def unified_flash_attention(
                 block_table=block_tables_arg,
                 cache_seqlens=seq_lens_arg,
                 softmax_scale=softmax_scale,
-                causal=True,
+                causal=causal,
                 alibi_slopes=alibi_slopes,
                 softcap=logits_soft_cap,
             ).squeeze(1)
