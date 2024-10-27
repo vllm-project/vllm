@@ -98,7 +98,7 @@ class MQLLMEngine:
         # TODO(robertgshaw2): this currently uses the same path as
         # the Detokenizer output socket. This may or may not be okay.
         self.output_socket = self.ctx.socket(zmq.constants.PUSH)
-        self.output_socket.connect(f"{ipc_path}{IPC_OUTPUT_EXT}")
+        self.output_socket.bind(f"{ipc_path}{IPC_OUTPUT_EXT}")
 
         # Send heartbeats back to client.
         self.heartbeat_socket = self.ctx.socket(zmq.constants.PUSH)

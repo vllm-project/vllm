@@ -99,7 +99,7 @@ class MQLLMEngineClient(EngineClient):
 
         # Receive streams of RequestOutput from the MQLLMEngine.
         self.output_socket: Socket = self.context.socket(zmq.constants.PULL)
-        self.output_socket.bind(f"{ipc_path}{IPC_OUTPUT_EXT}")
+        self.output_socket.connect(f"{ipc_path}{IPC_OUTPUT_EXT}")
 
         # IPC path for acking heartbeats.
         self.heartbeat_socket: Socket = self.context.socket(zmq.constants.PULL)
