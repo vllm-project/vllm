@@ -1479,3 +1479,12 @@ class LazyDict(Mapping, Generic[T]):
 
     def __len__(self):
         return len(self._factory)
+
+
+def weak_ref_tensor(tensor: torch.Tensor) -> torch.Tensor:
+    """
+    Create a weak reference to a tensor.
+    The new tensor will share the same data as the original tensor,
+    but will not keep the original tensor alive.
+    """
+    return torch.ops._C.weak_ref_tensor(tensor)
