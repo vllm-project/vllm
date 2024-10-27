@@ -246,7 +246,7 @@ class LLMEngine:
         req = Request(request_id, processed_inputs, params, eos_token_id,
                       arrival_time)
         self.scheduler.add_request(req)
-        self.detokenizer.add_request(req)
+        self._add_to_detokenizer(req)
 
     def stop_remote_worker_execution_loop(self) -> None:
         raise NotImplementedError("TP not implemented yet.")
@@ -310,11 +310,12 @@ class LLMEngine:
                 scheduler_output, output)
             self.send_to_detokenizer(sampled)
 
-    def add_to_detokenizer(self, request: Request) -> None:
-        """Add new request to Detokenizer."""
+    def _add_to_detokenizer(self, request: Request) -> None:
+        """Create DetokenizerNewRequest and send to Detokenizer."""
 
         new_request = DetokenizerNewRequest(
             request_id=request.request_id,
+            prompt=request.prompt,
             prompt_token_ids=request.prompt_token_ids,
             skip_special_tokens=request.sampling_params.skip_special_tokens,
             spaces_between_special_tokens=request.sampling_params.
@@ -335,7 +336,7 @@ class LLMEngine:
             DetokenizerInputData(
                 request_id=req.request_id,
                 new_token_ids=req.output_token_ids[-num_tokens:],
-                finished=req.finished,
+                finished=req.is_finished(),
                 finish_reason=req.get_finished_reason(),
                 stop_reason=req.stop_reason) for req, num_tokens in sampled
         ]

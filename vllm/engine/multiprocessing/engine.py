@@ -80,6 +80,10 @@ class MQLLMEngine:
         # the python object to be reused again.
         kwargs['use_cached_outputs'] = True
 
+        # For V1 Engine, pass down the output socket path
+        if VLLM_USE_V1:
+            kwargs['output_socket_path'] = f"{ipc_path}{IPC_OUTPUT_EXT}"
+
         self.engine = LLMEngine(*args, **kwargs)
         self.log_requests = log_requests
 
@@ -95,8 +99,9 @@ class MQLLMEngine:
         self.input_socket.bind(f"{ipc_path}{IPC_INPUT_EXT}")
 
         # Send output stream back to client.
+        # TODO(robertgshaw2): this currently is the same
         self.output_socket = self.ctx.socket(zmq.constants.PUSH)
-        self.output_socket.bind(f"{ipc_path}{IPC_OUTPUT_EXT}")
+        self.output_socket.connect(f"{ipc_path}{IPC_OUTPUT_EXT}")
 
         # Send heartbeats back to client.
         self.heartbeat_socket = self.ctx.socket(zmq.constants.PUSH)
@@ -227,6 +232,12 @@ class MQLLMEngine:
 
             # Send request outputs (if async, done in engine_step callback).
             if not self.use_async_sockets:
+
+                # In V1 Engine, Detokenizer sends the outputs back.
+                # If Request Outputs is None, this is a no-op.
+                if VLLM_USE_V1:
+                    assert request_outputs is None
+
                 self._send_outputs(request_outputs)
 
     def engine_step(self) -> List[RequestOutput]:

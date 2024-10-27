@@ -6,6 +6,7 @@ from typing import Dict, List, Optional, Union
 import msgspec
 import zmq
 from msgspec import msgpack
+import uuid
 
 from vllm.logger import init_logger
 from vllm.outputs import CompletionOutput, RequestOutput
@@ -14,8 +15,6 @@ from vllm.transformers_utils.detokenizer_utils import (
     convert_prompt_ids_to_tokens, detokenize_incrementally)
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
-IPC_PATH_NEW_TOKENS = "/tmp/prototype-new_tokens"
-IPC_PATH_NEW_REQUEST = "/tmp/prototype-new_request"
 IPC_POLLING_TIMEOUT_MS = 5000
 
 logger = init_logger(__name__)
@@ -36,7 +35,7 @@ class DetokenizerInputData:
 
     request_id: str
     new_token_ids: List[int]
-    finished: List[bool]
+    finished: bool
     finish_reason: Optional[str] = None
     stop_reason: Union[int, str, None] = None
 
@@ -70,6 +69,11 @@ class DetokenizerRequestState:
     spaces_between_special_tokens: bool
     output_kind: RequestOutputKind
 
+    @property
+    def prompt_token_ids(self) -> List[int]:
+        assert len(self.token_ids) >= self.num_prompt_tokens
+        return self.token_ids[:self.num_prompt_tokens]
+
     @classmethod
     def from_new_request(cls, tokenizer, new_request: DetokenizerNewRequest):
         tokens, prefix_offset, read_offset = convert_prompt_ids_to_tokens(
@@ -79,7 +83,6 @@ class DetokenizerRequestState:
         )
 
         return cls(
-            req_id=new_request.request_id,
             output_text="",
             prompt=new_request.prompt,
             num_prompt_tokens=len(new_request.prompt_token_ids),
@@ -100,40 +103,51 @@ class Detokenizer:
         # FIXME(woosuk): Currently, the detokenizer is just a hacky prototype.
         # For example, it does not terminate properly. We need to improve this.
 
-        # Serialization protocol.
+        # Setup IPC to the background process.
         self.msgpack_encoder = msgpack.Encoder()
-
-        # Setup IPC to the Detokenizer background process.
         self.zmq_context = zmq.Context()
-        self.new_request_socket = self.zmq_context.socket(zmq.PULL)
-        self.new_request_socket.bind(f"icp://{IPC_PATH_NEW_REQUEST}")
-        self.new_tokens_socket = self.zmq_context.socket(zmq.PULL)
-        self.new_tokens_socket.bind(f"icp://{IPC_PATH_NEW_TOKENS}")
+
+        # Paths to be used to send messages to DetokenizerProc.
+        new_request_socket_path = f"ipc:///tmp/requests-{uuid.uuid4()}"
+        new_tokens_socket_path = f"ipc:///tmp/tokens-{uuid.uuid4()}"
+
+        # Sockets.
+        self.new_request_socket = self.zmq_context.socket(zmq.PUSH)
+        self.new_request_socket.bind(new_request_socket_path)
+        self.new_tokens_socket = self.zmq_context.socket(zmq.PUSH)
+        self.new_tokens_socket.bind(new_tokens_socket_path)
 
         # Start the background process.
-        self.detokenizer = DetokenizerProc(tokenizer_name, output_socket_path)
+        self.detokenizer = DetokenizerProc(tokenizer_name,
+                                           new_request_socket_path,
+                                           new_tokens_socket_path,
+                                           output_socket_path)
         self.detokenizer.start()
 
     def add_request(self, new_request: DetokenizerNewRequest):
-        self.new_request_socket.send(self.msgpack_encoder.encode(new_request),
-                                     flags=zmq.NOBLOCK)
+        new_request_serialized = self.msgpack_encoder.encode(new_request)
+        self.new_request_socket.send(new_request_serialized, flags=zmq.NOBLOCK)
 
     def send(self, inputs: DetokenizerInputs) -> None:
-        self.new_tokens_socket.send(self.msgpack_encoder.encode(inputs),
-                                    flags=zmq.NOBLOCK)
+
+        new_tokens_serialized = self.msgpack_encoder.encode(inputs)
+        self.new_tokens_socket.send(new_tokens_serialized, flags=zmq.NOBLOCK)
 
     def terminate(self) -> None:
         self.new_tokens_socket.send(b"", flags=zmq.NOBLOCK)
         self.detokenizer.join()
         logger.info("Detokenizer shutdown is complete.")
-        # TODO(robertshaw2): this should shut down the
+        # TODO(robertshaw2): this should shut down the zmq
 
 
 class DetokenizerProc(multiprocessing.Process):
 
-    def __init__(self, tokenizer_name: str, output_socket_path: str):
+    def __init__(self, tokenizer_name: str, new_request_socket_path: str,
+                 new_tokens_socket_path: str, output_socket_path: str):
         super().__init__()
         self.tokenizer_name = tokenizer_name
+        self.new_request_socket_path = new_request_socket_path
+        self.new_tokens_socket_path = new_tokens_socket_path
         self.output_socket_path = output_socket_path
 
         # Cache the request output and update it incrementally to avoid
@@ -160,17 +174,17 @@ class DetokenizerProc(multiprocessing.Process):
 
         # Gets new requests from the LLMEngine.
         self.new_request_socket = self.zmq_context.socket(zmq.PULL)
-        self.new_request_socket.connect(f"{IPC_PATH_NEW_REQUEST}")
+        self.new_request_socket.connect(self.new_request_socket_path)
         self.poller.register(self.new_request_socket, zmq.POLLIN)
 
         # Gets new input from the LLMEngine.
         self.new_tokens_socket = self.zmq_context.socket(zmq.PULL)
-        self.new_tokens_socket.connect(f"{IPC_PATH_NEW_TOKENS}")
+        self.new_tokens_socket.connect(self.new_tokens_socket_path)
         self.poller.register(self.new_tokens_socket, zmq.POLLIN)
 
         # Sends RequestOutputs to the EngineClient.
         self.output_socket = self.zmq_context.socket(zmq.PUSH)
-        self.output_socket.bind(self.output_socket_path)
+        self.output_socket.connect(self.output_socket_path)
 
         # Busy loop handling new_requests and new_tokens from LLMEngine
         self._should_terminate = False
