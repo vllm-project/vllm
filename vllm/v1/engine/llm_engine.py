@@ -1,6 +1,8 @@
 import time
-from typing import (Any, Dict, Iterable, List, Mapping, Optional, Tuple, Type,
-                    Union)
+from typing import Any, Dict, List, Mapping, Optional, Tuple, Type, Union
+
+import msgspec
+import zmq
 
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
                          EngineConfig, LoadConfig, LoRAConfig, ModelConfig,
@@ -14,6 +16,7 @@ from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs,
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.outputs import RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
@@ -21,12 +24,10 @@ from vllm.transformers_utils.config import try_get_generation_config
 from vllm.transformers_utils.tokenizer_group import (
     BaseTokenizerGroup, init_tokenizer_from_configs)
 from vllm.usage.usage_lib import UsageContext
-
+from vllm.utils import get_open_zmq_ipc_path
+from vllm.v1.engine import EngineCoreOutputs, EngineCoreRequest
 from vllm.v1.executor.gpu_executor import GPUExecutor
-from vllm.v1.request import Request
-from vllm.v1.tokenizer.detokenizer import (Detokenizer, DetokenizerInputData,
-                                           DetokenizerInputs,
-                                           DetokenizerNewRequest)
+from vllm.v1.tokenizer.detokenizer import Detokenizer, DetokenizerRequest
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -145,7 +146,22 @@ class LLMEngine:
         self.input_registry = input_registry
         self.input_processor = input_registry.create_input_processor(
             model_config)
-    
+
+        self.encoder = msgspec.msgpack.Encoder()
+        self.decoder = msgspec.msgpack.Decoder(EngineCoreOutputs)
+
+        self.ctx = zmq.Context()  # type: ignore[attr-defined]
+
+        self.from_core_ipc_path = get_open_zmq_ipc_path()
+        self.to_core_ipc_path = get_open_zmq_ipc_path()
+
+        # Get output (EngineCoreOutput) from LLMEngineCore.
+        self.from_core = self.ctx.socket(zmq.constants.PULL)
+        self.from_core.bind(self.from_core_ipc_path)
+
+        # Send input (new Requests) to LLMEngineCore.
+        self.to_core = self.ctx.socket(zmq.constants.PUSH)
+        self.to_core.bind(self.to_core_ipc_path)
 
     @classmethod
     def from_engine_args(
@@ -200,12 +216,46 @@ class LLMEngine:
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
     ) -> None:
+        """
+        Add new request to the LLMEngine, in 3 steps:
+            1) Processing the raw inputs
+            2) Adding the request to the Detokenizer (running in this process)
+            3) Adding the request to the EngineCore (running in other process)
+        """
+
+        # TODO(woosuk): Support embedding mode.
+        # TODO(woosuk): Check max_logprobs
+        # TODO(woosuk): Support encoder-decoder models.
+
         if lora_request is not None and not self.lora_config:
             raise ValueError(f"Got lora_request {lora_request} but LoRA is "
                              "not enabled!")
         if arrival_time is None:
             arrival_time = time.time()
         assert priority == 0, "vLLM V1 does not support priority at the moment."
+
+        # 1) Process the inputs into the raw data needed for a request.
+        detokenizer_request, engine_core_request = self._make_requests(
+            request_id, prompt, params, arrival_time, lora_request,
+            prompt_adapter_request)
+
+        # 2) Add the request to Detokenizer (this process).
+        self.detokenizer.add_request(detokenizer_request)
+
+        # 3) Add the request to EngineCore (separate process).
+        self.to_core.send_multipart((self.encoder(engine_core_request), ),
+                                    copy=False,
+                                    flags=zmq.NOBLOCK)
+
+    def _make_requests(
+        self,
+        request_id: str,
+        prompt: PromptType,
+        params: Union[SamplingParams, PoolingParams],
+        arrival_time: float,
+        lora_request: Optional[LoRARequest] = None,
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None
+    ) -> Tuple[DetokenizerRequest, EngineCoreRequest]:
 
         preprocessed_inputs = self.input_preprocessor.preprocess(
             prompt,
@@ -216,54 +266,41 @@ class LLMEngine:
         processed_inputs = self.input_processor(preprocessed_inputs)
         self._validate_model_inputs(processed_inputs)
         eos_token_id = self.input_preprocessor.get_eos_token_id(lora_request)
-        
-        # send to LLMEngineCore
 
-    def abort_request(self, request_id: Union[str, Iterable[str]]) -> None:
-        # TODO: send to LLMEngineCore
-        pass
-    
+        assert isinstance(params, SamplingParams)
+        sampling_params = params.clone()
+        sampling_params.update_from_generation_config(
+            self.generation_config_fields, eos_token_id)
 
-    # def _add_to_detokenizer(self, request: Request) -> None:
-    #     """Create DetokenizerNewRequest and send to Detokenizer."""
+        # Make input to Detokenizer
+        detokenizer_request = DetokenizerRequest(
+            request_id, processed_inputs.prompt,
+            processed_inputs.prompt_token_ids,
+            sampling_params.skip_special_tokens,
+            sampling_params.spaces_between_special_tokens,
+            sampling_params.output_kind)
 
-    #     new_request = DetokenizerNewRequest(
-    #         request_id=request.request_id,
-    #         prompt=request.prompt,
-    #         prompt_token_ids=request.prompt_token_ids,
-    #         skip_special_tokens=request.sampling_params.skip_special_tokens,
-    #         spaces_between_special_tokens=request.sampling_params.
-    #         spaces_between_special_tokens,
-    #         output_kind=request.sampling_params.output_kind,
-    #     )
+        # Make input to EngineCore
+        engine_core_request = EngineCoreRequest(request_id, processed_inputs,
+                                                sampling_params, eos_token_id,
+                                                arrival_time, lora_request)
 
-    #     self.detokenizer.add_request(new_request)
+        return detokenizer_request, engine_core_request
 
-    def send_to_detokenizer(self, sampled: List[Tuple[Request, int]]) -> None:
-        """Send new tokens to Detokenizer."""
+    def step(self) -> List[RequestOutput]:
+        if self.from_core.poll(timeout=0) != 0:
+            frames = self.from_core.recv_multipart(copy=False)
+            engine_core_outputs = self.decoder(frames[0].buffer).outputs
+            request_outputs = self.detokenizer.step(engine_core_outputs)
+            return request_outputs
 
-        # TODO(robertgshaw2): We could avoid this conversion loop by either/or:
-        #   - scheduler.update_from_output() creates DetokenizerInputData
-        #   - serializing and sending the Requests directly to the Detokenizer
-        # The negative of this is that the Detokenizer is then more coupled.
-        input_data = [
-            DetokenizerInputData(
-                request_id=req.request_id,
-                new_token_ids=req.output_token_ids[-num_tokens:],
-                finished=req.is_finished(),
-                finish_reason=req.get_finished_reason(),
-                stop_reason=req.stop_reason) for req, num_tokens in sampled
-        ]
-
-        self.detokenizer.send(DetokenizerInputs(data=input_data))
-
-    def terminate_detokenizer(self) -> None:
-        self.detokenizer.terminate()
+        return []
 
     def check_health(self) -> None:
         if self.tokenizer:
             self.tokenizer.check_health()
-        self.model_executor.check_health()
+        # self.model_executor.check_health()
+        # TODO: send health check to EngineCore.
 
     def _validate_model_inputs(self, inputs: Union[DecoderOnlyInputs,
                                                    EncoderDecoderLLMInputs]):

@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, List, Optional, Union
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import RequestMetrics
+from vllm.v1.engine import EngineCoreRequest
 
 if TYPE_CHECKING:
     from vllm.inputs import DecoderOnlyInputs
@@ -42,6 +43,15 @@ class Request:
         self.num_prompt_tokens = len(self.prompt_token_ids)
         self.output_token_ids: List[int] = []
         self.num_computed_tokens = 0
+
+    @classmethod
+    def from_engine_core_input(cls, input: EngineCoreRequest) -> "Request":
+        return cls(request_id=input.request_id,
+                   inputs=input.inputs,
+                   sampling_params=input.sampling_params,
+                   eos_token_id=input.eos_token_id,
+                   arrival_time=input.arrival_time,
+                   lora_request=input.lora_request)
 
     @property
     def num_tokens(self) -> int:

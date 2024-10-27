@@ -1,13 +1,13 @@
 from collections import deque
 from dataclasses import dataclass
-from typing import Deque, Dict, Iterable, List, Optional, Set, Tuple, Union
+from typing import Deque, Dict, Iterable, List, Optional, Set, Union
 
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.logger import init_logger
 from vllm.multimodal import MultiModalDataDict
 from vllm.sampling_params import SamplingParams
-from vllm.v1.engine import EngineCoreOutput
 from vllm.v1.core.kv_cache_manager import KVCacheManager
+from vllm.v1.engine import EngineCoreOutput
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 
@@ -223,12 +223,13 @@ class Scheduler:
                                                        num_computed_tokens)
             self.running_reqs_data[request.request_id] = req_data
         return req_data
-    
+
     def update_from_output(
         self,
         scheduler_output: "SchedulerOutput",
         model_runner_output: "ModelRunnerOutput",
     ) -> List[EngineCoreOutput]:
+        # NOTE(robertgshaw2): This method should probably in EngineCore.
         # NOTE(woosuk): This method doesn't consider speculative decoding.
         sampled_token_ids = model_runner_output.sampled_token_ids_cpu.tolist()
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
@@ -247,20 +248,24 @@ class Scheduler:
                 # generates at most one token at each step.
                 token_id = sampled_token_ids[req_index]
                 request.output_token_ids.append(token_id)
+                num_new_tokens = 1
+
                 # TODO: Update the KV cache manager for prefix caching.
 
-                # Check for stop and update request state.
+                # Check for stop and update request state. This must
+                # be called before me make the EngineCoreOutput.
                 stopped = self._check_stop(request)
 
-                # Make output object. Note: this must be called after 
-                # _check_stop() such that is_finished() is correct.
-                engine_core_outputs.append(EngineCoreOutput(
-                    request_id=req_id,
-                    new_token_ids=1,
-                    finished=request.is_finished(),
-                    finish_reason=request.get_finished_reason(),
-                    stop_reason=request.stop_reason,
-                ))
+                # Make EngineCoreOutput
+                engine_core_outputs.append(
+                    EngineCoreOutput(
+                        request_id=req_id,
+                        new_token_ids=request.
+                        output_token_ids[-num_new_tokens:],
+                        finished=request.is_finished(),
+                        finish_reason=request.get_finished_reason(),
+                        stop_reason=request.stop_reason,
+                    ))
 
                 # Breakout of the loop.
                 if stopped:
@@ -268,7 +273,7 @@ class Scheduler:
 
             new_running.append(request)
         self.running = new_running
-        return sampled
+        return engine_core_outputs
 
     def _check_stop(self, request: Request) -> bool:
         if (request.num_tokens >= self.max_model_len
