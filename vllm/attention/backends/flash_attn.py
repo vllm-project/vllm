@@ -616,7 +616,7 @@ def unified_flash_attention(
     window_size: Optional[List[int]] = None,
     alibi_slopes: Optional[torch.Tensor] = None,
     logits_soft_cap: Optional[float] = None,
-):
+) -> None:
 
     current_metadata = get_forward_context()
     assert current_metadata is not None
@@ -767,5 +767,5 @@ def _(
     window_size: Optional[List[int]] = None,
     alibi_slopes: Optional[torch.Tensor] = None,
     logits_soft_cap: Optional[float] = None,
-):
+) -> None:
     return
