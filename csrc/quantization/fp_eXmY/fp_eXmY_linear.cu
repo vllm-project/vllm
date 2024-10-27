@@ -230,7 +230,8 @@ torch::Tensor fp_eXmY_linear_forward_cuda(int64_t EXPONENT, int64_t MANTISSA,
   // NOTE(alpin): use at::cuda::getCurrentCUDAStream() instead of default
   // stream (0) this fixes problem with CUDA graphs when used with
   // torch.compile()
-  auto stream = at::cuda::getCurrentCUDAStream();
+  auto dev = _in_feats.device().index();
+  auto stream = at::cuda::getCurrentCUDAStream(dev);
 
   /*
    The heuristic is weight_bit - exponent_bit - 1 = mantissa_bit
