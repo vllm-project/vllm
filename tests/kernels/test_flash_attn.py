@@ -127,7 +127,7 @@ def test_flash_attn_with_paged_kv(
         cache_seqlens=kv_lens_tensor,
         softcap=soft_cap if soft_cap is not None else 0,
         window_size=window_size,
-        out=output,
+        out=output.unsqueeze(1),
     )
 
     ref_output = ref_paged_attn(query=query,
