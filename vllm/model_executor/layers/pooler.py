@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 from enum import IntEnum
 
+from typing import Optional
+
 import torch
 import torch.nn as nn
 
@@ -32,7 +34,7 @@ class PoolingConfig:
         type enum value corresponding to the given string.
     """
 
-    def __init__(self, pooling_type: str, normalize: bool):
+    def __init__(self, pooling_type: str, normalize: Optional[bool] = None):
         self.pooling_type = self.get_pooling_type(pooling_type)
         self.normalize = normalize
 

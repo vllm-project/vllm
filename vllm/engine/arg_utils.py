@@ -16,6 +16,7 @@ from vllm.config import (CacheConfig, ConfigFormat, DecodingConfig,
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
+from vllm.model_executor.layers.pooler import PoolingConfig
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.transformers_utils.utils import check_gguf_file
@@ -183,6 +184,7 @@ class EngineArgs:
     override_neuron_config: Optional[Dict[str, Any]] = None
     mm_processor_kwargs: Optional[Dict[str, Any]] = None
     scheduling_policy: Literal["fcfs", "priority"] = "fcfs"
+    pooling_config: Optional[PoolingConfig] = None
 
     def __post_init__(self):
         if not self.tokenizer:
@@ -850,6 +852,18 @@ class EngineArgs:
             'priority (lower value means earlier handling) and time of '
             'arrival deciding any ties).')
 
+        parser.add_argument('--pooling-type',
+                            type=str,
+                            default='CLS',
+                            choices=['LAST', 'ALL', 'CLS', 'MEAN'],
+                            help='Configures the pooling operation which '
+                            'only applies to sentence-transformers models. ')
+
+        parser.add_argument('--normalize',
+                            type=bool,
+                            default=None,
+                            help='Wheter to normalize the pooled data.')
+
         return parser
 
     @classmethod
@@ -857,6 +871,10 @@ class EngineArgs:
         # Get the list of attributes of this dataclass.
         attrs = [attr.name for attr in dataclasses.fields(cls)]
         # Set the attributes from the parsed arguments.
+        pooling_config = PoolingConfig(pooling_type=args.pooling_type,
+                                       normalize=args.normalize)
+        d = vars(args)
+        d['pooling_config'] = pooling_config
         engine_args = cls(**{attr: getattr(args, attr) for attr in attrs})
         return engine_args
 
@@ -890,6 +908,7 @@ class EngineArgs:
             use_async_output_proc=not self.disable_async_output_proc,
             override_neuron_config=self.override_neuron_config,
             config_format=self.config_format,
+            pooling_config=self.pooling_config,
             mm_processor_kwargs=self.mm_processor_kwargs,
         )
 

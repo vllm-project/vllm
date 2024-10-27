@@ -18,6 +18,7 @@ from vllm.inputs import PromptType, TextPrompt, TokensPrompt
 from vllm.inputs.parse import parse_and_batch_prompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.model_executor.layers.pooler import PoolingConfig
 from vllm.model_executor.guided_decoding.guided_fields import (
     GuidedDecodingRequest, LLMGuidedOptions)
 from vllm.outputs import EmbeddingRequestOutput, RequestOutput
@@ -156,6 +157,7 @@ class LLM:
         max_seq_len_to_capture: int = 8192,
         disable_custom_all_reduce: bool = False,
         disable_async_output_proc: bool = False,
+        pooling_config: Optional[PoolingConfig] = None,
         mm_processor_kwargs: Optional[Dict[str, Any]] = None,
         # After positional args are removed, move this right below `model`
         task: TaskOption = "auto",
@@ -192,6 +194,7 @@ class LLM:
             max_seq_len_to_capture=max_seq_len_to_capture,
             disable_custom_all_reduce=disable_custom_all_reduce,
             disable_async_output_proc=disable_async_output_proc,
+            pooling_config=pooling_config,
             mm_processor_kwargs=mm_processor_kwargs,
             **kwargs,
         )

@@ -5,6 +5,8 @@ import pytest
 from vllm.engine.arg_utils import EngineArgs, nullable_kvs
 from vllm.utils import FlexibleArgumentParser
 
+from vllm.model_executor.layers.pooler import PoolingConfig
+
 
 @pytest.mark.parametrize(("arg", "expected"), [
     (None, None),
@@ -28,6 +30,15 @@ def test_limit_mm_per_prompt_parser(arg, expected):
         args = parser.parse_args(["--limit-mm-per-prompt", arg])
 
     assert args.limit_mm_per_prompt == expected
+
+
+def test_valid_pooling_config():
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args(["--pooling-type=MEAN", "--normalize=True"])
+    expected_pooling_config = PoolingConfig(pooling_type='MEAN',
+                                            normalize=True)
+    engine_args = EngineArgs.from_cli_args(args=args)
+    assert engine_args.pooling_config == expected_pooling_config
 
 
 @pytest.mark.parametrize(

@@ -149,6 +149,7 @@ class ModelConfig:
                  override_neuron_config: Optional[Dict[str, Any]] = None,
                  config_format: ConfigFormat = ConfigFormat.AUTO,
                  chat_template_text_format: str = "string",
+                 pooling_config: Optional[PoolingConfig] = None,
                  mm_processor_kwargs: Optional[Dict[str, Any]] = None) -> None:
         self.model = model
         self.tokenizer = tokenizer
@@ -179,7 +180,7 @@ class ModelConfig:
                                     code_revision, rope_scaling, rope_theta,
                                     config_format)
         self.hf_text_config = get_hf_text_config(self.hf_config)
-        self.pooling_config = self.get_pooling_config()
+        self.pooling_config = pooling_config or self.get_pooling_config()
         self.bert_config = self._get_bert_config()
         self.hf_image_processor_config = get_hf_image_processor_config(
             self.model, revision)
