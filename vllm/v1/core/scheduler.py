@@ -229,7 +229,7 @@ class Scheduler:
         scheduler_output: "SchedulerOutput",
         model_runner_output: "ModelRunnerOutput",
     ) -> List[EngineCoreOutput]:
-        # NOTE(robertgshaw2): This method should probably in EngineCore.
+        # NOTE(robertgshaw2): Should this method be in EngineCore instead?
         # NOTE(woosuk): This method doesn't consider speculative decoding.
         sampled_token_ids = model_runner_output.sampled_token_ids_cpu.tolist()
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
@@ -252,20 +252,18 @@ class Scheduler:
 
                 # TODO: Update the KV cache manager for prefix caching.
 
-                # Check for stop and update request state. This must
-                # be called before me make the EngineCoreOutput.
+                # Check for stop and update request state.
+                # This must be called before me make the EngineCoreOutput.
                 stopped = self._check_stop(request)
 
-                # Make EngineCoreOutput
-                engine_core_outputs.append(
-                    EngineCoreOutput(
-                        request_id=req_id,
-                        new_token_ids=request.
-                        output_token_ids[-num_new_tokens:],
-                        finished=request.is_finished(),
-                        finish_reason=request.get_finished_reason(),
-                        stop_reason=request.stop_reason,
-                    ))
+                # Add EngineCoreOutput for this Request.
+                output = EngineCoreOutput(
+                    request_id=req_id,
+                    new_token_ids=request.output_token_ids[-num_new_tokens:],
+                    finished=request.is_finished(),
+                    finish_reason=request.get_finished_reason(),
+                    stop_reason=request.stop_reason)
+                engine_core_outputs.append(output)
 
                 # Breakout of the loop.
                 if stopped:
