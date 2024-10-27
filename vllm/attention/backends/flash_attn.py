@@ -581,6 +581,7 @@ class FlashAttentionImpl(AttentionImpl):
             query,
             key,
             value,
+            output,
             self.num_heads,
             self.head_size,
             self.num_kv_heads,
@@ -592,7 +593,6 @@ class FlashAttentionImpl(AttentionImpl):
             self.sliding_window,
             self.alibi_slopes,
             self.logits_soft_cap,
-            output=output,
         )
 
         return output
