@@ -899,7 +899,10 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         return self._unquantized_generator(hf_weights_files, use_safetensors,
                                            quant_state_dict), quant_state_dict
 
-    def _is_quantized_weight_name(self, weight_name: str):
+    def _is_8bit_weight_name(self, weight_name: str):
+        return weight_name.lower().endswith(".scb")
+
+    def _is_4bit_weight_name(self, weight_name: str):
         quantized_suffix = {
             "absmax", "quant_map", "nested_absmax", "nested_quant_map",
             "bitsandbytes"
@@ -911,7 +914,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                                   quant_state_dict) -> Generator:
         for weight_name, weight_tensor in self._hf_weight_iter(
                 hf_weights_files, use_safetensors):
-            if not weight_name.lower().endswith(".scb"):
+            if not self._is_8bit_weight_name(weight_name):
                 continue
 
             weight_key = weight_name.lower().replace(".scb", ".qweight")
@@ -920,7 +923,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         for weight_name, weight_tensor in self._hf_weight_iter(
                 hf_weights_files, use_safetensors):
 
-            if not weight_name.endswith((".weight", ".bias")):
+            if self._is_8bit_weight_name(weight_name):
                 continue
 
             qweight_name = weight_name.replace(".weight", ".qweight")
@@ -940,7 +943,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                                                use_safetensors)
         temp_state_dict = {}
         for weight_name, weight_tensor in weight_iterator:
-            if not self._is_quantized_weight_name(weight_name):
+            if not self._is_4bit_weight_name(weight_name):
                 continue
             # bitsandbytes library requires
             # weight.quant_state.bitsandbytes__* in CPU
@@ -964,7 +967,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         for weight_name, weight_tensor in self._hf_weight_iter(
                 hf_weights_files, use_safetensors):
 
-            if self._is_quantized_weight_name(weight_name):
+            if self._is_4bit_weight_name(weight_name):
                 continue
 
             if (f"{weight_name}.quant_state.bitsandbytes__nf4" \
