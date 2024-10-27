@@ -575,7 +575,9 @@ class FlashAttentionImpl(AttentionImpl):
         assert k_scale == 1.0 and v_scale == 1.0, (
             "key/v_scale is not supported in FlashAttention.")
 
-        output = torch.ops.vllm.unified_flash_attention(
+        output = torch.empty_like(query)
+
+        torch.ops.vllm.unified_flash_attention(
             query,
             key,
             value,
@@ -590,17 +592,19 @@ class FlashAttentionImpl(AttentionImpl):
             self.sliding_window,
             self.alibi_slopes,
             self.logits_soft_cap,
+            output=output,
         )
 
         return output
 
 
 @torch.library.custom_op("vllm::unified_flash_attention",
-                         mutates_args=["kv_cache"])
+                         mutates_args=["kv_cache", "output"])
 def unified_flash_attention(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
+    output: torch.Tensor,
     num_heads: int,
     head_size: int,
     num_kv_heads: int,
@@ -612,7 +616,7 @@ def unified_flash_attention(
     window_size: Optional[List[int]] = None,
     alibi_slopes: Optional[torch.Tensor] = None,
     logits_soft_cap: Optional[float] = None,
-) -> torch.Tensor:
+):
 
     current_metadata = get_forward_context()
     assert current_metadata is not None
@@ -624,6 +628,8 @@ def unified_flash_attention(
     query = query.view(-1, num_heads, head_size)
     key = key.view(-1, num_kv_heads, head_size)
     value = value.view(-1, num_kv_heads, head_size)
+
+    output = output.view(-1, num_heads, head_size)
 
     if kv_cache.numel() > 0:
         key_cache = kv_cache[0]
@@ -652,16 +658,15 @@ def unified_flash_attention(
 
     # Query for decode. KV is not needed because it is already cached.
     decode_query = query[num_prefill_tokens:]
+    decode_output = output[num_prefill_tokens:]
     # QKV for prefill.
     query = query[:num_prefill_tokens]
+    prefill_output = output[:num_prefill_tokens]
     key = key[:num_prefill_tokens]
     value = value[:num_prefill_tokens]
 
     assert query.shape[0] == num_prefill_tokens
     assert decode_query.shape[0] == num_decode_tokens
-
-    prefill_output: Optional[torch.Tensor] = None
-    decode_output: Optional[torch.Tensor] = None
 
     if prefill_meta := attn_metadata.prefill_metadata:
         # Prompt run.
@@ -670,7 +675,7 @@ def unified_flash_attention(
             # normal attention
             # When block_tables are not filled, it means q and k are the
             # prompt, and they have the same length.
-            prefill_output = flash_attn_varlen_func(
+            flash_attn_varlen_func(
                 q=query,
                 k=key,
                 v=value,
@@ -683,12 +688,13 @@ def unified_flash_attention(
                 window_size=window_size,
                 alibi_slopes=alibi_slopes,
                 softcap=logits_soft_cap,
+                out=prefill_output,
             )
         else:
             # prefix-enabled attention
             assert prefill_meta.seq_lens is not None
             max_seq_len = max(prefill_meta.seq_lens)
-            prefill_output = flash_attn_varlen_func(  # noqa
+            flash_attn_varlen_func(  # noqa
                 q=query,
                 k=key_cache,
                 v=value_cache,
@@ -702,6 +708,7 @@ def unified_flash_attention(
                 alibi_slopes=alibi_slopes,
                 block_table=prefill_meta.block_tables,
                 softcap=logits_soft_cap,
+                out=prefill_output,
             )
 
     if decode_meta := attn_metadata.decode_metadata:
@@ -710,7 +717,7 @@ def unified_flash_attention(
         # because different queries might have different lengths.
         assert decode_meta.max_decode_query_len is not None
         if decode_meta.max_decode_query_len > 1:
-            decode_output = flash_attn_varlen_func(
+            flash_attn_varlen_func(
                 q=decode_query,
                 k=key_cache,
                 v=value_cache,
@@ -724,10 +731,11 @@ def unified_flash_attention(
                 alibi_slopes=alibi_slopes,
                 softcap=logits_soft_cap,
                 block_table=decode_meta.block_tables,
+                out=decode_output,
             )
         else:
             # Use flash_attn_with_kvcache for normal decoding.
-            decode_output = flash_attn_with_kvcache(
+            flash_attn_with_kvcache(
                 q=decode_query.unsqueeze(1),
                 k_cache=key_cache,
                 v_cache=value_cache,
@@ -738,21 +746,8 @@ def unified_flash_attention(
                 window_size=window_size,
                 alibi_slopes=alibi_slopes,
                 softcap=logits_soft_cap,
-            ).squeeze(1)
-
-    if prefill_output is None:
-        assert decode_output is not None
-        return decode_output.view(num_decode_tokens, hidden_size)
-    if decode_output is None:
-        assert prefill_output is not None
-        return prefill_output.view(num_prefill_tokens, hidden_size)
-
-    # Chunked prefill does not work with speculative decoding.
-    # Therefore, the query length for decode should be 1 in chunked prefill.
-    assert decode_meta is not None
-    decode_output = decode_output.squeeze(1)
-    output = torch.cat([prefill_output, decode_output], dim=0)
-    return output.view(num_tokens, hidden_size)
+                out=decode_output.unsqueeze(1),
+            )
 
 
 @unified_flash_attention.register_fake
@@ -760,6 +755,7 @@ def _(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
+    output: torch.Tensor,
     num_heads: int,
     head_size: int,
     num_kv_heads: int,
@@ -771,5 +767,5 @@ def _(
     window_size: Optional[List[int]] = None,
     alibi_slopes: Optional[torch.Tensor] = None,
     logits_soft_cap: Optional[float] = None,
-) -> torch.Tensor:
-    return torch.empty_like(query)
+):
+    return

@@ -116,7 +116,8 @@ def test_flash_attn_with_paged_kv(
                                  (num_seqs, max_num_blocks_per_seq),
                                  dtype=torch.int32)
 
-    output = flash_attn_with_kvcache(
+    output = torch.empty_like(query)
+    flash_attn_with_kvcache(
         q=query.unsqueeze(1),
         k_cache=key_cache,
         v_cache=value_cache,
@@ -126,7 +127,8 @@ def test_flash_attn_with_paged_kv(
         cache_seqlens=kv_lens_tensor,
         softcap=soft_cap if soft_cap is not None else 0,
         window_size=window_size,
-    ).squeeze(1)
+        out=output,
+    )
 
     ref_output = ref_paged_attn(query=query,
                                 key_cache=key_cache,
@@ -197,7 +199,8 @@ def test_varlen_with_paged_kv(
                                  (num_seqs, max_num_blocks_per_seq),
                                  dtype=torch.int32)
 
-    output = flash_attn_varlen_func(
+    output = torch.empty_like(query)
+    flash_attn_varlen_func(
         q=query,
         k=key_cache,
         v=value_cache,
@@ -210,6 +213,7 @@ def test_varlen_with_paged_kv(
         window_size=window_size,
         block_table=block_tables,
         softcap=soft_cap if soft_cap is not None else 0,
+        out=output,
     )
 
     ref_output = ref_paged_attn(
