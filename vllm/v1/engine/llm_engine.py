@@ -21,9 +21,9 @@ from vllm.transformers_utils.config import try_get_generation_config
 from vllm.transformers_utils.tokenizer_group import (
     BaseTokenizerGroup, init_tokenizer_from_configs)
 from vllm.usage.usage_lib import UsageContext
-from vllm.v1.core.scheduler import Scheduler
+
 from vllm.v1.executor.gpu_executor import GPUExecutor
-from vllm.v1.request import Request, RequestStatus
+from vllm.v1.request import Request
 from vllm.v1.tokenizer.detokenizer import (Detokenizer, DetokenizerInputData,
                                            DetokenizerInputs,
                                            DetokenizerNewRequest)
@@ -115,6 +115,7 @@ class LLMEngine:
         )
 
         self.model_config = model_config
+        assert self.model_config.task != "embedding"
         self.cache_config = cache_config
         self.lora_config = lora_config
         self.parallel_config = parallel_config
@@ -144,42 +145,7 @@ class LLMEngine:
         self.input_registry = input_registry
         self.input_processor = input_registry.create_input_processor(
             model_config)
-
-        self.model_executor = executor_class(
-            model_config=model_config,
-            cache_config=cache_config,
-            parallel_config=parallel_config,
-            scheduler_config=scheduler_config,
-            device_config=device_config,
-            lora_config=lora_config,
-            speculative_config=speculative_config,
-            load_config=load_config,
-            prompt_adapter_config=prompt_adapter_config,
-            observability_config=self.observability_config,
-        )
-        assert self.model_config.task != "embedding"
-        self._initialize_kv_caches()
-
-        # Create the scheduler.
-        # NOTE: the cache_config here have been updated with the numbers of
-        # GPU and CPU blocks, which are profiled in the distributed executor.
-        self.scheduler = Scheduler(scheduler_config, cache_config, lora_config)
-
-    def _initialize_kv_caches(self) -> None:
-        num_gpu_blocks, _ = self.model_executor.determine_num_available_blocks(
-        )
-
-        if self.cache_config.num_gpu_blocks_override is not None:
-            num_gpu_blocks_override = self.cache_config.num_gpu_blocks_override
-            logger.info(
-                "Overriding num_gpu_blocks=%d with "
-                "num_gpu_blocks_override=%d", num_gpu_blocks,
-                num_gpu_blocks_override)
-            num_gpu_blocks = num_gpu_blocks_override
-
-        self.cache_config.num_gpu_blocks = num_gpu_blocks
-        self.cache_config.num_cpu_blocks = 0
-        self.model_executor.initialize_cache(num_gpu_blocks)
+    
 
     @classmethod
     def from_engine_args(
@@ -220,34 +186,6 @@ class LLMEngine:
             self.prompt_adapter_config.verify_with_model_config(
                 self.model_config)
 
-    def _add_processed_request(
-        self,
-        request_id: str,
-        processed_inputs: Union[DecoderOnlyInputs, EncoderDecoderLLMInputs],
-        params: Union[SamplingParams, PoolingParams],
-        arrival_time: float,
-        lora_request: Optional[LoRARequest],
-        prompt_adapter_request: Optional[PromptAdapterRequest],
-        trace_headers: Optional[Mapping[str, str]] = None,
-    ) -> None:
-        assert prompt_adapter_request is None
-        assert trace_headers is None
-        self._validate_model_inputs(processed_inputs)
-        eos_token_id = self.input_preprocessor.get_eos_token_id(lora_request)
-
-        # TODO(woosuk): Support embedding mode.
-        assert isinstance(params, SamplingParams)
-        sampling_params = params.clone()
-        sampling_params.update_from_generation_config(
-            self.generation_config_fields, eos_token_id)
-
-        # TODO(woosuk): Check max_logprobs
-        # TODO(woosuk): Support encoder-decoder models.
-        req = Request(request_id, processed_inputs, params, eos_token_id,
-                      arrival_time)
-        self.scheduler.add_request(req)
-        self._add_to_detokenizer(req)
-
     def stop_remote_worker_execution_loop(self) -> None:
         raise NotImplementedError("TP not implemented yet.")
 
@@ -276,54 +214,30 @@ class LLMEngine:
             prompt_adapter_request=prompt_adapter_request,
         )
         processed_inputs = self.input_processor(preprocessed_inputs)
-
-        self._add_processed_request(
-            request_id=request_id,
-            processed_inputs=processed_inputs,
-            params=params,
-            arrival_time=arrival_time,
-            lora_request=lora_request,
-            prompt_adapter_request=prompt_adapter_request,
-            trace_headers=trace_headers,
-        )
+        self._validate_model_inputs(processed_inputs)
+        eos_token_id = self.input_preprocessor.get_eos_token_id(lora_request)
+        
+        # send to LLMEngineCore
 
     def abort_request(self, request_id: Union[str, Iterable[str]]) -> None:
-        self.scheduler.finish_requests(request_id,
-                                       RequestStatus.FINISHED_ABORTED)
-        # TODO(robertgshaw2): send msg to Detokenizer to free.
-        # (maybe this already happens, need to check)
+        # TODO: send to LLMEngineCore
+        pass
+    
 
-    def get_num_unfinished_requests(self) -> int:
-        """Gets the number of unfinished requests."""
-        return self.scheduler.get_num_unfinished_requests()
+    # def _add_to_detokenizer(self, request: Request) -> None:
+    #     """Create DetokenizerNewRequest and send to Detokenizer."""
 
-    def has_unfinished_requests(self) -> bool:
-        """Returns True if there are unfinished requests."""
-        return self.scheduler.has_unfinished_requests()
+    #     new_request = DetokenizerNewRequest(
+    #         request_id=request.request_id,
+    #         prompt=request.prompt,
+    #         prompt_token_ids=request.prompt_token_ids,
+    #         skip_special_tokens=request.sampling_params.skip_special_tokens,
+    #         spaces_between_special_tokens=request.sampling_params.
+    #         spaces_between_special_tokens,
+    #         output_kind=request.sampling_params.output_kind,
+    #     )
 
-    def step(self) -> None:
-        """Schedule, execute, and send output to Detokenizer."""
-        if self.scheduler.has_unfinished_requests():
-            scheduler_output = self.scheduler.schedule()
-            output = self.model_executor.execute_model(scheduler_output)
-            sampled = self.scheduler.update_from_output(
-                scheduler_output, output)
-            self.send_to_detokenizer(sampled)
-
-    def _add_to_detokenizer(self, request: Request) -> None:
-        """Create DetokenizerNewRequest and send to Detokenizer."""
-
-        new_request = DetokenizerNewRequest(
-            request_id=request.request_id,
-            prompt=request.prompt,
-            prompt_token_ids=request.prompt_token_ids,
-            skip_special_tokens=request.sampling_params.skip_special_tokens,
-            spaces_between_special_tokens=request.sampling_params.
-            spaces_between_special_tokens,
-            output_kind=request.sampling_params.output_kind,
-        )
-
-        self.detokenizer.add_request(new_request)
+    #     self.detokenizer.add_request(new_request)
 
     def send_to_detokenizer(self, sampled: List[Tuple[Request, int]]) -> None:
         """Send new tokens to Detokenizer."""
