@@ -80,7 +80,8 @@ class MQLLMEngine:
         # the python object to be reused again.
         kwargs['use_cached_outputs'] = True
 
-        # For V1 Engine, pass down the output socket path
+        # For V1 Engine, pass down the output socket path, since
+        # the LLMEngine needs to pass it to the Detokenizer.
         if VLLM_USE_V1:
             kwargs['output_socket_path'] = f"{ipc_path}{IPC_OUTPUT_EXT}"
 
