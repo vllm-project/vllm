@@ -322,8 +322,8 @@ def piecewise_backend(graph,
             # beyond the first dimension
 
             runtime_shapes_to_compile_flags[runtime_shapes] = runtime_shapes[
-                0] in compilation_configs.inductor_compile_sizes or \
-                runtime_shapes[0] in compilation_configs.cudagraph_capture_sizes
+                0] in compilation_configs.compile_sizes or \
+                runtime_shapes[0] in compilation_configs.capture_sizes
 
         if not runtime_shapes_to_compile_flags[runtime_shapes]:
             # we don't need to specialize for this shape
@@ -332,7 +332,7 @@ def piecewise_backend(graph,
         if runtime_shapes not in runtime_shapes_to_compiled_entry:
             # the first time we see this shape, we need to compile the graph
             if compilation_configs.use_inductor and runtime_shapes[
-                    0] in compilation_configs.inductor_compile_sizes:
+                    0] in compilation_configs.compile_sizes:
                 if is_first_graph:
                     logger.info("Compiling a graph for shape %s",
                                 runtime_shapes)
@@ -341,7 +341,7 @@ def piecewise_backend(graph,
             else:
                 runnable = graph
             use_cudagraph = compilation_configs.use_cudagraph and \
-                runtime_shapes[0] in compilation_configs.cudagraph_capture_sizes # noqa
+                runtime_shapes[0] in compilation_configs.capture_sizes # noqa
             entry = Entry(
                 runnable=runnable,
                 use_cudagraph=use_cudagraph,
