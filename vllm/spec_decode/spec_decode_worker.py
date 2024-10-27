@@ -1038,6 +1038,14 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         """
         raise NotImplementedError
 
+    def start_profile(self):
+        if isinstance(self.scorer_worker, Worker):
+            self.scorer_worker.start_profile()
+
+    def stop_profile(self):
+        if isinstance(self.scorer_worker, Worker):
+            self.scorer_worker.stop_profile()
+
 
 def split_num_cache_blocks_evenly(scorer_cache_block_size_bytes: int,
                                   proposer_cache_block_size_bytes: int,
