@@ -26,9 +26,10 @@ from vllm.transformers_utils.tokenizer_group import (
     BaseTokenizerGroup, init_tokenizer_from_configs)
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import get_open_zmq_ipc_path
-from vllm.v1.engine import EngineCoreOutputs, EngineCoreRequest
+from vllm.v1.engine import (DetokenizerRequest, EngineCoreOutputs,
+                            EngineCoreRequest)
+from vllm.v1.engine.detokenizer import Detokenizer
 from vllm.v1.executor.gpu_executor import GPUExecutor
-from vllm.v1.tokenizer.detokenizer import Detokenizer, DetokenizerRequest
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -207,6 +208,12 @@ class LLMEngine:
 
     def stop_remote_worker_execution_loop(self) -> None:
         raise NotImplementedError("TP not implemented yet.")
+
+    def get_num_unfinished_requests(self) -> int:
+        return self.detokenizer.get_num_unfinished_requests()
+
+    def has_unfinished_requests(self) -> bool:
+        return self.detokenizer.has_unfinsihed_requests()
 
     def add_request(
         self,

@@ -4,10 +4,21 @@ from typing import TYPE_CHECKING, List, Optional, Union
 import msgspec
 
 from vllm.lora.request import LoRARequest
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import RequestOutputKind, SamplingParams
 
 if TYPE_CHECKING:
     from vllm.inputs import DecoderOnlyInputs
+
+
+@dataclass
+class DetokenizerRequest:
+
+    request_id: str
+    prompt: Optional[str]
+    prompt_token_ids: List[int]
+    skip_special_tokens: bool
+    spaces_between_special_tokens: bool
+    output_kind: RequestOutputKind
 
 
 class EngineCoreRequest(msgspec.Struct):

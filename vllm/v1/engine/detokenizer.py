@@ -7,20 +7,9 @@ from vllm.sampling_params import RequestOutputKind
 from vllm.transformers_utils.detokenizer_utils import (
     AnyTokenizer, convert_prompt_ids_to_tokens, detokenize_incrementally)
 from vllm.transformers_utils.tokenizer import get_tokenizer
-from vllm.v1.engine import EngineCoreOutput
+from vllm.v1.engine import EngineCoreOutput, DetokenizerRequest
 
 logger = init_logger(__name__)
-
-
-@dataclass
-class DetokenizerRequest:
-
-    request_id: str
-    prompt: Optional[str]
-    prompt_token_ids: List[int]
-    skip_special_tokens: bool
-    spaces_between_special_tokens: bool
-    output_kind: RequestOutputKind
 
 
 @dataclass
