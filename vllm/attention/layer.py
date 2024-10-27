@@ -79,10 +79,9 @@ class Attention(nn.Module):
         # weight and activation dtype.
         dtype = torch.get_default_dtype()
         print('dtype ' + str(dtype))
-        attn_backend = get_attn_backend(head_size, sliding_window, dtype,
-                                        kv_cache_dtype, block_size,
-                                        is_attention_free, blocksparse_params
-                                        is not None)
+        attn_backend = get_attn_backend(head_size, dtype, kv_cache_dtype,
+                                        block_size, is_attention_free,
+                                        blocksparse_params is not None)
         print('attn_backend ' + str(attn_backend))
         impl_cls = attn_backend.get_impl_cls()
         self.impl = impl_cls(num_heads, head_size, scale, num_kv_heads,
