@@ -7,7 +7,7 @@ from vllm.sampling_params import RequestOutputKind
 from vllm.transformers_utils.detokenizer_utils import (
     AnyTokenizer, convert_prompt_ids_to_tokens, detokenize_incrementally)
 from vllm.transformers_utils.tokenizer import get_tokenizer
-from vllm.v1.engine import EngineCoreOutput, DetokenizerRequest
+from vllm.v1.engine import DetokenizerRequest, EngineCoreOutput
 
 logger = init_logger(__name__)
 
@@ -100,6 +100,12 @@ class Detokenizer:
 
         # Request id -> DetokenizerRequestState
         self.request_states: Dict[str, DetokenizerRequestState] = {}
+
+    def get_num_unfinished_requests(self):
+        return len(self.request_states)
+
+    def has_unfinished_requests(self) -> bool:
+        return len(self.request_states) > 0
 
     def add_request(self, request: DetokenizerRequest) -> None:
         """Add new request to the Detokenizer."""

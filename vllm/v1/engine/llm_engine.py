@@ -29,6 +29,7 @@ from vllm.utils import get_open_zmq_ipc_path
 from vllm.v1.engine import (DetokenizerRequest, EngineCoreOutputs,
                             EngineCoreRequest)
 from vllm.v1.engine.detokenizer import Detokenizer
+from vllm.v1.engine.llm_engine_core import LLMEngineCore
 from vllm.v1.executor.gpu_executor import GPUExecutor
 from vllm.version import __version__ as VLLM_VERSION
 
@@ -165,7 +166,42 @@ class LLMEngine:
         self.to_core = self.ctx.socket(zmq.constants.PUSH)
         self.to_core.bind(self.to_core_ipc_path)
 
-        # TODO: startup engine core.
+        # TODO: some of these configs will be mutated by
+        # EngineCore (in a separate process). It would be better
+        # if we could prune down what is needed for EngineCore
+        # and prevent having two sources of truth.
+        self.engine_core = LLMEngineCore(
+            input_path=self.to_core_ipc_path,
+            output_path=self.from_core_ipc_path,
+            executor_class=executor_class,
+            model_config=self.model_config,
+            cache_config=self.cache_config,
+            parallel_config=self.parallel_config,
+            scheduler_config=self.scheduler_config,
+            device_config=self.device_config,
+            load_config=self.load_config,
+            lora_config=self.lora_config,
+            speculative_config=self.speculative_config,
+            observability_config=self.observability_config,
+            prompt_adapter_config=self.prompt_adapter_config,
+        )
+        self.engine_core.start()
+
+    def __del__(self):
+        print("__del__ is called, shutting down.")
+
+        # TODO: do this more gracefully by sending a message?
+        # Ensure engine process is killed.
+        self.engine_core.terminate()
+
+        # Close all sockets and terminate the context.
+        self.ctx.destroy(linger=0)
+
+        # Wait for engine process to join.
+        self.engine_core.join(4)
+        if self.engine_core.exitcode is None:
+            # Kill if taking longer than 5 seconds to stop
+            self.engine_core.kill()
 
     @classmethod
     def from_engine_args(
@@ -209,11 +245,13 @@ class LLMEngine:
     def stop_remote_worker_execution_loop(self) -> None:
         raise NotImplementedError("TP not implemented yet.")
 
+    # NOTE: a significant drawback of this design is now we have two
+    # trackers of running state (the Detokenizer and the Scheduler).
     def get_num_unfinished_requests(self) -> int:
         return self.detokenizer.get_num_unfinished_requests()
 
     def has_unfinished_requests(self) -> bool:
-        return self.detokenizer.has_unfinsihed_requests()
+        return self.detokenizer.has_unfinished_requests()
 
     def add_request(
         self,
