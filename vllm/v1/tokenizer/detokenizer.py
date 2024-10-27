@@ -1,12 +1,10 @@
 import multiprocessing
 import pickle
-import uuid
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Union
 
 import msgspec
 import zmq
-from msgspec import msgpack
 
 from vllm.logger import init_logger
 from vllm.outputs import CompletionOutput, RequestOutput
@@ -14,6 +12,7 @@ from vllm.sampling_params import RequestOutputKind
 from vllm.transformers_utils.detokenizer_utils import (
     convert_prompt_ids_to_tokens, detokenize_incrementally)
 from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.utils import get_open_zmq_ipc_path
 
 IPC_POLLING_TIMEOUT_MS = 5000
 
@@ -104,12 +103,12 @@ class Detokenizer:
         # For example, it does not terminate properly. We need to improve this.
 
         # Setup IPC to the background process.
-        self.msgpack_encoder = msgpack.Encoder()
+        self.msgpack_encoder = msgspec.msgpack.Encoder()
         self.zmq_context = zmq.Context()
 
         # Paths to be used to send messages to DetokenizerProc.
-        new_request_socket_path = f"ipc:///tmp/requests-{uuid.uuid4()}"
-        new_tokens_socket_path = f"ipc:///tmp/tokens-{uuid.uuid4()}"
+        new_request_socket_path = get_open_zmq_ipc_path()
+        new_tokens_socket_path = get_open_zmq_ipc_path()
 
         # Sockets.
         self.new_request_socket = self.zmq_context.socket(zmq.PUSH)
@@ -161,10 +160,10 @@ class DetokenizerProc(multiprocessing.Process):
     def run(self):
         # Initialize these objects after the process is forked since they
         # are not picklable.
-        self.msgpack_encoder = msgpack.Encoder()
-        self.msgpack_new_request_decoder = msgpack.Decoder(
+        self.msgpack_encoder = msgspec.msgpack.Encoder()
+        self.msgpack_new_request_decoder = msgspec.msgpack.Decoder(
             DetokenizerNewRequest)
-        self.msgpack_input_decoder = msgpack.Decoder(DetokenizerInputs)
+        self.msgpack_input_decoder = msgspec.msgpack.Decoder(DetokenizerInputs)
         self.tokenizer = get_tokenizer(self.tokenizer_name)
 
         # Ipc objects.
