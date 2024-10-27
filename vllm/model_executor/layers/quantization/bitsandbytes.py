@@ -222,6 +222,11 @@ class BitsAndBytesLinearMethod(LinearMethodBase):
         from bitsandbytes import MatmulLtState, matmul
 
         original_type = x.dtype
+        original_shape = x.shape
+        reshape_after_matmul = False
+        if x.ndim > 2:
+            x = x.reshape(-1, x.size(-1))
+            reshape_after_matmul = True
         bf_x = x.to(torch.bfloat16)
 
         qweight = layer.qweight
@@ -275,6 +280,9 @@ class BitsAndBytesLinearMethod(LinearMethodBase):
                 qweight[offsets[i]:offsets[i + 1]] = matmul_states[i].CxB
 
         out = out.to(original_type)
+
+        if reshape_after_matmul:
+            out = out.view(*original_shape[:-1], out.size(-1))
 
         if bias is not None:
             out += bias
