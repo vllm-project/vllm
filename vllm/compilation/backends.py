@@ -7,6 +7,7 @@ import torch
 import torch.fx as fx
 
 from vllm.logger import init_logger
+from vllm.utils import weak_ref_tensors
 
 from . import CompilationConfig
 from .levels import CompilationLevel
@@ -366,8 +367,7 @@ def piecewise_backend(graph,
                             runtime_shapes)
             cudagraph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(cudagraph, pool=graph_pool):
-                # TODO: make `entry.output` a weakref of the Tensor
-                entry.output = entry.runnable(*args)
+                entry.output = weak_ref_tensors(entry.runnable(*args))
             entry.cudagraph = cudagraph
 
         entry.cudagraph.replay()

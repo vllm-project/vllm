@@ -1497,3 +1497,19 @@ def weak_ref_tensor(tensor: torch.Tensor) -> torch.Tensor:
     but will not keep the original tensor alive.
     """
     return torch.ops._C.weak_ref_tensor(tensor)
+
+
+def weak_ref_tensors(
+    tensors: Union[torch.Tensor, List[torch.Tensor], Tuple[torch.Tensor]]
+) -> Union[torch.Tensor, List[torch.Tensor], Tuple[torch.Tensor]]:
+    """
+    Convenience function to create weak references to tensors,
+    for single tensor, list of tensors or tuple of tensors.
+    """
+    if isinstance(tensors, torch.Tensor):
+        return weak_ref_tensor(tensors)
+    if isinstance(tensors, list):
+        return [weak_ref_tensor(t) for t in tensors]
+    if isinstance(tensors, tuple):
+        return tuple(weak_ref_tensor(t) for t in tensors)
+    raise ValueError("Invalid type for tensors")
