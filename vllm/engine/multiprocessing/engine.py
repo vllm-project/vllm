@@ -95,8 +95,6 @@ class MQLLMEngine:
         self.input_socket.bind(f"{ipc_path}{IPC_INPUT_EXT}")
 
         # Send output stream back to client.
-        # TODO(robertgshaw2): this currently uses the same path as
-        # the Detokenizer output socket. This may or may not be okay.
         self.output_socket = self.ctx.socket(zmq.constants.PUSH)
         self.output_socket.bind(f"{ipc_path}{IPC_OUTPUT_EXT}")
 
