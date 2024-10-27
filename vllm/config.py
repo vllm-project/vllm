@@ -17,8 +17,7 @@ from vllm.transformers_utils.config import (ConfigFormat, get_config,
                                             get_hf_image_processor_config,
                                             get_hf_text_config)
 from vllm.utils import (GiB_bytes, cuda_device_count_stateless, get_cpu_memory,
-                        is_hip, is_neuron, is_openvino, is_xpu,
-                        print_warning_once)
+                        is_hip, print_warning_once)
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
@@ -143,6 +142,7 @@ class ModelConfig:
                  use_async_output_proc: bool = True,
                  override_neuron_config: Optional[Dict[str, Any]] = None,
                  config_format: ConfigFormat = ConfigFormat.AUTO,
+                 chat_template_text_format: str = "string",
                  mm_processor_kwargs: Optional[Dict[str, Any]] = None) -> None:
         self.model = model
         self.tokenizer = tokenizer
@@ -177,6 +177,7 @@ class ModelConfig:
             self.model, revision)
         self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
         self.use_async_output_proc = use_async_output_proc
+        self.chat_template_text_format = chat_template_text_format
         self.mm_processor_kwargs = mm_processor_kwargs
 
         # Set enforce_eager to False if the value is unset.
@@ -215,8 +216,10 @@ class ModelConfig:
         self.is_attention_free = self._init_attention_free()
         self.has_inner_state = self._init_has_inner_state()
 
-        self.override_neuron_config = override_neuron_config if is_neuron(
-        ) else None
+        if current_platform.is_neuron():
+            self.override_neuron_config = override_neuron_config
+        else:
+            self.override_neuron_config = None
 
         supported_tasks, task = self._resolve_task(task, self.hf_config)
         self.supported_tasks = supported_tasks
@@ -368,7 +371,7 @@ class ModelConfig:
                     "Using AWQ quantization with ROCm, but VLLM_USE_TRITON_AWQ"
                     " is not set, enabling VLLM_USE_TRITON_AWQ.")
                 envs.VLLM_USE_TRITON_AWQ = True
-            if is_neuron(
+            if current_platform.is_neuron(
             ) and self.quantization not in neuron_supported_quantization:
                 raise ValueError(
                     f"{self.quantization} quantization is currently not "
@@ -1112,15 +1115,15 @@ class DeviceConfig:
             # Automated device type detection
             if current_platform.is_cuda_alike():
                 self.device_type = "cuda"
-            elif is_neuron():
+            elif current_platform.is_neuron():
                 self.device_type = "neuron"
-            elif is_openvino():
+            elif current_platform.is_openvino():
                 self.device_type = "openvino"
             elif current_platform.is_tpu():
                 self.device_type = "tpu"
             elif current_platform.is_cpu():
                 self.device_type = "cpu"
-            elif is_xpu():
+            elif current_platform.is_xpu():
                 self.device_type = "xpu"
             else:
                 raise RuntimeError("Failed to infer device type")
@@ -1408,11 +1411,11 @@ class SpeculativeConfig:
             else:
                 speculative_draft_tensor_parallel_size = \
                     target_parallel_config.tensor_parallel_size
-        elif speculative_draft_tensor_parallel_size != 1:
-            # TODO(wooyeon): allow tp values larger than 1
+        elif speculative_draft_tensor_parallel_size not in (
+                1, target_parallel_config.tensor_parallel_size):
             raise ValueError(
                 f"{speculative_draft_tensor_parallel_size=} cannot be "
-                f"other value than 1")
+                f"other value than 1 or target model tensor_parallel_size")
 
         draft_parallel_config = ParallelConfig(
             pipeline_parallel_size=target_parallel_config.

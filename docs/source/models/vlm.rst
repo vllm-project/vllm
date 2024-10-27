@@ -247,9 +247,9 @@ A full code example can be found in `examples/openai_api_client_for_multimodal.p
 
     By default, the timeout for fetching images through http url is ``5`` seconds. You can override this by setting the environment variable:
 
-    .. code-block:: shell
+    .. code-block:: console
 
-        export VLLM_IMAGE_FETCH_TIMEOUT=<timeout>
+        $ export VLLM_IMAGE_FETCH_TIMEOUT=<timeout>
 
 .. note::
     There is no need to format the prompt in the API request since it will be handled by the server.
