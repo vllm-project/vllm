@@ -159,7 +159,7 @@ class FP_eXmYLinearMethod(LinearMethodBase):
         weights = weight.data
         scales = weight.scales
         out_dim, in_dim = weights.shape
-        bsize = x.shape[0]
+        bsize = x.reshape(-1, x.shape[-1]).shape[0]
         splitK = _SPLIT_K_MAP[(bsize - 1) //
                               64].get(out_dim, 1) if bsize <= 768 else 1
         if bias is None:
