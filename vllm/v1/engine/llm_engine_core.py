@@ -1,5 +1,4 @@
 import multiprocessing
-import pickle
 from typing import List, Optional, Type
 
 import msgspec
@@ -11,7 +10,8 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          SpeculativeConfig)
 from vllm.logger import init_logger
 from vllm.v1.core.scheduler import Scheduler
-from vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs
+from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
+                            EngineCoreRequest)
 from vllm.v1.executor.gpu_executor import GPUExecutor
 from vllm.v1.request import Request
 
@@ -38,6 +38,7 @@ class LLMEngineCore(multiprocessing.Process):
         observability_config: Optional[ObservabilityConfig],
         prompt_adapter_config: Optional[PromptAdapterConfig],
     ):
+        super().__init__()
         self.input_path = input_path
         self.output_path = output_path
         self.executor_class = executor_class
@@ -55,6 +56,8 @@ class LLMEngineCore(multiprocessing.Process):
     def run(self):
         # Initialize these objects after the process is forked.
         self.msgpack_encoder = msgspec.msgpack.Encoder()
+        self.msgpack_decoder = msgspec.msgpack.Decoder(EngineCoreRequest)
+
         self.ctx = zmq.Context()  # type: ignore[attr-defined]
 
         # Get EngineCoreRequests from the LLMEngine.
@@ -143,7 +146,7 @@ class LLMEngineCore(multiprocessing.Process):
         try:
             while self.input_socket.poll(timeout=0) != 0:
                 frames = self.input_socket.recv_multipart(copy=False)
-                request = pickle.loads(frames[0].buffer)
+                request = self.msgpack_decoder.decode(frames[0].buffer)
 
                 assert isinstance(request, Request)
                 self.scheduler.add_request(request)

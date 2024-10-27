@@ -53,7 +53,6 @@ class LLMEngine:
         prompt_adapter_config: Optional[PromptAdapterConfig],
         executor_class: Type[GPUExecutor],
         log_stats: bool,
-        output_socket_path: str,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
         input_registry: InputRegistry = INPUT_REGISTRY,
@@ -139,8 +138,7 @@ class LLMEngine:
             # Ping the tokenizer to ensure liveness if it runs in a
             # different process.
             self.tokenizer.ping()
-        self.detokenizer = Detokenizer(self.model_config.tokenizer,
-                                       output_socket_path)
+        self.detokenizer = Detokenizer(self.model_config.tokenizer)
 
         self.generation_config_fields = _load_generation_config_dict(
             model_config)
@@ -190,17 +188,11 @@ class LLMEngine:
     def __del__(self):
         print("__del__ is called, shutting down.")
 
-        # TODO: do this more gracefully by sending a message?
-        # Ensure engine process is killed.
-        self.engine_core.terminate()
+        if hasattr(self, "ctx"):
+            self.ctx.destroy(linger=0)
 
-        # Close all sockets and terminate the context.
-        self.ctx.destroy(linger=0)
-
-        # Wait for engine process to join.
-        self.engine_core.join(4)
-        if self.engine_core.exitcode is None:
-            # Kill if taking longer than 5 seconds to stop
+        if hasattr(self, "engine_core"):
+            # TODO: do this more gracefully by sending a message?
             self.engine_core.kill()
 
     @classmethod
@@ -291,7 +283,7 @@ class LLMEngine:
         self.detokenizer.add_request(detokenizer_request)
 
         # 3) Add the request to EngineCore (separate process).
-        self.to_core.send_multipart((self.encoder(engine_core_request), ),
+        self.to_core.send_multipart((self.encoder.encode(engine_core_request), ),
                                     copy=False,
                                     flags=zmq.NOBLOCK)
 
@@ -300,7 +292,7 @@ class LLMEngine:
         # step is running. This is not the end of the generation process.
         if self.from_core.poll(timeout=0) != 0:
             frames = self.from_core.recv_multipart(copy=False)
-            engine_core_outputs = self.decoder(frames[0].buffer).outputs
+            engine_core_outputs = self.decoder.decode(frames[0].buffer).outputs
             request_outputs = self.detokenizer.step(engine_core_outputs)
             return request_outputs
 
@@ -345,16 +337,18 @@ class LLMEngine:
 
         # Make Request for Detokenizer.
         detokenizer_request = DetokenizerRequest(
-            request_id, processed_inputs.prompt,
-            processed_inputs.prompt_token_ids,
+            request_id, processed_inputs.get("prompt"),
+            processed_inputs.get("prompt_token_ids"),
             sampling_params.skip_special_tokens,
             sampling_params.spaces_between_special_tokens,
             sampling_params.output_kind)
 
         # Make Request for EngineCore.
-        engine_core_request = EngineCoreRequest(request_id, processed_inputs,
-                                                sampling_params, eos_token_id,
-                                                arrival_time, lora_request)
+        engine_core_request = EngineCoreRequest(
+            request_id, processed_inputs.get("prompt"),
+            processed_inputs.get("prompt_token_ids"),
+            sampling_params, eos_token_id,
+            arrival_time, lora_request)
 
         return detokenizer_request, engine_core_request
 

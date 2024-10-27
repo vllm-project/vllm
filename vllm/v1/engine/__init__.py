@@ -1,13 +1,10 @@
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, List, Optional, Union
+from typing import List, Optional, Union
 
 import msgspec
 
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import RequestOutputKind, SamplingParams
-
-if TYPE_CHECKING:
-    from vllm.inputs import DecoderOnlyInputs
 
 
 @dataclass
@@ -23,8 +20,13 @@ class DetokenizerRequest:
 
 class EngineCoreRequest(msgspec.Struct):
 
+    # NOTE: prompt and prompt_token_ids should be DecoderOnlyInput,
+    # but this is not playing well with msgspec due to circular 
+    # imports and weird typing we have going on in data.py
+
     request_id: str
-    inputs: "DecoderOnlyInputs"
+    prompt: Optional[str]
+    prompt_token_ids: List[int]
     sampling_params: SamplingParams
     eos_token_id: Optional[int]
     arrival_time: float
