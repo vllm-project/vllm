@@ -236,7 +236,7 @@ class MQLLMEngine:
             if not self.use_async_sockets:
 
                 # In V1 Engine, Detokenizer sends the outputs back.
-                # If Request Outputs is None, this is a no-op.
+                # note: if request_outputs=None, self._send-outputs is a no-op.
                 if VLLM_USE_V1:
                     assert request_outputs is None
 
