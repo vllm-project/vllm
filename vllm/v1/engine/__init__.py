@@ -21,7 +21,7 @@ class DetokenizerRequest:
 class EngineCoreRequest(msgspec.Struct):
 
     # NOTE: prompt and prompt_token_ids should be DecoderOnlyInput,
-    # but this is not playing well with msgspec due to circular 
+    # but this is not playing well with msgspec due to circular
     # imports and weird typing we have going on in data.py
 
     request_id: str

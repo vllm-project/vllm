@@ -3,8 +3,8 @@ from typing import (TYPE_CHECKING, Any, Dict, Generic, Iterable, List,
 
 from typing_extensions import NotRequired, TypedDict, TypeVar
 
-
-from vllm.multimodal import MultiModalDataDict
+if TYPE_CHECKING:
+    from vllm.multimodal import MultiModalDataDict
 
 
 class TextPrompt(TypedDict):
@@ -34,7 +34,7 @@ class TokensPrompt(TypedDict):
     prompt_token_ids: List[int]
     """A list of token IDs to pass to the model."""
 
-    multi_modal_data: NotRequired[MultiModalDataDict]
+    multi_modal_data: NotRequired["MultiModalDataDict"]
     """
     Optional multi-modal data to pass to the model,
     if the model supports it.

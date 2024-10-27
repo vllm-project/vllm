@@ -283,9 +283,10 @@ class LLMEngine:
         self.detokenizer.add_request(detokenizer_request)
 
         # 3) Add the request to EngineCore (separate process).
-        self.to_core.send_multipart((self.encoder.encode(engine_core_request), ),
-                                    copy=False,
-                                    flags=zmq.NOBLOCK)
+        self.to_core.send_multipart(
+            (self.encoder.encode(engine_core_request), ),
+            copy=False,
+            flags=zmq.NOBLOCK)
 
     def step(self) -> List[RequestOutput]:
         # NOTE: This method returns an empty list if the EngineCore
@@ -346,9 +347,8 @@ class LLMEngine:
         # Make Request for EngineCore.
         engine_core_request = EngineCoreRequest(
             request_id, processed_inputs.get("prompt"),
-            processed_inputs.get("prompt_token_ids"),
-            sampling_params, eos_token_id,
-            arrival_time, lora_request)
+            processed_inputs.get("prompt_token_ids"), sampling_params,
+            eos_token_id, arrival_time, lora_request)
 
         return detokenizer_request, engine_core_request
 
