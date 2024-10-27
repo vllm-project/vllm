@@ -26,8 +26,10 @@ _TEXT_GENERATION_MODELS = {
     "AquilaModel": ("llama", "LlamaForCausalLM"),
     "AquilaForCausalLM": ("llama", "LlamaForCausalLM"),  # AquilaChat2
     "ArcticForCausalLM": ("arctic", "ArcticForCausalLM"),
-    "BaiChuanForCausalLM": ("baichuan", "BaiChuanForCausalLM"),  # baichuan-7b
-    "BaichuanForCausalLM": ("baichuan", "BaichuanForCausalLM"),  # baichuan-13b
+    # baichuan-7b, upper case 'C' in the class name
+    "BaiChuanForCausalLM": ("baichuan", "BaiChuanForCausalLM"),
+    # baichuan-13b, lower case 'c' in the class name
+    "BaichuanForCausalLM": ("baichuan", "BaichuanForCausalLM"),
     "BloomForCausalLM": ("bloom", "BloomForCausalLM"),
     # ChatGLMModel supports multimodal
     "CohereForCausalLM": ("commandr", "CohereForCausalLM"),
@@ -47,12 +49,14 @@ _TEXT_GENERATION_MODELS = {
     "GraniteMoeForCausalLM": ("granitemoe", "GraniteMoeForCausalLM"),
     "InternLMForCausalLM": ("llama", "LlamaForCausalLM"),
     "InternLM2ForCausalLM": ("internlm2", "InternLM2ForCausalLM"),
+    "InternLM2VEForCausalLM": ("internlm2_ve", "InternLM2VEForCausalLM"),
     "JAISLMHeadModel": ("jais", "JAISLMHeadModel"),
     "JambaForCausalLM": ("jamba", "JambaForCausalLM"),
     "LlamaForCausalLM": ("llama", "LlamaForCausalLM"),
     # For decapoda-research/llama-*
     "LLaMAForCausalLM": ("llama", "LlamaForCausalLM"),
     "MambaForCausalLM": ("mamba", "MambaForCausalLM"),
+    "FalconMambaForCausalLM": ("mamba", "MambaForCausalLM"),
     "MistralForCausalLM": ("llama", "LlamaForCausalLM"),
     "MixtralForCausalLM": ("mixtral", "MixtralForCausalLM"),
     "QuantMixtralForCausalLM": ("mixtral_quant", "MixtralForCausalLM"),
@@ -83,14 +87,19 @@ _TEXT_GENERATION_MODELS = {
     # [Encoder-decoder]
     "BartModel": ("bart", "BartForConditionalGeneration"),
     "BartForConditionalGeneration": ("bart", "BartForConditionalGeneration"),
+    "Florence2ForConditionalGeneration": ("florence2", "Florence2ForConditionalGeneration"),  # noqa: E501
 }
 
 _EMBEDDING_MODELS = {
     # [Text-only]
+    "BertModel": ("bert", "BertEmbeddingModel"),
     "Gemma2Model": ("gemma2", "Gemma2EmbeddingModel"),
     "MistralModel": ("llama", "LlamaEmbeddingModel"),
     "Qwen2ForRewardModel": ("qwen2_rm", "Qwen2ForRewardModel"),
+    "Qwen2ForSequenceClassification": (
+        "qwen2_cls", "Qwen2ForSequenceClassification"),
     # [Multimodal]
+    "LlavaNextForConditionalGeneration": ("llava_next", "LlavaNextForConditionalGeneration"),  # noqa: E501
     "Phi3VForCausalLM": ("phi3v", "Phi3VForCausalLM"),
 }
 
@@ -114,6 +123,7 @@ _MULTIMODAL_MODELS = {
     "PixtralForConditionalGeneration": ("pixtral", "PixtralForConditionalGeneration"),  # noqa: E501
     "QWenLMHeadModel": ("qwen", "QWenLMHeadModel"),
     "Qwen2VLForConditionalGeneration": ("qwen2_vl", "Qwen2VLForConditionalGeneration"),  # noqa: E501
+    "Qwen2AudioForConditionalGeneration": ("qwen2_audio", "Qwen2AudioForConditionalGeneration"),  # noqa: E501
     "UltravoxModel": ("ultravox", "UltravoxModel"),
     # [Encoder-decoder]
     "MllamaForConditionalGeneration": ("mllama", "MllamaForConditionalGeneration"),  # noqa: E501

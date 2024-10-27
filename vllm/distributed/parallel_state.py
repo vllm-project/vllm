@@ -7,7 +7,7 @@ It takes over the control of the distributed environment from PyTorch.
 The typical workflow is:
 
 - call `init_distributed_environment` to initialize the distributed environment.
-- call `initialize_model_parallel` or `ensure_model_parallel_initialized` to 
+- call `initialize_model_parallel` or `ensure_model_parallel_initialized` to
  initialize the model parallel groups.
 
 - any code dealing with the distributed stuff
@@ -20,6 +20,7 @@ If you only need to use the distributed environment without model/pipeline
  steps.
 """
 import contextlib
+import gc
 import pickle
 import weakref
 from collections import namedtuple
@@ -391,8 +392,12 @@ class GroupCoordinator:
             # Convert negative dim to positive.
             dim += input_.dim()
         input_size = input_.size()
+        # NOTE: we have to use concat-style all-gather here,
+        # stack-style all-gather has compatibility issues with
+        # torch.compile . see https://github.com/pytorch/pytorch/issues/138795
+        output_size = (input_size[0] * world_size, ) + input_size[1:]
         # Allocate output tensor.
-        output_tensor = torch.empty((world_size, ) + input_size,
+        output_tensor = torch.empty(output_size,
                                     dtype=input_.dtype,
                                     device=input_.device)
         # All-gather.
@@ -400,6 +405,7 @@ class GroupCoordinator:
                                                  input_,
                                                  group=self.device_group)
         # Reshape
+        output_tensor = output_tensor.reshape((world_size, ) + input_size)
         output_tensor = output_tensor.movedim(0, dim)
         output_tensor = output_tensor.reshape(input_size[:dim] +
                                               (world_size *
@@ -1127,6 +1133,19 @@ def destroy_distributed_environment():
     _WORLD = None
     if torch.distributed.is_initialized():
         torch.distributed.destroy_process_group()
+
+
+def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
+    destroy_model_parallel()
+    destroy_distributed_environment()
+    with contextlib.suppress(AssertionError):
+        torch.distributed.destroy_process_group()
+    if shutdown_ray:
+        import ray  # Lazy import Ray
+        ray.shutdown()
+    gc.collect()
+    if not current_platform.is_cpu():
+        torch.cuda.empty_cache()
 
 
 def in_the_same_node_as(pg: ProcessGroup, source_rank: int = 0) -> List[bool]:
