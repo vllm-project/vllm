@@ -360,7 +360,6 @@ def _get_seq_len_block_table_args(
     '''
     return get_seq_len_block_table_args(attn_metadata, is_prompt, attn_type)
 
-
 class XFormersMetadataBuilder(CommonMetadataBuilder[XFormersMetadata]):
 
     _metadata_cls = XFormersMetadata
