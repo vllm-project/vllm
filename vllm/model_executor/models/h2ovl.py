@@ -1,6 +1,7 @@
 # adapted from https://huggingface.co/h2oai/h2ovl-mississippi-2b/blob/main/modeling_h2ovl_chat.py
+# https://huggingface.co/h2oai/h2ovl-mississippi-2b/blob/main/image_process.py
 # --------------------------------------------------------
-# H2OVL
+# H2OVL-Mississippi
 # Copyright (c) 2024 H2O.AI
 # Licensed under Apache 2.0 License [see LICENSE for details]
 # --------------------------------------------------------
@@ -30,7 +31,7 @@ from .internvl import (InternVLChatModel,
                        IMG_START, IMG_END, IMG_CONTEXT)
 
 
-# Modified to include blocks generated in second pass
+# modified to include blocks generated in second pass
 def calculate_num_blocks(orig_width: int, orig_height: int, min_num: int,
                          max_num: int, image_size: int,
                          use_thumbnail: bool,
@@ -43,7 +44,7 @@ def calculate_num_blocks(orig_width: int, orig_height: int, min_num: int,
                         if i * j <= max_num and i * j >= min_num)
     target_ratios = sorted(target_ratios, key=lambda x: x[0] * x[1])
 
-    # If prior_aspect_ratio is provided, filter the target ratios
+    # if prior_aspect_ratio is provided, filter the target ratios
     if prior_aspect_ratio is not None:
         target_ratios = [ratio for ratio in target_ratios if
                          prior_aspect_ratio[0] % ratio[0] != 0 and prior_aspect_ratio[1] % ratio[1] != 0]
@@ -95,7 +96,7 @@ def dynamic_preprocess(image: Image.Image, min_num: int, max_num: int,
     return processed_images, target_aspect_ratio
 
 
-# New dynamic_preprocess2 with prior_aspect_ratio
+# new dynamic_preprocess2 with prior_aspect_ratio
 def dynamic_preprocess2(image: Image.Image, min_num: int, max_num: int,
                         image_size: int, use_thumbnail: bool, prior_aspect_ratio: Tuple[int, int]) -> List[Image.Image]:
     orig_width, orig_height = image.size
@@ -148,7 +149,7 @@ def image_to_pixel_values(image:Image.Image,
                           input_size: int, min_num: int,
                           max_num: int, use_thumbnail: bool,
                           use_MSAC: bool) -> torch.Tensor:
-    # When MSAC is turned on, we need to preprocess the image twice
+    # when MSAC is turned on, we need to process the image twice
     if use_MSAC:
         pixel_values, target_aspect_ratio = load_image1(image, input_size=input_size, min_num=min_num, max_num=max_num)
         pixel_values2 = load_image2(image, input_size=input_size, min_num=min_num, max_num=max_num, target_aspect_ratio=target_aspect_ratio)
@@ -185,37 +186,21 @@ def image_to_pixel_values_wrapper(hf_config: PretrainedConfig,
 def get_max_internvl_image_tokens(ctx: InputContext,
                                   *,
                                   max_dynamic_patch: Optional[int] = None):
+    """
+    Calculate the maximum number of tokens with/without MSAC and thumbnail
+    """
     hf_config = ctx.get_hf_config()
-    vision_config = hf_config.vision_config
-    
-
     use_thumbnail = hf_config.use_thumbnail
-    max_dynamic_patch = hf_config.max_dynamic_patch
     use_MSAC = hf_config.use_msac
+    
+    if max_dynamic_patch is None:
+        max_dynamic_patch = hf_config.max_dynamic_patch
 
-    # calculate the actual max_dy
-    print('The max_dynamic_patch is:', max_dynamic_patch)
-
-    image_size = vision_config.image_size
     num_patches = get_internvl_num_patches(hf_config)
-    # return num_patches * max_dynamic_patch
-   
-    min_num = hf_config.min_dynamic_patch
-    max_num = hf_config.max_dynamic_patch
     
-    # Assuming we're calculating for a dummy image with maximum size
-    max_image_width, max_image_height = get_max_internvl_image_size(ctx, max_dynamic_patch=max_dynamic_patch)
-    dummy_image = Image.new('RGB', (max_image_width, max_image_height))
-    
-    # Calculate num_blocks based on the dummy image's size
-    num_blocks = image_to_pixel_values(dummy_image,
-                                       image_size,
-                                       min_num,
-                                       max_num,
-                                       use_thumbnail=use_thumbnail,
-                                       use_MSAC=use_MSAC).shape[0]
-    
-    # Return the final token count: num_blocks * num_patches
+    coefficient = 2 if use_MSAC else 1
+    num_blocks = coefficient * max_dynamic_patch + (1 if use_thumbnail else 0)
+
     return num_blocks * num_patches
 
 
@@ -337,8 +322,6 @@ class H2OVLChatModel(InternVLChatModel):
             else:
                 num_hidden_layers = vision_feature_layer + 1
 
-            # We added additional dummy heads to the original num of heads to
-            # make the number of heads divisible by 8.
             return InternVisionModel(
                 config.vision_config,
                 quant_config=quant_config,
