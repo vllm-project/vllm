@@ -424,11 +424,7 @@ function (define_gpu_extension_target GPU_MOD_NAME)
   # Don't use `TORCH_LIBRARIES` for CUDA since it pulls in a bunch of
   # dependencies that are not necessary and may not be installed.
   if (GPU_LANGUAGE STREQUAL "CUDA")
-    if ("${CUDA_CUDA_LIB}" STREQUAL "")
-      set(CUDA_CUDA_LIB "${CUDA_CUDA_LIBRARY}")
-    endif()
-    target_link_libraries(${GPU_MOD_NAME} PRIVATE ${CUDA_CUDA_LIB}
-      ${CUDA_LIBRARIES})
+    target_link_libraries(${GPU_MOD_NAME} PRIVATE CUDA::cudart CUDA::cuda_driver)
   else()
     target_link_libraries(${GPU_MOD_NAME} PRIVATE ${TORCH_LIBRARIES})
   endif()
