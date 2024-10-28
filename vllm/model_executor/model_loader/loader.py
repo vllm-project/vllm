@@ -23,7 +23,7 @@ from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoadFormat,
                          LoRAConfig, ModelConfig, MultiModalConfig,
-                         ParallelConfig, SchedulerConfig)
+                         ParallelConfig, PoolerConfig, SchedulerConfig)
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.envs import VLLM_USE_MODELSCOPE
@@ -122,7 +122,8 @@ def _get_model_initialization_kwargs(
         model_class: Type[nn.Module],
         lora_config: Optional[LoRAConfig],
         multimodal_config: Optional[MultiModalConfig],
-        scheduler_config: Optional[SchedulerConfig] = None) -> Dict[str, Any]:
+        scheduler_config: Optional[SchedulerConfig] = None,
+        pooler_config: Optional[PoolerConfig] = None) -> Dict[str, Any]:
     """Get extra kwargs for model initialization."""
     extra_kwargs: Dict[str, Any] = {}
 
@@ -143,7 +144,8 @@ def _get_model_initialization_kwargs(
 
     if has_inner_state(model_class) and scheduler_config:
         extra_kwargs["scheduler_config"] = scheduler_config
-
+    if pooler_config:
+        extra_kwargs["pooler_config"] = pooler_config
     return extra_kwargs
 
 
@@ -155,10 +157,12 @@ def build_model(model_class: Type[nn.Module],
                 lora_config: Optional[LoRAConfig],
                 multimodal_config: Optional[MultiModalConfig],
                 scheduler_config: Optional[SchedulerConfig],
-                prefix: Optional[str] = None) -> nn.Module:
+                prefix: Optional[str] = None,
+                pooler_config: Optional[PoolerConfig]) -> nn.Module:
     extra_kwargs = _get_model_initialization_kwargs(model_class, lora_config,
                                                     multimodal_config,
-                                                    scheduler_config)
+                                                    scheduler_config,
+                                                    pooler_config)
     if prefix:
         extra_kwargs["prefix"] = prefix
 
@@ -185,6 +189,7 @@ def _initialize_model(
         lora_config=lora_config,
         multimodal_config=model_config.multimodal_config,
         scheduler_config=scheduler_config,
+        pooler_config=model_config.pooler_config,
     )
 
 

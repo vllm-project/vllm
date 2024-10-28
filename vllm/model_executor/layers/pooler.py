@@ -1,5 +1,5 @@
-import os
 from enum import IntEnum
+from typing import List, Optional
 
 import torch
 import torch.nn as nn
@@ -30,18 +30,21 @@ class Pooler(nn.Module):
         normalize: Whether to normalize the pooled data.
     """
 
-    def __init__(self,
-                 pooling_type: PoolingType,
-                 normalize: bool,
-                 softmax: bool = False):
+    def __init__(
+        self,
+        pooling_type: PoolingType,
+        normalize: bool,
+        softmax: bool = False,
+        step_tag_id: int = -1,
+        returned_token_ids: Optional[List[int]] = None,
+    ):
         super().__init__()
 
         self.pooling_type = pooling_type
         self.normalize = normalize
         self.softmax = softmax
-        returned_token_ids = os.environ.get('RETURNED_TOKEN_IDS', '648,387')
-        self.returned_token_ids = list(map(int, returned_token_ids.split(",")))
-        self.step_tag_id = int(os.environ.get('STEP_TOKEN_ID', -1))
+        self.step_tag_id = step_tag_id
+        self.returned_token_ids = returned_token_ids
 
     def forward(
         self,
@@ -68,7 +71,12 @@ class Pooler(nn.Module):
                 pooled_data.append(hidden_states[offset:offset + prompt_len])
                 offset += prompt_len
         elif self.pooling_type == PoolingType.STEP:
-            logits = hidden_states[:, self.returned_token_ids].softmax(dim=-1)
+            if self.returned_token_ids is not None and len(
+                    self.returned_token_ids) > 0:
+                logits = hidden_states[:,
+                                       self.returned_token_ids].softmax(dim=-1)
+            else:
+                logits = hidden_states.softmax(dim=-1)
             offset = 0
             pooled_data = []
             for prompt_len, seq_data_i in zip(

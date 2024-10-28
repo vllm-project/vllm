@@ -159,6 +159,11 @@ class LLM:
         mm_processor_kwargs: Optional[Dict[str, Any]] = None,
         # After positional args are removed, move this right below `model`
         task: TaskOption = "auto",
+        pooling_type: Optional[str] = None,
+        pooling_norm: bool = False,
+        pooling_softmax: bool = False,
+        pooling_step_tag_id: int = -1,
+        pooling_returned_token_ids: Optional[List[int]] = None,
         **kwargs,
     ) -> None:
         '''
@@ -193,6 +198,11 @@ class LLM:
             disable_custom_all_reduce=disable_custom_all_reduce,
             disable_async_output_proc=disable_async_output_proc,
             mm_processor_kwargs=mm_processor_kwargs,
+            pooling_type=pooling_type,
+            pooling_norm=pooling_norm,
+            pooling_softmax=pooling_softmax,
+            pooling_step_tag_id=pooling_step_tag_id,
+            pooling_returned_token_ids=pooling_returned_token_ids,
             **kwargs,
         )
         self.llm_engine = LLMEngine.from_engine_args(

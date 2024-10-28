@@ -29,7 +29,7 @@ from transformers import LlamaConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, LoRAConfig
+from vllm.config import CacheConfig, LoRAConfig, PoolerConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -502,6 +502,7 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
         prefix: str = "",
+        pooler_config: Optional[PoolerConfig] = None,
     ) -> None:
         super().__init__()
 
@@ -543,7 +544,13 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             self.lm_head = PPMissingLayer()
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
-        self._pooler = Pooler(pooling_type=PoolingType.STEP, normalize=False)
+        self._pooler = Pooler(
+            pooling_type=PoolingType[pooler_config.pooling_type],
+            normalize=pooler_config.pooling_norm,
+            softmax=pooler_config.pooling_softmax,
+            step_tag_id=pooler_config.pooling_step_tag_id,
+            returned_token_ids=pooler_config.pooling_returned_token_ids,
+        )
 
     def forward(
         self,
