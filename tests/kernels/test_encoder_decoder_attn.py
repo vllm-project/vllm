@@ -19,7 +19,6 @@ from vllm.attention.backends.utils import STR_NOT_IMPL_ENC_DEC_ROCM_HIP
 from vllm.attention.selector import (_Backend, get_attn_backend,
                                      global_force_attn_backend_context_manager)
 from vllm.forward_context import set_forward_context
-from vllm.utils import is_hip
 from vllm.platforms import current_platform
 
 # List of support backends for encoder/decoder models
