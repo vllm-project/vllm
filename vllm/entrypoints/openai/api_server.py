@@ -527,8 +527,7 @@ def create_server_socket(addr: Tuple[str, int]) -> socket.socket:
     if socket.has_dualstack_ipv6():
         sock = socket.create_server(addr,
                                     family=socket.AF_INET6,
-                                    dualstack_ipv6=True
-        )
+                                    dualstack_ipv6=True)
     else:
         sock = socket.create_server(addr)
 
