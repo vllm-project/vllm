@@ -12,7 +12,7 @@ import cloudpickle
 import torch.nn as nn
 
 from vllm.logger import init_logger
-from vllm.utils import is_hip
+from vllm.platforms import current_platform
 
 from .interfaces import (has_inner_state, is_attention_free,
                          supports_multimodal, supports_pp)
@@ -26,8 +26,10 @@ _TEXT_GENERATION_MODELS = {
     "AquilaModel": ("llama", "LlamaForCausalLM"),
     "AquilaForCausalLM": ("llama", "LlamaForCausalLM"),  # AquilaChat2
     "ArcticForCausalLM": ("arctic", "ArcticForCausalLM"),
-    "BaiChuanForCausalLM": ("baichuan", "BaiChuanForCausalLM"),  # baichuan-7b
-    "BaichuanForCausalLM": ("baichuan", "BaichuanForCausalLM"),  # baichuan-13b
+    # baichuan-7b, upper case 'C' in the class name
+    "BaiChuanForCausalLM": ("baichuan", "BaiChuanForCausalLM"),
+    # baichuan-13b, lower case 'c' in the class name
+    "BaichuanForCausalLM": ("baichuan", "BaichuanForCausalLM"),
     "BloomForCausalLM": ("bloom", "BloomForCausalLM"),
     # ChatGLMModel supports multimodal
     "CohereForCausalLM": ("commandr", "CohereForCausalLM"),
@@ -47,6 +49,7 @@ _TEXT_GENERATION_MODELS = {
     "GraniteMoeForCausalLM": ("granitemoe", "GraniteMoeForCausalLM"),
     "InternLMForCausalLM": ("llama", "LlamaForCausalLM"),
     "InternLM2ForCausalLM": ("internlm2", "InternLM2ForCausalLM"),
+    "InternLM2VEForCausalLM": ("internlm2_ve", "InternLM2VEForCausalLM"),
     "JAISLMHeadModel": ("jais", "JAISLMHeadModel"),
     "JambaForCausalLM": ("jamba", "JambaForCausalLM"),
     "LlamaForCausalLM": ("llama", "LlamaForCausalLM"),
@@ -84,6 +87,7 @@ _TEXT_GENERATION_MODELS = {
     # [Encoder-decoder]
     "BartModel": ("bart", "BartForConditionalGeneration"),
     "BartForConditionalGeneration": ("bart", "BartForConditionalGeneration"),
+    "Florence2ForConditionalGeneration": ("florence2", "Florence2ForConditionalGeneration"),  # noqa: E501
 }
 
 _EMBEDDING_MODELS = {
@@ -92,7 +96,10 @@ _EMBEDDING_MODELS = {
     "Gemma2Model": ("gemma2", "Gemma2EmbeddingModel"),
     "MistralModel": ("llama", "LlamaEmbeddingModel"),
     "Qwen2ForRewardModel": ("qwen2_rm", "Qwen2ForRewardModel"),
+    "Qwen2ForSequenceClassification": (
+        "qwen2_cls", "Qwen2ForSequenceClassification"),
     # [Multimodal]
+    "LlavaNextForConditionalGeneration": ("llava_next", "LlavaNextForConditionalGeneration"),  # noqa: E501
     "Phi3VForCausalLM": ("phi3v", "Phi3VForCausalLM"),
 }
 
@@ -116,6 +123,7 @@ _MULTIMODAL_MODELS = {
     "PixtralForConditionalGeneration": ("pixtral", "PixtralForConditionalGeneration"),  # noqa: E501
     "QWenLMHeadModel": ("qwen", "QWenLMHeadModel"),
     "Qwen2VLForConditionalGeneration": ("qwen2_vl", "Qwen2VLForConditionalGeneration"),  # noqa: E501
+    "Qwen2AudioForConditionalGeneration": ("qwen2_audio", "Qwen2AudioForConditionalGeneration"),  # noqa: E501
     "UltravoxModel": ("ultravox", "UltravoxModel"),
     # [Encoder-decoder]
     "MllamaForConditionalGeneration": ("mllama", "MllamaForConditionalGeneration"),  # noqa: E501
@@ -239,7 +247,7 @@ def _try_load_model_cls(
     model_arch: str,
     model: _BaseRegisteredModel,
 ) -> Optional[Type[nn.Module]]:
-    if is_hip():
+    if current_platform.is_rocm():
         if model_arch in _ROCM_UNSUPPORTED_MODELS:
             raise ValueError(f"Model architecture '{model_arch}' is not "
                              "supported by ROCm for now.")
