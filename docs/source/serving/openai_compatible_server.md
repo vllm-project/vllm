@@ -49,7 +49,7 @@ completion = client.chat.completions.create(
 )
 ```
 
-### Extra Parameters for Chat API
+### Extra Parameters for Chat Completions API
 The following [sampling parameters (click through to see documentation)](../dev/sampling_params.rst) are supported.
 
 ```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
