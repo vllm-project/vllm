@@ -1,0 +1,135 @@
+{%- macro json_to_python_type(param_name, json_spec) %}
+{%- set basic_type_map = {
+  'string': 'str',
+  'number': 'float',
+  'integer': 'int',
+  'boolean': 'bool',
+  'null': 'None'
+} %}
+
+{%- if json_spec.enum %}
+  {{- param_name|title }}
+{%- elif basic_type_map[json_spec.type] is defined %}
+  {{- basic_type_map[json_spec.type] }}
+{%- elif json_spec.type == 'array' %}
+  {{- 'List[' +  json_to_python_type(param_name, json_spec['items']) + ']' }}
+{%- elif json_spec.type == 'object' %}
+  {{- 'Dict[str, ' + json_to_python_type(param_name, json_spec.additionalProperties if json_spec.additionalProperties else 'Any') + ']' if not json_spec.properties else param_name|title }}
+{%- elif json_spec.type is iterable %}
+  {{- 'Union[' }}
+  {%- for t in json_spec.type %}
+    {{- json_to_python_type(param_name, {'type': t}) }}
+    {{- ', ' if not loop.last }}
+  {%- endfor %}
+  {{- ']' }}
+{%- else %}
+  {{- 'Any' }}
+{%- endif %}
+{%- endmacro %}
+
+{%- macro object_to_fields(json_spec, field_indent) %}
+  {%- set o_ns = namespace(f = caller()) %}
+  {%- for param_name, param_fields in json_spec.properties|items %}
+    {%- if param_fields.enum %}
+      {{- '\n\nclass ' + param_name|title + '(Enum):\n' }}
+      {%- for enum_option in param_fields.enum %}
+        {{- '    enum_' + loop.index0|string + ' = ' + enum_option|tojson + '\n' }}
+      {%- endfor %}
+    {%- elif param_fields.type == 'object' and param_fields.properties %}
+      {%- call object_to_fields(param_fields, '    ') %}
+        {{- '\n\nclass ' + param_name|title + '(BaseModel):\n' }}
+      {%- endcall %}
+    {%- elif param_fields.type == 'array' and param_fields['items'] and param_fields['items'].type == 'object' and param_fields['items'].properties %}
+      {%- call object_to_fields(param_fields['items'], '    ') %}
+        {{- '\n\nclass ' + param_name|title + '(BaseModel):\n' }}
+      {%- endcall %}
+    {%- endif %}
+    {%- set param_default = param_fields.default|tojson if param_fields.default is string else param_fields.default|string if param_fields.default is defined else 'None' %}
+    {%- set o_ns.f = o_ns.f + field_indent + param_name + ': ' %}
+    {%- set o_ns.f = o_ns.f + ('Optional[' + json_to_python_type(param_name, param_fields) + ']' if param_name not in json_spec.required else json_to_python_type(param_name, param_fields)) %}
+    {%- if not param_fields.title and not param_fields.description and not param_fields.pattern %}
+      {%- set o_ns.f = o_ns.f + (' = ' + param_default if param_name not in json_spec.required else '') %}
+    {%- else %}
+      {%- set o_ns.f = o_ns.f + (' = Field(...' if param_name in json_spec.required else ' = Field(' + param_default) %}
+      {%- set o_ns.f = o_ns.f + (', description=' + param_fields.description|tojson if param_fields.description else '') %}
+      {%- set o_ns.f = o_ns.f + (', regex=' + param_fields.pattern|tojson if param_fields.pattern else '') %}
+      {%- set o_ns.f = o_ns.f + (', title=' + param_fields.title|tojson if param_fields.title else '') %}
+      {%- set o_ns.f = o_ns.f + ')' %}
+    {%- endif %}
+    {%- set o_ns.f = o_ns.f + '\n' %}
+  {%- endfor %}
+  {{- o_ns.f }}
+{%- endmacro %}
+
+{%- macro tool_parser(tools) %}
+{%- for tool in tools %}
+  {%- if tool.type is not defined or tool.type == 'function' %}
+    {%- if tool.function is defined %}
+      {%- set tool = tool.function %}
+    {%- endif %}
+    {%- set tool_params = tool.parameters if tool.parameters is defined else none %}
+    {%- call object_to_fields(tool_params, '        ') %}
+      {{- '\n\ndef ' + tool.name + '(' }}
+      {%- if tool_params %}
+        {%- for param_name, param_fields in tool_params.properties|items %}
+          {%- set param_default = param_fields.default|tojson if param_fields.default is string else param_fields.default|string if param_fields.default is defined else 'None' %}
+          {{- ', ' if loop.index0 != 0 }}
+          {{- param_name }}
+          {{- '=' + param_default if param_name not in tool_params.required }}
+        {%- endfor %}
+      {%- endif %}
+      {{- '):\n    """' }}
+      {{- tool.description }}
+      {{- '\n\n    Args:\n' if tool_params else '\n' }}
+    {%- endcall %}
+    {{- '    """\n' }}
+  {%- endif %}
+{%- endfor %}
+{%- endmacro %}
+
+{%- if messages[0]['role'] == 'system' %}
+  {%- set loop_messages = messages[1:] %}
+  {%- set system_message = messages[0]['content'] %}
+{%- else %}
+  {%- set loop_messages = messages %}
+  {%- set system_message = '' %}
+{%- endif %}
+{{- '<|im_start|>system\n' + system_message if system_message or tools }}
+{%- if tools %}
+  {{- '\n# Functions\nHere is a list of functions that you can invoke:\n```python\nfrom enum import Enum\nfrom typing import List, Dict, Optional\nfrom pydantic import BaseModel, Field\n\n' }}
+  {{- tool_parser(tools) }}
+  {{- "\n```\n\n# Function Call Rule and Output Format\n- If the user's question can be answered without calling any function, please answer the user's question directly. In this situation, you should return your thought and answer the user's question directly.\n- If the user cannot be answered without calling any function, and the user does not provide enough information to call functions, please ask the user for more information. In this situation, you should return your thought and ask the user for more information.\n- If the user's question cannot be answered without calling any function, and the user has provided enough information to call functions to solve it, you should call the functions. In this situation, the assistant should return your thought and call the functions.\n- Use default parameters unless the user has specified otherwise.\n- You should answer in the following format:\n\n<|thought_start|>\n{explain why the user's question can be answered without calling a function or why you should ask the user for more information or why you should call one or more functions and your plan to solve the user's question.}\n<|thought_end|>\n<|tool_call_start|>\n```python\nfunc1(params_name=params_value, params_name2=params_value2...)\nfunc2(params)\n```\n<|tool_call_end|>\n{answer the user's question directly or ask the user for more information}" }}
+{%- endif %}
+{{- '<|im_end|>\n' if system_message or tools }}
+{%- for message in loop_messages %}
+  {%- set content = message.content %}
+  {%- if message.role == 'assistant' and message.tool_calls %}
+    {{- '<|im_start|>' + message.role + '\n' }}
+    {{- '<|thought_start|>\n' + message.thought + '\n<|thought_end|>\n' if message.thought }}
+    {{- '<|tool_call_start|>\n```python\n' }}
+    {%- for tool_call in message.tool_calls %}
+      {%- if tool_call.function is defined %}
+        {%- set tool_call = tool_call.function %}
+      {%- endif %}
+      {{- tool_call.name + '(' }}
+      {%- if tool_call.arguments is defined and tool_call.arguments|length > 0 %}
+        {%- for param_name, param_value in tool_call.arguments|items %}
+          {{- param_name + '=' + param_value|tojson }}
+          {{- ',' if not loop.last }}
+        {%- endfor %}
+      {%- endif %}
+      {{- ')\n' }}
+    {%- endfor %}
+    {{- '```\n<|tool_call_end|>\n' }}
+    {{- content if content and not content.startswith('<|tool_call_start|>') }}
+    {{- '<|im_end|>\n' }}
+  {%- elif message.role == 'assistant' and message.thought %}
+    {{- '<|im_start|>' + message.role + '\n' + '<|thought_start|>\n' + message.thought + '\n<|thought_end|>\n' + content + '<|im_end|>\n' }}
+  {%- else %}
+    {{- '<|im_start|>' + message.role + '\n' + content + '<|im_end|>\n' }}
+  {%- endif %}
+{%- endfor %}
+
+{%- if add_generation_prompt %}
+  {{- '<|im_start|>assistant\n' }}
+{%- endif %}
