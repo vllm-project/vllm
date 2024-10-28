@@ -8,6 +8,7 @@ from typing import List, NamedTuple, Type
 
 import pytest
 from huggingface_hub import hf_hub_download
+from transformers import AutoTokenizer
 
 from tests.quantization.utils import is_quant_method_supported
 
@@ -36,7 +37,7 @@ LLAMA_CONFIG = GGUFTestConfig(
 )
 
 QWEN2_CONFIG = GGUFTestConfig(
-    original_model="Qwen/Qwen2-1.5B-Instruct",
+    original_model="Qwen/Qwen2.5-1.5B-Instruct",
     gguf_repo="Qwen/Qwen2.5-1.5B-Instruct-GGUF",
     gguf_filename="qwen2.5-1.5b-instruct-q4_k_m.gguf",
 )
@@ -54,7 +55,7 @@ GPT2_CONFIG = GGUFTestConfig(
 )
 
 STABLELM_CONFIG = GGUFTestConfig(
-    original_model="afrideva/stablelm-3b-4e1t-GGUF",
+    original_model="stabilityai/stablelm-3b-4e1t",
     gguf_repo="afrideva/stablelm-3b-4e1t-GGUF",
     gguf_filename="stablelm-3b-4e1t.q4_k_m.gguf",
 )
@@ -62,12 +63,16 @@ STABLELM_CONFIG = GGUFTestConfig(
 STARCODER_CONFIG = GGUFTestConfig(
     original_model="bigcode/starcoder2-3b",
     gguf_repo="QuantFactory/starcoder2-3b-GGUF",
-    gguf_filename="starcoder2-3b.Q4_K_M.gguf",
+    gguf_filename="starcoder2-3b.Q6_K.gguf",
 )
 
 MODELS = [
-    LLAMA_CONFIG, QWEN2_CONFIG, PHI3_CONFIG, GPT2_CONFIG, STABLELM_CONFIG,
-    STARCODER_CONFIG
+    LLAMA_CONFIG,
+    QWEN2_CONFIG,
+    PHI3_CONFIG,
+    GPT2_CONFIG,
+    STABLELM_CONFIG,
+    STARCODER_CONFIG,
 ]
 
 
@@ -91,17 +96,26 @@ def test_models(
     if num_gpus_available < tp_size:
         pytest.skip(f"Not enough GPUs for tensor parallelism {tp_size}")
 
+    tokenizer = AutoTokenizer.from_pretrained(model.original_model)
+    if tokenizer.chat_template is not None:
+        messages = [[{
+            'role': 'user',
+            'content': prompt
+        }] for prompt in example_prompts]
+        example_prompts = tokenizer.apply_chat_template(
+            messages, tokenize=False, add_generation_prompt=True)
+
     # Run unquantized model.
     with vllm_runner(model_name=model.original_model,
                      dtype=dtype,
                      max_model_len=MAX_MODEL_LEN,
                      tensor_parallel_size=tp_size) as original_model:
-
         original_outputs = original_model.generate_greedy_logprobs(
             example_prompts[:-1], max_tokens, num_logprobs)
 
     # Run gguf model.
     with vllm_runner(model_name=model.gguf_model,
+                     tokenizer_name=model.original_model,
                      dtype=dtype,
                      max_model_len=MAX_MODEL_LEN,
                      tensor_parallel_size=tp_size) as gguf_model:
