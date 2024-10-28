@@ -4,7 +4,7 @@ import dataclasses
 import json
 import random
 import time
-from typing import List, Optional, Tuple
+from typing import List, Optional
 
 import torch
 from PIL import Image
@@ -28,7 +28,8 @@ class SampleRequest:
 
     Attributes:
         prompt: The input text prompt for the model.
-        multi_modal_data: Optional dictionary containing multi-modal data (e.g., images).
+        multi_modal_data: Optional dictionary containing multi-modal data (e.g.
+            images).
         prompt_len: The length of the prompt in tokens.
         expected_output_len: The expected length of the output in tokens.
     """
