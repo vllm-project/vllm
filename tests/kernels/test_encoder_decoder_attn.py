@@ -18,7 +18,7 @@ from vllm.attention import (Attention, AttentionBackend, AttentionMetadata,
 from vllm.attention.backends.utils import STR_NOT_IMPL_ENC_DEC_ROCM_HIP
 from vllm.attention.selector import (_Backend,
                                      global_force_attn_backend_context_manager)
-from vllm.utils import is_hip
+from vllm.platforms import current_platform
 
 # List of support backends for encoder/decoder models
 LIST_ENC_DEC_SUPPORTED_BACKENDS = [_Backend.XFORMERS]
@@ -82,7 +82,7 @@ class TestResources(NamedTuple):
         will leverage attn_backend for the purpose of
         constructing backend-compatible attention
         metadata instances
-   
+
     Attributes:
 
     * scale: 1/sqrt(d) scale factor for attn
@@ -105,10 +105,10 @@ def _make_test_resources(test_pt: TestPoint, ) -> TestResources:
     Build key components for performing encoder/decoder attention test.
 
     Note that
-    (1) The Attention instance constructed here, automatically selects 
+    (1) The Attention instance constructed here, automatically selects
         an attention backend class based on platform info & a set of canned
         heuristics, so
-    (2) The attention backend instance constructed here is thus *not 
+    (2) The attention backend instance constructed here is thus *not
         the same backend instance* used by attn, but rather it is
         intended to be a *different instance* of the *same backend class*;
         therefore,
@@ -156,7 +156,7 @@ def _encoder_attn_setup(
     '''
     Set up test vectors & data structures for encoder attention test.
 
-    A triplet of synthetic query/key/value tensors are constructed. 
+    A triplet of synthetic query/key/value tensors are constructed.
     Given this is an encoder attention test, the key & value
     sequences will have the same length as the corresponding queries.
 
@@ -169,14 +169,14 @@ def _encoder_attn_setup(
     Arguments:
 
     * test_pt: TestPoint data structure; this function relies on the
-               following fields: batch_size, num_heads, head_size, 
+               following fields: batch_size, num_heads, head_size,
                block_size, max_q_seq_len
     * test_rsrcs: TestResources data structure; this function relies on the
                   scale field
 
-    
+
     Returns:
-    
+
     * PhaseTestParameters data structure comprising (1) packed query/key/value
       tensors, (2) the ideal output of attention computed using a naive
       implementation, and (3) KVCache field set to None
@@ -265,7 +265,7 @@ def _decoder_attn_setup(
     Arguments:
 
     * test_pt: TestPoint data structure; this function relies on the
-               following fields: batch_size, num_heads, head_size, 
+               following fields: batch_size, num_heads, head_size,
                block_size, max_q_seq_len
     * test_rsrcs: TestResources data structure; this function relies on the
                   scale field
@@ -275,14 +275,14 @@ def _decoder_attn_setup(
     * qkv: Unpacked (batch_size x padded_seq_len x num_heads x
            head_size) query/key/value tensors
     * Prefill-phase decoder self-attention PhaseTestParameters data structure,
-      including (1) packed (number_of_tokens x num_heads x head_size) 
+      including (1) packed (number_of_tokens x num_heads x head_size)
       query/key/value tensors along with (2) ideal attention output
-      computed using a naive implementation, and (3) memory-mapping data 
+      computed using a naive implementation, and (3) memory-mapping data
       structures appropriate for prefill phase.
-    * Decode-phase decoder self-attention PhaseTestParameters data structure, 
-      including (1) packed (number_of_tokens x num_heads x head_size) 
-      query/key/value tensors along with (2) ideal attention output 
-      computed using a naive implementation, and (3) memory-mapping data 
+    * Decode-phase decoder self-attention PhaseTestParameters data structure,
+      including (1) packed (number_of_tokens x num_heads x head_size)
+      query/key/value tensors along with (2) ideal attention output
+      computed using a naive implementation, and (3) memory-mapping data
       structures appropriate for decode phase.
     * max_block_idx: max physical address in decoder self-attention block-table
                      (intended to be used as the base address for the encoder/
@@ -436,12 +436,12 @@ def _enc_dec_cross_attn_setup_reuses_query(
 
     This function also constructs the cross-attention KV cache memory mapping
     (slot mapping and block table), ensuring that the block table starts at
-    block_base_addr. 
+    block_base_addr.
 
     Arguments:
 
     * decoder_qkv: pre-existing unpacked (batch_size x padded_seq_len x
-                   num_heads x head_size) decoder self-attention inputs; 
+                   num_heads x head_size) decoder self-attention inputs;
                    this function relies on the query and q_seq_lens
                    fields
     * encoder_test_params: PhaseTestParameters data structure which was
@@ -452,7 +452,7 @@ def _enc_dec_cross_attn_setup_reuses_query(
                                          self-attention; all fields
                                          including KV cache required
     * test_pt: TestPoint data structure; this function relies on the
-               following fields: batch_size, num_heads, head_size, 
+               following fields: batch_size, num_heads, head_size,
                block_size, max_q_seq_len
     * test_rsrcs: TestResources data structure; this function relies on the
                   scale field
@@ -460,16 +460,16 @@ def _enc_dec_cross_attn_setup_reuses_query(
 
     Returns:
 
-    * Prefill-phase encoder/decoder cross-attention PhaseTestParameters data 
-      structure, including (1) packed 
-      (number_of_tokens x num_heads x head_size) query/key/value tensors
-      along with (2) ideal attention output computed using a 
-      naive implementation, and (3) memory-mapping data structures appropriate
-      for prefill phase.
-    * Decode-phase encoder/decoder cross-attention PhaseTestParameters data 
+    * Prefill-phase encoder/decoder cross-attention PhaseTestParameters data
       structure, including (1) packed
       (number_of_tokens x num_heads x head_size) query/key/value tensors
-      along with (2) ideal attention output computed using a 
+      along with (2) ideal attention output computed using a
+      naive implementation, and (3) memory-mapping data structures appropriate
+      for prefill phase.
+    * Decode-phase encoder/decoder cross-attention PhaseTestParameters data
+      structure, including (1) packed
+      (number_of_tokens x num_heads x head_size) query/key/value tensors
+      along with (2) ideal attention output computed using a
       naive implementation, and (3) memory-mapping data structures appropriate
       for decode phase.
     '''
@@ -596,7 +596,7 @@ def _run_encoder_attention_test(
     '''
     Run encoder attention.
 
-    attn.forward() is passed attn_type=AttentionType.ENCODER in order 
+    attn.forward() is passed attn_type=AttentionType.ENCODER in order
     to configure the kernel invocation for encoder attention
 
     Requires attn_metadata.num_decode_tokens == 0
@@ -607,7 +607,7 @@ def _run_encoder_attention_test(
     * attn: Attention wrapper instance
     * encoder_test_params: encoder PhaseTestParameters data structure;
                            this function relies on the packed
-                           (number_of_tokens x num_heads x head_size) 
+                           (number_of_tokens x num_heads x head_size)
                            query/key/value fields
     * attn_metadata: attention metadata for encoder/decoder-self attention
 
@@ -646,7 +646,7 @@ def _run_decoder_self_attention_test(
                   and attn (Attention wrapper instance) fields
     * decoder_test_params: decoder PhaseTestParameters data structure;
                            this function relies on the packed
-                           (number_of_tokens x num_heads x head_size) 
+                           (number_of_tokens x num_heads x head_size)
                            query/key/value fields
     * attn_metadata: attention metadata for decoder-self attention
                      (contains KV cache memory-mapping)
@@ -694,11 +694,11 @@ def _run_encoder_decoder_cross_attention_test(
                   and attn (Attention wrapper instance) fields
     * decoder_test_params: decoder PhaseTestParameters data structure;
                            this function relies on the packed
-                           (number_of_tokens x num_heads x head_size) 
+                           (number_of_tokens x num_heads x head_size)
                            query field
     * cross_test_params: encoder/decoder PhaseTestParameters data structure;
                          this function relies on the packed
-                         (number_of_tokens x num_heads x head_size) 
+                         (number_of_tokens x num_heads x head_size)
                          key/value fields
     * attn_metadata: attention metadata for encoder/decoder-self attention
 
@@ -726,7 +726,8 @@ def _run_encoder_decoder_cross_attention_test(
                         attn_type=attn_type)
 
 
-@pytest.mark.skipif(is_hip(), reason=STR_NOT_IMPL_ENC_DEC_ROCM_HIP)
+@pytest.mark.skipif(current_platform.is_rocm(),
+                    reason=STR_NOT_IMPL_ENC_DEC_ROCM_HIP)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("attn_backend", LIST_ENC_DEC_SUPPORTED_BACKENDS)
@@ -755,7 +756,8 @@ def test_encoder_only(
     No KV cache is required for encoder-only attention.
 
     Note on ROCm/HIP: currently encoder/decoder models are not supported on
-    AMD GPUs, therefore this test simply is skipped if is_hip(). 
+    AMD GPUs, therefore this test simply is skipped if
+    current_platform.is_rocm().
 
     This test globally forces an override of the usual backend
     auto-selection process, forcing the specific backend-under-test
@@ -811,7 +813,8 @@ def test_encoder_only(
         assert_actual_matches_ideal(enc_test_params, enc_pckd_act_out)
 
 
-@pytest.mark.skipif(is_hip(), reason=STR_NOT_IMPL_ENC_DEC_ROCM_HIP)
+@pytest.mark.skipif(current_platform.is_rocm(),
+                    reason=STR_NOT_IMPL_ENC_DEC_ROCM_HIP)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("attn_backend", LIST_ENC_DEC_SUPPORTED_BACKENDS)
@@ -837,14 +840,14 @@ def test_e2e_enc_dec_attn(
       attributes for prefill-phase, and (2) an analogous attention metadata
       structure but for decode-phase
     * Test attention steps in the following order
-    
+
         * Encoder attention
         * Prefill self-attention
         * Prefill cross-attention
         * Decode self-attention
         * Decode cross-attention
-        * Besides being reflective of realistic use-cases, this order would 
-          exacerbate any accidental overlap in the self-/cross-attention 
+        * Besides being reflective of realistic use-cases, this order would
+          exacerbate any accidental overlap in the self-/cross-attention
           block tables, which one hopes to avoid
 
 
@@ -864,10 +867,11 @@ def test_e2e_enc_dec_attn(
     to be utilized.
 
     Note on ROCm/HIP: currently encoder/decoder models are not supported on
-    AMD GPUs, therefore this test simply is skipped if is_hip(). 
+    AMD GPUs, therefore this test simply is skipped if
+    current_platform.is_rocm().
 
     Note on metadata: there is a single attention metadata structure shared by
-    all prefill-phase attention operations (encoder, decoder, enc/dec cross), 
+    all prefill-phase attention operations (encoder, decoder, enc/dec cross),
     and a single one shared by all decode-phase attention operations
     (decoder & enc/dec cross.) This is intended to reflect the behavior
     of EncoderDecoderModelRunner, which constructs a single attention metadata
