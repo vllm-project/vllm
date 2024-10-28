@@ -318,7 +318,6 @@ def input_processor_when_multimodal_input_video(ctx: InputContext,
 
     model_config = ctx.model_config
     hf_config = ctx.get_hf_config(LlavaOnevisionConfig)
-    vision_config = hf_config.vision_config
 
     if isinstance(video_data, np.ndarray):
         # Supports both CLIP and Siglip
