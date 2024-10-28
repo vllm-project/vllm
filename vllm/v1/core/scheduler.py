@@ -210,6 +210,7 @@ class Scheduler:
         )
 
         self.finished_req_ids = set()
+        self.kv_cache_manager.async_remove_touched_blocks()
         return scheduler_output
 
     def _make_running_request_data(
