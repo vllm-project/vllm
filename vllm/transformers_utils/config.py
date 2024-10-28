@@ -18,7 +18,8 @@ from vllm.logger import init_logger
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.transformers_utils.configs import (ChatGLMConfig, DbrxConfig,
-                                             EAGLEConfig, ExaoneConfig, H2OVLChatConfig,
+                                             EAGLEConfig, ExaoneConfig,
+                                             H2OVLChatConfig,
                                              InternVLChatConfig, JAISConfig,
                                              MedusaConfig, MllamaConfig,
                                              MLPSpeculatorConfig, MPTConfig,

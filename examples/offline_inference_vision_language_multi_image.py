@@ -106,6 +106,7 @@ def load_phi3v(question: str, image_urls: List[str]) -> ModelRequestData:
         chat_template=None,
     )
 
+
 def load_h2onvl(question: str, image_urls: List[str]) -> ModelRequestData:
     model_name = "h2oai/h2ovl-mississippi-2b"
 
@@ -138,6 +139,7 @@ def load_h2onvl(question: str, image_urls: List[str]) -> ModelRequestData:
         image_data=[fetch_image(url) for url in image_urls],
         chat_template=None,
     )
+
 
 def load_internvl(question: str, image_urls: List[str]) -> ModelRequestData:
     model_name = "OpenGVLab/InternVL2-2B"
@@ -318,7 +320,6 @@ def run_generate(model, question: str, image_urls: List[str]):
     for o in outputs:
         generated_text = o.outputs[0].text
         print(generated_text)
-        
 
 
 def run_chat(model: str, question: str, image_urls: List[str]):
