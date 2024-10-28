@@ -9,8 +9,8 @@ from vllm.multimodal.utils import (rescale_image_size, rescale_video_size,
 from vllm.sequence import SampleLogprobs
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 
-from ....conftest import (VIDEO_ASSETS, HfRunner, PromptImageInput, VllmRunner,
-                          _VideoAssets)
+from ....conftest import (VIDEO_ASSETS, HfRunner, PromptImageInput, PromptVideoInput,
+                          VllmRunner, _VideoAssets)
 from ....utils import large_gpu_test
 from ...utils import check_logprobs_close
 

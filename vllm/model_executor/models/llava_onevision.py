@@ -348,18 +348,18 @@ def input_processor_when_multimodal_input_video(ctx: InputContext,
         tokenizer = cached_get_tokenizer(model_config.tokenizer)
         new_prompt, new_token_ids = repeat_and_pad_placeholder_tokens(
             tokenizer,
-            llm_inputs.get("prompt"),
-            llm_inputs["prompt_token_ids"],
+            inputs.get("prompt"),
+            inputs["prompt_token_ids"],
             placeholder_token_id=hf_config.video_token_index,
             repeat_count=video_feature_size,
         )
-        return LLMInputs(prompt_token_ids=new_token_ids,
-                         prompt=new_prompt,
-                         multi_modal_data=multi_modal_data)
+        return token_inputs(prompt_token_ids=new_token_ids,
+                            prompt=new_prompt,
+                            multi_modal_data=multi_modal_data)
     else:
         raise TypeError(f"Invalid video type: {type(video_data)}")
 
-    msg = f"Unsupported vision config: {type(vision_config)}"
+    msg = f"Unsupported video type: {type(video_data)}"
     raise NotImplementedError(msg)
 
 
@@ -841,6 +841,8 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
                 batch.
             pixel_values_videos: Pixels in each frames for each input videos.
         """
+        # import pdb; pdb.set_trace()
+
         if intermediate_tensors is not None:
             input_ids = None
             inputs_embeds = None
