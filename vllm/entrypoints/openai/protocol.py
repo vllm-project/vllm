@@ -701,9 +701,45 @@ class CompletionRequest(OpenAIBaseModel):
         return data
 
 
-class ChatEmbeddingRequest(OpenAIBaseModel):
-    messages: List[ChatCompletionMessageParam]
+class EmbeddingCompletionRequest(OpenAIBaseModel):
+    # Ordered by official OpenAI API documentation
+    # https://platform.openai.com/docs/api-reference/embeddings
     model: str
+    input: Union[List[int], List[List[int]], str, List[str]]
+    encoding_format: Literal["float", "base64"] = "float"
+    dimensions: Optional[int] = None
+    user: Optional[str] = None
+    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
+
+    # doc: begin-embedding-pooling-params
+    additional_data: Optional[Any] = None
+
+    # doc: end-embedding-pooling-params
+
+    # doc: begin-embedding-extra-params
+    add_special_tokens: bool = Field(
+        default=True,
+        description=(
+            "If true (the default), special tokens (e.g. BOS) will be added to "
+            "the prompt."),
+    )
+    priority: int = Field(
+        default=0,
+        description=(
+            "The priority of the request (lower means earlier handling; "
+            "default: 0). Any priority other than 0 will raise an error "
+            "if the served model does not use priority scheduling."))
+
+    # doc: end-embedding-extra-params
+
+    def to_pooling_params(self):
+        return PoolingParams(additional_data=self.additional_data)
+
+
+class EmbeddingChatRequest(OpenAIBaseModel):
+    model: str
+    messages: List[ChatCompletionMessageParam]
+
     encoding_format: Literal["float", "base64"] = "float"
     dimensions: Optional[int] = None
     user: Optional[str] = None
@@ -711,8 +747,6 @@ class ChatEmbeddingRequest(OpenAIBaseModel):
 
     # doc: begin-chat-embedding-pooling-params
     additional_data: Optional[Any] = None
-
-    # doc: end-chat-embedding-pooling-params
 
     # doc: begin-chat-embedding-extra-params
     add_generation_prompt: bool = Field(
@@ -762,37 +796,20 @@ class ChatEmbeddingRequest(OpenAIBaseModel):
 
     # doc: end-chat-embedding-extra-params
 
-    def to_pooling_params(self):
-        return PoolingParams(additional_data=self.additional_data)
-
-
-class EmbeddingRequest(OpenAIBaseModel):
-    # Ordered by official OpenAI API documentation
-    # https://platform.openai.com/docs/api-reference/embeddings
-    model: str
-    input: Union[List[int], List[List[int]], str, List[str]]
-    encoding_format: Literal["float", "base64"] = "float"
-    dimensions: Optional[int] = None
-    user: Optional[str] = None
-    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
-
-    # doc: begin-embedding-pooling-params
-    additional_data: Optional[Any] = None
-
-    # doc: end-embedding-pooling-params
-
-    # doc: begin-embedding-extra-params
-    priority: int = Field(
-        default=0,
-        description=(
-            "The priority of the request (lower means earlier handling; "
-            "default: 0). Any priority other than 0 will raise an error "
-            "if the served model does not use priority scheduling."))
-
-    # doc: end-embedding-extra-params
+    @model_validator(mode="before")
+    @classmethod
+    def check_generation_prompt(cls, data):
+        if data.get("continue_final_message") and data.get(
+                "add_generation_prompt"):
+            raise ValueError("Cannot set both `continue_final_message` and "
+                             "`add_generation_prompt` to True.")
+        return data
 
     def to_pooling_params(self):
         return PoolingParams(additional_data=self.additional_data)
+
+
+EmbeddingRequest = Union[EmbeddingCompletionRequest, EmbeddingChatRequest]
 
 
 class CompletionLogProbs(OpenAIBaseModel):

@@ -76,11 +76,6 @@ class OpenAIServingTokenization(OpenAIServing):
             conversation, mm_data_future = parse_chat_messages_futures(
                 request.messages, model_config, tokenizer)
 
-            mm_data = await mm_data_future
-            if mm_data:
-                logger.warning(
-                    "Multi-modal inputs are ignored during tokenization")
-
             if isinstance(tokenizer, MistralTokenizer):
                 prompt = apply_mistral_chat_template(
                     tokenizer,
@@ -97,6 +92,11 @@ class OpenAIServingTokenization(OpenAIServing):
                     add_generation_prompt=request.add_generation_prompt,
                     continue_final_message=request.continue_final_message,
                 )
+
+            mm_data = await mm_data_future
+            if mm_data:
+                logger.warning(
+                    "Multi-modal inputs are ignored during tokenization")
         else:
             prompt = request.prompt
 

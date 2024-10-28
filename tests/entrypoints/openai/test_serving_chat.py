@@ -6,8 +6,7 @@ from unittest.mock import MagicMock
 from vllm.config import MultiModalConfig
 from vllm.engine.multiprocessing.client import MQLLMEngineClient
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest
-from vllm.entrypoints.openai.serving_chat.completions import (
-    OpenAIServingChatCompletions)
+from vllm.entrypoints.openai.serving_chat import OpenAIServingChatCompletions
 from vllm.entrypoints.openai.serving_engine import BaseModelPath
 from vllm.transformers_utils.tokenizer import get_tokenizer
 

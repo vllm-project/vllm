@@ -18,8 +18,7 @@ from vllm.entrypoints.openai.protocol import (BatchRequestInput,
                                               ChatCompletionResponse,
                                               EmbeddingResponse, ErrorResponse)
 # yapf: enable
-from vllm.entrypoints.openai.serving_chat.completions import (
-    OpenAIServingChatCompletions)
+from vllm.entrypoints.openai.serving_chat import OpenAIServingChatCompletions
 from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
 from vllm.entrypoints.openai.serving_engine import BaseModelPath
 from vllm.usage.usage_lib import UsageContext

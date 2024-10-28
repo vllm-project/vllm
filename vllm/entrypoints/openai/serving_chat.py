@@ -152,14 +152,10 @@ class OpenAIServingChatCompletions(OpenAIServing):
                     documents=request.documents,
                     **(request.chat_template_kwargs or {}),
                 )
-        except Exception as e:
-            logger.exception("Error in applying chat template from request")
-            return self.create_error_response(str(e))
-
-        try:
+        
             mm_data = await mm_data_future
         except Exception as e:
-            logger.exception("Error in loading multi-modal data")
+            logger.exception("Error in applying chat template from request")
             return self.create_error_response(str(e))
 
         # validation for OpenAI tools

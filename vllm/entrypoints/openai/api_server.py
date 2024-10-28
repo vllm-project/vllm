@@ -48,8 +48,7 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               TokenizeResponse,
                                               UnloadLoraAdapterRequest)
 # yapf: enable
-from vllm.entrypoints.openai.serving_chat.completions import (
-    OpenAIServingChatCompletions)
+from vllm.entrypoints.openai.serving_chat import OpenAIServingChatCompletions
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
 from vllm.entrypoints.openai.serving_engine import BaseModelPath
