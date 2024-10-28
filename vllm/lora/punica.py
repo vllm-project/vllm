@@ -103,10 +103,15 @@ def convert_mapping(
     embedding_indices = index_mapping_indices.copy()
     lora_indices = index_mapping_indices.copy()
     long_lora_offsets: Optional[torch.Tensor] = None
+
+    from vllm.platforms import current_platform
     if long_lora_context:
-        long_lora_offsets = torch.zeros(len(index_mapping_indices),
-                                        device=get_device(),
-                                        dtype=torch.long)
+        if current_platform.is_hpu():
+            long_lora_offsets_list: List[int] = []
+        else:
+            long_lora_offsets = torch.zeros(len(index_mapping_indices),
+                                            device=get_device(),
+                                            dtype=torch.long)
     prompt_mapping: List[int] = [
         lora_index_to_id.index(x) if x > 0 else -1
         for x in mapping.prompt_mapping
@@ -119,10 +124,18 @@ def convert_mapping(
         embedding_indices[i] = lora_idx if index_mapping_indices[i] > 0 else 0
         lora_indices[i] = lora_idx
         if long_lora_context:
-            assert long_lora_offsets is not None
             lora_offset: int = long_lora_context.offsets_by_lora_id.get(
                 index_mapping_indices[i], 0)
-            long_lora_offsets[i] = lora_offset
+            if current_platform.is_hpu():
+                long_lora_offsets_list.append(lora_offset)
+            else:
+                assert long_lora_offsets is not None
+                long_lora_offsets[i] = lora_offset
+
+    if long_lora_context and current_platform.is_hpu():
+        long_lora_offsets = torch.tensor(long_lora_offsets_list,
+                                         device=get_device(),
+                                         dtype=torch.long)
 
     indices_list: List[Union[List[int], torch.Tensor]] = [
         index_mapping_indices,
