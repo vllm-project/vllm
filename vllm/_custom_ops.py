@@ -509,11 +509,51 @@ def cutlass_scaled_mm_azp(a: torch.Tensor,
     return out
 
 
+def cutlass_scaled_test_mm_supports_fp8(cuda_device_capability: int) -> bool:
+    return torch.ops._C.cutlass_scaled_test_mm_supports_fp8(cuda_device_capability)
+
+
+def cutlass_sparsify_and_compress_entry(a: torch.Tensor) \
+    -> Tuple[torch.Tensor, torch.Tensor]:
+    assert (a.dtype is torch.int8 or a.dtype is torch.int8)
+
+    m = a.shape[0]
+    k = a.shape[1]
+    a_compressed = torch.empty((m, k), dtype=a.dtype, device=a.device)
+    e = torch.empty((m, k), dtype=torch.uint8, device=a.device)
+
+    if not (torch.ops._C.cutlass_sparsify_and_compress_entry(a_compressed, e, a)):
+        raise ValueError
+
+    return a_compressed, e
+
+
+def cutlass_scaled_test_mm(a: torch.Tensor,
+                      e: torch.Tensor,
+                      b: torch.Tensor,
+                      scale_a: torch.Tensor,
+                      scale_b: torch.Tensor,
+                      out_dtype: torch.dtype,
+                      bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    assert (b.shape[0] % 16 == 0 and b.shape[1] % 16 == 0)
+    assert (out_dtype is torch.bfloat16 or out_dtype is torch.float16)
+    assert bias is None or bias.shape[0] == b.shape[
+        1] and bias.dtype == out_dtype
+
+    m = a.shape[0]
+    n = b.shape[1]
+    out = torch.empty((m, n), dtype=out_dtype, device=a.device)
+
+    torch.ops._C.cutlass_scaled_test_mm(out, a, e, b, scale_a, scale_b, bias)
+
+    return out
+
+
 def cutlass_semi_structured_mm(a: torch.Tensor,
                       b: torch.Tensor,
                       out_dtype: torch.dtype) -> torch.Tensor:
     assert (b.shape[0] % 16 == 0 and b.shape[1] % 16 == 0)
-    assert (out_dtype is torch.bfloat16 or out_dtype is torch.float16)
+    assert (out_dtype is torch.bfloat16 or out_dtype is torch.float16 or out_dtype is torch.float)
 
     m = a.shape[0]
     n = b.shape[1]

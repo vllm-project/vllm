@@ -116,6 +116,17 @@ void cutlass_scaled_mm_azp(torch::Tensor& out, torch::Tensor const& a,
                            c10::optional<torch::Tensor> const& azp,
                            c10::optional<torch::Tensor> const& bias);
 
+bool cutlass_scaled_test_mm_supports_fp8(int64_t cuda_device_capability);
+
+void cutlass_scaled_test_mm(torch::Tensor& out, torch::Tensor const& a,
+                       torch::Tensor const& e,
+                       torch::Tensor const& b, torch::Tensor const& a_scales,
+                       torch::Tensor const& b_scales,
+                       c10::optional<torch::Tensor> const& bias);
+
+bool cutlass_sparsify_and_compress_entry(torch::Tensor& a_compressed, torch::Tensor& e,
+                                 torch::Tensor const& a);
+
 void cutlass_semi_structured_mm(torch::Tensor& out, torch::Tensor const& a,
                                 torch::Tensor const& b);
 #endif

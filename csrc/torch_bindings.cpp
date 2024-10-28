@@ -264,6 +264,23 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("cutlass_scaled_mm_supports_fp8(int cuda_device_capability) -> bool");
   ops.impl("cutlass_scaled_mm_supports_fp8", &cutlass_scaled_mm_supports_fp8);
 
+  // Test
+  ops.def(
+      "cutlass_scaled_test_mm(Tensor! out, Tensor a,"
+      "                  Tensor e,"
+      "                  Tensor b, Tensor a_scales,"
+      "                  Tensor b_scales, Tensor? bias) -> ()");
+  ops.impl("cutlass_scaled_test_mm", torch::kCUDA, &cutlass_scaled_test_mm);
+
+  // Test
+  ops.def("cutlass_scaled_test_mm_supports_fp8(int cuda_device_capability) -> bool");
+  ops.impl("cutlass_scaled_test_mm_supports_fp8", &cutlass_scaled_test_mm_supports_fp8);
+
+  // Test
+  ops.def("cutlass_sparsify_and_compress_entry(Tensor! a_compressed, Tensor! e,"
+          " Tensor a) -> bool");
+  ops.impl("cutlass_sparsify_and_compress_entry", &cutlass_sparsify_and_compress_entry);
+
   // CUTLASS sparse GEMM, supporting semi-structured sparsity
   ops.def(
       "cutlass_semi_structured_mm(Tensor! out, Tensor a,"

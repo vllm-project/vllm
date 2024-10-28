@@ -23,7 +23,6 @@
 #include "cutlass/epilogue/collective/collective_builder.hpp"
 #include "cutlass/gemm/collective/collective_builder.hpp"
 
-#include "broadcast_load_epilogue_c3x.hpp"
 #include "common.hpp"
 // clang-format on
 
@@ -43,86 +42,139 @@ using namespace cute;
 namespace {
 
 template <typename ElementAB_, typename ElementD_,
-          typename TileShape, typename ClusterShape, typename KernelSchedule,
-          typename EpilogueSchedule>
+          typename TileShape_, typename ClusterShape_, typename KernelSchedule_,
+          typename EpilogueSchedule_>
 struct cutlass_3x_sparse_gemm {
-  using ElementAB = ElementAB_;
-  using ElementD = ElementD_;
-  // using ElementAcc =
-  //     typename std::conditional<std::is_same_v<ElementAB, int8_t>, int32_t,
-  //                               float>::type;
-  using ElementAcc = ElementD;
+//   using ElementAB = ElementAB_;
+//   using ElementD = ElementD_;
+//   // using ElementAcc =
+//   //     typename std::conditional<std::is_same_v<ElementAB, int8_t>, int32_t,
+//   //                               float>::type;
+//   using ElementAcc = ElementD;
 
-  using StrideD = Stride<int64_t, Int<1>, Int<0>>;
-  using ElementC = void;
-  constexpr int AlignmentC  = 128 / cutlass::sizeof_bits<ElementC>::value;
-  using LayoutTagC  = cutlass::layout::ColumnMajor;
-  using StrideC = StrideD;
+//   using StrideD = Stride<int64_t, Int<1>, Int<0>>;
+//   using ElementC = void;
+//   constexpr int AlignmentD  = 128 / cutlass::sizeof_bits<ElementD>::value;
+//   using LayoutTagC  = cutlass::layout::ColumnMajor;
+//   using StrideC = StrideD;
 
-  constexpr int AlignmentAB  = 128 / cutlass::sizeof_bits<ElementAB>::value;
+//   constexpr int AlignmentAB  = 128 / cutlass::sizeof_bits<ElementAB>::value;
 
-  // using CollectiveEpilogue =
-  //     typename cutlass::epilogue::collective::CollectiveBuilder<
-  //         cutlass::arch::Sm90, cutlass::arch::OpClassTensorOp, TileShape,
-  //         ClusterShape, cutlass::epilogue::collective::EpilogueTileAuto,
-  //         ElementAcc, float, ElementC, StrideC, 4, ElementD, StrideD, 4,
-  //         EpilogueSchedule, EVTCompute>::CollectiveOp;
+//   // using CollectiveEpilogue =
+//   //     typename cutlass::epilogue::collective::CollectiveBuilder<
+//   //         cutlass::arch::Sm90, cutlass::arch::OpClassTensorOp, TileShape,
+//   //         ClusterShape, cutlass::epilogue::collective::EpilogueTileAuto,
+//   //         ElementAcc, float, ElementC, StrideC, 4, ElementD, StrideD, 4,
+//   //         EpilogueSchedule, EVTCompute>::CollectiveOp;
   
-  using CollectiveEpilogue = typename cutlass::epilogue::collective::CollectiveBuilder<
+//   using CollectiveEpilogue = typename cutlass::epilogue::collective::CollectiveBuilder<
+//     cutlass::arch::Sm90, cutlass::arch::OpClassTensorOp,
+//     TileShape, ClusterShape,
+//     cutlass::epilogue::collective::EpilogueTileAuto,
+//     ElementAcc, ElementAcc,
+//     ElementC, LayoutTagC, AlignmentD,
+//     ElementD, LayoutTagC, AlignmentD,
+//     EpilogueSchedule
+//   >::CollectiveOp;
+
+//   // static constexpr size_t CEStorageSize =
+//   //     sizeof(typename CollectiveEpilogue::SharedStorage);
+//   // using Stages = typename cutlass::gemm::collective::StageCountAutoCarveout<
+//   //     static_cast<int>(CEStorageSize)>;
+
+//   // using CollectiveMainloop =
+//   //     typename cutlass::gemm::collective::CollectiveBuilder<
+//   //         cutlass::arch::Sm90, cutlass::arch::OpClassTensorOp, 
+//   //         ElementAB, cutlass::layout::RowMajor, 16, 
+//   //         ElementAB, cutlass::layout::ColumnMajor, 16, 
+//   //         ElementAcc, TileShape, ClusterShape,
+//   //         Stages,
+//   //         KernelSchedule>::CollectiveOp;
+
+//   using CollectiveMainloop = typename cutlass::gemm::collective::CollectiveBuilder<
+//     // cutlass::arch::Sm90, cutlass::arch::OpClassSparseTensorOp,
+//     cutlass::arch::Sm90, cutlass::arch::OpClassTensorOp,
+//     ElementAB, cutlass::layout::RowMajor, AlignmentAB,
+//     ElementAB, cutlass::layout::ColumnMajor, AlignmentAB,
+//     ElementAcc,
+//     TileShape, ClusterShape,
+//     cutlass::gemm::collective::StageCountAutoCarveout<
+//       static_cast<int>(sizeof(typename CollectiveEpilogue::SharedStorage))
+//     >,
+//     KernelSchedule
+//   >::CollectiveOp;
+
+//   // using KernelType = enable_sm90_or_later<cutlass::gemm::kernel::GemmUniversal<
+//   //     cute::Shape<int, int, int, int>, CollectiveMainloop, CollectiveEpilogue,
+//   //     cutlass::gemm::PersistentScheduler>>;
+  
+//   using GemmKernel = cutlass::gemm::kernel::GemmUniversal<
+//     cute::Shape<int, int, int, int>,
+//     CollectiveMainloop,
+//     CollectiveEpilogue
+// >;
+
+//   struct GemmKernel : public KernelType {};
+
+  using         ElementA    = float;                                          // Element type for A matrix operand
+using         LayoutA     = cutlass::layout::RowMajor;                      // Layout type for A matrix operand
+// constexpr int AlignmentA  = 128 / cutlass::sizeof_bits<ElementA>::value;    // Memory access granularity/alignment of A matrix in units of elements (up to 16 bytes)
+
+// B matrix configuration
+using         ElementB    = float;                                          // Element type for B matrix operand
+using         LayoutB     = cutlass::layout::ColumnMajor;                   // Layout type for B matrix operand
+// constexpr int AlignmentB  = 128 / cutlass::sizeof_bits<ElementB>::value;    // Memory access granularity/alignment of B matrix in units of elements (up to 16 bytes)
+
+// C/D matrix configuration
+using         ElementC    = float;                                          // Element type for C and D matrix operands
+using         LayoutC     = cutlass::layout::RowMajor;                   // Layout type for C and D matrix operands
+// constexpr int AlignmentC  = 128 / cutlass::sizeof_bits<ElementC>::value;    // Memory access granularity/alignment of C matrix in units of elements (up to 16 bytes)
+
+// Core kernel configurations
+using ElementAccumulator  = float;                                          // Element type for internal accumulation
+using ArchTag             = cutlass::arch::Sm90;                            // Tag indicating the minimum SM that supports the intended feature
+using OperatorClass       = cutlass::arch::OpClassTensorOp;                 // Operator class tag
+using TileShape           = Shape<_128,_128,_32>;                           // Threadblock-level tile size
+using ClusterShape        = Shape<_1,_2,_1>;                                // Shape of the threadblocks in a cluster
+using StageCountType = cutlass::gemm::collective::StageCountAuto;           // Stage count maximized based on the tile size
+using KernelSchedule = cutlass::gemm::collective::KernelScheduleAuto;       // Kernel to launch based on the default setting in the Collective Builder
+
+using CollectiveEpilogue = typename cutlass::epilogue::collective::CollectiveBuilder<
     cutlass::arch::Sm90, cutlass::arch::OpClassTensorOp,
     TileShape, ClusterShape,
     cutlass::epilogue::collective::EpilogueTileAuto,
-    ElementAcc, ElementAcc,
-    ElementC, LayoutTagC, AlignmentC,
-    ElementD, LayoutTagC, AlignmentC,
-    EpilogueSchedule
+    ElementAccumulator, ElementAccumulator,
+    ElementC, LayoutC, 4,
+    ElementC, LayoutC, 4,
+    cutlass::epilogue::collective::EpilogueScheduleAuto
   >::CollectiveOp;
 
-  // static constexpr size_t CEStorageSize =
-  //     sizeof(typename CollectiveEpilogue::SharedStorage);
-  // using Stages = typename cutlass::gemm::collective::StageCountAutoCarveout<
-  //     static_cast<int>(CEStorageSize)>;
-
-  // using CollectiveMainloop =
-  //     typename cutlass::gemm::collective::CollectiveBuilder<
-  //         cutlass::arch::Sm90, cutlass::arch::OpClassTensorOp, 
-  //         ElementAB, cutlass::layout::RowMajor, 16, 
-  //         ElementAB, cutlass::layout::ColumnMajor, 16, 
-  //         ElementAcc, TileShape, ClusterShape,
-  //         Stages,
-  //         KernelSchedule>::CollectiveOp;
-
-  using CollectiveMainloop = typename cutlass::gemm::collective::CollectiveBuilder<
-    // cutlass::arch::Sm90, cutlass::arch::OpClassSparseTensorOp,
-    cutlass::arch::Sm90, cutlass::arch::OpClassTensorOp,
-    ElementAB, cutlass::layout::RowMajor, AlignmentAB,
-    ElementAB, cutlass::layout::ColumnMajor, AlignmentAB,
-    ElementAcc,
+using CollectiveMainloop = typename cutlass::gemm::collective::CollectiveBuilder<
+    ArchTag, OperatorClass,
+    ElementA, LayoutA, 4,
+    ElementB, LayoutB, 4,
+    ElementAccumulator,
     TileShape, ClusterShape,
     cutlass::gemm::collective::StageCountAutoCarveout<
-      static_cast<int>(sizeof(typename CollectiveEpilogue::SharedStorage))
-    >,
-    KernelSchedule
+      static_cast<int>(sizeof(typename CollectiveEpilogue::SharedStorage))>,
+    cutlass::gemm::collective::KernelScheduleAuto
   >::CollectiveOp;
 
-  // using KernelType = enable_sm90_or_later<cutlass::gemm::kernel::GemmUniversal<
-  //     cute::Shape<int, int, int, int>, CollectiveMainloop, CollectiveEpilogue,
-  //     cutlass::gemm::PersistentScheduler>>;
-  
-  using GemmKernel = cutlass::gemm::kernel::GemmUniversal<
-    cute::Shape<int, int, int, int>,
+using GemmKernel = cutlass::gemm::kernel::GemmUniversal<
+    Shape<int,int,int>, // Indicates ProblemShape
     CollectiveMainloop,
     CollectiveEpilogue
 >;
 
-  struct GemmKernel : public KernelType {};
+using Gemm = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
+
 };
 
 template <typename Gemm>
 void cutlass_gemm_caller(torch::Tensor& out, torch::Tensor const& a,
                          torch::Tensor const& b) {
-  using ElementAB = typename Gemm::ElementAB;
-  using ElementD = typename Gemm::ElementD;
+  using ElementAB = typename Gemm::ElementA;
+  using ElementD = typename Gemm::ElementC;
 
   int32_t m = a.size(0);
   int32_t n = b.size(1);
@@ -134,14 +186,15 @@ void cutlass_gemm_caller(torch::Tensor& out, torch::Tensor const& a,
 
   using StrideA = Stride<int64_t, Int<1>, int64_t>;
   using StrideB = Stride<int64_t, Int<1>, int64_t>;
-  using StrideC = typename Gemm::StrideC;
+  using StrideC = Stride<int64_t, Int<1>, Int<0>>;
 
   StrideA a_stride{lda, Int<1>{}, 0};
   StrideB b_stride{ldb, Int<1>{}, 0};
   StrideC c_stride{ldc, Int<1>{}, Int<0>{}};
 
   using GemmKernel = typename Gemm::GemmKernel;
-  typename GemmKernel::ProblemShape prob_shape{m, n, k, 1};
+  // typename GemmKernel::ProblemShape prob_shape{m, n, k, 1};
+  typename GemmKernel::ProblemShape prob_shape{m, n, k};
 
   auto a_ptr = static_cast<ElementAB*>(a.data_ptr());
   auto b_ptr = static_cast<ElementAB*>(b.data_ptr());
@@ -149,13 +202,9 @@ void cutlass_gemm_caller(torch::Tensor& out, torch::Tensor const& a,
                                                        b_stride};
 
   auto c_ptr = static_cast<ElementD*>(out.data_ptr());
-  // typename GemmKernel::EpilogueArguments epilogue_args{
-  //     Gemm::Epilogue::prepare_args(
-  //         std::forward<EpilogueArgs>(epilogue_params)...),
-  //     c_ptr, c_stride, c_ptr, c_stride};
 
   typename GemmKernel::Arguments args{cutlass::gemm::GemmUniversalMode::kGemm,
-                                      prob_shape, mainloop_args, epilogue_args};
+                                      prob_shape, mainloop_args};
 
   // Launch the CUTLASS GEMM kernel.
   using GemmOp = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
@@ -164,7 +213,7 @@ void cutlass_gemm_caller(torch::Tensor& out, torch::Tensor const& a,
 
   size_t workspace_size = gemm_op.get_workspace_size(args);
   auto const workspace_options =
-      torch::TensorOptions().dtype(torch::kUInt8).device(a.device());
+      torch::TensorOptions().dtype(torch::kFloat32).device(a.device());
   auto workspace = torch::empty(workspace_size, workspace_options);
 
   auto stream = at::cuda::getCurrentCUDAStream(a.get_device());
@@ -174,49 +223,37 @@ void cutlass_gemm_caller(torch::Tensor& out, torch::Tensor const& a,
 }
 
 template <typename InType, typename OutType>
-struct sm90_fp8_config_default {
+struct sm90_config_default {
   // M in (128, inf)
-  static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
-  using KernelSchedule =
-      cutlass::gemm::KernelTmaWarpSpecialized;
-  using EpilogueSchedule = cutlass::epilogue::TmaWarpSpecialized;
-  using TileShape = Shape<_128, _128, _128>;
-  using ClusterShape = Shape<_1, _2, _1>;
+  // using KernelSchedule =
+  //     cutlass::gemm::KernelTmaWarpSpecialized;
+  // using EpilogueSchedule = cutlass::epilogue::TmaWarpSpecialized;
+  using TileShape           = Shape<_128,_128,_32>;                           // Threadblock-level tile size
+using ClusterShape        = Shape<_1,_2,_1>;
   using Cutlass3xGemm =
-      cutlass_3x_sparse_gemm<InType, OutType, TileShape, ClusterShape,
-                      KernelSchedule, EpilogueSchedule>;
+      cutlass_3x_sparse_gemm<float, float, TileShape, ClusterShape,
+                      cutlass::gemm::collective::KernelScheduleAuto,
+                      cutlass::epilogue::collective::EpilogueScheduleAuto>;
 };
 
 }  // namespace
 
 template <typename InType, typename OutType>
-void cutlass_gemm_sm90_fp8_dispatch(torch::Tensor& out, torch::Tensor const& a,
+void cutlass_gemm_sm90_dispatch(torch::Tensor& out, torch::Tensor const& a,
                                     torch::Tensor const& b) {
-  static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
-  TORCH_CHECK(a.dtype() == torch::kFloat8_e4m3fn);
-  TORCH_CHECK(b.dtype() == torch::kFloat8_e4m3fn);
-
   using Cutlass3xGemmDefault =
-      typename sm90_fp8_config_default<InType, OutType>::Cutlass3xGemm;
+      typename sm90_config_default<InType, OutType>::Cutlass3xGemm;
 
   return cutlass_gemm_caller<Cutlass3xGemmDefault>(out, a, b);
 }
 
 void cutlass_semi_structured_mm_sm90(torch::Tensor& out, torch::Tensor const& a,
                                      torch::Tensor const& b) {
-  TORCH_CHECK(a.dtype() == torch::kFloat8_e4m3fn);
-  TORCH_CHECK(b.dtype() == torch::kFloat8_e4m3fn);
 
-  if (out.dtype() == torch::kBFloat16) {
-      return cutlass_gemm_sm90_fp8_dispatch<cutlass::float_e4m3_t,
-                                          cutlass::bfloat16_t>(
-          out, a, b);
-  } else {
-      TORCH_CHECK(out.dtype() == torch::kFloat16);
-      return cutlass_gemm_sm90_fp8_dispatch<cutlass::float_e4m3_t,
-                                          cutlass::half_t>(
-          out, a, b);
-  }
+  TORCH_CHECK(out.dtype() == torch::kFloat32);
+  return cutlass_gemm_sm90_dispatch<float,
+                                      float>(
+      out, a, b);
   // TODO: Add other data types
 }
 

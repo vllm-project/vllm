@@ -5,13 +5,10 @@
 
 #if defined ENABLE_SCALED_MM_C3X && ENABLE_SCALED_MM_C3X
 void cutlass_semi_structured_mm_sm90(torch::Tensor& c, torch::Tensor const& a,
-                            torch::Tensor const& b,
-                            torch::Tensor const& a_scales,
-                            torch::Tensor const& b_scales,
-                            c10::optional<torch::Tensor> const& bias);
+                            torch::Tensor const& b);
 #endif
 
-int32_t get_sm_version_num() {
+int32_t get_sm_version_number() {
   int32_t major_capability, minor_capability;
   cudaDeviceGetAttribute(&major_capability, cudaDevAttrComputeCapabilityMajor,
                          0);
@@ -33,18 +30,19 @@ void cutlass_semi_structured_mm(torch::Tensor& c, torch::Tensor const& a,
   TORCH_CHECK(b.stride(0) == 1);                      // Column-major
   TORCH_CHECK(c.stride(0) % 16 == 0 &&
               b.stride(1) % 16 == 0);  // 16 Byte Alignment
+  TORCH_CHECK(a.is_contiguous() && b.is_contiguous());
 
   at::cuda::OptionalCUDAGuard const device_guard(device_of(a));
-  int32_t version_num = get_sm_version_num();
+  int32_t version_num = get_sm_version_number();
   // Hopper
 
   // TODO: Guard against compilation issues for sm90 kernels
-// #if defined ENABLE_SCALED_MM_C3X && ENABLE_SCALED_MM_C3X
+#if defined ENABLE_SCALED_MM_C3X && ENABLE_SCALED_MM_C3X
   if (version_num >= 90) {
-    cutlass_semi_structured_mm_sm90(c, a, b, a_scales, b_scales, bias);
+    cutlass_semi_structured_mm_sm90(c, a, b);
     return;
   }
-// #endif
+#endif
 
   TORCH_CHECK_NOT_IMPLEMENTED(
       false,
