@@ -1,3 +1,4 @@
+import asyncio
 from dataclasses import dataclass
 from typing import List, Optional, Union
 
@@ -5,6 +6,7 @@ import msgspec
 
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import RequestOutputKind, SamplingParams
+from vllm.outputs import RequestOutput
 
 LLM_ENGINE_CORE_READY_STR = "READY"
 
@@ -19,12 +21,15 @@ class DetokenizerRequest:
     spaces_between_special_tokens: bool
     output_kind: RequestOutputKind
 
+    # Queue for streaming outputs to clients.
+    output_queue: Optional[asyncio.Queue[RequestOutput]] = None
+
 
 class EngineCoreRequest(msgspec.Struct):
 
     # NOTE: prompt and prompt_token_ids should be DecoderOnlyInput,
-    # but this is not playing well with msgspec due to circular
-    # imports and weird typing we have going on in data.py
+    # but this object is currently not playing well with msgspec 
+    # due to circular imports and typing we have in data.py
 
     request_id: str
     prompt: Optional[str]

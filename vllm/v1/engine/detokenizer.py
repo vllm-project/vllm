@@ -1,3 +1,4 @@
+import asyncio
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
@@ -32,6 +33,9 @@ class DetokenizerRequestState:
     # Request output (Cached + updated incrementally)
     request_output: RequestOutput
 
+    # Queue for streaming outputs to clients in async mode.
+    output_queue: Optional[asyncio.Queue[RequestOutput]] = None
+
     @classmethod
     def from_new_request(cls, tokenizer: AnyTokenizer,
                          request: DetokenizerRequest):
@@ -59,7 +63,8 @@ class DetokenizerRequestState:
             spaces_between_special_tokens=request.
             spaces_between_special_tokens,
             output_kind=request.output_kind,
-            request_output=request_output)
+            request_output=request_output,
+            output_queue=request.output_queue)
 
     @staticmethod
     def _initialize_request_output(
@@ -95,11 +100,15 @@ class DetokenizerRequestState:
 
 class Detokenizer:
 
-    def __init__(self, tokenizer_name: str):
+    def __init__(self, tokenizer_name: str, async_mode: bool = False):
         self.tokenizer = get_tokenizer(tokenizer_name)
+        self.async_mode = async_mode
 
         # Request id -> DetokenizerRequestState
         self.request_states: Dict[str, DetokenizerRequestState] = {}
+
+    def is_request_active(self, request_id: str):
+        return request_id in self.request_states
 
     def get_num_unfinished_requests(self):
         return len(self.request_states)
@@ -107,20 +116,22 @@ class Detokenizer:
     def has_unfinished_requests(self) -> bool:
         return len(self.request_states) > 0
 
-    def add_request(self, request: DetokenizerRequest) -> None:
+    def add_request(self, request: DetokenizerRequest):
         """Add new request to the Detokenizer."""
 
         assert (request.request_id not in self.request_states)
+        assert ((self.async_mode and request.output_queue is not None) or
+                (not self.async_mode and request.output_queue is None))
 
         request_state = DetokenizerRequestState.from_new_request(
             self.tokenizer, request)
         self.request_states[request.request_id] = request_state
 
     def step(
-            self, encore_core_outputs: List[EngineCoreOutput]
+        self, encore_core_outputs: List[EngineCoreOutput]
     ) -> List[RequestOutput]:
-        """Update the detokenizer state with the new tokens from EngineCore."""
-
+        """Update state and request the RequestOutputs to the LLMEngine."""
+        
         request_outputs: List[RequestOutput] = []
         for engine_core_output in encore_core_outputs:
             request_id = engine_core_output.request_id
@@ -143,6 +154,37 @@ class Detokenizer:
 
         # Send RequestOutputs to EngineClient.
         return request_outputs
+
+    def step_async(
+        self, encore_core_outputs: List[EngineCoreOutput]
+    ) -> None:
+        """Update state and put the RequestOutput in the per request queues."""
+        
+        request_outputs: List[RequestOutput] = []
+        for engine_core_output in encore_core_outputs:
+            request_id = engine_core_output.request_id
+            request_state = self.request_states[request_id]
+
+            # Detokenize and update state.
+            self._update_request_state(
+                tokenizer=self.tokenizer,
+                request_state=request_state,
+                new_token_ids=engine_core_output.new_token_ids,
+                finished=engine_core_output.finished,
+                finish_reason=engine_core_output.finish_reason,
+                stop_reason=engine_core_output.stop_reason,
+            )
+
+            # Put the RequestOutput into the per request output queue.
+            assert request_state.output_queue is not None
+            # TODO: is caching RequestOutput sound? What happens if the 
+            # reader from the stream falls behind the LLMEngine? Won't the 
+            # object in the queue get mutated?
+            request_state.output_queue.put_nowait(request_state.request_output)
+
+            # Free completed requests.
+            if engine_core_output.finished:
+                self._free(request_id)
 
     def _free(self, request_id: str) -> None:
         """Remove the request from the RequestState tracker."""

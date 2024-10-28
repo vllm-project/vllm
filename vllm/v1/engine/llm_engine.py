@@ -4,6 +4,7 @@ from typing import (Any, Dict, Iterable, List, Mapping, Optional, Tuple, Type,
 
 import msgspec
 import zmq
+import zmq.asyncio
 
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
                          EngineConfig, LoadConfig, LoRAConfig, ModelConfig,
@@ -57,6 +58,7 @@ class LLMEngine:
         stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
         input_registry: InputRegistry = INPUT_REGISTRY,
         use_cached_outputs: bool = False,
+        use_async_sockets: bool = False,
     ) -> None:
         # Override the configs for V1.
         # FIXME
@@ -153,7 +155,11 @@ class LLMEngine:
         self.decoder = msgspec.msgpack.Decoder(EngineCoreOutputs)
 
         # IPC path setup
-        self.ctx = zmq.Context()  # type: ignore[attr-defined]
+        if use_async_sockets:
+            import zmq.asyncio
+            self.ctx = zmq.asyncio.Context()  # type: ignore[attr-defined]
+        else:
+            self.ctx = zmq.Context()  # type: ignore[attr-defined]
         from_core_ipc_path = get_open_zmq_ipc_path()
         to_core_ipc_path = get_open_zmq_ipc_path()
         core_ready_ipc_path = get_open_zmq_ipc_path()
@@ -269,28 +275,11 @@ class LLMEngine:
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
     ) -> None:
-        """
-        Add new request to the LLMEngine, in 3 steps:
-            1) Processing the raw inputs
-            2) Adding the request to the Detokenizer (running in this process)
-            3) Adding the request to the EngineCore (running in other process)
-        """
 
-        # TODO(woosuk): Support embedding mode.
-        # TODO(woosuk): Check max_logprobs
-        # TODO(woosuk): Support encoder-decoder models.
-
-        if lora_request is not None and not self.lora_config:
-            raise ValueError(f"Got lora_request {lora_request} but LoRA is "
-                             "not enabled!")
-        if arrival_time is None:
-            arrival_time = time.time()
-        assert priority == 0, "vLLM V1 does not support priority at the moment."
-
-        # 1) Process the inputs into the raw data needed for a request.
-        detokenizer_request, engine_core_request = self._make_requests(
+        # 1) Process raw inputs into the request.
+        detokenizer_request, engine_core_request = self._process_inputs(
             request_id, prompt, params, arrival_time, lora_request,
-            prompt_adapter_request)
+            trace_headers, prompt_adapter_request, priority)
 
         # 2) Add the request to Detokenizer (this process).
         self.detokenizer.add_request(detokenizer_request)
@@ -336,15 +325,29 @@ class LLMEngine:
         # self.model_executor.check_health()
         # TODO: send health check to EngineCore.
 
-    def _make_requests(
+    def _process_inputs(
         self,
         request_id: str,
         prompt: PromptType,
         params: Union[SamplingParams, PoolingParams],
         arrival_time: float,
         lora_request: Optional[LoRARequest] = None,
-        prompt_adapter_request: Optional[PromptAdapterRequest] = None
+        trace_headers: Optional[Mapping[str, str]] = None,
+        prompt_adapter_request: Optional[PromptAdapterRequest] = None,
+        priority: int = 0,
     ) -> Tuple[DetokenizerRequest, EngineCoreRequest]:
+
+        # TODO(woosuk): Support embedding mode.
+        # TODO(woosuk): Check max_logprobs
+        # TODO(woosuk): Support encoder-decoder models.
+
+        if lora_request is not None and not self.lora_config:
+            raise ValueError(f"Got lora_request {lora_request} but LoRA is "
+                             "not enabled!")
+        if arrival_time is None:
+            arrival_time = time.time()
+        assert priority == 0, "vLLM V1 does not support priority at the moment."
+        assert trace_headers is None, "vLLM V1 does not support tracing yet."
 
         # Process inputs.
         preprocessed_inputs = self.input_preprocessor.preprocess(
