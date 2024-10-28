@@ -317,10 +317,27 @@ def get_pooling_config(model, revision='main', token: Optional[str] = None):
                                            token)
         pooling_type_name = next(
             (item for item, val in pooling_dict.items() if val is True), None)
+        
+        pooling_type_name = get_pooling_config_name(pooling_type_name)
 
         return {"pooling_type": pooling_type_name, "normalize": normalize}
 
     return None
+
+
+def get_pooling_config_name(pooling_name: str):
+    if "pooling_mode_" in pooling_name:
+        pooling_name = pooling_name.replace("pooling_mode_", "")
+
+    if "_" in pooling_name:
+        pooling_name = pooling_name.split("_")[0]
+
+    if "lasttoken" in pooling_name:
+        pooling_name = "last"
+
+    pooling_type_name = pooling_name.upper()
+    
+    return pooling_type_name
 
 
 def get_sentence_transformer_tokenizer_config(model,

@@ -421,8 +421,11 @@ class ModelConfig:
             self.enforce_eager = True
 
     def get_pooling_type(self, pooling_type_name: str) -> PoolingType:
-        mapping = {i.name: i for i in PoolingType}
-        return mapping[pooling_type_name.strip().upper()]
+        pooling_types = {i.name: i for i in PoolingType}
+        pooling_type = pooling_types[pooling_type_name]
+        if pooling_type:
+            return PoolingType(pooling_type)
+        return None
 
     def get_pooling_config(
             self, pooling_type_arg: Optional[str],
@@ -433,6 +436,11 @@ class ModelConfig:
         if pooling_config is not None:
             pooling_type = pooling_config["pooling_type"]
             normalize = pooling_config["normalize"]
+            if not pooling_type_arg and not normalize_arg:
+                return PoolingConfig(
+                    pooling_type=self.get_pooling_type(pooling_type),
+                    normalize=normalize
+                )
         if pooling_type_arg:
             pooling_type = pooling_type_arg
         if normalize_arg:
