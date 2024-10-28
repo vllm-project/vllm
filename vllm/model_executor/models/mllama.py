@@ -1002,6 +1002,7 @@ class MllamaForCausalLM(nn.Module):
             org_num_embeddings=config.vocab_size,
             padding_size=DEFAULT_VOCAB_PADDING_SIZE,
             quant_config=quant_config,
+            prefix=f"{prefix}.lm_head",
         )
 
     def forward(

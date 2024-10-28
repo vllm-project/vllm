@@ -401,10 +401,16 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         # Initialize the vision tower only up to the required feature layer
         self.vision_tower = init_vision_tower_for_llava(
-            config, quant_config, require_post_norm=False)
+            config,
+            quant_config,
+            require_post_norm=False,
+            prefix="vision_tower")
         self.multi_modal_projector = LlavaOnevisionMultiModalProjector(config)
         self.language_model = init_vllm_registered_model(
-            config.text_config, cache_config, quant_config)
+            config.text_config,
+            cache_config,
+            quant_config,
+            prefix="language_model")
         self.image_newline = nn.Parameter(
             torch.empty(config.text_config.hidden_size))
 
