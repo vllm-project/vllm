@@ -1,3 +1,4 @@
+import contextlib
 from collections import defaultdict, deque
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -69,7 +70,7 @@ class KVCacheManager:
         # [Prefix caching] The free block list ordered by block ID in the
         # beginning. However, when a block is allocated and then freed, it
         # will be added back with the eviction order:
-        # 1. The least recently used block is at the front
+        # 1. The least recent used block is at the front (LRU).
         # 2. If two blocks have the same last accessed time (allocated by the
         #    same sequence), the one with more hash tokens (the tail of a block
         #    chain) is at the front.
@@ -80,8 +81,10 @@ class KVCacheManager:
         # due to prefix caching. If a block in free block list is touched
         # by a request, we do not remove it immediately from free_block_list
         # due to O(n) removal cost. Instead, we remove ref_cnt>0 blocks when
-        # allocating new blocks. That's why we need to maintain
-        # lazy_remove_block_ids and num_free_blocks counter separately.
+        # 1. allocate new blocks in the same batch, or
+        # 2. finish scheduling a step and call async_remove_touched_blocks.
+        # That's why we need to maintain lazy_remove_block_ids and
+        # num_free_blocks counter separately.
         #
         # [No prefix caching] The free block list is simply in the order
         # of last accessed time.
@@ -120,7 +123,7 @@ class KVCacheManager:
             A list of block IDs that are computed for the request.
         """
         if not self.enable_caching:
-            # No prefix caching.
+            # Prefix caching is disabled.
             return []
 
         computed_block_ids = []
@@ -158,10 +161,17 @@ class KVCacheManager:
                                    self.block_size)
         req_block_ids = self.req_to_block_ids[request.request_id]
 
+        num_new_blocks = num_required_blocks - len(req_block_ids)
+        if num_new_blocks > self.num_free_blocks:
+            # Need to allocate new blocks due to insufficient pre-allocated
+            # slots, but we cannot allocate new blocks due to the limit.
+            return None
+
         # Assign token IDs to already allocated blocks.
         new_token_ids = None
         prev_block_id = None
         if self.enable_caching:
+            # Figure out the token IDs to add to the blocks.
             if request.num_computed_tokens < request.num_prompt_tokens:
                 # (Chunked) Prefill.
                 new_token_ids = request.prompt_token_ids[
@@ -175,6 +185,8 @@ class KVCacheManager:
                     num_computed_output_tokens:num_computed_output_tokens +
                     num_tokens]
 
+            # Find the last full block index.
+            # TODO: This may be optimized by calculating the computed tokens.
             last_full_block_idx = len(req_block_ids) - 1
             while (last_full_block_idx >= 0 and self.block_pool[
                     req_block_ids[last_full_block_idx]].block_hash is None):
@@ -190,20 +202,16 @@ class KVCacheManager:
             new_token_ids = new_token_ids[token_id_idx:]
             prev_block_id = req_block_ids[-1]
 
+        # No new block is needed. When caching is enabled, we make sure
+        # token_id_idx is equal to len(new_token_ids), meaning that all tokens
+        # are added to allocated blocks.
         if num_required_blocks <= len(req_block_ids):
-            # No new block is needed. We caching is enabled,
-            # then token_id_idx must be equal to len(new_token_ids),
-            # meaning that all tokens are added to allocated blocks.
             assert not self.enable_caching or token_id_idx == num_tokens, \
                     f"{token_id_idx=} != {num_tokens=}"
             return []
 
-        num_new_blocks = num_required_blocks - len(req_block_ids)
-        if num_new_blocks > self.num_free_blocks:
-            # Cannot allocate new blocks.
-            return None
-
-        # Allocate new blocks and add token IDs to them if caching is enabled.
+        # Allocate new blocks considering preallocated blocks, and
+        # add token IDs to them if caching is enabled.
         num_new_blocks = min(num_new_blocks + self.num_preallocate_blocks,
                              self.num_free_blocks)
         new_blocks = self._get_new_blocks(num_new_blocks, new_token_ids,
@@ -255,7 +263,7 @@ class KVCacheManager:
                     f"#prompt_tokens={len(request.prompt_token_ids)} < "
                     f"#computed_tokens={num_computed_tokens}")
 
-            # Touch the computed blocks to make sure they are not evicted.
+            # Touch the computed blocks to make sure they won't be evicted.
             self._lazy_touch(computed_block_ids)
 
             # Get the previous block ID to construct the block chain.
@@ -285,6 +293,7 @@ class KVCacheManager:
         if self.enable_caching:
             # Make sure async tasks (remove touched blocks) are finished.
             self._wait_for_removing_touched_blocks()
+            assert not self.lazy_remove_block_ids
 
             # Free blocks in reverse order so that the tail blocks are
             # freed first.
@@ -303,17 +312,16 @@ class KVCacheManager:
     def async_remove_touched_blocks(self) -> None:
         """Asynchronously remove the touched blocks from the free block list.
         This function should be called at the end of a scheduling step, so that
-        the costly operation of removing the touched blocks is done in parallel
+        costly operations of removing the touched blocks are done in parallel
         with the model forward pass.
         """
 
         def _sync_remove_touched_blocks():
             for block_id in self.lazy_remove_block_ids:
-                try:
+                # The block may have been removed during allocate_slots
+                # so suppress the element not found error.
+                with contextlib.suppress(ValueError):
                     self.free_block_queue.remove(self.block_pool[block_id])
-                except ValueError:
-                    # The block may have been removed during allocate_slots.
-                    pass
             self.lazy_remove_block_ids.clear()
 
         if self.lazy_remove_block_ids:
@@ -322,7 +330,8 @@ class KVCacheManager:
                 _sync_remove_touched_blocks)
 
     def _wait_for_removing_touched_blocks(self) -> None:
-        """Wait for the asynchronous task to finish."""
+        """Wait for the asynchronous task to finish if there are
+        a task on the fly."""
         if self._async_touch_task is not None:
             self._async_touch_task.result()
             self._async_touch_task = None
@@ -357,8 +366,9 @@ class KVCacheManager:
         while idx < num_blocks:
             curr_block = self.free_block_queue.popleft()
             # The block has been allocated by another request. This happens
-            # when another request touches (cache hit) the block before it
-            # is evicted.
+            # when another request *in the same batch* touches (cache hit)
+            # the block before calling async_remove_touched_blocks.
+            # In this case, this block should also in lazy_remove_block_ids.
             if curr_block.ref_cnt > 0:
                 continue
 
@@ -425,10 +435,11 @@ class KVCacheManager:
 
     def _lazy_touch(self, block_ids: List[int]) -> None:
         """Touch a block manes to remove it from the free block list
-        so that it will not be evicted. This happens when the block is
-        freed but has not been evicted yet, and then it is going to be
-        reused by another request. "Lazy" touch means that we do not remove
+        so that it will not be evicted. "Lazy" touch means that we do not remove
         the block from the free block list immediately to avoid O(n) cost.
+        The blocks will be removed from the free block list when
+        1. allocate new blocks in the same batch, or
+        2. finish scheduling a step and call async_remove_touched_blocks.
 
         Args:
             block_id: The ID of the block to touch.
