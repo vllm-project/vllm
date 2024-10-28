@@ -212,11 +212,7 @@ def dummy_data_for_llava_onevision(ctx: InputContext, seq_len: int,
     hf_config = ctx.get_hf_config(LlavaOnevisionConfig)
     vision_config = hf_config.vision_config
 
-    # TODO: support multiple videos
     num_videos = mm_counts["video"]
-    if num_videos > _MAX_NUM_VIDEOS:
-        raise NotImplementedError(
-            f"Only {_MAX_NUM_VIDEOS} videos are supported")
 
     # TODO: support configuring the number of frames
     num_frames = _MAX_FRAMES_PER_VIDEO
