@@ -42,6 +42,7 @@ from vllm.model_executor.layers.pooler import Pooler, PoolingType
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     get_compressed_tensors_cache_scale)
+from vllm.model_executor.layers.quantization.hqq_marlin import HQQMarlinConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -309,6 +310,9 @@ class LlamaModel(nn.Module):
         else:
             self.norm = PPMissingLayer()
 
+        self.is_hqq = (quant_config is not None
+                       and isinstance(quant_config, HQQMarlinConfig))
+
         self.make_empty_intermediate_tensors = (
             make_empty_intermediate_tensors_factory(
                 ["hidden_states", "residual"], config.hidden_size))
@@ -360,6 +364,19 @@ class LlamaModel(nn.Module):
             (".gate_up_proj", ".gate_proj", 0),
             (".gate_up_proj", ".up_proj", 1),
         ]
+
+        # unpack function from https://github.com/mobiusml/hqq
+        def unpack_4bit_u8(
+                W_q: torch.Tensor,
+                dtype=torch.uint8) -> torch.Tensor:  # uint8/2 > uint8
+            step = W_q.shape[0]
+            tmp = torch.empty([2 * step, W_q.shape[1]],
+                              dtype=dtype,
+                              device=W_q.device)
+            tmp[:step] = (W_q & 0b11110000) >> 4
+            tmp[step:] = W_q & 0b00001111
+            return tmp
+
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
@@ -388,9 +405,29 @@ class LlamaModel(nn.Module):
                 if is_pp_missing_parameter(name, self):
                     continue
 
+                # TODO should input/output dim in hqq_marlin.py depend on this?
+                ignore_hqq = (".axis", ".channel_wise", ".compute_dtype",
+                              ".encoded_state_dict", ".group_size", ".nbits",
+                              ".offload_meta", ".optimize", ".packing",
+                              ".quant_scale", ".quant_zero", ".round_zero",
+                              ".shape", ".stores_quant_config",
+                              ".unpack_view_dtype", ".view_as_float")
+                if name.endswith(ignore_hqq) and name not in params_dict:
+                    continue
+
                 param = params_dict[name]
                 weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
+                if self.is_hqq and name.endswith(".W_q"):
+                    weight_loader(
+                        param,
+                        unpack_4bit_u8(loaded_weight).reshape(
+                            -1, param.shape[1]), shard_id)
+                elif self.is_hqq and name.endswith((".scale", ".zero")):
+                    weight_loader(param,
+                                  loaded_weight.reshape(-1, param.shape[1]),
+                                  shard_id)
+                else:
+                    weight_loader(param, loaded_weight, shard_id)
 
                 break
             else:
@@ -405,10 +442,29 @@ class LlamaModel(nn.Module):
                 if is_pp_missing_parameter(name, self):
                     continue
 
+                # TODO should input/output dim in hqq_marlin.py depend on this?
+                ignore_hqq = (".axis", ".channel_wise", ".compute_dtype",
+                              ".encoded_state_dict", ".group_size", ".nbits",
+                              ".offload_meta", ".optimize", ".packing",
+                              ".quant_scale", ".quant_zero", ".round_zero",
+                              ".shape", ".stores_quant_config",
+                              ".unpack_view_dtype", ".view_as_float")
+                if name.endswith(ignore_hqq) and name not in params_dict:
+                    continue
+
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
-                weight_loader(param, loaded_weight)
+                if self.is_hqq and name.endswith(".W_q"):
+                    weight_loader(
+                        param,
+                        unpack_4bit_u8(loaded_weight).reshape(
+                            -1, param.shape[1]))
+                elif self.is_hqq and name.endswith((".scale", ".zero")):
+                    weight_loader(param,
+                                  loaded_weight.reshape(-1, param.shape[1]))
+                else:
+                    weight_loader(param, loaded_weight)
 
     # If this function is called, it should always initialize KV cache scale
     # factors (or else raise an exception). Thus, handled exceptions should

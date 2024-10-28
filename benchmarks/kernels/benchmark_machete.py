@@ -156,7 +156,8 @@ def bench(atype: torch.dtype,
                                      size_m=a.shape[0],
                                      size_n=w_ref.shape[1],
                                      size_k=w_ref.shape[0],
-                                     is_k_full=True))))
+                                     is_k_full=True,
+                                     is_zp_float=False))))
 
     # machete
     timers.append(
