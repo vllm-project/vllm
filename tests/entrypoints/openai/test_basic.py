@@ -68,7 +68,6 @@ def server(server_args):
 
 @pytest_asyncio.fixture
 async def client(server):
-    server.url_for()
     async with server.get_async_client() as async_client:
         yield async_client
 
