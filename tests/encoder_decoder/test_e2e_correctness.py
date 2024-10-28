@@ -29,7 +29,7 @@ def vllm_to_hf_output(
 
 
 @pytest.mark.parametrize("model", ["facebook/bart-large-cnn"])
-@pytest.mark.parametrize("dtype", ["bfloat16"])
+@pytest.mark.parametrize("dtype", ["bfloat16", "float"])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [5])
 @pytest.mark.parametrize("decoder_prompt_type", list(DecoderPromptType))

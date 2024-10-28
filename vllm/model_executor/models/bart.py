@@ -184,9 +184,6 @@ class BartEncoderAttention(nn.Module):
 
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        print('Enc qkv_shape ' + str(qkv.shape))
-        print('Enc q_shape ' + str(q.shape))
-        print('Enc hidden_states_shape ' + str(hidden_states.shape))
 
         attn_output = self.attn(q,
                                 k,
@@ -269,10 +266,6 @@ class BartDecoderSelfAttention(nn.Module):
 
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        print('Dec qkv_shape ' + str(qkv.shape))
-        print('Dec q_shape ' + str(q.shape))
-        print('Dec hidden_states_shape ' + str(hidden_states.shape))
-
 
         attn_output = self.attn(q,
                                 k,

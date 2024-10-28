@@ -532,8 +532,6 @@ class FlashAttentionMetadataBuilder(
                      dtype=query_start_loc.dtype,
                      out=query_start_loc[1:])
 
-        print('build.seq_start_loc ' + str(seq_start_loc))
-
         return FlashAttentionMetadata(
             num_prefills=self.num_prefills,
             slot_mapping=slot_mapping_tensor,
@@ -677,7 +675,7 @@ class FlashAttentionImpl(AttentionImpl):
         return output
 
 
-def _get_query_key_seq_metadata(
+def _get_key_query_seq_metadata(
     attn_metadata,
     is_prompt: bool,
     attn_type: AttentionType,
@@ -714,6 +712,43 @@ def _get_query_key_seq_metadata(
     else:
         raise AttributeError(f"Invalid attention type {str(attn_type)}")
 
+def _get_num_prefill_encode_decode_tokens(
+    attn_metadata: FlashAttentionMetadata,
+    attn_type: AttentionType,
+) -> tuple[int, int, int]:
+    if attn_type == AttentionType.ENCODER:
+        # Encoder attention - chunked prefill is not applicable;
+        # derive token-count from query shape & and treat them
+        # as 100% prefill tokens
+        assert attn_metadata.num_encoder_tokens is not None
+        num_prefill_tokens = attn_metadata.num_encoder_tokens
+        num_encoder_tokens = attn_metadata.num_encoder_tokens
+        num_decode_tokens = 0
+    elif attn_type == AttentionType.ENCODER_DECODER:
+        # Encoder/decoder cross-attention requires no chunked
+        # prefill (100% prefill or 100% decode tokens, no mix)
+        assert attn_metadata.num_encoder_tokens is not None
+        num_prefill_tokens = attn_metadata.num_prefill_tokens
+        num_encoder_tokens = attn_metadata.num_encoder_tokens
+        num_decode_tokens = attn_metadata.num_decode_tokens
+    else: # attn_type == AttentionType.DECODER or 
+          # attn_type == AttentionType.ENCODER_ONLY 
+        num_prefill_tokens = attn_metadata.num_prefill_tokens
+        num_encoder_tokens = attn_metadata.num_prefill_tokens
+        num_decode_tokens = attn_metadata.num_decode_tokens
+
+    return (num_prefill_tokens, num_encoder_tokens, num_decode_tokens)
+
+def _get_causal_option(attn_type: AttentionType)-> bool:
+    if (attn_type == AttentionType.ENCODER or \
+        attn_type == AttentionType.ENCODER_ONLY or \
+        attn_type ==  AttentionType.ENCODER_DECODER) :
+        return False
+    
+    return True
+
+   
+
 
 @torch.library.custom_op("vllm::unified_flash_attention",
                          mutates_args=["kv_cache"])
@@ -747,19 +782,10 @@ def unified_flash_attention(
     assert isinstance(current_metadata, FlashAttentionMetadata)
     attn_metadata: FlashAttentionMetadata = current_metadata
 
-    print('query.shape ' + str(query.shape))
-    if key is not None:
-        print('key.shape ' + str(key.shape))
-        print('value.shape ' + str(key.shape))
-    print('attn_type ' + str(attn_type))
-    print('num_heads ' + str(num_heads))
-    print('num_kv_heads ' + str(num_kv_heads))
-    #num_tokens, hidden_size = query.shape
+    num_tokens, hidden_size = query.shape
 
     # Reshape the query, key, and value tensors.
     query = query.view(-1, num_heads, head_size)
-    hidden_size = num_heads * head_size
-    num_tokens = query.shape[0]
     if (key is not None) and (value is not None):
         key = key.view(-1, num_kv_heads, head_size)
         value = value.view(-1, num_kv_heads, head_size)
@@ -793,56 +819,11 @@ def unified_flash_attention(
                 v_scale,
             )
     
-    
-    if attn_type == AttentionType.ENCODER:
-        # Encoder attention - chunked prefill is not applicable;
-        # derive token-count from query shape & and treat them
-        # as 100% prefill tokens
-        assert attn_metadata.num_encoder_tokens is not None
-        num_prefill_tokens = attn_metadata.num_encoder_tokens
-        num_encoder_tokens = attn_metadata.num_encoder_tokens
-        num_decode_tokens = 0
-    elif attn_type == AttentionType.DECODER:
-        # Decoder self-attention supports chunked prefill.
-        num_prefill_tokens = attn_metadata.num_prefill_tokens
-        num_encoder_tokens = attn_metadata.num_prefill_tokens
-        num_decode_tokens = attn_metadata.num_decode_tokens
-        # Only enforce this shape-constraint for decoder
-        # self-attention
-        assert key.shape[0] == num_prefill_tokens + num_decode_tokens
-        assert value.shape[0] == num_prefill_tokens + num_decode_tokens
-    else:  # attn_type == AttentionType.ENCODER_DECODER
-        # Encoder/decoder cross-attention requires no chunked
-        # prefill (100% prefill or 100% decode tokens, no mix)
-        num_prefill_tokens = attn_metadata.num_prefill_tokens
-        if attn_metadata.num_encoder_tokens is not None:
-            num_encoder_tokens = attn_metadata.num_encoder_tokens
-        else:
-            num_encoder_tokens = attn_metadata.num_prefill_tokens
-        num_decode_tokens = attn_metadata.num_decode_tokens
-    # Query for decode. KV is not needed because it is already cached.
+    num_prefill_tokens, num_encoder_tokens,  num_decode_tokens = \
+        _get_num_prefill_encode_decode_tokens(attn_metadata, attn_type)
     decode_query = query[num_prefill_tokens:]
     # QKV for prefill.
     query = query[:num_prefill_tokens]
-    if (key is not None) and (value is not None):
-        #print('key.shape[0] ' + str(key.shape[0]))
-        #assert key.shape[0] == num_prefill_tokens + num_decode_tokens, \
-        #            f"key : {key.shape} : #prefill tokens {num_prefill_tokens} : #decode tokens {num_decode_tokens}" # noqa
-        #print('Hell224!!')
-        #assert value.shape[0] == num_prefill_tokens + num_decode_tokens, \
-        #            f"value : {value.shape} : #prefill toks {num_prefill_tokens} : #decode toks {num_decode_tokens}" # noqa
-        #print('Hell225!!')
-        #if attn_type == AttentionType.ENCODER_DECODER:
-        #    key = key
-        #    value = value
-        #else:            
-        #    key = key[:num_prefill_tokens]
-        #    value = value[:num_prefill_tokens]
-        key = key[:num_encoder_tokens]
-        value = value[:num_encoder_tokens]
-        print('key11.shape() ' + str(key.shape))
-        print('value11.shape() ' + str(value.shape))
-
     assert query.shape[0] == num_prefill_tokens
     assert decode_query.shape[0] == num_decode_tokens
 
@@ -855,13 +836,17 @@ def unified_flash_attention(
             # normal attention
             # When block_tables are not filled, it means q and k are the
             # prompt, and they have the same length.
-            q_seq_start_loc, q_seq_len, k_seq_start_loc, k_seq_len = _get_query_key_seq_metadata(
+            q_seq_start_loc, q_seq_len, k_seq_start_loc, k_seq_len = _get_key_query_seq_metadata(
                 prefill_meta, True, attn_type)
-            causal = True
+
             if (attn_type == AttentionType.ENCODER or \
-                attn_type == AttentionType.ENCODER_ONLY or \
-                attn_type ==  AttentionType.ENCODER_DECODER) :
-                causal = False
+                attn_type == AttentionType.ENCODER_DECODER):
+                key = key[:num_encoder_tokens]
+                value = value[:num_encoder_tokens]
+            else:
+                key = key[:num_prefill_tokens]
+                value = value[:num_prefill_tokens]
+            
             prefill_output = flash_attn_varlen_func(
                 q=query,
                 k=key,
@@ -871,7 +856,7 @@ def unified_flash_attention(
                 max_seqlen_q=q_seq_len,
                 max_seqlen_k=k_seq_len,
                 softmax_scale=softmax_scale,
-                causal=causal,
+                causal=_get_causal_option(attn_type),
                 window_size=window_size,
                 alibi_slopes=alibi_slopes,
                 softcap=logits_soft_cap,
@@ -926,12 +911,6 @@ def unified_flash_attention(
                 _,
                 block_tables_arg,
             ) = get_seq_len_block_table_args(decode_meta, False, attn_type)
-            causal = True
-            if (attn_type == AttentionType.ENCODER or \
-                attn_type == AttentionType.ENCODER_ONLY or \
-                attn_type ==  AttentionType.ENCODER_DECODER) :
-                causal = False
-
             decode_output = flash_attn_with_kvcache(
                 q=decode_query.unsqueeze(1),
                 k_cache=key_cache,
@@ -939,7 +918,7 @@ def unified_flash_attention(
                 block_table=block_tables_arg,
                 cache_seqlens=seq_lens_arg,
                 softmax_scale=softmax_scale,
-                causal=causal,
+                causal=True,
                 window_size=window_size,
                 alibi_slopes=alibi_slopes,
                 softcap=logits_soft_cap,
