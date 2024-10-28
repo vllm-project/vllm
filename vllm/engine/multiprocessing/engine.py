@@ -8,7 +8,7 @@ from typing import Iterator, List, Optional, Union
 import cloudpickle
 import zmq
 
-from vllm import AsyncEngineArgs, LLMEngine, SamplingParams
+from vllm import AsyncEngineArgs, SamplingParams
 from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig)
 # yapf conflicts with isort for this block
@@ -21,11 +21,16 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          RPCStartupRequest, RPCStartupResponse,
                                          RPCUProfileRequest)
 # yapf: enable
-from vllm.envs import VLLM_RPC_TIMEOUT
+from vllm.envs import VLLM_RPC_TIMEOUT, VLLM_USE_V1
 from vllm.executor.gpu_executor import GPUExecutor
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.usage.usage_lib import UsageContext
+
+if VLLM_USE_V1:
+    from vllm.v1.engine.llm_engine import LLMEngine
+else:
+    from vllm.engine.llm_engine import LLMEngine
 
 CONFIG_TYPE = Union[ModelConfig, DecodingConfig, ParallelConfig,
                     SchedulerConfig, LoRAConfig]
@@ -73,11 +78,9 @@ class MQLLMEngine:
         # For MQLLMEngine, we can use cached outputs, since each new request
         # output is immediately pickled and send over the socket, which frees
         # the python object to be reused again.
-        use_cached_outputs = True
+        kwargs['use_cached_outputs'] = True
 
-        self.engine = LLMEngine(*args,
-                                **kwargs,
-                                use_cached_outputs=use_cached_outputs)
+        self.engine = LLMEngine(*args, **kwargs)
         self.log_requests = log_requests
 
         self.use_async_sockets = use_async_sockets
@@ -130,19 +133,24 @@ class MQLLMEngine:
     def from_engine_args(cls, engine_args: AsyncEngineArgs,
                          usage_context: UsageContext, ipc_path: str):
         """Creates an MQLLMEngine from the engine arguments."""
+        # Setup plugins for each process
+        from vllm.plugins import load_general_plugins
+        load_general_plugins()
 
         engine_config = engine_args.create_engine_config()
 
         executor_class = LLMEngine._get_executor_cls(engine_config)
 
-        return cls(
-            ipc_path=ipc_path,
-            use_async_sockets=engine_config.model_config.use_async_output_proc,
-            **engine_config.to_dict(),
-            executor_class=executor_class,
-            log_requests=not engine_args.disable_log_requests,
-            log_stats=not engine_args.disable_log_stats,
-            usage_context=usage_context)
+        use_async_sockets = (engine_config.model_config.use_async_output_proc
+                             and not VLLM_USE_V1)
+
+        return cls(ipc_path=ipc_path,
+                   use_async_sockets=use_async_sockets,
+                   **engine_config.to_dict(),
+                   executor_class=executor_class,
+                   log_requests=not engine_args.disable_log_requests,
+                   log_stats=not engine_args.disable_log_stats,
+                   usage_context=usage_context)
 
     def start(self):
         try:
@@ -282,7 +290,8 @@ class MQLLMEngine:
                 params=request.params,
                 lora_request=request.lora_request,
                 trace_headers=request.trace_headers,
-                prompt_adapter_request=request.prompt_adapter_request)
+                prompt_adapter_request=request.prompt_adapter_request,
+                priority=request.priority)
 
             if self.log_requests:
                 logger.info("Added request %s.", request.request_id)

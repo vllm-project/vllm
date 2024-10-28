@@ -3,14 +3,14 @@ import copy
 from dataclasses import dataclass
 from enum import Enum, IntEnum
 from functools import cached_property
-from typing import Any, Callable, Dict, List, Optional, Set, Union
+from typing import Any, Dict, List, Optional, Set, Union
 
 import msgspec
-import torch
 from pydantic import BaseModel
 from typing_extensions import Annotated
 
 from vllm.logger import init_logger
+from vllm.logits_process import LogitsProcessor
 
 logger = init_logger(__name__)
 
@@ -22,16 +22,6 @@ class SamplingType(IntEnum):
     GREEDY = 0
     RANDOM = 1
     RANDOM_SEED = 2
-
-
-LogitsProcessor = Union[Callable[[List[int], torch.Tensor], torch.Tensor],
-                        Callable[[List[int], List[int], torch.Tensor],
-                                 torch.Tensor]]
-"""LogitsProcessor is a function that takes a list
-of previously generated tokens, the logits tensor
-for the next token and, optionally, prompt tokens as a
-first argument, and returns a modified tensor of logits
-to sample from."""
 
 
 # maybe make msgspec?
@@ -49,14 +39,17 @@ class GuidedDecodingParams:
 
     @staticmethod
     def from_optional(
-        json: Optional[Union[Dict, BaseModel, str]],
+        json: Optional[Union[Dict, BaseModel, str]] = None,
         regex: Optional[str] = None,
         choice: Optional[List[str]] = None,
         grammar: Optional[str] = None,
         json_object: Optional[bool] = None,
         backend: Optional[str] = None,
         whitespace_pattern: Optional[str] = None,
-    ) -> "GuidedDecodingParams":
+    ) -> Optional["GuidedDecodingParams"]:
+        if all(arg is None
+               for arg in (json, regex, choice, grammar, json_object)):
+            return None
         # Extract json schemas from pydantic models
         if isinstance(json, (BaseModel, type(BaseModel))):
             json = json.model_json_schema()
@@ -106,9 +99,8 @@ class SamplingParams(
         n: Number of output sequences to return for the given prompt.
         best_of: Number of output sequences that are generated from the prompt.
             From these `best_of` sequences, the top `n` sequences are returned.
-            `best_of` must be greater than or equal to `n`. This is treated as
-            the beam width when `use_beam_search` is True. By default, `best_of`
-            is set to `n`.
+            `best_of` must be greater than or equal to `n`. By default,
+            `best_of` is set to `n`.
         presence_penalty: Float that penalizes new tokens based on whether they
             appear in the generated text so far. Values > 0 encourage the model
             to use new tokens, while values < 0 encourage the model to repeat
@@ -137,6 +129,10 @@ class SamplingParams(
         stop_token_ids: List of tokens that stop the generation when they are
             generated. The returned output will contain the stop tokens unless
             the stop tokens are special tokens.
+        bad_words: List of words that are not allowed to be generated.
+            More precisely, only the last token of a corresponding
+            token sequence is not allowed when the next generated token
+            can complete the sequence.
         include_stop_str_in_output: Whether to include the stop strings in
             output text. Defaults to False.
         ignore_eos: Whether to ignore the EOS token and continue generating
@@ -173,6 +169,7 @@ class SamplingParams(
 
     n: int = 1
     best_of: Optional[int] = None
+    _real_n: Optional[int] = None
     presence_penalty: float = 0.0
     frequency_penalty: float = 0.0
     repetition_penalty: float = 1.0
@@ -183,6 +180,7 @@ class SamplingParams(
     seed: Optional[int] = None
     stop: Optional[Union[str, List[str]]] = None
     stop_token_ids: Optional[List[int]] = None
+    bad_words: Optional[List[str]] = None
     ignore_eos: bool = False
     max_tokens: Optional[int] = 16
     min_tokens: int = 0
@@ -225,6 +223,7 @@ class SamplingParams(
         seed: Optional[int] = None,
         stop: Optional[Union[str, List[str]]] = None,
         stop_token_ids: Optional[List[int]] = None,
+        bad_words: Optional[List[str]] = None,
         include_stop_str_in_output: bool = False,
         ignore_eos: bool = False,
         max_tokens: Optional[int] = 16,
@@ -264,6 +263,7 @@ class SamplingParams(
             seed=seed,
             stop=stop,
             stop_token_ids=stop_token_ids,
+            bad_words=bad_words,
             include_stop_str_in_output=include_stop_str_in_output,
             ignore_eos=ignore_eos,
             max_tokens=max_tokens,
@@ -282,27 +282,49 @@ class SamplingParams(
         )
 
     def __post_init__(self) -> None:
-        self.best_of = self.best_of or self.n
+        # how we deal with `best_of``:
+        # if `best_of`` is not set, we default to `n`;
+        # if `best_of`` is set, we set `n`` to `best_of`,
+        # and set `_real_n`` to the original `n`.
+        # when we return the result, we will check
+        # if we need to return `n` or `_real_n` results
+        if self.best_of:
+            if self.best_of < self.n:
+                raise ValueError(
+                    f"best_of must be greater than or equal to n, "
+                    f"got n={self.n} and best_of={self.best_of}.")
+            self._real_n = self.n
+            self.n = self.best_of
+
         if 0 < self.temperature < _MAX_TEMP:
             logger.warning(
                 "temperature %s is less than %s, which may cause numerical "
                 "errors nan or inf in tensors. We have maxed it out to %s.",
                 self.temperature, _MAX_TEMP, _MAX_TEMP)
             self.temperature = max(self.temperature, _MAX_TEMP)
+
         if self.seed == -1:
             self.seed = None
         else:
             self.seed = self.seed
+
         if self.stop is None:
             self.stop = []
         elif isinstance(self.stop, str):
             self.stop = [self.stop]
         else:
             self.stop = list(self.stop)
+
         if self.stop_token_ids is None:
             self.stop_token_ids = []
         else:
             self.stop_token_ids = list(self.stop_token_ids)
+
+        if self.bad_words is None:
+            self.bad_words = []
+        else:
+            self.bad_words = list(self.bad_words)
+
         self.logprobs = 1 if self.logprobs is True else self.logprobs
         self.prompt_logprobs = (1 if self.prompt_logprobs is True else
                                 self.prompt_logprobs)
@@ -329,12 +351,6 @@ class SamplingParams(
                              f"type {type(self.n)}")
         if self.n < 1:
             raise ValueError(f"n must be at least 1, got {self.n}.")
-        if not isinstance(self.best_of, int):
-            raise ValueError(f'best_of must be an int, but is of '
-                             f'type {type(self.best_of)}')
-        if self.best_of < self.n:
-            raise ValueError(f"best_of must be greater than or equal to n, "
-                             f"got n={self.n} and best_of={self.best_of}.")
         if not -2.0 <= self.presence_penalty <= 2.0:
             raise ValueError("presence_penalty must be in [-2, 2], got "
                              f"{self.presence_penalty}.")
@@ -385,15 +401,14 @@ class SamplingParams(
             raise ValueError(
                 "stop strings are only supported when detokenize is True. "
                 "Set detokenize=True to use stop.")
-        if self.best_of != self.n and self.output_kind == (
+        if self.best_of != self._real_n and self.output_kind == (
                 RequestOutputKind.DELTA):
             raise ValueError("best_of must equal n to use output_kind=DELTA")
 
     def _verify_greedy_sampling(self) -> None:
-        assert isinstance(self.best_of, int)
-        if self.best_of > 1:
-            raise ValueError("best_of must be 1 when using greedy sampling."
-                             f"Got {self.best_of}.")
+        if self.n > 1:
+            raise ValueError("n must be 1 when using greedy sampling, "
+                             f"got {self.n}.")
 
     def update_from_generation_config(
             self,
@@ -450,7 +465,6 @@ class SamplingParams(
     def __repr__(self) -> str:
         return (
             f"SamplingParams(n={self.n}, "
-            f"best_of={self.best_of}, "
             f"presence_penalty={self.presence_penalty}, "
             f"frequency_penalty={self.frequency_penalty}, "
             f"repetition_penalty={self.repetition_penalty}, "
@@ -461,6 +475,7 @@ class SamplingParams(
             f"seed={self.seed}, "
             f"stop={self.stop}, "
             f"stop_token_ids={self.stop_token_ids}, "
+            f"bad_words={self.bad_words}, "
             f"include_stop_str_in_output={self.include_stop_str_in_output}, "
             f"ignore_eos={self.ignore_eos}, "
             f"max_tokens={self.max_tokens}, "

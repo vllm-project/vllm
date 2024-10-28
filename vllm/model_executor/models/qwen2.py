@@ -48,8 +48,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
-from .utils import (PPMissingLayer, group_weights_with_prefix,
-                    is_pp_missing_parameter,
+from .utils import (AutoWeightsLoader, PPMissingLayer, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers)
 
 
@@ -366,6 +365,28 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     embedding_modules = {}
     embedding_padding_modules = []
 
+    # BitandBytes specific attributes
+    default_bitsandbytes_target_modules = [
+        ".gate_proj.",
+        ".down_proj.",
+        ".up_proj.",
+        ".q_proj.",
+        ".k_proj.",
+        ".v_proj.",
+        ".o_proj.",
+    ]
+
+    # in TP, these weights are partitioned along the column dimension (dim=-1)
+    column_parallel_weights_modules = [".down_proj.", ".o_proj."]
+    bitsandbytes_stacked_params_mapping = {
+        # shard_name, weight_name, index
+        "q_proj": ("qkv_proj", 0),
+        "k_proj": ("qkv_proj", 1),
+        "v_proj": ("qkv_proj", 2),
+        "gate_proj": ("gate_up_proj", 0),
+        "up_proj": ("gate_up_proj", 1),
+    }
+
     def __init__(
         self,
         config: Qwen2Config,
@@ -435,17 +456,9 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         return next_tokens
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        weights_group = group_weights_with_prefix(weights)
-
-        self.model.load_weights(weights_group["model"])
-
-        if not self.config.tie_word_embeddings:
-            lm_head_dict = dict(self.lm_head.named_parameters())
-            for name, loaded_weight in weights_group["lm_head"]:
-                if is_pp_missing_parameter(name, self.lm_head):
-                    continue
-
-                param = lm_head_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                weight_loader(param, loaded_weight)
+        loader = AutoWeightsLoader(
+            self,
+            skip_prefixes=(["lm_head."]
+                           if self.config.tie_word_embeddings else None),
+        )
+        loader.load_weights(weights)

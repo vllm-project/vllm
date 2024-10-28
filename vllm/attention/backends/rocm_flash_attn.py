@@ -21,14 +21,17 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 _PARTITION_SIZE_ROCM = 512
-_ON_NAVI = "gfx1" in torch.cuda.get_device_properties("cuda").gcnArchName
+_GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
+_ON_NAVI = "gfx1" in _GPU_ARCH
+_ON_MI250_MI300 = any(arch in _GPU_ARCH
+                      for arch in ["gfx90a", "gfx940", "gfx941", "gfx942"])
 
 
 class ROCmFlashAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "rocm-flash-attn"
+        return "ROCM_FLASH"
 
     @staticmethod
     def get_impl_cls() -> Type["ROCmFlashAttentionImpl"]:
@@ -121,11 +124,8 @@ class ROCmFlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
     # so far).
     context_lens_tensor: Optional[torch.Tensor]
 
-    # Number of query tokens for each request in the batch.
-    # Currently, we require that all requests have the same number of query
-    # tokens during the decoding phase. When speculavie decoding is enabled,
-    # decode_query_len might be greater than 1. In all other cases, it is 1.
-    decode_query_len: Optional[int] = None
+    # Max number of query tokens among request in the batch.
+    max_decode_query_len: Optional[int] = None
 
     _cached_prefill_metadata: Optional["ROCmFlashAttentionMetadata"] = None
     _cached_decode_metadata: Optional["ROCmFlashAttentionMetadata"] = None
@@ -420,6 +420,8 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
+        # Reminder: Please update docs/source/serving/compatibility_matrix.rst
+        # If the feature combo become valid
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError("Encoder self-attention and "
                                       "encoder/decoder cross-attention "
@@ -663,7 +665,8 @@ def _use_rocm_custom_paged_attention(qtype: torch.dtype, head_size: int,
                                      block_size: int, gqa_ratio: int,
                                      max_seq_len: int) -> bool:
     # rocm custom page attention not support on navi (gfx1*)
-    return (not _ON_NAVI and (qtype == torch.half or qtype == torch.bfloat16)
+    return (_ON_MI250_MI300 and not _ON_NAVI
+            and (qtype == torch.half or qtype == torch.bfloat16)
             and (head_size == 64 or head_size == 128)
             and (block_size == 16 or block_size == 32)
             and (gqa_ratio >= 1 and gqa_ratio <= 16) and max_seq_len <= 32768)

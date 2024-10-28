@@ -2,11 +2,13 @@ import os
 from typing import List, Optional, Tuple, Type
 
 import pytest
-from transformers import AutoConfig, AutoModelForVision2Seq, AutoTokenizer
+from transformers import (AutoConfig, AutoModelForVision2Seq, AutoTokenizer,
+                          BatchEncoding)
 
 from vllm.multimodal.utils import rescale_image_size
+from vllm.platforms import current_platform
 from vllm.sequence import SampleLogprobs
-from vllm.utils import is_hip
+from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 
 from ....conftest import IMAGE_ASSETS, HfRunner, VllmRunner, _ImageAssets
 from ...utils import check_logprobs_close
@@ -23,7 +25,7 @@ models = ["google/paligemma-3b-mix-224"]
 # ROCm Triton FA can run into compilation issues with these models due to,
 # excessive use of shared memory. Use other backends in the meantime.
 # FIXME (mattwong, gshtrasb, hongxiayan)
-if is_hip():
+if current_platform.is_rocm():
     os.environ["VLLM_USE_TRITON_FLASH_ATTN"] = "0"
 
 
@@ -69,11 +71,12 @@ def run_test(
 
     All the image fixtures for the test are from IMAGE_ASSETS.
     For huggingface runner, we provide the PIL images as input.
-    For vllm runner, we provide MultiModalDataDict objects 
+    For vllm runner, we provide MultiModalDataDict objects
     and corresponding MultiModalConfig as input.
     Note, the text input is also adjusted to abide by vllm contract.
     The text output is sanitized to be able to compare with hf.
     """
+    torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[dtype]
     images = [asset.pil_image for asset in image_assets]
 
     inputs_per_image = [(
@@ -100,7 +103,14 @@ def run_test(
             for prompts, images in inputs_per_image
         ]
 
-    with hf_runner(model, dtype=dtype,
+    def process(hf_inputs: BatchEncoding):
+        hf_inputs["pixel_values"] = hf_inputs["pixel_values"] \
+            .to(torch_dtype)  # type: ignore
+        return hf_inputs
+
+    with hf_runner(model,
+                   dtype=dtype,
+                   postprocess_inputs=process,
                    auto_cls=AutoModelForVision2Seq) as hf_model:
         hf_outputs_per_image = [
             hf_model.generate_greedy_logprobs_limit(prompts,
@@ -142,7 +152,7 @@ def run_test(
     pytest.param(
         "float",
         marks=pytest.mark.skipif(
-            is_hip(),
+            current_platform.is_rocm(),
             reason=
             "ROCm FA does not yet fully support 32-bit precision on PaliGemma")
     ), "half"
