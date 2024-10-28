@@ -26,6 +26,7 @@ from vllm_hpu_extension.profiler import (HabanaHighLevelProfiler,
                                          HabanaMemoryProfiler, format_bytes)
 
 from vllm.attention import AttentionMetadata, get_attn_backend
+from vllm.attention.backends.hpu_attn import HPUAttentionBackend
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          ModelConfig, ObservabilityConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig)
@@ -575,12 +576,12 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
 
         self.attn_backend = get_attn_backend(
             self.model_config.get_head_size(),
-            self.model_config.get_sliding_window(),
             self.model_config.dtype,
             self.kv_cache_dtype,
             self.block_size,
             self.model_config.is_attention_free,
         )
+        assert self.attn_backend == HPUAttentionBackend
 
         # Lazy initialization
         self.lora_manager: LRUCacheWorkerLoRAManager = None
