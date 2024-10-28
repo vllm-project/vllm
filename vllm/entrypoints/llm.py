@@ -159,6 +159,7 @@ class LLM:
         mm_processor_kwargs: Optional[Dict[str, Any]] = None,
         # After positional args are removed, move this right below `model`
         task: TaskOption = "auto",
+        forward_hidden_state: bool = False,
         **kwargs,
     ) -> None:
         '''
