@@ -840,8 +840,6 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
                 batch.
             pixel_values_videos: Pixels in each frames for each input videos.
         """
-        # import pdb; pdb.set_trace()
-
         if intermediate_tensors is not None:
             input_ids = None
             inputs_embeds = None
