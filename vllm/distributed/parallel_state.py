@@ -431,6 +431,24 @@ class GroupCoordinator:
         if dim < 0:
             # Convert negative dim to positive.
             dim += input_.dim()
+
+        # for XPU device use allreduce to replace allgather
+        # can reduce one extra cat
+        if current_platform.is_xpu():
+            # Allocate output tensor.
+            output_tensor = torch.zeros(input_.shape[:-1] + 
+                                        (input_.shape[-1] * world_size,)
+                                        ).to(input_.device)
+            output_tensor[:, self.rank * input_.shape[-1] : 
+                          (self.rank + 1) * input_.shape[-1]] = input_
+            # Allreduce
+            torch.distributed.all_reduce(output_tensor,
+                                         group=self.device_group)
+            if self.rank_in_group != dst:
+                output_tensor = None
+
+            return output_tensor
+
         # Allocate output tensor.
         if self.rank_in_group == dst:
             gather_list = [torch.empty_like(input_) for _ in range(world_size)]
