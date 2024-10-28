@@ -41,6 +41,7 @@ from vllm.model_executor.models import supports_lora, supports_multimodal
 from vllm.model_executor.models.utils import set_cpu_offload_max_bytes
 from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
                              MultiModalInputs, MultiModalRegistry)
+from vllm.platforms import current_platform
 from vllm.prompt_adapter.layers import PromptAdapterMapping
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.prompt_adapter.worker_manager import (
@@ -49,7 +50,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
 from vllm.transformers_utils.config import uses_mrope
 from vllm.utils import (DeviceMemoryProfiler, PyObjectCache, async_tensor_h2d,
-                        flatten_2d_lists, is_hip, is_pin_memory_available,
+                        flatten_2d_lists, is_pin_memory_available,
                         supports_dynamo, weak_ref_tensor)
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase, ModelRunnerInputBuilderBase,
@@ -737,13 +738,13 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         family of functions.
 
         Args:
-            num_seqs (int): Number of sequences scheduled to run. 
+            num_seqs (int): Number of sequences scheduled to run.
             max_decode_seq_len (int): Greatest of all the decode sequence
                 lengths. Used only in checking the viablility of using
                 CUDA graphs.
             max_encoder_seq_len (int, optional): Greatest of all the encode
                 sequence lengths. Defaults to 0. Used only in checking the
-                viability of using CUDA graphs. 
+                viability of using CUDA graphs.
         Returns:
             int: Returns the determined number of padding sequences. If
                 CUDA graphs is not viable, returns -1.
@@ -1103,7 +1104,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 self.prompt_adapter_manager.create_prompt_adapter_manager(
                     self.model))
 
-        if self.kv_cache_dtype == "fp8" and is_hip():
+        if self.kv_cache_dtype == "fp8" and current_platform.is_rocm():
             # Currently only ROCm accepts kv-cache scaling factors
             # via quantization_param_path and this will be deprecated
             # in the future.

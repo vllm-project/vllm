@@ -25,7 +25,8 @@ def test_env(name: str, device: str, monkeypatch):
                                         False)
         assert backend.name == "TORCH_SDPA"
     elif device == "hip":
-        with patch("vllm.attention.selector.is_hip", return_value=True):
+        with patch("vllm.attention.selector.current_platform.is_rocm",
+                   return_value=True):
             backend = which_attn_to_use(16, torch.float16, torch.float16, 16,
                                         False)
         assert backend.name == "ROCM_FLASH"

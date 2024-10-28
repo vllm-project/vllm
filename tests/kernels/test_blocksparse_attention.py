@@ -7,7 +7,8 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.attention.ops.blocksparse_attention.interface import (
     LocalStridedBlockSparseAttn)
-from vllm.utils import get_max_shared_memory_bytes, is_hip, seed_everything
+from vllm.platforms import current_platform
+from vllm.utils import get_max_shared_memory_bytes, seed_everything
 
 from .allclose_default import get_default_atol, get_default_rtol
 
@@ -316,8 +317,8 @@ def test_paged_attention(
     # NOTE(woosuk): Due to the kernel-level differences in the two
     # implementations, there is a small numerical difference in the two
     # outputs. Thus, we use a relaxed tolerance for the test.
-    atol = get_default_atol(output) if is_hip() else 1e-3
-    rtol = get_default_rtol(output) if is_hip() else 1e-5
+    atol = get_default_atol(output) if current_platform.is_rocm() else 1e-3
+    rtol = get_default_rtol(output) if current_platform.is_rocm() else 1e-5
 
     # NOTE(zhaoyang): FP8 KV Cache will introduce quantization error,
     # so we use a relaxed tolerance for the test.

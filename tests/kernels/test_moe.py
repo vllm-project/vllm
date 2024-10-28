@@ -18,8 +18,9 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (
 from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
     marlin_quantize)
 from vllm.model_executor.models.mixtral import MixtralMoE
+from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
-from vllm.utils import is_hip, seed_everything
+from vllm.utils import seed_everything
 
 
 @pytest.mark.parametrize("m", [1024 * 128, 512, 222, 33, 1])
@@ -103,7 +104,7 @@ def test_mixtral_moe(dtype: torch.dtype):
 @pytest.mark.parametrize("act_order", [True, False])
 @pytest.mark.parametrize("num_bits", [4, 8])
 @pytest.mark.parametrize("is_k_full", [True, False])
-@pytest.mark.skipif(is_hip(), reason="Skip for rocm")
+@pytest.mark.skipif(current_platform.is_rocm(), reason="Skip for rocm")
 def test_fused_marlin_moe(
     m: int,
     n: int,
@@ -256,7 +257,7 @@ def test_fused_marlin_moe(
 @pytest.mark.parametrize("act_order", [True, False])
 @pytest.mark.parametrize("num_bits", [4, 8])
 @pytest.mark.parametrize("is_k_full", [True, False])
-@pytest.mark.skipif(is_hip(), reason="Skip for rocm")
+@pytest.mark.skipif(current_platform.is_rocm(), reason="Skip for rocm")
 def test_single_marlin_moe_multiply(
     m: int,
     n: int,
