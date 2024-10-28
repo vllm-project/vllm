@@ -30,6 +30,7 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
                                                QKVParallelLinear,
+                                               ReplicatedLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -39,7 +40,8 @@ from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.module_mapping import MultiModelKeys
+from vllm.model_executor.models.module_mapping import (ModelComposeMethod,
+                                                       MultiModelKeys)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.base import MultiModalInputs
@@ -123,8 +125,8 @@ class VisualAttention(nn.Module):
         # Strided linear layer.
         assert self._qkv_same_embed_dim, \
                 'Visual Attention implementation only supports self-attention'
-        self.in_proj = nn.Linear(embed_dim, 3 * embed_dim)
-        self.out_proj = nn.Linear(embed_dim, embed_dim)
+        self.in_proj = ReplicatedLinear(embed_dim, 3 * embed_dim)
+        self.out_proj = ReplicatedLinear(embed_dim, embed_dim)
         self.norm_factor = math.sqrt(self.hidden_size_per_attention_head)
 
     def forward(
@@ -134,7 +136,7 @@ class VisualAttention(nn.Module):
     ) -> torch.Tensor:
         # query/key/value: [sq, b, h]
         sq, b, _ = x.size()
-        mixed_x_layer = self.in_proj(x)
+        mixed_x_layer, _ = self.in_proj(x)
 
         # [sq, b, (np * 3 * hn)] --> [sq, b, np, 3 * hn]
         new_tensor_shape = mixed_x_layer.size()[:-1] + \
@@ -183,7 +185,7 @@ class VisualAttention(nn.Module):
             (self.hidden_size_per_partition,)
         context_layer = context_layer.view(*new_context_layer_shape)
 
-        output = self.out_proj(context_layer)
+        output, _ = self.out_proj(context_layer)
 
         return output
 
@@ -992,29 +994,17 @@ class QWenBaseModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
 
 class QWenLLM(QWenBaseModel):
     packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
+        "c_attn": ["c_attn"],
         "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
+            "w2",
+            "w1",
         ],
     }
     # LoRA specific attributes
     supported_lora_modules = [
-        # vision encoder
-        "fc1",
-        "fc2",
-        "out_proj",
-        # language model
-        "qkv_proj",  # same name with vision encoder
-        "o_proj",
+        "c_attn",
         "gate_up_proj",
-        "down_proj",
-        # resampler
-        "kv_proj",
+        "c_proj",
     ]
 
     embedding_modules = {}
@@ -1023,27 +1013,21 @@ class QWenLLM(QWenBaseModel):
 
 class QWenVL(QWenBaseModel):
     packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
+        "c_attn": ["c_attn"],
         "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
+            "w2",
+            "w1",
         ],
     }
     # LoRA specific attributes
     supported_lora_modules = [
-        # vision encoder
-        "fc1",
-        "fc2",
-        "out_proj",
-        # language model
-        "qkv_proj",  # same name with vision encoder
-        "o_proj",
+        "c_attn",
         "gate_up_proj",
-        "down_proj",
+        "c_proj",
+        # visual module
+        "out_proj",
+        "in_proj",
+        "c_fc",
         # resampler
         "kv_proj",
     ]
@@ -1055,9 +1039,11 @@ class QWenVL(QWenBaseModel):
         """
         Get the module prefix in multimodal models
         """
-        return MultiModelKeys.from_string_field(language_model="llm",
-                                                connector="resampler",
-                                                tower_model="vpm")
+        return MultiModelKeys.from_string_field(
+            language_model="transformer.h",
+            connector="transformer.visual.attn_pool",
+            tower_model="transformer.visual.transformer",
+            compose_type=ModelComposeMethod.Coupled)
 
 
 @MULTIMODAL_REGISTRY.register_image_input_mapper(input_mapper_for_qwen)
@@ -1085,9 +1071,11 @@ class QWenLMHeadModel(QWenBaseModel):
         quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
     ):
-        if multimodal_config is None:
-            return QWenLLM(config, multimodal_config, cache_config,
-                           quant_config)
-        else:
+        # Initialize VL
+        if hasattr(config, "visual"):
             return QWenVL(config, multimodal_config, cache_config,
-                          quant_config)
+                          quant_config, lora_config)
+        # Initialize LLM
+        else:
+            return QWenLLM(config, multimodal_config, cache_config,
+                           quant_config, lora_config)

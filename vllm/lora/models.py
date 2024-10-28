@@ -26,7 +26,8 @@ from vllm.lora.utils import (from_layer, from_layer_logits_processor,
                              is_regex_target_modules,
                              parse_fine_tuned_lora_name, replace_submodule)
 from vllm.model_executor.models import SupportsLoRA, supports_multimodal
-from vllm.model_executor.models.module_mapping import MultiModelKeys
+from vllm.model_executor.models.module_mapping import (ModelComposeMethod,
+                                                       MultiModelKeys)
 from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.utils import is_pin_memory_available
 
@@ -577,11 +578,29 @@ class LoRAModelManager(AdapterModelManager):
         language model. LoRA for other modules, such as the vision tower, will 
         be filtered out.
         """
-        if self.supports_mm:
+        module_mapping: MultiModelKeys = self.model.get_mm_mapping()
+
+        def _verify_decoupled_model():
+            """
+            Suitable for MiniCPMV, InternVL, etc.
+            """
             prefix = module_name.split(".")[0]
-            module_mapping: MultiModelKeys = self.model.get_mm_mapping()
             return (prefix in module_mapping.connector
                     or prefix in module_mapping.tower_model)
+
+        def _verify_coupled_model():
+            """
+            Suitable for QWenVL, GLM4V, etc.
+            """
+            prefix_lst = module_mapping.connector + module_mapping.tower_model
+            return any(
+                [module_name.startswith(prefix) for prefix in prefix_lst])
+
+        if self.supports_mm:
+            if module_mapping.compose_type == ModelComposeMethod.Decoupled:
+                return _verify_decoupled_model()
+            else:
+                return _verify_coupled_model()
         return False
 
     def _register_packed_modules(self, module_full_name: str) -> None:
