@@ -1,4 +1,5 @@
 from collections import defaultdict, deque
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Dict, List, Optional, Tuple
@@ -87,6 +88,9 @@ class KVCacheManager:
         self.free_block_queue = deque(self.block_pool)
         self.lazy_remove_block_ids = set()
         self.num_free_blocks = num_gpu_blocks
+
+        self._async_executor = ThreadPoolExecutor(max_workers=1)
+        self._async_touch_task: Optional[Future] = None
 
         # {block_hash: {block ID: block}}. A cached block is
         # a full block with a block hash that can be used for prefix caching.
@@ -252,8 +256,7 @@ class KVCacheManager:
                     f"#computed_tokens={num_computed_tokens}")
 
             # Touch the computed blocks to make sure they are not evicted.
-            for block_id in computed_block_ids:
-                self._touch(block_id)
+            self._lazy_touch(computed_block_ids)
 
             # Get the previous block ID to construct the block chain.
             prev_block_id = computed_block_ids[
@@ -280,19 +283,14 @@ class KVCacheManager:
         """
         block_ids = self.req_to_block_ids.pop(request.request_id)
         if self.enable_caching:
+            # Make sure async tasks (remove touched blocks) are finished.
+            self._wait_for_removing_touched_blocks()
+
             # Free blocks in reverse order so that the tail blocks are
             # freed first.
             for block_id in reversed(block_ids):
                 self.block_pool[block_id].ref_cnt -= 1
                 if self.block_pool[block_id].ref_cnt == 0:
-                    if block_id in self.lazy_remove_block_ids:
-                        # This happens when a block is touched gets freed before
-                        # being lazily removed from free_block_list yet. In this
-                        # case we have to pay O(n) cost to move the block to the
-                        # end of the free_block_list to maintain theeviction
-                        # order.
-                        self.free_block_queue.remove(self.block_pool[block_id])
-                        self.lazy_remove_block_ids.remove(block_id)
                     self.free_block_queue.append(self.block_pool[block_id])
                     self.num_free_blocks += 1
         else:
@@ -301,6 +299,28 @@ class KVCacheManager:
                 if self.block_pool[block_id].ref_cnt == 0:
                     self.free_block_queue.append(self.block_pool[block_id])
                     self.num_free_blocks += 1
+
+    def async_remove_touched_blocks(self) -> None:
+        """Asynchronously remove the touched blocks from the free block list.
+        This function should be called at the end of a scheduling step, so that
+        the costly operation of removing the touched blocks is done in parallel
+        with the model forward pass.
+        """
+
+        def _sync_remove_touched_blocks():
+            for block_id in self.lazy_remove_block_ids:
+                self.free_block_queue.remove(self.block_pool[block_id])
+
+        self._wait_for_removing_touched_blocks()
+        self._async_touch_task = self._async_executor.submit(
+            _sync_remove_touched_blocks)
+
+    def _wait_for_removing_touched_blocks(self) -> None:
+        """Wait for the asynchronous task to finish."""
+        if self._async_touch_task is not None:
+            self._async_touch_task.result()
+            self._async_touch_task = None
+        assert not self.lazy_remove_block_ids
 
     def _get_new_blocks(
             self,
@@ -398,23 +418,25 @@ class KVCacheManager:
             return self.cached_block_hash_to_block[block_hash][first_block_id]
         return None
 
-    def _touch(self, block_id: int) -> None:
+    def _lazy_touch(self, block_ids: List[int]) -> None:
         """Touch a block manes to remove it from the free block list
         so that it will not be evicted. This happens when the block is
-        freed but has not been evicted yet, and then it can be reused
-        by another request.
+        freed but has not been evicted yet, and then it is going to be
+        reused by another request. "Lazy" touch means that we do not remove
+        the block from the free block list immediately to avoid O(n) cost.
 
         Args:
             block_id: The ID of the block to touch.
         """
-        curr_block = self.block_pool[block_id]
-        # The block has no reference yet, meaning that it is in
-        # the free list, so we reduce the number of free blocks by 1,
-        # but not remove it from the free list now to avoid O(n) cost.
-        if curr_block.ref_cnt == 0:
-            self.num_free_blocks -= 1
-            self.lazy_remove_block_ids.add(block_id)
-        curr_block.ref_cnt += 1
+        for block_id in block_ids:
+            curr_block = self.block_pool[block_id]
+            # The block has no reference yet, meaning that it is in
+            # the free list, so we reduce the number of free blocks by 1,
+            # but not remove it from the free list now to avoid O(n) cost.
+            if curr_block.ref_cnt == 0:
+                self.num_free_blocks -= 1
+                self.lazy_remove_block_ids.add(block_id)
+            curr_block.ref_cnt += 1
 
     def _add_token_ids_to_blocks(self,
                                  block_ids: List[int],
