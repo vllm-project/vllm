@@ -43,7 +43,6 @@ MAX_IMAGE_FEATURE_SIZE_HEIGHT = MAX_IMAGE_FEATURE_SIZE_WIDTH = 448
 
 # For profile run
 _MAX_FRAMES_PER_VIDEO = 16
-_MAX_NUM_VIDEOS = 8
 
 
 class LlavaOnevisionVideoPixelInputs(TypedDict):
@@ -778,7 +777,6 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         if isinstance(video_pixels, torch.Tensor):
             b, num_videos, frames, c, h, w = video_pixels.shape
-            assert (num_videos <= _MAX_NUM_VIDEOS)
             pixel_values = video_pixels.view(b * num_videos * frames, c, h, w)
             stacked_embeddings = self._video_pixels_to_features(
                 self.vision_tower, pixel_values)
