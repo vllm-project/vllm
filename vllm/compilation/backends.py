@@ -34,26 +34,21 @@ def should_slice(shape) -> bool:
     return (shape[0] % n_slices == 0 and shape[0] >= 128)
 
 
-# getitem_1 = residual (mutation)
-# arg7_1 = first gemm weights
-# getitem_24 = first gemm activation
-# arg8_1 = rms norm weights
-# getitem_1a = residual
-# arg9_1 = second gemm weights
-def match_gemm_rs_ag_gemm(getitem_1,   # residual
-                          arg7_1,      # first gemm weight
-                          getitem_22,  # first gemm activation
-                          arg8_1,      # rms norm weight
-                          arg9_1,      # second gemm weight
+def match_gemm_rs_ag_gemm(residual,
+                          #my_residual,
+                          gemm_1_weights,
+                          gemm_1_activations,
+                          rms_norm_weight,
+                          gemm_2_weights,
                           ):
-    permute_2 = torch.ops.aten.permute.default(arg7_1, [1, 0])
-    mm_1 = torch.ops.aten.mm.default(getitem_22, permute_2)
+    permute_2 = torch.ops.aten.permute.default(gemm_1_weights, [1, 0])
+    mm_1 = torch.ops.aten.mm.default(gemm_1_activations, permute_2)
     auto_functionalized_4 = torch.ops.higher_order.auto_functionalized(torch.ops.vllm.inplace_all_reduce.default, tensor = mm_1, group_name = 'tp:0')  # how to deal with groupname?
     getitem_25 = auto_functionalized_4[1]
-    auto_functionalized_5 = torch.ops.higher_order.auto_functionalized(torch.ops._C.fused_add_rms_norm.default, input = getitem_25, residual = getitem_1, weight = arg8_1, epsilon = 1e-05)
+    auto_functionalized_5 = torch.ops.higher_order.auto_functionalized(torch.ops._C.fused_add_rms_norm.default, input = getitem_25, residual = residual, weight = rms_norm_weight, epsilon = 1e-05)
     getitem_27 = auto_functionalized_5[1]
     getitem_28 = auto_functionalized_5[2]  # new residual
-    permute_3 = torch.ops.aten.permute.default(arg9_1, [1, 0])
+    permute_3 = torch.ops.aten.permute.default(gemm_2_weights, [1, 0])
     mm_2 = torch.ops.aten.mm.default(getitem_27, permute_3)
     return mm_2, getitem_28
 
@@ -65,91 +60,59 @@ def slices(residual) -> List[torch.Tensor]:
     return residual_slices
 
 
-@torch.library.custom_op("vllm::gemm_rs_ag_gemm_orig", mutates_args=())
-def gemm_rs_ag_gemm(getitem_1: torch.Tensor,    # residual
-                    getitem_28: torch.Tensor,   # my residual
-                    arg7_1: torch.Tensor,       # first gemm weights
-                    getitem_22: torch.Tensor,   # first gemm activation
-                    arg8_1: torch.Tensor,       # rms norm weights
-                    arg9_1: torch.Tensor,       # second gemm weights
-                    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    group_name = torch.distributed.group.WORLD.group_name # TODO: factor out to setup
-    slice_size = 2048
-    split_1 = torch.ops.aten.split.Tensor(getitem_1, slice_size)
-    getitem_26 = split_1[0];  split_1 = None
-    permute_3 = torch.ops.aten.permute.default(arg7_1, [1, 0])
-    clone = torch.ops.aten.clone.default(permute_3, memory_format = torch.contiguous_format)
-    fused_matmul_reduce_scatter = torch.ops.symm_mem.fused_matmul_reduce_scatter.default(getitem_22, clone, 'avg', 0, group_name)
-    auto_functionalized_4 = torch.ops.higher_order.auto_functionalized(torch.ops._C.fused_add_rms_norm.default, input = fused_matmul_reduce_scatter, residual = getitem_26, weight = arg8_1, epsilon = 1e-05)
-    getitem_29 = auto_functionalized_4[1]
-    getitem_30 = auto_functionalized_4[2]
-    slice_scatter_2 = torch.ops.aten.slice_scatter.default(getitem_1, getitem_30, 0, 0, slice_size)
-    split_2 = torch.ops.aten.split.Tensor(slice_scatter_2, slice_size)
-    getitem_31 = split_2[0]
-    permute_5 = torch.ops.aten.permute.default(arg9_1, [1, 0])
-    clone_1 = torch.ops.aten.clone.default(permute_5, memory_format = torch.contiguous_format)
-    fused_all_gather_matmul = torch.ops.symm_mem.fused_all_gather_matmul.default(getitem_29, [clone_1], 0, group_name) # XXXXXXXXXXX
-    getitem_34 = fused_all_gather_matmul[1]
-    getitem_35 = getitem_34[0]
-    return getitem_35, getitem_31
-
-
-# First split only on first occurrence!
-# need to introduce splits since original graph does not have them.
-
-schema_str="(Tensor(a) getitem_1, Tensor(a) getitem_28, Tensor arg7_1, Tensor getitem_22, Tensor arg8_1, Tensor arg9_1, bool first_layer) -> (Tensor, Tensor, Tensor)"
+#schema_str="(Tensor(a) residual, Tensor(a) my_residual, Tensor gemm_1_weights, Tensor gemm_1_activations, Tensor rms_norm_weight, Tensor gemm_2_weights, bool first_layer) -> (Tensor, Tensor, Tensor)"
 
 @torch.library.custom_op("vllm::gemm_rs_ag_gemm", mutates_args=())#, schema=schema_str)
-def gemm_rs_ag_gemm(getitem_1: torch.Tensor,   # residual
-                    getitem_28: torch.Tensor,  # my residual
-                    arg7_1: torch.Tensor,      # first gemm weights
-                    getitem_22: torch.Tensor,  # first gemm activatiions
-                    arg8_1: torch.Tensor,      # rms norm weights
-                    arg9_1: torch.Tensor,      # second gemm weights
+def gemm_rs_ag_gemm(residual: torch.Tensor,
+                    my_residual: torch.Tensor,
+                    gemm_1_weights: torch.Tensor,
+                    gemm_1_activations: torch.Tensor,
+                    rms_norm_weight: torch.Tensor,
+                    gemm_2_weights: torch.Tensor,
                     first_layer: bool) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    print(f"CUSTOM {getitem_1.shape}({getitem_28.shape}), should_slice={should_slice(getitem_1.shape)}, first={first_layer}")
+    print(f"CUSTOM {residual.shape}({my_residual.shape}), should_slice={should_slice(residual.shape)}, first={first_layer}")
 
     # this is terrible
     if True:
-        res_slices = slices(getitem_1)
+        res_slices = slices(residual)
         slice_size = res_slices[get_tensor_model_parallel_rank()].shape[0]
     else:
         slice_size = 2048
-    print(f"SLICE_SIZE = {slice_size}, orig_shape={getitem_1.shape}, slice_shapes=[{[x.shape for x in res_slices]}]")
+    print(f"SLICE_SIZE = {slice_size}, orig_shape={residual.shape}, slice_shapes=[{[x.shape for x in res_slices]}]")
 
-    if should_slice(getitem_1.shape) and first_layer:
-        print(f"FIRST! rank={get_tensor_model_parallel_rank}")
-        split_1 = torch.ops.aten.split.Tensor(getitem_1, slice_size)
+    if should_slice(residual.shape) and first_layer:
+        print(f"FIRST! rank={get_tensor_model_parallel_rank()}")
+        split_1 = torch.ops.aten.split.Tensor(residual, slice_size)
         getitem_26 = split_1[0];  split_1 = None
     else:
-        getitem_26 = getitem_1
+        getitem_26 = my_residual
 
-    if not should_slice(getitem_1.shape):
+    if not should_slice(residual.shape):
         print("NAIVE")
-        permute_3 = torch.ops.aten.permute.default(arg7_1, [1, 0])
-        output = torch.matmul(getitem_22, permute_3)
+        permute_3 = torch.ops.aten.permute.default(gemm_1_weights, [1, 0])
+        output = torch.matmul(gemm_1_activations, permute_3)
         # all reduce?
-        auto_functionalized_4 = torch.ops.higher_order.auto_functionalized(torch.ops._C.fused_add_rms_norm.default, input=output, residual=getitem_26, weight=arg8_1, epsilon=1e-05)
+        auto_functionalized_4 = torch.ops.higher_order.auto_functionalized(torch.ops._C.fused_add_rms_norm.default, input=output, residual=getitem_26, weight=rms_norm_weight, epsilon=1e-05)
         getitem_29 = auto_functionalized_4[1]
         getitem_30 = auto_functionalized_4[2]
-        permute_5 = torch.ops.aten.permute.default(arg9_1, [1, 0])
+        permute_5 = torch.ops.aten.permute.default(gemm_2_weights, [1, 0])
         getitem_35 = torch.matmul(getitem_29, permute_5)
         getitem_30a = getitem_30.clone()
         print(f"DONE CUSTOM NAIVE {getitem_30.shape}")
         return getitem_35, getitem_30, getitem_30a
     else:
         group_name = torch.distributed.group.WORLD.group_name # TODO: factor out to setup
-        permute_3 = torch.ops.aten.permute.default(arg7_1, [1, 0])
+        permute_3 = torch.ops.aten.permute.default(gemm_1_weights, [1, 0])
         clone = torch.ops.aten.clone.default(permute_3, memory_format = torch.contiguous_format)
-        output = torch.ops.symm_mem.fused_matmul_reduce_scatter.default(getitem_22, clone, 'avg', 0, group_name)
-        auto_functionalized_4 = torch.ops.higher_order.auto_functionalized(torch.ops._C.fused_add_rms_norm.default, input=output, residual=getitem_26, weight=arg8_1, epsilon=1e-05)
+        output = torch.ops.symm_mem.fused_matmul_reduce_scatter.default(gemm_1_activations, clone, 'avg', 0, group_name)
+        auto_functionalized_4 = torch.ops.higher_order.auto_functionalized(torch.ops._C.fused_add_rms_norm.default, input=output, residual=getitem_26, weight=rms_norm_weight, epsilon=1e-05)
         getitem_29 = auto_functionalized_4[1]
         getitem_30 = auto_functionalized_4[2]
-        getitem_28a = getitem_1 if first_layer else getitem_28
-        slice_scatter_2 = torch.ops.aten.slice_scatter.default(getitem_28a, getitem_30, 0, 0, slice_size)
+        residual_1 = residual if first_layer else my_residual
+        slice_scatter_2 = torch.ops.aten.slice_scatter.default(residual_1, getitem_30, 0, 0, slice_size)
         split_2 = torch.ops.aten.split.Tensor(slice_scatter_2, slice_size)
         getitem_31 = split_2[0]
-        permute_5 = torch.ops.aten.permute.default(arg9_1, [1, 0])
+        permute_5 = torch.ops.aten.permute.default(gemm_2_weights, [1, 0])
         clone_1 = torch.ops.aten.clone.default(permute_5, memory_format = torch.contiguous_format)
         fused_all_gather_matmul = torch.ops.symm_mem.fused_all_gather_matmul.default(getitem_29, [clone_1], 0, group_name)
         getitem_34 = fused_all_gather_matmul[1]
@@ -161,23 +124,23 @@ def gemm_rs_ag_gemm(getitem_1: torch.Tensor,   # residual
 
 # this is wrong?  do we need it?
 @torch.library.register_fake("vllm::gemm_rs_ag_gemm")
-def gemm_rs_ag_gemm_fake(getitem_1: torch.Tensor,
-                         getitem_28: torch.Tensor,
-                         arg7_1: torch.Tensor,
-                         getitem_22: torch.Tensor,
-                         arg8_1: torch.Tensor,
-                         arg9_1: torch.Tensor,
+def gemm_rs_ag_gemm_fake(residual: torch.Tensor,
+                         my_residual: torch.Tensor,
+                         gemm_1_weights: torch.Tensor,
+                         gemm_1_activations: torch.Tensor,
+                         rms_norm_weight: torch.Tensor,
+                         gemm_2_weights: torch.Tensor,
                          first_layer: bool,
                          ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    mm_res = torch.empty((getitem_22.shape[0], arg9_1.shape[0]), device=getitem_22.device, dtype=getitem_22.dtype)  #???
-    resid = torch.empty_like(getitem_1)
+    mm_res = torch.empty((gemm_1_activations.shape[0], gemm_2_weights.shape[0]), device=gemm_1_activations.device, dtype=gemm_1_activations.dtype)  #???
+    resid = torch.empty_like(residual)
     my_resid = resid.clone()  # last one right? or needs to be split
     return (mm_res, resid, my_resid)
 
 
 # doesn't matter, only needed for signature
-def replace_gemm_rs_ag_gemm(getitem_1, arg7_1, getitem_22, arg8_1, arg9_1):
-    results = torch.ops.vllm.gemm_rs_ag_gemm(getitem_1, getitem_1, arg7_1, getitem_22, arg8_1, arg9_1)
+def replace_gemm_rs_ag_gemm(residual, gemm_1_weights, gemm_1_activations, rms_norm_weight, gemm_2_weights):
+    results = torch.ops.vllm.gemm_rs_ag_gemm(residual, residual, gemm_1_weights, gemm_1_activations, rms_norm_weight, gemm_2_weights)
     getitem_34 = results[0]
     getitem_35 = results[1]
     return getitem_34, getitem_35
@@ -282,30 +245,27 @@ def process_matches(graph: fx.Graph, matches):
 
     # "sort" matches in topo order
     matches = sorted(matches, key=lambda x: find_min_index(x))
-    replacements = []
+
+    # this is pretty hacky since the order doesn't necessarily encode the dependency.
+    res_replacements = []
+    my_res_replacements = []
 
     for match in matches:
         last_node_in_match = match.nodes[-1] #max(match.nodes, key=lambda x: nodes.index(x))
 
         with graph.inserting_after(last_node_in_match):
-            if False and len(replacements) == 0:
-                replacements.append(graph.call_function(torch.ops.aten.empty.memory_format,
-                                                        args = ([0, 0],),
-                                                        kwargs = {"dtype": torch.float16, "device": "cuda", "pin_memory": False}))
-                graph.inserting_after(replacements[-1])
-            else:
-                replacements.append(match.kwargs["getitem_1"])
-
             kwargs = match.kwargs
             kwargs["first_layer"] = match == matches[0]
-            kwargs["getitem_28"] = replacements[-1]
+            kwargs["residual"] = res_replacements[-1] if len(res_replacements) > 0 else match.kwargs["residual"]
+            kwargs["my_residual"] = my_res_replacements[-1] if len(my_res_replacements) > 0 else match.kwargs["residual"]
             fused_node = graph.call_function(torch.ops.vllm.gemm_rs_ag_gemm.default, kwargs=kwargs)
 
             graph.inserting_after(fused_node)
             result_node_new = graph.call_function(operator.getitem, (fused_node, 0))
             residual_node_new = graph.call_function(operator.getitem, (fused_node, 1))
             my_residual_node_new = graph.call_function(operator.getitem, (fused_node, 2))
-            replacements.append(my_residual_node_new)
+            res_replacements.append(residual_node_new)
+            my_res_replacements.append(my_residual_node_new)
 
         rms_node = find_auto_fn(match.nodes, torch.ops._C.fused_add_rms_norm.default)
         gemm_node = find_fn(match.nodes, torch.ops.aten.mm.default)
@@ -327,7 +287,7 @@ def process_matches(graph: fx.Graph, matches):
 
     # Finally, remove matched nodes
     graph.eliminate_dead_code()
-    #assert all(node not in graph.nodes for match in matches for node in match.nodes)
+    assert all(node not in graph.nodes for match in matches for node in match.nodes)
 
 
 def dump_graph(graph: torch.fx.Graph, stage: str):
