@@ -828,7 +828,10 @@ class LLMEngine:
         if arrival_time is None:
             arrival_time = time.time()
 
-        self._validate_token_prompt(prompt, lora_request)
+        if self.tokenizer is not None:
+            self._validate_token_prompt(
+                prompt,
+                tokenizer=self.get_tokenizer(lora_request=lora_request))
 
         preprocessed_inputs = self.input_preprocessor.preprocess(
             prompt,
@@ -857,7 +860,7 @@ class LLMEngine:
         )
 
     def _validate_token_prompt(self, prompt: PromptType,
-                               lora_request: Optional[LoRARequest]):
+                               tokenizer: AnyTokenizer):
         # Guard against out-of-vocab tokens.
         # For some tokenizers, tokenizer.decode will happily return empty text
         # for token ids that are out of vocab, and we don't detect token ids
@@ -867,14 +870,11 @@ class LLMEngine:
         # This needs to happen before multimodal input pre-processing, which
         # may add dummy <image> tokens that aren't part of the tokenizer's
         # vocabulary.
-        if self.tokenizer is not None and self._is_token_prompt(prompt):
+        if self._is_token_prompt(prompt):
             prompt_ids = prompt["prompt_token_ids"]
             if len(prompt_ids) == 0:
                 # Empty prompt check is handled later
                 return
-            # If the engine is run with --skip-tokenizer-init then we have no
-            # tokenizer to check
-            tokenizer = self.get_tokenizer(lora_request)
             max_input_id = max(prompt_ids)
             if max_input_id > tokenizer.max_token_id:
                 raise ValueError(
