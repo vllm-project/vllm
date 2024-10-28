@@ -9,7 +9,7 @@ import torch
 import vllm.envs as envs
 from transformers import PretrainedConfig
 from vllm.logger import init_logger
-from vllm.model_executor.layers.pooler import PoolingConfig
+from vllm.model_executor.layers.pooler import PoolingConfig, PoolingType
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.model_executor.models import ModelRegistry
 from vllm.platforms import current_platform
@@ -420,8 +420,13 @@ class ModelConfig:
                 "fallback to the eager mode.")
             self.enforce_eager = True
 
-    def get_pooling_config(self, pooling_type_arg,
-                           normalize_arg) -> Optional[PoolingConfig]:
+    def get_pooling_type(self, pooling_type_name: str) -> PoolingType:
+        mapping = {i.name: i for i in PoolingType}
+        return mapping[pooling_type_name.strip().upper()]
+
+    def get_pooling_config(
+            self, pooling_type_arg: Optional[str],
+            normalize_arg: Optional[bool]) -> Optional[PoolingConfig]:
         pooling_config = get_pooling_config(self.model, self.revision)
         pooling_type = None
         normalize = None
@@ -433,8 +438,9 @@ class ModelConfig:
         if normalize_arg:
             normalize = normalize_arg
         if pooling_type and normalize:
-            return PoolingConfig(pooling_type=pooling_type,
-                                 normalize=normalize)
+            return PoolingConfig(
+                pooling_type=self.get_pooling_type(pooling_type),
+                normalize=normalize)
         else:
             return None
 
