@@ -390,7 +390,7 @@ class LoRAModelManager(AdapterModelManager):
                     module_lora.bias = None
                     logger.warning(
                         "Not using the adapter bias for %s. Explicitly "
-                        "enable the bias with --enable-lora-bias", module_name)
+                        "enable the bias with --enable-lora-bias.", module_name)
                 module.set_lora(index, module_lora.lora_a, module_lora.lora_b,
                                 module_lora.embeddings_tensor,
                                 module_lora.bias)
