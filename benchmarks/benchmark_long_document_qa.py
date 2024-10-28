@@ -80,7 +80,8 @@ def main(args):
               block_allocator=args.block_allocator,
               preemption_mode=preemption_mode,
               swap_space=args.cpu_memory_gb,
-              gpu_memory_utilization=args.gpu_memory_utilization)
+              gpu_memory_utilization=args.gpu_memory_utilization,
+              max_model_len=30000)
 
     sampling_params = SamplingParams(temperature=0, max_tokens=args.output_len)
 
