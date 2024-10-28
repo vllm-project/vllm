@@ -9,6 +9,8 @@ from vllm.sampling_params import RequestOutputKind
 from vllm.sequence import (PromptLogprobs, RequestMetrics, SampleLogprobs,
                            SequenceGroup, SequenceGroupBase, SequenceStatus)
 
+import torch
+
 
 @dataclass
 class CompletionOutput:
@@ -37,6 +39,7 @@ class CompletionOutput:
     finish_reason: Optional[str] = None
     stop_reason: Union[int, str, None] = None
     lora_request: Optional[LoRARequest] = None
+    output_hidden_states: Optional[torch.Tensor] = None
 
     def finished(self) -> bool:
         return self.finish_reason is not None
@@ -163,10 +166,11 @@ class RequestOutput:
         outputs = []
         include_prompt = True
         for i, seq in enumerate(top_n_seqs):
-            output_text = seq.get_output_text_to_return(
-                text_buffer_length, delta)
+            output_text = seq.get_output_text_to_return(text_buffer_length, delta)
 
             output_token_ids = seq.get_output_token_ids_to_return(delta)
+            output_hidden_states = seq.get_output_token_ids_hiddenstates_to_return(delta)
+            
             num_output_tokens = 1 if isinstance(output_token_ids,
                                                 int) else len(output_token_ids)
 
@@ -192,9 +196,10 @@ class RequestOutput:
                                          cumulative_logprob=None,
                                          logprobs=None,
                                          finish_reason=None,
-                                         stop_reason=None))
+                                         stop_reason=None,
+                                         hidden_states=None))
                 output = cached_outputs[i]
-
+                
                 # Init cached output object
                 assert output.index == i
                 output.text = output_text
@@ -214,12 +219,15 @@ class RequestOutput:
 
             else:
                 output = CompletionOutput(
-                    top_n_seqs.index(seq), output_text, [output_token_ids]
-                    if isinstance(output_token_ids, int) else output_token_ids,
-                    seq.get_cumulative_logprob() if include_logprobs else None,
-                    output_logprobs,
-                    SequenceStatus.get_finished_reason(seq.status),
-                    seq.stop_reason)
+                    index = top_n_seqs.index(seq), 
+                    text = output_text, 
+                    token_ids = [output_token_ids] if isinstance(output_token_ids, int) else output_token_ids,
+                    cumulative_logprob = seq.get_cumulative_logprob() if include_logprobs else None,
+                    logprobs = output_logprobs,
+                    finish_reason = SequenceStatus.get_finished_reason(seq.status),
+                    stop_reason = seq.stop_reason,
+                    output_hidden_states = output_hidden_states)
+
 
             outputs.append(output)
 

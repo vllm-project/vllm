@@ -112,6 +112,7 @@ class ModelConfig:
             Defaults to 'auto' which defaults to 'hf'.
         mm_processor_kwargs: Arguments to be forwarded to the model's processor
             for multi-modal data, e.g., image processor.
+        forward_hidden_state: False: forward token id; True: forward last token hidden states
     """
 
     def __init__(self,
@@ -142,7 +143,8 @@ class ModelConfig:
                  use_async_output_proc: bool = True,
                  override_neuron_config: Optional[Dict[str, Any]] = None,
                  config_format: ConfigFormat = ConfigFormat.AUTO,
-                 mm_processor_kwargs: Optional[Dict[str, Any]] = None) -> None:
+                 mm_processor_kwargs: Optional[Dict[str, Any]] = None,
+                 forward_hidden_state: Optional[bool] = False) -> None:
         self.model = model
         self.tokenizer = tokenizer
         self.tokenizer_mode = tokenizer_mode
@@ -222,6 +224,8 @@ class ModelConfig:
         supported_tasks, task = self._resolve_task(task, self.hf_config)
         self.supported_tasks = supported_tasks
         self.task: Final = task
+        
+        self.forward_hidden_state = forward_hidden_state
 
         self._verify_quantization()
         self._verify_cuda_graph()

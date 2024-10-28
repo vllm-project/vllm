@@ -123,6 +123,7 @@ class InputRegistry:
         ctx: InputContext,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        input_embedding_matrix: None
     ) -> Tuple["SequenceData", Optional["MultiModalDataDict"]]:
         """
         The default dummy data factory represents the longest possible text
@@ -134,7 +135,7 @@ class InputRegistry:
         # Avoid circular import
         from vllm.sequence import SequenceData
 
-        dummy_seq_data = SequenceData.from_prompt_token_counts((0, seq_len))
+        dummy_seq_data = SequenceData.from_prompt_token_counts(input_embedding_matrix, (0, seq_len))
         dummy_multi_modal_data = None
 
         return dummy_seq_data, dummy_multi_modal_data
@@ -194,6 +195,7 @@ class InputRegistry:
         model_config: "ModelConfig",
         seq_len: int,
         mm_registry: "MultiModalRegistry",
+        input_embedding_matrix: None,
         is_encoder_data: bool = False,
     ) -> Tuple["SequenceData", Optional["MultiModalDataDict"]]:
         """
@@ -220,8 +222,10 @@ class InputRegistry:
         mm_processor_kwargs = get_allowed_kwarg_only_overrides(
             dummy_factory, overrides=model_config.mm_processor_kwargs)
 
-        seq_data, mm_data = dummy_factory(InputContext(model_config), seq_len,
-                                          _MultiModalCounts(mm_counts),
+        seq_data, mm_data = dummy_factory(ctx=InputContext(model_config), 
+                                          seq_len=seq_len,
+                                          mm_counts=_MultiModalCounts(mm_counts),
+                                          input_embedding_matrix=input_embedding_matrix,
                                           **mm_processor_kwargs)
 
         # Having more tokens is over-conservative but otherwise fine

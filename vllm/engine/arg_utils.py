@@ -182,6 +182,8 @@ class EngineArgs:
     override_neuron_config: Optional[Dict[str, Any]] = None
     mm_processor_kwargs: Optional[Dict[str, Any]] = None
     scheduling_policy: Literal["fcfs", "priority"] = "fcfs"
+    
+    forward_hidden_state: Optional[bool] = False
 
     def __post_init__(self):
         if not self.tokenizer:
@@ -840,6 +842,12 @@ class EngineArgs:
             'or "priority" (requests are handled based on given '
             'priority (lower value means earlier handling) and time of '
             'arrival deciding any ties).')
+        
+        parser.add_argument(
+            '--forward_hidden_state',
+            type=bool,
+            default=False,
+            help='False: forward token id; True: forward last token hidden states')
 
         return parser
 
@@ -881,6 +889,7 @@ class EngineArgs:
             override_neuron_config=self.override_neuron_config,
             config_format=self.config_format,
             mm_processor_kwargs=self.mm_processor_kwargs,
+            forward_hidden_state=self.forward_hidden_state
         )
 
     def create_load_config(self) -> LoadConfig:

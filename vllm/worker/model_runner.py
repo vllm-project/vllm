@@ -60,6 +60,8 @@ from vllm.worker.model_runner_base import (
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionBackend
+    
+import copy
 
 logger = init_logger(__name__)
 
@@ -92,6 +94,7 @@ class ModelInputForGPU(ModelRunnerInputBase):
     additional fields.
     """
     input_tokens: Optional[torch.Tensor] = None
+    input_tokens_hiddenstates: Optional[torch.Tensor] = None
     input_positions: Optional[torch.Tensor] = None
     seq_lens: Optional[List[int]] = None
     query_lens: Optional[List[int]] = None
@@ -111,6 +114,7 @@ class ModelInputForGPU(ModelRunnerInputBase):
     def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
         tensor_dict = {
             "input_tokens": self.input_tokens,
+            "input_tokens_hiddenstates": self.input_tokens_hiddenstates,
             "input_positions": self.input_positions,
             "lora_requests": self.lora_requests,
             "lora_mapping": self.lora_mapping,
@@ -149,6 +153,7 @@ class ModelInputForGPUWithSamplingMetadata(ModelInputForGPU):
     def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
         tensor_dict = {
             "input_tokens": self.input_tokens,
+            "input_tokens_hiddenstates": self.input_tokens_hiddenstates,
             "input_positions": self.input_positions,
             "lora_requests": self.lora_requests,
             "lora_mapping": self.lora_mapping,
@@ -188,6 +193,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
 
         def simple_reinit(self):
             self.input_tokens[0].clear()  # type: ignore
+            self.input_tokens_hiddenstates[0].clear()  # type: ignore
             self.input_positions[0].clear()  # type: ignore
             self.mrope_input_positions = None  # type: ignore
             self.seq_lens[0] = 0  # type: ignore
@@ -214,6 +220,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
 
             # Input tokens and positions.
             input_tokens: Optional[List[List[int]]] = None,
+            input_tokens_hiddenstates: Optional[List[List[List[float]]]] = None,
             input_positions: Optional[List[List[int]]] = None,
             mrope_input_positions: Optional[List[List[List[int]]]] = None,
 
@@ -271,6 +278,12 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                     else:
                         for seq_id in range(len(self.seq_ids)):
                             self.input_tokens[seq_id].clear()
+                            
+                    if input_tokens_hiddenstates:
+                        self.input_tokens_hiddenstates = input_tokens_hiddenstates
+                    else:
+                        for seq_id in range(len(self.seq_ids)):
+                            self.input_tokens_hiddenstates[seq_id].clear()
 
                     if input_positions:
                         self.input_positions = input_positions
@@ -340,6 +353,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
 
             else:
                 self.input_tokens = input_tokens or []
+                self.input_tokens_hiddenstates = input_tokens_hiddenstates or []
                 self.input_positions = input_positions or []
                 self.mrope_input_positions = mrope_input_positions or None
                 self.seq_lens = seq_lens or []
@@ -371,6 +385,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             self.n_seqs = len(self.seq_ids)
 
             self.input_tokens = [[] for _ in range(self.n_seqs)]
+            self.input_tokens_hiddenstates = [[] for _ in range(self.n_seqs)]
             self.input_positions = [[] for _ in range(self.n_seqs)]
             self.mrope_input_positions = None
             self.seq_lens = [0] * self.n_seqs
@@ -484,11 +499,13 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
 
         # Compute tokens.
         tokens = seq_data.get_token_ids()[context_len:seq_len]
+        hidden_states = seq_data.get_token_ids_hiddenstates()[context_len:seq_len]
 
         inter_data.seq_lens[seq_idx] = seq_len
         inter_data.orig_seq_lens[seq_idx] = seq_len
         inter_data.context_lens[seq_idx] = context_len
         inter_data.input_tokens[seq_idx].extend(tokens)
+        inter_data.input_tokens_hiddenstates[seq_idx].extend(hidden_states)
         inter_data.input_positions[seq_idx].extend(range(context_len, seq_len))
         inter_data.query_lens[seq_idx] = seq_len - context_len
 
@@ -542,6 +559,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             uncomputed_start = prefix_cache_len - context_len
             inter_data.input_tokens[seq_idx] = inter_data.input_tokens[
                 seq_idx][uncomputed_start:]
+            inter_data.input_tokens_hiddenstates[seq_idx] = inter_data.input_tokens_hiddenstates[
+                seq_idx][uncomputed_start:]            
             inter_data.input_positions[seq_idx] = inter_data.input_positions[
                 seq_idx][uncomputed_start:]
             context_len = prefix_cache_len
@@ -555,6 +574,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             # mark all tokens as computed in the scheduler and do not
             # schedule this sequence, so this case should not happen.
             inter_data.input_tokens[seq_idx] = inter_data.input_tokens[
+                seq_idx][-1:]
+            inter_data.input_tokens_hiddenstates[seq_idx] = inter_data.input_tokens_hiddenstates[
                 seq_idx][-1:]
             inter_data.input_positions[seq_idx] = inter_data.input_positions[
                 seq_idx][-1:]
@@ -777,6 +798,11 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         for inter_data in self.inter_data_list:
             for cur_input_tokens in inter_data.input_tokens:
                 input_tokens.extend(cur_input_tokens)
+                
+        input_tokens_hiddenstates = []
+        for inter_data in self.inter_data_list:
+            for cur_input_tokens_hiddenstates in inter_data.input_tokens_hiddenstates:
+                input_tokens_hiddenstates.extend(cur_input_tokens_hiddenstates)
 
         if not input_tokens:
             # This may happen when all prefill requests hit
@@ -841,10 +867,19 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         # Tokens and positions.
         if cuda_graph_pad_size:
             input_tokens.extend(itertools.repeat(0, cuda_graph_pad_size))
+            
+        if cuda_graph_pad_size > 0:
+            assert false, "cuda_graph_pad_size > 0, pay attention to input_tokens_hiddenstates"
+            input_tokens_hiddenstates.extend([input_tokens_hiddenstates] * cuda_graph_pad_size)
+        
         assert self.runner.device is not None
         input_tokens_tensor = async_tensor_h2d(input_tokens, torch.long,
                                                self.runner.device,
                                                self.runner.pin_memory)
+        input_tokens_hiddenstates_tensor = async_tensor_h2d(input_tokens_hiddenstates, torch.float,
+                                               self.runner.device,
+                                               self.runner.pin_memory)
+        
         if mrope_input_positions is not None:
             for idx in range(3):
                 mrope_input_positions[idx].extend(
@@ -922,6 +957,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
 
         return self.model_input_cls(
             input_tokens=input_tokens_tensor,
+            input_tokens_hiddenstates=input_tokens_hiddenstates_tensor,
             input_positions=input_positions_tensor,
             attn_metadata=attn_metadata,
             seq_lens=seq_lens,
@@ -1195,7 +1231,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         return builder.build()  # type: ignore
 
     @torch.inference_mode()
-    def profile_run(self) -> None:
+    def profile_run(self, input_embedding_matrix) -> None:
         # Enable top-k sampling to reflect the accurate memory usage.
         sampling_params = SamplingParams(top_p=0.99, top_k=self.vocab_size - 1)
         max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
@@ -1255,9 +1291,10 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             batch_size += seq_len
 
             seq_data, dummy_multi_modal_data = self.input_registry \
-                .dummy_data_for_profiling(self.model_config,
-                                          seq_len,
-                                          self.mm_registry)
+                .dummy_data_for_profiling(model_config=self.model_config,
+                                          seq_len=seq_len,
+                                          mm_registry=self.mm_registry,
+                                          input_embedding_matrix=input_embedding_matrix)
 
             seq = SequenceGroupMetadata(
                 request_id=str(group_id),
@@ -1287,6 +1324,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         finished_requests_ids = [seq.request_id for seq in seqs]
         model_input = self.prepare_model_input(
             seqs, finished_requests_ids=finished_requests_ids)
+
         intermediate_tensors = None
         if not get_pp_group().is_first_rank:
             intermediate_tensors = self.model.make_empty_intermediate_tensors(
@@ -1405,6 +1443,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         # Prepare dummy inputs. These will be reused for all batch sizes.
         max_batch_size = self.max_batchsize_to_capture
         input_tokens = torch.zeros(max_batch_size, dtype=torch.long).cuda()
+        assert False, "capture_model not init input_tokens_hiddenstates"
         input_positions = torch.zeros(max_batch_size, dtype=torch.long).cuda()
         if self.model_is_mrope:
             input_positions = torch.tile(input_positions, (3, 1))
@@ -1652,10 +1691,17 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             model_forward_start = torch.cuda.Event(enable_timing=True)
             model_forward_end = torch.cuda.Event(enable_timing=True)
             model_forward_start.record()
-
+            
         with set_forward_context(model_input.attn_metadata):
+            
+            if self.model_config.forward_hidden_state == True:
+                inputs_embeds = model_input.input_tokens_hiddenstates.half()
+            else:
+                inputs_embeds = None
+            
             hidden_or_intermediate_states = model_executable(
                 input_ids=model_input.input_tokens,
+                inputs_embeds=inputs_embeds,
                 positions=model_input.input_positions,
                 kv_caches=kv_caches,
                 attn_metadata=model_input.attn_metadata,
@@ -1701,6 +1747,21 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             logits=logits,
             sampling_metadata=model_input.sampling_metadata,
         )
+        
+        assert model_input.sampling_metadata is not None
+        indices = model_input.sampling_metadata.selected_token_indices
+        if model_input.is_prompt:
+            hidden_states = hidden_or_intermediate_states.index_select(0, indices)
+        elif decode_meta.use_cuda_graph:
+            hidden_states = hidden_or_intermediate_states[:len(indices)]
+        else:
+            hidden_states = hidden_or_intermediate_states
+        hidden_states = hidden_states.tolist()
+        
+        assert len(hidden_states) == len(output.outputs), "output hidden states length != len(output.outputs)"
+        for i in range(len(hidden_states)):
+            output.outputs[i].hidden_state = copy.deepcopy(hidden_states[i])
+        
         if (self.observability_config is not None
                 and self.observability_config.collect_model_forward_time
                 and output is not None):

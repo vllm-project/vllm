@@ -99,7 +99,7 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
     def process_prompt_logprob(self, seq_group: SequenceGroup,
                                outputs: List[SequenceGroupOutput]) -> None:
         """Process prompt logprobs associated with one step of a single-step-
-        scheduled computation.
+        scheduled computation.c
         
         Args:
           seq_group: the output is associated with this :class:`SequenceGroup`
@@ -117,10 +117,13 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
         if sampling_params.n == 1:
             # only have one output sample
             sample = outputs.samples[0]
+            
+            hidden_state = outputs.hidden_state
+            
             # only have one sequence
             seq = seq_group.seqs[0]
             if not is_async:
-                seq.append_token_id(sample.output_token, sample.logprobs)
+                seq.append_token_id(sample.output_token, sample.logprobs, hidden_state)
             if sampling_params.detokenize and self.detokenizer:
                 new_char_count = self.detokenizer.decode_sequence_inplace(
                     seq, sampling_params)

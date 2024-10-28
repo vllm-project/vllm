@@ -63,6 +63,8 @@ from vllm.version import __version__ as VLLM_VERSION
 logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
 
+import time
+
 
 def _load_generation_config_dict(model_config: ModelConfig) -> Dict[str, Any]:
     config = try_get_generation_config(
@@ -323,6 +325,14 @@ class LLMEngine:
                                      "make sure skip_tokenizer_init is False")
             return tokenizer_group.get_lora_tokenizer(sequence.lora_request)
 
+        from transformers import AutoModelForCausalLM
+        model = AutoModelForCausalLM.from_pretrained(
+            model_config.model,
+            trust_remote_code=True,
+            device_map="cpu")
+        self.input_embedding_matrix = model.get_input_embeddings()
+        print(f"Load Model {type(model)} input_embedding_matrix. Size: {self.input_embedding_matrix.weight.size()}; Type: { self.input_embedding_matrix.weight.dtype}")
+
         self.seq_counter = Counter()
         self.generation_config_fields = _load_generation_config_dict(
             model_config)
@@ -485,7 +495,7 @@ class LLMEngine:
         and the swap CPU cache.
         """
         num_gpu_blocks, num_cpu_blocks = (
-            self.model_executor.determine_num_available_blocks())
+            self.model_executor.determine_num_available_blocks(self.input_embedding_matrix))
 
         if self.cache_config.num_gpu_blocks_override is not None:
             num_gpu_blocks_override = self.cache_config.num_gpu_blocks_override
@@ -655,9 +665,13 @@ class LLMEngine:
         block_size = self.cache_config.block_size
         seq_id = next(self.seq_counter)
         eos_token_id = self.input_preprocessor.get_eos_token_id(lora_request)
-
+        
+        token_ids_tensor = torch.tensor(processed_inputs["prompt_token_ids"])
+        hidden_states = self.input_embedding_matrix(token_ids_tensor)
+        hidden_states = hidden_states.tolist()
+    
         seq = Sequence(seq_id, processed_inputs, block_size, eos_token_id,
-                       lora_request, prompt_adapter_request)
+                       lora_request, prompt_adapter_request, hidden_states=hidden_states)
 
         encoder_seq = None
         if 'encoder_prompt_token_ids' in processed_inputs:
@@ -843,7 +857,7 @@ class LLMEngine:
         processed_inputs["mm_processor_kwargs"] = preprocessed_inputs.get(
             "mm_processor_kwargs")
 
-        return self._add_processed_request(
+        result = self._add_processed_request(
             request_id=request_id,
             processed_inputs=processed_inputs,
             params=params,
@@ -853,6 +867,8 @@ class LLMEngine:
             trace_headers=trace_headers,
             priority=priority,
         )
+           
+        return result
 
     def _create_sequence_group_with_sampling(
         self,

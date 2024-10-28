@@ -194,6 +194,7 @@ class LLM:
             disable_custom_all_reduce=disable_custom_all_reduce,
             disable_async_output_proc=disable_async_output_proc,
             mm_processor_kwargs=mm_processor_kwargs,
+            forward_hidden_state=forward_hidden_state,
             **kwargs,
         )
         self.llm_engine = LLMEngine.from_engine_args(
