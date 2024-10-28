@@ -61,8 +61,12 @@ class MistralToolParser(ToolParser):
         self.streamed_args_for_tool: List[str] = [
         ]  # map what has been streamed for each tool so far to a list
         self.bot_token = "[TOOL_CALLS]"
-        self.bot_token_id = self.model_tokenizer.get_vocab()[self.bot_token]
+        self.bot_token_id = self.vocab.get(self.bot_token)
         self.tool_call_regex = re.compile(r"\[{.*?}\]", re.DOTALL)
+        if self.bot_token_id is None:
+            raise RuntimeError(
+                "Mistral Tool Parser could not locate the tool call token in "
+                "the tokenizer!")
 
     def extract_tool_calls(
         self,
@@ -107,8 +111,8 @@ class MistralToolParser(ToolParser):
                 tool_calls=tool_calls,
                 content=content if len(content) > 0 else None)
 
-        except Exception as e:
-            logger.error("Error in extracting tool call from response: %s", e)
+        except Exception:
+            logger.exception("Error in extracting tool call from response.")
             # return information to just treat the tool call as regular JSON
             return ExtractedToolCallInformation(tools_called=False,
                                                 tool_calls=[],
@@ -294,8 +298,8 @@ class MistralToolParser(ToolParser):
             self.prev_tool_call_arr = tool_call_arr
             return delta
 
-        except Exception as e:
-            logger.error("Error trying to handle streaming tool call: %s", e)
+        except Exception:
+            logger.exception("Error trying to handle streaming tool call.")
             logger.debug(
                 "Skipping chunk as a result of tool streaming extraction "
                 "error")

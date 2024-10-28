@@ -28,6 +28,7 @@ from torch import nn
 from transformers import CohereConfig
 
 from vllm.attention import Attention, AttentionMetadata
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, LoRAConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -41,7 +42,8 @@ from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader, row_parallel_weight_loader)
+    default_weight_loader, maybe_remap_kv_scale_name,
+    row_parallel_weight_loader)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.sequence import IntermediateTensors
@@ -249,6 +251,7 @@ class CohereDecoderLayer(nn.Module):
         return hidden_states, residual
 
 
+@support_torch_compile
 class CohereModel(nn.Module):
 
     def __init__(
@@ -426,6 +429,11 @@ class CohereForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
+                # Remapping the name of FP8 kv-scale.
+                name = maybe_remap_kv_scale_name(name, params_dict)
+                if name is None:
+                    continue
+
                 if is_pp_missing_parameter(name, self):
                     continue
                 param = params_dict[name]

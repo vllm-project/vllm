@@ -49,7 +49,7 @@ set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx940;gfx941;gfx942;gfx1030;gfx11
 # requirements.txt files and should be kept consistent.  The ROCm torch
 # versions are derived from Dockerfile.rocm
 #
-set(TORCH_SUPPORTED_VERSION_CUDA "2.4.0")
+set(TORCH_SUPPORTED_VERSION_CUDA "2.5.0")
 set(TORCH_SUPPORTED_VERSION_ROCM "2.5.0")
 
 #
@@ -82,24 +82,6 @@ endif()
 # etc.
 #
 find_package(Torch REQUIRED)
-
-#
-message(STATUS "Enabling core extension.")
-
-# Define _core_C extension
-#  built for (almost) every target platform, (excludes TPU and Neuron)
-
-set(VLLM_EXT_SRC
-  "csrc/core/torch_bindings.cpp")
-
-define_gpu_extension_target(
-  _core_C
-  DESTINATION vllm
-  LANGUAGE CXX
-  SOURCES ${VLLM_EXT_SRC}
-  COMPILE_FLAGS ${CXX_COMPILE_FLAGS}
-  USE_SABI 3
-  WITH_SOABI)
 
 #
 # Forward the non-CUDA device extensions to external CMake scripts.
@@ -144,26 +126,31 @@ else()
 endif()
 
 
-#
-# For cuda we want to be able to control which architectures we compile for on 
-# a per-file basis in order to cut down on compile time. So here we extract
-# the set of architectures we want to compile for and remove the from the 
-# CMAKE_CUDA_FLAGS so that they are not applied globally.
-#
 if(VLLM_GPU_LANG STREQUAL "CUDA")
+  #
+  # For cuda we want to be able to control which architectures we compile for on 
+  # a per-file basis in order to cut down on compile time. So here we extract
+  # the set of architectures we want to compile for and remove the from the 
+  # CMAKE_CUDA_FLAGS so that they are not applied globally.
+  #
   clear_cuda_arches(CUDA_ARCH_FLAGS)
   extract_unique_cuda_archs_ascending(CUDA_ARCHS "${CUDA_ARCH_FLAGS}")
   message(STATUS "CUDA target architectures: ${CUDA_ARCHS}")
+  # Filter the target architectures by the supported supported archs
+  # since for some files we will build for all CUDA_ARCHS.
+  cuda_archs_loose_intersection(CUDA_ARCHS 
+    "${CUDA_SUPPORTED_ARCHS}" "${CUDA_ARCHS}")
+  message(STATUS "CUDA supported target architectures: ${CUDA_ARCHS}")
+else()
+  #
+  # For other GPU targets override the GPU architectures detected by cmake/torch
+  # and filter them by the supported versions for the current language.
+  # The final set of arches is stored in `VLLM_GPU_ARCHES`.
+  #
+  override_gpu_arches(VLLM_GPU_ARCHES
+    ${VLLM_GPU_LANG}
+    "${${VLLM_GPU_LANG}_SUPPORTED_ARCHS}")
 endif()
-
-#
-# Override the GPU architectures detected by cmake/torch and filter them by
-# the supported versions for the current language.
-# The final set of arches is stored in `VLLM_GPU_ARCHES`.
-#
-override_gpu_arches(VLLM_GPU_ARCHES
-  ${VLLM_GPU_LANG}
-  "${${VLLM_GPU_LANG}_SUPPORTED_ARCHS}")
 
 #
 # Query torch for additional GPU compilation flags for the given
@@ -182,12 +169,12 @@ endif()
 
 #
 # Use FetchContent for C++ dependencies that are compiled as part of vLLM's build process.
-# Configure it to place files in vllm/.deps, in order to play nicely with sccache.
+# setup.py will override FETCHCONTENT_BASE_DIR to play nicely with sccache.
+# Each dependency that produces build artifacts should override its BINARY_DIR to avoid
+# conflicts between build types. It should instead be set to ${CMAKE_BINARY_DIR}/<dependency>.
 #
 include(FetchContent)
-get_filename_component(PROJECT_ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}" ABSOLUTE)
-file(MAKE_DIRECTORY "${FETCHCONTENT_BASE_DIR}")
-set(FETCHCONTENT_BASE_DIR "${PROJECT_ROOT_DIR}/.deps")
+file(MAKE_DIRECTORY ${FETCHCONTENT_BASE_DIR}) # Ensure the directory exists
 message(STATUS "FetchContent base directory: ${FETCHCONTENT_BASE_DIR}")
 
 #
@@ -208,7 +195,6 @@ set(VLLM_EXT_SRC
   "csrc/quantization/compressed_tensors/int8_quant_kernels.cu"
   "csrc/quantization/fp8/common.cu"
   "csrc/cuda_utils_kernels.cu"
-  "csrc/moe_align_block_size_kernels.cu"
   "csrc/prepare_inputs/advance_step.cu"
   "csrc/torch_bindings.cpp")
 
@@ -265,7 +251,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     message(STATUS "Building Marlin kernels for archs: ${MARLIN_ARCHS}")
   else()
     message(STATUS "Not building Marlin kernels as no compatible archs found"
-                   "in CUDA target architectures")
+                   " in CUDA target architectures")
   endif()
 
   #
@@ -281,10 +267,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     list(APPEND VLLM_GPU_FLAGS "-DENABLE_SCALED_MM_C3X=1")
     message(STATUS "Building scaled_mm_c3x for archs: ${SCALED_MM_3X_ARCHS}")
   else()
-    # clear SCALED_MM_3X_ARCHS so the scaled_mm_c2x kernels know we didn't 
-    # build any 3x kernels
-    set(SCALED_MM_3X_ARCHS)
-
     if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0 AND SCALED_MM_3X_ARCHS)
       message(STATUS "Not building scaled_mm_c3x as CUDA Compiler version is "
                      "not >= 12.0, we recommend upgrading to CUDA 12.0 or "
@@ -294,13 +276,17 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       message(STATUS "Not building scaled_mm_c3x as no compatible archs found "
                      "in CUDA target architectures")
     endif()
+
+    # clear SCALED_MM_3X_ARCHS so the scaled_mm_c2x kernels know we didn't 
+    # build any 3x kernels
+    set(SCALED_MM_3X_ARCHS)
   endif()
 
   #
   # For the cutlass_scaled_mm kernels we want to build the c2x (CUTLASS 2.x)
   # kernels for the remaining archs that are not already built for 3x.
   cuda_archs_loose_intersection(SCALED_MM_2X_ARCHS 
-    "7.5;8.0;8.6;8.9;9.0;9.0a" "${CUDA_ARCHS}")
+    "7.5;8.0;8.6;8.9;9.0" "${CUDA_ARCHS}")
   # subtract out the archs that are already built for 3x
   list(REMOVE_ITEM SCALED_MM_2X_ARCHS ${SCALED_MM_3X_ARCHS})
   if (SCALED_MM_2X_ARCHS)
@@ -418,6 +404,7 @@ target_compile_definitions(_C PRIVATE CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
 
 set(VLLM_MOE_EXT_SRC
   "csrc/moe/torch_bindings.cpp"
+  "csrc/moe/moe_align_sum_kernels.cu"
   "csrc/moe/topk_softmax_kernels.cu")
 
 set_gencode_flags_for_srcs(
@@ -445,7 +432,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     message(STATUS "Building Marlin MOE kernels for archs: ${MARLIN_MOE_ARCHS}")
   else()
     message(STATUS "Not building Marlin MOE kernels as no compatible archs found"
-                   "in CUDA target architectures")
+                   " in CUDA target architectures")
   endif()
 endif()
 
@@ -520,8 +507,10 @@ else()
   FetchContent_Declare(
           vllm-flash-attn
           GIT_REPOSITORY https://github.com/vllm-project/flash-attention.git
-          GIT_TAG 013f0c4fc47e6574060879d9734c1df8c5c273bd
+          GIT_TAG 5259c586c403a4e4d8bf69973c159b40cc346fb9
           GIT_PROGRESS TRUE
+          # Don't share the vllm-flash-attn build between build types
+          BINARY_DIR ${CMAKE_BINARY_DIR}/vllm-flash-attn
   )
 endif()
 

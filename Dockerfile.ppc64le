@@ -14,6 +14,9 @@ RUN micromamba install -y -n base -c https://ftp.osuosl.org/pub/open-ce/1.11.0-p
 COPY ./ /workspace/vllm
 
 WORKDIR /workspace/vllm
+ARG GIT_REPO_CHECK=0
+RUN --mount=type=bind,source=.git,target=.git \
+    if [ "$GIT_REPO_CHECK" != 0 ]; then bash tools/check_repo.sh; fi
 
 # These packages will be in rocketce eventually
 RUN --mount=type=cache,target=/root/.cache/pip  \
@@ -30,4 +33,4 @@ WORKDIR /workspace/
 
 RUN ln -s /workspace/vllm/tests && ln -s /workspace/vllm/examples && ln -s /workspace/vllm/benchmarks
 
-ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
+ENTRYPOINT ["/opt/conda/bin/python3", "-m", "vllm.entrypoints.openai.api_server"]

@@ -24,6 +24,7 @@ from torch import nn
 from transformers import OPTConfig
 
 from vllm.attention import Attention, AttentionMetadata
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
@@ -279,6 +280,7 @@ class OPTDecoder(nn.Module):
         return hidden_states
 
 
+@support_torch_compile
 class OPTModel(nn.Module):
 
     def __init__(
@@ -314,6 +316,19 @@ class OPTModel(nn.Module):
 
 
 class OPTForCausalLM(nn.Module, SupportsPP):
+
+    # BitandBytes specific attributes
+    bitsandbytes_stacked_params_mapping = {
+        # shard_name, weight_name, index
+        "q_proj": ("qkv_proj", 0),
+        "k_proj": ("qkv_proj", 1),
+        "v_proj": ("qkv_proj", 2),
+    }
+    default_bitsandbytes_target_modules = [
+        ".q_proj.", ".k_proj.", ".v_proj.", ".out_proj.", ".fc1.", ".fc2."
+    ]
+    # in TP, these weights are partitioned along the column dimension (dim=-1)
+    column_parallel_weights_modules = [".out_proj.", ".fc2."]
 
     def __init__(
         self,

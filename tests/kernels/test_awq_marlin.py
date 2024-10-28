@@ -5,10 +5,10 @@ Run `pytest tests/kernels/test_awq_marlin.py`.
 import pytest
 import torch
 
+import vllm.model_executor.layers.fused_moe  # noqa
 from tests.kernels.utils import (compute_max_diff, stack_and_dev, torch_moe,
                                  torch_moe_single)
-from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
-    fused_marlin_moe, single_marlin_moe)
+from vllm import _custom_ops as ops
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
     awq_marlin_quantize)
@@ -21,6 +21,9 @@ from vllm.scalar_type import scalar_types
 @pytest.mark.parametrize("e", [8, 64])
 @pytest.mark.parametrize("topk", [2, 6])
 @pytest.mark.parametrize("group_size", [-1, 32, 64, 128])
+@pytest.mark.skipif(not (ops.supports_moe_ops
+                         and hasattr(torch.ops._moe_C, "marlin_gemm_moe")),
+                    reason="Marlin is not supported on this GPU type.")
 def test_fused_marlin_moe_awq(
     m: int,
     n: int,
@@ -77,7 +80,7 @@ def test_fused_marlin_moe_awq(
     score = torch.randn((m, e), device="cuda", dtype=dtype)
 
     topk_weights, topk_ids = fused_topk(a, score, topk, False)
-    marlin_output = fused_marlin_moe(
+    marlin_output = torch.ops.vllm.fused_marlin_moe(
         a,
         qweight1,
         qweight2,
@@ -146,14 +149,14 @@ def test_single_marlin_moe_multiply_awq(
 
     score = torch.randn((m, e), device="cuda", dtype=dtype)
 
-    marlin_output = single_marlin_moe(a,
-                                      qweight,
-                                      scales,
-                                      score,
-                                      topk,
-                                      renormalize=False,
-                                      w_zeros=zp,
-                                      num_bits=num_bits)
+    marlin_output = torch.ops.vllm.single_marlin_moe(a,
+                                                     qweight,
+                                                     scales,
+                                                     score,
+                                                     topk,
+                                                     renormalize=False,
+                                                     w_zeros=zp,
+                                                     num_bits=num_bits)
 
     torch_output = torch_moe_single(a, w_ref.transpose(1, 2), score, topk)
 

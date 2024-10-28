@@ -7,11 +7,11 @@ from transformers import PaliGemmaConfig
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
-from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
+from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, InputContext,
+                         token_inputs)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import SamplerOutput
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.gemma import GemmaForCausalLM
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -21,7 +21,7 @@ from vllm.sequence import IntermediateTensors
 from .interfaces import SupportsMultiModal, SupportsPP
 from .siglip import (SiglipVisionModel, dummy_image_for_siglip,
                      dummy_seq_data_for_siglip, get_max_siglip_image_tokens)
-from .utils import group_weights_with_prefix, merge_multimodal_embeddings
+from .utils import AutoWeightsLoader, merge_multimodal_embeddings
 
 logger = init_logger(__name__)
 
@@ -69,7 +69,8 @@ def dummy_data_for_paligemma(ctx: InputContext, seq_len: int,
     return seq_data, mm_data
 
 
-def input_processor_for_paligemma(ctx: InputContext, llm_inputs: LLMInputs):
+def input_processor_for_paligemma(ctx: InputContext,
+                                  inputs: DecoderOnlyInputs):
 
     """
     The correct prompt format needs to be:
@@ -78,9 +79,9 @@ def input_processor_for_paligemma(ctx: InputContext, llm_inputs: LLMInputs):
     See https://github.com/huggingface/transformers/blob/25245ec26dc29bcf6102e1b4ddd0dfd02e720cf5/src/transformers/models/paligemma/processing_paligemma.py#L55
     """ # noqa
 
-    multi_modal_data = llm_inputs.get("multi_modal_data")
+    multi_modal_data = inputs.get("multi_modal_data")
     if multi_modal_data is None or "image" not in multi_modal_data:
-        return llm_inputs
+        return inputs
 
     model_config = ctx.model_config
     hf_config = ctx.get_hf_config(PaliGemmaConfig)
@@ -92,8 +93,8 @@ def input_processor_for_paligemma(ctx: InputContext, llm_inputs: LLMInputs):
     image_token_str_pad = image_token_str * image_feature_size
     image_token_ids_pad = [hf_config.image_token_index] * image_feature_size
 
-    orig_prompt = llm_inputs.get("prompt")
-    orig_prompt_ids = llm_inputs.get("prompt_token_ids")
+    orig_prompt = inputs.get("prompt")
+    orig_prompt_ids = inputs.get("prompt_token_ids")
 
     if orig_prompt is not None and image_token_str in orig_prompt:
         logger.warning(
@@ -107,9 +108,9 @@ def input_processor_for_paligemma(ctx: InputContext, llm_inputs: LLMInputs):
     new_token_ids = image_token_ids_pad + orig_prompt_ids + [108]  #newline
 
     # NOTE: Create a defensive copy of the original inputs
-    return LLMInputs(prompt_token_ids=new_token_ids,
-                     prompt=new_prompt,
-                     multi_modal_data=multi_modal_data)
+    return token_inputs(prompt_token_ids=new_token_ids,
+                        prompt=new_prompt,
+                        multi_modal_data=multi_modal_data)
 
 
 class PaliGemmaMultiModalProjector(nn.Module):
@@ -141,7 +142,8 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.config = config
         self.multimodal_config = multimodal_config
 
-        self.vision_tower = SiglipVisionModel(config.vision_config)
+        self.vision_tower = SiglipVisionModel(config.vision_config,
+                                              quant_config)
         self.multi_modal_projector = PaliGemmaMultiModalProjector(
             vision_hidden_size=config.vision_config.hidden_size,
             projection_dim=config.vision_config.projection_dim)
@@ -292,19 +294,5 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal,
         return self.language_model.sample(logits, sampling_metadata)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        # prepare weight iterators for components
-        weights_group = group_weights_with_prefix(weights)
-
-        # load vision tower
-        self.vision_tower.load_weights(weights_group["vision_tower"])
-
-        # load mlp projector
-        mlp_params_dict = dict(self.multi_modal_projector.named_parameters())
-        for name, loaded_weight in weights_group["multi_modal_projector"]:
-            param = mlp_params_dict[name]
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
-            weight_loader(param, loaded_weight)
-
-        # load llm backbone
-        self.language_model.load_weights(weights_group["language_model"])
+        loader = AutoWeightsLoader(self)
+        loader.load_weights(weights)

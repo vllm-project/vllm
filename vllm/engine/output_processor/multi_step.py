@@ -1,5 +1,5 @@
 import functools
-from typing import Callable, List, Optional
+from typing import Callable, List, cast
 
 from vllm.core.scheduler import Scheduler
 from vllm.engine.output_processor.interfaces import (
@@ -9,8 +9,10 @@ from vllm.engine.output_processor.single_step import (
 from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import (VLLM_INVALID_TOKEN_ID, Sequence, SequenceGroup,
-                           SequenceGroupOutput, SequenceOutput, SequenceStatus)
+from vllm.sequence import (VLLM_INVALID_TOKEN_ID,
+                           CompletionSequenceGroupOutput, Sequence,
+                           SequenceGroup, SequenceGroupOutput, SequenceOutput,
+                           SequenceStatus)
 from vllm.transformers_utils.detokenizer import Detokenizer
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import Counter
@@ -57,11 +59,14 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
         """
         for output in outputs:
             # Concatenate single-step prompt logprob processing results.
+            assert isinstance(output, CompletionSequenceGroupOutput)
             single_step_process_prompt_logprob(self, seq_group, output)
 
     @staticmethod
     @functools.lru_cache()
     def _log_prompt_logprob_unsupported_warning_once():
+        # Reminder: Please update docs/source/serving/compatibility_matrix.rst
+        # If the feature combo become valid
         logger.warning(
             "Prompt logprob is not supported by multi step workers. "
             "(e.g., speculative decode uses multi step workers).")
@@ -69,7 +74,7 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
     def process_outputs(self,
                         sequence_group: SequenceGroup,
                         outputs: List[SequenceGroupOutput],
-                        is_async: bool = False) -> Optional[int]:
+                        is_async: bool = False) -> None:
         """Append new tokens in the outputs to sequences in the sequence group.
 
         This only supports sequence groups of size 1. It supports greater than
@@ -84,10 +89,6 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
             tokens from the previous step. If this is true, then
             no tokens need to be appended since it is already done
             externally (before the next schedule() call)
-            
-        Returns:
-            The number of tokens appended to the sequence. This is optional
-            because only speculative decode uses this return value.
         """
         # Sequences can be in RUNNING or FINISHED_ABORTED state
         # once scheduled, as a sequence is moved to FINSIHED_ABORTED
@@ -102,21 +103,30 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
             "Beam search not supported in multi-step decoding.")
         seq = seqs[0]
         seq_id = seq.seq_id
-        assert all(
-            [seq_id == output.samples[0].parent_seq_id for output in outputs])
+        # This method is defined in the more generic
+        # SequenceGroupOutputProcessor, but here we assume that the outputs are
+        # of a more specific type.
+        assert all([
+            isinstance(output, CompletionSequenceGroupOutput)
+            for output in outputs
+        ])
+        compl_outputs = cast(List[CompletionSequenceGroupOutput], outputs)
+        assert all([
+            seq_id == output.samples[0].parent_seq_id
+            for output in compl_outputs
+        ])
 
         if is_async:
             # Async case: We process tokens one by one. Here, we know the token
             # was already appended, so we only need to do the rest of the
             # postprocessor: Detokenization + stopping logic
             self._process_decode_and_stop(seq, sequence_group.sampling_params)
-            return None
         else:
             # Standard multi-step case
 
             # Since there's only one sequence per sequence group,
             # we can take the first sample.
-            samples = [output.samples[0] for output in outputs]
+            samples = [output.samples[0] for output in compl_outputs]
 
             # entries in sample tokens may be invalid (eg. due to spec decode
             # rejecting tokens).
@@ -126,8 +136,8 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
             ]
             assert valid_samples
 
-            return self._process_seq_outputs(seq, valid_samples,
-                                             sequence_group.sampling_params)
+            self._process_seq_outputs(seq, valid_samples,
+                                      sequence_group.sampling_params)
 
     def _process_decode_and_stop(self, seq: Sequence,
                                  sampling_params: SamplingParams) -> None:
@@ -145,7 +155,7 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
 
     def _process_seq_outputs(self, seq: Sequence,
                              valid_samples: List[SequenceOutput],
-                             sampling_params: SamplingParams) -> int:
+                             sampling_params: SamplingParams) -> None:
         output_token_ids = [sample.output_token for sample in valid_samples]
         output_logprobs = [sample.logprobs for sample in valid_samples]
 
@@ -168,6 +178,7 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
                     output_token_ids = output_token_ids[:i + 1]
                     break
 
+        is_prefill_sampled_token = seq.data.get_num_uncomputed_tokens() == 0
         # Incrementally append tokens to the sequence, as if we had only one new
         # token.
         for output_token_id, output_logprob in zip(output_token_ids,
@@ -177,8 +188,14 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
                 logprobs=output_logprob,
             )
 
+            if is_prefill_sampled_token:
+                is_prefill_sampled_token = False
+            else:
+                # Update num_computed_tokens iff the sampled token is not from
+                # a prefill step.
+                seq.data.update_num_computed_tokens(1)
+
             self._process_decode_and_stop(seq, sampling_params)
 
             if seq.is_finished():
                 break
-        return len(output_token_ids)

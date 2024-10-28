@@ -8,14 +8,15 @@ import time
 import warnings
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Literal, Optional, Type, Union
 
 import openai
 import pytest
 import requests
 from openai.types.completion import Completion
-from typing_extensions import ParamSpec
+from typing_extensions import ParamSpec, assert_never
 
+import vllm.envs as envs
 from tests.models.utils import TextTextLogprobs
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
@@ -25,7 +26,7 @@ from vllm.model_executor.model_loader.loader import get_model_loader
 from vllm.platforms import current_platform
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.utils import (FlexibleArgumentParser, GB_bytes,
-                        cuda_device_count_stateless, get_open_port, is_hip)
+                        cuda_device_count_stateless, get_open_port)
 
 if current_platform.is_rocm():
     from amdsmi import (amdsmi_get_gpu_vram_usage,
@@ -163,11 +164,140 @@ class RemoteOpenAIServer:
         )
 
 
+def _test_completion(
+    client: openai.OpenAI,
+    model: str,
+    prompt: str,
+    token_ids: List[int],
+):
+    results = []
+
+    # test with text prompt
+    completion = client.completions.create(model=model,
+                                           prompt=prompt,
+                                           max_tokens=5,
+                                           temperature=0.0)
+
+    results.append({
+        "test": "single_completion",
+        "text": completion.choices[0].text,
+        "finish_reason": completion.choices[0].finish_reason,
+        "usage": completion.usage,
+    })
+
+    # test using token IDs
+    completion = client.completions.create(
+        model=model,
+        prompt=token_ids,
+        max_tokens=5,
+        temperature=0.0,
+    )
+
+    results.append({
+        "test": "token_ids",
+        "text": completion.choices[0].text,
+        "finish_reason": completion.choices[0].finish_reason,
+        "usage": completion.usage,
+    })
+
+    # test seeded random sampling
+    completion = client.completions.create(model=model,
+                                           prompt=prompt,
+                                           max_tokens=5,
+                                           seed=33,
+                                           temperature=1.0)
+
+    results.append({
+        "test": "seeded_sampling",
+        "text": completion.choices[0].text,
+        "finish_reason": completion.choices[0].finish_reason,
+        "usage": completion.usage,
+    })
+
+    # test seeded random sampling with multiple prompts
+    completion = client.completions.create(model=model,
+                                           prompt=[prompt, prompt],
+                                           max_tokens=5,
+                                           seed=33,
+                                           temperature=1.0)
+
+    results.append({
+        "test":
+        "seeded_sampling",
+        "text": [choice.text for choice in completion.choices],
+        "finish_reason":
+        [choice.finish_reason for choice in completion.choices],
+        "usage":
+        completion.usage,
+    })
+
+    # test simple list
+    batch = client.completions.create(
+        model=model,
+        prompt=[prompt, prompt],
+        max_tokens=5,
+        temperature=0.0,
+    )
+
+    results.append({
+        "test": "simple_list",
+        "text0": batch.choices[0].text,
+        "text1": batch.choices[1].text,
+    })
+
+    # test streaming
+    batch = client.completions.create(
+        model=model,
+        prompt=[prompt, prompt],
+        max_tokens=5,
+        temperature=0.0,
+        stream=True,
+    )
+
+    texts = [""] * 2
+    for chunk in batch:
+        assert len(chunk.choices) == 1
+        choice = chunk.choices[0]
+        texts[choice.index] += choice.text
+
+    results.append({
+        "test": "streaming",
+        "texts": texts,
+    })
+
+    return results
+
+
+def _test_embeddings(
+    client: openai.OpenAI,
+    model: str,
+    text: str,
+):
+    results = []
+
+    # test with text input
+    embeddings = client.embeddings.create(
+        model=model,
+        input=text,
+        encoding_format="float",
+    )
+
+    results.append({
+        "test": "single_embedding",
+        "embedding": embeddings.data[0].embedding,
+        "usage": embeddings.usage,
+    })
+
+    return results
+
+
 def compare_two_settings(model: str,
                          arg1: List[str],
                          arg2: List[str],
                          env1: Optional[Dict[str, str]] = None,
                          env2: Optional[Dict[str, str]] = None,
+                         *,
+                         method: Literal["generate", "encode"] = "generate",
                          max_wait_seconds: Optional[float] = None) -> None:
     """
     Launch API server with two different sets of arguments/environments
@@ -181,14 +311,38 @@ def compare_two_settings(model: str,
         env2: The second set of environment variables to pass to the API server.
     """
 
+    compare_all_settings(
+        model,
+        [arg1, arg2],
+        [env1, env2],
+        method=method,
+        max_wait_seconds=max_wait_seconds,
+    )
+
+
+def compare_all_settings(model: str,
+                         all_args: List[List[str]],
+                         all_envs: List[Optional[Dict[str, str]]],
+                         *,
+                         method: Literal["generate", "encode"] = "generate",
+                         max_wait_seconds: Optional[float] = None) -> None:
+    """
+    Launch API server with several different sets of arguments/environments
+    and compare the results of the API calls with the first set of arguments.
+    Args:
+        model: The model to test.
+        all_args: A list of argument lists to pass to the API server.
+        all_envs: A list of environment dictionaries to pass to the API server.
+    """
+
     trust_remote_code = False
-    for args in (arg1, arg2):
+    for args in all_args:
         if "--trust-remote-code" in args:
             trust_remote_code = True
             break
 
     tokenizer_mode = "auto"
-    for args in (arg1, arg2):
+    for args in all_args:
         if "--tokenizer-mode" in args:
             tokenizer_mode = args[args.index("--tokenizer-mode") + 1]
             break
@@ -199,10 +353,28 @@ def compare_two_settings(model: str,
         tokenizer_mode=tokenizer_mode,
     )
 
+    can_force_load_format = True
+
+    for args in all_args:
+        if "--load-format" in args:
+            can_force_load_format = False
+            break
+
     prompt = "Hello, my name is"
     token_ids = tokenizer(prompt).input_ids
-    results = []
-    for args, env in ((arg1, env1), (arg2, env2)):
+    ref_results: List = []
+    for i, (args, env) in enumerate(zip(all_args, all_envs)):
+        if can_force_load_format:
+            # we are comparing the results and
+            # usually we don't need real weights.
+            # we force to use dummy weights by default,
+            # and it should work for most of the cases.
+            # if not, we can use VLLM_TEST_FORCE_LOAD_FORMAT
+            # environment variable to force the load format,
+            # e.g. in quantization tests.
+            args = args + ["--load-format", envs.VLLM_TEST_FORCE_LOAD_FORMAT]
+        compare_results: List = []
+        results = ref_results if i == 0 else compare_results
         with RemoteOpenAIServer(model,
                                 args,
                                 env_dict=env,
@@ -219,104 +391,27 @@ def compare_two_settings(model: str,
                 "root": served_model.root,
             })
 
-            # test with text prompt
-            completion = client.completions.create(model=model,
-                                                   prompt=prompt,
-                                                   max_tokens=5,
-                                                   temperature=0.0)
+            if method == "generate":
+                results += _test_completion(client, model, prompt, token_ids)
+            elif method == "encode":
+                results += _test_embeddings(client, model, prompt)
+            else:
+                assert_never(method)
 
-            results.append({
-                "test": "single_completion",
-                "text": completion.choices[0].text,
-                "finish_reason": completion.choices[0].finish_reason,
-                "usage": completion.usage,
-            })
-
-            # test using token IDs
-            completion = client.completions.create(
-                model=model,
-                prompt=token_ids,
-                max_tokens=5,
-                temperature=0.0,
-            )
-
-            results.append({
-                "test": "token_ids",
-                "text": completion.choices[0].text,
-                "finish_reason": completion.choices[0].finish_reason,
-                "usage": completion.usage,
-            })
-
-            # test seeded random sampling
-            completion = client.completions.create(model=model,
-                                                   prompt=prompt,
-                                                   max_tokens=5,
-                                                   seed=33,
-                                                   temperature=1.0)
-
-            results.append({
-                "test": "seeded_sampling",
-                "text": completion.choices[0].text,
-                "finish_reason": completion.choices[0].finish_reason,
-                "usage": completion.usage,
-            })
-
-            # test seeded random sampling with multiple prompts
-            completion = client.completions.create(model=model,
-                                                   prompt=[prompt, prompt],
-                                                   max_tokens=5,
-                                                   seed=33,
-                                                   temperature=1.0)
-
-            results.append({
-                "test":
-                "seeded_sampling",
-                "text": [choice.text for choice in completion.choices],
-                "finish_reason":
-                [choice.finish_reason for choice in completion.choices],
-                "usage":
-                completion.usage,
-            })
-
-            # test simple list
-            batch = client.completions.create(
-                model=model,
-                prompt=[prompt, prompt],
-                max_tokens=5,
-                temperature=0.0,
-            )
-
-            results.append({
-                "test": "simple_list",
-                "text0": batch.choices[0].text,
-                "text1": batch.choices[1].text,
-            })
-
-            # test streaming
-            batch = client.completions.create(
-                model=model,
-                prompt=[prompt, prompt],
-                max_tokens=5,
-                temperature=0.0,
-                stream=True,
-            )
-            texts = [""] * 2
-            for chunk in batch:
-                assert len(chunk.choices) == 1
-                choice = chunk.choices[0]
-                texts[choice.index] += choice.text
-            results.append({
-                "test": "streaming",
-                "texts": texts,
-            })
-
-    n = len(results) // 2
-    arg1_results = results[:n]
-    arg2_results = results[n:]
-    for arg1_result, arg2_result in zip(arg1_results, arg2_results):
-        assert arg1_result == arg2_result, (
-            f"Results for {model=} are not the same with {arg1=} and {arg2=}. "
-            f"{arg1_result=} != {arg2_result=}")
+            if i > 0:
+                # if any setting fails, raise an error early
+                ref_args = all_args[0]
+                ref_envs = all_envs[0]
+                compare_args = all_args[i]
+                compare_envs = all_envs[i]
+                for ref_result, compare_result in zip(ref_results,
+                                                      compare_results):
+                    assert ref_result == compare_result, (
+                        f"Results for {model=} are not the same.\n"
+                        f"{ref_args=} {ref_envs=}\n"
+                        f"{compare_args=} {compare_envs=}\n"
+                        f"{ref_result=}\n"
+                        f"{compare_result=}\n")
 
 
 def init_test_distributed_environment(
@@ -359,13 +454,13 @@ def multi_process_parallel(
 
 
 @contextmanager
-def error_on_warning():
+def error_on_warning(category: Type[Warning] = Warning):
     """
     Within the scope of this context manager, tests will fail if any warning
-    is emitted.
+    of the given category is emitted.
     """
     with warnings.catch_warnings():
-        warnings.simplefilter("error")
+        warnings.filterwarnings("error", category=category)
 
         yield
 
@@ -392,7 +487,7 @@ def wait_for_gpu_memory_to_clear(devices: List[int],
         output: Dict[int, str] = {}
         output_raw: Dict[int, float] = {}
         for device in devices:
-            if is_hip():
+            if current_platform.is_rocm():
                 dev_handle = amdsmi_get_processor_handles()[device]
                 mem_info = amdsmi_get_gpu_vram_usage(dev_handle)
                 gb_used = mem_info["vram_used"] / 2**10
@@ -492,7 +587,7 @@ def large_gpu_test(*, min_gb: int):
     )
 
     def wrapper(f: Callable[_P, None]) -> Callable[_P, None]:
-        return test_skipif(fork_new_process_for_each_test(f))
+        return test_skipif(f)
 
     return wrapper
 
