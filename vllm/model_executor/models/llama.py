@@ -38,7 +38,8 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.pooler import Pooler, PoolingType
+from vllm.model_executor.layers.pooler import (Pooler, PoolingConfig,
+                                               PoolingType)
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     get_compressed_tensors_cache_scale)
@@ -627,12 +628,18 @@ class LlamaEmbeddingModel(nn.Module, SupportsPP):
 
     def __init__(
         self,
+        pooling_config: Optional[PoolingConfig] = None,
         **kwargs,
     ) -> None:
         super().__init__()
 
         self.model = LlamaModel(**kwargs)
-        self._pooler = Pooler(pooling_type=PoolingType.LAST, normalize=True)
+        if pooling_config is not None:
+            self._pooler = Pooler(pooling_config.pooling_type,
+                                  pooling_config.normalize)
+        else:
+            self._pooler = Pooler(pooling_type=PoolingType.LAST,
+                                  normalize=True)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
