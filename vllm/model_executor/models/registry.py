@@ -12,7 +12,7 @@ import cloudpickle
 import torch.nn as nn
 
 from vllm.logger import init_logger
-from vllm.utils import is_hip
+from vllm.platforms import current_platform
 
 from .interfaces import (has_inner_state, is_attention_free,
                          supports_multimodal, supports_pp)
@@ -96,6 +96,8 @@ _EMBEDDING_MODELS = {
     "Gemma2Model": ("gemma2", "Gemma2EmbeddingModel"),
     "MistralModel": ("llama", "LlamaEmbeddingModel"),
     "Qwen2ForRewardModel": ("qwen2_rm", "Qwen2ForRewardModel"),
+    "Qwen2ForSequenceClassification": (
+        "qwen2_cls", "Qwen2ForSequenceClassification"),
     # [Multimodal]
     "LlavaNextForConditionalGeneration": ("llava_next", "LlavaNextForConditionalGeneration"),  # noqa: E501
     "Phi3VForCausalLM": ("phi3v", "Phi3VForCausalLM"),
@@ -245,7 +247,7 @@ def _try_load_model_cls(
     model_arch: str,
     model: _BaseRegisteredModel,
 ) -> Optional[Type[nn.Module]]:
-    if is_hip():
+    if current_platform.is_rocm():
         if model_arch in _ROCM_UNSUPPORTED_MODELS:
             raise ValueError(f"Model architecture '{model_arch}' is not "
                              "supported by ROCm for now.")
