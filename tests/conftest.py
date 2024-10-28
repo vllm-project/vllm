@@ -32,9 +32,10 @@ from vllm.inputs import (ExplicitEncoderDecoderPrompt, TextPrompt,
                          to_enc_dec_tuple_list, zip_enc_dec_prompts)
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
+from vllm.platforms import current_platform
 from vllm.sampling_params import BeamSearchParams
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, cuda_device_count_stateless,
-                        identity, is_cpu)
+                        identity)
 
 logger = init_logger(__name__)
 
@@ -42,10 +43,12 @@ _TEST_DIR = os.path.dirname(__file__)
 _TEST_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "example.txt")]
 _LONG_PROMPTS = [os.path.join(_TEST_DIR, "prompts", "summary.txt")]
 
-PromptImageInput = Union[List[Image.Image], List[List[Image.Image]]]
-PromptAudioInput = Union[List[Tuple[np.ndarray, int]],
-                         List[List[Tuple[np.ndarray, int]]]]
-PromptVideoInput = Union[List[np.ndarray], List[List[np.ndarray]]]
+_M = TypeVar("_M")
+_PromptMultiModalInput = Union[List[_M], List[List[_M]]]
+
+PromptImageInput = _PromptMultiModalInput[Image.Image]
+PromptAudioInput = _PromptMultiModalInput[Tuple[np.ndarray, int]]
+PromptVideoInput = _PromptMultiModalInput[np.ndarray]
 
 
 def _read_prompts(filename: str) -> List[str]:
@@ -229,19 +232,22 @@ def video_assets() -> _VideoAssets:
     return VIDEO_ASSETS
 
 
-_T = TypeVar("_T", nn.Module, torch.Tensor, BatchEncoding, BatchFeature)
+_T = TypeVar("_T", nn.Module, torch.Tensor, BatchEncoding, BatchFeature, dict)
 
 
 class HfRunner:
 
-    def wrap_device(self, input: _T, device: Optional[str] = None) -> _T:
+    def wrap_device(self, x: _T, device: Optional[str] = None) -> _T:
         if device is None:
-            return self.wrap_device(input, "cpu" if is_cpu() else "cuda")
+            device = "cpu" if current_platform.is_cpu() else "cuda"
 
-        if hasattr(input, "device") and input.device.type == device:
-            return input
+        if isinstance(x, dict):
+            return {k: self.wrap_device(v, device) for k, v in x.items()}
 
-        return input.to(device)
+        if hasattr(x, "device") and x.device.type == device:
+            return x
+
+        return x.to(device)
 
     def __init__(
         self,
@@ -249,7 +255,9 @@ class HfRunner:
         dtype: str = "half",
         *,
         model_kwargs: Optional[Dict[str, Any]] = None,
+        is_embedding_model: bool = False,
         is_sentence_transformer: bool = False,
+        skip_tokenizer_init: bool = False,
         auto_cls: Type[_BaseAutoModelClass] = AutoModelForCausalLM,
         postprocess_inputs: Callable[[BatchEncoding],
                                      BatchEncoding] = identity,
@@ -277,11 +285,12 @@ class HfRunner:
                     **model_kwargs,
                 ))
 
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            model_name,
-            torch_dtype=torch_dtype,
-            trust_remote_code=True,
-        )
+        if not skip_tokenizer_init:
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                model_name,
+                torch_dtype=torch_dtype,
+                trust_remote_code=True,
+            )
 
         # don't put this import at the top level
         # it will call torch.cuda.device_count()
@@ -291,6 +300,8 @@ class HfRunner:
             torch_dtype=torch_dtype,
             trust_remote_code=True,
         )
+        if skip_tokenizer_init:
+            self.tokenizer = self.processor.tokenizer
 
         self.postprocess_inputs = postprocess_inputs
 
@@ -316,12 +327,12 @@ class HfRunner:
                 "text": prompt,
                 "return_tensors": "pt",
             }
-            if images is not None and images[i] is not None:
-                processor_kwargs["images"] = images[i]
-            if videos is not None and videos[i] is not None:
-                processor_kwargs["videos"] = videos[i]
-            if audios is not None and audios[i] is not None:
-                audio, sr = audios[i]
+            if images is not None and (image := images[i]) is not None:
+                processor_kwargs["images"] = image
+            if videos is not None and (video := videos[i]) is not None:
+                processor_kwargs["videos"] = video
+            if audios is not None and (audio_tuple := audios[i]) is not None:
+                audio, sr = audio_tuple
                 processor_kwargs["audio"] = audio
                 processor_kwargs["sampling_rate"] = sr
 
@@ -332,11 +343,22 @@ class HfRunner:
 
         return all_inputs
 
+    def classify(self, prompts: List[str]) -> List[str]:
+        # output is final logits
+        all_inputs = self.get_inputs(prompts)
+        outputs = []
+        for inputs in all_inputs:
+            output = self.model(**self.wrap_device(inputs))
+            logits = output.logits.softmax(dim=-1)[0].tolist()
+            outputs.append(logits)
+
+        return outputs
+
     def generate(
         self,
         prompts: List[str],
         images: Optional[PromptImageInput] = None,
-        videos: Optional[List[np.ndarray]] = None,
+        videos: Optional[PromptVideoInput] = None,
         audios: Optional[PromptAudioInput] = None,
         **kwargs: Any,
     ) -> List[Tuple[List[List[int]], List[str]]]:
@@ -366,7 +388,7 @@ class HfRunner:
         prompts: List[str],
         max_tokens: int,
         images: Optional[PromptImageInput] = None,
-        videos: Optional[List[np.ndarray]] = None,
+        videos: Optional[PromptVideoInput] = None,
         audios: Optional[PromptAudioInput] = None,
         **kwargs: Any,
     ) -> List[Tuple[List[int], str]]:
@@ -407,7 +429,7 @@ class HfRunner:
         prompts: List[str],
         max_tokens: int,
         images: Optional[PromptImageInput] = None,
-        videos: Optional[List[np.ndarray]] = None,
+        videos: Optional[PromptVideoInput] = None,
         audios: Optional[PromptAudioInput] = None,
         **kwargs: Any,
     ) -> List[List[torch.Tensor]]:
@@ -486,7 +508,7 @@ class HfRunner:
         num_logprobs: int,
         images: Optional[PromptImageInput] = None,
         audios: Optional[PromptAudioInput] = None,
-        videos: Optional[List[np.ndarray]] = None,
+        videos: Optional[PromptVideoInput] = None,
         **kwargs: Any,
     ) -> List[TokensTextLogprobs]:
         all_inputs = self.get_inputs(prompts,
@@ -531,6 +553,7 @@ class HfRunner:
         encoder_decoder_prompts: List[ExplicitEncoderDecoderPrompt[str, str]],
         max_tokens: int,
         num_logprobs: int,
+        images: Optional[PromptImageInput] = None,
         **kwargs: Any,
     ) -> List[TokensTextLogprobs]:
         '''
@@ -541,11 +564,17 @@ class HfRunner:
         all_output_ids: List[List[int]] = []
         all_output_strs: List[str] = []
 
-        for (encoder_prompt,
-             decoder_prompt) in to_enc_dec_tuple_list(encoder_decoder_prompts):
+        for i, (encoder_prompt, decoder_prompt) in enumerate(
+                to_enc_dec_tuple_list(encoder_decoder_prompts)):
+            processor_kwargs: Dict[str, Any] = {
+                "text": encoder_prompt,
+                "return_tensors": "pt",
+            }
+            if images is not None and images[i] is not None:
+                processor_kwargs["images"] = images[i]
 
             encoder_input_ids = self.wrap_device(
-                self.tokenizer(encoder_prompt, return_tensors="pt").input_ids,
+                self.processor(**processor_kwargs).input_ids,
                 device=self.model.device.type,
             )
 
@@ -655,17 +684,28 @@ class VllmRunner:
         inputs = [TextPrompt(prompt=prompt) for prompt in prompts]
         if images is not None:
             for i, image in enumerate(images):
-                inputs[i]["multi_modal_data"] = {"image": image}
+                if image is not None:
+                    inputs[i]["multi_modal_data"] = {"image": image}
 
         if videos is not None:
             for i, video in enumerate(videos):
-                inputs[i]["multi_modal_data"] = {"video": video}
+                if video is not None:
+                    inputs[i]["multi_modal_data"] = {"video": video}
 
         if audios is not None:
             for i, audio in enumerate(audios):
-                inputs[i]["multi_modal_data"] = {"audio": audio}
+                if audio is not None:
+                    inputs[i]["multi_modal_data"] = {"audio": audio}
 
         return inputs
+
+    def classify(self, prompts: List[str]) -> List[str]:
+        req_outputs = self.model.encode(prompts)
+        outputs = []
+        for req_output in req_outputs:
+            embedding = req_output.outputs.embedding
+            outputs.append(embedding)
+        return outputs
 
     def generate(
         self,
@@ -835,13 +875,20 @@ class VllmRunner:
             returned_outputs.append((token_ids, texts))
         return returned_outputs
 
-    def encode(self, prompts: List[str]) -> List[List[float]]:
-        req_outputs = self.model.encode(prompts)
-        outputs = []
-        for req_output in req_outputs:
-            embedding = req_output.outputs.embedding
-            outputs.append(embedding)
-        return outputs
+    def encode(
+        self,
+        prompts: List[str],
+        images: Optional[PromptImageInput] = None,
+        videos: Optional[PromptVideoInput] = None,
+        audios: Optional[PromptAudioInput] = None,
+    ) -> List[List[float]]:
+        inputs = self.get_inputs(prompts,
+                                 images=images,
+                                 videos=videos,
+                                 audios=audios)
+
+        req_outputs = self.model.encode(inputs)
+        return [req_output.outputs.embedding for req_output in req_outputs]
 
     def __enter__(self):
         return self

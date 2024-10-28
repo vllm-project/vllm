@@ -11,7 +11,7 @@ from unittest.mock import patch
 import pytest
 
 from vllm import LLM
-from vllm.utils import is_hip
+from vllm.platforms import current_platform
 from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
 
 from ..models.utils import check_outputs_equal
@@ -19,7 +19,7 @@ from ..utils import multi_gpu_test
 
 MODELS = [
     "facebook/opt-125m",
-    "meta-llama/Llama-2-7b-hf",
+    "meta-llama/Llama-3.2-1B",
 ]
 
 TARGET_TEST_SUITE = os.environ.get("TARGET_TEST_SUITE", "L4")
@@ -51,7 +51,7 @@ def test_models(
     enforce_eager: bool,
 ) -> None:
 
-    if backend == "FLASHINFER" and is_hip():
+    if backend == "FLASHINFER" and current_platform.is_rocm():
         pytest.skip("Flashinfer does not support ROCm/HIP.")
 
     os.environ["VLLM_ATTENTION_BACKEND"] = backend
