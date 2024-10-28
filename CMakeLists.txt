@@ -49,7 +49,7 @@ set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx940;gfx941;gfx942;gfx1030;gfx11
 # requirements.txt files and should be kept consistent.  The ROCm torch
 # versions are derived from Dockerfile.rocm
 #
-set(TORCH_SUPPORTED_VERSION_CUDA "2.4.0")
+set(TORCH_SUPPORTED_VERSION_CUDA "2.5.0")
 set(TORCH_SUPPORTED_VERSION_ROCM "2.5.0")
 
 #
@@ -169,12 +169,12 @@ endif()
 
 #
 # Use FetchContent for C++ dependencies that are compiled as part of vLLM's build process.
-# Configure it to place files in vllm/.deps, in order to play nicely with sccache.
+# setup.py will override FETCHCONTENT_BASE_DIR to play nicely with sccache.
+# Each dependency that produces build artifacts should override its BINARY_DIR to avoid
+# conflicts between build types. It should instead be set to ${CMAKE_BINARY_DIR}/<dependency>.
 #
 include(FetchContent)
-get_filename_component(PROJECT_ROOT_DIR "${CMAKE_CURRENT_SOURCE_DIR}" ABSOLUTE)
-file(MAKE_DIRECTORY "${FETCHCONTENT_BASE_DIR}")
-set(FETCHCONTENT_BASE_DIR "${PROJECT_ROOT_DIR}/.deps")
+file(MAKE_DIRECTORY ${FETCHCONTENT_BASE_DIR}) # Ensure the directory exists
 message(STATUS "FetchContent base directory: ${FETCHCONTENT_BASE_DIR}")
 
 #
@@ -195,7 +195,6 @@ set(VLLM_EXT_SRC
   "csrc/quantization/compressed_tensors/int8_quant_kernels.cu"
   "csrc/quantization/fp8/common.cu"
   "csrc/cuda_utils_kernels.cu"
-  "csrc/moe_align_block_size_kernels.cu"
   "csrc/prepare_inputs/advance_step.cu"
   "csrc/torch_bindings.cpp")
 
@@ -405,6 +404,7 @@ target_compile_definitions(_C PRIVATE CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
 
 set(VLLM_MOE_EXT_SRC
   "csrc/moe/torch_bindings.cpp"
+  "csrc/moe/moe_align_sum_kernels.cu"
   "csrc/moe/topk_softmax_kernels.cu")
 
 set_gencode_flags_for_srcs(
@@ -507,8 +507,10 @@ else()
   FetchContent_Declare(
           vllm-flash-attn
           GIT_REPOSITORY https://github.com/vllm-project/flash-attention.git
-          GIT_TAG 013f0c4fc47e6574060879d9734c1df8c5c273bd
+          GIT_TAG 5259c586c403a4e4d8bf69973c159b40cc346fb9
           GIT_PROGRESS TRUE
+          # Don't share the vllm-flash-attn build between build types
+          BINARY_DIR ${CMAKE_BINARY_DIR}/vllm-flash-attn
   )
 endif()
 
