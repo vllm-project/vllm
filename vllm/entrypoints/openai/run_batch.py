@@ -223,6 +223,7 @@ async def main(args):
         model_config,
         base_model_paths,
         request_logger=request_logger,
+        chat_template=None,
     )
 
     tracker = BatchProgressTracker()

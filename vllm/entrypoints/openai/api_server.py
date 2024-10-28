@@ -513,6 +513,7 @@ def init_app_state(
         model_config,
         base_model_paths,
         request_logger=request_logger,
+        chat_template=args.chat_template,
     )
     state.openai_serving_tokenization = OpenAIServingTokenization(
         engine_client,

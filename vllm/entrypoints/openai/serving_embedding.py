@@ -9,24 +9,17 @@ from typing_extensions import assert_never
 
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.chat_utils import (apply_hf_chat_template,
-                                         apply_mistral_chat_template,
-                                         load_chat_template,
-                                         parse_chat_messages_futures)
+from vllm.entrypoints.chat_utils import load_chat_template
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (EmbeddingChatRequest,
                                               EmbeddingRequest,
                                               EmbeddingResponse,
                                               EmbeddingResponseData,
                                               ErrorResponse, UsageInfo)
-from vllm.entrypoints.openai.serving_engine import (BaseModelPath,
-                                                    OpenAIServing,
-                                                    TextTokensPrompt)
-from vllm.inputs import TokensPrompt
+from vllm.entrypoints.openai.serving_engine import BaseModelPath, OpenAIServing
 from vllm.logger import init_logger
 from vllm.outputs import EmbeddingOutput, EmbeddingRequestOutput
-from vllm.transformers_utils.tokenizer import MistralTokenizer
-from vllm.utils import is_list_of, merge_async_iterators, random_uuid
+from vllm.utils import merge_async_iterators, random_uuid
 
 logger = init_logger(__name__)
 
@@ -140,15 +133,6 @@ class OpenAIServingEmbedding(OpenAIServing):
 
         truncate_prompt_tokens = None
 
-        if request.truncate_prompt_tokens is not None:
-            if request.truncate_prompt_tokens <= self.max_model_len:
-                truncate_prompt_tokens = request.truncate_prompt_tokens
-            else:
-                return self.create_error_response(
-                    "truncate_prompt_tokens value is "
-                    "greater than max_model_len."
-                    " Please, select a smaller truncation size.")
-
         # Schedule the request and get the result generator.
         generators: List[AsyncGenerator[EmbeddingRequestOutput, None]] = []
         try:
@@ -159,58 +143,25 @@ class OpenAIServingEmbedding(OpenAIServing):
 
             tokenizer = await self.engine_client.get_tokenizer(lora_request)
 
-            prompt: Union[str, List[int]]
             if isinstance(request, EmbeddingChatRequest):
-                model_config = self.model_config
-
-                conversation, mm_data_future = parse_chat_messages_futures(
-                    request.messages, model_config, tokenizer)
-
-                if isinstance(tokenizer, MistralTokenizer):
-                    prompt = apply_mistral_chat_template(
-                        tokenizer,
-                        messages=request.messages,
-                        chat_template=self.chat_template,
-                        add_generation_prompt=request.add_generation_prompt,
-                        continue_final_message=request.continue_final_message,
-                    )
-                else:
-                    prompt = apply_hf_chat_template(
-                        tokenizer,
-                        conversation=conversation,
-                        chat_template=self.chat_template,
-                        add_generation_prompt=request.add_generation_prompt,
-                        continue_final_message=request.continue_final_message,
-                    )
-
-                prompts = [prompt]
-
-                mm_data = await mm_data_future
-            else:
-                prompts = list(
-                    self._tokenize_prompt_input_or_inputs(
-                        request, tokenizer, request.input,
-                        truncate_prompt_tokens))
-
-            if isinstance(prompt, str):
-                prompt_inputs = self._tokenize_prompt_input(
+                request_prompts, engine_prompts = await self._parse_chat_inputs(
                     request,
                     tokenizer,
-                    prompt,
+                    request.messages,
+                    chat_template=self.chat_template,
+                    add_generation_prompt=request.add_generation_prompt,
+                    continue_final_message=request.continue_final_message,
                     truncate_prompt_tokens=truncate_prompt_tokens,
                     add_special_tokens=request.add_special_tokens,
                 )
             else:
-                # For MistralTokenizer
-                assert is_list_of(prompt, int), (
-                    "Prompt has to be either a string or a list of token ids")
-                prompt_inputs = TextTokensPrompt(
-                    prompt=tokenizer.decode(prompt), prompt_token_ids=prompt)
-
-            engine_inputs = TokensPrompt(
-                prompt_token_ids=prompt_inputs["prompt_token_ids"])
-            if mm_data is not None:
-                engine_inputs["multi_modal_data"] = mm_data
+                request_prompts, engine_prompts = self._parse_completion_inputs(
+                    request,
+                    tokenizer,
+                    request.input,
+                    truncate_prompt_tokens=truncate_prompt_tokens,
+                    add_special_tokens=request.add_special_tokens,
+                )
         except ValueError as e:
             logger.exception("Error in applying extracting prompt inputs")
             return self.create_error_response(str(e))
@@ -218,11 +169,11 @@ class OpenAIServingEmbedding(OpenAIServing):
         try:
             pooling_params = request.to_pooling_params()
 
-            for i, prompt_inputs in enumerate(prompts):
+            for i, engine_prompt in enumerate(engine_prompts):
                 request_id_item = f"{request_id}-{i}"
 
                 self._log_inputs(request_id_item,
-                                 prompt_inputs,
+                                 request_prompts[i],
                                  params=pooling_params,
                                  lora_request=lora_request,
                                  prompt_adapter_request=prompt_adapter_request)
@@ -233,7 +184,7 @@ class OpenAIServingEmbedding(OpenAIServing):
                         "for embedding models")
 
                 generator = self.engine_client.encode(
-                    engine_inputs,
+                    engine_prompt,
                     pooling_params,
                     request_id_item,
                     lora_request=lora_request,
@@ -252,7 +203,7 @@ class OpenAIServingEmbedding(OpenAIServing):
 
         # Non-streaming response
         final_res_batch: List[Optional[EmbeddingRequestOutput]]
-        final_res_batch = [None] * len(prompts)
+        final_res_batch = [None] * len(engine_prompt)
         try:
             async for i, res in result_generator:
                 final_res_batch[i] = res
