@@ -498,51 +498,28 @@ def get_requirements() -> List[str]:
     return requirements
 
 
-ext_modules = []
-
-if _is_cuda() or _is_hip():
-    ext_modules.append(CMakeExtension(name="vllm._moe_C"))
-
-if _is_hip():
-    ext_modules.append(CMakeExtension(name="vllm._rocm_C"))
-
-if _is_cuda():
-    ext_modules.append(
-        CMakeExtension(name="vllm.vllm_flash_attn.vllm_flash_attn_c"))
-
-if _build_custom_ops():
-    ext_modules.append(CMakeExtension(name="vllm._C"))
-
-package_data = {
-    "vllm": ["py.typed", "model_executor/layers/fused_moe/configs/*.json"]
-}
-
-if envs.VLLM_USE_PRECOMPILED:
+def repackage_wheel(package_data: Dict[str, List[str]],
+                    wheel_location) -> None:
+    """Extracts libraries and other files from an existing wheel."""
     assert _is_cuda(), "VLLM_USE_PRECOMPILED is only supported for CUDA builds"
 
     import zipfile
 
-    ext_modules = []
-
-    wheel_location = os.getenv(
-        "VLLM_PRECOMPILED_WHEEL_LOCATION",
-        "https://vllm-wheels.s3.us-west-2.amazonaws.com/nightly/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl"
-    )
-
     if os.path.exists(wheel_filename := os.path.basename(wheel_location)):
         print(f"Using existing wheel={wheel_filename}")
     else:
-        # pip will not be available in PEP-517 style builds with build isolation (pip install <url/path>)
         try:
             subprocess.check_call(
                 f"pip download --no-deps {wheel_location}".split(" "))
         except subprocess.CalledProcessError:
-            print("#" * 30)
-            print("Failed to download using pip, retrying using urlretrieve")
-            try:
-                from urllib.request import urlretrieve
+            # pip will not be available in PEP-517 style builds with
+            # build isolation, such as when running
+            #    `pip install <path|git+https://<url>`.
+            from urllib.request import urlretrieve
 
-                result = urlretrieve(wheel_location, filename=wheel_filename)
+            print("Failed to download using pip, retrying using urlretrieve.")
+            try:
+                urlretrieve(wheel_location, filename=wheel_filename)
             except Exception as e:
                 from setuptools.errors import SetupError
 
@@ -567,6 +544,34 @@ if envs.VLLM_USE_PRECOMPILED:
                 continue
 
             package_data[package_name].append(file_name)
+
+
+ext_modules = []
+
+if _is_cuda() or _is_hip():
+    ext_modules.append(CMakeExtension(name="vllm._moe_C"))
+
+if _is_hip():
+    ext_modules.append(CMakeExtension(name="vllm._rocm_C"))
+
+if _is_cuda():
+    ext_modules.append(
+        CMakeExtension(name="vllm.vllm_flash_attn.vllm_flash_attn_c"))
+
+if _build_custom_ops():
+    ext_modules.append(CMakeExtension(name="vllm._C"))
+
+package_data = {
+    "vllm": ["py.typed", "model_executor/layers/fused_moe/configs/*.json"]
+}
+if envs.VLLM_USE_PRECOMPILED:
+    ext_modules = []
+    wheel_location = os.getenv(
+        "VLLM_PRECOMPILED_WHEEL_LOCATION",
+        "https://vllm-wheels.s3.us-west-2.amazonaws.com/nightly/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl"
+    )
+
+    repackage_wheel(package_data, wheel_location)
 
 if _no_device():
     ext_modules = []
