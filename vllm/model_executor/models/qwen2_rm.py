@@ -120,5 +120,5 @@ class Qwen2ForRewardModel(nn.Module, SupportsPP):
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(self,
-                                   ignore_unexpected_prefixes=["lm_head."])
+                                   ignore_unexpected_prefixes=["lm_head"])
         loader.load_weights(weights)
