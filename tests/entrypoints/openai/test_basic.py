@@ -1,7 +1,6 @@
 from http import HTTPStatus
 from typing import List
 
-import openai
 import pytest
 import pytest_asyncio
 import requests
@@ -69,6 +68,7 @@ def server(server_args):
 
 @pytest_asyncio.fixture
 async def client(server):
+    server.url_for()
     async with server.get_async_client() as async_client:
         yield async_client
 
@@ -83,10 +83,8 @@ async def client(server):
     indirect=True,
 )
 @pytest.mark.asyncio
-async def test_show_version(client: openai.AsyncOpenAI):
-    base_url = str(client.base_url)[:-3].strip("/")
-
-    response = requests.get(base_url + "/version")
+async def test_show_version(server: RemoteOpenAIServer):
+    response = requests.get(server.url_for("version"))
     response.raise_for_status()
 
     assert response.json() == {"version": VLLM_VERSION}
@@ -102,9 +100,7 @@ async def test_show_version(client: openai.AsyncOpenAI):
     indirect=True,
 )
 @pytest.mark.asyncio
-async def test_check_health(client: openai.AsyncOpenAI):
-    base_url = str(client.base_url)[:-3].strip("/")
-
-    response = requests.get(base_url + "/health")
+async def test_check_health(server: RemoteOpenAIServer):
+    response = requests.get(server.url_for("health"))
 
     assert response.status_code == HTTPStatus.OK
