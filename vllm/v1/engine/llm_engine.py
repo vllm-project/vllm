@@ -26,8 +26,8 @@ from vllm.transformers_utils.tokenizer_group import (
     BaseTokenizerGroup, init_tokenizer_from_configs)
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import get_open_zmq_ipc_path
-from vllm.v1.engine import (DetokenizerRequest, EngineCoreOutputs,
-                            EngineCoreRequest)
+from vllm.v1.engine import (LLM_ENGINE_CORE_READY_STR, DetokenizerRequest,
+                            EngineCoreOutputs, EngineCoreRequest)
 from vllm.v1.engine.detokenizer import Detokenizer
 from vllm.v1.engine.llm_engine_core import LLMEngineCore
 from vllm.v1.executor.gpu_executor import GPUExecutor
@@ -148,29 +148,33 @@ class LLMEngine:
         self.input_processor = input_registry.create_input_processor(
             model_config)
 
+        # IPC serialization / deserialization
         self.encoder = msgspec.msgpack.Encoder()
         self.decoder = msgspec.msgpack.Decoder(EngineCoreOutputs)
 
+        # IPC path setup
         self.ctx = zmq.Context()  # type: ignore[attr-defined]
-
-        self.to_core_ipc_path = get_open_zmq_ipc_path()
+        from_core_ipc_path = get_open_zmq_ipc_path()
+        to_core_ipc_path = get_open_zmq_ipc_path()
+        core_ready_ipc_path = get_open_zmq_ipc_path()
 
         # Get output (EngineCoreOutput) from LLMEngineCore.
-        self.from_core_ipc_path = get_open_zmq_ipc_path()
         self.from_core = self.ctx.socket(zmq.constants.PULL)
-        self.from_core.bind(self.from_core_ipc_path)
+        self.from_core.connect(from_core_ipc_path)
 
         # Send input (new Requests) to LLMEngineCore.
         self.to_core = self.ctx.socket(zmq.constants.PUSH)
-        self.to_core.bind(self.to_core_ipc_path)
+        self.to_core.bind(to_core_ipc_path)
 
         # TODO: some of these configs will be mutated by
-        # EngineCore (in a separate process). It would be better
-        # if we could prune down what is needed for EngineCore
-        # and prevent having two sources of truth.
+        # EngineCore (in a separate process), e.g. cache_config.
+        # It would be better if we could prune down what is needed
+        # for EngineCore and prevent having two sources of truth
+        # or perhaps made these immutable?
         self.engine_core = LLMEngineCore(
-            input_path=self.to_core_ipc_path,
-            output_path=self.from_core_ipc_path,
+            input_path=to_core_ipc_path,
+            output_path=from_core_ipc_path,
+            core_ready_path=core_ready_ipc_path,
             executor_class=executor_class,
             model_config=self.model_config,
             cache_config=self.cache_config,
@@ -184,15 +188,17 @@ class LLMEngine:
             prompt_adapter_config=self.prompt_adapter_config,
         )
         self.engine_core.start()
+        self._wait_for_engine_core(core_ready_ipc_path)
 
     def __del__(self):
-        print("__del__ is called, shutting down.")
+        logger.debug("Shutting down LLMEngineCore.")
 
         if hasattr(self, "ctx"):
             self.ctx.destroy(linger=0)
 
         if hasattr(self, "engine_core"):
             # TODO: do this more gracefully by sending a message?
+            # or at least using .terminate()
             self.engine_core.kill()
 
     @classmethod
@@ -215,6 +221,21 @@ class LLMEngine:
             stat_loggers=stat_loggers,
         )
         return engine
+
+    def _wait_for_engine_core(self, ipc_path: str):
+        try:
+            ready_socket = self.ctx.socket(zmq.constants.PULL)
+            ready_socket.connect(ipc_path)
+            while ready_socket.poll(timeout=5000) == 0:
+                logger.debug("Waiting for LLMEngineCore to startup.")
+                if not self.engine_core.is_alive():
+                    raise RuntimeError("LLMEngineCore process failed to start")
+
+            message = ready_socket.recv_string()
+            assert message == LLM_ENGINE_CORE_READY_STR
+
+        finally:
+            ready_socket.close(linger=0)
 
     def _init_tokenizer(self) -> BaseTokenizerGroup:
         return init_tokenizer_from_configs(
@@ -239,6 +260,11 @@ class LLMEngine:
 
     # NOTE: a significant drawback of this design is now we have two
     # trackers of running state (the Detokenizer and the Scheduler).
+    # Is there a better way to do this?
+    # Unfortunately we need need to send state over IPC?
+    # Maybe we could get back the scheduler state with EngineCoreOutput?
+    # Such that state is explicitly in sync rather than implicitly?
+
     def get_num_unfinished_requests(self) -> int:
         return self.detokenizer.get_num_unfinished_requests()
 

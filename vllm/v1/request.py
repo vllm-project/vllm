@@ -1,6 +1,7 @@
 import enum
 from typing import TYPE_CHECKING, List, Optional, Union
 
+from vllm.inputs.data import DecoderOnlyInputs
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import RequestMetrics
@@ -45,13 +46,17 @@ class Request:
         self.num_computed_tokens = 0
 
     @classmethod
-    def from_engine_core_input(cls, input: EngineCoreRequest) -> "Request":
-        return cls(request_id=input.request_id,
-                   inputs=input.inputs,
-                   sampling_params=input.sampling_params,
-                   eos_token_id=input.eos_token_id,
-                   arrival_time=input.arrival_time,
-                   lora_request=input.lora_request)
+    def from_engine_core_request(cls, request: EngineCoreRequest) -> "Request":
+
+        return cls(
+            request_id=request.request_id,
+            inputs=DecoderOnlyInputs(prompt_token_ids=request.prompt_token_ids,
+                                     prompt=request.prompt),
+            sampling_params=request.sampling_params,
+            eos_token_id=request.eos_token_id,
+            arrival_time=request.arrival_time,
+            lora_request=request.lora_request,
+        )
 
     @property
     def num_tokens(self) -> int:

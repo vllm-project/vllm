@@ -6,6 +6,8 @@ import msgspec
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 
+LLM_ENGINE_CORE_READY_STR = "READY"
+
 
 @dataclass
 class DetokenizerRequest:
