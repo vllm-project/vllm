@@ -319,7 +319,7 @@ def get_pooling_config(model, revision='main', token: Optional[str] = None):
         pooling_type_name = next(
             (item for item, val in pooling_dict.items() if val is True), None)
 
-        if pooling_type_name:
+        if pooling_type_name is not None:
             pooling_type_name = get_pooling_config_name(pooling_type_name)
 
         return {"pooling_type": pooling_type_name, "normalize": normalize}
