@@ -9,37 +9,40 @@ steps:
           - image: badouralix/curl-jq
             command:
             - sh .buildkite/nightly-benchmarks/scripts/wait-for-image.sh
+
   - wait
-  # - label: "A100"
-  #   agents:
-  #     queue: A100
-  #   plugins:
-  #   - kubernetes:
-  #       podSpec:
-  #         priorityClassName: perf-benchmark
-  #         containers:
-  #         - image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT
-  #           command:
-  #           - bash .buildkite/nightly-benchmarks/scripts/run-performance-benchmarks.sh
-  #           resources:
-  #             limits:
-  #               nvidia.com/gpu: 8
-  #           volumeMounts:
-  #           - name: devshm
-  #             mountPath: /dev/shm
-  #           env:
-  #           - name: VLLM_USAGE_SOURCE
-  #             value: ci-test
-  #           - name: HF_TOKEN
-  #             valueFrom:
-  #               secretKeyRef:
-  #                 name: hf-token-secret
-  #                 key: token
-  #         nodeSelector:
-  #           nvidia.com/gpu.product: NVIDIA-A100-SXM4-80GB
-  #         volumes:
-  #         - name: devshm
-  #           emptyDir:
+
+  - label: "A100"
+    agents:
+      queue: A100
+    plugins:
+    - kubernetes:
+        podSpec:
+          priorityClassName: perf-benchmark
+          containers:
+          - image: public.ecr.aws/q9t5s3a7/vllm-ci-test-repo:$BUILDKITE_COMMIT
+            command:
+            - bash .buildkite/nightly-benchmarks/scripts/run-performance-benchmarks.sh
+            resources:
+              limits:
+                nvidia.com/gpu: 8
+            volumeMounts:
+            - name: devshm
+              mountPath: /dev/shm
+            env:
+            - name: VLLM_USAGE_SOURCE
+              value: ci-test
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hf-token-secret
+                  key: token
+          nodeSelector:
+            nvidia.com/gpu.product: NVIDIA-A100-SXM4-80GB
+          volumes:
+          - name: devshm
+            emptyDir:
+             medium: Memory
 
   - label: "H200"
     agents:
@@ -59,7 +62,6 @@ steps:
         - HF_TOKEN
 
 
- #             medium: Memory
   # - label: "H100"
   #   agents:
   #     queue: H100
