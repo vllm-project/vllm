@@ -18,7 +18,8 @@ from vllm.entrypoints.openai.protocol import (BatchRequestInput,
                                               ChatCompletionResponse,
                                               EmbeddingResponse, ErrorResponse)
 # yapf: enable
-from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
+from vllm.entrypoints.openai.serving_chat.completions import (
+    OpenAIServingChatCompletions)
 from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
 from vllm.entrypoints.openai.serving_engine import BaseModelPath
 from vllm.usage.usage_lib import UsageContext
@@ -208,7 +209,7 @@ async def main(args):
         request_logger = RequestLogger(max_log_len=args.max_log_len)
 
     # Create the openai serving objects.
-    openai_serving_chat = OpenAIServingChat(
+    openai_serving_chat = OpenAIServingChatCompletions(
         engine,
         model_config,
         base_model_paths,

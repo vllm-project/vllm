@@ -38,12 +38,12 @@ from vllm.sequence import Logprob
 from vllm.tracing import (contains_trace_headers, extract_trace_headers,
                           log_tracing_disabled_warning)
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
-from vllm.utils import iterate_with_cancellation
+from vllm.utils import iterate_with_cancellation, is_list_of
 
 logger = init_logger(__name__)
 
 
-class OpenAIServingChat(OpenAIServing):
+class OpenAIServingChatCompletions(OpenAIServing):
 
     def __init__(self,
                  engine_client: EngineClient,
@@ -94,12 +94,12 @@ class OpenAIServingChat(OpenAIServing):
         raw_request: Optional[Request] = None,
     ) -> Union[AsyncGenerator[str, None], ChatCompletionResponse,
                ErrorResponse]:
-        """Completion API similar to OpenAI's API.
+        """
+        Chat Completion API similar to OpenAI's API.
 
         See https://platform.openai.com/docs/api-reference/chat/create
         for the API specification. This API mimics the OpenAI
-        ChatCompletion API.
-
+        Chat Completion API.
         """
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
@@ -176,7 +176,7 @@ class OpenAIServingChat(OpenAIServing):
                 "\"auto\" tool choice requires "
                 "--enable-auto-tool-choice and --tool-call-parser to be set")
 
-        request_id = f"chat-{request.request_id}"
+        request_id = f"chatcmpl-{request.request_id}"
 
         request_metadata = RequestResponseMetadata(request_id=request_id)
         if raw_request:
@@ -196,9 +196,9 @@ class OpenAIServingChat(OpenAIServing):
                     add_special_tokens=request.add_special_tokens,
                 )
             else:
-                assert isinstance(prompt, list) and isinstance(
-                    prompt[0], int
-                ), "Prompt has to be either a string or a list of token ids"
+                # For MistralTokenizer
+                assert is_list_of(prompt, int), (
+                    "Prompt has to be either a string or a list of token ids")
                 prompt_inputs = TextTokensPrompt(
                     prompt=tokenizer.decode(prompt), prompt_token_ids=prompt)
 

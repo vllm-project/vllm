@@ -1,7 +1,6 @@
 import asyncio
 import time
-from typing import (AsyncGenerator, AsyncIterator, Callable, Dict, List,
-                    Optional)
+from typing import AsyncGenerator, AsyncIterator, Dict, List, Optional
 from typing import Sequence as GenericSequence
 from typing import Tuple, Union, cast
 
@@ -36,11 +35,6 @@ from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import merge_async_iterators, random_uuid
 
 logger = init_logger(__name__)
-
-TypeTokenIDs = List[int]
-TypeTopLogProbs = List[Optional[Dict[int, float]]]
-TypeCreateLogProbsFn = Callable[
-    [TypeTokenIDs, TypeTopLogProbs, Optional[int], int], CompletionLogProbs]
 
 
 class OpenAIServingCompletion(OpenAIServing):

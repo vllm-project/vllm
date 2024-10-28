@@ -13,6 +13,7 @@ from vllm.entrypoints.logger import RequestLogger
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
+                                              ChatEmbeddingRequest,
                                               CompletionRequest,
                                               DetokenizeRequest,
                                               EmbeddingRequest, ErrorResponse,
@@ -57,7 +58,7 @@ class LoRAModulePath:
 
 
 AnyRequest = Union[ChatCompletionRequest, CompletionRequest, DetokenizeRequest,
-                   EmbeddingRequest, TokenizeRequest]
+                   ChatEmbeddingRequest, EmbeddingRequest, TokenizeRequest]
 
 
 class TextTokensPrompt(TypedDict):

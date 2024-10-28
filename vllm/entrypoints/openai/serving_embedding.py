@@ -21,7 +21,16 @@ from vllm.utils import merge_async_iterators, random_uuid
 
 logger = init_logger(__name__)
 
-TypeTokenIDs = List[int]
+
+def check_embedding_mode(model_config: ModelConfig) -> bool:
+    embedding_mode = model_config.task == "embedding"
+
+    if not embedding_mode:
+        logger.warning("embedding_mode is False. Embedding API will not work.")
+    else:
+        logger.info("Activating the server engine with embedding enabled.")
+
+    return embedding_mode
 
 
 def _get_embedding(
@@ -83,15 +92,16 @@ class OpenAIServingEmbedding(OpenAIServing):
                          lora_modules=None,
                          prompt_adapters=None,
                          request_logger=request_logger)
-        self._enabled = self._check_embedding_mode(
-            model_config.task == "embedding")
+
+        self._enabled = check_embedding_mode(model_config)
 
     async def create_embedding(
         self,
         request: EmbeddingRequest,
         raw_request: Optional[Request] = None,
     ) -> Union[EmbeddingResponse, ErrorResponse]:
-        """Completion API similar to OpenAI's API.
+        """
+        Embedding API similar to OpenAI's API.
 
         See https://platform.openai.com/docs/api-reference/embeddings/create
         for the API specification. This API mimics the OpenAI Embedding API.
