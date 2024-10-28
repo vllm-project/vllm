@@ -11,14 +11,14 @@ from typing import NamedTuple, Optional
 
 import pytest
 import torch
-from vllm.forward_context import get_forward_context, set_forward_context
 
 from tests.kernels.utils import *
 from vllm.attention import (Attention, AttentionBackend, AttentionMetadata,
                             AttentionType)
 from vllm.attention.backends.utils import STR_NOT_IMPL_ENC_DEC_ROCM_HIP
-from vllm.attention.selector import (_Backend,
+from vllm.attention.selector import (_Backend, get_attn_backend,
                                      global_force_attn_backend_context_manager)
+from vllm.forward_context import set_forward_context
 from vllm.utils import is_hip
 
 # List of support backends for encoder/decoder models
@@ -26,7 +26,6 @@ LIST_ENC_DEC_SUPPORTED_BACKENDS = [_Backend.XFORMERS, _Backend.FLASH_ATTN]
 HEAD_SIZES = [64, 256]
 
 NUM_HEADS = [1, 16]
-
 
 BATCH_SIZES = [1, 16]
 BLOCK_SIZES = [16]
@@ -623,7 +622,8 @@ def _run_encoder_attention_test(
     packed_qkv = encoder_test_params.packed_qkvo.packed_qkv
     assert packed_qkv is not None
     with set_forward_context(attn_metadata):
-        return attn.forward(packed_qkv.query.view(-1, test_pt.num_heads * test_pt.head_size),
+        return attn.forward(packed_qkv.query.view(
+            -1, test_pt.num_heads * test_pt.head_size),
                             packed_qkv.key,
                             packed_qkv.value,
                             torch.tensor([],
@@ -666,13 +666,13 @@ def _run_decoder_self_attention_test(
     packed_qkv = decoder_test_params.packed_qkvo.packed_qkv
     assert packed_qkv is not None
     with set_forward_context(attn_metadata):
-        return attn.forward(#packed_qkv.query,
-                            packed_qkv.query.view(-1, test_pt.num_heads * test_pt.head_size),
-                            packed_qkv.key,
-                            packed_qkv.value,
-                            kv_cache,
-                            attn_metadata,
-                            attn_type=attn_type)
+        return attn.forward(  #packed_qkv.query,
+            packed_qkv.query.view(-1, test_pt.num_heads * test_pt.head_size),
+            packed_qkv.key,
+            packed_qkv.value,
+            kv_cache,
+            attn_metadata,
+            attn_type=attn_type)
 
 
 def _run_encoder_decoder_cross_attention_test(
@@ -727,14 +727,21 @@ def _run_encoder_decoder_cross_attention_test(
         key = (None if cross_pckd_qkv is None else cross_pckd_qkv.key)
         value = (None if cross_pckd_qkv is None else cross_pckd_qkv.value)
     with set_forward_context(attn_metadata):
-        return attn.forward(#decoder_test_params.packed_qkvo.packed_qkv.query,
-                            decoder_test_params.packed_qkvo.packed_qkv.query.view(
-                                -1, test_pt.num_heads * test_pt.head_size),
-                            key,
-                            value,
-                            kv_cache,
-                            attn_metadata,
-                            attn_type=attn_type)
+        return attn.forward(  #decoder_test_params.packed_qkvo.packed_qkv.query,
+            decoder_test_params.packed_qkvo.packed_qkv.query.view(
+                -1, test_pt.num_heads * test_pt.head_size),
+            key,
+            value,
+            kv_cache,
+            attn_metadata,
+            attn_type=attn_type)
+
+
+@pytest.fixture(autouse=True)
+def clear_cache():
+    """Clear the cached value of attention backend before each test."""
+    get_attn_backend.cache_clear()
+    yield
 
 
 @pytest.mark.skipif(is_hip(), reason=STR_NOT_IMPL_ENC_DEC_ROCM_HIP)
@@ -782,7 +789,6 @@ def test_encoder_only(
     * max_dec_seq_len: max length of decoder input sequences
     * max_enc_seq_len: max length of encoder input sequences
     '''
-
     # Force Attention wrapper backend
     with global_force_attn_backend_context_manager(attn_backend):
         torch.set_default_dtype(torch.bfloat16)
@@ -817,10 +823,14 @@ def test_encoder_only(
         # PREFILL: encoder attention
 
         enc_pckd_act_out: torch.Tensor = (_run_encoder_attention_test(
-            test_rsrcs.attn, enc_test_params, prephase_attn_metadata, test_pt=test_pt))
+            test_rsrcs.attn,
+            enc_test_params,
+            prephase_attn_metadata,
+            test_pt=test_pt))
 
         # - Is encoder attention result correct?
         assert_actual_matches_ideal(enc_test_params, enc_pckd_act_out)
+
 
 @pytest.mark.skipif(is_hip(), reason=STR_NOT_IMPL_ENC_DEC_ROCM_HIP)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
@@ -899,7 +909,6 @@ def test_e2e_enc_dec_attn(
     * max_dec_seq_len: max length of decoder input sequences
     * max_enc_seq_len: max length of encoder input sequences
     '''
-
     # Force Attention wrapper backend
     with global_force_attn_backend_context_manager(attn_backend):
         torch.set_default_dtype(torch.bfloat16)
@@ -971,7 +980,10 @@ def test_e2e_enc_dec_attn(
         # PREFILL: decoder self-attention test
 
         prephase_dec_pckd_act_out = _run_decoder_self_attention_test(
-            test_rsrcs, prephase_dec_test_params, prephase_attn_metadata, test_pt=test_pt)
+            test_rsrcs,
+            prephase_dec_test_params,
+            prephase_attn_metadata,
+            test_pt=test_pt)
 
         # - Is prefill decoder self-attention correct?
         assert_actual_matches_ideal(prephase_dec_test_params,
@@ -980,8 +992,11 @@ def test_e2e_enc_dec_attn(
         # PREFILL: encoder/decoder cross-attention test
 
         prephase_cross_pckd_act_out = _run_encoder_decoder_cross_attention_test(
-            test_rsrcs, prephase_dec_test_params, prephase_cross_test_params,
-            prephase_attn_metadata, test_pt=test_pt)
+            test_rsrcs,
+            prephase_dec_test_params,
+            prephase_cross_test_params,
+            prephase_attn_metadata,
+            test_pt=test_pt)
 
         # - Is prefill encoder/decoder cross-attention correct?
         assert_actual_matches_ideal(prephase_cross_test_params,
@@ -1001,7 +1016,10 @@ def test_e2e_enc_dec_attn(
         # DECODE: decoder self-attention test
 
         decphase_dec_pckd_act_out = _run_decoder_self_attention_test(
-            test_rsrcs, decphase_dec_test_params, decphase_attn_metadata, test_pt=test_pt)
+            test_rsrcs,
+            decphase_dec_test_params,
+            decphase_attn_metadata,
+            test_pt=test_pt)
 
         # - Is decode-phase decoder self-attention correct?
         assert_actual_matches_ideal(decphase_dec_test_params,
@@ -1010,7 +1028,11 @@ def test_e2e_enc_dec_attn(
         # DECODE: encoder/decoder cross-attention test
 
         decphase_cross_pckd_act_out = _run_encoder_decoder_cross_attention_test(
-            test_rsrcs, decphase_dec_test_params, None, decphase_attn_metadata, test_pt=test_pt)
+            test_rsrcs,
+            decphase_dec_test_params,
+            None,
+            decphase_attn_metadata,
+            test_pt=test_pt)
 
         # - Is decode-phase encoder/decoder cross-attention correct?
         assert_actual_matches_ideal(decphase_cross_test_params,

@@ -7,6 +7,7 @@ from typing import List, Optional, Tuple, Type
 import pytest
 from transformers import AutoModelForSeq2SeqLM
 
+from vllm.attention.selector import get_attn_backend
 from vllm.sequence import SampleLogprobs
 
 from ....conftest import (DecoderPromptType, ExplicitEncoderDecoderPrompt,
@@ -168,6 +169,13 @@ def run_test(
         name_1="vllm",
         num_outputs_0_skip_tokens=hf_skip_tokens,
     )
+
+
+@pytest.fixture(autouse=True)
+def clear_cache():
+    """Clear the cached value of attention backend before each test."""
+    get_attn_backend.cache_clear()
+    yield
 
 
 @pytest.mark.parametrize("model", MODELS)

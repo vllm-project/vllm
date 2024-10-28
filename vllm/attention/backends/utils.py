@@ -7,8 +7,8 @@ import torch
 
 from vllm.attention import (AttentionMetadata, AttentionMetadataBuilder,
                             AttentionState)
-from vllm.utils import async_tensor_h2d, make_tensor_with_pad
 from vllm.attention.backends.abstract import AttentionType
+from vllm.utils import async_tensor_h2d, make_tensor_with_pad
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner_base import ModelRunnerBase
@@ -318,9 +318,11 @@ class CommonAttentionState(AttentionState):
         if is_encoder_decoder_model:
             # The encoder decoder model works only with XFormers and
             # Flash Attention backend. Assert the same.
-            assert self.runner.attn_backend.get_name() in ["XFORMERS", "FLASH_ATTN"], \
-                f"Expected attn_backend name to be either 'XFORMERS' or 'FLASH_ATTN', but "\
-                f"got '{self.runner.attn_backend.get_name()}'" 
+            assert self.runner.attn_backend.get_name() in\
+                ["XFORMERS", "FLASH_ATTN"], \
+                f"Expected attn_backend name to be either 'XFORMERS' or " \
+                f"'FLASH_ATTN', but "\
+                f"got '{self.runner.attn_backend.get_name()}'"
             self._update_captured_metadata_for_enc_dec_model(
                 batch_size=batch_size, attn_metadata=attn_metadata)
 
@@ -338,9 +340,11 @@ class CommonAttentionState(AttentionState):
         if is_encoder_decoder_model:
             # The encoder decoder model works only with XFormers and
             # Flash Attention backend. Assert the same.
-            assert self.runner.attn_backend.get_name() in ["XFORMERS", "FLASH_ATTN"], \
-                f"Expected attn_backend name to be either 'XFORMERS' or 'FLASH_ATTN', but "\
-                f"got '{self.runner.attn_backend.get_name()}'" 
+            assert self.runner.attn_backend.get_name() in\
+                ["XFORMERS", "FLASH_ATTN"], \
+                f"Expected attn_backend name to be either 'XFORMERS' or "\
+                f"'FLASH_ATTN', but "\
+                f"got '{self.runner.attn_backend.get_name()}'"
             self._add_additonal_input_buffers_for_enc_dec_model(
                 attn_metadata=attn_metadata, input_buffers=input_buffers)
         return input_buffers
@@ -357,11 +361,13 @@ class CommonAttentionState(AttentionState):
         if is_encoder_decoder_model:
             # The encoder decoder model works only with XFormers and
             # Flash Attention backend. Assert the same.
-            assert self.runner.attn_backend.get_name() in ["XFORMERS", "FLASH_ATTN"], \
-                f"Expected attn_backend name to be either 'XFORMERS' or 'FLASH_ATTN', but "\
-                f"got '{self.runner.attn_backend.get_name()}'" 
-            self._prepare_input_buffers_for_enc_dec_model(attn_metadata,
-                                                          input_buffers)
+            assert self.runner.attn_backend.get_name() in\
+                ["XFORMERS", "FLASH_ATTN"], \
+                f"Expected attn_backend name to be either 'XFORMERS' or "\
+                f"'FLASH_ATTN', but "\
+                f"got '{self.runner.attn_backend.get_name()}'"
+            self._prepare_input_buffers_for_enc_dec_model(
+                attn_metadata, input_buffers)
 
     def begin_forward(self, model_input) -> None:
         return

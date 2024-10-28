@@ -13,8 +13,8 @@ from torch._prims_common import TensorLikeType
 
 from vllm.attention import AttentionBackend, AttentionMetadata, AttentionType
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.utils import (STR_BACKEND_ENV_VAR, STR_XFORMERS_ATTN_VAL,
-                        STR_FLASH_ATTN_VAL, make_tensor_with_pad)
+from vllm.utils import (STR_BACKEND_ENV_VAR, STR_FLASH_ATTN_VAL,
+                        STR_XFORMERS_ATTN_VAL, make_tensor_with_pad)
 
 # For now, disable "test_aot_dispatch_dynamic" since there are some
 # bugs related to this test in PyTorch 2.4.
@@ -631,8 +631,8 @@ def make_kv_cache(num_blocks: int,
             (2, num_blocks, block_size, num_heads, head_size)).to(device)
     else:
         raise ValueError(
-            f"Unknown backend value: '{backend}'. Expected 'XFORMERS' or 'FLASH_ATTN'."
-        )
+            f"Unknown backend value: '{backend}'. Expected 'XFORMERS' or "
+            f"'FLASH_ATTN'.")
     if default_val is not None:
         kv_cache[:, :, :] = default_val
     return kv_cache

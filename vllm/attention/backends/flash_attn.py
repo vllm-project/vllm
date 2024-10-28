@@ -12,8 +12,8 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
 from vllm.attention.backends.utils import (PAD_SLOT_ID, CommonAttentionState,
                                            compute_slot_mapping,
                                            compute_slot_mapping_start_idx,
-                                           is_block_tables_empty,
-                                           get_seq_len_block_table_args)
+                                           get_seq_len_block_table_args,
+                                           is_block_tables_empty)
 from vllm.forward_context import get_forward_context
 from vllm.utils import async_tensor_h2d, make_tensor_with_pad
 
@@ -675,11 +675,33 @@ class FlashAttentionImpl(AttentionImpl):
         return output
 
 
-def _get_key_query_seq_metadata(
+def _get_query_key_seq_metadata(
     attn_metadata,
     is_prompt: bool,
     attn_type: AttentionType,
 ) -> tuple:
+    """
+    Returns sequence metadata for key and query based on the specified 
+    attention type and whether input is a prompt.
+
+    This function computes the starting locations and maximum sequence lengths 
+    for key and query sequences for different attention types.
+
+    Args:
+        attn_metadata: The attention metadata object
+        is_prompt (bool): A flag indicating if the input is a prompt
+        attn_type (AttentionType): The type of attention being used.
+
+    Returns:
+        tuple: A tuple containing four integers:
+            - Starting location for the query sequence.
+            - Maximum sequence length for the query sequence.
+            - Starting location for the key sequence.
+            - Maximum sequence length for the key sequence.
+
+    Raises:
+        AttributeError: If an invalid attention type is provided.
+    """
     if attn_type == AttentionType.DECODER:
         # Decoder self-attention
         # Choose max_seq_len based on whether we are in prompt_run
@@ -712,14 +734,30 @@ def _get_key_query_seq_metadata(
     else:
         raise AttributeError(f"Invalid attention type {str(attn_type)}")
 
+
 def _get_num_prefill_encode_decode_tokens(
     attn_metadata: FlashAttentionMetadata,
     attn_type: AttentionType,
-) -> tuple[int, int, int]:
+) -> Tuple[int, int, int]:
+    """
+    Calculate the number of prefill, encoder, and decode tokens based on the 
+    attention metadata and the specified attention type.
+
+    Args:
+        attn_metadata (FlashAttentionMetadata): Attention Metadata object.
+        attn_type (AttentionType): The type of attention being used.
+    Returns:
+        Tuple[int, int, int]: A tuple containing three integers:
+            - The number of prefill tokens.
+            - The number of encoder tokens.
+            - The number of decode tokens.
+
+    Raises:
+        AssertionError: If the number of encoder tokens in `attn_metadata` 
+        is `None` when required for the calculations.
+    """
     if attn_type == AttentionType.ENCODER:
         # Encoder attention - chunked prefill is not applicable;
-        # derive token-count from query shape & and treat them
-        # as 100% prefill tokens
         assert attn_metadata.num_encoder_tokens is not None
         num_prefill_tokens = attn_metadata.num_encoder_tokens
         num_encoder_tokens = attn_metadata.num_encoder_tokens
@@ -731,23 +769,31 @@ def _get_num_prefill_encode_decode_tokens(
         num_prefill_tokens = attn_metadata.num_prefill_tokens
         num_encoder_tokens = attn_metadata.num_encoder_tokens
         num_decode_tokens = attn_metadata.num_decode_tokens
-    else: # attn_type == AttentionType.DECODER or 
-          # attn_type == AttentionType.ENCODER_ONLY 
+    else:  # attn_type == AttentionType.DECODER or
+        # attn_type == AttentionType.ENCODER_ONLY
         num_prefill_tokens = attn_metadata.num_prefill_tokens
-        num_encoder_tokens = attn_metadata.num_prefill_tokens
+        num_encoder_tokens = 0
         num_decode_tokens = attn_metadata.num_decode_tokens
 
     return (num_prefill_tokens, num_encoder_tokens, num_decode_tokens)
 
-def _get_causal_option(attn_type: AttentionType)-> bool:
-    if (attn_type == AttentionType.ENCODER or \
-        attn_type == AttentionType.ENCODER_ONLY or \
-        attn_type ==  AttentionType.ENCODER_DECODER) :
-        return False
-    
-    return True
 
-   
+def _get_causal_option(attn_type: AttentionType) -> bool:
+    """
+    Determine whether the given attention type is suitable for causal 
+    attention mechanisms.
+
+    Args:
+        attn_type (AttentionType): The type of attention being evaluated
+
+    Returns:
+        bool: Returns `True` if the attention type is suitable for causal 
+        attention (i.e., not encoder, encoder-only, or encoder-decoder), 
+        otherwise returns `False`.
+    """
+    return not (attn_type == AttentionType.ENCODER
+                or attn_type == AttentionType.ENCODER_ONLY
+                or attn_type == AttentionType.ENCODER_DECODER)
 
 
 @torch.library.custom_op("vllm::unified_flash_attention",
@@ -773,9 +819,9 @@ def unified_flash_attention(
     # Convert integer attn_type to enum
     try:
         attn_type = AttentionType(attn_type_int_val)
-    except ValueError:
+    except ValueError as err:
         raise AttributeError(
-            f"Invalid attention type {str(attn_type_int_val)}")
+            f"Invalid attention type {str(attn_type_int_val)}") from err
 
     current_metadata = get_forward_context()
     assert current_metadata is not None
@@ -813,12 +859,13 @@ def unified_flash_attention(
                 value,
                 kv_cache[0],
                 kv_cache[1],
-                updated_slot_mapping.flatten(),
+                updated_slot_mapping.flatten()
+                if updated_slot_mapping is not None else None,
                 kv_cache_dtype,
                 k_scale,
                 v_scale,
             )
-    
+
     num_prefill_tokens, num_encoder_tokens,  num_decode_tokens = \
         _get_num_prefill_encode_decode_tokens(attn_metadata, attn_type)
     decode_query = query[num_prefill_tokens:]
@@ -836,8 +883,8 @@ def unified_flash_attention(
             # normal attention
             # When block_tables are not filled, it means q and k are the
             # prompt, and they have the same length.
-            q_seq_start_loc, q_seq_len, k_seq_start_loc, k_seq_len = _get_key_query_seq_metadata(
-                prefill_meta, True, attn_type)
+            q_seq_start_loc, q_seq_len, k_seq_start_loc, k_seq_len = \
+                _get_query_key_seq_metadata(prefill_meta, True, attn_type)
 
             if (attn_type == AttentionType.ENCODER or \
                 attn_type == AttentionType.ENCODER_DECODER):
@@ -846,7 +893,7 @@ def unified_flash_attention(
             else:
                 key = key[:num_prefill_tokens]
                 value = value[:num_prefill_tokens]
-            
+
             prefill_output = flash_attn_varlen_func(
                 q=query,
                 k=key,

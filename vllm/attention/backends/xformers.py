@@ -13,9 +13,9 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
 from vllm.attention.backends.utils import (CommonAttentionState,
                                            CommonMetadataBuilder,
-                                           is_all_encoder_attn_metadata_set,
+                                           get_seq_len_block_table_args,
                                            is_all_cross_attn_metadata_set,
-                                           get_seq_len_block_table_args)
+                                           is_all_encoder_attn_metadata_set)
 from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
 from vllm.logger import init_logger
@@ -359,6 +359,7 @@ def _get_seq_len_block_table_args(
     * Appropriate block tables (or None)
     '''
     return get_seq_len_block_table_args(attn_metadata, is_prompt, attn_type)
+
 
 class XFormersMetadataBuilder(CommonMetadataBuilder[XFormersMetadata]):
 

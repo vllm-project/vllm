@@ -7,6 +7,7 @@ from typing import List, Optional, Tuple
 import pytest
 from transformers import AutoModelForSeq2SeqLM
 
+from vllm.attention.selector import get_attn_backend
 from vllm.platforms import current_platform
 from vllm.sequence import SampleLogprobs
 
@@ -26,6 +27,13 @@ def vllm_to_hf_output(
         hf_output_str = "<s>" + hf_output_str
 
     return output_ids, hf_output_str, out_logprobs
+
+
+@pytest.fixture(autouse=True)
+def clear_cache():
+    """Clear the cached value of attention backend before each test."""
+    get_attn_backend.cache_clear()
+    yield
 
 
 @pytest.mark.parametrize("model", ["facebook/bart-large-cnn"])
