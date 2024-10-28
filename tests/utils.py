@@ -8,7 +8,7 @@ import time
 import warnings
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Literal, Optional, Union
+from typing import Any, Callable, Dict, List, Literal, Optional, Type, Union
 
 import openai
 import pytest
@@ -26,7 +26,7 @@ from vllm.model_executor.model_loader.loader import get_model_loader
 from vllm.platforms import current_platform
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.utils import (FlexibleArgumentParser, GB_bytes,
-                        cuda_device_count_stateless, get_open_port, is_hip)
+                        cuda_device_count_stateless, get_open_port)
 
 if current_platform.is_rocm():
     from amdsmi import (amdsmi_get_gpu_vram_usage,
@@ -454,13 +454,13 @@ def multi_process_parallel(
 
 
 @contextmanager
-def error_on_warning():
+def error_on_warning(category: Type[Warning] = Warning):
     """
     Within the scope of this context manager, tests will fail if any warning
-    is emitted.
+    of the given category is emitted.
     """
     with warnings.catch_warnings():
-        warnings.simplefilter("error")
+        warnings.filterwarnings("error", category=category)
 
         yield
 
@@ -487,7 +487,7 @@ def wait_for_gpu_memory_to_clear(devices: List[int],
         output: Dict[int, str] = {}
         output_raw: Dict[int, float] = {}
         for device in devices:
-            if is_hip():
+            if current_platform.is_rocm():
                 dev_handle = amdsmi_get_processor_handles()[device]
                 mem_info = amdsmi_get_gpu_vram_usage(dev_handle)
                 gb_used = mem_info["vram_used"] / 2**10
@@ -587,7 +587,7 @@ def large_gpu_test(*, min_gb: int):
     )
 
     def wrapper(f: Callable[_P, None]) -> Callable[_P, None]:
-        return test_skipif(fork_new_process_for_each_test(f))
+        return test_skipif(f)
 
     return wrapper
 
@@ -678,12 +678,3 @@ def get_client_text_logprob_generations(
     return [(text_generations, text,
              (None if x.logprobs is None else x.logprobs.top_logprobs))
             for completion in completions for x in completion.choices]
-
-
-def check_deprecated_block_manager_usage(test_name: str):
-    assert envs.VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1 is True, (
-        f"To allow the use of deprecated BlockSpaceManagerV1, set the "
-        f"environment variable VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1=1. "
-        f"You can run the tests with: "
-        f"`VLLM_ALLOW_DEPRECATED_BLOCK_MANAGER_V1=1 pytest {test_name}`"  #noqa
-    )

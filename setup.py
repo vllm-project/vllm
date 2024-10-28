@@ -157,6 +157,14 @@ class cmake_build_ext(build_ext):
         # on subsequent calls to python.
         cmake_args += ['-DVLLM_PYTHON_PATH={}'.format(":".join(sys.path))]
 
+        # Override the base directory for FetchContent downloads to $ROOT/.deps
+        # This allows sharing dependencies between profiles,
+        # and plays more nicely with sccache.
+        # To override this, set the FETCHCONTENT_BASE_DIR environment variable.
+        fc_base_dir = os.path.join(ROOT_DIR, ".deps")
+        fc_base_dir = os.environ.get("FETCHCONTENT_BASE_DIR", fc_base_dir)
+        cmake_args += ['-DFETCHCONTENT_BASE_DIR={}'.format(fc_base_dir)]
+
         #
         # Setup parallelism and build tool
         #
@@ -288,10 +296,6 @@ def _is_xpu() -> bool:
 
 def _build_custom_ops() -> bool:
     return _is_cuda() or _is_hip() or _is_cpu()
-
-
-def _build_core_ext() -> bool:
-    return not (_is_neuron() or _is_tpu() or _is_openvino() or _is_xpu())
 
 
 def get_hipcc_rocm_version():
@@ -455,9 +459,6 @@ def get_requirements() -> List[str]:
 
 
 ext_modules = []
-
-if _build_core_ext():
-    ext_modules.append(CMakeExtension(name="vllm._core_C"))
 
 if _is_cuda() or _is_hip():
     ext_modules.append(CMakeExtension(name="vllm._moe_C"))

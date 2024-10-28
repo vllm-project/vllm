@@ -4,8 +4,9 @@ import random
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import (Callable, Deque, Dict, Iterable, List, Optional, Set,
-                    Tuple, Union)
+from typing import Callable, Deque, Dict, Iterable, List, Optional
+from typing import Sequence as GenericSequence
+from typing import Set, Tuple, Union
 
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager
@@ -115,7 +116,7 @@ class ScheduledSequenceGroup:
 class SchedulerOutputs:
     """The scheduling decision made from a scheduler."""
     # Scheduled sequence groups.
-    scheduled_seq_groups: Iterable[ScheduledSequenceGroup]
+    scheduled_seq_groups: GenericSequence[ScheduledSequenceGroup]
     # Number of prefill groups scheduled.
     num_prefill_groups: int
     # Total number of batched tokens.
@@ -289,7 +290,7 @@ def scheduler_running_outputs_builder():
 
 
 def scheduled_seq_group_builder():
-    return ScheduledSequenceGroup(SequenceGroup("", [], -1),
+    return ScheduledSequenceGroup(SequenceGroup.__new__(SequenceGroup),
                                   token_chunk_size=0)
     # return ScheduledSequenceGroup(seq_group=None, token_chunk_size=0)
 
@@ -311,10 +312,8 @@ class Scheduler:
         # LoRAs. This should be improved in the future.
         self.lora_config = lora_config
 
-        version = "v1"
-        if self.scheduler_config.use_v2_block_manager:
-            version = "v2"
-        if (self.scheduler_config.embedding_mode
+        version = "selfattn"
+        if (self.scheduler_config.task == "embedding"
                 or self.cache_config.is_attention_free):
             version = "placeholder"
 

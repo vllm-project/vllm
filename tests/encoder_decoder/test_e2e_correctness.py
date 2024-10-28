@@ -7,8 +7,8 @@ from typing import List, Optional, Tuple
 import pytest
 from transformers import AutoModelForSeq2SeqLM
 
+from vllm.platforms import current_platform
 from vllm.sequence import SampleLogprobs
-from vllm.utils import is_cpu
 
 from ..conftest import DecoderPromptType
 from ..models.utils import check_logprobs_close
@@ -35,7 +35,7 @@ def vllm_to_hf_output(
 @pytest.mark.parametrize("decoder_prompt_type", list(DecoderPromptType))
 @pytest.mark.parametrize("enforce_eager", [True, False])
 @pytest.mark.skipif(
-    is_cpu(),
+    current_platform.is_cpu(),
     reason="CPU backend is not currently supported with encoder/decoder models"
 )
 def test_encoder_decoder_e2e(
@@ -50,7 +50,7 @@ def test_encoder_decoder_e2e(
     enforce_eager: bool,
 ) -> None:
     '''
-    End-to-End (E2E) test for the encoder-decoder framework. 
+    End-to-End (E2E) test for the encoder-decoder framework.
     This test evaluates the encoder-decoder functionality using the BART
     model. We compare the outputs of the Hugging Face and vLLM
     implementations to ensure that both implementations produce consistent

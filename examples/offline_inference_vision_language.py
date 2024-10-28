@@ -1,6 +1,6 @@
 """
-This example shows how to use vLLM for running offline inference 
-with the correct prompt format on vision language models.
+This example shows how to use vLLM for running offline inference with
+the correct prompt format on vision language models for text generation.
 
 For most models, the prompt format should follow corresponding examples
 on HuggingFace model repository.
@@ -267,12 +267,33 @@ def run_qwen2_vl(question: str, modality: str):
         model=model_name,
         max_model_len=8192,
         max_num_seqs=5,
+        # Note - mm_processor_kwargs can also be passed to generate/chat calls
+        mm_processor_kwargs={
+            "min_pixels": 28 * 28,
+            "max_pixels": 1280 * 28 * 28,
+        },
     )
 
     prompt = ("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
               "<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>"
               f"{question}<|im_end|>\n"
               "<|im_start|>assistant\n")
+    stop_token_ids = None
+    return llm, prompt, stop_token_ids
+
+
+# Pixtral HF-format
+def run_pixtral_hf(question: str, modality: str):
+    assert modality == "image"
+
+    model_name = "mistral-community/pixtral-12b"
+
+    llm = LLM(
+        model=model_name,
+        max_model_len=8192,
+    )
+
+    prompt = f"<s>[INST]{question}\n[IMG][/INST]"
     stop_token_ids = None
     return llm, prompt, stop_token_ids
 
@@ -347,6 +368,7 @@ model_example_map = {
     "NVLM_D": run_nvlm_d,
     "qwen_vl": run_qwen_vl,
     "qwen2_vl": run_qwen2_vl,
+    "pixtral_hf": run_pixtral_hf,
     "mllama": run_mllama,
     "molmo": run_molmo,
     "glm4v": run_glm4v,
@@ -433,7 +455,7 @@ def main(args):
 if __name__ == "__main__":
     parser = FlexibleArgumentParser(
         description='Demo on using vLLM for offline inference with '
-        'vision language models')
+        'vision language models for text generation')
     parser.add_argument('--model-type',
                         '-m',
                         type=str,
