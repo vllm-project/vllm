@@ -532,9 +532,15 @@ if envs.VLLM_USE_PRECOMPILED:
     if os.path.exists(wheel_filename := os.path.basename(wheel_location)):
         print(f"Using existing wheel={wheel_filename}")
     else:
+        # pip will not be available in PEP-517 style builds with build isolation (pip install <url/path>)
         try:
-            subprocess.check_call(
-                f"pip download --no-deps {wheel_location}".split(" "))
+            if which("pip"):
+                subprocess.check_call(
+                    f"pip download --no-deps {wheel_location}".split(" "))
+            else:
+                from urllib.request import urlretrieve
+
+                urlretrieve(wheel_location, filename=wheel_filename)
         except subprocess.CalledProcessError as exc:
             from setuptools.errors import SetupError
 
