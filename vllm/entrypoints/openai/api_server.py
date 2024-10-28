@@ -523,6 +523,7 @@ def init_app_state(
         chat_template=args.chat_template,
     )
 
+
 def create_server_socket(addr: Tuple[str, int]) -> socket.socket:
     if socket.has_dualstack_ipv6():
         sock = socket.create_server(addr,
@@ -532,6 +533,7 @@ def create_server_socket(addr: Tuple[str, int]) -> socket.socket:
         sock = socket.create_server(addr)
 
     return sock
+
 
 async def run_server(args, **uvicorn_kwargs) -> None:
     logger.info("vLLM API server version %s", VLLM_VERSION)
