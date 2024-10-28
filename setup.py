@@ -534,18 +534,20 @@ if envs.VLLM_USE_PRECOMPILED:
     else:
         # pip will not be available in PEP-517 style builds with build isolation (pip install <url/path>)
         try:
-            if which("pip"):
-                subprocess.check_call(
-                    f"pip download --no-deps {wheel_location}".split(" "))
-            else:
+            subprocess.check_call(
+                f"pip download --no-deps {wheel_location}".split(" "))
+        except subprocess.CalledProcessError:
+            print("#" * 30)
+            print("Failed to download using pip, retrying using urlretrieve")
+            try:
                 from urllib.request import urlretrieve
 
-                urlretrieve(wheel_location, filename=wheel_filename)
-        except subprocess.CalledProcessError as exc:
-            from setuptools.errors import SetupError
+                result = urlretrieve(wheel_location, filename=wheel_filename)
+            except Exception as e:
+                from setuptools.errors import SetupError
 
-            raise SetupError(
-                f"Failed to get vLLM wheel from {wheel_location}") from exc
+                raise SetupError(
+                    f"Failed to get vLLM wheel from {wheel_location}") from e
 
     with zipfile.ZipFile(wheel_filename) as wheel:
         for lib in filter(
