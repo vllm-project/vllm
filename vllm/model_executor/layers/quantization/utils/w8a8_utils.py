@@ -122,14 +122,20 @@ def apply_fp8_linear(
         # Note: we pad the input because torch._scaled_mm is more performant
         # for matrices with batch dimension > 16.
         # This could change in the future.
+        #if torch.isneginf(input_scale) or torch.isinf(input_scale):
+        #    input_scale = TORCH_DEVICE_IDENTITY
+        #if torch.isneginf(weight_scale) or torch.isinf(weight_scale):
+        #    weight_scale = TORCH_DEVICE_IDENTITY
+        batched = input.dim() > 2
+        inp_view = input.view(-1, input.shape[-1]) if batched else input
         if input.dtype != torch.float8_e4m3fnuz:
             qinput, x_scale = ops.scaled_fp8_quant(
-                input,
+                inp_view,
                 input_scale,
                 num_token_padding=17,
                 use_per_token_if_dynamic=use_per_token_if_dynamic)
         else:
-            qinput, x_scale = input, input_scale
+            qinput, x_scale = inp_view, input_scale
 
         per_tensor_weights = (weight_scale.numel() == 1)
         per_tensor_activations = (x_scale.numel() == 1)
@@ -145,8 +151,11 @@ def apply_fp8_linear(
             # A fix for discrepancy in scaled_mm which returns tuple
             # for torch < 2.5 and a single value in torch >= 2.5
             if type(output) is tuple and len(output) == 2:
-                return torch.narrow(output[0], 0, 0, input.shape[0])
-            return torch.narrow(output, 0, 0, input.shape[0])
+                output = output[0]
+
+            return (torch.narrow(
+                output, 0, 0, input.shape[0]) if not batched else output.view(
+                    input.shape[0], input.shape[1], weight.shape[1]))
 
         else:
             # Fallback for channelwise case, where we use unfused DQ
