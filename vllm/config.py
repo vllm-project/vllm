@@ -428,23 +428,17 @@ class ModelConfig:
             self, pooling_type_arg: Optional[str],
             normalize_arg: Optional[bool]) -> Optional[PoolingConfig]:
         pooling_config = get_pooling_config(self.model, self.revision)
-        pooling_type = None
-        normalize = None
         if pooling_config is not None:
             pooling_type = pooling_config["pooling_type"]
-            normalize = pooling_config["normalize"]
-            if not pooling_type_arg and not normalize_arg:
-                return PoolingConfig(
+            normalize = pooling_config.get["normalize"]
+            pooling_config = PoolingConfig(
                     pooling_type=self.get_pooling_type(pooling_type),
                     normalize=normalize)
-        if pooling_type_arg:
-            pooling_type = pooling_type_arg
-        if normalize_arg:
-            normalize = normalize_arg
-        if pooling_type and normalize:
-            return PoolingConfig(
-                pooling_type=self.get_pooling_type(pooling_type),
-                normalize=normalize)
+            if pooling_type_arg is not None:
+                pooling_config.pooling_type = self.get_pooling_type(pooling_type_arg)
+            if normalize_arg is not None:
+                pooling_config.normalize = normalize_arg
+            return pooling_config
         else:
             return None
 
