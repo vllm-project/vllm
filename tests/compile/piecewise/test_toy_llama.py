@@ -143,7 +143,6 @@ class LlamaModel(nn.Module):
 
         self.embedding_tokens.weight.data.fill_(0.0)
 
-    @torch.inference_mode
     def forward(
         self,
         input_ids: Optional[torch.Tensor],
@@ -160,6 +159,7 @@ directory = os.path.dirname(__file__)
 config = os.path.join(directory, "compilation_config.json")
 
 
+@torch.inference_mode
 def run_model(use_compile: bool, split_attn: bool = False) -> torch.Tensor:
 
     os.environ["VLLM_TORCH_COMPILE_CONFIG"] = config
@@ -211,25 +211,24 @@ def test_toy_llama():
         assert torch.allclose(outputs[0], outputs[i])
 
 
-if __name__ == "__main__":
+@torch.inference_mode
+def benchmark():
     os.environ["VLLM_TORCH_COMPILE_LEVEL"] = str(CompilationLevel.PIECEWISE)
     from triton.testing import do_bench
     cls = support_torch_compile(LlamaModel)
 
     # similar to llama 3.1-8B
-    llama_3_1 = LlamaConfig(hidden_size=4096,
-                            mlp_size=14336,
-                            vocab_size=128 * 1024,
-                            num_layers=32)
+    llama_config = LlamaConfig(hidden_size=4096,
+                               mlp_size=14336,
+                               vocab_size=128 * 1024,
+                               num_layers=32)
 
     # a tiny model to measure the overhead
     # of piecewise cudagraph
-    llama_toy = LlamaConfig(hidden_size=40,
-                            mlp_size=80,
-                            vocab_size=128,
-                            num_layers=2)
-
-    llama_config = llama_3_1
+    llama_config = LlamaConfig(hidden_size=40,
+                               mlp_size=80,
+                               vocab_size=128,
+                               num_layers=2)
 
     cudagraph_sizes = [1, 2, 4] + [i * 8 for i in range(1, 33)]
 
@@ -262,17 +261,26 @@ if __name__ == "__main__":
                     graphs[b] = (graph, output)
                 else:
                     output = model(input_ids[:b], positions[:b])
-
                     graphs[b] = (model, output)
         for b in cudagraph_sizes:
             if piecewise:
-                runtime = do_bench(graphs[b][0](input_ids[:b], positions[:b]))
+                # noqa is for `Function definition does not bind loop variable`
+                # it will be problematic if we save the created lambda function
+                # and use it later, because it will look up the name `b` in the
+                # enclosing scope, and the value of `b` will always be 256.
+                # it is fine here, because we only use the lambda function once.
+                runtime = do_bench(lambda: graphs[b][0]  # noqa
+                                   (input_ids[:b], positions[:b]))  # noqa
                 piecewise_cudagraph_time[b] = runtime
             else:
-                runtime = do_bench(graphs[b][0].replay())
+                runtime = do_bench(lambda: graphs[b][0].replay())  # noqa
                 full_cudagraph_time[b] = runtime
 
     # print in tabular format
     print("batch size\tfull cudagraph\tpiecewise cudagraph")
     for b in cudagraph_sizes:
         print(f"{b}\t{full_cudagraph_time[b]}\t{piecewise_cudagraph_time[b]}")
+
+
+if __name__ == "__main__":
+    benchmark()
