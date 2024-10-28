@@ -82,8 +82,10 @@ class FlashAttentionImpl(AttentionImpl):
         if alibi_slopes is not None:
             alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
         self.alibi_slopes = alibi_slopes
-        self.sliding_window = ((sliding_window, sliding_window)
-                               if sliding_window is not None else (-1, -1))
+        if sliding_window is None:
+            self.sliding_window = (-1, -1)
+        else:
+            self.sliding_window = (sliding_window - 1, 0)
         self.kv_cache_dtype = kv_cache_dtype
         if logits_soft_cap is None:
             # In flash-attn, setting logits_soft_cap as 0 means no soft cap.
@@ -92,12 +94,6 @@ class FlashAttentionImpl(AttentionImpl):
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
-
-        if sliding_window is not None:
-            # NOTE(woosuk): flash-attn's sliding window does not work with
-            # paged KV cache.
-            raise ValueError(
-                "Sliding window is not supported in FlashAttention.")
 
         support_head_sizes = FlashAttentionBackend.get_supported_head_sizes()
         if head_size not in support_head_sizes:

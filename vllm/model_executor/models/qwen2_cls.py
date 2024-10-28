@@ -1,10 +1,11 @@
 # coding=utf-8
 # Adapted from
 # https://huggingface.co/Qwen/Qwen2.5-Math-RM-72B/blob/main/modeling_qwen2_rm.py
+# Copyright 2024 Kakao Corp. (Kanana-X Team)
 # Copyright 2024 The Qwen team.
 # Copyright 2023 The vLLM team.
-"""Inference-only Qwen2-RM model compatible with HuggingFace weights."""
-from typing import Iterable, List, Optional, Tuple, Union
+"""Inference-only Qwen2-Classification model compatible with HF weights."""
+from typing import Iterable, List, Optional, Tuple
 
 import torch
 from torch import nn
@@ -12,30 +13,18 @@ from transformers import Qwen2Config
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig
-from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               RowParallelLinear)
+from vllm.model_executor.layers.linear import RowParallelLinear
 from vllm.model_executor.layers.pooler import Pooler, PoolingType
-from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig)
+from vllm.model_executor.models.qwen2 import Qwen2Model
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.sequence import IntermediateTensors, PoolerOutput
 
-from .interfaces import SupportsPP
-from .qwen2 import Qwen2Model
 from .utils import AutoWeightsLoader
 
 
-class ReLU(nn.Module):
-
-    def __init__(self):
-        super().__init__()
-        self.activation = nn.ReLU()
-
-    def forward(self, input):
-        input, _ = input
-        return self.activation(input)
-
-
-class Qwen2ForRewardModel(nn.Module, SupportsPP):
+class Qwen2ForSequenceClassification(nn.Module):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -85,18 +74,12 @@ class Qwen2ForRewardModel(nn.Module, SupportsPP):
         self.quant_config = quant_config
         self.model = Qwen2Model(config, cache_config, quant_config)
 
-        self.score = nn.Sequential(
-            ColumnParallelLinear(config.hidden_size,
-                                 config.hidden_size,
-                                 quant_config=quant_config),
-            ReLU(),
-            RowParallelLinear(config.hidden_size, 1,
-                              quant_config=quant_config),
-        )
-        self._pooler = Pooler(pooling_type=PoolingType.ALL, normalize=False)
-
-        self.make_empty_intermediate_tensors = (
-            self.model.make_empty_intermediate_tensors)
+        self.score = RowParallelLinear(config.hidden_size,
+                                       config.num_labels,
+                                       quant_config=quant_config)
+        self._pooler = Pooler(pooling_type=PoolingType.LAST,
+                              normalize=False,
+                              softmax=True)
 
     def forward(
         self,
@@ -105,7 +88,7 @@ class Qwen2ForRewardModel(nn.Module, SupportsPP):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
-    ) -> Union[torch.Tensor, IntermediateTensors]:
+    ) -> torch.Tensor:
         hidden_states = self.model(input_ids, positions, kv_caches,
                                    attn_metadata, intermediate_tensors)
         logits, _ = self.score(hidden_states)
