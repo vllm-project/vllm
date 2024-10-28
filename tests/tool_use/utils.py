@@ -93,7 +93,10 @@ CONFIGS: Dict[str, ServerConfig] = {
         "mbayser/granite-20b-functioncalling-FP8-KV",
         "arguments": [
             "--tool-call-parser", "granite-20b-fc", "--chat-template",
-            str(VLLM_PATH / "examples/tool_chat_template_granite_20b_fc.jinja")
+            str(VLLM_PATH /
+                "examples/tool_chat_template_granite_20b_fc.jinja"),
+            "--max_num_seqs", "1", "--max-model-len", "1024",
+            "--enforce-eager", "--cpu-offload-gb", "20"
         ],
         "supports_parallel":
         False,
