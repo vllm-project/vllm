@@ -12,7 +12,7 @@ import cloudpickle
 import torch.nn as nn
 
 from vllm.logger import init_logger
-from vllm.utils import is_hip
+from vllm.platforms import current_platform
 
 from .interfaces import (has_inner_state, is_attention_free,
                          supports_multimodal, supports_pp)
@@ -247,7 +247,7 @@ def _try_load_model_cls(
     model_arch: str,
     model: _BaseRegisteredModel,
 ) -> Optional[Type[nn.Module]]:
-    if is_hip():
+    if current_platform.is_rocm():
         if model_arch in _ROCM_UNSUPPORTED_MODELS:
             raise ValueError(f"Model architecture '{model_arch}' is not "
                              "supported by ROCm for now.")
