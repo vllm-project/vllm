@@ -868,10 +868,13 @@ class LLMEngine:
         # may add dummy <image> tokens that aren't part of the tokenizer's
         # vocabulary.
         if self.tokenizer is not None and self._is_token_prompt(prompt):
+            prompt_ids = prompt["prompt_token_ids"]
+            if len(prompt_ids) == 0:
+                # Empty prompt check is handled later
+                return
             # If the engine is run with --skip-tokenizer-init then we have no
             # tokenizer to check
             tokenizer = self.get_tokenizer(lora_request)
-            prompt_ids = prompt["prompt_token_ids"]
             max_input_id = max(prompt_ids)
             if max_input_id > tokenizer.max_token_id:
                 raise ValueError(
