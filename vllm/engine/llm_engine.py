@@ -10,7 +10,7 @@ from typing import Sequence as GenericSequence
 from typing import Set, Type, Union, cast, overload
 
 import torch
-from typing_extensions import TypeVar
+from typing_extensions import TypeIs, TypeVar
 
 import vllm.envs as envs
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
@@ -31,7 +31,8 @@ from vllm.executor.executor_base import ExecutorBase
 from vllm.executor.gpu_executor import GPUExecutor
 from vllm.executor.ray_utils import initialize_ray_cluster
 from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs,
-                         EncoderDecoderInputs, InputRegistry, PromptType)
+                         EncoderDecoderInputs, InputRegistry, PromptType,
+                         TokensPrompt)
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -827,6 +828,8 @@ class LLMEngine:
         if arrival_time is None:
             arrival_time = time.time()
 
+        self._validate_token_prompt(prompt, lora_request)
+
         preprocessed_inputs = self.input_preprocessor.preprocess(
             prompt,
             request_id=request_id,
@@ -852,6 +855,31 @@ class LLMEngine:
             trace_headers=trace_headers,
             priority=priority,
         )
+
+    def _validate_token_prompt(self, prompt: PromptType,
+                               lora_request: Optional[LoRARequest]):
+        # Guard against out-of-vocab tokens.
+        # For some tokenizers, tokenizer.decode will happily return empty text
+        # for token ids that are out of vocab, and we don't detect token ids
+        # that are greater than the max token id before running the model.
+        # However, these token ids will later crash a cuda kernel at runtime
+        # with an index out of bounds error. This will crash the entire engine.
+        # This needs to happen before multimodal input pre-processing, which
+        # may add dummy <image> tokens that aren't part of the tokenizer's
+        # vocabulary.
+        if self.tokenizer is not None and self._is_token_prompt(prompt):
+            # If the engine is run with --skip-tokenizer-init then we have no
+            # tokenizer to check
+            tokenizer = self.get_tokenizer(lora_request)
+            prompt_ids = prompt["prompt_token_ids"]
+            max_input_id = max(prompt_ids)
+            if max_input_id > tokenizer.max_token_id:
+                raise ValueError(
+                    "Token id {} is out of vocabulary".format(max_input_id))
+
+    @staticmethod
+    def _is_token_prompt(prompt: PromptType) -> TypeIs[TokensPrompt]:
+        return isinstance(prompt, dict) and "prompt_token_ids" in prompt
 
     def _create_sequence_group_with_sampling(
         self,
@@ -1938,21 +1966,6 @@ class LLMEngine:
 
         if prompt_ids is None or len(prompt_ids) == 0:
             raise ValueError("Prompt cannot be empty")
-
-        # Guard against out-of-vocab tokens.
-        # For some tokenizers, tokenizer.decode will happily return empty text
-        # for token ids that are out of vocab, and we don't detect token ids
-        # that are greater than the max token id before running the model.
-        # However, these token ids will later crash a cuda kernel at runtime
-        # with an index out of bounds error. This will crash the entire engine.
-        if self.tokenizer is not None:
-            # If the engine is run with --skip-tokenizer-init then we have no
-            # tokenizer to check
-            tokenizer = self.get_tokenizer(lora_request)
-            max_input_id = max(prompt_ids)
-            if max_input_id > tokenizer.max_token_id:
-                raise ValueError(
-                    "Token id {} is out of vocabulary".format(max_input_id))
 
         if self.model_config.is_multimodal_model:
             max_prompt_len = self.model_config.max_model_len
