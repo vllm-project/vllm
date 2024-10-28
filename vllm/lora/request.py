@@ -45,8 +45,8 @@ class LoRARequest(
         assert self.lora_path, "lora_path cannot be empty"
         if self.lora_int_id < 1:
             warnings.warn(
-                "The 'lora_int_id' must be greater than 0"
-                "self.lora_int_id set to 1",
+                "The 'lora_int_id' must be greater than 0 "
+                "self.lora_int_id set to 1.",
                 stacklevel=2)
             self.lora_int_id = 1
 
