@@ -214,6 +214,7 @@ class LLM:
             tokenizer_group.tokenizer = get_cached_tokenizer(tokenizer)
 
     def finish_measurements(self):
+        assert not envs.VLLM_USE_V1, "INC does not support vLLM V1"
         self.llm_engine.finish_measurements()
 
     @overload  # LEGACY: single (prompt + optional token ids)
