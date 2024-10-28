@@ -23,6 +23,7 @@ __all__ = [
     "DbrxConfig",
     "MPTConfig",
     "RWConfig",
+    "H2OVLChatConfig",
     "InternVLChatConfig",
     "JAISConfig",
     "MedusaConfig",
