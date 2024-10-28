@@ -317,7 +317,7 @@ def get_pooling_config(model, revision='main', token: Optional[str] = None):
                                            token)
         pooling_type_name = next(
             (item for item, val in pooling_dict.items() if val is True), None)
-        
+
         pooling_type_name = get_pooling_config_name(pooling_type_name)
 
         return {"pooling_type": pooling_type_name, "normalize": normalize}
@@ -336,7 +336,7 @@ def get_pooling_config_name(pooling_name: str):
         pooling_name = "last"
 
     pooling_type_name = pooling_name.upper()
-    
+
     return pooling_type_name
 
 

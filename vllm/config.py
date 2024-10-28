@@ -439,8 +439,7 @@ class ModelConfig:
             if not pooling_type_arg and not normalize_arg:
                 return PoolingConfig(
                     pooling_type=self.get_pooling_type(pooling_type),
-                    normalize=normalize
-                )
+                    normalize=normalize)
         if pooling_type_arg:
             pooling_type = pooling_type_arg
         if normalize_arg:
