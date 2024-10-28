@@ -10,11 +10,19 @@ from vllm._custom_ops import (semi_structured_fp8_compress,
 from vllm.platforms import current_platform
 
 
-def compress_to_torch_sparse_semi_structured_mat(original_tensor):
-    if original_tensor.dtype == torch.float8_e4m3fn:
-        packed = semi_structured_fp8_compress(original_tensor)
+def compress_to_torch_sparse_semi_structured_mat(pruned_tensor: torch.Tensor):
+    '''
+    Compresses original pruned (with zeros) tensor into packed version
+    Args:
+        pruned_tensor(torch.Tensor) - pruned but not packed tensor
+    Returns: 
+        torch.SparseSemiStructuredTensorCUSPARSELT: torch wrapped cusparseLt-packed tensor. 
+    '''
+    
+    if pruned_tensor.dtype == torch.float8_e4m3fn:
+        packed = semi_structured_fp8_compress(pruned_tensor)
         return SparseSemiStructuredTensorCUSPARSELT(
-            shape=original_tensor.shape,
+            shape=pruned_tensor.shape,
             packed=packed,
             meta=None,
             packed_t=None,
@@ -23,62 +31,101 @@ def compress_to_torch_sparse_semi_structured_mat(original_tensor):
             fuse_transpose_cusparselt=SparseSemiStructuredTensor.
             _FUSE_TRANSPOSE,
             alg_id_cusparselt=SparseSemiStructuredTensor._DEFAULT_ALG_ID,
-            requires_grad=original_tensor.requires_grad,
+            requires_grad=pruned_tensor.requires_grad,
         )
     else:
-        return to_sparse_semi_structured(original_tensor)
+        return to_sparse_semi_structured(pruned_tensor)
 
-
-def decompress_torch_sparse_semi_structured_mat(sp_mat):
-    if sp_mat.dtype == torch.float8_e4m3fn:
-        return semi_structured_fp8_mm(sp_mat.packed,
-                                      torch.eye(sp_mat.shape[-1],
-                                                dtype=sp_mat.dtype,
-                                                device=sp_mat.device).t(),
+#  
+def decompress_torch_sparse_semi_structured_mat(packed_tensor: torch.Tensor):
+    '''
+    Unpacks the cusparseLt packed tensor into pruned tensor
+    Args:
+        packed_tensor - torch wrapped cusparseLt-packed tensor. Result of compress_to_torch_sparse_semi_structured_mat.
+    Returns:
+        pruned (torch.Tensor) - pruned torch.tensor
+    '''
+    if packed_tensor.dtype == torch.float8_e4m3fn:
+        return semi_structured_fp8_mm(packed_tensor.packed,
+                                      torch.eye(packed_tensor.shape[-1],
+                                                dtype=packed_tensor.dtype,
+                                                device=packed_tensor.device).t(),
                                       transpose_result=False)
     else:
         # Fix of to_dense() function supporting int8
         # cuSparseLT for int8 requires dense matrix to be non-contiguous
         return torch.mm(
-            sp_mat,
-            torch.eye(sp_mat.shape[-1],
-                      dtype=sp_mat.dtype,
-                      device=sp_mat.device).t())
+            packed_tensor,
+            torch.eye(packed_tensor.shape[-1],
+                      dtype=packed_tensor.dtype,
+                      device=packed_tensor.device).t())
 
 
-def semi_structured_sparse_dense_gemm(a_sparse: torch.Tensor,
+def semi_structured_sparse_dense_gemm(a_packed: torch.Tensor,
                                       b_dense: torch.Tensor,
                                       bias: torch.Tensor = None):
-    assert a_sparse.dtype in [
+    '''
+    Performs matrix multiplication (A @ B) of semi-structured sparse (A) and dense (B) matrices
+    Args:
+        a_packed (torch.Tensor) - torch wrapped cusparseLt-packed tensor. Result of compress_to_torch_sparse_semi_structured_mat.
+        b_dense (torch.Tensor) - dense matrix tensor.
+        bias (torch.Tensor) - bias to fuse in matrix multiplication. default : None. 
+    Result:
+        torch.Tensor - Result of matrix multiplication.
+    '''
+    assert a_packed.dtype in [
         torch.float16, torch.bfloat16, torch.int8, torch.float8_e4m3fn
-    ], f"Semi structured sparse-dense matmul does not support {a_sparse.dtype}"
-    if a_sparse.dtype == torch.float8_e4m3fn:
-        return semi_structured_fp8_mm(a_sparse.packed,
+    ], f"Semi structured sparse-dense matmul does not support {a_packed.dtype}"
+    if a_packed.dtype == torch.float8_e4m3fn:
+        return semi_structured_fp8_mm(a_packed.packed,
                                       b_dense,
                                       bias=bias,
                                       transpose_result=False)
     else:
-        return torch.mm(a_sparse, b_dense)
+        return torch.mm(a_packed, b_dense)
 
 
-def semi_structured_dense_sparse_T_gemm(a: torch.Tensor,
-                                        b_T: torch.Tensor,
+def semi_structured_dense_sparse_T_gemm(a_dense: torch.Tensor,
+                                        b_T_packed: torch.Tensor,
                                         bias: torch.Tensor = None):
-    return (semi_structured_sparse_dense_gemm(b_T, a.t(), bias)).t()
+    '''
+    Performs matrix multiplication (a @ b_T) of transposed semi-structured sparse and dense matrices
+    Args:
+        a_dense (torch.Tensor) - dense matrix tensor.
+        b_T_packed (torch.Tensor) - torch wrapped cusparseLt-packed tensor. Result of compress_to_torch_sparse_semi_structured_mat
+        bias (torch.Tensor) - bias to fuse in matrix multiplication. default : None.
+    
+    Returns:
+        torch.Tensor - Result of matrix multiplication.
+    '''
+    return (semi_structured_sparse_dense_gemm(b_T_packed, a_dense.t(), bias)).t()
 
 
-def semi_structured_sparse_dense_gemm_scaled(a_sparse: torch.Tensor,
+def semi_structured_sparse_dense_gemm_scaled(a_packed: torch.Tensor,
                                              b_dense: torch.Tensor,
                                              scale_a: torch.Tensor,
                                              scale_b: torch.Tensor,
                                              bias: torch.Tensor = None):
-    assert (a_sparse.dtype == torch.float8_e4m3fn
+    '''
+    Performs scaled matrix multiplication (a @ b) of transposed semi-structured sparse and dense fp8 matrices
+    Args:
+        a_packed (torch.Tensor) - torch wrapped cusparseLt-packed tensor. Result of compress_to_torch_sparse_semi_structured_mat.
+        b_dense (torch.Tensor) - dense matrix tensor.
+        scale_a (torch.Tensor) - scaling factor for sparse matrix, must be in float32.
+        scale_b (torch.Tensor) - scaling factor for dense matrix, must be in float32.
+        bias (torch.Tensor) - bias to fuse in matrix multiplication. default : None.
+
+    Returns:
+        torch.Tensor - Result of matrix multiplication.
+    '''
+
+    assert (a_packed.dtype == torch.float8_e4m3fn
             and b_dense.dtype == torch.float8_e4m3fn)
     assert not b_dense.is_contiguous(
     ), "cusparseLt requires dense matrix be non-contiguous"
     # cusparseLt requires alpha to be float
     assert scale_a.dtype == torch.float32 and scale_b.dtype == torch.float32
-    return semi_structured_fp8_mm(a_sparse.packed,
+    return semi_structured_fp8_mm(a_packed.packed,
                                   b_dense,
                                   alpha=scale_a * scale_b,
                                   bias=bias,
