@@ -2,15 +2,16 @@
 Test the piecewise compilation with a simple model, comparing the output
 with and without the piecewise compilation.
 """
+import os
+from dataclasses import dataclass
 from typing import Optional, Tuple
 
 import torch
 from torch import nn
-from dataclasses import dataclass
-from vllm.compilation.levels import CompilationLevel
-import os
+
 from vllm.compilation.compile_context import set_compile_context
 from vllm.compilation.decorators import support_torch_compile
+from vllm.compilation.levels import CompilationLevel
 
 
 @torch.library.custom_op("silly::attention", mutates_args=["out"])
@@ -142,6 +143,7 @@ class LlamaModel(nn.Module):
 
         self.embedding_tokens.weight.data.fill_(0.0)
 
+    @torch.inference_mode
     def forward(
         self,
         input_ids: Optional[torch.Tensor],
@@ -154,11 +156,12 @@ class LlamaModel(nn.Module):
         return hidden_states
 
 
-@torch.inference_mode
+directory = os.path.dirname(__file__)
+config = os.path.join(directory, "compilation_config.json")
+
+
 def run_model(use_compile: bool, split_attn: bool = False) -> torch.Tensor:
 
-    directory = os.path.dirname(__file__)
-    config = os.path.join(directory, "compilation_config.json")
     os.environ["VLLM_TORCH_COMPILE_CONFIG"] = config
 
     if use_compile:
@@ -214,31 +217,60 @@ if __name__ == "__main__":
     cls = support_torch_compile(LlamaModel)
 
     # similar to llama 3.1-8B
-    llama_config = LlamaConfig(hidden_size=4096,
-                               mlp_size=14336,
-                               vocab_size=128 * 1024,
-                               num_layers=32)
+    llama_3_1 = LlamaConfig(hidden_size=4096,
+                            mlp_size=14336,
+                            vocab_size=128 * 1024,
+                            num_layers=32)
 
-    model = cls(llama_config).eval().cuda()
+    # a tiny model to measure the overhead
+    # of piecewise cudagraph
+    llama_toy = LlamaConfig(hidden_size=40,
+                            mlp_size=80,
+                            vocab_size=128,
+                            num_layers=2)
 
-    B = 256  # max batch size
-    input_ids = torch.randint(0, llama_config.vocab_size, (B, )).cuda()
-    positions = torch.arange(B).cuda()
+    llama_config = llama_3_1
 
     cudagraph_sizes = [1, 2, 4] + [i * 8 for i in range(1, 33)]
 
-    graph_pool = torch.cuda.graph_pool_handle()
+    full_cudagraph_time = {}
+    piecewise_cudagraph_time = {}
 
-    graphs = {}
+    for piecewise in [False, True]:
+        if piecewise:
+            os.environ["VLLM_TORCH_COMPILE_CONFIG"] = config
+            from vllm.plugins import set_non_cudagraph_ops
+            set_non_cudagraph_ops(["silly.attention"])
 
-    with set_compile_context(cudagraph_sizes):
-        model(input_ids, positions)
-        for b in cudagraph_sizes[::-1]:
-            graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(graph, pool=graph_pool):
-                output = model(input_ids[:b], positions[:b])
-            graphs[b] = (graph, output)
+        model = cls(llama_config).eval().cuda()
 
+        B = 256  # max batch size
+        input_ids = torch.randint(0, llama_config.vocab_size, (B, )).cuda()
+        positions = torch.arange(B).cuda()
+
+        graphs = {}
+
+        with set_compile_context(cudagraph_sizes):
+            model(input_ids, positions)
+            for b in cudagraph_sizes[::-1]:
+                if not piecewise:
+                    graph = torch.cuda.CUDAGraph()
+                    with torch.cuda.graph(graph):
+                        output = model(input_ids[:b], positions[:b])
+                    graphs[b] = (graph, output)
+                else:
+                    output = model(input_ids[:b], positions[:b])
+
+                    graphs[b] = (model, output)
+        for b in cudagraph_sizes:
+            if piecewise:
+                runtime = do_bench(graphs[b][0](input_ids[:b], positions[:b]))
+                piecewise_cudagraph_time[b] = runtime
+            else:
+                runtime = do_bench(graphs[b][0].replay())
+                full_cudagraph_time[b] = runtime
+
+    # print in tabular format
+    print("batch size\tfull cudagraph\tpiecewise cudagraph")
     for b in cudagraph_sizes:
-        print(f"Running cudagraph with batch size {b}")
-        print(do_bench(lambda: graphs[b][0].replay()))
+        print(f"{b}\t{full_cudagraph_time[b]}\t{piecewise_cudagraph_time[b]}")
