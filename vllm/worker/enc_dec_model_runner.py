@@ -101,8 +101,8 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         models) but these arguments are present here for compatibility with 
         the base-class constructor.
         '''
-
-        #self._maybe_force_supported_attention_backend()
+        print('model_name ' + str(model_config.model))
+        self._maybe_force_supported_attention_backend(model_config.model)
 
         super().__init__(
             model_config,
@@ -119,7 +119,10 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         # Crash for unsupported encoder/scenarios
         assert_enc_dec_mr_supported_scenario(self)
 
-    def _maybe_force_supported_attention_backend(self):
+    def _is_xformers_only_encoder_decoder_model(self, model: str) -> bool:
+        return "llama-3.2-11b-vision-instruct" in model.lower()
+
+    def _maybe_force_supported_attention_backend(self, model: str):
         '''
         Force vLLM to use the XFormers attention backend,
         which is currently the only supported option.
@@ -135,22 +138,26 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         is_forced_by_global = maybe_global_forced_backend is not None
         is_forced_by_env_var = maybe_env_var_forced_backend is not None
 
-        if not (is_forced_by_global or is_forced_by_env_var):
+        if not (is_forced_by_global or is_forced_by_env_var) \
+            and self._is_xformers_only_encoder_decoder_model(model):
             # The user has not already specified an attention backend
             # override
-            logger.info("EncoderDecoderModelRunner requires "
-                        "XFormers backend; overriding backend "
-                        "auto-selection and forcing XFormers.")
+            logger.info(
+                "Encoder-Decoder Model %s requires XFormers backend; "
+                "overriding backend auto-selection and "
+                "forcing XFormers.", model)
             global_force_attn_backend(_Backend.XFORMERS)
         elif is_forced_by_global:
             # Backend override enforced by global variable takes
             # precedence over vLLM backend environment variable.
-            if maybe_global_forced_backend != _Backend.XFORMERS:
+            if maybe_global_forced_backend not in\
+                 [_Backend.XFORMERS, _Backend.FLASH_ATTN]:
                 raise_backend_err()
         elif is_forced_by_env_var:
             # Backend override enforced by vLLM backend
             # environment variable
-            if maybe_env_var_forced_backend != _Backend.XFORMERS:
+            if maybe_env_var_forced_backend not in\
+                 [_Backend.XFORMERS, _Backend.FLASH_ATTN]:
                 raise_backend_err()
 
     def _list_to_int32_tensor(

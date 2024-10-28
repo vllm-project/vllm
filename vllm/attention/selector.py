@@ -180,7 +180,6 @@ def which_attn_to_use(
     # ENVIRONMENT VARIABLE.
     backend_by_global_setting: Optional[_Backend] = (
         get_global_forced_attn_backend())
-    print('backend_by_global_setting ' + str(backend_by_global_setting))
     if backend_by_global_setting is not None:
         selected_backend = backend_by_global_setting
     else:
@@ -298,9 +297,6 @@ def global_force_attn_backend_context_manager(
 
     # Globally force the new backend override
     global_force_attn_backend(attn_backend)
-
-    print('original value ' + str(original_value))
-    print('new value ' + str(attn_backend))
 
     # Yield control back to the enclosed code block
     try:
