@@ -908,7 +908,9 @@ class Scheduler:
             assert len(waiting_seqs) == 1, (
                 "Waiting sequence group should have only one prompt "
                 "sequence.")
-            # self._update_prefix_cached_tokens(waiting_seqs[0])
+            seq = waiting_seqs[0]
+            self._update_prefix_cached_tokens(seq)
+            num_cached_tokens = seq.get_num_cached_tokens()
             num_new_tokens = self._get_num_new_tokens(
                 seq_group,
                 SequenceStatus.WAITING,
@@ -917,11 +919,11 @@ class Scheduler:
             )
 
             num_new_tokens_exclude_cached = self._get_num_new_tokens_exclude_cached(
-                num_new_tokens, waiting_seqs[0]
+                num_new_tokens, seq 
             )
 
             if not enable_chunking:
-                num_prompt_tokens = waiting_seqs[0].get_len()
+                num_prompt_tokens = seq.get_len()
                 assert num_new_tokens == num_prompt_tokens
 
             prompt_limit = self._get_prompt_limit(seq_group)
@@ -929,8 +931,7 @@ class Scheduler:
                 logger.warning(
                     "Input prompt (%d tokens) is too long"
                     " and exceeds limit of %d", num_new_tokens, prompt_limit)
-                for seq in waiting_seqs:
-                    seq.status = SequenceStatus.FINISHED_IGNORED
+                seq.status = SequenceStatus.FINISHED_IGNORED
                 ignored_seq_groups.append(seq_group)
                 waiting_queue.popleft()
                 continue
@@ -960,8 +961,7 @@ class Scheduler:
                     "Input prompt (%d tokens) + lookahead slots (%d) is "
                     "too long and exceeds the capacity of block_manager",
                     num_new_tokens, num_lookahead_slots)
-                for seq in waiting_seqs:
-                    seq.status = SequenceStatus.FINISHED_IGNORED
+                seq.status = SequenceStatus.FINISHED_IGNORED
                 ignored_seq_groups.append(seq_group)
                 waiting_queue.popleft()
                 continue
@@ -1003,6 +1003,12 @@ class Scheduler:
                 self._allocate_and_set_running(seq_group)
             except Exception as e:
                 breakpoint()
+
+            # NOTE(rickyx): We are updating this again since some of the previously
+            # cached blocks that were in evictor might now become active again. 
+            # Therefore, the actual number of tokens cached might have changed.
+            self._update_prefix_cached_tokens(seq)
+            num_cached_tokens = max(num_cached_tokens, seq.get_num_cached_tokens())
 
             if enable_chunking and self.scheduler_config.is_multi_step:
                 blocks_to_copy: List[Tuple[int, int]] = []
@@ -1677,7 +1683,7 @@ class Scheduler:
         num_new_tokens = 0
         seqs = seq_group.get_seqs(status=status)
         for seq in seqs:
-            self._update_prefix_cached_tokens(seq)
+            # self._update_prefix_cached_tokens(seq)
             num_new_tokens += seq.get_num_new_tokens()
         assert num_new_tokens > 0
         # Chunk if a running request cannot fit in the given budget.
