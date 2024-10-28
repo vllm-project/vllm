@@ -232,6 +232,7 @@ def benchmark():
 
     cudagraph_sizes = [1, 2, 4] + [i * 8 for i in range(1, 33)]
 
+    eager_time = {}
     full_cudagraph_time = {}
     piecewise_cudagraph_time = {}
 
@@ -274,12 +275,16 @@ def benchmark():
                 piecewise_cudagraph_time[b] = runtime
             else:
                 runtime = do_bench(lambda: graphs[b][0].replay())  # noqa
+                eager_runtime = do_bench(
+                    lambda: model(input_ids[:b], positions[:b]))  # noqa
                 full_cudagraph_time[b] = runtime
+                eager_time[b] = eager_runtime
 
     # print in tabular format
-    print("batch size\tfull cudagraph\tpiecewise cudagraph")
+    print("batch size\teager mode\tfull cudagraph\tpiecewise cudagraph")
     for b in cudagraph_sizes:
-        print(f"{b}\t{full_cudagraph_time[b]}\t{piecewise_cudagraph_time[b]}")
+        print((f"{b}\t{eager_time[b]:.3f}\t{full_cudagraph_time[b]:.3f}"
+               f"\t{piecewise_cudagraph_time[b]:.3f}"))
 
 
 if __name__ == "__main__":
