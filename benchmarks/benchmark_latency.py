@@ -47,6 +47,7 @@ def main(args: argparse.Namespace):
         distributed_executor_backend=args.distributed_executor_backend,
         otlp_traces_endpoint=args.otlp_traces_endpoint,
         enable_prefix_caching=args.enable_prefix_caching,
+        max_num_seqs=args.batch_size,
     )
 
     sampling_params = SamplingParams(
@@ -179,7 +180,7 @@ if __name__ == '__main__':
     parser.add_argument(
         '--kv-cache-dtype',
         type=str,
-        choices=['auto', 'fp8', 'fp8_e5m2', 'fp8_e4m3'],
+        choices=['auto', 'fp8', 'fp8_e5m2', 'fp8_e4m3', 'fp8_inc'],
         default="auto",
         help='Data type for kv cache storage. If "auto", will use model '
         'data type. CUDA 11.8+ supports fp8 (=fp8_e4m3) and fp8_e5m2. '
