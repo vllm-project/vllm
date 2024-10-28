@@ -258,19 +258,6 @@ class LLMEngine:
     def stop_remote_worker_execution_loop(self) -> None:
         raise NotImplementedError("TP not implemented yet.")
 
-    # NOTE: a significant drawback of this design is now we have two
-    # trackers of running state (the Detokenizer and the Scheduler).
-    # Is there a better way to do this?
-    # Unfortunately we need need to send state over IPC?
-    # Maybe we could get back the scheduler state with EngineCoreOutput?
-    # Such that state is explicitly in sync rather than implicitly?
-
-    def get_num_unfinished_requests(self) -> int:
-        return self.detokenizer.get_num_unfinished_requests()
-
-    def has_unfinished_requests(self) -> bool:
-        return self.detokenizer.has_unfinished_requests()
-
     def add_request(
         self,
         request_id: str,
@@ -314,6 +301,24 @@ class LLMEngine:
             copy=False,
             flags=zmq.NOBLOCK)
 
+    def abort_request(self, request_id: Union[str, Iterable[str]]) -> None:
+        # TODO: send to EngineCore
+        # TODO: send to Deoktenizer
+        pass
+
+    # NOTE: a significant drawback of this design is now we have two
+    # trackers of running state (the Detokenizer and the Scheduler).
+    # Is there a better way to do this?
+    # Unfortunately we need need to send state over IPC?
+    # Maybe we could get back the scheduler state with EngineCoreOutput?
+    # Such that state is explicitly in sync rather than implicitly?
+
+    def get_num_unfinished_requests(self) -> int:
+        return self.detokenizer.get_num_unfinished_requests()
+
+    def has_unfinished_requests(self) -> bool:
+        return self.detokenizer.has_unfinished_requests()
+
     def step(self) -> List[RequestOutput]:
         # NOTE: This method returns an empty list if the EngineCore
         # step is running. This is not the end of the generation process.
@@ -324,11 +329,6 @@ class LLMEngine:
             return request_outputs
 
         return []
-
-    def abort_request(self, request_id: Union[str, Iterable[str]]) -> None:
-        # TODO: send to EngineCore
-        # TODO: send to Deoktenizer
-        pass
 
     def check_health(self) -> None:
         if self.tokenizer:
