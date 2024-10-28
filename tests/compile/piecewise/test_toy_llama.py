@@ -7,6 +7,10 @@ from typing import Optional, Tuple
 import torch
 from torch import nn
 from dataclasses import dataclass
+from vllm.compilation.levels import CompilationLevel
+import os
+from vllm.compilation.compile_context import set_compile_context
+from vllm.compilation.decorators import support_torch_compile
 
 
 @torch.library.custom_op("silly::attention", mutates_args=["out"])
@@ -153,12 +157,9 @@ class LlamaModel(nn.Module):
 @torch.inference_mode
 def run_model(use_compile: bool, split_attn: bool = False) -> torch.Tensor:
 
-    import os
     directory = os.path.dirname(__file__)
     config = os.path.join(directory, "compilation_config.json")
     os.environ["VLLM_TORCH_COMPILE_CONFIG"] = config
-
-    from vllm.compilation.levels import CompilationLevel
 
     if use_compile:
         os.environ["VLLM_TORCH_COMPILE_LEVEL"] = str(
@@ -171,15 +172,13 @@ def run_model(use_compile: bool, split_attn: bool = False) -> torch.Tensor:
         from vllm.plugins import set_non_cudagraph_ops
         set_non_cudagraph_ops(["silly.attention"])
 
-    from vllm.compilation.compile_context import set_compile_context
-    from vllm.compilation.decorators import support_torch_compile
     cls = LlamaModel
     if use_compile:
         cls = support_torch_compile(LlamaModel)
     llama_config = LlamaConfig(hidden_size=128,
-                         mlp_size=256,
-                         vocab_size=128,
-                         num_layers=2)
+                               mlp_size=256,
+                               vocab_size=128,
+                               num_layers=2)
     model = cls(llama_config).eval().cuda()
 
     B = 16  # max batch size
@@ -207,3 +206,39 @@ def test_toy_llama():
 
     for i in range(1, len(outputs)):
         assert torch.allclose(outputs[0], outputs[i])
+
+
+if __name__ == "__main__":
+    os.environ["VLLM_TORCH_COMPILE_LEVEL"] = str(CompilationLevel.PIECEWISE)
+    from triton.testing import do_bench
+    cls = support_torch_compile(LlamaModel)
+
+    # similar to llama 3.1-8B
+    llama_config = LlamaConfig(hidden_size=4096,
+                               mlp_size=14336,
+                               vocab_size=128 * 1024,
+                               num_layers=32)
+
+    model = cls(llama_config).eval().cuda()
+
+    B = 256  # max batch size
+    input_ids = torch.randint(0, llama_config.vocab_size, (B, )).cuda()
+    positions = torch.arange(B).cuda()
+
+    cudagraph_sizes = [1, 2, 4] + [i * 8 for i in range(1, 33)]
+
+    graph_pool = torch.cuda.graph_pool_handle()
+
+    graphs = {}
+
+    with set_compile_context(cudagraph_sizes):
+        model(input_ids, positions)
+        for b in cudagraph_sizes[::-1]:
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, pool=graph_pool):
+                output = model(input_ids[:b], positions[:b])
+            graphs[b] = (graph, output)
+
+    for b in cudagraph_sizes:
+        print(f"Running cudagraph with batch size {b}")
+        print(do_bench(lambda: graphs[b][0].replay()))
