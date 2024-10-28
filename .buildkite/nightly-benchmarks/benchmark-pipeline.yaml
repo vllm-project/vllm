@@ -42,7 +42,7 @@ steps:
           volumes:
           - name: devshm
             emptyDir:
-             medium: Memory
+              medium: Memory
 
   - label: "H200"
     agents:
