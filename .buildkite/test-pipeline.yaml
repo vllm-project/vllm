@@ -335,7 +335,10 @@ steps:
   - tests/models/decoder_only/vision_language
   commands:
     - pytest -v -s models/decoder_only/audio_language
-    - pytest -v -s models/decoder_only/vision_language
+    # HACK - run phi3v tests separately to sidestep this transformers bug
+    # https://github.com/huggingface/transformers/issues/34307
+    - pytest -v -s models/decoder_only/vision_language -k 'phi3v'
+    - pytest -v -s models/decoder_only/vision_language -k 'not phi3v'
 
 - label: Other Models Test # 6min
   #mirror_hardwares: [amd]
