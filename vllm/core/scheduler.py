@@ -137,7 +137,9 @@ class SchedulerOutputs:
 
     def __post_init__(self):
         # Swap in and swap out should never happen at the same time.
-        assert not (self.blocks_to_swap_in and self.blocks_to_swap_out)
+        # NOTE(Kuntai): in CpuOffloadingBlockAllocator swap in and swap out
+        # will happen at the same time. So we comment out the following line.
+        # assert not (self.blocks_to_swap_in and self.blocks_to_swap_out)
 
         self.num_loras: int = len(self.lora_requests)
         if self.num_loras > 0:
