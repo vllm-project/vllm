@@ -38,12 +38,12 @@ from vllm.sequence import Logprob
 from vllm.tracing import (contains_trace_headers, extract_trace_headers,
                           log_tracing_disabled_warning)
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
-from vllm.utils import iterate_with_cancellation, is_list_of
+from vllm.utils import is_list_of, iterate_with_cancellation
 
 logger = init_logger(__name__)
 
 
-class OpenAIServingChatCompletions(OpenAIServing):
+class OpenAIServingChat(OpenAIServing):
 
     def __init__(self,
                  engine_client: EngineClient,
@@ -152,7 +152,7 @@ class OpenAIServingChatCompletions(OpenAIServing):
                     documents=request.documents,
                     **(request.chat_template_kwargs or {}),
                 )
-        
+
             mm_data = await mm_data_future
         except Exception as e:
             logger.exception("Error in applying chat template from request")

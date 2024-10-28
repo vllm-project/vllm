@@ -48,7 +48,7 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               TokenizeResponse,
                                               UnloadLoraAdapterRequest)
 # yapf: enable
-from vllm.entrypoints.openai.serving_chat import OpenAIServingChatCompletions
+from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
 from vllm.entrypoints.openai.serving_engine import BaseModelPath
@@ -245,7 +245,7 @@ def mount_metrics(app: FastAPI):
     app.routes.append(metrics_route)
 
 
-def chat(request: Request) -> OpenAIServingChatCompletions:
+def chat(request: Request) -> OpenAIServingChat:
     return request.app.state.openai_serving_chat
 
 
@@ -487,7 +487,7 @@ def init_app_state(
     state.engine_client = engine_client
     state.log_stats = not args.disable_log_stats
 
-    state.openai_serving_chat = OpenAIServingChatCompletions(
+    state.openai_serving_chat = OpenAIServingChat(
         engine_client,
         model_config,
         base_model_paths,

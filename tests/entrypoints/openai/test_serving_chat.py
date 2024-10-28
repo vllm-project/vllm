@@ -6,7 +6,7 @@ from unittest.mock import MagicMock
 from vllm.config import MultiModalConfig
 from vllm.engine.multiprocessing.client import MQLLMEngineClient
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest
-from vllm.entrypoints.openai.serving_chat import OpenAIServingChatCompletions
+from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_engine import BaseModelPath
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
@@ -44,15 +44,14 @@ async def _async_serving_chat_init():
     engine = MockEngine()
     model_config = await engine.get_model_config()
 
-    serving_completion = OpenAIServingChatCompletions(
-        engine,
-        model_config,
-        BASE_MODEL_PATHS,
-        response_role="assistant",
-        chat_template=CHAT_TEMPLATE,
-        lora_modules=None,
-        prompt_adapters=None,
-        request_logger=None)
+    serving_completion = OpenAIServingChat(engine,
+                                           model_config,
+                                           BASE_MODEL_PATHS,
+                                           response_role="assistant",
+                                           chat_template=CHAT_TEMPLATE,
+                                           lora_modules=None,
+                                           prompt_adapters=None,
+                                           request_logger=None)
     return serving_completion
 
 
@@ -66,14 +65,14 @@ def test_serving_chat_should_set_correct_max_tokens():
     mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
 
-    serving_chat = OpenAIServingChatCompletions(mock_engine,
-                                                MockModelConfig(),
-                                                BASE_MODEL_PATHS,
-                                                response_role="assistant",
-                                                chat_template=CHAT_TEMPLATE,
-                                                lora_modules=None,
-                                                prompt_adapters=None,
-                                                request_logger=None)
+    serving_chat = OpenAIServingChat(mock_engine,
+                                     MockModelConfig(),
+                                     BASE_MODEL_PATHS,
+                                     response_role="assistant",
+                                     chat_template=CHAT_TEMPLATE,
+                                     lora_modules=None,
+                                     prompt_adapters=None,
+                                     request_logger=None)
     req = ChatCompletionRequest(
         model=MODEL_NAME,
         messages=[{
