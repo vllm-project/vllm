@@ -542,15 +542,23 @@ if envs.VLLM_USE_PRECOMPILED:
                 f"Failed to get vLLM wheel from {wheel_location}") from exc
 
     with zipfile.ZipFile(wheel_filename) as wheel:
-        for lib in filter(lambda file: file.filename.endswith(".so"),
-                          wheel.filelist):
+        for lib in filter(
+                lambda file: file.filename.endswith(".so") or file.filename.
+                startswith("vllm/vllm_flash_attn"), wheel.filelist):
+            print(
+                "Extracting and including {lib.filename} from existing wheel")
             package_name = os.path.dirname(lib.filename).replace("/", ".")
+            file_name = os.path.basename(lib.filename)
+
             if package_name not in package_data:
                 package_data[package_name] = []
 
             wheel.extract(lib)
-            package_data[package_name].append(lib.filename)
-            print(f"Added {lib.filename} to package_data[\"{package_name}\"]")
+            if file_name.endswith(".py"):
+                # python files shouldn't be added to package_data
+                continue
+
+            package_data[package_name].append(file_name)
 
 if _no_device():
     ext_modules = []
