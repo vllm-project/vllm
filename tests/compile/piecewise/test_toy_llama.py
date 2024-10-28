@@ -236,6 +236,8 @@ if __name__ == "__main__":
     full_cudagraph_time = {}
     piecewise_cudagraph_time = {}
 
+    pool = torch.cuda.graph_pool_handle()
+
     for piecewise in [False, True]:
         if piecewise:
             os.environ["VLLM_TORCH_COMPILE_CONFIG"] = config
@@ -255,7 +257,7 @@ if __name__ == "__main__":
             for b in cudagraph_sizes[::-1]:
                 if not piecewise:
                     graph = torch.cuda.CUDAGraph()
-                    with torch.cuda.graph(graph):
+                    with torch.cuda.graph(graph, pool=pool):
                         output = model(input_ids[:b], positions[:b])
                     graphs[b] = (graph, output)
                 else:
