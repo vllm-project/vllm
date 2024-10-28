@@ -207,7 +207,6 @@ VLM_TEST_SETTINGS = {
             ),
             limit_mm_per_prompt={"video": 4},
         )],
-        marks=[large_gpu_mark(min_gb=48)],
     ),
     "llava_next_video": VLMTestInfo(
         models=["llava-hf/LLaVA-NeXT-Video-7B-hf"],
@@ -364,7 +363,6 @@ VLM_TEST_SETTINGS = {
             ),
             limit_mm_per_prompt={"image": 4},
         )],
-        marks=[large_gpu_mark(min_gb=48)],
     ),
 }
 # yapf: enable
