@@ -11,7 +11,7 @@ from argparse import Namespace
 from contextlib import asynccontextmanager
 from functools import partial
 from http import HTTPStatus
-from typing import AsyncIterator, Set
+from typing import AsyncIterator, Set, Tuple
 
 import uvloop
 from fastapi import APIRouter, FastAPI, Request
@@ -523,28 +523,13 @@ def init_app_state(
         chat_template=args.chat_template,
     )
 
-def create_server_socket() -> socket.socket:
-    # try to create a dualstack socket
-    try:
-        sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
-        try:
-            sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
-        except socket.error as e:
-            logger.warning("Failed to disable IPV6_V6ONLY"
-                           "for server socket: %s", e)
-        
-        # still return this socket when IPV6_V6ONLY is not supported
-        return sock
-    except socket.error as e:
-        logger.warning("Failed to create dualstack socket: %s,"
-                       "use AF_INET for compatibility", e)
+def create_server_socket(addr: Tuple[str, int]) -> socket.socket:
+    if socket.has_dualstack_ipv6():
+        sock = socket.create_server(addr, family=socket.AF_INET6, dualstack_ipv6=True)
+    else:
+        sock = socket.create_server(addr)
 
-    # fallback to AF_INET for compatibility
-    try:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        return sock
-    except socket.error:
-        raise
+    return sock
 
 async def run_server(args, **uvicorn_kwargs) -> None:
     logger.info("vLLM API server version %s", VLLM_VERSION)
@@ -562,8 +547,8 @@ async def run_server(args, **uvicorn_kwargs) -> None:
     # workaround to make sure that we bind the port before the engine is set up.
     # This avoids race conditions with ray.
     # see https://github.com/vllm-project/vllm/issues/8204
-    sock = create_server_socket()
-    sock.bind(("", args.port))
+    sock_addr = ("", args.port)
+    sock = create_server_socket(sock_addr)
 
     def signal_handler(*_) -> None:
         # Interrupt server on sigterm while initializing
