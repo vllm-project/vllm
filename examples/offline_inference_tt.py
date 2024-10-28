@@ -40,7 +40,7 @@ def run_inference(
         "max_num_batched_tokens": 131072,
         "log_global_stats": True if measure_perf else False,
         "num_scheduler_steps": 10,
-        "disable_async_output_proc": True,
+        "disable_async_output_proc": False,
     }
     
     # Generation args

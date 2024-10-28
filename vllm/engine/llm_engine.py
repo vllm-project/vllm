@@ -1680,7 +1680,7 @@ class LLMEngine:
                     latency = seq_group.get_last_latency(now)
                     
                     # Divide by the number of outputs for the multi-step case
-                    num_outputs = len(model_output)
+                    num_outputs = scheduler_outputs.num_lookahead_slots + 1
                     latency /= num_outputs
                     
                     time_per_output_tokens_iter.append(latency)

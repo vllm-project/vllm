@@ -266,14 +266,21 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
         num_steps: int = 1,
     ) -> Optional[List[SamplerOutput]]:
         is_decode = model_input.prompt_lens is None
+        
+        # Note on async_out_proc + multi-step: for gpu/tpu, the N steps are enqueued on device and the last step
+        # will trigger the output processor for all outputs but the last. Currently for TT, the inputs/outputs of each step
+        # are transferred between host/device, so async_out_proc does not help unless using async_out_proc_per_trace
+        # which triggers the output processor for step (i) on host while device is executing step (i+1).
         use_async_out_proc = model_input.async_callback is not None
+        async_out_proc_per_trace = self.trace_mode and self.scheduler_config.is_multi_step and use_async_out_proc
+        
         if not is_decode:
             assert num_steps == 1, "Num steps must be 1 for prefill"
 
         if model_input.is_first_multi_step:  # always true if not using multi-step
             self.cached_step_outputs = []
             for i in range(num_steps):
-                next_token_ids = self._execute_model_single_step(model_input, kv_caches, is_decode)
+                next_token_ids = self._execute_model_single_step(model_input, kv_caches, is_decode, async_out_proc_per_trace, step_idx=i)
                 self.cached_step_outputs.append(next_token_ids)
                 
                 if i < num_steps - 1:
@@ -306,6 +313,8 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
         sampler_outputs = []  # no outputs unless last step
         if model_input.is_last_step:  # always true if not using multi-step
             num_outputs = len(self.cached_step_outputs)
+            if async_out_proc_per_trace:
+                assert num_outputs == 1, "Last step should only have one output"
             for i in range(num_outputs):
                 next_token_ids = self.cached_step_outputs.pop(0)
                 # TODO: add read back from device once model can keep executing steps on device
@@ -315,19 +324,22 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                 )
                 sampler_outputs.append(sampler_output)
                 if i < num_outputs - 1 and use_async_out_proc:
-                    ctx = model_input.async_callback.keywords["ctx"]
-                    ctx.append_output(
-                        outputs=[sampler_output],
-                        seq_group_metadata_list=ctx.seq_group_metadata_list,
-                        scheduler_outputs=ctx.scheduler_outputs,
-                        is_async=False,
-                        is_last_step=False,
-                        is_first_step_output=i == 0)
-                    model_input.async_callback()  # trigger output processor
+                    self._send_async_out(sampler_output, model_input.async_callback, is_first_step_output=i == 0)
             if use_async_out_proc:
                 return [sampler_outputs[-1]]  # only return the last output for async output processor
         
         return sampler_outputs
+    
+    def _send_async_out(self, sampler_output, async_callback, is_first_step_output):
+        ctx = async_callback.keywords["ctx"]
+        ctx.append_output(
+            outputs=[sampler_output],
+            seq_group_metadata_list=ctx.seq_group_metadata_list,
+            scheduler_outputs=ctx.scheduler_outputs,
+            is_async=False,
+            is_last_step=False,
+            is_first_step_output=is_first_step_output)
+        async_callback()  # trigger output processor
     
     def _make_sampler_output(
         self,
@@ -346,7 +358,7 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                 CompletionSequenceGroupOutput(seq_outputs, None))
         return SamplerOutput(sampler_outputs)
     
-    def _execute_model_single_step(self, model_input: TTModelInput, kv_caches: List[torch.Tensor], is_decode):
+    def _execute_model_single_step(self, model_input: TTModelInput, kv_caches: List[torch.Tensor], is_decode, async_out_proc_per_trace=False, step_idx=0):
         execute_model_kwargs = {
             "tokens": model_input.input_tokens,
             "start_pos": model_input.input_positions,
@@ -372,14 +384,25 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
                     "cache_idxs_tt": cache_idxs_tt,
                     "tt_logits": tt_logits,
                     "tt_page_table": tt_page_table,
+                    "read_from_device": False,
                 }
             
             # Remove kv_cache from execute_model_kwargs since it doesn't need to be copied to device for trace execution
             execute_model_kwargs.pop("kv_cache")
             
-            logits = self.model.decode_forward_trace(
+            tt_logits = self.model.decode_forward_trace(
                 **execute_model_kwargs, **self.execute_trace_kwargs
             )
+            if async_out_proc_per_trace:
+                # trigger output processor on host while device is executing next step
+                if step_idx > 0:
+                    next_token_ids = self.cached_step_outputs.pop(0)
+                    sampler_output = self._make_sampler_output(
+                        next_token_ids,
+                        model_input.seq_groups
+                    )
+                    self._send_async_out(sampler_output, model_input.async_callback, is_first_step_output=(step_idx == 1))
+            logits = self.model.read_forward_trace(tt_logits, model_input.unpadded_batch_size)
         else:
             logits = self.model.forward(**execute_model_kwargs)  # [batch_size, seq_len, vocab_size]
 
