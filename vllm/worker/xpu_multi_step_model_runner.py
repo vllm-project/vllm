@@ -115,11 +115,11 @@ class XPUStatefulModelInput(BroadcastableModelInput):
     is_multi_step: bool = True
     is_last_step: bool = False
     is_first_multi_step: bool = False
+    base_output_proc_callback: Optional[Callable] = None
     # ping-pong data structures for multi-step to wait on the previous step
     step_xpu_events: List[torch.xpu.Event] = field(
         default_factory=lambda: [torch.xpu.Event()] * 2)
     # FIXME: use blocking
-    # default_factory=lambda: [torch.xpu.Event(blocking=True)] * 2)
     num_seqs: int = -1
     num_queries: int = -1
 
@@ -161,7 +161,6 @@ class XPUStatefulModelInput(BroadcastableModelInput):
 
         self.step_xpu_events[self.current_step & 1] = \
             torch.xpu.Event()
-        # torch.xpu.Event(blocking=True)
         self.step_xpu_events[self.current_step & 1].record(current_stream)
 
     def wait_previous_step(self):
@@ -196,11 +195,15 @@ class XPUMultiStepModelRunner(XPUModelRunnerBase[XPUStatefulModelInput]):
         self._base_model_runner: XPUModelRunnerBase = base_model_runner
 
         self.is_multi_step = self.scheduler_config.is_multi_step
-        # used to copy tensors from GPU to CPU asynchronously
-        self._copy_stream = torch.xpu.Stream()
         self.pinned_sampled_token_ids: Optional[torch.Tensor] = None
 
-        self.pythonization_cache = PythonizationCache()
+        self.pythonization_cache = PythonizationCache() \
+            if self.parallel_config.pipeline_parallel_size == 1 else None
+
+    @functools.cached_property
+    def _copy_stream(self):
+        # used to copy tensors from GPU to CPU asynchronously
+        return torch.xpu.Stream()
 
     def make_model_input_from_broadcasted_tensor_dict(
             self, tensor_dict: Dict[str, Any]) -> XPUStatefulModelInput:
@@ -219,10 +222,16 @@ class XPUMultiStepModelRunner(XPUModelRunnerBase[XPUStatefulModelInput]):
         frozen_model_input = self._base_model_runner.prepare_model_input(
             seq_group_metadata_list, virtual_engine, finished_requests_ids)
 
+        assert frozen_model_input.query_lens is not None
+        assert frozen_model_input.seq_lens is not None
+        assert frozen_model_input.attn_metadata is not None
+        num_queries = len(frozen_model_input.query_lens)
+        num_seqs = len(frozen_model_input.seq_lens)
+
         model_input = XPUStatefulModelInput(
             frozen_model_input=frozen_model_input,
-            num_seqs=len(frozen_model_input.seq_lens),
-            num_queries=len(frozen_model_input.query_lens),
+            num_seqs=num_seqs,
+            num_queries=num_queries,
         )
         return model_input
 
@@ -246,6 +255,7 @@ class XPUMultiStepModelRunner(XPUModelRunnerBase[XPUStatefulModelInput]):
                         is_async=False,
                         is_last_step=False,
                         is_first_step_output=step_num == 0)
+
                     output_proc_callback()
                 else:
                     cont = False
@@ -260,9 +270,8 @@ class XPUMultiStepModelRunner(XPUModelRunnerBase[XPUStatefulModelInput]):
         has_async_callback = output_proc_callback is not None
 
         outputs = []
-        for output_id in range(len(model_input.cached_outputs)):
-            output = model_input.cached_outputs[output_id]
-            is_last_step = output_id == len(model_input.cached_outputs) - 1
+        for step_num, output in enumerate(model_input.cached_outputs):
+            is_last_step = step_num == len(model_input.cached_outputs) - 1
 
             # For non-async case:
             #   -- We simply add the outputs
@@ -285,12 +294,14 @@ class XPUMultiStepModelRunner(XPUModelRunnerBase[XPUStatefulModelInput]):
                     if not is_last_step:
                         ctx = output_proc_callback.keywords[  # type: ignore
                             "ctx"]  # type: ignore
-                        is_async = False
-                        is_last_step = False
-                        ctx.output_queue.append(
-                            ([output.sampler_output
-                              ], ctx.seq_group_metadata_list,
-                             ctx.scheduler_outputs, is_async, is_last_step))
+                        ctx.append_output(
+                            outputs=[output.sampler_output],
+                            seq_group_metadata_list=ctx.
+                            seq_group_metadata_list,
+                            scheduler_outputs=ctx.scheduler_outputs,
+                            is_async=False,
+                            is_last_step=False,
+                            is_first_step_output=step_num == 0)
                     else:
                         outputs.append(output.sampler_output)
             else:
@@ -356,18 +367,27 @@ class XPUMultiStepModelRunner(XPUModelRunnerBase[XPUStatefulModelInput]):
             model_input = self._advance_step(
                 model_input, model_input.cached_outputs[-1].sampler_output)
 
-        output_proc_callback = None
+            # frozen_model_input may have been updated
+            frozen_model_input = model_input.frozen_model_input
+            assert frozen_model_input is not None
+
+        if model_input.base_output_proc_callback is None:
+            assert frozen_model_input is not None
+            model_input.base_output_proc_callback = \
+                        frozen_model_input.async_callback
+
         if frozen_model_input.async_callback is not None:
-            output_proc_callback = frozen_model_input.async_callback
-            assert output_proc_callback is not None
+            assert model_input.base_output_proc_callback is not None
             async_callback = functools.partial(
                 self._async_process_outputs,
                 model_input=model_input,
-                output_proc_callback=output_proc_callback)
+                output_proc_callback=model_input.base_output_proc_callback)
 
-            frozen_model_input = dataclasses.replace(  # type: ignore
+            model_input.frozen_model_input = dataclasses.replace(  # type: ignore
                 model_input.frozen_model_input,
                 async_callback=async_callback)
+            # Update the local instance
+            frozen_model_input = model_input.frozen_model_input
             assert frozen_model_input is not None
 
         # Execute the model
@@ -422,9 +442,10 @@ class XPUMultiStepModelRunner(XPUModelRunnerBase[XPUStatefulModelInput]):
 
         # Pythonize the output and block if needed since it is the last step
         if model_input.is_last_step:
-            outputs = self._final_process_outputs(model_input,
-                                                  output_proc_callback)
-            self.pythonization_cache.reset()
+            outputs = self._final_process_outputs(
+                model_input, model_input.base_output_proc_callback)
+            if self.pythonization_cache:
+                self.pythonization_cache.reset()
             return outputs
 
         # should be [SamplerOutput]
@@ -554,35 +575,66 @@ def _pythonize_sampler_output(
 
     frozen_model_input = model_input.frozen_model_input
     assert frozen_model_input.sampling_metadata is not None
+    sampling_metadata = frozen_model_input.sampling_metadata
     # samples generation should have been skipped
     assert not output.outputs
 
     pinned_buffer = pinned_sampled_token_buffer[:model_input.num_queries]
 
-    # CPU GPU sync
-    pinned_buffer = pinned_buffer.copy_(
-        sampled_token_ids[:model_input.num_queries], non_blocking=False)
+    # We guarantee output tensors are ready, so it is safe to
+    # pythonize the sampler output & obtain CPU-side logprobs.
+    #
+    # However we should check whether logprobs pythonization may
+    # be skipped entirely, i.e. because no logprobs were requested
+    # or pythonization was not deferred. To that end,
+    #
+    # * `prompt_logprobs_are_requested_for_prefill` signals that
+    #   there are *any* prefill-phase requests which specify that
+    #   prompt logprobs should be returned.
+    #
+    # * `any_logprobs_are_requested` signals that there are any
+    #   requests which (1) specify that sample logprobs should be
+    #   returned, or (2) are in the prefill phase AND specify that
+    #   prompt logprobs should be returned.
+    #
+    # Later on, these flags cause adjustments to the pythonization
+    # process to accommodate logprobs.
+
+    seq_groups = sampling_metadata.seq_groups
+    prompt_logprobs_are_requested_for_prefill = any([
+        sg.sampling_params.prompt_logprobs is not None and sg.is_prompt
+        for sg in seq_groups
+    ])
+    any_logprobs_are_requested = (
+        prompt_logprobs_are_requested_for_prefill
+        or any([sg.sampling_params.logprobs is not None for sg in seq_groups]))
+
+    if prompt_logprobs_are_requested_for_prefill:
+        # CPU GPU sync, after gathering *only* sampled tokens (since
+        # requesting prompt logprobs leads `sampled_token_ids` to
+        # include prompt token ids in addition to sampled token ids.)
+        sample_idx_tensor = torch.tensor(
+            [sdx for sg in seq_groups for sdx in sg.sample_indices])
+        pinned_buffer = pinned_buffer.copy_(
+            sampled_token_ids[sample_idx_tensor, :], non_blocking=False)
+    else:
+        # CPU GPU sync
+        pinned_buffer = pinned_buffer.copy_(
+            sampled_token_ids[:model_input.num_queries], non_blocking=False)
 
     # this will not block as the tensors are already on CPU
     samples_list = pinned_buffer.tolist()
 
-    sampling_metadata = frozen_model_input.sampling_metadata
-
     skip_sampler_cpu_output = (
         frozen_model_input.sampling_metadata.skip_sampler_cpu_output)
 
-    # We are guaranteed output tensors are ready, so it is safe to
-    # pythonize the sampler output & obtain CPU-side logprobs.
-    #
-    # However this computation may be skipped entirely
-    # if no pythonization was deferred.
-    seq_groups = sampling_metadata.seq_groups
-    logprobs_are_requested = any([
-        sg.sampling_params.logprobs is not None
-        or sg.sampling_params.prompt_logprobs is not None for sg in seq_groups
-    ])
+    # *Don't* skip logprobs pythonization *if*:
+    # * Any requests require logprobs to be returned in this
+    # iteration AND
+    # * These requests are being scheduled in a fashion which
+    # defers pythonization (i.e. multi-step scheduling.)
     do_pythonize_logprobs = (skip_sampler_cpu_output
-                             and logprobs_are_requested)
+                             and any_logprobs_are_requested)
     (
         prompt_logprobs,
         sample_logprobs,
@@ -607,7 +659,7 @@ def _pythonize_sampler_output(
                 prompt_logprobs[sgdx],
                 sample_logprobs[sgdx],
             )
-        elif logprobs_are_requested:
+        elif any_logprobs_are_requested:
             (
                 group_prompt_logprobs,
                 group_sample_logprobs,
@@ -637,7 +689,7 @@ def _pythonize_sampler_output(
                 seq_output.parent_seq_id = seq_ids[parent_id]
                 seq_output.output_token = next_token_id
 
-                if logprobs_are_requested:
+                if any_logprobs_are_requested:
                     seq_output.logprobs = group_sample_logprobs[tdx]
                 else:
                     logprobs = next(iter(seq_output.logprobs.values()))
@@ -655,7 +707,7 @@ def _pythonize_sampler_output(
                 seq_outputs.append(
                     SequenceOutput(seq_ids[parent_id], next_token_id,
                                    (group_sample_logprobs[tdx]
-                                    if logprobs_are_requested else {
+                                    if any_logprobs_are_requested else {
                                         next_token_id:
                                         Logprob(logprob=float('inf'),
                                                 rank=None,
@@ -663,12 +715,12 @@ def _pythonize_sampler_output(
                                     })))
         if cache is not None:
             completion_seq_group_output.prompt_logprobs = \
-                group_prompt_logprobs if logprobs_are_requested else None
+                group_prompt_logprobs if any_logprobs_are_requested else None
             output.outputs.append(completion_seq_group_output)
         else:
             output.outputs.append(
                 CompletionSequenceGroupOutput(
                     seq_outputs, (group_prompt_logprobs
-                                  if logprobs_are_requested else None)))
+                                  if any_logprobs_are_requested else None)))
 
     assert len(output.outputs) > 0
