@@ -309,18 +309,24 @@ class KVCacheManager:
 
         def _sync_remove_touched_blocks():
             for block_id in self.lazy_remove_block_ids:
-                self.free_block_queue.remove(self.block_pool[block_id])
+                try:
+                    self.free_block_queue.remove(self.block_pool[block_id])
+                except ValueError:
+                    # The block may have been removed during allocate_slots.
+                    pass
+            self.lazy_remove_block_ids.clear()
 
-        self._wait_for_removing_touched_blocks()
-        self._async_touch_task = self._async_executor.submit(
-            _sync_remove_touched_blocks)
+        if self.lazy_remove_block_ids:
+            self._wait_for_removing_touched_blocks()
+            self._async_touch_task = self._async_executor.submit(
+                _sync_remove_touched_blocks)
 
     def _wait_for_removing_touched_blocks(self) -> None:
         """Wait for the asynchronous task to finish."""
         if self._async_touch_task is not None:
             self._async_touch_task.result()
             self._async_touch_task = None
-        assert not self.lazy_remove_block_ids
+            assert not self.lazy_remove_block_ids
 
     def _get_new_blocks(
             self,
@@ -354,7 +360,6 @@ class KVCacheManager:
             # when another request touches (cache hit) the block before it
             # is evicted.
             if curr_block.ref_cnt > 0:
-                self.lazy_remove_block_ids.remove(curr_block.block_id)
                 continue
 
             # Evict blocks from the cache.
