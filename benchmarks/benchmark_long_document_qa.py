@@ -25,30 +25,21 @@ ShareGPT example usage:
         --input-length-range 128:256
 """
 
-import json
 import random
 import time
-from typing import List, Optional, Tuple
-
-from transformers import PreTrainedTokenizerBase
 
 from vllm import LLM, SamplingParams
 from vllm.utils import FlexibleArgumentParser
 
-try:
-    from vllm.transformers_utils.tokenizer import get_tokenizer
-except ImportError:
-    from backend_request_func import get_tokenizer
-    
-
 
 def test_long_document_qa(llm=None, sampling_params=None, prompts=None):
-    
+
     start_time = time.time()
     llm.generate(prompts, sampling_params=sampling_params)
     end_time = time.time()
     print(f"cost time {end_time - start_time}")
-    
+
+
 def repeat_prompts(prompts, repeat_count):
     repeated_prompts = prompts * repeat_count
     random.shuffle(repeated_prompts)
@@ -56,21 +47,22 @@ def repeat_prompts(prompts, repeat_count):
 
 
 def main(args):
-    
-    tokenizer = get_tokenizer(args.model, trust_remote_code=True)
+
     random.seed(args.seed)
-    
-    # append the document id at the beginning to avoid any of the document 
+
+    # append the document id at the beginning to avoid any of the document
     # being the prefix of other documents
-    prompts = [str(i) + ' '.join(['hi'] * args.document_length)
-               for i in range(args.num_documents)]
-    
+    prompts = [
+        str(i) + ' '.join(['hi'] * args.document_length)
+        for i in range(args.num_documents)
+    ]
+
     preemption_mode = ""
     if args.block_allocator == "CpuOffloadingBlockAllocator":
         preemption_mode = "recompute"
     else:
         preemption_mode = "swap"
-        
+
     llm = LLM(model=args.model,
               tokenizer_mode='auto',
               trust_remote_code=True,
@@ -106,11 +98,12 @@ if __name__ == "__main__":
     parser = FlexibleArgumentParser(
         description=
         'Benchmark the performance with or without automatic prefix caching.')
-    parser.add_argument('--model',
-                        type=str,
-                        # this test aims to test long document QA capability,
-                        # so we use llama 3.1 8B as it can process long context
-                        default='meta-llama/Llama-3.1-8B')
+    parser.add_argument(
+        '--model',
+        type=str,
+        # this test aims to test long document QA capability,
+        # so we use llama 3.1 8B as it can process long context
+        default='meta-llama/Llama-3.1-8B')
     parser.add_argument("--dataset-path",
                         type=str,
                         default=None,
@@ -124,13 +117,14 @@ if __name__ == "__main__":
                         type=int,
                         default=2,
                         help='Number of times to repeat each prompt')
-    parser.add_argument('--document-length',
-                        type=int,
-                        # Roughly the number of tokens for a system paper, 
-                        # excluding images
-                        default=20010,
-                        help='Range of input lengths for sampling prompts,'
-                        'specified as "min:max" (e.g., "128:256").')
+    parser.add_argument(
+        '--document-length',
+        type=int,
+        # Roughly the number of tokens for a system paper,
+        # excluding images
+        default=20010,
+        help='Range of input lengths for sampling prompts,'
+        'specified as "min:max" (e.g., "128:256").')
     parser.add_argument('--num-documents',
                         type=int,
                         default=8,
@@ -154,8 +148,7 @@ if __name__ == "__main__":
         default=1,
         help="The amount of CPU memory (GB) that is used by vLLM. Not very "
         "useful for CpuGpuBlockAllocator, but useful for "
-        "CpuOffloadingBlockAllocator to have more CPU KV cache space"
-    )
+        "CpuOffloadingBlockAllocator to have more CPU KV cache space")
     parser.add_argument(
         '--block-allocator',
         type=str,
