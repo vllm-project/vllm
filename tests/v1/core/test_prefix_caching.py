@@ -167,3 +167,53 @@ def test_decode():
     assert len(manager.block_pool[4].token_ids) == 16
     assert len(manager.block_pool[5].token_ids) == 11
     assert len(manager.block_pool[6].token_ids) == 0
+
+
+def test_evict():
+    manager = KVCacheManager(
+        block_size=16,
+        num_gpu_blocks=10,
+        sliding_window=False,
+        enable_caching=True,
+        num_preallocate_tokens=16,
+    )
+
+    last_token_id = 5 * 16 + 7
+    req0 = make_request("0", list(range(last_token_id)))
+    computed_block_ids = manager.get_computed_blocks(req0)
+    assert not computed_block_ids
+    block_ids = manager.allocate_slots(req0, 5 * 16 + 7, computed_block_ids)
+    assert len(block_ids) == 7  # 5 full + 1 partial + 1 preallocated
+
+    # 3 blocks.
+    req1 = make_request("1", list(range(last_token_id,
+                                        last_token_id + 3 * 16)))
+    computed_block_ids = manager.get_computed_blocks(req1)
+    assert not computed_block_ids
+    block_ids = manager.allocate_slots(req1, 3 * 16, computed_block_ids)
+    assert len(block_ids) == 3  # 3 full blocks
+    last_token_id += 3 * 16
+
+    assert manager.num_free_blocks == 0
+
+    manager.free(req0)
+    manager.free(req1)
+    assert manager.num_free_blocks == 10
+    assert [b.block_id for b in manager.free_block_queue
+            ] == [6, 5, 4, 3, 2, 1, 0, 9, 8, 7]
+
+    # Touch the first 2 blocks.
+    req2 = make_request("2", list(range(2 * 16 + 3)))
+    computed_block_ids = manager.get_computed_blocks(req2)
+    assert computed_block_ids == [0, 1]
+    block_ids = manager.allocate_slots(req2, 3, computed_block_ids)
+    assert block_ids == [6, 5]
+    # Number of free blocks should be updated immediately
+    assert manager.num_free_blocks == 6
+    # The touched blocks haven't been removed from the free block queue.
+    assert len(manager.free_block_queue) == 8
+
+    # The touched blocks should be removed from the free block queue.
+    manager.async_remove_touched_blocks()
+    manager.wait_for_removing_touched_blocks()
+    assert len(manager.free_block_queue) == 6

@@ -292,7 +292,7 @@ class KVCacheManager:
         block_ids = self.req_to_block_ids.pop(request.request_id)
         if self.enable_caching:
             # Make sure async tasks (remove touched blocks) are finished.
-            self._wait_for_removing_touched_blocks()
+            self.wait_for_removing_touched_blocks()
             assert not self.lazy_remove_block_ids
 
             # Free blocks in reverse order so that the tail blocks are
@@ -325,11 +325,11 @@ class KVCacheManager:
             self.lazy_remove_block_ids.clear()
 
         if self.lazy_remove_block_ids:
-            self._wait_for_removing_touched_blocks()
+            self.wait_for_removing_touched_blocks()
             self._async_touch_task = self._async_executor.submit(
                 _sync_remove_touched_blocks)
 
-    def _wait_for_removing_touched_blocks(self) -> None:
+    def wait_for_removing_touched_blocks(self) -> None:
         """Wait for the asynchronous task to finish if there are
         a task on the fly."""
         if self._async_touch_task is not None:
