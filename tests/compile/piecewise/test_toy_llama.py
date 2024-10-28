@@ -243,11 +243,11 @@ def benchmark():
             from vllm.plugins import set_non_cudagraph_ops
             set_non_cudagraph_ops(["silly.attention"])
 
-        model = cls(llama_config).eval().cuda()
+        model = cls(llama_config).eval().cuda().to(torch.bfloat16)
 
         B = 256  # max batch size
         input_ids = torch.randint(0, llama_config.vocab_size, (B, )).cuda()
-        positions = torch.arange(B).cuda()
+        positions = torch.arange(B).cuda().to(torch.bfloat16)
 
         graphs = {}
 
