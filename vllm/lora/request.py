@@ -43,7 +43,13 @@ class LoRARequest(
 
         # Ensure lora_path is not empty
         assert self.lora_path, "lora_path cannot be empty"
-        assert self.lora_int_id > 0, "lora_int_id must be greater than 0"
+        if self.lora_int_id < 1:
+            warnings.warn(
+                "The 'lora_int_id' must be greater than 0"
+                "self.lora_int_id set to 1",
+                stacklevel=2
+            )
+            self.lora_int_id = 1
 
     @property
     def adapter_id(self):
