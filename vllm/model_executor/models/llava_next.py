@@ -5,11 +5,11 @@ from typing import (Iterable, List, Literal, Mapping, Optional, Tuple,
 import torch
 import torch.nn as nn
 from PIL import Image
-from transformers import CLIPVisionConfig, LlavaNextConfig, SiglipVisionConfig
 from transformers.models.llava_next.modeling_llava_next import (
     get_anyres_image_grid_shape, unpad_image)
 from typing_extensions import NotRequired
 
+from transformers import CLIPVisionConfig, LlavaNextConfig, SiglipVisionConfig
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
 from vllm.inputs import INPUT_REGISTRY, DecoderOnlyInputs, InputContext

@@ -116,12 +116,31 @@ def test_get_pooling_config():
         revision=None,
     )
 
-    minilm_pooling_config = minilm_model_config.get_pooling_config()
+    minilm_pooling_config = minilm_model_config.get_pooling_config(None, None)
 
     assert isinstance(minilm_model_config.pooling_config, PoolingConfig)
     assert minilm_pooling_config.normalize
     assert isinstance(minilm_pooling_config.pooling_type, PoolingType)
     assert minilm_pooling_config.pooling_type == PoolingType.MEAN
+
+
+def test_get_pooling_config_from_args():
+    model_id = "sentence-transformers/all-MiniLM-L12-v2"
+    minilm_model_config = ModelConfig(model_id,
+                                      task="auto",
+                                      tokenizer=model_id,
+                                      tokenizer_mode="auto",
+                                      trust_remote_code=False,
+                                      seed=0,
+                                      dtype="float16",
+                                      revision=None)
+
+    minilm_pooling_config = minilm_model_config.get_pooling_config('CLS', True)
+
+    assert isinstance(minilm_model_config.pooling_config, PoolingConfig)
+    assert minilm_pooling_config.normalize
+    assert isinstance(minilm_pooling_config.pooling_type, PoolingType)
+    assert minilm_pooling_config.pooling_type == PoolingType.CLS
 
 
 def test_get_bert_tokenization_sentence_transformer_config():

@@ -5,9 +5,9 @@ from typing import (TYPE_CHECKING, Any, ClassVar, Dict, Final, List, Literal,
                     Mapping, Optional, Set, Tuple, Type, Union)
 
 import torch
-from transformers import PretrainedConfig
 
 import vllm.envs as envs
+from transformers import PretrainedConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.pooler import PoolingConfig
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
@@ -149,7 +149,8 @@ class ModelConfig:
                  override_neuron_config: Optional[Dict[str, Any]] = None,
                  config_format: ConfigFormat = ConfigFormat.AUTO,
                  chat_template_text_format: str = "string",
-                 pooling_config: Optional[PoolingConfig] = None,
+                 pooling_type: Optional[str] = None,
+                 normalize: Optional[bool] = None,
                  mm_processor_kwargs: Optional[Dict[str, Any]] = None) -> None:
         self.model = model
         self.tokenizer = tokenizer
@@ -180,7 +181,7 @@ class ModelConfig:
                                     code_revision, rope_scaling, rope_theta,
                                     config_format)
         self.hf_text_config = get_hf_text_config(self.hf_config)
-        self.pooling_config = pooling_config or self.get_pooling_config()
+        self.pooling_config = self.get_pooling_config(pooling_type, normalize)
         self.bert_config = self._get_bert_config()
         self.hf_image_processor_config = get_hf_image_processor_config(
             self.model, revision)
@@ -419,12 +420,23 @@ class ModelConfig:
                 "fallback to the eager mode.")
             self.enforce_eager = True
 
-    def get_pooling_config(self) -> Optional[PoolingConfig]:
+    def get_pooling_config(self, pooling_type_arg,
+                           normalize_arg) -> Optional[PoolingConfig]:
         pooling_config = get_pooling_config(self.model, self.revision)
+        pooling_type = None
+        normalize = None
         if pooling_config is not None:
-            return PoolingConfig(pooling_config["pooling_type"],
-                                 pooling_config["normalize"])
-        return None
+            pooling_type = pooling_config["pooling_type"]
+            normalize = pooling_config["normalize"]
+        if pooling_type_arg:
+            pooling_type = pooling_type_arg
+        if normalize_arg:
+            normalize = normalize_arg
+        if pooling_type and normalize:
+            return PoolingConfig(pooling_type=pooling_type,
+                                 normalize=normalize)
+        else:
+            return None
 
     def verify_async_output_proc(self, parallel_config, speculative_config,
                                  device_config) -> None:
