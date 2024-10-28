@@ -108,16 +108,15 @@ def apply_bias_packed_nslice(
     indices = indices.view(-1)
 
     offset_left = 0
-    for slice_idx in range(len(output_slices)):
+    for slice_idx, slice in enumerate(output_slices):
         bias = bias_stacked[slice_idx]
         if bias is not None:
             bias = bias.view(-1, bias.shape[-1])
             bias = bias[indices]
             bias[indices == -1] = 0
-            output[:,
-                   offset_left:offset_left + output_slices[slice_idx]] += bias
+            output[:, offset_left:offset_left + slice] += bias
 
-        offset_left += output_slices[slice_idx]
+        offset_left += slice
 
     return output.view_as(org_output)
 
@@ -817,7 +816,6 @@ class QKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
         return lora_b
 
     def slice_bias(self, bias: torch.Tensor) -> torch.Tensor:
-        bias_q, bias_k, bias_v = None, None, None
         bias_q = bias[self.q_proj_shard_size *
                       self.q_shard_id:self.q_proj_shard_size *
                       (self.q_shard_id + 1)]
@@ -1030,19 +1028,19 @@ class MergedQKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
     def slice_bias(
         self, bias: List[Union[torch.Tensor,
                                None]]) -> List[Union[torch.Tensor, None]]:
-        bias_q, bias_k, bias_v = None, None, None
-        if bias[0] is not None:
-            bias_q = bias[0][self.q_proj_shard_size *
-                             self.q_shard_id:self.q_proj_shard_size *
-                             (self.q_shard_id + 1)]
-        if bias[1] is not None:
-            bias_k = bias[1][self.kv_proj_shard_size *
-                             self.kv_shard_id:self.kv_proj_shard_size *
-                             (self.kv_shard_id + 1)]
-        if bias[2] is not None:
-            bias_v = bias[2][self.kv_proj_shard_size *
-                             self.kv_shard_id:self.kv_proj_shard_size *
-                             (self.kv_shard_id + 1)]
+        bias_q, bias_k, bias_v = bias
+        if bias_q is not None:
+            bias_q = bias_q[self.q_proj_shard_size *
+                            self.q_shard_id:self.q_proj_shard_size *
+                            (self.q_shard_id + 1)]
+        if bias_k is not None:
+            bias_k = bias_k[self.kv_proj_shard_size *
+                            self.kv_shard_id:self.kv_proj_shard_size *
+                            (self.kv_shard_id + 1)]
+        if bias_v is not None:
+            bias_v = bias_v[self.kv_proj_shard_size *
+                            self.kv_shard_id:self.kv_proj_shard_size *
+                            (self.kv_shard_id + 1)]
         bias = [bias_q, bias_k, bias_v]
         return bias
 

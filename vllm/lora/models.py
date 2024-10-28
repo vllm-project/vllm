@@ -140,10 +140,10 @@ class LoRAModel(AdapterModel):
             if is_bias:
                 loras[module_name].bias = tensor.to(device=device,
                                                     dtype=dtype).t()
+                bias = tensor.to(device=device, dtype=dtype).t()
                 if pin_memory:
-                    bias = loras[module_name].bias
-                    if bias is not None:
-                        loras[module_name].bias = bias.pin_memory()
+                    bias = bias.pin_memory()
+                loras[module_name].bias = bias
             elif is_lora_a:
                 loras[module_name].lora_a = tensor.to(device=device,
                                                       dtype=dtype).t()
@@ -388,6 +388,9 @@ class LoRAModelManager(AdapterModelManager):
                 # Bias is not explicitly enabled with the flag enable_lora_bias.
                 if not self.lora_config.bias_enabled:
                     module_lora.bias = None
+                    logger.warning(
+                        "Not using the adapter bias for %s. Explicitly "
+                        "enable the bias with --enable-lora-bias", module_name)
                 module.set_lora(index, module_lora.lora_a, module_lora.lora_b,
                                 module_lora.embeddings_tensor,
                                 module_lora.bias)
