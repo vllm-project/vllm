@@ -1,15 +1,17 @@
 #include <torch/all.h>
 #include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
 
 #include <ATen/ATen.h>
 #include <THC/THCAtomics.cuh>
 
-#include "cuda_compat.h"
-#include "dispatch_utils.h"
+#include "../cuda_compat.h"
+#include "../dispatch_utils.h"
 
 #define CEILDIV(x, y) (((x) + (y) - 1) / (y))
 
 namespace vllm {
+namespace moe {
 
 namespace {
 __device__ __forceinline__ int32_t index(int32_t total_col, int32_t row,
@@ -32,10 +34,10 @@ __global__ void moe_align_block_size_kernel(scalar_t* __restrict__ topk_ids,
   extern __shared__ int32_t shared_mem[];
 
   int32_t* tokens_cnts =
-      shared_mem;  // 2d tensor with shape (num_experts + 1, num_experts)
+      shared_mem;  // 2d tensor with shape (blockDim.x + 1, num_experts)
   int32_t* cumsum =
-      shared_mem + (num_experts + 1) *
-                       num_experts;  // 1d tensor with shape (num_experts + 1)
+      shared_mem +
+      (blockDim.x + 1) * num_experts;  // 1d tensor with shape (num_experts + 1)
 
   for (int i = 0; i < num_experts; ++i) {
     tokens_cnts[index(num_experts, threadIdx.x + 1, i)] = 0;
@@ -53,10 +55,12 @@ __global__ void moe_align_block_size_kernel(scalar_t* __restrict__ topk_ids,
   __syncthreads();
 
   // For each expert we accumulate the token counts from the different threads.
-  tokens_cnts[index(num_experts, 0, threadIdx.x)] = 0;
-  for (int i = 1; i <= blockDim.x; ++i) {
-    tokens_cnts[index(num_experts, i, threadIdx.x)] +=
-        tokens_cnts[index(num_experts, i - 1, threadIdx.x)];
+  if (threadIdx.x < num_experts) {
+    tokens_cnts[index(num_experts, 0, threadIdx.x)] = 0;
+    for (int i = 1; i <= blockDim.x; ++i) {
+      tokens_cnts[index(num_experts, i, threadIdx.x)] +=
+          tokens_cnts[index(num_experts, i - 1, threadIdx.x)];
+    }
   }
 
   __syncthreads();
@@ -79,9 +83,11 @@ __global__ void moe_align_block_size_kernel(scalar_t* __restrict__ topk_ids,
    * For each expert, each thread processes the tokens of the corresponding
    * blocks and stores the corresponding expert_id for each block.
    */
-  for (int i = cumsum[threadIdx.x]; i < cumsum[threadIdx.x + 1];
-       i += block_size) {
-    expert_ids[i / block_size] = threadIdx.x;
+  if (threadIdx.x < num_experts) {
+    for (int i = cumsum[threadIdx.x]; i < cumsum[threadIdx.x + 1];
+         i += block_size) {
+      expert_ids[i / block_size] = threadIdx.x;
+    }
   }
 
   /**
@@ -106,6 +112,24 @@ __global__ void moe_align_block_size_kernel(scalar_t* __restrict__ topk_ids,
     ++tokens_cnts[index(num_experts, threadIdx.x, expert_id)];
   }
 }
+
+template <typename scalar_t, int TOPK>
+__global__ void moe_sum_kernel(
+    scalar_t* __restrict__ out,          // [..., d]
+    const scalar_t* __restrict__ input,  // [..., topk, d]
+    const int d) {
+  const int64_t token_idx = blockIdx.x;
+  for (int64_t idx = threadIdx.x; idx < d; idx += blockDim.x) {
+    scalar_t x = 0.0;
+#pragma unroll
+    for (int k = 0; k < TOPK; ++k) {
+      x += VLLM_LDG(&input[token_idx * TOPK * d + k * d + idx]);
+    }
+    out[token_idx * d + idx] = x;
+  }
+}
+
+}  // namespace moe
 }  // namespace vllm
 
 void moe_align_block_size(torch::Tensor topk_ids, int64_t num_experts,
@@ -117,18 +141,62 @@ void moe_align_block_size(torch::Tensor topk_ids, int64_t num_experts,
       topk_ids.scalar_type(), "moe_align_block_size_kernel", [&] {
         // calc needed amount of shared mem for `tokens_cnts` and `cumsum`
         // tensors
+        const int32_t num_thread = max((int32_t)num_experts, WARP_SIZE);
         const int32_t shared_mem =
-            ((num_experts + 1) * num_experts + (num_experts + 1)) *
+            ((num_thread + 1) * num_experts + (num_experts + 1)) *
             sizeof(int32_t);
 
         // set dynamic shared mem
-        auto kernel = vllm::moe_align_block_size_kernel<scalar_t>;
+        auto kernel = vllm::moe::moe_align_block_size_kernel<scalar_t>;
         AT_CUDA_CHECK(VLLM_DevFuncAttribute_SET_MaxDynamicSharedMemorySize(
             (void*)kernel, shared_mem));
-        kernel<<<1, num_experts, shared_mem, stream>>>(
+        kernel<<<1, num_thread, shared_mem, stream>>>(
             topk_ids.data_ptr<scalar_t>(), sorted_token_ids.data_ptr<int32_t>(),
             experts_ids.data_ptr<int32_t>(),
             num_tokens_post_pad.data_ptr<int32_t>(), num_experts, block_size,
             topk_ids.numel());
       });
+}
+
+void moe_sum(torch::Tensor& input,   // [num_tokens, topk, hidden_size]
+             torch::Tensor& output)  // [num_tokens, hidden_size]
+{
+  const int hidden_size = input.size(-1);
+  const int num_tokens = output.numel() / hidden_size;
+  const int topk = input.size(1);
+
+  dim3 grid(num_tokens);
+  dim3 block(std::min(hidden_size, 1024));
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(output));
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+  switch (topk) {
+    case 2:
+      VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "moe_sum_kernel", [&] {
+        vllm::moe::moe_sum_kernel<scalar_t, 2><<<grid, block, 0, stream>>>(
+            output.data_ptr<scalar_t>(), input.data_ptr<scalar_t>(),
+            hidden_size);
+      });
+      break;
+
+    case 3:
+      VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "moe_sum_kernel", [&] {
+        vllm::moe::moe_sum_kernel<scalar_t, 3><<<grid, block, 0, stream>>>(
+            output.data_ptr<scalar_t>(), input.data_ptr<scalar_t>(),
+            hidden_size);
+      });
+      break;
+
+    case 4:
+      VLLM_DISPATCH_FLOATING_TYPES(input.scalar_type(), "moe_sum_kernel", [&] {
+        vllm::moe::moe_sum_kernel<scalar_t, 4><<<grid, block, 0, stream>>>(
+            output.data_ptr<scalar_t>(), input.data_ptr<scalar_t>(),
+            hidden_size);
+      });
+      break;
+
+    default:
+      at::sum_out(output, input, 1);
+      break;
+  }
 }

@@ -341,7 +341,9 @@ async def chat_completions(request: ChatCompletionRequest,
     mm_tracker = MultiModalItemTracker(runner.engine_config.model_config,
                                        runner.tokenizer)
     for msg in request.messages:
-        parsed_msg = _parse_chat_message_content(msg, mm_tracker)
+        parsed_msg = _parse_chat_message_content(
+            msg, mm_tracker,
+            runner.engine_config.model_config.chat_template_text_format)
         conversation.extend(parsed_msg)
 
     prompt = runner.tokenizer.apply_chat_template(  # type: ignore

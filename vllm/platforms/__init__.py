@@ -58,6 +58,20 @@ try:
 except Exception:
     pass
 
+is_neuron = False
+try:
+    import transformers_neuronx  # noqa: F401
+    is_neuron = True
+except ImportError:
+    pass
+
+is_openvino = False
+try:
+    from importlib.metadata import version
+    is_openvino = "openvino" in version("vllm")
+except Exception:
+    pass
+
 if is_tpu:
     # people might install pytorch built with cuda but run on tpu
     # so we need to check tpu first
@@ -75,6 +89,12 @@ elif is_xpu:
 elif is_cpu:
     from .cpu import CpuPlatform
     current_platform = CpuPlatform()
+elif is_neuron:
+    from .neuron import NeuronPlatform
+    current_platform = NeuronPlatform()
+elif is_openvino:
+    from .openvino import OpenVinoPlatform
+    current_platform = OpenVinoPlatform()
 else:
     current_platform = UnspecifiedPlatform()
 

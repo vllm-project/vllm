@@ -8,16 +8,16 @@ import inspect
 import ipaddress
 import os
 import random
-import re
 import socket
 import subprocess
 import sys
 import tempfile
 import threading
+import time
 import uuid
 import warnings
 import weakref
-from asyncio import FIRST_COMPLETED, ensure_future
+from asyncio import FIRST_COMPLETED, AbstractEventLoop, Future, Task
 from collections.abc import Mapping
 from functools import lru_cache, partial, wraps
 from platform import uname
@@ -422,71 +422,6 @@ class PyObjectCache:
         self._index = 0
 
 
-def is_hip() -> bool:
-    return torch.version.hip is not None
-
-
-@lru_cache(maxsize=None)
-def is_navi4x() -> bool:
-    if not is_hip() or not torch.cuda.is_available():
-        return False
-    # All (visible) GPUs must be of the same type,
-    # otherwise FP8 results can't be guaranteed.
-    archName = torch.cuda.get_device_properties('cuda').gcnArchName
-    return (archName is not None) and \
-        (re.match("gfx12[0-9]{2}", archName) is not None)
-
-
-@lru_cache(maxsize=None)
-def is_cpu() -> bool:
-    from importlib.metadata import PackageNotFoundError, version
-    try:
-        return "cpu" in version("vllm")
-    except PackageNotFoundError:
-        return False
-
-
-@lru_cache(maxsize=None)
-def is_openvino() -> bool:
-    from importlib.metadata import PackageNotFoundError, version
-    try:
-        return "openvino" in version("vllm")
-    except PackageNotFoundError:
-        return False
-
-
-@lru_cache(maxsize=None)
-def is_neuron() -> bool:
-    try:
-        import transformers_neuronx
-    except ImportError:
-        transformers_neuronx = None
-    return transformers_neuronx is not None
-
-
-@lru_cache(maxsize=None)
-def is_xpu() -> bool:
-    from importlib.metadata import PackageNotFoundError, version
-    try:
-        is_xpu_flag = "xpu" in version("vllm")
-    except PackageNotFoundError:
-        return False
-    # vllm is not build with xpu
-    if not is_xpu_flag:
-        return False
-    try:
-        import intel_extension_for_pytorch as ipex  # noqa: F401
-        _import_ipex = True
-    except ImportError as e:
-        logger.warning("Import Error for IPEX: %s", e.msg)
-        _import_ipex = False
-    # ipex dependency is not ready
-    if not _import_ipex:
-        logger.warning("not found ipex lib")
-        return False
-    return hasattr(torch, "xpu") and torch.xpu.is_available()
-
-
 @lru_cache(maxsize=None)
 def get_max_shared_memory_bytes(gpu: int = 0) -> int:
     """Returns the maximum shared memory per thread block in bytes."""
@@ -516,7 +451,7 @@ def seed_everything(seed: int) -> None:
     if current_platform.is_cuda_alike():
         torch.cuda.manual_seed_all(seed)
 
-    if is_xpu():
+    if current_platform.is_xpu():
         torch.xpu.manual_seed_all(seed)
 
 
@@ -557,6 +492,12 @@ def make_async(func: Callable[P, T]) -> Callable[P, Awaitable[T]]:
     return _async_wrapper
 
 
+def _next_task(iterator: AsyncGenerator[T, None],
+               loop: AbstractEventLoop) -> Task:
+    # Can use anext() in python >= 3.10
+    return loop.create_task(iterator.__anext__())  # type: ignore[arg-type]
+
+
 async def iterate_with_cancellation(
     iterator: AsyncGenerator[T, None],
     is_cancelled: Callable[[], Awaitable[bool]],
@@ -565,19 +506,27 @@ async def iterate_with_cancellation(
     at least once per second to check for client cancellation.
     """
 
-    # Can use anext() in python >= 3.10
-    awaits = [ensure_future(iterator.__anext__())]
+    loop = asyncio.get_running_loop()
+
+    awaits: List[Future[T]] = [_next_task(iterator, loop)]
+    next_cancel_check: float = 0
     while True:
-        done, pending = await asyncio.wait(awaits, timeout=1)
-        if await is_cancelled():
-            with contextlib.suppress(BaseException):
-                awaits[0].cancel()
-                await iterator.aclose()
-            raise asyncio.CancelledError("client cancelled")
+        done, pending = await asyncio.wait(awaits, timeout=1.5)
+
+        # Check for cancellation at most once per second
+        time_now = time.time()
+        if time_now >= next_cancel_check:
+            if await is_cancelled():
+                with contextlib.suppress(BaseException):
+                    awaits[0].cancel()
+                    await iterator.aclose()
+                raise asyncio.CancelledError("client cancelled")
+            next_cancel_check = time_now + 1
+
         if done:
             try:
                 item = await awaits[0]
-                awaits[0] = ensure_future(iterator.__anext__())
+                awaits[0] = _next_task(iterator, loop)
                 yield item
             except StopAsyncIteration:
                 # we are done
@@ -598,25 +547,29 @@ async def merge_async_iterators(
     to check for client cancellation.
     """
 
-    # Can use anext() in python >= 3.10
-    awaits = {
-        ensure_future(pair[1].__anext__()): pair
-        for pair in enumerate(iterators)
-    }
-    timeout = None if is_cancelled is None else 1
+    loop = asyncio.get_running_loop()
+
+    awaits = {_next_task(pair[1], loop): pair for pair in enumerate(iterators)}
+    timeout = None if is_cancelled is None else 1.5
+    next_cancel_check: float = 0
     try:
         while awaits:
             done, pending = await asyncio.wait(awaits.keys(),
                                                return_when=FIRST_COMPLETED,
                                                timeout=timeout)
-            if is_cancelled is not None and await is_cancelled():
-                raise asyncio.CancelledError("client cancelled")
+            if is_cancelled is not None:
+                # Check for cancellation at most once per second
+                time_now = time.time()
+                if time_now >= next_cancel_check:
+                    if await is_cancelled():
+                        raise asyncio.CancelledError("client cancelled")
+                    next_cancel_check = time_now + 1
             for d in done:
                 pair = awaits.pop(d)
                 try:
                     item = await d
                     i, it = pair
-                    awaits[ensure_future(it.__anext__())] = pair
+                    awaits[_next_task(it, loop)] = pair
                     yield i, item
                 except StopAsyncIteration:
                     pass
@@ -893,13 +846,13 @@ def is_pin_memory_available() -> bool:
         print_warning_once("Using 'pin_memory=False' as WSL is detected. "
                            "This may slow down the performance.")
         return False
-    elif is_xpu():
+    elif current_platform.is_xpu():
         print_warning_once("Pin memory is not supported on XPU.")
         return False
-    elif is_neuron():
+    elif current_platform.is_neuron():
         print_warning_once("Pin memory is not supported on Neuron.")
         return False
-    elif is_cpu() or is_openvino():
+    elif current_platform.is_cpu() or current_platform.is_openvino():
         return False
     return True
 
@@ -914,7 +867,7 @@ class DeviceMemoryProfiler:
         if current_platform.is_cuda_alike():
             torch.cuda.reset_peak_memory_stats(self.device)
             mem = torch.cuda.max_memory_allocated(self.device)
-        elif is_xpu():
+        elif current_platform.is_xpu():
             torch.xpu.reset_peak_memory_stats(self.device)  # type: ignore
             mem = torch.xpu.max_memory_allocated(self.device)  # type: ignore
         return mem
@@ -1069,6 +1022,8 @@ def flatten_2d_lists(lists: List[List[T]]) -> List[T]:
     return [item for sublist in lists for item in sublist]
 
 
+# TODO: This function can be removed if transformer_modules classes are
+# serialized by value when communicating between processes
 def init_cached_hf_modules() -> None:
     """
     Lazy initialization of the Hugging Face modules.
@@ -1247,7 +1202,7 @@ def _cuda_device_count_stateless(
 
     if not torch.cuda._is_compiled():
         return 0
-    if is_hip():
+    if current_platform.is_rocm():
         # ROCm uses amdsmi instead of nvml for stateless device count
         # This requires a sufficiently modern version of Torch 2.4.0
         raw_count = torch.cuda._device_count_amdsmi() if (hasattr(
@@ -1304,6 +1259,18 @@ def run_once(f: Callable[P, None]) -> Callable[P, None]:
     return wrapper
 
 
+class StoreBoolean(argparse.Action):
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        if values.lower() == "true":
+            setattr(namespace, self.dest, True)
+        elif values.lower() == "false":
+            setattr(namespace, self.dest, False)
+        else:
+            raise ValueError(f"Invalid boolean value: {values}. "
+                             "Expected 'true' or 'false'.")
+
+
 class FlexibleArgumentParser(argparse.ArgumentParser):
     """ArgumentParser that allows both underscore and dash in names."""
 
@@ -1312,7 +1279,7 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
             args = sys.argv[1:]
 
         if '--config' in args:
-            args = FlexibleArgumentParser._pull_args_from_config(args)
+            args = self._pull_args_from_config(args)
 
         # Convert underscores to dashes and vice versa in argument names
         processed_args = []
@@ -1330,8 +1297,7 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
 
         return super().parse_args(processed_args, namespace)
 
-    @staticmethod
-    def _pull_args_from_config(args: List[str]) -> List[str]:
+    def _pull_args_from_config(self, args: List[str]) -> List[str]:
         """Method to pull arguments specified in the config file
         into the command-line args variable.
 
@@ -1375,7 +1341,7 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
 
         file_path = args[index + 1]
 
-        config_args = FlexibleArgumentParser._load_config_file(file_path)
+        config_args = self._load_config_file(file_path)
 
         # 0th index is for {serve,chat,complete}
         # followed by model_tag (only for serve)
@@ -1396,8 +1362,7 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
 
         return args
 
-    @staticmethod
-    def _load_config_file(file_path: str) -> List[str]:
+    def _load_config_file(self, file_path: str) -> List[str]:
         """Loads a yaml file and returns the key value pairs as a
         flattened list with argparse like pattern
         ```yaml
@@ -1431,9 +1396,18 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
                 Make sure path is correct", file_path)
             raise ex
 
+        store_boolean_arguments = [
+            action.dest for action in self._actions
+            if isinstance(action, StoreBoolean)
+        ]
+
         for key, value in config.items():
-            processed_args.append('--' + key)
-            processed_args.append(str(value))
+            if isinstance(value, bool) and key not in store_boolean_arguments:
+                if value:
+                    processed_args.append('--' + key)
+            else:
+                processed_args.append('--' + key)
+                processed_args.append(str(value))
 
         return processed_args
 
@@ -1628,3 +1602,22 @@ class LazyDict(Mapping, Generic[T]):
 
     def __len__(self):
         return len(self._factory)
+
+
+def weak_ref_tensor(tensor: torch.Tensor) -> torch.Tensor:
+    """
+    Create a weak reference to a tensor.
+    The new tensor will share the same data as the original tensor,
+    but will not keep the original tensor alive.
+    """
+    return torch.ops._C.weak_ref_tensor(tensor)
+
+
+@lru_cache(maxsize=None)
+def is_navi() -> bool:
+    if not current_platform.is_rocm() or not torch.cuda.is_available():
+        return False
+    # All (visible) GPUs must be of the same type,
+    # otherwise FP8 results can't be guaranteed.
+    archName = torch.cuda.get_device_properties('cuda').gcnArchName
+    return archName is not None and "gfx1" in archName
