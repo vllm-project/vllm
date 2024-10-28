@@ -9,6 +9,7 @@ from vllm.transformers_utils.detokenizer_utils import (
     AnyTokenizer, convert_prompt_ids_to_tokens, detokenize_incrementally)
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.v1.engine import DetokenizerRequest, EngineCoreOutput
+from vllm.v1.engine.async_stream import AsyncStream
 
 logger = init_logger(__name__)
 
@@ -33,12 +34,16 @@ class DetokenizerRequestState:
     # Request output (Cached + updated incrementally)
     request_output: RequestOutput
 
-    # Queue for streaming outputs to clients in async mode.
-    output_queue: Optional[asyncio.Queue[RequestOutput]] = None
+    # Streaming RequestOutputs to clients in async mode.
+    stream: Optional[AsyncStream] = None
 
     @classmethod
-    def from_new_request(cls, tokenizer: AnyTokenizer,
-                         request: DetokenizerRequest):
+    def from_new_request(
+        cls,
+        tokenizer: AnyTokenizer, 
+        request: DetokenizerRequest,
+        stream: Optional[AsyncStream] = None,
+    ) -> "DetokenizerRequestState":
 
         tokens, prefix_offset, read_offset = convert_prompt_ids_to_tokens(
             tokenizer=tokenizer,
@@ -64,7 +69,8 @@ class DetokenizerRequestState:
             spaces_between_special_tokens,
             output_kind=request.output_kind,
             request_output=request_output,
-            output_queue=request.output_queue)
+            stream=stream,
+        )
 
     @staticmethod
     def _initialize_request_output(
@@ -116,15 +122,19 @@ class Detokenizer:
     def has_unfinished_requests(self) -> bool:
         return len(self.request_states) > 0
 
-    def add_request(self, request: DetokenizerRequest):
+    def add_request(
+        self,
+        request: DetokenizerRequest,
+        stream: Optional[AsyncStream] = None,
+    ):
         """Add new request to the Detokenizer."""
 
         assert (request.request_id not in self.request_states)
-        assert ((self.async_mode and request.output_queue is not None) or
-                (not self.async_mode and request.output_queue is None))
+        assert ((self.async_mode and stream is not None) or
+                (not self.async_mode and stream is None))
 
         request_state = DetokenizerRequestState.from_new_request(
-            self.tokenizer, request)
+            self.tokenizer, request, stream)
         self.request_states[request.request_id] = request_state
 
     def step(
@@ -135,24 +145,25 @@ class Detokenizer:
         request_outputs: List[RequestOutput] = []
         for engine_core_output in encore_core_outputs:
             request_id = engine_core_output.request_id
-            request_state = self.request_states[request_id]
 
             # Detokenize and update state.
-            self._update_request_state(
+            request_output = self._update_request_state(
                 tokenizer=self.tokenizer,
-                request_state=request_state,
+                request_state=self.request_states[request_id],
                 new_token_ids=engine_core_output.new_token_ids,
                 finished=engine_core_output.finished,
                 finish_reason=engine_core_output.finish_reason,
                 stop_reason=engine_core_output.stop_reason,
             )
-            request_outputs.append(request_state.request_output)
+
+            # Add to RequestOutputs list.
+            request_outputs.append(request_output)
 
             # Free completed requests.
             if engine_core_output.finished:
-                self._free(request_id)
+                self.request_states.pop(request_id)
 
-        # Send RequestOutputs to EngineClient.
+        # Return to EngineClient.
         return request_outputs
 
     def step_async(
@@ -160,38 +171,31 @@ class Detokenizer:
     ) -> None:
         """Update state and put the RequestOutput in the per request queues."""
         
-        request_outputs: List[RequestOutput] = []
         for engine_core_output in encore_core_outputs:
             request_id = engine_core_output.request_id
-            request_state = self.request_states[request_id]
 
             # Detokenize and update state.
-            self._update_request_state(
+            request_output = self._update_request_state(
                 tokenizer=self.tokenizer,
-                request_state=request_state,
+                request_state=self.request_states[request_id],
                 new_token_ids=engine_core_output.new_token_ids,
                 finished=engine_core_output.finished,
                 finish_reason=engine_core_output.finish_reason,
                 stop_reason=engine_core_output.stop_reason,
             )
 
-            # Put the RequestOutput into the per request output queue.
-            assert request_state.output_queue is not None
-            # TODO: is caching RequestOutput sound? What happens if the 
-            # reader from the stream falls behind the LLMEngine? Won't the 
-            # object in the queue get mutated?
-            request_state.output_queue.put_nowait(request_state.request_output)
+            # Send the RequestOutput to the per client output queue.
+            assert self.request_states[request_id].stream is not None
+            self.request_states[request_id].stream.put(request_output)
+            # TODO: is caching RequestOutput sound?
+            # What happens if the reader from the stream falls behind? 
+            # Won't the object in the queue get mutated?
 
             # Free completed requests.
             if engine_core_output.finished:
-                self._free(request_id)
-
-    def _free(self, request_id: str) -> None:
-        """Remove the request from the RequestState tracker."""
-
-        # TODO(robertgshaw2): should this be a del?
-        assert request_id in self.request_states
-        self.request_states.pop(request_id)
+                self.request_states[request_id].stream.finish()
+                self.request_states.pop(request_id)
+                logger.debug("Finished request %s.", request_id)
 
     @staticmethod
     def _update_request_state(
@@ -201,7 +205,7 @@ class Detokenizer:
         finished: bool,
         finish_reason: Optional[str],
         stop_reason: Optional[str],
-    ) -> None:
+    ) -> RequestOutput:
         """
         Update RequestState for the request_id by:
             1) Detokenize the new token ids incrementally.
@@ -256,3 +260,5 @@ class Detokenizer:
             completion_output.finish_reason = finish_reason
             completion_output.stop_reason = stop_reason
             request_output.finished = finished
+        
+        return request_output
