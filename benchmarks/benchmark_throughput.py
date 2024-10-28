@@ -81,12 +81,13 @@ def sample_requests(
             SampleRequest(prompt=prompt,
                           prompt_len=prompt_len,
                           expected_output_len=output_len))
-        print(data)
         if "image" in data:
-            filtered_dataset[-1].multi_modal_data = filtered_dataset[-1].multi_modal_data or {}
+            filtered_dataset[-1].multi_modal_data = filtered_dataset[
+                -1].multi_modal_data or {}
             image_path = data["image"]
             assert isinstance(image_path, str)
-            filtered_dataset[-1].multi_modal_data["image"] = Image.open(image_path).convert("RGB")
+            filtered_dataset[-1].multi_modal_data["image"] = Image.open(
+                image_path).convert("RGB")
 
     return filtered_dataset
 
@@ -103,8 +104,9 @@ def run_vllm(
     prompts: List[TextPrompt] = []
     sampling_params: List[SamplingParams] = []
     for request in requests:
-        prompts.append(TextPrompt(prompt=request.prompt, multi_modal_data=request.multi_modal_data))
-        print(prompts[-1])
+        prompts.append(
+            TextPrompt(prompt=request.prompt,
+                       multi_modal_data=request.multi_modal_data))
         sampling_params.append(
             SamplingParams(
                 n=n,
