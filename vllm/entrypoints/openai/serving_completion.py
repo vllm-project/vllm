@@ -131,7 +131,9 @@ class OpenAIServingCompletion(OpenAIServing):
             for i, engine_prompt in enumerate(engine_prompts):
                 sampling_params: Union[SamplingParams, BeamSearchParams]
                 default_max_tokens = self.max_model_len - len(
-                    engine_prompt["prompt_token_ids"])
+                    engine_prompt.get("prompt_token_ids", [])
+                    or engine_prompt.get("prompt_embeds", []))
+
                 if request.use_beam_search:
                     sampling_params = request.to_beam_search_params(
                         default_max_tokens, self.default_sampling_params)
@@ -211,7 +213,7 @@ class OpenAIServingCompletion(OpenAIServing):
                 # We did not pass it into vLLM engine to avoid being redundant
                 # with the inputs token IDs
                 if final_res.prompt is None:
-                    final_res.prompt = request_prompts[i]["prompt"]
+                    final_res.prompt = request_prompts[i].get("prompt")
 
             final_res_batch_checked = cast(list[RequestOutput],
                                            final_res_batch)

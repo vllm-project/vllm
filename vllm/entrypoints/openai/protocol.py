@@ -730,8 +730,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
 class CompletionRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/completions/create
-    model: Optional[str] = None
-    prompt: Union[list[int], list[list[int]], str, list[str]]
+    model: str
+    prompt: Optional[Union[list[int], list[list[int]], str, list[str]]] = None
+    prompt_embeds: Optional[Union[bytes, list[bytes]]] = None
     best_of: Optional[int] = None
     echo: Optional[bool] = False
     frequency_penalty: Optional[float] = 0.0
@@ -1003,6 +1004,14 @@ class CompletionRequest(OpenAIBaseModel):
             raise ValueError(
                 "Stream options can only be defined when `stream=True`.")
 
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_prompt_and_prompt_embeds(cls, data):
+        if data.get("prompt") is None and data.get("prompt_embeds") is None:
+            raise ValueError(
+                "At least one of `prompt` or `prompt_embeds` must be set.")
         return data
 
 
@@ -1622,9 +1631,9 @@ class TranscriptionRequest(OpenAIBaseModel):
 
     # doc: begin-transcription-extra-params
     stream: Optional[bool] = False
-    """Custom field not present in the original OpenAI definition. When set, 
+    """Custom field not present in the original OpenAI definition. When set,
     it will enable output to be streamed in a similar fashion as the Chat
-    Completion endpoint. 
+    Completion endpoint.
     """
     # Flattened stream option to simplify form data.
     stream_include_usage: Optional[bool] = False
@@ -1642,7 +1651,7 @@ class TranscriptionRequest(OpenAIBaseModel):
     """
 
     top_p: Optional[float] = None
-    """Enables nucleus (top-p) sampling, where tokens are selected from the 
+    """Enables nucleus (top-p) sampling, where tokens are selected from the
     smallest possible set whose cumulative probability exceeds `p`.
     """
 
@@ -1650,7 +1659,7 @@ class TranscriptionRequest(OpenAIBaseModel):
     """Limits sampling to the `k` most probable tokens at each step."""
 
     min_p: Optional[float] = None
-    """Filters out tokens with a probability lower than `min_p`, ensuring a 
+    """Filters out tokens with a probability lower than `min_p`, ensuring a
     minimum likelihood threshold during sampling.
     """
 

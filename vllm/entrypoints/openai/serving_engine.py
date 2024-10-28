@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
-
+import base64
+import io
 import json
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from concurrent.futures.thread import ThreadPoolExecutor
 from http import HTTPStatus
 from typing import Annotated, Any, Callable, Optional, TypedDict, Union
 
+import torch
 from fastapi import Request
 from pydantic import Field
 from starlette.datastructures import Headers
@@ -67,7 +69,11 @@ class TextTokensPrompt(TypedDict):
     prompt_token_ids: list[int]
 
 
-RequestPrompt = Union[list[int], str, TextTokensPrompt]
+class EmbedsPrompt(TypedDict):
+    prompt_embeds: torch.Tensor
+
+
+RequestPrompt = Union[list[int], str, TextTokensPrompt, EmbedsPrompt]
 
 
 class OpenAIServing:
@@ -320,10 +326,11 @@ class OpenAIServing:
         self,
         request: AnyRequest,
         tokenizer: AnyTokenizer,
-        input_or_inputs: Union[str, list[str], list[int], list[list[int]]],
+        input_or_inputs: Optional[Union[str, list[str], list[int],
+                                        list[list[int]]]],
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
         add_special_tokens: bool = True,
-    ) -> list[TextTokensPrompt]:
+    ) -> Union[list[TextTokensPrompt], list[EmbedsPrompt]]:
         """
         Tokenize/detokenize depending on the input format.
 
@@ -335,21 +342,27 @@ class OpenAIServing:
         # VSCode Pyright extension should still work properly
         # "is True" is required for Pyright to perform type narrowing
         # See: https://github.com/microsoft/pyright/issues/7672
-        return [
-            self._normalize_prompt_text_to_input(
-                request,
-                tokenizer,
-                prompt=prompt_input["content"],
-                truncate_prompt_tokens=truncate_prompt_tokens,
-                add_special_tokens=add_special_tokens)
-            if prompt_input["is_tokens"] is False else
-            self._normalize_prompt_tokens_to_input(
-                request,
-                tokenizer,
-                prompt_ids=prompt_input["content"],
-                truncate_prompt_tokens=truncate_prompt_tokens)
-            for prompt_input in parse_and_batch_prompt(input_or_inputs)
-        ]
+        request_prompts = []
+        if input_or_inputs:
+            request_prompts.extend([
+                self._normalize_prompt_text_to_input(
+                    request,
+                    tokenizer,
+                    prompt=prompt_input["content"],
+                    truncate_prompt_tokens=truncate_prompt_tokens,
+                    add_special_tokens=add_special_tokens)
+                if prompt_input["is_tokens"] is False else
+                self._normalize_prompt_tokens_to_input(
+                    request,
+                    tokenizer,
+                    prompt_ids=prompt_input["content"],
+                    truncate_prompt_tokens=truncate_prompt_tokens)
+                for prompt_input in parse_and_batch_prompt(input_or_inputs)
+            ])
+        request_prompts.extend(
+            self._load_prompt_embeds(request.prompt_embeds,
+                                     truncate_prompt_tokens))
+        return request_prompts
 
     async def _preprocess_completion(
         self,
@@ -358,7 +371,8 @@ class OpenAIServing:
         input_or_inputs: Union[str, list[str], list[int], list[list[int]]],
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
         add_special_tokens: bool = True,
-    ) -> tuple[list[TextTokensPrompt], list[TokensPrompt]]:
+    ) -> tuple[Union[list[TextTokensPrompt], list[EmbedsPrompt]], Union[
+            list[TokensPrompt], list[EmbedsPrompt]]]:
         request_prompts = await self._tokenize_prompt_input_or_inputs_async(
             request,
             tokenizer,
@@ -368,6 +382,7 @@ class OpenAIServing:
         )
 
         engine_prompts = [
+            request_prompt if "prompt_embeds" in request_prompt else
             TokensPrompt(prompt_token_ids=request_prompt["prompt_token_ids"])
             for request_prompt in request_prompts
         ]
@@ -472,6 +487,34 @@ class OpenAIServing:
 
         return conversation, [request_prompt], [engine_prompt]
 
+    def _load_prompt_embeds(
+        self,
+        prompt_embeds: Optional[Union[bytes, list[bytes]]],
+        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
+    ) -> list[EmbedsPrompt]:
+
+        def _load_and_validate_embed(embed: bytes) -> EmbedsPrompt:
+            tensor = torch.load(io.BytesIO(base64.b64decode(embed)))
+            assert isinstance(
+                tensor,
+                (torch.FloatTensor, torch.BFloat16Tensor, torch.HalfTensor))
+            if tensor.dim() > 2:
+                tensor = tensor.squeeze(0)
+                assert tensor.dim() == 2
+            if truncate_prompt_tokens is not None:
+                tensor = tensor[-truncate_prompt_tokens:]
+            return {"prompt_embeds": tensor}
+
+        if prompt_embeds:
+            if isinstance(prompt_embeds, list):
+                return [
+                    _load_and_validate_embed(embed) for embed in prompt_embeds
+                ]
+            else:
+                return [_load_and_validate_embed(prompt_embeds)]
+        else:
+            return []
+
     def _log_inputs(
         self,
         request_id: str,
@@ -483,13 +526,13 @@ class OpenAIServing:
     ) -> None:
         if self.request_logger is None:
             return
-
+        prompt, prompt_token_ids, prompt_embeds = None, None, None
         if isinstance(inputs, str):
             prompt = inputs
-            prompt_token_ids = None
         elif isinstance(inputs, list):
-            prompt = None
             prompt_token_ids = inputs
+        elif 'prompt_embeds' in inputs:
+            prompt_embeds = inputs.get("prompt_embeds")
         else:
             prompt = inputs["prompt"]
             prompt_token_ids = inputs["prompt_token_ids"]
@@ -498,6 +541,7 @@ class OpenAIServing:
             request_id,
             prompt,
             prompt_token_ids,
+            prompt_embeds,
             params=params,
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
