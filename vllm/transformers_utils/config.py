@@ -18,6 +18,7 @@ from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
 from transformers import GenerationConfig, PretrainedConfig
 from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
+from vllm.model_executor.layers.pooler import PoolingType
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.transformers_utils.configs import (ChatGLMConfig, DbrxConfig,
@@ -318,14 +319,15 @@ def get_pooling_config(model, revision='main', token: Optional[str] = None):
         pooling_type_name = next(
             (item for item, val in pooling_dict.items() if val is True), None)
 
-        pooling_type_name = get_pooling_config_name(pooling_type_name)
+        if pooling_type_name:
+            pooling_type_name = get_pooling_config_name(pooling_type_name)
 
         return {"pooling_type": pooling_type_name, "normalize": normalize}
 
     return None
 
 
-def get_pooling_config_name(pooling_name: str):
+def get_pooling_config_name(pooling_name):
     if "pooling_mode_" in pooling_name:
         pooling_name = pooling_name.replace("pooling_mode_", "")
 
@@ -335,9 +337,15 @@ def get_pooling_config_name(pooling_name: str):
     if "lasttoken" in pooling_name:
         pooling_name = "last"
 
+    supported_pooling_types = [i.name for i in PoolingType]
     pooling_type_name = pooling_name.upper()
 
-    return pooling_type_name
+    try:
+        if pooling_type_name in supported_pooling_types:
+            return pooling_type_name
+    except NotImplementedError as e:
+        logger.debug("Pooling type not supported", e)
+        return None
 
 
 def get_sentence_transformer_tokenizer_config(model,

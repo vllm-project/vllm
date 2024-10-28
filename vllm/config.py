@@ -422,10 +422,7 @@ class ModelConfig:
 
     def get_pooling_type(self, pooling_type_name: str) -> PoolingType:
         pooling_types = {i.name: i for i in PoolingType}
-        pooling_type = pooling_types[pooling_type_name]
-        if pooling_type:
-            return PoolingType(pooling_type)
-        return None
+        return pooling_types.get(pooling_type_name)
 
     def get_pooling_config(
             self, pooling_type_arg: Optional[str],
