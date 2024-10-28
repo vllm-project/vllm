@@ -319,15 +319,6 @@ def is_hip() -> bool:
 
 
 @lru_cache(maxsize=None)
-def is_openvino() -> bool:
-    from importlib.metadata import PackageNotFoundError, version
-    try:
-        return "openvino" in version("vllm")
-    except PackageNotFoundError:
-        return False
-
-
-@lru_cache(maxsize=None)
 def get_max_shared_memory_bytes(gpu: int = 0) -> int:
     """Returns the maximum shared memory per thread block in bytes."""
     from vllm import _custom_ops as ops
@@ -757,7 +748,7 @@ def is_pin_memory_available() -> bool:
     elif current_platform.is_neuron():
         print_warning_once("Pin memory is not supported on Neuron.")
         return False
-    elif current_platform.is_cpu() or is_openvino():
+    elif current_platform.is_cpu() or current_platform.is_openvino():
         return False
     return True
 
@@ -1488,3 +1479,12 @@ class LazyDict(Mapping, Generic[T]):
 
     def __len__(self):
         return len(self._factory)
+
+
+def weak_ref_tensor(tensor: torch.Tensor) -> torch.Tensor:
+    """
+    Create a weak reference to a tensor.
+    The new tensor will share the same data as the original tensor,
+    but will not keep the original tensor alive.
+    """
+    return torch.ops._C.weak_ref_tensor(tensor)

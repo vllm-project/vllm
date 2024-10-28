@@ -3,12 +3,13 @@ from typing import List, Optional, Tuple, Type, overload
 import pytest
 from transformers import AutoConfig, AutoModelForVision2Seq, AutoTokenizer
 
+from vllm.inputs import InputContext
 from vllm.multimodal.utils import rescale_image_size
 from vllm.sequence import SampleLogprobs
 
 from ....conftest import (IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner,
                           _ImageAssets)
-from ...utils import check_logprobs_close
+from ...utils import build_model_context, check_logprobs_close
 
 _LIMIT_IMAGE_PER_PROMPT = 4
 
@@ -20,6 +21,19 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
 })
 
 models = ["llava-hf/llava-v1.6-mistral-7b-hf"]
+
+
+@pytest.fixture()
+def get_max_llava_next_image_tokens():
+    from vllm.model_executor.models.llava_next import (
+        get_max_llava_next_image_tokens)
+    return get_max_llava_next_image_tokens
+
+
+@pytest.fixture()
+def dummy_data_for_llava_next():
+    from vllm.model_executor.models.llava_next import dummy_data_for_llava_next
+    return dummy_data_for_llava_next
 
 
 def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
@@ -281,3 +295,53 @@ def test_models_multiple_image_inputs(hf_runner, vllm_runner, image_assets,
         num_logprobs=num_logprobs,
         tensor_parallel_size=1,
     )
+
+
+@pytest.mark.parametrize("gridpoints,expected_max_tokens", [
+    ([[336, 336]], 1176),
+    ([[336, 672], [672, 336], [672, 672], [1008, 336], [336, 1008]], 2928),
+])
+def test_get_max_llava_next_image_tokens(gridpoints, expected_max_tokens,
+                                         get_max_llava_next_image_tokens):
+    ctx = build_model_context(model_name="llava-hf/llava-v1.6-mistral-7b-hf")
+
+    # Update the config image_grid_pinpoints
+    # and calculate the resulting max tokens
+    ctx.model_config.hf_config.image_grid_pinpoints = gridpoints
+
+    actual_max_tokens = get_max_llava_next_image_tokens(
+        InputContext(ctx.model_config))
+
+    assert expected_max_tokens == actual_max_tokens
+
+
+@pytest.mark.parametrize(
+    "gridpoints,expected_size",
+    [
+        # One point; it has to be the largest
+        ([[336, 336]], (336, 336)),
+        # Default for most llava next models; the 2x2 tile is the largest
+        ([[336, 672], [672, 336], [672, 672], [1008, 336], [336, 1008]],
+         (672, 672)),
+        # If two rectangular gridpoints are the same, the more vertical
+        # one has the higher feature count due to newline features
+        ([[336, 672], [672, 336]], (672, 336))
+    ])
+def test_dummy_data_for_llava_next_feature_size(dummy_data_for_llava_next,
+                                                gridpoints, expected_size):
+    ctx = build_model_context(model_name="llava-hf/llava-v1.6-mistral-7b-hf")
+
+    # Update the config image_grid_pinpoints
+    ctx.model_config.hf_config.image_grid_pinpoints = gridpoints
+    seq_len = 5000  # bigger than the max feature size for any image
+
+    seq_data, mm_data = dummy_data_for_llava_next(
+        ctx,
+        seq_len=seq_len,
+        mm_counts={"image": 1},
+    )
+
+    # The dummy data dims should match the gridpoint with the biggest feat size
+    assert mm_data["image"].height == expected_size[0]
+    assert mm_data["image"].width == expected_size[1]
+    assert len(seq_data.get_token_ids()) >= seq_len
