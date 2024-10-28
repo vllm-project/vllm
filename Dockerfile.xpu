@@ -33,7 +33,10 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     --extra-index-url https://pytorch-extension.intel.com/release-whl/stable/xpu/us/ \
     -r requirements-xpu.txt
 
-COPY ./ /workspace/vllm
+COPY . .
+ARG GIT_REPO_CHECK
+RUN --mount=type=bind,source=.git,target=.git \
+    if [ "$GIT_REPO_CHECK" != 0 ]; then bash tools/check_repo.sh; fi
 
 ENV VLLM_TARGET_DEVICE=xpu
 

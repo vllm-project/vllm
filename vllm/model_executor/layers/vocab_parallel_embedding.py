@@ -443,7 +443,7 @@ class ParallelLMHead(VocabParallelEmbedding):
         super().__init__(num_embeddings, embedding_dim, params_dtype,
                          org_num_embeddings, padding_size, quant_config,
                          prefix)
-
+        self.quant_config = quant_config
         if bias:
             self.bias = Parameter(
                 torch.empty(self.num_embeddings_per_partition,
@@ -454,6 +454,15 @@ class ParallelLMHead(VocabParallelEmbedding):
             })
         else:
             self.register_parameter("bias", None)
+
+    def tie_weights(self, embed_tokens: VocabParallelEmbedding):
+        """Tie the weights with word embeddings."""
+        # GGUF quantized embed_tokens.
+        if self.quant_config and self.quant_config.get_name() == "gguf":
+            return embed_tokens
+        else:
+            self.weight = embed_tokens.weight
+            return self
 
     def forward(self, input_):
         del input_
