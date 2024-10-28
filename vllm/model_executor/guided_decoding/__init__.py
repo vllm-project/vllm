@@ -1,6 +1,7 @@
 from typing import Optional
 
-from vllm.sampling_params import GuidedDecodingParams, LogitsProcessor
+from vllm.logits_process import LogitsProcessor
+from vllm.sampling_params import GuidedDecodingParams
 
 
 async def get_guided_decoding_logits_processor(

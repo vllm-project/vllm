@@ -32,8 +32,8 @@ HF_MULTIIMAGE_IMAGE_PROMPT = \
 models = ["openbmb/MiniCPM-Llama3-V-2_5"]
 
 
-def _wrap_inputs(hf_inputs: BatchEncoding) -> BatchEncoding:
-    return BatchEncoding({"model_inputs": hf_inputs})
+def _wrap_inputs(hf_inputs: BatchEncoding):
+    return {"model_inputs": hf_inputs}
 
 
 def trunc_hf_output(hf_output: Tuple[List[int], str,

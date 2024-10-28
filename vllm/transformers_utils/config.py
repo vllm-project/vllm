@@ -23,8 +23,8 @@ from vllm.transformers_utils.configs import (ChatGLMConfig, DbrxConfig,
                                              MedusaConfig, MllamaConfig,
                                              MLPSpeculatorConfig, MPTConfig,
                                              NemotronConfig, NVLM_D_Config,
-                                             Qwen2VLConfig, RWConfig,
-                                             SolarConfig, UltravoxConfig)
+                                             RWConfig, SolarConfig,
+                                             UltravoxConfig)
 # yapf: enable
 from vllm.transformers_utils.utils import check_gguf_file
 
@@ -57,7 +57,6 @@ _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     "NVLM_D": NVLM_D_Config,
     "solar": SolarConfig,
     "ultravox": UltravoxConfig,
-    "qwen2_vl": Qwen2VLConfig,
     **_CONFIG_REGISTRY_OVERRIDE_HF
 }
 
@@ -89,6 +88,43 @@ def file_or_path_exists(model: Union[str, Path], config_name, revision,
         # Don't raise in offline mode, all we know is that we don't have this
         # file cached.
         return False
+
+
+def patch_rope_scaling(config: PretrainedConfig) -> None:
+    """Provide backwards compatibility for RoPE."""
+    text_config = getattr(config, "text_config", None)
+    if text_config is not None:
+        patch_rope_scaling(text_config)
+
+    rope_scaling = getattr(config, "rope_scaling", None)
+    if rope_scaling is not None:
+        patch_rope_scaling_dict(rope_scaling)
+
+
+def patch_rope_scaling_dict(rope_scaling: Dict[str, Any]) -> None:
+    if "rope_type" not in rope_scaling and "type" in rope_scaling:
+        rope_scaling["rope_type"] = rope_scaling["type"]
+        logger.info("Replacing legacy 'type' key with 'rope_type'")
+
+    if "rope_type" not in rope_scaling:
+        raise ValueError("rope_scaling should have a 'rope_type' key")
+
+    if rope_scaling["rope_type"] == "su":
+        rope_scaling["rope_type"] = "longrope"
+        logger.warning("Replacing legacy rope_type 'su' with 'longrope'")
+    elif rope_scaling["rope_type"] == "mrope":
+        assert "mrope_section" in rope_scaling
+        rope_scaling["rope_type"] = "default"
+        logger.warning("Replacing legacy rope_type 'mrope' with 'default'")
+
+
+def uses_mrope(config: PretrainedConfig) -> bool:
+    """Detect if the model with this config uses M-ROPE."""
+    rope_scaling = getattr(config, "rope_scaling", None)
+    if rope_scaling is None:
+        return False
+
+    return "mrope_section" in rope_scaling
 
 
 def get_config(
@@ -191,7 +227,71 @@ def get_config(
             )
             config.update({key: value})
 
+    patch_rope_scaling(config)
+
     return config
+
+
+def maybe_register_config_serialize_by_value(trust_remote_code: bool) -> None:
+    """Try to register HF model configuration class to serialize by value
+
+        With trust_remote_code, the config class is typically an instance of a
+        custom class imported from the HF modules cache. The class will not be
+        importable in spawned workers by default (and won't exist at all on
+        other nodes), which breaks serialization of the config.
+
+        In this function we tell the cloudpickle serialization library to pass
+        instances of these generated classes by value instead of by reference,
+        i.e. the class definition is serialized along with its data so that the
+        class module does not need to be importable on the receiving end. This
+        registration only works if the modules cache has already been
+        initialized.
+
+
+        See: https://github.com/cloudpipe/cloudpickle?tab=readme-ov-file#overriding-pickles-serialization-mechanism-for-importable-constructs
+    """
+    if not trust_remote_code:
+        return
+
+    try:
+        import transformers_modules
+    except ImportError:
+        logger.debug("Could not import transformers_modules used for remote"
+                     " code. If remote code is not needed remove"
+                     " `--trust-remote-code`.")
+        return
+
+    try:
+        import cloudpickle
+        cloudpickle.register_pickle_by_value(transformers_modules)
+
+        # ray vendors its own version of cloudpickle
+        from vllm.executor.ray_utils import ray
+        if ray:
+            ray.cloudpickle.register_pickle_by_value(transformers_modules)
+
+        # multiprocessing uses pickle to serialize arguments when using spawn
+        # Here we get pickle to use cloudpickle to serialize ModelConfig objects
+        # that contain instances of the custom config class to avoid
+        # serialization problems if the generated module (and model) has a `.`
+        # in its name
+        import multiprocessing
+        import pickle
+
+        from vllm.config import ModelConfig
+
+        def _reduce_modelconfig(mc: ModelConfig):
+            return (pickle.loads, (cloudpickle.dumps(mc), ))
+
+        multiprocessing.reducer.register(ModelConfig, _reduce_modelconfig)
+
+    except Exception as e:
+        logger.warning(
+            "Unable to register remote classes used by"
+            " trust_remote_code with by-value serialization. This may"
+            " lead to a later error. If remote code is not needed"
+            " remove `--trust-remote-code`",
+            exc_info=e)
 
 
 def load_params_config(model, revision) -> PretrainedConfig:

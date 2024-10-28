@@ -3,7 +3,7 @@ import dataclasses
 import json
 from dataclasses import dataclass
 from typing import (TYPE_CHECKING, Any, Dict, List, Literal, Mapping, Optional,
-                    Tuple, Type, Union)
+                    Tuple, Type, Union, cast, get_args)
 
 import torch
 
@@ -12,13 +12,15 @@ from vllm.config import (CacheConfig, ConfigFormat, DecodingConfig,
                          DeviceConfig, EngineConfig, LoadConfig, LoadFormat,
                          LoRAConfig, ModelConfig, ObservabilityConfig,
                          ParallelConfig, PromptAdapterConfig, SchedulerConfig,
-                         SpeculativeConfig, TokenizerPoolConfig)
+                         SpeculativeConfig, TaskOption, TokenizerPoolConfig)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.platforms import current_platform
+from vllm.transformers_utils.config import (
+    maybe_register_config_serialize_by_value)
 from vllm.transformers_utils.utils import check_gguf_file
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils import FlexibleArgumentParser, StoreBoolean
 
 if TYPE_CHECKING:
     from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
@@ -86,13 +88,15 @@ class EngineArgs:
     model: str = 'facebook/opt-125m'
     served_model_name: Optional[Union[str, List[str]]] = None
     tokenizer: Optional[str] = None
+    task: TaskOption = "auto"
     skip_tokenizer_init: bool = False
     tokenizer_mode: str = 'auto'
+    chat_template_text_format: str = 'string'
     trust_remote_code: bool = False
     download_dir: Optional[str] = None
     load_format: str = 'auto'
     weights_load_device: Optional[str] = None
-    config_format: str = 'auto'
+    config_format: ConfigFormat = ConfigFormat.AUTO
     dtype: str = 'auto'
     kv_cache_dtype: str = 'auto'
     quantization_param_path: Optional[str] = None
@@ -188,7 +192,7 @@ class EngineArgs:
     scheduling_policy: Literal["fcfs", "priority"] = "fcfs"
 
     def __post_init__(self):
-        if self.tokenizer is None:
+        if not self.tokenizer:
             self.tokenizer = self.model
 
         # Setup plugins
@@ -205,6 +209,15 @@ class EngineArgs:
             type=str,
             default=EngineArgs.model,
             help='Name or path of the huggingface model to use.')
+        parser.add_argument(
+            '--task',
+            default=EngineArgs.task,
+            choices=get_args(TaskOption),
+            help='The task to use the model for. Each vLLM instance only '
+            'supports one task, even if the same model can be used for '
+            'multiple tasks. When the model only supports one task, "auto" '
+            'can be used to select it; otherwise, you must specify explicitly '
+            'which task to use.')
         parser.add_argument(
             '--tokenizer',
             type=nullable_str,
@@ -245,6 +258,14 @@ class EngineArgs:
             'fast tokenizer if available.\n* "slow" will '
             'always use the slow tokenizer. \n* '
             '"mistral" will always use the `mistral_common` tokenizer.')
+        parser.add_argument(
+            '--chat-template-text-format',
+            type=str,
+            default=EngineArgs.chat_template_text_format,
+            choices=['string', 'openai'],
+            help='The format to render text content within a chat template. '
+            '"string" will keep the content field as a string whereas '
+            '"openai" will parse content in the current OpenAI format.')
         parser.add_argument('--trust-remote-code',
                             action='store_true',
                             help='Trust remote code from huggingface.')
@@ -387,12 +408,13 @@ class EngineArgs:
                             action='store_true',
                             help='Disables sliding window, '
                             'capping to sliding window size')
-        parser.add_argument(
-            '--use-v2-block-manager',
-            default=EngineArgs.use_v2_block_manager,
-            action='store_true',
-            help='Use BlockSpaceMangerV2. By default this is set to True. '
-            'Set to False to use BlockSpaceManagerV1')
+        parser.add_argument('--use-v2-block-manager',
+                            action='store_true',
+                            help='[DEPRECATED] block manager v1 has been '
+                            'removed and SelfAttnBlockSpaceManager (i.e. '
+                            'block manager v2) is now the default. '
+                            'Setting this flag to True or False'
+                            ' has no effect on vLLM behavior.')
         parser.add_argument(
             '--use-padding-aware-scheduling',
             default=EngineArgs.use_padding_aware_scheduling,
@@ -438,7 +460,11 @@ class EngineArgs:
             help='The fraction of GPU memory to be used for the model '
             'executor, which can range from 0 to 1. For example, a value of '
             '0.5 would imply 50%% GPU memory utilization. If unspecified, '
-            'will use the default value of 0.9.')
+            'will use the default value of 0.9. This is a global gpu memory '
+            'utilization limit, for example if 50%% of the gpu memory is '
+            'already used before vLLM starts and --gpu-memory-utilization is '
+            'set to 0.9, then only 40%% of the gpu memory will be allocated '
+            'to the model executor.')
         parser.add_argument(
             '--num-gpu-blocks-override',
             type=int,
@@ -482,11 +508,12 @@ class EngineArgs:
                             'None, we assume the model weights are not '
                             'quantized and use `dtype` to determine the data '
                             'type of the weights.')
-        parser.add_argument('--rope-scaling',
-                            default=None,
-                            type=json.loads,
-                            help='RoPE scaling configuration in JSON format. '
-                            'For example, {"type":"dynamic","factor":2.0}')
+        parser.add_argument(
+            '--rope-scaling',
+            default=None,
+            type=json.loads,
+            help='RoPE scaling configuration in JSON format. '
+            'For example, {"rope_type":"dynamic","factor":2.0}')
         parser.add_argument('--rope-theta',
                             default=None,
                             type=float,
@@ -864,8 +891,11 @@ class EngineArgs:
     def create_model_config(self) -> ModelConfig:
         return ModelConfig(
             model=self.model,
-            tokenizer=self.tokenizer,
+            task=self.task,
+            # We know this is not None because we set it in __post_init__
+            tokenizer=cast(str, self.tokenizer),
             tokenizer_mode=self.tokenizer_mode,
+            chat_template_text_format=self.chat_template_text_format,
             trust_remote_code=self.trust_remote_code,
             dtype=self.dtype,
             seed=self.seed,
@@ -937,9 +967,12 @@ class EngineArgs:
                     "supported for multimodal models and has been disabled.")
             self.enable_prefix_caching = False
 
+        maybe_register_config_serialize_by_value(self.trust_remote_code)
+
         cache_config = CacheConfig(
+            # neuron needs block_size = max_model_len
             block_size=self.block_size if self.device != "neuron" else
-            self.max_model_len,  # neuron needs block_size = max_model_len
+            (self.max_model_len if self.max_model_len is not None else 0),
             gpu_memory_utilization=self.gpu_memory_utilization,
             swap_space=self.swap_space,
             cache_dtype=self.kv_cache_dtype,
@@ -997,12 +1030,6 @@ class EngineArgs:
                 "in low performance due to small KV cache space. Consider "
                 "setting --max-model-len to a smaller value.", max_model_len)
 
-        if self.num_scheduler_steps > 1 and not self.use_v2_block_manager:
-            self.use_v2_block_manager = True
-            logger.warning(
-                "Enabled BlockSpaceManagerV2 because it is "
-                "required for multi-step (--num-scheduler-steps > 1)")
-
         speculative_config = SpeculativeConfig.maybe_create_spec_config(
             target_model_config=model_config,
             target_parallel_config=parallel_config,
@@ -1018,7 +1045,6 @@ class EngineArgs:
             speculative_disable_by_batch_size,
             speculative_max_model_len=self.speculative_max_model_len,
             enable_chunked_prefill=self.enable_chunked_prefill,
-            use_v2_block_manager=self.use_v2_block_manager,
             disable_log_stats=self.disable_log_stats,
             ngram_prompt_lookup_max=self.ngram_prompt_lookup_max,
             ngram_prompt_lookup_min=self.ngram_prompt_lookup_min,
@@ -1049,16 +1075,25 @@ class EngineArgs:
             if speculative_config is None \
             else speculative_config.num_lookahead_slots
 
+        if not self.use_v2_block_manager:
+            logger.warning(
+                "[DEPRECATED] Block manager v1 has been removed, "
+                "and setting --use-v2-block-manager to True or False has "
+                "no effect on vLLM behavior. Please remove "
+                "--use-v2-block-manager in your engine argument. "
+                "If your use case is not supported by "
+                "SelfAttnBlockSpaceManager (i.e. block manager v2),"
+                " please file an issue with detailed information.")
+
         scheduler_config = SchedulerConfig(
+            task=model_config.task,
             max_num_batched_tokens=self.max_num_batched_tokens,
             max_num_seqs=self.max_num_seqs,
             max_num_prefill_seqs=self.max_num_prefill_seqs,
             max_model_len=model_config.max_model_len,
-            use_v2_block_manager=self.use_v2_block_manager,
             num_lookahead_slots=num_lookahead_slots,
             delay_factor=self.scheduler_delay_factor,
             enable_chunked_prefill=self.enable_chunked_prefill,
-            embedding_mode=model_config.embedding_mode,
             is_multimodal_model=model_config.is_multimodal_model,
             preemption_mode=self.preemption_mode,
             num_scheduler_steps=self.num_scheduler_steps,
@@ -1112,13 +1147,6 @@ class EngineArgs:
             or "all" in detailed_trace_modules,
         )
 
-        if (model_config.get_sliding_window() is not None
-                and scheduler_config.chunked_prefill_enabled
-                and not scheduler_config.use_v2_block_manager):
-            raise ValueError(
-                "Chunked prefill is not supported with sliding window. "
-                "Set --disable-sliding-window to disable sliding window.")
-
         return EngineConfig(
             model_config=model_config,
             cache_config=cache_config,
@@ -1148,18 +1176,6 @@ class AsyncEngineArgs(EngineArgs):
                             action='store_true',
                             help='Disable logging requests.')
         return parser
-
-
-class StoreBoolean(argparse.Action):
-
-    def __call__(self, parser, namespace, values, option_string=None):
-        if values.lower() == "true":
-            setattr(namespace, self.dest, True)
-        elif values.lower() == "false":
-            setattr(namespace, self.dest, False)
-        else:
-            raise ValueError(f"Invalid boolean value: {values}. "
-                             "Expected 'true' or 'false'.")
 
 
 # These functions are used by sphinx to build the documentation

@@ -17,9 +17,6 @@ SPEC_MODEL = "JackFram/llama-160m"
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
 
-        # Required for spec decode.
-        "use_v2_block_manager": True,
-
         # speculative model
         "speculative_model": "JackFram/llama-160m",
 

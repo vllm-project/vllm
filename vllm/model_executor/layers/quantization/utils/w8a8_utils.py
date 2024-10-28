@@ -4,11 +4,11 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
-from vllm.utils import is_hip
 
 # Input scaling factors are no longer optional in _scaled_mm starting
 # from pytorch 2.5. Allocating a dummy tensor to pass as input_scale
-TORCH_DEVICE_IDENTITY = torch.ones(1).cuda() if is_hip() else None
+TORCH_DEVICE_IDENTITY = torch.ones(1).cuda() \
+            if current_platform.is_rocm() else None
 
 if current_platform.is_hpu():
     import habana_frameworks.torch.utils.experimental as htexp
@@ -18,7 +18,7 @@ if current_platform.is_hpu():
 
 def cutlass_fp8_supported() -> bool:
     # cutlass is not supported on Rocm
-    if is_hip():
+    if current_platform.is_rocm():
         return False
 
     capability_tuple = current_platform.get_device_capability()
