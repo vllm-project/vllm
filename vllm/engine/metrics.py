@@ -441,7 +441,7 @@ class PrometheusStatLogger(StatLoggerBase):
             histogram.labels(**self.labels).observe(datum)
 
     def _log_gauge_string(self, gauge, data: Dict[str, str]) -> None:
-        gauge.labels(**data).set(1)
+        gauge.labels(**data).set_to_current_time()
 
     def _log_prometheus(self, stats: Stats) -> None:
         # System state data
