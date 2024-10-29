@@ -8,7 +8,6 @@ from typing import List, Optional
 
 import torch
 import uvloop
-from PIL import Image
 from tqdm import tqdm
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           PreTrainedTokenizerBase)
@@ -53,20 +52,23 @@ def sample_requests(
         dataset = json.load(f)
     # Filter out the conversations with less than 2 turns.
     dataset = [data for data in dataset if len(data["conversations"]) >= 2]
+    # Only keep the first two turns of each conversation.
+    dataset = [(data["conversations"][0]["value"],
+                data["conversations"][1]["value"]) for data in dataset]
+
     # Shuffle the dataset.
     random.shuffle(dataset)
 
     # Filter out sequences that are too long or too short
     filtered_dataset: List[SampleRequest] = []
-    for data in dataset:
+    for i in range(len(dataset)):
         if len(filtered_dataset) == num_requests:
             break
 
-        # Only keep the first two turns of each conversation.
-        prompt = data["conversations"][0]["value"]
-        completion = data["conversations"][1]["value"]
         # Tokenize the prompts and completions.
+        prompt = dataset[i][0]
         prompt_token_ids = tokenizer(prompt).input_ids
+        completion = dataset[i][1]
         completion_token_ids = tokenizer(completion).input_ids
         prompt_len = len(prompt_token_ids)
         output_len = len(completion_token_ids
@@ -81,13 +83,6 @@ def sample_requests(
             SampleRequest(prompt=prompt,
                           prompt_len=prompt_len,
                           expected_output_len=output_len))
-        if "image" in data:
-            filtered_dataset[-1].multi_modal_data = filtered_dataset[
-                -1].multi_modal_data or {}
-            image_path = data["image"]
-            assert isinstance(image_path, str)
-            filtered_dataset[-1].multi_modal_data["image"] = Image.open(
-                image_path).convert("RGB")
 
     return filtered_dataset
 
@@ -104,9 +99,7 @@ def run_vllm(
     prompts: List[TextPrompt] = []
     sampling_params: List[SamplingParams] = []
     for request in requests:
-        prompts.append(
-            TextPrompt(prompt=request.prompt,
-                       multi_modal_data=request.multi_modal_data))
+        prompts.append(TextPrompt(prompt=request.prompt))
         sampling_params.append(
             SamplingParams(
                 n=n,
