@@ -289,13 +289,13 @@ class VllmBackend:
         returned_callable: Callable  # type: ignore
 
         if len(self.piecewise_graphs) == 0:
+            compilation_counter.num_piecewise_graphs_seen += 1
+            compilation_counter.num_piecewise_capturable_graphs_seen += 1
             returned_callable = PiecewiseBackend(graph,
                                                  self.compilation_configs,
                                                  self.graph_pool,
                                                  is_first_graph=True)
         else:
-            compilation_counter.num_piecewise_graphs_seen += len(
-                self.piecewise_graphs)
             from torch._dynamo.utils import lazy_format_graph_code
             logger.debug(
                 "%s", lazy_format_graph_code("stiching module", self.split_gm))
@@ -303,6 +303,8 @@ class VllmBackend:
             is_first_graph = True
 
             for item in self.piecewise_graphs:
+                compilation_counter.num_piecewise_graphs_seen += 1
+                compilation_counter.num_piecewise_capturable_graphs_seen += not item.is_splitting_graph # noqa
                 if not item.is_splitting_graph:
                     # cannot setattr to a module, so we need to set
                     # the attribute in the __dict__

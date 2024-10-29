@@ -10,6 +10,7 @@ from torch import nn
 from vllm.compilation.compile_context import set_compile_context
 from vllm.compilation.decorators import support_torch_compile
 from vllm.compilation.levels import CompilationLevel
+from vllm.compilation.counter import compilation_counter
 
 os.environ["VLLM_TORCH_COMPILE_LEVEL"] = str(CompilationLevel.PIECEWISE)
 
@@ -69,18 +70,27 @@ def test_simple_piecewise_compile():
 
     input_buffer = torch.randn(100).cuda()
 
-    with set_compile_context([1, 2]):
-        model(input_buffer)
+    with compilation_counter.expect(
+            num_graphs_seen=1,  # one graph for the model
+            num_piecewise_graphs_seen=5,  # 2 * num_layers + 1
+            num_piecewise_capturable_graphs_seen=3,  # 1 + num_layers
+            num_inductor_compilations=3,  # 1 + num_cudagraph_sizes
+            num_cudagraph_caputured=
+            6,  # num_cudagraph_sizes * num_piecewise_capturable_graphs_seen
+    ):
 
-        model(input_buffer[:2])
-        model(input_buffer[:1])
+        with set_compile_context([1, 2]):
+            model(input_buffer)
 
-    input_buffer[:2].zero_()
-    global global_counter
-    global_counter = 0
-    output = model(input_buffer[:2])
-    assert global_counter == 2
-    assert torch.allclose(output.cpu(), torch.tensor([3., 1.]))
+            model(input_buffer[:2])
+            model(input_buffer[:1])
+
+        input_buffer[:2].zero_()
+        global global_counter
+        global_counter = 0
+        output = model(input_buffer[:2])
+        assert global_counter == 2
+        assert torch.allclose(output.cpu(), torch.tensor([3., 1.]))
 
     # clean up to avoid side effects for other tests
     del os.environ["VLLM_TORCH_COMPILE_CONFIG"]
