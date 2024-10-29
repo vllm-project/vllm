@@ -186,8 +186,8 @@ class EngineArgs:
 
     # Pooling configuration.
     pooling_type: Optional[str] = None
-    pooling_norm: bool = False
-    pooling_softmax: bool = False
+    pooling_norm: Optional[bool] = None
+    pooling_softmax: Optional[bool] = None
     pooling_step_tag_id: Optional[int] = None
     pooling_returned_token_ids: Optional[List[int]] = None
 

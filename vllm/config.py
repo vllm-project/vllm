@@ -160,8 +160,8 @@ class ModelConfig:
             chat_template_text_format: str = "string",
             mm_processor_kwargs: Optional[Dict[str, Any]] = None,
             pooling_type: Optional[str] = None,
-            pooling_norm: bool = False,
-            pooling_softmax: bool = False,
+            pooling_norm: Optional[bool] = None,
+            pooling_softmax: Optional[bool] = None,
             pooling_step_tag_id: Optional[int] = None,
             pooling_returned_token_ids: Optional[List[int]] = None) -> None:
         self.model = model
@@ -272,8 +272,8 @@ class ModelConfig:
     def _init_pooler_config(
         self,
         pooling_type: Optional[str] = None,
-        pooling_norm: bool = False,
-        pooling_softmax: bool = False,
+        pooling_norm: Optional[bool] = None,
+        pooling_softmax: Optional[bool] = None,
         pooling_step_tag_id: Optional[int] = None,
         pooling_returned_token_ids: Optional[List[int]] = None
     ) -> Optional["PoolerConfig"]:
@@ -1696,8 +1696,8 @@ class PoolerConfig:
     """Controls the behavior of pooler in embedding model"""
 
     pooling_type: Optional[str] = None
-    pooling_norm: bool = False
-    pooling_softmax: bool = False
+    pooling_norm: Optional[bool] = None
+    pooling_softmax: Optional[bool] = None
     pooling_step_tag_id: Optional[int] = None
     pooling_returned_token_ids: Optional[List[int]] = None
 

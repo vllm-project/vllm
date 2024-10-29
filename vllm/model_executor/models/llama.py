@@ -545,9 +545,10 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
         self._pooler = Pooler(
-            pooling_type=PoolingType[pooler_config.pooling_type],
-            normalize=pooler_config.pooling_norm,
-            softmax=pooler_config.pooling_softmax,
+            pooling_type=PoolingType[pooler_config.pooling_type]
+            if pooler_config.pooling_type is not None else PoolingType.STEP,
+            normalize=pooler_config.pooling_norm or False,
+            softmax=pooler_config.pooling_softmax or False,
             step_tag_id=pooler_config.pooling_step_tag_id,
             returned_token_ids=pooler_config.pooling_returned_token_ids,
         )
@@ -646,12 +647,20 @@ class LlamaEmbeddingModel(nn.Module, SupportsPP):
 
     def __init__(
         self,
+        pooler_config: Optional[PoolerConfig] = None,
         **kwargs,
     ) -> None:
         super().__init__()
 
         self.model = LlamaModel(**kwargs)
-        self._pooler = Pooler(pooling_type=PoolingType.LAST, normalize=True)
+        self._pooler = Pooler(
+            pooling_type=PoolingType[pooler_config.pooling_type]
+            if pooler_config.pooling_type is not None else PoolingType.LAST,
+            normalize=pooler_config.pooling_norm or True,
+            softmax=pooler_config.pooling_softmax or False,
+            step_tag_id=pooler_config.pooling_step_tag_id,
+            returned_token_ids=pooler_config.pooling_returned_token_ids,
+        )
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 

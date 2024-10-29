@@ -32,9 +32,9 @@ class Pooler(nn.Module):
 
     def __init__(
         self,
-        pooling_type: PoolingType,
-        normalize: bool = False,
-        softmax: bool = False,
+        pooling_type: Optional[PoolingType] = None,
+        normalize: Optional[bool] = None,
+        softmax: Optional[bool] = None,
         step_tag_id: Optional[int] = None,
         returned_token_ids: Optional[List[int]] = None,
     ):

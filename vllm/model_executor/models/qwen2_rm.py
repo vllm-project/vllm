@@ -11,7 +11,7 @@ from torch import nn
 from transformers import Qwen2Config
 
 from vllm.attention import AttentionMetadata
-from vllm.config import CacheConfig, LoRAConfig
+from vllm.config import CacheConfig, LoRAConfig, PoolerConfig
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.pooler import Pooler, PoolingType
@@ -64,6 +64,7 @@ class Qwen2ForRewardModel(nn.Module, SupportsPP):
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
+        pooler_config: Optional[PoolerConfig] = None,
     ) -> None:
         # TODO (@robertgshaw2): see if this can be moved out
         if (cache_config.sliding_window is not None
@@ -93,8 +94,14 @@ class Qwen2ForRewardModel(nn.Module, SupportsPP):
             RowParallelLinear(config.hidden_size, 1,
                               quant_config=quant_config),
         )
-        self._pooler = Pooler(pooling_type=PoolingType.ALL, normalize=False)
-
+        self._pooler = Pooler(
+            pooling_type=PoolingType[pooler_config.pooling_type]
+            if pooler_config.pooling_type is not None else PoolingType.ALL,
+            normalize=pooler_config.pooling_norm or False,
+            softmax=pooler_config.pooling_softmax or False,
+            step_tag_id=pooler_config.pooling_step_tag_id,
+            returned_token_ids=pooler_config.pooling_returned_token_ids,
+        )
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 

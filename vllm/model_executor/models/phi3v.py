@@ -26,7 +26,8 @@ from PIL import Image
 from transformers import CLIPVisionConfig, PretrainedConfig
 
 from vllm.attention import AttentionMetadata
-from vllm.config import CacheConfig, ModelConfig, MultiModalConfig
+from vllm.config import (CacheConfig, ModelConfig, MultiModalConfig,
+                         PoolerConfig)
 from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, InputContext,
                          token_inputs)
 from vllm.logger import init_logger
@@ -530,7 +531,8 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                  config: PretrainedConfig,
                  multimodal_config: MultiModalConfig,
                  cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None) -> None:
+                 quant_config: Optional[QuantizationConfig] = None,
+                 pooler_config: Optional[PoolerConfig] = None) -> None:
         super().__init__()
 
         self.config = config
@@ -556,8 +558,14 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
         # The same model class supports both language generation and embedding
         # because the architecture name is the same
-        self._pooler = Pooler(pooling_type=PoolingType.LAST, normalize=True)
-
+        self._pooler = Pooler(
+            pooling_type=PoolingType[pooler_config.pooling_type]
+            if pooler_config.pooling_type is not None else PoolingType.LAST,
+            normalize=pooler_config.pooling_norm or True,
+            softmax=pooler_config.pooling_softmax or False,
+            step_tag_id=pooler_config.pooling_step_tag_id,
+            returned_token_ids=pooler_config.pooling_returned_token_ids,
+        )
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
 

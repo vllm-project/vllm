@@ -11,7 +11,7 @@ from transformers.models.llava_next.modeling_llava_next import (
 from typing_extensions import NotRequired
 
 from vllm.attention import AttentionMetadata
-from vllm.config import CacheConfig, MultiModalConfig
+from vllm.config import CacheConfig, MultiModalConfig, PoolerConfig
 from vllm.inputs import INPUT_REGISTRY, DecoderOnlyInputs, InputContext
 from vllm.model_executor.layers.pooler import Pooler, PoolingType
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -285,7 +285,8 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
                  config: LlavaNextConfig,
                  multimodal_config: MultiModalConfig,
                  cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None) -> None:
+                 quant_config: Optional[QuantizationConfig] = None,
+                 pooler_config: Optional[PoolerConfig] = None) -> None:
         super().__init__()
 
         self.config = config
@@ -312,8 +313,14 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         # The same model class supports both language generation and embedding
         # because the architecture name is the same
-        self._pooler = Pooler(pooling_type=PoolingType.LAST, normalize=True)
-
+        self._pooler = Pooler(
+            pooling_type=PoolingType[pooler_config.pooling_type]
+            if pooler_config.pooling_type is not None else PoolingType.LAST,
+            normalize=pooler_config.pooling_norm or True,
+            softmax=pooler_config.pooling_softmax or False,
+            step_tag_id=pooler_config.pooling_step_tag_id,
+            returned_token_ids=pooler_config.pooling_returned_token_ids,
+        )
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
 
