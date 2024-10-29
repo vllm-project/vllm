@@ -527,7 +527,6 @@ def make_backend(backend_name: str) -> AttentionBackend:
         from vllm.attention.backends.xformers import XFormersBackend
         return XFormersBackend()
     elif backend_name == STR_FLASH_ATTN_VAL:
-        #print('Hello')
         from vllm.attention.backends.flash_attn import FlashAttentionBackend
         return FlashAttentionBackend()
 
@@ -581,10 +580,6 @@ def _make_metadata_tensors(
                      dtype=seq_start_loc.dtype,
                      out=seq_start_loc[1:])
 
-    print('seq_start_loc ' + str(seq_start_loc))
-    print('seq_lens_tensor ' + str(seq_lens_tensor))
-    print('max_seq_len ' + str(max_seq_len))
-
     encoder_seq_start_loc = torch.zeros(encoder_seq_lens_tensor.shape[0] + 1,
                                         dtype=torch.int32,
                                         device=encoder_seq_lens_tensor.device)
@@ -592,8 +587,6 @@ def _make_metadata_tensors(
                  dim=0,
                  dtype=encoder_seq_start_loc.dtype,
                  out=encoder_seq_start_loc[1:])
-
-    #print('encoder_seq_start_loc ' + str(encoder_seq_start_loc))
 
     return (seq_lens_tensor, context_lens_tensor, max_context_len, max_seq_len,
             seq_start_loc, encoder_seq_lens_tensor, encoder_seq_start_loc,
@@ -839,7 +832,6 @@ def make_test_metadata(
     * AttentionMetadata structure
     '''
 
-    #print('Here for metadata!!!')
     # Decoder self-attention memory mapping
     # decoder_test_params is None signals encoder-only
     # scenario, so kv_mmap is None
@@ -884,8 +876,6 @@ def make_test_metadata(
         # * Extract *cross-attention* slot_mapping and block table
         #   (kv_mmap)
         cross_kv_mmap = cross_test_params.kv_mmap
-
-    #print('Here for metadata!!')
 
     if is_prompt:
         # Prefill-phase scenario

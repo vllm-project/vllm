@@ -170,14 +170,6 @@ def run_test(
         num_outputs_0_skip_tokens=hf_skip_tokens,
     )
 
-
-@pytest.fixture(autouse=True)
-def clear_cache():
-    """Clear the cached value of attention backend before each test."""
-    get_attn_backend.cache_clear()
-    yield
-
-
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["float", "bfloat16"])
 @pytest.mark.parametrize("max_tokens", [64])

@@ -622,8 +622,10 @@ def _run_encoder_attention_test(
     packed_qkv = encoder_test_params.packed_qkvo.packed_qkv
     assert packed_qkv is not None
     with set_forward_context(attn_metadata):
-        return attn.forward(packed_qkv.query.view(
-            -1, test_pt.num_heads * test_pt.head_size),
+        # TODO - Fix the shape of the query to be []
+        reshaped_query = packed_qkv.query.view(
+            -1, test_pt.num_heads * test_pt.head_size)
+        return attn.forward(reshaped_query,
                             packed_qkv.key,
                             packed_qkv.value,
                             torch.tensor([],
@@ -666,8 +668,11 @@ def _run_decoder_self_attention_test(
     packed_qkv = decoder_test_params.packed_qkvo.packed_qkv
     assert packed_qkv is not None
     with set_forward_context(attn_metadata):
-        return attn.forward(  #packed_qkv.query,
-            packed_qkv.query.view(-1, test_pt.num_heads * test_pt.head_size),
+        # The current test assumes that the input query is of the 
+        # shape 
+        reshaped_query = packed_qkv.query.view(
+            -1, test_pt.num_heads * test_pt.head_size) 
+        return attn.forward(reshaped_query,
             packed_qkv.key,
             packed_qkv.value,
             kv_cache,
@@ -727,9 +732,9 @@ def _run_encoder_decoder_cross_attention_test(
         key = (None if cross_pckd_qkv is None else cross_pckd_qkv.key)
         value = (None if cross_pckd_qkv is None else cross_pckd_qkv.value)
     with set_forward_context(attn_metadata):
-        return attn.forward(  #decoder_test_params.packed_qkvo.packed_qkv.query,
-            decoder_test_params.packed_qkvo.packed_qkv.query.view(
-                -1, test_pt.num_heads * test_pt.head_size),
+        reshaped_query = decoder_test_params.packed_qkvo.packed_qkv.query.view(
+            -1, test_pt.num_heads * test_pt.head_size)
+        return attn.forward(reshaped_query,
             key,
             value,
             kv_cache,

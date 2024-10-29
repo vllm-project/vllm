@@ -28,14 +28,6 @@ def vllm_to_hf_output(
 
     return output_ids, hf_output_str, out_logprobs
 
-
-@pytest.fixture(autouse=True)
-def clear_cache():
-    """Clear the cached value of attention backend before each test."""
-    get_attn_backend.cache_clear()
-    yield
-
-
 @pytest.mark.parametrize("model", ["facebook/bart-large-cnn"])
 @pytest.mark.parametrize("dtype", ["bfloat16", "float"])
 @pytest.mark.parametrize("max_tokens", [128])

@@ -813,7 +813,7 @@ def unified_flash_attention(
     window_size: Optional[List[int]] = None,
     alibi_slopes: Optional[torch.Tensor] = None,
     logits_soft_cap: Optional[float] = None,
-    attn_type_int_val: int = 0,
+    attn_type_int_val: int = AttentionType.DECODER.value,
 ) -> torch.Tensor:
 
     # Convert integer attn_type to enum
@@ -1002,5 +1002,6 @@ def _(
     window_size: Optional[List[int]] = None,
     alibi_slopes: Optional[torch.Tensor] = None,
     logits_soft_cap: Optional[float] = None,
+    attn_type_int_val: int = AttentionType.DECODER.value,
 ) -> torch.Tensor:
     return torch.empty_like(query)
