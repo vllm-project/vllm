@@ -78,7 +78,7 @@ def test_fused_rms_norm_quant(
     seed: int,
     device: str,
 ) -> None:
-    seed_everything(seed)
+    current_platform.seed_everything(seed)
     torch.set_default_device(device)
 
     weight = torch.empty(hidden_size, dtype=dtype).normal_(mean=1.0, std=0.1)
