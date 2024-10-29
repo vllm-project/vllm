@@ -191,6 +191,16 @@ class CustomAllreduce:
 
     def _get_ipc_meta(self, inp: torch.Tensor):
         data = inp.untyped_storage()._share_cuda_()
+        # https://github.com/pytorch/pytorch/pull/130890 changes
+        # the binary format of the ipc handle
+        if len(data[1]) > 64:
+            assert len(data[1]) == 66
+            # only support SHAREABLE_HANDLE_VERSION = 1
+            assert int(data[1][0]) == 1
+            # only support SHAREABLE_CUDA_MALLOC = 'c'
+            assert data[1][1] == b'c'
+            data[1] = data[1][2:]
+            # TODO: support expandable segment
         shard_data = (
             data[1],  # ipc handle to base ptr
             data[3],  # offset of base ptr
