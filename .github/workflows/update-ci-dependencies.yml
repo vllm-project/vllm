@@ -3,6 +3,9 @@ on:
   schedule: # Run every Monday at midnight
     - cron: '0 0 * * 1'
   workflow_dispatch:
+  pull_request:
+    branches:
+      - main
 jobs:
   update_ci_dependencies:
     runs-on: ubuntu-latest
