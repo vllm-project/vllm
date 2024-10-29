@@ -19,7 +19,7 @@ jobs:
       - name: Install pip-tools
         run: python -m pip install pip-tools
       - name: Update dependencies
-        run: python -m piptools compile --upgrade --output-file requirements.txt requirements.in
+        run: python -m piptools compile --upgrade --output-file requirements-test.txt requirements-test.in
       - name: Create PR
         uses: peter-evans/create-pull-request@v7
         with:
