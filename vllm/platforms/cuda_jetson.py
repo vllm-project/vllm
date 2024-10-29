@@ -6,12 +6,9 @@ Due to lack of NVML, we must initialize cuda context via torch
 to fetch device information.
 """
 
-import os
 from functools import lru_cache
 
 import torch
-
-from vllm.logger import init_logger
 
 from .interface import DeviceCapability, Platform, PlatformEnum
 
