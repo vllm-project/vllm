@@ -81,3 +81,6 @@ def test_simple_piecewise_compile():
     output = model(input_buffer[:2])
     assert global_counter == 2
     assert torch.allclose(output.cpu(), torch.tensor([3., 1.]))
+
+    # clean up to avoid side effects for other tests
+    del os.environ["VLLM_TORCH_COMPILE_CONFIG"]
