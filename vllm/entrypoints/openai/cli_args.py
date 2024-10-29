@@ -77,7 +77,7 @@ class PromptAdapterParserAction(argparse.Action):
 def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
     parser.add_argument("--host",
                         type=nullable_str,
-                        default=None,
+                        default="0.0.0.0",
                         help="host name")
     parser.add_argument("--port", type=int, default=8000, help="port number")
     parser.add_argument(
