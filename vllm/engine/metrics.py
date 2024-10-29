@@ -1,3 +1,4 @@
+import time
 from typing import TYPE_CHECKING
 from typing import Counter as CollectionsCounter
 from typing import Dict, List, Optional, Type, Union, cast
@@ -228,6 +229,10 @@ class _RayGaugeWrapper:
 
     def set(self, value: Union[int, float]):
         return self._gauge.set(value)
+
+    def set_to_current_time(self):
+        # ray metrics doesn't have set_to_current time, https://docs.ray.io/en/latest/_modules/ray/util/metrics.html
+        return self._gauge.set(time.time())
 
 
 class _RayCounterWrapper:
