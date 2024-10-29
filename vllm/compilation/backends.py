@@ -399,6 +399,9 @@ class PiecewiseBackend:
 
         entry = self.concrete_size_entries[runtime_shape]
 
+        if entry.runnable is None:
+            entry.runnable = self.compiled_graph_for_general_shape
+
         if entry.need_to_compile and not entry.compiled:
             entry.compiled = True
             # args are real arguments
@@ -409,8 +412,6 @@ class PiecewiseBackend:
                 entry.runnable = wrap_inductor(
                     self.graph, args,
                     self.compilation_configs.inductor_compile_config)
-            else:
-                entry.runnable = self.compiled_graph_for_general_shape
 
         if not entry.use_cudagraph:
             return entry.runnable(*args)
