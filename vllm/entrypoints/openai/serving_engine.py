@@ -2,10 +2,11 @@ import json
 import pathlib
 from dataclasses import dataclass
 from http import HTTPStatus
-from typing import (Any, Callable, Dict, Iterable, Iterator, List, Optional,
-                    Sequence, Tuple, TypedDict, Union)
+from typing import (Any, Callable, Dict, Iterable, Iterator, List, Mapping,
+                    Optional, Sequence, Tuple, TypedDict, Union)
 
 from pydantic import Field
+from starlette.datastructures import Headers
 from typing_extensions import Annotated
 
 from vllm.config import ModelConfig
@@ -40,6 +41,8 @@ from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.sequence import Logprob
+from vllm.tracing import (contains_trace_headers, extract_trace_headers,
+                          log_tracing_disabled_warning)
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
 from vllm.utils import AtomicCounter, is_list_of
 
@@ -521,6 +524,20 @@ class OpenAIServing:
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
         )
+
+    async def _get_trace_headers(
+        self,
+        headers: Headers,
+    ) -> Optional[Mapping[str, str]]:
+        is_tracing_enabled = await self.engine_client.is_tracing_enabled()
+
+        if is_tracing_enabled:
+            return extract_trace_headers(headers)
+
+        if contains_trace_headers(headers):
+            log_tracing_disabled_warning()
+
+        return None
 
     @staticmethod
     def _get_decoded_token(logprob: Logprob,

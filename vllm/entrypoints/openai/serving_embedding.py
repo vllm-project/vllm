@@ -150,6 +150,10 @@ class OpenAIServingEmbedding(OpenAIServing):
 
             tokenizer = await self.engine_client.get_tokenizer(lora_request)
 
+            if prompt_adapter_request is not None:
+                raise NotImplementedError("Prompt adapter is not supported "
+                                          "for embedding models")
+
             if isinstance(request, EmbeddingChatRequest):
                 (
                     conversation,
@@ -191,16 +195,15 @@ class OpenAIServingEmbedding(OpenAIServing):
                                  lora_request=lora_request,
                                  prompt_adapter_request=prompt_adapter_request)
 
-                if prompt_adapter_request is not None:
-                    raise NotImplementedError(
-                        "Prompt adapter is not supported "
-                        "for embedding models")
+                trace_headers = (None if raw_request is None else await
+                                 self._get_trace_headers(raw_request.headers))
 
                 generator = self.engine_client.encode(
                     engine_prompt,
                     pooling_params,
                     request_id_item,
                     lora_request=lora_request,
+                    trace_headers=trace_headers,
                     priority=request.priority,
                 )
 

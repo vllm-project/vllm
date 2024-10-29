@@ -29,8 +29,6 @@ from vllm.logger import init_logger
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.sequence import Logprob
-from vllm.tracing import (contains_trace_headers, extract_trace_headers,
-                          log_tracing_disabled_warning)
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
 from vllm.utils import iterate_with_cancellation
 
@@ -183,14 +181,8 @@ class OpenAIServingChat(OpenAIServing):
                                  lora_request=lora_request,
                                  prompt_adapter_request=prompt_adapter_request)
 
-                is_tracing_enabled = (await
-                                      self.engine_client.is_tracing_enabled())
-                trace_headers = None
-                if is_tracing_enabled and raw_request:
-                    trace_headers = extract_trace_headers(raw_request.headers)
-                if (not is_tracing_enabled and raw_request
-                        and contains_trace_headers(raw_request.headers)):
-                    log_tracing_disabled_warning()
+                trace_headers = (None if raw_request is None else await
+                                 self._get_trace_headers(raw_request.headers))
 
                 if isinstance(sampling_params, BeamSearchParams):
                     generator = self.engine_client.beam_search(
