@@ -10,8 +10,10 @@ import torch
 from torch import nn
 
 from vllm.compilation.compile_context import set_compile_context
+from vllm.compilation.config import CompilationConfig
 from vllm.compilation.decorators import support_torch_compile
 from vllm.compilation.levels import CompilationLevel
+from vllm.plugins import set_compilation_config
 
 
 @torch.library.custom_op("silly::attention", mutates_args=["out"])
@@ -155,11 +157,6 @@ class LlamaModel(nn.Module):
         return hidden_states
 
 
-directory = os.path.dirname(__file__)
-config = os.path.join(directory, "compilation_config.json")
-piecewise_config = os.path.join(directory, "piecewise_compilation_config.json")
-
-
 @torch.inference_mode
 def run_model(use_compile: bool, split_attn: bool = False) -> torch.Tensor:
 
@@ -168,12 +165,17 @@ def run_model(use_compile: bool, split_attn: bool = False) -> torch.Tensor:
             CompilationLevel.PIECEWISE)
 
         if split_attn:
-            os.environ["VLLM_TORCH_COMPILE_CONFIG"] = piecewise_config
+            set_compilation_config(
+                CompilationConfig(
+                    use_cudagraph=True,
+                    non_cudagraph_ops=["silly.attention"],
+                ))
         else:
-            os.environ["VLLM_TORCH_COMPILE_CONFIG"] = config
+            set_compilation_config(CompilationConfig(use_cudagraph=True, ))
     else:
         os.environ["VLLM_TORCH_COMPILE_LEVEL"] = str(
             CompilationLevel.NO_COMPILATION)
+        set_compilation_config(None)
 
     cls = LlamaModel
     if use_compile:
@@ -240,7 +242,13 @@ def benchmark():
 
     for piecewise in [False, True]:
         if piecewise:
-            os.environ["VLLM_TORCH_COMPILE_CONFIG"] = piecewise_config
+            set_compilation_config(
+                CompilationConfig(
+                    use_cudagraph=True,
+                    non_cudagraph_ops=["silly.attention"],
+                ))
+        else:
+            set_compilation_config(None)
 
         model = cls(llama_config).eval().cuda().to(torch.bfloat16)
 
