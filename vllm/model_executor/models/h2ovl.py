@@ -67,16 +67,18 @@ def calculate_num_blocks(
 
 
 # adapted from https://huggingface.co/OpenGVLab/InternVL2-1B
+# refactored to handle prior_aspect_ratio as optional
 def dynamic_preprocess(
     image: Image.Image,
     min_num: int,
     max_num: int,
     image_size: int,
     use_thumbnail: bool,
+    prior_aspect_ratio: Optional[Tuple[int, int]] = None,
 ) -> Tuple[List[Image.Image], Tuple[int, int]]:
     orig_width, orig_height = image.size
 
-    # calculate the number of blocks without thumbnail
+    # calculate the number of blocks based on prior aspect ratio if available
     blocks, target_width, target_height, target_aspect_ratio = (
         calculate_num_blocks(
             orig_width,
@@ -85,6 +87,7 @@ def dynamic_preprocess(
             max_num,
             image_size,
             use_thumbnail=False,
+            prior_aspect_ratio=prior_aspect_ratio,
         ))
     # resize the image
     resized_img = image.resize((target_width, target_height))
@@ -106,84 +109,29 @@ def dynamic_preprocess(
     return processed_images, target_aspect_ratio
 
 
-# new dynamic_preprocess2 with prior_aspect_ratio
-def dynamic_preprocess2(
+def load_image(
     image: Image.Image,
-    min_num: int,
-    max_num: int,
-    image_size: int,
-    use_thumbnail: bool,
-    prior_aspect_ratio: Tuple[int, int],
-) -> List[Image.Image]:
-    orig_width, orig_height = image.size
-
-    # calculate the number of blocks based on prior aspect ratio
-    blocks, target_width, target_height, _ = calculate_num_blocks(
-        orig_width,
-        orig_height,
-        min_num,
-        max_num,
-        image_size,
-        use_thumbnail=False,
-        prior_aspect_ratio=prior_aspect_ratio,
-    )
-    # resize the image
-    resized_img = image.resize((target_width, target_height))
-    processed_images = []
-    for i in range(blocks):
-        box = (
-            (i % (target_width // image_size)) * image_size,
-            (i // (target_width // image_size)) * image_size,
-            ((i % (target_width // image_size)) + 1) * image_size,
-            ((i // (target_width // image_size)) + 1) * image_size,
-        )
-        # split the image
-        split_img = resized_img.crop(box)
-        processed_images.append(split_img)
-    assert len(processed_images) == blocks
-    if use_thumbnail and len(processed_images) != 1:
-        thumbnail_img = image.resize((image_size, image_size))
-        processed_images.append(thumbnail_img)
-    return processed_images
-
-
-def load_image1(image: Image.Image, input_size=448, min_num=1, max_num=6):
-    # image = Image.open(image_file).convert('RGB')
+    input_size=448,
+    min_num=1,
+    max_num=6,
+    use_thumbnail=True,
+    prior_aspect_ratio: Optional[Tuple[int, int]] = None,
+) -> Tuple[torch.Tensor, Tuple[int, int]]:
     transform = build_transform(input_size=input_size)
     images, target_aspect_ratio = dynamic_preprocess(
         image,
         image_size=input_size,
-        use_thumbnail=True,
+        use_thumbnail=use_thumbnail,
         min_num=min_num,
         max_num=max_num,
+        prior_aspect_ratio=prior_aspect_ratio,
     )
     pixel_values = [transform(image) for image in images]
     pixel_values = torch.stack(pixel_values)
     return pixel_values, target_aspect_ratio
 
 
-def load_image2(
-    image: Image.Image,
-    input_size=448,
-    min_num=1,
-    max_num=6,
-    target_aspect_ratio=None,
-):
-    # image = Image.open(image_file).convert('RGB')
-    transform = build_transform(input_size=input_size)
-    images = dynamic_preprocess2(
-        image,
-        image_size=input_size,
-        use_thumbnail=True,
-        min_num=min_num,
-        max_num=max_num,
-        prior_aspect_ratio=target_aspect_ratio,
-    )
-    pixel_values = [transform(image) for image in images]
-    pixel_values = torch.stack(pixel_values)
-    return pixel_values
-
-
+# refactored to use the combined load_image function
 def image_to_pixel_values(
     image: Image.Image,
     input_size: int,
@@ -194,31 +142,34 @@ def image_to_pixel_values(
 ) -> torch.Tensor:
     # when MSAC is turned on, we need to process the image twice
     if use_MSAC:
-        pixel_values, target_aspect_ratio = load_image1(image,
-                                                        input_size=input_size,
-                                                        min_num=min_num,
-                                                        max_num=max_num)
-        pixel_values2 = load_image2(
+        # first pass
+        pixel_values, target_aspect_ratio = load_image(
             image,
             input_size=input_size,
             min_num=min_num,
             max_num=max_num,
-            target_aspect_ratio=target_aspect_ratio,
+            use_thumbnail=True,
         )
+        # second pass
+        pixel_values2, _ = load_image(
+            image,
+            input_size=input_size,
+            min_num=min_num,
+            max_num=max_num,
+            prior_aspect_ratio=target_aspect_ratio,
+        )
+        # combine pixel values
         pixel_values = torch.cat(
             [pixel_values2[:-1], pixel_values[:-1], pixel_values2[-1:]], 0)
 
     else:
-        transform = build_transform(input_size=input_size)
-        images, _ = dynamic_preprocess(
+        pixel_values, _ = load_image(
             image,
+            input_size=input_size,
             min_num=min_num,
             max_num=max_num,
-            image_size=input_size,
             use_thumbnail=use_thumbnail,
         )
-        pixel_values = [transform(image) for image in images]
-        pixel_values = torch.stack(pixel_values)
 
     return pixel_values
 
@@ -263,6 +214,9 @@ def get_max_internvl_image_tokens(ctx: InputContext,
 
 
 class H2OVLInputPipeline(InternVLInputPipeline):
+    """
+    Input pipeline for processing image and text data for the H2OVL model.
+    """
 
     def __init__(self):
         super().__init__(IMG_START, IMG_END, IMG_CONTEXT)
@@ -274,6 +228,7 @@ class H2OVLInputPipeline(InternVLInputPipeline):
         *,
         max_dynamic_patch: Optional[int] = None,
     ) -> DecoderOnlyInputs:
+        # get multi_modal_data
         multi_modal_data = inputs.get("multi_modal_data")
         if multi_modal_data is None or "image" not in multi_modal_data:
             return inputs
@@ -284,25 +239,32 @@ class H2OVLInputPipeline(InternVLInputPipeline):
         image_data = multi_modal_data["image"]
         num_patches = get_internvl_num_patches(hf_config)
 
-        # can only get the total blocks num after the image fully processed
-        num_blocks_calculator = image_to_pixel_values_wrapper(
+        image_pixel_values_mapper = image_to_pixel_values_wrapper(
             hf_config, max_dynamic_patch=max_dynamic_patch)
 
+        # single image
         if isinstance(image_data, Image.Image):
-            num_blocks = num_blocks_calculator(image_data).shape[0]
+            pixel_values = image_pixel_values_mapper(image_data)
+            num_blocks = pixel_values.shape[0]
             image_feature_sizes = [num_blocks * num_patches]
+            pixel_values = pixel_values.unsqueeze(0)
 
+        # multi images
         elif is_list_of(image_data, Image.Image):
             # Do not use MSAC for multi images
             hf_config.use_msac = False
             image_feature_sizes = []
-            for image in image_data:
-                num_blocks = num_blocks_calculator(image).shape[0]
+            pixel_values = [
+                image_pixel_values_mapper(image) for image in image_data
+            ]
+            for pixel_value in pixel_values:
+                num_blocks = pixel_value.shape[0]
                 image_feature_sizes.append(num_blocks * num_patches)
 
         elif isinstance(image_data, torch.Tensor):
             num_images, image_feature_size, hidden_size = image_data.shape
             image_feature_sizes = [image_feature_size]
+            pixel_values = image_data
         else:
             raise TypeError(f"Invalid image type: {type(image_data)}")
 
@@ -320,6 +282,20 @@ class H2OVLInputPipeline(InternVLInputPipeline):
                                                num_patches)
         new_prompt_token_ids = tokenizer.encode(new_prompt)
 
+        # Wrap image processing in input_processor to avoid duplication
+        image_token_id = tokenizer.encode(
+            self.img_context_token,
+            add_special_tokens=False,
+            return_tensors="pt",
+        )[0]
+        # Prepare image_data dictionary
+        image_data = {
+            "pixel_values": pixel_values,
+            "image_token_id": image_token_id,
+        }
+        # Update multi_modal_data
+        multi_modal_data = {"image": image_data}
+
         return token_inputs(
             prompt=prompt,
             prompt_token_ids=new_prompt_token_ids,
@@ -332,18 +308,26 @@ class H2OVLInputPipeline(InternVLInputPipeline):
         data: object,
         *,
         max_dynamic_patch: Optional[int] = None,
-    ):
+    ) -> MultiModalInputs:
+
+        # NOTE: when preprocessing for the image data is done in the
+        # 'input_processor' function
+        if isinstance(data, dict):
+            return MultiModalInputs(data)
+
+        # these is only for dummy data
         hf_config = ctx.get_hf_config()
 
         image_pixel_values_mapper = image_to_pixel_values_wrapper(
             hf_config, max_dynamic_patch)
 
         if isinstance(data, Image.Image):
-            data = image_pixel_values_mapper(data)
-            data = data.unsqueeze(0)
+            pixel_values = image_pixel_values_mapper(data)
+            pixel_values = pixel_values.unsqueeze(0)
+
         elif is_list_of(data, Image.Image):
             hf_config.use_msac = False
-            data = [image_pixel_values_mapper(img) for img in data]
+            pixel_values = [image_pixel_values_mapper(img) for img in data]
 
         else:
             return MultiModalInputs({"image_embeds": data})
@@ -359,7 +343,7 @@ class H2OVLInputPipeline(InternVLInputPipeline):
         )[0]
 
         return MultiModalInputs({
-            "pixel_values": data,
+            "pixel_values": pixel_values,
             "image_token_id": image_token_id
         })
 
