@@ -5,8 +5,9 @@ from typing import List, Optional
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.platforms import current_platform
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, FlexibleArgumentParser,
-                        create_kv_caches_with_random, is_hip, seed_everything)
+                        create_kv_caches_with_random)
 
 NUM_BLOCKS = 1024 * 1024
 PARTITION_SIZE = 512
@@ -28,7 +29,7 @@ def main(
     device: str = "cuda",
     kv_cache_dtype: Optional[str] = None,
 ) -> None:
-    seed_everything(seed)
+    current_platform.seed_everything(seed)
 
     scale = float(1.0 / (head_size**0.5))
     query = torch.empty(num_seqs,
@@ -77,7 +78,7 @@ def main(
     # Prepare for the paged attention kernel.
     output = torch.empty_like(query)
     if version == "v2":
-        if is_hip() and not args.custom_paged_attn:
+        if current_platform.is_rocm() and not args.custom_paged_attn:
             global PARTITION_SIZE
             PARTITION_SIZE = 1024
         num_partitions = ((max_seq_len + PARTITION_SIZE - 1) // PARTITION_SIZE)

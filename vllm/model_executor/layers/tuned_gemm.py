@@ -9,7 +9,8 @@ from rocsolidxgemm import rocb_create_extension, rocb_mm
 
 from vllm import _custom_ops as ops
 from vllm.envs import VLLM_USE_ROCM_SKINNY_GEMM
-from vllm.utils import is_hip
+from vllm.platforms import current_platform
+from vllm.utils import is_navi
 
 
 class TunedGemm:
@@ -28,8 +29,8 @@ class TunedGemm:
         self.cu_count = torch.cuda.get_device_properties(
             device='cuda').multi_processor_count
 
-        self.use_skinny = is_hip() and VLLM_USE_ROCM_SKINNY_GEMM and \
-            "gfx1" not in torch.cuda.get_device_properties('cuda').gcnArchName
+        self.use_skinny = (current_platform.is_rocm()
+                           and VLLM_USE_ROCM_SKINNY_GEMM and not is_navi())
 
         if (self.save_gemm == 1):
             self.tuned_df = pd.DataFrame(

@@ -21,11 +21,11 @@ from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalInputs,
                              MultiModalRegistry)
+from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (IntermediateTensors, PoolerOutput,
                            SequenceGroupMetadata)
-from vllm.utils import (STR_NOT_IMPL_ENC_DEC_BACKEND, is_hip,
-                        make_tensor_with_pad)
+from vllm.utils import STR_NOT_IMPL_ENC_DEC_BACKEND, make_tensor_with_pad
 from vllm.worker.model_runner import (GPUModelRunnerBase,
                                       ModelInputForGPUBuilder,
                                       ModelInputForGPUWithSamplingMetadata,
@@ -142,8 +142,8 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
             logger.info("EncoderDecoderModelRunner requires "
                         "XFormers or ROCM backend; overriding backend "
                         "auto-selection and forcing XFormers or ROCM.")
-            global_force_attn_backend(
-                _Backend.ROCM_FLASH if is_hip() else _Backend.XFORMERS)
+            global_force_attn_backend(_Backend.ROCM_FLASH if current_platform.
+                                      is_rocm() else _Backend.XFORMERS)
         elif is_forced_by_global:
             # Backend override enforced by global variable takes
             # precedence over vLLM backend environment variable.

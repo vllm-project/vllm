@@ -7,7 +7,8 @@ import torch
 
 from vllm.attention import (AttentionMetadata, AttentionMetadataBuilder,
                             AttentionState)
-from vllm.utils import async_tensor_h2d, is_hip, make_tensor_with_pad
+from vllm.platforms import current_platform
+from vllm.utils import async_tensor_h2d, make_tensor_with_pad
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner_base import ModelRunnerBase
@@ -326,7 +327,7 @@ class CommonAttentionState(AttentionState):
         if is_encoder_decoder_model:
             # The encoder decoder model works only with XFormers backend.
             # Assert the same.
-            if is_hip():
+            if current_platform.is_rocm():
                 assert (self.runner.attn_backend.get_name() == "ROCM_FLASH"), (
                     f"Expected attn_backend name to be 'ROCM_FLASH', but "
                     f" got '{self.runner.attn_backend.get_name()}'")
@@ -353,7 +354,7 @@ class CommonAttentionState(AttentionState):
         if is_encoder_decoder_model:
             # The encoder decoder model works only with XFormers backend.
             # Assert the same.
-            if is_hip():
+            if current_platform.is_rocm():
                 assert (self.runner.attn_backend.get_name() == "ROCM_FLASH"), (
                     f"Expected attn_backend name to be 'ROCM_FLASH', but "
                     f" got '{self.runner.attn_backend.get_name()}'")
@@ -380,7 +381,7 @@ class CommonAttentionState(AttentionState):
             # The encoder decoder model works only with XFormers backend.
             # Assert the same.
 
-            if is_hip():
+            if current_platform.is_rocm():
                 assert (self.runner.attn_backend.get_name() == "ROCM_FLASH"), (
                     f"Expected attn_backend name to be 'ROCM_FLASH', but "
                     f" got '{self.runner.attn_backend.get_name()}'")

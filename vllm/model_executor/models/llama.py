@@ -53,8 +53,9 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, kv_cache_scales_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors, PoolerOutput
-from vllm.utils import is_hip, is_navi4x
+from vllm.utils import is_navi
 
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (AutoWeightsLoader, PPMissingLayer, is_pp_missing_parameter,
@@ -87,15 +88,16 @@ class LlamaMLP(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.down_proj",
         )
-        self.use_fp8 = isinstance(quant_config, Fp8Config) \
-                       if is_hip() and not is_navi4x() else False
+        self.use_fp8 = (isinstance(quant_config, Fp8Config)
+                        if current_platform.is_rocm() and not is_navi() else
+                        False)
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
                              "Only silu is supported for now.")
         self.act_fn = SiluAndMul()
 
     def forward(self, x):
-        if is_hip() and x.shape[0] == 1 and x.shape[1] == 1:
+        if current_platform.is_rocm() and x.shape[0] == 1 and x.shape[1] == 1:
             out = torch.empty(x.shape[0],
                               self.gate_up_proj.weight.shape[0] // 2,
                               dtype=x.dtype,
@@ -192,8 +194,8 @@ class LlamaAttention(nn.Module):
         )
         # For CUDA devices and Navi4x, attn_fp8_out will be set to false.
         self.attn_fp8_out = envs.VLLM_USE_ROCM_CUSTOM_PAGED_ATTN_FP8_OUT \
-                            and is_hip() \
-                            and not is_navi4x() \
+                            and current_platform.is_rocm() \
+                            and not is_navi() \
                             and isinstance(quant_config, Fp8Config)
 
     def forward(
@@ -228,8 +230,9 @@ class LlamaDecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
-        self.use_fp8 = isinstance(quant_config, Fp8Config) \
-            if is_hip() and not is_navi4x() else False
+        self.use_fp8 = (isinstance(quant_config, Fp8Config)
+                        if current_platform.is_rocm() and not is_navi() else
+                        False)
         rope_theta = getattr(config, "rope_theta", 10000)
         rope_scaling = getattr(config, "rope_scaling", None)
         if rope_scaling is not None and getattr(
@@ -299,13 +302,7 @@ class LlamaDecoderLayer(nn.Module):
         return hidden_states, residual
 
 
-@support_torch_compile(
-    dynamic_arg_dims={
-        "input_ids": 0,
-        "positions": 0,
-        "inputs_embeds": 0,
-        "intermediate_tensors": 0,
-    })
+@support_torch_compile
 class LlamaModel(nn.Module):
 
     def __init__(
@@ -461,7 +458,7 @@ class LlamaModel(nn.Module):
                 layer_self_attn = self.layers[layer_idx].self_attn
 
             # Navi4x quantization should be treated as CUDA devices.
-            if is_hip() and not is_navi4x():
+            if current_platform.is_rocm() and not is_navi():
                 # The scaling factor convention we are assuming is
                 # quantized_value * scaling_factor ~= true_value
                 # which is consistent with the practice of setting

@@ -27,7 +27,7 @@ from vllm.model_executor.parameter import (ModelWeightParameter,
                                            PerTensorScaleParameter)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
-from vllm.utils import is_hip, is_navi4x, print_warning_once
+from vllm.utils import is_navi, print_warning_once
 
 ACTIVATION_SCHEMES = ["static", "dynamic"]
 
@@ -125,8 +125,10 @@ class Fp8LinearMethod(LinearMethodBase):
         self.use_marlin = (not current_platform.has_device_capability(89)
                            or envs.VLLM_TEST_FORCE_FP8_MARLIN)
         # Disable marlin for rocm
-        if is_hip():
+        if current_platform.is_rocm():
             self.use_marlin = False
+
+        self.default_scale = torch.finfo(torch.float32).min
 
     def create_weights(
         self,
@@ -170,7 +172,7 @@ class Fp8LinearMethod(LinearMethodBase):
                 len(output_partition_sizes), dtype=torch.float32),
                                             weight_loader=weight_loader)
 
-            scale[:] = torch.finfo(torch.float32).min
+            scale[:] = self.default_scale
             layer.register_parameter("weight_scale", scale)
 
             # INPUT ACTIVATION SCALE
@@ -179,7 +181,7 @@ class Fp8LinearMethod(LinearMethodBase):
                     len(output_partition_sizes), dtype=torch.float32),
                                                 weight_loader=weight_loader)
 
-                scale[:] = torch.finfo(torch.float32).min
+                scale[:] = self.default_scale
                 layer.register_parameter("input_scale", scale)
             else:
                 layer.register_parameter("input_scale", None)
@@ -208,9 +210,13 @@ class Fp8LinearMethod(LinearMethodBase):
         # If checkpoint is fp8, handle that there are N scales for N
         # shards in a fused module
         else:
+            layer.weight_scale.data[layer.weight_scale.data ==
+                                    self.default_scale] = 1
             layer.weight_scale = torch.nn.Parameter(layer.weight_scale.data,
                                                     requires_grad=False)
             if self.quant_config.activation_scheme == "static":
+                layer.input_scale.data[layer.input_scale.data ==
+                                       self.default_scale] = 1
                 layer.input_scale = torch.nn.Parameter(layer.input_scale.data,
                                                        requires_grad=False)
             # If using marlin (w8a16), kernel uses channelwise weights,
@@ -228,7 +234,7 @@ class Fp8LinearMethod(LinearMethodBase):
                 weight_scale = layer.weight_scale
 
                 # If rocm (except Navi4x), use float8_e4m3fnuz.
-                if is_hip() and not is_navi4x():
+                if current_platform.is_rocm() and not is_navi():
                     weight, weight_scale, input_scale = \
                         normalize_e4m3fn_to_e4m3fnuz(
                             weight=weight,
@@ -379,8 +385,8 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         # If checkpoint is fp16, quantize in place.
         if not self.quant_config.is_checkpoint_fp8_serialized:
             # If rocm (except Navi4x), use float8_e4m3fnuz as dtype
-            fp8_dtype = torch.float8_e4m3fnuz \
-                        if is_hip() and not is_navi4x() else torch.float8_e4m3fn
+            fp8_dtype = (torch.float8_e4m3fnuz if current_platform.is_rocm()
+                         and not is_navi() else torch.float8_e4m3fn)
             w13_weight = torch.empty_like(layer.w13_weight.data,
                                           dtype=fp8_dtype)
             w2_weight = torch.empty_like(layer.w2_weight.data, dtype=fp8_dtype)
@@ -429,7 +435,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                     layer.w2_input_scale.max(), requires_grad=False)
             # If rocm (except Navi4x, which uses e4m3fn),
             # normalize the weights and scales to e4m3fnuz
-            if is_hip() and not is_navi4x():
+            if current_platform.is_rocm() and not is_navi():
                 # Normalize the weights and scales
                 w13_weight, w13_weight_scale, w13_input_scale = \
                     normalize_e4m3fn_to_e4m3fnuz(

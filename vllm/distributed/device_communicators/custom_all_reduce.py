@@ -12,7 +12,7 @@ from vllm.distributed.device_communicators.custom_all_reduce_utils import (
 from vllm.distributed.parallel_state import in_the_same_node_as
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import cuda_device_count_stateless, is_hip
+from vllm.utils import cuda_device_count_stateless
 
 try:
     ops.meta_size()
@@ -49,7 +49,7 @@ class CustomAllreduce:
 
     # max_size: max supported allreduce size
     _MAX_CAR_SIZE = 8192 * 1024
-    if is_hip():
+    if current_platform.is_rocm():
         # crossover is at 16MB buffer size for ROCm
         _MAX_CAR_SIZE = 2 * 8192 * 1024
 
