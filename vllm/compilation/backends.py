@@ -262,7 +262,7 @@ class VllmBackend:
         # config is read now, because only here can
         # we get the sizes to capture for cudagraph
         # from compilation context
-        self.compilation_configs = CompilationConfig.select_config()
+        self.compilation_configs = CompilationConfig.select_and_init_config()
 
         self.split_gm, self.piecewise_graphs = split_graph(
             graph, self.compilation_configs.non_cudagraph_ops)
@@ -343,7 +343,6 @@ class PiecewiseBackend:
 
         self.compile_sizes: Set[int] = set(
             self.compilation_configs.compile_sizes)
-        assert self.compilation_configs.capture_sizes is not None
         self.capture_sizes: Set[int] = set(
             self.compilation_configs.capture_sizes)
 

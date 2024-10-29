@@ -20,7 +20,7 @@ class CompilationConfig(BaseModel):
             - False: cudagraph inside compilation is not used.
             - True: cudagraph inside compilation is used. It requires
                 that all input buffers have fixed addresses.
-        - capture_sizes: sizes to capture cudagraph.
+        - cudagraph_capture_sizes: sizes to capture cudagraph.
             - None: capture sizes are inferred from compilation context.
             - List[int]: capture sizes are specified.
         - cudagraph_num_of_warmups: number of warmup runs for cudagraph.
@@ -66,35 +66,13 @@ class CompilationConfig(BaseModel):
     use_cudagraph: bool = False
     non_cudagraph_ops: List[str] = Field(default_factory=list)
     cudagraph_num_of_warmups: int = 0
-    capture_sizes: Optional[List[int]] = None
+    cudagraph_capture_sizes: Optional[List[int]] = None
 
     # not configurable, computed after init
     compile_sizes: List[int] = PrivateAttr
+    capture_sizes: List[int] = PrivateAttr
 
     def model_post_init(self, __context: Any) -> None:
-        context = get_compile_context()
-        context = copy.deepcopy(context) if context is not None else []
-        sizes_to_specialize: List[int] = context
-        if self.capture_sizes is None:
-            self.capture_sizes = sizes_to_specialize
-        else:
-            logger.info(("cudagraph sizes specified by model runner"
-                         " %s is overridden by config %s"),
-                        sizes_to_specialize, self.capture_sizes)
-        if self.inductor_specialize_for_cudagraph_no_more_than is not None:
-            assert self.inductor_compile_sizes is None, (
-                "inductor_compile_sizes should be None when "
-                "inductor_specialize_for_cudagraph_no_more_than is not None")
-            self.compile_sizes = [
-                x for x in self.capture_sizes
-                if x <= self.inductor_specialize_for_cudagraph_no_more_than
-            ]
-        else:
-            assert self.inductor_compile_sizes is not None, (
-                "inductor_compile_sizes should not be None when "
-                "inductor_specialize_for_cudagraph_no_more_than is None")
-            self.compile_sizes = self.inductor_compile_sizes
-
         for k, v in self.inductor_passes.items():
             if not isinstance(v, str):
                 assert callable(v), (
@@ -118,8 +96,37 @@ class CompilationConfig(BaseModel):
                     self.inductor_compile_config["post_grad_custom_post_pass"],
                 )
 
+    def init_during_runtime(self):
+        """To complete the initialization of config,
+        we need to know the compile context, which is only available
+        during the first run of the model.
+        """
+        context = get_compile_context()
+        context = copy.deepcopy(context) if context is not None else []
+        sizes_to_specialize: List[int] = context
+        if self.cudagraph_capture_sizes is None:
+            self.capture_sizes = sizes_to_specialize
+        else:
+            self.capture_sizes = self.cudagraph_capture_sizes
+            logger.info(("cudagraph sizes specified by model runner"
+                         " %s is overridden by config %s"),
+                        sizes_to_specialize, self.cudagraph_capture_sizes)
+        if self.inductor_specialize_for_cudagraph_no_more_than is not None:
+            assert self.inductor_compile_sizes is None, (
+                "inductor_compile_sizes should be None when "
+                "inductor_specialize_for_cudagraph_no_more_than is not None")
+            self.compile_sizes = [
+                x for x in self.capture_sizes
+                if x <= self.inductor_specialize_for_cudagraph_no_more_than
+            ]
+        else:
+            assert self.inductor_compile_sizes is not None, (
+                "inductor_compile_sizes should not be None when "
+                "inductor_specialize_for_cudagraph_no_more_than is None")
+            self.compile_sizes = self.inductor_compile_sizes
+
     @staticmethod
-    def select_config() -> "CompilationConfig":
+    def select_and_init_config() -> "CompilationConfig":
         """The order of selecting config is:
         1. Use the config specified in environment variable.
         2. Use the config specified in plugins.
@@ -136,4 +143,5 @@ class CompilationConfig(BaseModel):
             config = predefined_config if predefined_config is not None else (
                 CompilationConfig())
 
+        config.init_during_runtime()
         return config
