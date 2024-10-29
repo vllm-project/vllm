@@ -23,7 +23,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 
 
 FROM base AS rocm_base
-ENV ROCM_VERSION=6.1.2
+ARG ROCM_VERSION=6.2.3
 
 RUN printf "[amdgpu]\n\
 name=amdgpu\n\
@@ -48,9 +48,11 @@ RUN microdnf -y install \
 
 RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=cache,target=/root/.cache/uv \
-    uv pip install -v --index-url "https://download.pytorch.org/whl/nightly/rocm6.1" \
-        torch==2.5.0.dev20240912+rocm6.1 \
-        torchvision==0.20.0.dev20240912+rocm6.1
+    export version="$(awk -F. '{print $1"."$2}' <<< $ROCM_VERSION)" && \
+    uv pip install --pre \
+        --index-url "https://download.pytorch.org/whl/nightly/rocm${version}" \
+        torch==2.6.0.dev20240918+rocm${version}\
+        torchvision==0.20.0.dev20240918+rocm${version}
 
 FROM rocm_base as rocm_devel
 
@@ -191,9 +193,10 @@ RUN --mount=type=bind,from=build_amdsmi,src=/install,target=/install/amdsmi/ \
     --mount=type=bind,from=build_vllm,src=/workspace/dist,target=/install/vllm/ \
     --mount=type=cache,target=/root/.cache/pip \
     --mount=type=cache,target=/root/.cache/uv \
+    export version="$(awk -F. '{print $1"."$2}' <<< $ROCM_VERSION)" && \
     uv pip install -v  \
         --index-strategy=unsafe-best-match \
-        --extra-index-url "https://download.pytorch.org/whl/nightly/rocm6.1" \
+        --extra-index-url "https://download.pytorch.org/whl/nightly/rocm${version}" \
         /install/amdsmi/*.whl\
         /install/flashattention/*.whl\
         /install/vllm/*.whl
