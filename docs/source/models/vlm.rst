@@ -258,7 +258,8 @@ Chat Embeddings API
 ^^^^^^^^^^^^^^^^^^^
 
 vLLM's Chat Embeddings API is a superset of OpenAI's `Embeddings API <https://platform.openai.com/docs/api-reference/embeddings>`_,
-where chat conversations can be passed instead of batched inputs. This enables multi-modal inputs to be passed to embedding models.
+where a list of ``messages`` can be passed instead of batched ``inputs``. The format of ``messages`` is the same as in Chat Completions API.
+This enables multi-modal inputs to be passed to embedding models.
 
 In this example, we will serve the ``TIGER-Lab/VLM2Vec-Full`` model.
 
@@ -281,7 +282,7 @@ Since this schema is not defined by OpenAI client, we have to post a request to 
     image_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
 
     response = requests.post(
-        server.url_for("v1/embeddings"),
+        "http://localhost:8000/v1/embeddings",
         json={
             "model": model_name,
             "messages": [{
