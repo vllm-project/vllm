@@ -10,15 +10,15 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          SpeculativeConfig)
 from vllm.logger import init_logger
 from vllm.v1.core.scheduler import Scheduler
-from vllm.v1.engine import (LLM_ENGINE_CORE_READY_STR, EngineCoreOutput,
-                            EngineCoreOutputs, EngineCoreRequest)
+from vllm.v1.engine import (LLM_ENGINE_CORE_READY_STR, 
+                            POLLING_TIMEOUT_MS,
+                            EngineCoreOutput,
+                            EngineCoreOutputs, 
+                            EngineCoreRequest)
 from vllm.v1.executor.gpu_executor import GPUExecutor
 from vllm.v1.request import Request
 
 logger = init_logger(__name__)
-
-POLLING_TIMEOUT_MS = 10000
-
 
 # TODO: better name? LLMEngineProc?
 class LLMEngineCore(multiprocessing.Process):
@@ -130,7 +130,7 @@ class LLMEngineCore(multiprocessing.Process):
             # Poll the input socket until there is work to do.
             if not self.scheduler.has_unfinished_requests():
                 while self.input_socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
-                    logger.debug("Waiting for new requests.")
+                    logger.debug("Waiting for new requests fom LLMEngine.")
 
             # Handle new input from the socket.
             self._handle_new_input()

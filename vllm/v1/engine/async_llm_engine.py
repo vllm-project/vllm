@@ -31,13 +31,16 @@ class _AsyncLLMEngine(LLMEngine):
         super().__init__(*args, **kwargs, use_async_sockets=True)
 
     async def wait_for_startup(self):
+
+        """Poll the ready socket until the LLMEngineCore is ready."""
         try:
             ready_socket = self.ctx.socket(zmq.constants.PULL)
             ready_socket.connect(self.readiness_ipc_path)
             while await ready_socket.poll(timeout=5000) == 0:
                 logger.debug("Waiting for LLMEngineCore to startup.")
+
                 if not self.engine_core.is_alive():
-                    raise RuntimeError("LLMEngineCore process failed to start")
+                    raise RuntimeError("LLMEngineCore process failed to start.")
 
             message = await ready_socket.recv_string()
             assert message == LLM_ENGINE_CORE_READY_STR
@@ -62,7 +65,7 @@ class _AsyncLLMEngine(LLMEngine):
             pass
 
         # AsyncStream generator
-        stream = AsyncStream(request_id, _abort),
+        stream = AsyncStream(request_id, _abort)
 
         # 1) Process raw inputs into the request.
         detokenizer_request, engine_core_request = self._process_inputs(
@@ -91,7 +94,7 @@ class _AsyncLLMEngine(LLMEngine):
         # NOTE: we could simplify the Detokenizer code by returning the full
         # List[RequestOutput] rather than pushing to the Queue at the expense
         # of doing another loop through List[RequestOutput] here.
-        self.detokenizer.step_async(engine_core_outputs)
+        self.detokenizer.step_streaming(engine_core_outputs)
 
 
 class AsyncLLMEngine(EngineClient):
@@ -101,6 +104,7 @@ class AsyncLLMEngine(EngineClient):
                  log_requests: bool = True,
                  start_engine_loop: bool = True,
                  **kwargs) -> None:
+
         self.log_requests = log_requests
         self.engine = _AsyncLLMEngine(*args, **kwargs)
         self.output_queues: Dict[str, asyncio.Queue] = {}
@@ -141,7 +145,9 @@ class AsyncLLMEngine(EngineClient):
         return engine
 
     async def wait_for_startup(self):
-        self.engine.wait_for_startup()
+        """Wait until the _AsyncLLMEngine is ready"""
+
+        await self.engine.wait_for_startup()
 
     async def add_request(
         self,
@@ -164,7 +170,7 @@ class AsyncLLMEngine(EngineClient):
 
         logger.debug("Added request %s.", request_id)
 
-        return stream
+        return stream.generator()
 
     async def generate(
         self,
@@ -186,7 +192,7 @@ class AsyncLLMEngine(EngineClient):
                 prompt_adapter_request=prompt_adapter_request,
                 priority=priority,
         ):
-            yield LLMEngine.validate_output(output, RequestOutput)
+            yield output
 
     async def run_engine_loop(self):
         # TODO: add weakref from current AsyncLLMEngine

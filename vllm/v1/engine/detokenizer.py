@@ -105,9 +105,9 @@ class DetokenizerRequestState:
 
 class Detokenizer:
 
-    def __init__(self, tokenizer_name: str, async_mode: bool = False):
+    def __init__(self, tokenizer_name: str, stream_mode: bool = False):
         self.tokenizer = get_tokenizer(tokenizer_name)
-        self.async_mode = async_mode
+        self.stream_mode = stream_mode
 
         # Request id -> DetokenizerRequestState
         self.request_states: Dict[str, DetokenizerRequestState] = {}
@@ -129,8 +129,8 @@ class Detokenizer:
         """Add new request to the Detokenizer."""
 
         assert (request.request_id not in self.request_states)
-        assert ((self.async_mode and stream is not None)
-                or (not self.async_mode and stream is None))
+        assert ((self.stream_mode and stream is not None)
+                or (not self.stream_mode and stream is None))
 
         request_state = DetokenizerRequestState.from_new_request(
             self.tokenizer, request, stream)
@@ -140,6 +140,8 @@ class Detokenizer:
             self, encore_core_outputs: List[EngineCoreOutput]
     ) -> List[RequestOutput]:
         """Update state and request the RequestOutputs to the LLMEngine."""
+
+        assert not self.stream_mode
 
         request_outputs: List[RequestOutput] = []
         for engine_core_output in encore_core_outputs:
@@ -165,8 +167,10 @@ class Detokenizer:
         # Return to EngineClient.
         return request_outputs
 
-    def step_async(self, encore_core_outputs: List[EngineCoreOutput]) -> None:
+    def step_streaming(self, encore_core_outputs: List[EngineCoreOutput]) -> None:
         """Update state and put the RequestOutput in the per request queues."""
+
+        assert self.stream_mode
 
         for engine_core_output in encore_core_outputs:
             request_id = engine_core_output.request_id

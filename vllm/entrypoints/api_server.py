@@ -80,6 +80,7 @@ async def generate(request: Request) -> Response:
     final_output = None
     try:
         async for request_output in results_generator:
+            print(f"{request_output=}")
             final_output = request_output
     except asyncio.CancelledError:
         return Response(status_code=499)

@@ -27,8 +27,11 @@ from vllm.transformers_utils.tokenizer_group import (
     BaseTokenizerGroup, init_tokenizer_from_configs)
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import get_open_zmq_ipc_path
-from vllm.v1.engine import (LLM_ENGINE_CORE_READY_STR, DetokenizerRequest,
-                            EngineCoreOutputs, EngineCoreRequest)
+from vllm.v1.engine import (LLM_ENGINE_CORE_READY_STR,
+                            POLLING_TIMEOUT_MS,
+                            DetokenizerRequest,
+                            EngineCoreOutputs,
+                            EngineCoreRequest)
 from vllm.v1.engine.detokenizer import Detokenizer
 from vllm.v1.engine.llm_engine_core import LLMEngineCore
 from vllm.v1.executor.gpu_executor import GPUExecutor
@@ -140,7 +143,8 @@ class LLMEngine:
             # Ping the tokenizer to ensure liveness if it runs in a
             # different process.
             self.tokenizer.ping()
-        self.detokenizer = Detokenizer(self.model_config.tokenizer)
+        self.detokenizer = Detokenizer(self.model_config.tokenizer,
+                                       stream_mode=use_async_sockets)
 
         self.generation_config_fields = _load_generation_config_dict(
             model_config)
@@ -236,7 +240,7 @@ class LLMEngine:
         try:
             ready_socket = self.ctx.socket(zmq.constants.PULL)
             ready_socket.connect(ipc_path)
-            while ready_socket.poll(timeout=5000) == 0:
+            while ready_socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
                 logger.debug("Waiting for LLMEngineCore to startup.")
                 if not self.engine_core.is_alive():
                     raise RuntimeError("LLMEngineCore process failed to start")

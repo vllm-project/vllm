@@ -9,6 +9,7 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 
 LLM_ENGINE_CORE_READY_STR = "READY"
+POLLING_TIMEOUT_MS = 5000
 
 
 @dataclass
