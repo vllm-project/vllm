@@ -85,7 +85,9 @@ def gemm_rs_ag_gemm(residual: torch.Tensor,
         split_1 = torch.ops.aten.split.Tensor(residual, slice_size)
         getitem_26 = split_1[0];  split_1 = None
     else:
-        getitem_26 = my_residual
+        #getitem_26 = my_residual
+        getitem_26 = residual
+        slice_size = residual.shape[0]
 
     if not should_slice(residual.shape):
         print("NAIVE")
@@ -118,7 +120,7 @@ def gemm_rs_ag_gemm(residual: torch.Tensor,
         getitem_34 = fused_all_gather_matmul[1]
         getitem_35 = getitem_34[0]
 
-        print(f"DONE CUSTOM {getitem_31.shape}")
+        print(f"DONE CUSTOM {getitem_35.shape}, {getitem_31.shape}, {slice_scatter_2.shape}")
         return getitem_35, getitem_31.clone(), slice_scatter_2   # check if clones are needed
 
 
@@ -132,10 +134,27 @@ def gemm_rs_ag_gemm_fake(residual: torch.Tensor,
                          gemm_2_weights: torch.Tensor,
                          first_layer: bool,
                          ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    # this is terrible
+    if True:
+        res_slices = slices(residual)
+        slice_size = res_slices[get_tensor_model_parallel_rank()].shape[0]  # can we always use rank 0?
+    else:
+        slice_size = 2048
+
+    if should_slice(residual.shape) and first_layer:
+        print(f"FIRST! rank={get_tensor_model_parallel_rank()}")
+        split_1 = torch.ops.aten.split.Tensor(residual, slice_size)
+        my_residual = split_1[0];  split_1 = None
+    else:
+        #residual = my_residual
+        slice_size = residual.shape[0]
+
+    # is this type correct? seems to be
     mm_res = torch.empty((gemm_1_activations.shape[0], gemm_2_weights.shape[0]), device=gemm_1_activations.device, dtype=gemm_1_activations.dtype)  #???
-    resid = torch.empty_like(residual)
-    my_resid = resid.clone()  # last one right? or needs to be split
-    return (mm_res, resid, my_resid)
+
+    print(f"DONE FAKE = {mm_res.shape}, {my_residual.shape}, {residual.shape}")
+
+    return (mm_res, my_residual, residual)
 
 
 # doesn't matter, only needed for signature
