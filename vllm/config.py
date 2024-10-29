@@ -1892,13 +1892,6 @@ class ObservabilityConfig:
                 "'otlp_traces_endpoint'. Ensure OpenTelemetry packages are "
                 f"installed. Original error:\n{otel_import_error_traceback}")
 
-        if ((self.collect_model_forward_time
-             or self.collect_model_execute_time)
-                and self.otlp_traces_endpoint is None):
-            raise ValueError(
-                "collect_model_forward_time or collect_model_execute_time "
-                "requires --otlp-traces-endpoint to be set.")
-
 
 @dataclass(frozen=True)
 class EngineConfig:
