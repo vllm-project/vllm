@@ -173,79 +173,129 @@ def wrap_inductor(graph, example_inputs, additional_inductor_config):
     return compile_fx(graph, example_inputs, config_patches=current_config)
 
 
-def vllm_backend(graph, example_inputs) -> Callable:
+@dataclasses.dataclass
+class SplitItem:
+    submod_name: str
+    is_splitting_graph: bool
+    graph: fx.GraphModule
 
-    # config is read when we first compile the graph
-    # (i.e. when this backend is first called)
-    compilation_configs = CompilationConfig.default_config()
 
-    non_cudagraph_ops = compilation_configs.non_cudagraph_ops
-
-    from torch._dynamo.utils import lazy_format_graph_code
-
-    # split graph by non_cudagraph_ops
+def split_graph(graph: fx.GraphModule,
+                ops: List[str]) -> Tuple[fx.GraphModule, List[SplitItem]]:
+    # split graph by ops
     subgraph_id = 0
     node_to_subgraph_id = {}
-    attention_graphs = []
+    split_op_graphs = []
     for node in graph.graph.nodes:
         if node.op in ("output", "placeholder"):
             continue
-        if node.op == 'call_function' and str(
-                node.target) in non_cudagraph_ops:
+        if node.op == 'call_function' and str(node.target) in ops:
             subgraph_id += 1
             node_to_subgraph_id[node] = subgraph_id
-            attention_graphs.append(subgraph_id)
+            split_op_graphs.append(subgraph_id)
             subgraph_id += 1
         else:
             node_to_subgraph_id[node] = subgraph_id
 
-    graph_pool = torch.cuda.graph_pool_handle()
-    final_graph: Callable = None  # type: ignore
+    # `keep_original_order` is important!
+    # otherwise pytorch might reorder the nodes and
+    # the semantics of the graph will change when we
+    # have mutations in the graph
+    split_gm = torch.fx.passes.split_module.split_module(
+        graph,
+        None,
+        lambda node: node_to_subgraph_id[node],
+        keep_original_order=True)
 
-    if subgraph_id != 0:
-        # `keep_original_order` is important!
-        # otherwise pytorch might reorder the nodes and
-        # the semantics of the graph will change when we
-        # have mutations in the graph
-        split_gm = torch.fx.passes.split_module.split_module(
-            graph,
-            None,
-            lambda node: node_to_subgraph_id[node],
-            keep_original_order=True)
+    outputs = []
 
-        logger.debug("%s", lazy_format_graph_code("stiching module", split_gm))
+    # sort the names to make sure the order is deterministic
+    names = [name for (name, module) in split_gm.named_modules()]
+    names.sort()
 
-        # sort the names to make sure the order is deterministic
-        names = [name for (name, module) in split_gm.named_modules()]
-        names.sort()
+    for name in names:
+        if "." in name or name == "":
+            # recursive child module or the root module
+            continue
 
-        is_first_graph = True
-        for name in names:
-            if "." in name or name == "":
-                # recursive child module or the root module
-                continue
+        module = getattr(split_gm, name)
 
-            module = getattr(split_gm, name)
+        graph_id = int(name.replace("submod_", ""))
+        outputs.append(SplitItem(name, graph_id in split_op_graphs, module))
 
-            graph_id = int(name.replace("submod_", ""))
-            if graph_id not in attention_graphs:
-                # cannot setattr to a module, so we need to set it to the dict
-                split_gm.__dict__[name] = piecewise_backend(
-                    module, compilation_configs, graph_pool, is_first_graph)
-                is_first_graph = False
+    return split_gm, outputs
 
-        final_graph = split_gm
 
-    else:
-        final_graph = piecewise_backend(graph,
-                                        compilation_configs,
-                                        graph_pool,
-                                        is_first_graph=True)
+class VllmBackend:
+    """The compilation backend for `torch.compile` with VLLM.
+    It is used for compilation level of `CompilationLevel.PIECEWISE`,
+    where we customize the compilation.
+    """
 
-    # trigger the first compilation
-    final_graph(*example_inputs)
+    compilation_configs: CompilationConfig
+    graph_pool: Any
+    _called: bool = False
+    # the graph we compiled
+    graph: fx.GraphModule
+    # the stiching graph module for all the piecewise graphs
+    split_gm: fx.GraphModule
+    piecewise_graphs: List[SplitItem]
+    returned_callable: Callable
 
-    return final_graph
+    def __init__(self, ):
+        # every instance of VllmBackend has its own graph pool
+        self.graph_pool = torch.cuda.graph_pool_handle()
+
+        # `torch.compile` is JIT compiled, so we don't need to
+        # do anything here
+
+    def __call__(self, graph: fx.GraphModule, example_inputs) -> Callable:
+
+        # we control the compilation process, each instance can only be
+        # called once
+        assert not self._called, "VllmBackend can only be called once"
+
+        self.graph = graph
+        # config is read now, because only here can
+        # we get the sizes to capture for cudagraph
+        # from compilation context
+        self.compilation_configs = CompilationConfig.default_config()
+
+        self.split_gm, self.piecewise_graphs = split_graph(
+            graph, self.compilation_configs.non_cudagraph_ops)
+
+        self.returned_callable: Callable = None  # type: ignore
+
+        if len(self.piecewise_graphs) == 0:
+            self.returned_callable = piecewise_backend(
+                graph,
+                self.compilation_configs,
+                self.graph_pool,
+                is_first_graph=True)
+        else:
+            from torch._dynamo.utils import lazy_format_graph_code
+            logger.debug(
+                "%s", lazy_format_graph_code("stiching module", self.split_gm))
+
+            is_first_graph = True
+
+            for item in self.piecewise_graphs:
+                if not item.is_splitting_graph:
+                    # cannot setattr to a module, so we need to set
+                    # the attribute in the __dict__
+                    self.split_gm.__dict__[
+                        item.submod_name] = piecewise_backend(
+                            item.graph, self.compilation_configs,
+                            self.graph_pool, is_first_graph)
+                    is_first_graph = False
+            self.returned_callable = self.split_gm
+
+        # trigger the first compilation
+        self.returned_callable(*example_inputs)
+
+        self._called = True
+
+        return self.returned_callable
 
 
 @dataclasses.dataclass
@@ -381,4 +431,4 @@ def select_default_backend(level: int) -> Union[str, Callable]:
         return backend_str
     assert level == CompilationLevel.PIECEWISE
 
-    return vllm_backend
+    return VllmBackend()
