@@ -321,6 +321,10 @@ class PiecewiseBackend:
                  compilation_configs: CompilationConfig,
                  graph_pool: Any,
                  is_first_graph: bool = False):
+        """
+        The backend for piecewise compilation.
+        It mainly handles the compilation and cudagraph capturing.
+        """
         self.graph = graph
         self.compilation_configs = compilation_configs
         self.graph_pool = graph_pool
@@ -334,7 +338,7 @@ class PiecewiseBackend:
         self.compile_finished = False
         self.first_run_finished = False
 
-        self.graph_for_symbolic_shape: Callable = None  # type: ignore
+        self.compiled_graph_for_general_shape: Callable = None  # type: ignore
 
         self.sym_shape_indices: List[int] = []
 
@@ -353,11 +357,11 @@ class PiecewiseBackend:
             if self.compilation_configs.use_inductor:
                 if self.is_first_graph:
                     logger.info("Compiling a graph for general shape")
-                self.graph_for_symbolic_shape = wrap_inductor(
+                self.compiled_graph_for_general_shape = wrap_inductor(
                     self.graph, args,
                     self.compilation_configs.inductor_compile_config)
             else:
-                self.graph_for_symbolic_shape = self.graph
+                self.compiled_graph_for_general_shape = self.graph
 
             for shape in self.compile_sizes.union(self.capture_sizes):
                 self.entries[shape] = ConcreteSizeEntry(
@@ -374,11 +378,11 @@ class PiecewiseBackend:
 
         if not self.first_run_finished:
             self.first_run_finished = True
-            return self.graph_for_symbolic_shape(*args)
+            return self.compiled_graph_for_general_shape(*args)
 
         runtime_shape = args[self.sym_shape_indices[0]]
         if runtime_shape not in self.entries:
-            return self.graph_for_symbolic_shape(*args)
+            return self.compiled_graph_for_general_shape(*args)
 
         entry = self.entries[runtime_shape]
 
@@ -392,7 +396,7 @@ class PiecewiseBackend:
                     self.graph, args,
                     self.compilation_configs.inductor_compile_config)
             else:
-                entry.runnable = self.graph_for_symbolic_shape
+                entry.runnable = self.compiled_graph_for_general_shape
 
         if not entry.use_cudagraph:
             return entry.runnable(*args)
