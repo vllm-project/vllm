@@ -2,10 +2,7 @@ from typing import List, Optional, Union
 
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.chat_utils import (apply_hf_chat_template,
-                                         apply_mistral_chat_template,
-                                         load_chat_template,
-                                         parse_chat_messages_futures)
+from vllm.entrypoints.chat_utils import load_chat_template
 from vllm.entrypoints.logger import RequestLogger
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -20,7 +17,6 @@ from vllm.entrypoints.openai.serving_engine import (BaseModelPath,
                                                     LoRAModulePath,
                                                     OpenAIServing)
 from vllm.logger import init_logger
-from vllm.transformers_utils.tokenizer import MistralTokenizer
 from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
