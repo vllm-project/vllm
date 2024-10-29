@@ -4,6 +4,7 @@ from typing import List, Optional
 import torch
 import torch.nn as nn
 
+from vllm.config import PoolerConfig
 from vllm.model_executor.pooling_metadata import (PoolingMetadata,
                                                   PoolingTensors)
 from vllm.sequence import EmbeddingSequenceGroupOutput, PoolerOutput
@@ -45,6 +46,26 @@ class Pooler(nn.Module):
         self.softmax = softmax
         self.step_tag_id = step_tag_id
         self.returned_token_ids = returned_token_ids
+
+    @classmethod
+    def from_config_with_defaults(
+        cls,
+        pooler_config: PoolerConfig,
+        pooling_type: Optional[PoolingType] = None,
+        normalize: Optional[bool] = None,
+        softmax: Optional[bool] = None,
+        step_tag_id: Optional[int] = None,
+        returned_token_ids: Optional[List[int]] = None,
+    ) -> "Pooler":
+        return cls(
+            pooling_type=PoolingType[pooler_config.pooling_type]
+            if pooler_config.pooling_type is not None else pooling_type,
+            normalize=pooler_config.pooling_norm or normalize,
+            softmax=pooler_config.pooling_softmax or softmax,
+            step_tag_id=pooler_config.pooling_step_tag_id or step_tag_id,
+            returned_token_ids=pooler_config.pooling_returned_token_ids
+            or returned_token_ids,
+        )
 
     def forward(
         self,

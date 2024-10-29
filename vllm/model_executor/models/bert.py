@@ -391,14 +391,11 @@ class BertEmbeddingModel(nn.Module):
     ) -> None:
         super().__init__()
         self.model = BertModel(config, cache_config, quant_config)
-        self._pooler = Pooler(
-            pooling_type=PoolingType[pooler_config.pooling_type]
-            if pooler_config.pooling_type is not None else PoolingType.CLS,
-            normalize=pooler_config.pooling_norm or True,
-            softmax=pooler_config.pooling_softmax or False,
-            step_tag_id=pooler_config.pooling_step_tag_id,
-            returned_token_ids=pooler_config.pooling_returned_token_ids,
-        )
+        self._pooler = Pooler.from_config_with_defaults(
+            pooler_config,
+            pooling_type=PoolingType.CLS,
+            normalize=True,
+            softmax=False)
 
     def forward(
         self,

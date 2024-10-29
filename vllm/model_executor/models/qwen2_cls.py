@@ -78,14 +78,11 @@ class Qwen2ForSequenceClassification(nn.Module):
         self.score = RowParallelLinear(config.hidden_size,
                                        config.num_labels,
                                        quant_config=quant_config)
-        self._pooler = Pooler(
-            pooling_type=PoolingType[pooler_config.pooling_type]
-            if pooler_config.pooling_type is not None else PoolingType.LAST,
-            normalize=pooler_config.pooling_norm or False,
-            softmax=pooler_config.pooling_softmax or True,
-            step_tag_id=pooler_config.pooling_step_tag_id,
-            returned_token_ids=pooler_config.pooling_returned_token_ids,
-        )
+        self._pooler = Pooler.from_config_with_defaults(
+            pooler_config,
+            pooling_type=PoolingType.LAST,
+            normalize=False,
+            softmax=True)
 
     def forward(
         self,

@@ -313,14 +313,11 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         # The same model class supports both language generation and embedding
         # because the architecture name is the same
-        self._pooler = Pooler(
-            pooling_type=PoolingType[pooler_config.pooling_type]
-            if pooler_config.pooling_type is not None else PoolingType.LAST,
-            normalize=pooler_config.pooling_norm or True,
-            softmax=pooler_config.pooling_softmax or False,
-            step_tag_id=pooler_config.pooling_step_tag_id,
-            returned_token_ids=pooler_config.pooling_returned_token_ids,
-        )
+        self._pooler = Pooler.from_config_with_defaults(
+            pooler_config,
+            pooling_type=PoolingType.LAST,
+            normalize=True,
+            softmax=False)
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
 
