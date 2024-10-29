@@ -33,9 +33,9 @@ class Pooler(nn.Module):
 
     def __init__(
         self,
-        pooling_type: Optional[PoolingType] = None,
-        normalize: Optional[bool] = None,
-        softmax: Optional[bool] = None,
+        pooling_type: PoolingType,
+        normalize: bool,
+        softmax: bool,
         step_tag_id: Optional[int] = None,
         returned_token_ids: Optional[List[int]] = None,
     ):
@@ -51,20 +51,24 @@ class Pooler(nn.Module):
     def from_config_with_defaults(
         cls,
         pooler_config: PoolerConfig,
-        pooling_type: Optional[PoolingType] = None,
-        normalize: Optional[bool] = None,
-        softmax: Optional[bool] = None,
+        pooling_type: PoolingType,
+        normalize: bool,
+        softmax: bool,
         step_tag_id: Optional[int] = None,
         returned_token_ids: Optional[List[int]] = None,
     ) -> "Pooler":
         return cls(
             pooling_type=PoolingType[pooler_config.pooling_type]
             if pooler_config.pooling_type is not None else pooling_type,
-            normalize=pooler_config.pooling_norm or normalize,
-            softmax=pooler_config.pooling_softmax or softmax,
-            step_tag_id=pooler_config.pooling_step_tag_id or step_tag_id,
+            normalize=pooler_config.pooling_norm
+            if pooler_config.pooling_norm is not None else normalize,
+            softmax=pooler_config.pooling_softmax
+            if pooler_config.pooling_softmax is not None else softmax,
+            step_tag_id=pooler_config.pooling_step_tag_id
+            if pooler_config.pooling_step_tag_id is not None else step_tag_id,
             returned_token_ids=pooler_config.pooling_returned_token_ids
-            or returned_token_ids,
+            if pooler_config.pooling_returned_token_ids is not None else
+            returned_token_ids,
         )
 
     def forward(
