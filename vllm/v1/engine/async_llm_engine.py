@@ -3,7 +3,10 @@ import zmq
 import zmq.asyncio
 from typing import (AsyncGenerator, Dict, Optional, Mapping, Union)
 
+from vllm.config import EngineConfig
 from vllm.engine.protocol import EngineClient
+from vllm.engine.metrics_types import StatLoggerBase
+from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.inputs import PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -11,6 +14,8 @@ from vllm.outputs import EmbeddingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
+from vllm.usage.usage_lib import UsageContext
+
 from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.engine.async_stream import AsyncStream
 
@@ -18,9 +23,11 @@ logger = init_logger(__name__)
 
 POLL_TIMEOUT_MS = 5000
 
+
 class _AsyncLLMEngine(LLMEngine):
-    def __init__(*args, **kwargs):
-        super().__init__(*args, 
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args,
                          **kwargs,
                          use_async_sockets=True)
 
@@ -74,17 +81,51 @@ class _AsyncLLMEngine(LLMEngine):
 
 class AsyncLLMEngine(EngineClient):
 
-    def __init__(
-        self,
-        *args,
-        log_requests: bool = True,
-        start_engine_loop: bool = True,
-        **kwargs
-    ) -> None:
+    def __init__(self,
+                 *args,
+                 log_requests: bool = True,
+                 start_engine_loop: bool = True,
+                 **kwargs) -> None:
         self.log_requests = log_requests
         self.engine = _AsyncLLMEngine(*args, **kwargs)
         self.output_queues: Dict[str, asyncio.Queue] = {}
+
+        assert start_engine_loop
+        self.background_loop = asyncio.create_task(self.run_engine_loop())
+
+        # TODO: add background loop sheilding
+        # TODO: add AsyncEngineDeadError
+
     
+    @classmethod
+    def from_engine_args(
+        cls,
+        engine_args: AsyncEngineArgs,
+        engine_config: Optional[EngineConfig] = None,
+        start_engine_loop: bool = True,
+        usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
+        stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
+    ) -> "AsyncLLMEngine":
+        """Creates an AsyncLLMEngine from the EngineArgs."""
+        
+        # Create the engine configs.
+        if engine_config is None:
+            engine_config = engine_args.create_engine_config()
+
+        executor_class = LLMEngine._get_executor_cls(engine_config)
+
+        # Create the async LLM engine.
+        engine = cls(
+            **engine_config.to_dict(),
+            executor_class=executor_class,
+            log_requests=not engine_args.disable_log_requests,
+            log_stats=not engine_args.disable_log_stats,
+            start_engine_loop=start_engine_loop,
+            usage_context=usage_context,
+            stat_loggers=stat_loggers,
+        )
+        return engine
+
     async def add_request(
         self,
         request_id: str,
@@ -131,9 +172,51 @@ class AsyncLLMEngine(EngineClient):
             yield LLMEngine.validate_output(output, RequestOutput)
 
     async def run_engine_loop(self):
-        # TODO: add weakref stuff in current AsyncLLMEngine
+        # TODO: add weakref from current AsyncLLMEngine
         # TODO: shutdown remote worker execution loop.
         # TODO: add PP
 
         while True:
             await self.engine.step_async()
+
+    async def abort(self):
+        pass
+
+    async def check_health(self):
+        pass
+
+    async def dead_error(self):
+        pass
+
+    async def do_log_stats(self):
+        pass
+    
+    async def encode(self):
+        pass
+    
+    async def errored(self):
+        pass
+    
+    async def get_decoding_config(self):
+        pass
+    
+    async def get_model_config(self):
+        pass
+    
+    async def get_tokenizer(self):
+        pass
+        
+    async def is_running(self):
+        pass
+    
+    async def is_stopped(self):
+        pass 
+    
+    async def is_tracing_enabled(self):
+        pass
+    
+    async def start_profile(self):
+        pass
+        
+    async def stop_profile(self):
+        pass
