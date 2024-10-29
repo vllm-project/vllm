@@ -402,6 +402,7 @@ class NeuronSpeculationCausalLM(nn.Module):
         self.model.compile(compiled_model_path)
         self.model.load(compiled_model_path)
 
+
 def _get_model_architecture(config: PretrainedConfig) -> str:
     architectures = getattr(config, "architectures", [])
     for arch in architectures:
@@ -438,7 +439,6 @@ def _get_default_neuron_config(model_config: ModelConfig,
     )
     return neuron_config
 
-
 def _get_default_neuron_speculation_config(model_config: ModelConfig,
                                            parallel_config: ParallelConfig,
                                            scheduler_config: SchedulerConfig,
@@ -457,7 +457,6 @@ def _get_default_neuron_speculation_config(model_config: ModelConfig,
         on_device_sampling_config= dict(top_k=1, do_sample=False,)
     )
     return neuron_config
-
 
 def _get_neuron_config_after_override(default_neuron_config,
                                       overridden_neuron_config):
