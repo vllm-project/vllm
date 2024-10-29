@@ -158,7 +158,7 @@ def build_model(model_class: Type[nn.Module],
                 multimodal_config: Optional[MultiModalConfig],
                 scheduler_config: Optional[SchedulerConfig],
                 prefix: Optional[str] = None,
-                pooler_config: Optional[PoolerConfig]) -> nn.Module:
+                pooler_config: Optional[PoolerConfig] = None) -> nn.Module:
     extra_kwargs = _get_model_initialization_kwargs(model_class, lora_config,
                                                     multimodal_config,
                                                     scheduler_config,
