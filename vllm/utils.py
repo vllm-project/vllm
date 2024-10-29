@@ -7,7 +7,6 @@ import gc
 import inspect
 import ipaddress
 import os
-import random
 import socket
 import subprocess
 import sys
@@ -314,10 +313,6 @@ class PyObjectCache:
         self._index = 0
 
 
-def is_hip() -> bool:
-    return torch.version.hip is not None
-
-
 @lru_cache(maxsize=None)
 def get_max_shared_memory_bytes(gpu: int = 0) -> int:
     """Returns the maximum shared memory per thread block in bytes."""
@@ -333,22 +328,6 @@ def get_max_shared_memory_bytes(gpu: int = 0) -> int:
 def get_cpu_memory() -> int:
     """Returns the total CPU memory of the node in bytes."""
     return psutil.virtual_memory().total
-
-
-def seed_everything(seed: int) -> None:
-    """
-    Set the seed of each random module.
-
-    Loosely based on: https://github.com/Lightning-AI/pytorch-lightning/blob/2.4.0/src/lightning/fabric/utilities/seed.py#L20
-    """
-    random.seed(seed)
-    np.random.seed(seed)
-
-    if current_platform.is_cuda_alike():
-        torch.cuda.manual_seed_all(seed)
-
-    if current_platform.is_xpu():
-        torch.xpu.manual_seed_all(seed)
 
 
 def random_uuid() -> str:
@@ -647,7 +626,7 @@ def create_kv_caches_with_random_flash(
     seed: int = 0,
     device: Optional[str] = "cuda",
 ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
-    seed_everything(seed)
+    current_platform.seed_everything(seed)
 
     torch_dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
     key_value_cache_shape = (num_blocks, 2, block_size, num_heads, head_size)
@@ -689,7 +668,7 @@ def create_kv_caches_with_random(
             f"Does not support key cache of type fp8 with head_size {head_size}"
         )
 
-    seed_everything(seed)
+    current_platform.seed_everything(seed)
 
     torch_dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
 
@@ -1098,7 +1077,7 @@ def _cuda_device_count_stateless(
 
     if not torch.cuda._is_compiled():
         return 0
-    if is_hip():
+    if current_platform.is_rocm():
         # ROCm uses amdsmi instead of nvml for stateless device count
         # This requires a sufficiently modern version of Torch 2.4.0
         raw_count = torch.cuda._device_count_amdsmi() if (hasattr(
@@ -1155,6 +1134,18 @@ def run_once(f: Callable[P, None]) -> Callable[P, None]:
     return wrapper
 
 
+class StoreBoolean(argparse.Action):
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        if values.lower() == "true":
+            setattr(namespace, self.dest, True)
+        elif values.lower() == "false":
+            setattr(namespace, self.dest, False)
+        else:
+            raise ValueError(f"Invalid boolean value: {values}. "
+                             "Expected 'true' or 'false'.")
+
+
 class FlexibleArgumentParser(argparse.ArgumentParser):
     """ArgumentParser that allows both underscore and dash in names."""
 
@@ -1163,7 +1154,7 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
             args = sys.argv[1:]
 
         if '--config' in args:
-            args = FlexibleArgumentParser._pull_args_from_config(args)
+            args = self._pull_args_from_config(args)
 
         # Convert underscores to dashes and vice versa in argument names
         processed_args = []
@@ -1181,8 +1172,7 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
 
         return super().parse_args(processed_args, namespace)
 
-    @staticmethod
-    def _pull_args_from_config(args: List[str]) -> List[str]:
+    def _pull_args_from_config(self, args: List[str]) -> List[str]:
         """Method to pull arguments specified in the config file
         into the command-line args variable.
 
@@ -1226,7 +1216,7 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
 
         file_path = args[index + 1]
 
-        config_args = FlexibleArgumentParser._load_config_file(file_path)
+        config_args = self._load_config_file(file_path)
 
         # 0th index is for {serve,chat,complete}
         # followed by model_tag (only for serve)
@@ -1247,8 +1237,7 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
 
         return args
 
-    @staticmethod
-    def _load_config_file(file_path: str) -> List[str]:
+    def _load_config_file(self, file_path: str) -> List[str]:
         """Loads a yaml file and returns the key value pairs as a
         flattened list with argparse like pattern
         ```yaml
@@ -1282,9 +1271,18 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
                 Make sure path is correct", file_path)
             raise ex
 
+        store_boolean_arguments = [
+            action.dest for action in self._actions
+            if isinstance(action, StoreBoolean)
+        ]
+
         for key, value in config.items():
-            processed_args.append('--' + key)
-            processed_args.append(str(value))
+            if isinstance(value, bool) and key not in store_boolean_arguments:
+                if value:
+                    processed_args.append('--' + key)
+            else:
+                processed_args.append('--' + key)
+                processed_args.append(str(value))
 
         return processed_args
 
