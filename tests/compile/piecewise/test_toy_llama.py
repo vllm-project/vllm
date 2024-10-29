@@ -220,7 +220,7 @@ def test_toy_llama():
             num_inductor_compilations=0,
             num_cudagraph_caputured=0,
     ):
-        outputs.append(run_model(use_compile=False))
+        outputs.append(run_model(llama_config, use_compile=False))
     with compilation_counter.expect(
             num_graphs_seen=1,  # one graph for the model
             num_piecewise_graphs_seen=1,
@@ -229,7 +229,7 @@ def test_toy_llama():
             num_cudagraph_caputured=
             2,  # num_cudagraph_sizes * num_piecewise_capturable_graphs_seen
     ):
-        outputs.append(run_model(use_compile=True))
+        outputs.append(run_model(llama_config, use_compile=True))
 
     with compilation_counter.expect(
             num_graphs_seen=1,  # one graph for the model
@@ -242,7 +242,8 @@ def test_toy_llama():
         (1 + llama_config.num_layers
          ),  # num_cudagraph_sizes * num_piecewise_capturable_graphs_seen
     ):
-        outputs.append(run_model(use_compile=True, split_attn=True))
+        outputs.append(
+            run_model(llama_config, use_compile=True, split_attn=True))
 
     for i in range(1, len(outputs)):
         assert torch.allclose(outputs[0], outputs[i])
