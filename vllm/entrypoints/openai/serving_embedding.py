@@ -212,7 +212,7 @@ class OpenAIServingEmbedding(OpenAIServing):
 
         # Non-streaming response
         final_res_batch: List[Optional[EmbeddingRequestOutput]]
-        final_res_batch = [None] * len(engine_prompt)
+        final_res_batch = [None] * len(request_prompts)
         try:
             async for i, res in result_generator:
                 final_res_batch[i] = res
