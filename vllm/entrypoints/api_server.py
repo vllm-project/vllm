@@ -14,10 +14,9 @@ from typing import Any, AsyncGenerator, Optional
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
-from vllm.envs import VLLM_USE_V1
 from vllm.engine.arg_utils import AsyncEngineArgs
-
 from vllm.entrypoints.launcher import serve_http
+from vllm.envs import VLLM_USE_V1
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
 from vllm.usage.usage_lib import UsageContext

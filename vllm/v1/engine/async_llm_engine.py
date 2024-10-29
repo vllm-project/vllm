@@ -1,12 +1,13 @@
 import asyncio
+from typing import AsyncGenerator, Dict, Mapping, Optional, Union
+
 import zmq
 import zmq.asyncio
-from typing import (AsyncGenerator, Dict, Optional, Mapping, Union)
 
 from vllm.config import EngineConfig
-from vllm.engine.protocol import EngineClient
-from vllm.engine.metrics_types import StatLoggerBase
 from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.engine.metrics_types import StatLoggerBase
+from vllm.engine.protocol import EngineClient
 from vllm.inputs import PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -15,10 +16,9 @@ from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.usage.usage_lib import UsageContext
-
-from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.engine import LLM_ENGINE_CORE_READY_STR
 from vllm.v1.engine.async_stream import AsyncStream
+from vllm.v1.engine.llm_engine import LLMEngine
 
 logger = init_logger(__name__)
 
@@ -108,7 +108,7 @@ class AsyncLLMEngine(EngineClient):
         assert start_engine_loop
         self.background_loop = asyncio.create_task(self.run_engine_loop())
 
-        # TODO: add background loop sheilding
+        # TODO: add background loop shielding
         # TODO: add AsyncEngineDeadError
 
     @classmethod

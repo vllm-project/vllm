@@ -5,8 +5,8 @@ from typing import List, Optional, Union
 import msgspec
 
 from vllm.lora.request import LoRARequest
-from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.outputs import RequestOutput
+from vllm.sampling_params import RequestOutputKind, SamplingParams
 
 LLM_ENGINE_CORE_READY_STR = "READY"
 
