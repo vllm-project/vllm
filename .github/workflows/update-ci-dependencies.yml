@@ -18,7 +18,7 @@ jobs:
       - name: Update dependencies
         run: python -m piptools compile --upgrade --output-file requirements.txt requirements.in
       - name: Create PR
-        uses: peter-evans/create-pull-request@v3
+        uses: peter-evans/create-pull-request@v7
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           commit-message: Update CI dependencies
