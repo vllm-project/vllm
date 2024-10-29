@@ -304,7 +304,7 @@ class VllmBackend:
 
             for item in self.piecewise_graphs:
                 compilation_counter.num_piecewise_graphs_seen += 1
-                compilation_counter.num_piecewise_capturable_graphs_seen += not item.is_splitting_graph # noqa
+                compilation_counter.num_piecewise_capturable_graphs_seen += not item.is_splitting_graph  # noqa
                 if not item.is_splitting_graph:
                     # cannot setattr to a module, so we need to set
                     # the attribute in the __dict__

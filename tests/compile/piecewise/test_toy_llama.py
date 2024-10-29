@@ -11,6 +11,7 @@ from torch import nn
 
 from vllm.compilation.compile_context import set_compile_context
 from vllm.compilation.config import CompilationConfig
+from vllm.compilation.counter import compilation_counter
 from vllm.compilation.decorators import support_torch_compile
 from vllm.compilation.levels import CompilationLevel
 from vllm.plugins import set_compilation_config
@@ -158,7 +159,9 @@ class LlamaModel(nn.Module):
 
 
 @torch.inference_mode
-def run_model(use_compile: bool, split_attn: bool = False) -> torch.Tensor:
+def run_model(llama_config,
+              use_compile: bool,
+              split_attn: bool = False) -> torch.Tensor:
 
     if use_compile:
         os.environ["VLLM_TORCH_COMPILE_LEVEL"] = str(
@@ -180,10 +183,6 @@ def run_model(use_compile: bool, split_attn: bool = False) -> torch.Tensor:
     cls = LlamaModel
     if use_compile:
         cls = support_torch_compile(LlamaModel)
-    llama_config = LlamaConfig(hidden_size=128,
-                               mlp_size=256,
-                               vocab_size=128,
-                               num_layers=2)
     model = cls(llama_config).eval().cuda()
 
     B = 16  # max batch size
@@ -208,10 +207,42 @@ def run_model(use_compile: bool, split_attn: bool = False) -> torch.Tensor:
 def test_toy_llama():
     # compare output with and without piecewise compilation
 
+    llama_config = LlamaConfig(hidden_size=128,
+                               mlp_size=256,
+                               vocab_size=128,
+                               num_layers=2)
+
     outputs = []
-    outputs.append(run_model(use_compile=False))
-    outputs.append(run_model(use_compile=True))
-    outputs.append(run_model(use_compile=True, split_attn=True))
+    with compilation_counter.expect(
+            num_graphs_seen=0,
+            num_piecewise_graphs_seen=0,
+            num_piecewise_capturable_graphs_seen=0,
+            num_inductor_compilations=0,
+            num_cudagraph_caputured=0,
+    ):
+        outputs.append(run_model(use_compile=False))
+    with compilation_counter.expect(
+            num_graphs_seen=1,  # one graph for the model
+            num_piecewise_graphs_seen=1,
+            num_piecewise_capturable_graphs_seen=1,
+            num_inductor_compilations=3,  # 1 + num_cudagraph_sizes
+            num_cudagraph_caputured=
+            2,  # num_cudagraph_sizes * num_piecewise_capturable_graphs_seen
+    ):
+        outputs.append(run_model(use_compile=True))
+
+    with compilation_counter.expect(
+            num_graphs_seen=1,  # one graph for the model
+            num_piecewise_graphs_seen=2 * llama_config.num_layers +
+            1,  # 2 * num_layers + 1
+            num_piecewise_capturable_graphs_seen=1 +
+            llama_config.num_layers,  # 1 + num_layers
+            num_inductor_compilations=3,  # 1 + num_cudagraph_sizes
+            num_cudagraph_caputured=2 *
+        (1 + llama_config.num_layers
+         ),  # num_cudagraph_sizes * num_piecewise_capturable_graphs_seen
+    ):
+        outputs.append(run_model(use_compile=True, split_attn=True))
 
     for i in range(1, len(outputs)):
         assert torch.allclose(outputs[0], outputs[i])

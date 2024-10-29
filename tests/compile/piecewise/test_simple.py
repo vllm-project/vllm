@@ -8,9 +8,9 @@ import torch
 from torch import nn
 
 from vllm.compilation.compile_context import set_compile_context
+from vllm.compilation.counter import compilation_counter
 from vllm.compilation.decorators import support_torch_compile
 from vllm.compilation.levels import CompilationLevel
-from vllm.compilation.counter import compilation_counter
 
 os.environ["VLLM_TORCH_COMPILE_LEVEL"] = str(CompilationLevel.PIECEWISE)
 
