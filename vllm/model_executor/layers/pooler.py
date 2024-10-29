@@ -56,7 +56,9 @@ class Pooler(nn.Module):
         softmax: bool,
         step_tag_id: Optional[int] = None,
         returned_token_ids: Optional[List[int]] = None,
-    ) -> "Pooler":
+    ) -> Optional["Pooler"]:
+        if pooler_config is None:
+            return None
         return cls(
             pooling_type=PoolingType[pooler_config.pooling_type]
             if pooler_config.pooling_type is not None else pooling_type,
