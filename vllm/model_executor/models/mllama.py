@@ -1396,6 +1396,15 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
+                from vllm.model_executor.model_loader.weight_utils import (
+                    maybe_remap_kv_scale_name)
+                orig_name = name
+                name = maybe_remap_kv_scale_name(name, params_dict)
+                if name is None:
+                    logger.debug("Missing name %s, orig name %s", name,
+                                 orig_name)
+                    continue
+
                 param = params_dict.pop(name)
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
