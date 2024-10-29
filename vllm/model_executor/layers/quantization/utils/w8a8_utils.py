@@ -110,11 +110,11 @@ def apply_fp8_linear(
 
         # Fused GEMM_DQ
         output = ops.cutlass_scaled_mm(qinput,
-                                     weight,
-                                     out_dtype=input.dtype,
-                                     scale_a=x_scale,
-                                     scale_b=weight_scale,
-                                     bias=bias)
+                                       weight,
+                                       out_dtype=input.dtype,
+                                       scale_a=x_scale,
+                                       scale_b=weight_scale,
+                                       bias=bias)
         return output.view(*output_shape)
 
     # torch.scaled_mm supports per tensor weights + activations only
@@ -145,7 +145,8 @@ def apply_fp8_linear(
             if type(output) is tuple and len(output) == 2:
                 output = output[0]
 
-            return torch.narrow(output, 0, 0, input_2d.shape[0]).view(*output_shape)
+            return torch.narrow(output, 0, 0,
+                                input_2d.shape[0]).view(*output_shape)
 
         else:
             # Fallback for channelwise case, where we use unfused DQ
