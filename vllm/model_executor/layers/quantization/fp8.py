@@ -126,6 +126,8 @@ class Fp8LinearMethod(LinearMethodBase):
         if current_platform.is_rocm():
             self.use_marlin = False
 
+        self.default_scale = torch.finfo(torch.float32).min
+
     def create_weights(
         self,
         layer: torch.nn.Module,
@@ -168,7 +170,7 @@ class Fp8LinearMethod(LinearMethodBase):
                 len(output_partition_sizes), dtype=torch.float32),
                                             weight_loader=weight_loader)
 
-            scale[:] = torch.finfo(torch.float32).min
+            scale[:] = self.default_scale
             layer.register_parameter("weight_scale", scale)
 
             # INPUT ACTIVATION SCALE
@@ -177,7 +179,7 @@ class Fp8LinearMethod(LinearMethodBase):
                     len(output_partition_sizes), dtype=torch.float32),
                                                 weight_loader=weight_loader)
 
-                scale[:] = torch.finfo(torch.float32).min
+                scale[:] = self.default_scale
                 layer.register_parameter("input_scale", scale)
             else:
                 layer.register_parameter("input_scale", None)
@@ -206,13 +208,13 @@ class Fp8LinearMethod(LinearMethodBase):
         # If checkpoint is fp8, handle that there are N scales for N
         # shards in a fused module
         else:
-            layer.weight_scale.data[layer.weight_scale.data == torch.finfo(
-                torch.float32).min] = 1
+            layer.weight_scale.data[layer.weight_scale.data ==
+                                    self.default_scale] = 1
             layer.weight_scale = torch.nn.Parameter(layer.weight_scale.data,
                                                     requires_grad=False)
             if self.quant_config.activation_scheme == "static":
-                layer.input_scale.data[layer.input_scale.data == torch.finfo(
-                    torch.float32).min] = 1
+                layer.input_scale.data[layer.input_scale.data ==
+                                       self.default_scale] = 1
                 layer.input_scale = torch.nn.Parameter(layer.input_scale.data,
                                                        requires_grad=False)
             # If using marlin (w8a16), kernel uses channelwise weights,

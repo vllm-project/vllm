@@ -115,10 +115,10 @@ def apply_fp8_linear(
     # torch.scaled_mm supports per tensor weights + activations only
     # so fallback to naive if per channel or per token
     else:
+        batched = input.dim() == 3
         # Note: we pad the input because torch._scaled_mm is more performant
         # for matrices with batch dimension > 16.
         # This could change in the future.
-        batched = input.dim() > 2
         inp_view = input.view(-1, input.shape[-1]) if batched else input
         qinput, x_scale = ops.scaled_fp8_quant(
             inp_view,
