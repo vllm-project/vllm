@@ -294,6 +294,8 @@ class VllmBackend:
 
         self.returned_callable = returned_callable
         # trigger the first compilation
+        # TODO: if we can get the example inputs for each subgraph,
+        # we don't need to call it here
         self.returned_callable(*example_inputs)
 
         self._called = True
@@ -324,6 +326,15 @@ class PiecewiseBackend:
         """
         The backend for piecewise compilation.
         It mainly handles the compilation and cudagraph capturing.
+
+        We will compile `self.graph` once for the general shape,
+        and then compile for different shapes specified in
+        `compilation_configs.compile_sizes`.
+
+        Independently, we will capture cudagraph for different shapes.
+
+        If a shape needs both compilation and cudagraph, we will
+        compile it first, and then capture cudagraph.
         """
         self.graph = graph
         self.compilation_configs = compilation_configs
@@ -344,7 +355,13 @@ class PiecewiseBackend:
 
         # the entries for different shapes that we need to either
         # compile or capture cudagraph
-        self.entries: Dict[int, ConcreteSizeEntry] = {}
+        self.concrete_size_entries: Dict[int, ConcreteSizeEntry] = {}
+        for shape in self.compile_sizes.union(self.capture_sizes):
+            self.concrete_size_entries[shape] = ConcreteSizeEntry(
+                runtime_shape=shape,
+                need_to_compile=shape in self.compile_sizes,
+                use_cudagraph=shape in self.capture_sizes,
+            )
 
     def __call__(self, *args) -> Any:
 
@@ -354,7 +371,12 @@ class PiecewiseBackend:
             # this is the first compilation, we will compile a graph with
             # dynamic shape, as the caller will mark first dimension as dynamic
 
+            self.sym_shape_indices = [
+                i for i, x in enumerate(args) if isinstance(x, torch.SymInt)
+            ]
+
             if self.compilation_configs.use_inductor:
+                # args here are example inputs (fake tensors)
                 if self.is_first_graph:
                     logger.info("Compiling a graph for general shape")
                 self.compiled_graph_for_general_shape = wrap_inductor(
@@ -363,17 +385,6 @@ class PiecewiseBackend:
             else:
                 self.compiled_graph_for_general_shape = self.graph
 
-            for shape in self.compile_sizes.union(self.capture_sizes):
-                self.entries[shape] = ConcreteSizeEntry(
-                    runtime_shape=shape,
-                    need_to_compile=shape in self.compile_sizes,
-                    use_cudagraph=shape in self.capture_sizes,
-                )
-
-            self.sym_shape_indices = [
-                i for i, x in enumerate(args) if isinstance(x, torch.SymInt)
-            ]
-
             return self.graph(*args)
 
         if not self.first_run_finished:
@@ -381,13 +392,15 @@ class PiecewiseBackend:
             return self.compiled_graph_for_general_shape(*args)
 
         runtime_shape = args[self.sym_shape_indices[0]]
-        if runtime_shape not in self.entries:
+        if runtime_shape not in self.concrete_size_entries:
+            # we don't need to do anything for this shape
             return self.compiled_graph_for_general_shape(*args)
 
-        entry = self.entries[runtime_shape]
+        entry = self.concrete_size_entries[runtime_shape]
 
         if entry.need_to_compile and not entry.compiled:
             entry.compiled = True
+            # args are real arguments
             if self.compilation_configs.use_inductor:
                 if self.is_first_graph:
                     logger.info("Compiling a graph for shape %s",
