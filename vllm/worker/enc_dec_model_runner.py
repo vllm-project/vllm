@@ -119,7 +119,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         assert_enc_dec_mr_supported_scenario(self)
 
     def _is_xformers_only_encoder_decoder_model(self, model: str) -> bool:
-        # The Llama 3.2 model implementation uses 
+        # The Llama 3.2 model implementation uses
         return "llama-3.2-11b-vision-instruct" in model.lower()
 
     def _maybe_force_supported_attention_backend(self, model: str):

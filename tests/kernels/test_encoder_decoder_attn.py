@@ -668,16 +668,16 @@ def _run_decoder_self_attention_test(
     packed_qkv = decoder_test_params.packed_qkvo.packed_qkv
     assert packed_qkv is not None
     with set_forward_context(attn_metadata):
-        # The current test assumes that the input query is of the 
-        # shape 
+        # The current test assumes that the input query is of the
+        # shape
         reshaped_query = packed_qkv.query.view(
-            -1, test_pt.num_heads * test_pt.head_size) 
+            -1, test_pt.num_heads * test_pt.head_size)
         return attn.forward(reshaped_query,
-            packed_qkv.key,
-            packed_qkv.value,
-            kv_cache,
-            attn_metadata,
-            attn_type=attn_type)
+                            packed_qkv.key,
+                            packed_qkv.value,
+                            kv_cache,
+                            attn_metadata,
+                            attn_type=attn_type)
 
 
 def _run_encoder_decoder_cross_attention_test(
@@ -735,11 +735,11 @@ def _run_encoder_decoder_cross_attention_test(
         reshaped_query = decoder_test_params.packed_qkvo.packed_qkv.query.view(
             -1, test_pt.num_heads * test_pt.head_size)
         return attn.forward(reshaped_query,
-            key,
-            value,
-            kv_cache,
-            attn_metadata,
-            attn_type=attn_type)
+                            key,
+                            value,
+                            kv_cache,
+                            attn_metadata,
+                            attn_type=attn_type)
 
 
 @pytest.fixture(autouse=True)
