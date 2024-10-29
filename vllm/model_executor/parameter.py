@@ -104,8 +104,7 @@ class _ColumnvLLMParameter(BasevLLMParameter):
         param_data = param_data.narrow(self.output_dim, shard_offset,
                                        shard_size)
         loaded_weight = loaded_weight.narrow(self.output_dim,
-                                             tp_rank * shard_size, shard_size)
-                                             
+                                             tp_rank * shard_size, shard_size)                                 
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 

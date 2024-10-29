@@ -24,6 +24,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     should_ignore_layer)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.platforms import current_platform
+from compressed_tensors.compressors import ModelCompressor
 
 __all__ = ["CompressedTensorsLinearMethod"]
 
@@ -34,13 +35,16 @@ class CompressedTensorsConfig(QuantizationConfig):
                  target_scheme_map: Dict[str, Any],
                  ignore: List[str],
                  quant_format: str,
-                 kv_cache_scheme: Optional[Dict[str, Any]] = None):
+                 kv_cache_scheme: Optional[Dict[str, Any]] = None,
+                 model_compressor: Optional[ModelCompressor] = None,
+                 ):
 
         self.ignore = ignore
         self.quant_format = quant_format
         # Map from [target -> scheme]
         self.target_scheme_map = target_scheme_map
         self.kv_cache_scheme = kv_cache_scheme
+        self.model_compressor = model_compressor
 
     def get_linear_method(self) -> "CompressedTensorsLinearMethod":
         return CompressedTensorsLinearMethod(self)
@@ -125,6 +129,8 @@ class CompressedTensorsConfig(QuantizationConfig):
         for t in targets:
             target_scheme_map[t] = sparsity_format
 
+        model_compressor = ModelCompressor.from_compression_config(config)
+
         """
         return cls(target_scheme_map=target_scheme_map,
                    ignore=ignore,
@@ -135,6 +141,7 @@ class CompressedTensorsConfig(QuantizationConfig):
             target_scheme_map=target_scheme_map,
             ignore=ignore,
             quant_format=sparsity_format,
+            model_compressor=model_compressor,
         )
 
     @classmethod
@@ -350,7 +357,9 @@ class CompressedTensorsConfig(QuantizationConfig):
         # (e.g. fp8 needs ada lovelace)
         self._check_scheme_supported(scheme.get_min_capability())
         """
-        scheme = CompressedTensors24()
+        scheme = CompressedTensors24(
+            model_compressor=self.model_compressor,
+        )
 
         return scheme
 
