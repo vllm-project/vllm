@@ -73,7 +73,6 @@ class FlashAttentionBackend(AttentionBackend):
         src_key_cache = src_kv_cache[0]
         dst_key_cache = dst_kv_cache[0]
         ops.swap_blocks(src_key_cache, dst_key_cache, src_to_dst)
-
         src_value_cache = src_kv_cache[1]
         dst_value_cache = dst_kv_cache[1]
         ops.swap_blocks(src_value_cache, dst_value_cache, src_to_dst)
