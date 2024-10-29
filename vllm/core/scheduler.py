@@ -290,7 +290,7 @@ def scheduler_running_outputs_builder():
 
 
 def scheduled_seq_group_builder():
-    return ScheduledSequenceGroup(SequenceGroup("", [], -1),
+    return ScheduledSequenceGroup(SequenceGroup.__new__(SequenceGroup),
                                   token_chunk_size=0)
     # return ScheduledSequenceGroup(seq_group=None, token_chunk_size=0)
 
@@ -313,7 +313,7 @@ class Scheduler:
         self.lora_config = lora_config
 
         version = "selfattn"
-        if (self.scheduler_config.embedding_mode
+        if (self.scheduler_config.task == "embedding"
                 or self.cache_config.is_attention_free):
             version = "placeholder"
 
