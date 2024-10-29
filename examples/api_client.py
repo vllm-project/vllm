@@ -26,7 +26,6 @@ def post_http_request(prompt: str,
     pload = {
         "prompt": prompt,
         "n": n,
-        "use_beam_search": True,
         "temperature": 0.0,
         "max_tokens": 16,
         "stream": stream,
@@ -58,7 +57,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", type=str, default="localhost")
     parser.add_argument("--port", type=int, default=8000)
-    parser.add_argument("--n", type=int, default=4)
+    parser.add_argument("--n", type=int, default=1)
     parser.add_argument("--prompt", type=str, default="San Francisco is a")
     parser.add_argument("--stream", action="store_true")
     args = parser.parse_args()
@@ -77,8 +76,8 @@ if __name__ == "__main__":
             num_printed_lines = 0
             for i, line in enumerate(h):
                 num_printed_lines += 1
-                print(f"Beam candidate {i}: {line!r}", flush=True)
+                print(f"Output {i}: {line!r}", flush=True)
     else:
         output = get_response(response)
         for i, line in enumerate(output):
-            print(f"Beam candidate {i}: {line!r}", flush=True)
+            print(f"Output {i}: {line!r}", flush=True)

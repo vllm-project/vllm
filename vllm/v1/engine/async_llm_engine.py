@@ -28,9 +28,7 @@ POLL_TIMEOUT_MS = 5000
 class _AsyncLLMEngine(LLMEngine):
 
     def __init__(self, *args, **kwargs):
-        super().__init__(*args,
-                         **kwargs,
-                         use_async_sockets=True)
+        super().__init__(*args, **kwargs, use_async_sockets=True)
 
     async def wait_for_startup(self):
         try:
@@ -46,7 +44,7 @@ class _AsyncLLMEngine(LLMEngine):
 
         finally:
             ready_socket.close(linger=0)
-        
+
     async def add_request_async(
         self,
         request_id: str,
@@ -92,8 +90,9 @@ class _AsyncLLMEngine(LLMEngine):
         # Make RequestOutputs and push to the per-client output queues
         # NOTE: we could simplify the Detokenizer code by returning the full
         # List[RequestOutput] rather than pushing to the Queue at the expense
-        # of doing another loop through List[RequestOutput] here.        
+        # of doing another loop through List[RequestOutput] here.
         self.detokenizer.step_async(engine_core_outputs)
+
 
 class AsyncLLMEngine(EngineClient):
 
@@ -111,7 +110,7 @@ class AsyncLLMEngine(EngineClient):
 
         # TODO: add background loop sheilding
         # TODO: add AsyncEngineDeadError
-    
+
     @classmethod
     def from_engine_args(
         cls,
@@ -122,7 +121,7 @@ class AsyncLLMEngine(EngineClient):
         stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
     ) -> "AsyncLLMEngine":
         """Creates an AsyncLLMEngine from the EngineArgs."""
-        
+
         # Create the engine configs.
         if engine_config is None:
             engine_config = engine_args.create_engine_config()
@@ -179,13 +178,13 @@ class AsyncLLMEngine(EngineClient):
     ) -> AsyncGenerator[RequestOutput, None]:
 
         async for output in await self.add_request(
-            request_id,
-            prompt,
-            sampling_params,
-            lora_request=lora_request,
-            trace_headers=trace_headers,
-            prompt_adapter_request=prompt_adapter_request,
-            priority=priority,
+                request_id,
+                prompt,
+                sampling_params,
+                lora_request=lora_request,
+                trace_headers=trace_headers,
+                prompt_adapter_request=prompt_adapter_request,
+                priority=priority,
         ):
             yield LLMEngine.validate_output(output, RequestOutput)
 
@@ -208,33 +207,33 @@ class AsyncLLMEngine(EngineClient):
 
     async def do_log_stats(self):
         pass
-    
+
     async def encode(self):
         pass
-    
+
     async def errored(self):
         pass
-    
+
     async def get_decoding_config(self):
         pass
-    
+
     async def get_model_config(self):
         pass
-    
+
     async def get_tokenizer(self):
         pass
-        
+
     async def is_running(self):
         pass
-    
+
     async def is_stopped(self):
-        pass 
-    
+        pass
+
     async def is_tracing_enabled(self):
         pass
-    
+
     async def start_profile(self):
         pass
-        
+
     async def stop_profile(self):
         pass

@@ -40,7 +40,7 @@ class DetokenizerRequestState:
     @classmethod
     def from_new_request(
         cls,
-        tokenizer: AnyTokenizer, 
+        tokenizer: AnyTokenizer,
         request: DetokenizerRequest,
         stream: Optional[AsyncStream] = None,
     ) -> "DetokenizerRequestState":
@@ -130,18 +130,18 @@ class Detokenizer:
         """Add new request to the Detokenizer."""
 
         assert (request.request_id not in self.request_states)
-        assert ((self.async_mode and stream is not None) or
-                (not self.async_mode and stream is None))
+        assert ((self.async_mode and stream is not None)
+                or (not self.async_mode and stream is None))
 
         request_state = DetokenizerRequestState.from_new_request(
             self.tokenizer, request, stream)
         self.request_states[request.request_id] = request_state
 
     def step(
-        self, encore_core_outputs: List[EngineCoreOutput]
+            self, encore_core_outputs: List[EngineCoreOutput]
     ) -> List[RequestOutput]:
         """Update state and request the RequestOutputs to the LLMEngine."""
-        
+
         request_outputs: List[RequestOutput] = []
         for engine_core_output in encore_core_outputs:
             request_id = engine_core_output.request_id
@@ -166,11 +166,9 @@ class Detokenizer:
         # Return to EngineClient.
         return request_outputs
 
-    def step_async(
-        self, encore_core_outputs: List[EngineCoreOutput]
-    ) -> None:
+    def step_async(self, encore_core_outputs: List[EngineCoreOutput]) -> None:
         """Update state and put the RequestOutput in the per request queues."""
-        
+
         for engine_core_output in encore_core_outputs:
             request_id = engine_core_output.request_id
 
@@ -188,7 +186,7 @@ class Detokenizer:
             assert self.request_states[request_id].stream is not None
             self.request_states[request_id].stream.put(request_output)
             # TODO: is caching RequestOutput sound?
-            # What happens if the reader from the stream falls behind? 
+            # What happens if the reader from the stream falls behind?
             # Won't the object in the queue get mutated?
 
             # Free completed requests.
@@ -260,5 +258,5 @@ class Detokenizer:
             completion_output.finish_reason = finish_reason
             completion_output.stop_reason = stop_reason
             request_output.finished = finished
-        
+
         return request_output

@@ -30,7 +30,6 @@ if VLLM_USE_V1:
 else:
     from vllm.engine.async_llm_engine import AsyncLLMEngine
 
-
 logger = init_logger("vllm.entrypoints.api_server")
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds.
