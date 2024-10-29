@@ -42,7 +42,7 @@ if current_platform.is_rocm():
             yield
         finally:
             amdsmi_shut_down()
-elif current_platform.is_cuda():
+elif current_platform.is_cuda_nvml():
     from pynvml import (nvmlDeviceGetHandleByIndex, nvmlDeviceGetMemoryInfo,
                         nvmlInit, nvmlShutdown)
 
