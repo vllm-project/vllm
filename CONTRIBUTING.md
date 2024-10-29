@@ -41,7 +41,7 @@ When contributing changes to this project, you must agree to the [DCO](DCO).
 Commits must include a `Signed-off-by:` header which certifies agreement with
 the terms of the [DCO](DCO).
 
-Using `-s` with `git commit` will automtaically add this header.
+Using `-s` with `git commit` will automatically add this header.
 
 ### Issues
 
