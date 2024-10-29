@@ -714,7 +714,6 @@ def unified_flash_attention(
         # Decoding run.
         # Use flash_attn_varlen_func kernel for speculative decoding
         # because different queries might have different lengths.
-        # print(f"{decode_query.shape=}")
 
         assert decode_meta.max_decode_query_len is not None
         # use only for actual varlen decoding
@@ -755,9 +754,7 @@ def unified_flash_attention(
     if decode_output is None:
         assert prefill_output is not None
         return prefill_output.view(num_prefill_tokens, hidden_size)
-
-    # Chunked prefill does not work with speculative decoding.
-    # Therefore, the query length for decode should be 1 in chunked prefill.
+    
     assert decode_meta is not None
     decode_output = decode_output.squeeze(1)
     output = torch.cat([prefill_output, decode_output], dim=0)
