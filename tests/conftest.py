@@ -232,20 +232,22 @@ def video_assets() -> _VideoAssets:
     return VIDEO_ASSETS
 
 
-_T = TypeVar("_T", nn.Module, torch.Tensor, BatchEncoding, BatchFeature)
+_T = TypeVar("_T", nn.Module, torch.Tensor, BatchEncoding, BatchFeature, dict)
 
 
 class HfRunner:
 
-    def wrap_device(self, input: _T, device: Optional[str] = None) -> _T:
+    def wrap_device(self, x: _T, device: Optional[str] = None) -> _T:
         if device is None:
-            return self.wrap_device(
-                input, "cpu" if current_platform.is_cpu() else "cuda")
+            device = "cpu" if current_platform.is_cpu() else "cuda"
 
-        if hasattr(input, "device") and input.device.type == device:
-            return input
+        if isinstance(x, dict):
+            return {k: self.wrap_device(v, device) for k, v in x.items()}
 
-        return input.to(device)
+        if hasattr(x, "device") and x.device.type == device:
+            return x
+
+        return x.to(device)
 
     def __init__(
         self,
@@ -253,7 +255,9 @@ class HfRunner:
         dtype: str = "half",
         *,
         model_kwargs: Optional[Dict[str, Any]] = None,
+        is_embedding_model: bool = False,
         is_sentence_transformer: bool = False,
+        skip_tokenizer_init: bool = False,
         auto_cls: Type[_BaseAutoModelClass] = AutoModelForCausalLM,
         postprocess_inputs: Callable[[BatchEncoding],
                                      BatchEncoding] = identity,
@@ -281,11 +285,12 @@ class HfRunner:
                     **model_kwargs,
                 ))
 
-        self.tokenizer = AutoTokenizer.from_pretrained(
-            model_name,
-            torch_dtype=torch_dtype,
-            trust_remote_code=True,
-        )
+        if not skip_tokenizer_init:
+            self.tokenizer = AutoTokenizer.from_pretrained(
+                model_name,
+                torch_dtype=torch_dtype,
+                trust_remote_code=True,
+            )
 
         # don't put this import at the top level
         # it will call torch.cuda.device_count()
@@ -295,6 +300,8 @@ class HfRunner:
             torch_dtype=torch_dtype,
             trust_remote_code=True,
         )
+        if skip_tokenizer_init:
+            self.tokenizer = self.processor.tokenizer
 
         self.postprocess_inputs = postprocess_inputs
 
@@ -335,6 +342,17 @@ class HfRunner:
             all_inputs.append(inputs)
 
         return all_inputs
+
+    def classify(self, prompts: List[str]) -> List[str]:
+        # output is final logits
+        all_inputs = self.get_inputs(prompts)
+        outputs = []
+        for inputs in all_inputs:
+            output = self.model(**self.wrap_device(inputs))
+            logits = output.logits.softmax(dim=-1)[0].tolist()
+            outputs.append(logits)
+
+        return outputs
 
     def generate(
         self,
@@ -535,6 +553,7 @@ class HfRunner:
         encoder_decoder_prompts: List[ExplicitEncoderDecoderPrompt[str, str]],
         max_tokens: int,
         num_logprobs: int,
+        images: Optional[PromptImageInput] = None,
         **kwargs: Any,
     ) -> List[TokensTextLogprobs]:
         '''
@@ -545,11 +564,17 @@ class HfRunner:
         all_output_ids: List[List[int]] = []
         all_output_strs: List[str] = []
 
-        for (encoder_prompt,
-             decoder_prompt) in to_enc_dec_tuple_list(encoder_decoder_prompts):
+        for i, (encoder_prompt, decoder_prompt) in enumerate(
+                to_enc_dec_tuple_list(encoder_decoder_prompts)):
+            processor_kwargs: Dict[str, Any] = {
+                "text": encoder_prompt,
+                "return_tensors": "pt",
+            }
+            if images is not None and images[i] is not None:
+                processor_kwargs["images"] = images[i]
 
             encoder_input_ids = self.wrap_device(
-                self.tokenizer(encoder_prompt, return_tensors="pt").input_ids,
+                self.processor(**processor_kwargs).input_ids,
                 device=self.model.device.type,
             )
 
@@ -673,6 +698,14 @@ class VllmRunner:
                     inputs[i]["multi_modal_data"] = {"audio": audio}
 
         return inputs
+
+    def classify(self, prompts: List[str]) -> List[str]:
+        req_outputs = self.model.encode(prompts)
+        outputs = []
+        for req_output in req_outputs:
+            embedding = req_output.outputs.embedding
+            outputs.append(embedding)
+        return outputs
 
     def generate(
         self,
