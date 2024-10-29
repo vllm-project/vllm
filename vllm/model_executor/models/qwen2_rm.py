@@ -8,8 +8,8 @@ from typing import Iterable, List, Optional, Tuple, Union
 
 import torch
 from torch import nn
-
 from transformers import Qwen2Config
+
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,

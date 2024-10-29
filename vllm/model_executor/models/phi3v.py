@@ -23,8 +23,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 from PIL import Image
-
 from transformers import CLIPVisionConfig, PretrainedConfig
+
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, ModelConfig, MultiModalConfig
 from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, InputContext,

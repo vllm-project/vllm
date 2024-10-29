@@ -18,8 +18,8 @@ from typing import Iterable, List, Optional, Set, Tuple, Union
 
 import torch
 from torch import nn
-
 from transformers import Gemma2Config
+
 from vllm.attention import Attention, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, LoRAConfig

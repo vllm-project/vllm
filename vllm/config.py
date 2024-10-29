@@ -421,7 +421,7 @@ class ModelConfig:
             self.enforce_eager = True
 
     def get_pooling_type(self,
-                         pooling_type_name: str) -> Optional[PoolingType]:
+                         pooling_type_name: str) -> Union[PoolingType, None]:
         pooling_types = {i.name: i for i in PoolingType}
         return pooling_types.get(pooling_type_name)
 
@@ -430,10 +430,11 @@ class ModelConfig:
             normalize_arg: Optional[bool]) -> Optional[PoolingConfig]:
         pooling_config = get_pooling_config(self.model, self.revision)
         if pooling_config is not None:
-            pooling_type = pooling_config["pooling_type"]
+            pooling_type = self.get_pooling_type(
+                pooling_config["pooling_type"])
             normalize = pooling_config["normalize"]
             pooling_config = PoolingConfig(
-                pooling_type=self.get_pooling_type(pooling_type),
+                pooling_type=pooling_type,  # type: ignore
                 normalize=normalize)
             if pooling_type_arg is not None:
                 pooling_config.pooling_type = self.get_pooling_type(
