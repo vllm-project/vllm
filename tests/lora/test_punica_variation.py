@@ -1,6 +1,6 @@
 """
-This script is mainly used to test whether trtion kernels can run normally 
-under different conditions, including various batches, numbers of LoRA , and 
+This script is mainly used to test whether trtion kernels can run normally
+under different conditions, including various batches, numbers of LoRA , and
 maximum ranks.
 """
 from unittest.mock import patch
@@ -14,8 +14,8 @@ from vllm.lora.ops.bgmv_shrink import bgmv_shrink
 from vllm.lora.ops.sgmv_expand import sgmv_expand
 from vllm.lora.ops.sgmv_expand_slice import sgmv_expand_slice
 from vllm.lora.ops.sgmv_shrink import sgmv_shrink
+from vllm.platforms import current_platform
 from vllm.triton_utils.libentry import LibEntry
-from vllm.utils import seed_everything
 
 from .utils import (generate_data, generate_data_for_expand_nslices,
                     ref_torch_groupgemm)
@@ -61,7 +61,7 @@ def test_punica_sgmv(
     device: str,
 ):
     torch.set_default_device(device)
-    seed_everything(seed)
+    current_platform.seed_everything(seed)
 
     seq_length = 128
     (
@@ -154,7 +154,7 @@ def test_punica_bgmv(
     from vllm.lora.ops.bgmv_shrink import _bgmv_shrink_kernel
 
     torch.set_default_device(device)
-    seed_everything(seed)
+    current_platform.seed_everything(seed)
 
     seq_length = 1
     (
@@ -242,7 +242,7 @@ def test_punica_expand_nslices(
     from vllm.lora.ops.bgmv_expand_slice import _bgmv_expand_slice_kernel
 
     torch.set_default_device(device)
-    seed_everything(seed)
+    current_platform.seed_everything(seed)
 
     seq_length = 128 if op_type == "sgmv" else 1
     (

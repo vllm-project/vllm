@@ -8,7 +8,7 @@ from tests.kernels.utils import opcheck
 from vllm.model_executor.layers.activation import (FastGELU, FatreluAndMul,
                                                    GeluAndMul, NewGELU,
                                                    QuickGELU, SiluAndMul)
-from vllm.utils import seed_everything
+from vllm.platforms import current_platform
 
 from .allclose_default import get_default_atol, get_default_rtol
 
@@ -37,7 +37,7 @@ def test_act_and_mul(
     seed: int,
     device: str,
 ) -> None:
-    seed_everything(seed)
+    current_platform.seed_everything(seed)
     torch.set_default_device(device)
     x = torch.randn(num_tokens, 2 * d, dtype=dtype)
     if activation == "silu":
@@ -85,7 +85,7 @@ def test_activation(
     seed: int,
     device: str,
 ) -> None:
-    seed_everything(seed)
+    current_platform.seed_everything(seed)
     torch.set_default_device(device)
     x = torch.randn(num_tokens, d, dtype=dtype)
     layer = activation[0]()
