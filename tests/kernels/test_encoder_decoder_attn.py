@@ -622,7 +622,13 @@ def _run_encoder_attention_test(
     packed_qkv = encoder_test_params.packed_qkvo.packed_qkv
     assert packed_qkv is not None
     with set_forward_context(attn_metadata):
-        # TODO - Fix the shape of the query to be []
+        # In the test setup the shape of the query is
+        # [batch_size, seq_len, num_heads, head_size]. However
+        # the attention backend expect the shape to be
+        # [num_tokens, hidden_size]. Hence reshape the query before
+        # invoking the forward method.
+        # TODO - Update the way we construct the query so that it
+        # is shaped as [num_tokens, hidden_size] and we can skip the reshape.
         reshaped_query = packed_qkv.query.view(
             -1, test_pt.num_heads * test_pt.head_size)
         return attn.forward(reshaped_query,
@@ -668,8 +674,13 @@ def _run_decoder_self_attention_test(
     packed_qkv = decoder_test_params.packed_qkvo.packed_qkv
     assert packed_qkv is not None
     with set_forward_context(attn_metadata):
-        # The current test assumes that the input query is of the
-        # shape
+        # In the test setup the shape of the query is
+        # [batch_size, seq_len, num_heads, head_size]. However
+        # the attention backend expect the shape to be
+        # [num_tokens, hidden_size]. Hence reshape the query before
+        # invoking the forward method.
+        # TODO - Update the way we construct the query so that it
+        # is shaped as [num_tokens, hidden_size] and we can skip the reshape.
         reshaped_query = packed_qkv.query.view(
             -1, test_pt.num_heads * test_pt.head_size)
         return attn.forward(reshaped_query,
@@ -732,6 +743,13 @@ def _run_encoder_decoder_cross_attention_test(
         key = (None if cross_pckd_qkv is None else cross_pckd_qkv.key)
         value = (None if cross_pckd_qkv is None else cross_pckd_qkv.value)
     with set_forward_context(attn_metadata):
+        # In the test setup the shape of the query is
+        # [batch_size, seq_len, num_heads, head_size]. However
+        # the attention backend expect the shape to be
+        # [num_tokens, hidden_size]. Hence reshape the query before
+        # invoking the forward method.
+        # TODO - Update the way we construct the query so that it
+        # is shaped as [num_tokens, hidden_size] and we can skip the reshape.
         reshaped_query = decoder_test_params.packed_qkvo.packed_qkv.query.view(
             -1, test_pt.num_heads * test_pt.head_size)
         return attn.forward(reshaped_query,
@@ -743,10 +761,17 @@ def _run_encoder_decoder_cross_attention_test(
 
 
 @pytest.fixture(autouse=True)
-def clear_cache():
-    """Clear the cached value of attention backend before each test."""
+def set_reset_environment():
+    # Set the default torch datatype to bfloat16 to enable
+    # testing of the Flash Attention backend. Also clear the
+    # cached value of the backend.
+    default_dtype = torch.get_default_dtype()
+    torch.set_default_dtype(torch.bfloat16)
     get_attn_backend.cache_clear()
     yield
+    # Reset the torch datatype to what it was before the test
+    # so as not to impact the remaining tests.
+    torch.set_default_dtype(default_dtype)
 
 
 @pytest.mark.skipif(current_platform.is_rocm(),
@@ -798,8 +823,6 @@ def test_encoder_only(
     '''
     # Force Attention wrapper backend
     with global_force_attn_backend_context_manager(attn_backend):
-        torch.set_default_dtype(torch.bfloat16)
-
         # Note: KV cache size of 4096 is arbitrary & chosen intentionally
         # to be more than necessary, since exceeding the kv cache size
         # is not part of this test
@@ -920,7 +943,6 @@ def test_e2e_enc_dec_attn(
     '''
     # Force Attention wrapper backend
     with global_force_attn_backend_context_manager(attn_backend):
-        torch.set_default_dtype(torch.bfloat16)
         # Note: KV cache size of 4096 is arbitrary & chosen intentionally
         # to be more than necessary, since exceeding the kv cache size
         # is not part of this test
