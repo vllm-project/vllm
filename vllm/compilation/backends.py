@@ -179,8 +179,7 @@ def vllm_backend(graph, example_inputs) -> Callable:
     # (i.e. when this backend is first called)
     compilation_configs = CompilationConfig.default_config()
 
-    from vllm.plugins import get_non_cudagraph_ops
-    non_cudagraph_ops = get_non_cudagraph_ops()
+    non_cudagraph_ops = compilation_configs.non_cudagraph_ops
 
     from torch._dynamo.utils import lazy_format_graph_code
 

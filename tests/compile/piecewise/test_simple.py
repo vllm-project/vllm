@@ -10,9 +10,7 @@ from torch import nn
 from vllm.compilation.compile_context import set_compile_context
 from vllm.compilation.decorators import support_torch_compile
 from vllm.compilation.levels import CompilationLevel
-from vllm.plugins import set_non_cudagraph_ops
 
-set_non_cudagraph_ops(["silly.attention"])
 os.environ["VLLM_TORCH_COMPILE_LEVEL"] = str(CompilationLevel.PIECEWISE)
 
 global_counter = 0

@@ -157,23 +157,23 @@ class LlamaModel(nn.Module):
 
 directory = os.path.dirname(__file__)
 config = os.path.join(directory, "compilation_config.json")
+piecewise_config = os.path.join(directory, "piecewise_compilation_config.json")
 
 
 @torch.inference_mode
 def run_model(use_compile: bool, split_attn: bool = False) -> torch.Tensor:
 
-    os.environ["VLLM_TORCH_COMPILE_CONFIG"] = config
-
     if use_compile:
         os.environ["VLLM_TORCH_COMPILE_LEVEL"] = str(
             CompilationLevel.PIECEWISE)
+
+        if split_attn:
+            os.environ["VLLM_TORCH_COMPILE_CONFIG"] = piecewise_config
+        else:
+            os.environ["VLLM_TORCH_COMPILE_CONFIG"] = config
     else:
         os.environ["VLLM_TORCH_COMPILE_LEVEL"] = str(
             CompilationLevel.NO_COMPILATION)
-
-    if use_compile and split_attn:
-        from vllm.plugins import set_non_cudagraph_ops
-        set_non_cudagraph_ops(["silly.attention"])
 
     cls = LlamaModel
     if use_compile:
@@ -240,9 +240,7 @@ def benchmark():
 
     for piecewise in [False, True]:
         if piecewise:
-            os.environ["VLLM_TORCH_COMPILE_CONFIG"] = config
-            from vllm.plugins import set_non_cudagraph_ops
-            set_non_cudagraph_ops(["silly.attention"])
+            os.environ["VLLM_TORCH_COMPILE_CONFIG"] = piecewise_config
 
         model = cls(llama_config).eval().cuda().to(torch.bfloat16)
 

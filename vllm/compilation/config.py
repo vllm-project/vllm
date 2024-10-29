@@ -17,6 +17,7 @@ class CompilationConfig(BaseModel):
             - False: cudagraph inside compilation is not used.
             - True: cudagraph inside compilation is used. It requires
                 that all input buffers have fixed addresses.
+        -
         - cudagraph_num_of_warmups: number of warmup runs for cudagraph.
             It means the first several runs will be treated as warmup runs.
             Only after that, the execution will be recorded, and the recorded
@@ -46,6 +47,7 @@ class CompilationConfig(BaseModel):
     inductor_passes: Dict[str, str] = Field(default_factory=dict)
 
     use_cudagraph: bool = False
+    non_cudagraph_ops: List[str] = Field(default_factory=list)
     cudagraph_num_of_warmups: int = 0
 
     # not configurable, computed after init
