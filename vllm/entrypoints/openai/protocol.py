@@ -183,7 +183,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     top_k: int = -1
     min_p: float = 0.0
     repetition_penalty: float = 1.0
-    repetition_penalty_range: int = 0,
+    repetition_penalty_range: int = 0
     length_penalty: float = 1.0
     stop_token_ids: Optional[List[int]] = Field(default_factory=list)
     include_stop_str_in_output: bool = False
@@ -536,7 +536,7 @@ class CompletionRequest(OpenAIBaseModel):
     top_k: int = -1
     min_p: float = 0.0
     repetition_penalty: float = 1.0
-    repetition_penalty_range: int = 0,
+    repetition_penalty_range: int = 0
     length_penalty: float = 1.0
     stop_token_ids: Optional[List[int]] = Field(default_factory=list)
     include_stop_str_in_output: bool = False
