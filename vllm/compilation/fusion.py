@@ -326,7 +326,7 @@ class FusionPass(VllmInductorPass):
         self.patterns: PatternMatcherPass = PatternMatcherPass(
             pass_name="fusion_pass")
 
-        for epsilon in [1e-5]:  # TODO figure out how to do multiple epsilons
+        for epsilon in [1e-5, 1e-6]:
             # Fuse rms_norm + static_scaled_fp8_quant into
             # rms_norm_static_fp8_quant
             RMSNormQuantPattern(epsilon).register(self.patterns)
@@ -337,6 +337,10 @@ class FusionPass(VllmInductorPass):
             # the match (see process_matches)
             FusedAddRMSNormQuantPattern(epsilon).register(
                 self.patterns, self.record_match)
+
+            # WARNING: This is a hack to clear the pattern matcher cache
+            # and allow multiple values of epsilon.
+            torch._inductor.pattern_matcher._seen_patterns.clear()
 
     def record_match(self, match: MultiOutputMatch) -> bool:
         # Hijack the extra_check to record the match and

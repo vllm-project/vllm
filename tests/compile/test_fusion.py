@@ -48,9 +48,6 @@ def test_fusion_rmsnorm_quant(dtype, hidden_size, num_tokens, eps):
     torch.set_default_device("cuda")
     torch.set_default_dtype(torch.float16)
 
-    if eps != 1e-5:
-        pytest.skip("Only test eps=1e-5 for now")
-
     # Reshape pass is needed for the fusion pass to work
     config = CompilationConfig.PassConfig(enable_fusion=True,
                                           enable_reshape=True)
