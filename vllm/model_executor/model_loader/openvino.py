@@ -95,7 +95,7 @@ def _require_model_export(model_id, revision=None, subfolder=None):
         return True
 
 
-class OpenVINOCasualLM(nn.Module):
+class OpenVINOCausalLM(nn.Module):
 
     def __init__(
         self,
@@ -199,5 +199,5 @@ def get_model(
             "be added in the future. If this is important to you, "
             "please open an issue on github.")
 
-    return OpenVINOCasualLM(ov_core, model_config, device_config,
+    return OpenVINOCausalLM(ov_core, model_config, device_config,
                             kv_cache_dtype)
