@@ -104,8 +104,8 @@ The following [pooling parameters (click through to see documentation)](../dev/p
 
 ```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
 :language: python
-:start-after: begin-embedding-sampling-params
-:end-before: end-embedding-sampling-params
+:start-after: begin-embedding-pooling-params
+:end-before: end-embedding-pooling-params
 ```
 
 The following extra parameters are supported:
