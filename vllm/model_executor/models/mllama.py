@@ -401,7 +401,8 @@ class MllamaVisionEncoderLayer(nn.Module):
         self.intermediate_size = config.intermediate_size
 
         self.self_attn = MllamaVisionSdpaAttention(config,
-                                                   quant_config=quant_config)
+                                                   quant_config=quant_config,
+                                                   prefix=f"{prefix}.self_attn")
         self.mlp = CLIPMLP(config,
                            quant_config=quant_config,
                            prefix=f"{prefix}.mlp")
