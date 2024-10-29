@@ -581,6 +581,9 @@ class OpenAIServingChat(OpenAIServing):
                 final_res = res
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
+        except ValueError as e:
+            # TODO: Use a vllm-specific Validation Error
+            return self.create_error_response(str(e))
 
         assert final_res is not None
 

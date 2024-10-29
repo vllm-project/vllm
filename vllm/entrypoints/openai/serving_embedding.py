@@ -225,7 +225,10 @@ class OpenAIServingEmbedding(OpenAIServing):
         try:
             async for i, res in result_generator:
                 final_res_batch[i] = res
+        except asyncio.CancelledError:
+            return self.create_error_response("Client disconnected")
 
+        try:
             for final_res in final_res_batch:
                 assert final_res is not None
 
@@ -235,8 +238,6 @@ class OpenAIServingEmbedding(OpenAIServing):
             response = request_output_to_embedding_response(
                 final_res_batch_checked, request_id, created_time, model_name,
                 encoding_format)
-        except asyncio.CancelledError:
-            return self.create_error_response("Client disconnected")
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
