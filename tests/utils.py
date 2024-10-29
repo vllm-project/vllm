@@ -5,6 +5,7 @@ import signal
 import subprocess
 import sys
 import time
+import traceback
 import warnings
 from contextlib import contextmanager
 from pathlib import Path
@@ -17,6 +18,7 @@ from openai.types.completion import Completion
 from typing_extensions import ParamSpec, assert_never
 
 import vllm.envs as envs
+from vllm.logger import init_logger
 from tests.models.utils import TextTextLogprobs
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
@@ -27,6 +29,8 @@ from vllm.platforms import current_platform
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.utils import (FlexibleArgumentParser, GB_bytes,
                         cuda_device_count_stateless, get_open_port)
+
+logger = init_logger(__name__)
 
 if current_platform.is_rocm():
     from amdsmi import (amdsmi_get_gpu_vram_usage,
@@ -133,15 +137,16 @@ class RemoteOpenAIServer:
             try:
                 if requests.get(url).status_code == 200:
                     break
-            except Exception as err:
+            except Exception:
+                # For full exception trace, please set the logger level to DEBUG
+                logger.debug(traceback.format_exc())
                 result = self.proc.poll()
                 if result is not None and result != 0:
-                    raise RuntimeError("Server exited unexpectedly.") from err
+                    raise RuntimeError("Server exited unexpectedly.") from None
 
                 time.sleep(0.5)
                 if time.time() - start > timeout:
-                    raise RuntimeError(
-                        "Server failed to start in time.") from err
+                    raise RuntimeError("Server failed to start in time.") from None
 
     @property
     def url_root(self) -> str:
