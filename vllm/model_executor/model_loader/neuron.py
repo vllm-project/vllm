@@ -142,6 +142,7 @@ class NeuronSpeculationCausalLM(nn.Module):
         # Organize input tensors by step instead of by sequence.
         accepted_token_ids_by_step = logits.transpose(0, 1)
         accepted_token_ids_by_step[accepted_token_ids_by_step==self.model.pad_token_id]=-1
+        accepted_token_ids_by_step = accepted_token_ids_by_step.tolist()
 
         sampler_output_list = []
         for step_index in range(num_steps):
