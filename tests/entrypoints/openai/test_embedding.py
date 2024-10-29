@@ -6,9 +6,12 @@ import pytest
 import pytest_asyncio
 import requests
 
+from vllm.transformers_utils.tokenizer import get_tokenizer
+
 from ...utils import RemoteOpenAIServer
 
 MODEL_NAME = "intfloat/e5-mistral-7b-instruct"
+DUMMY_CHAT_TEMPLATE = """{% for message in messages %}{{message['role'] + ': ' + message['content'] + '\\n'}}{% endfor %}"""  # noqa: E501
 
 
 @pytest.fixture(scope="module")
@@ -20,6 +23,8 @@ def server():
         "--enforce-eager",
         "--max-model-len",
         "8192",
+        "--chat-template",
+        DUMMY_CHAT_TEMPLATE,
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
@@ -126,13 +131,23 @@ async def test_conversation_embedding(server: RemoteOpenAIServer,
                              })
     response.raise_for_status()
 
+    tokenizer = get_tokenizer(tokenizer_name=model_name, tokenizer_mode="fast")
+    prompt = tokenizer.apply_chat_template(
+        messages,
+        chat_template=DUMMY_CHAT_TEMPLATE,
+        add_generation_prompt=True,
+        continue_final_message=False,
+        tokenize=False,
+    )
+    tokens = tokenizer.encode(prompt, add_special_tokens=False)
+
     embeddings = response.json()
-    assert embeddings.id is not None
-    assert len(embeddings.data) == 3
-    assert len(embeddings.data[0].embedding) == 4096
-    assert embeddings.usage.completion_tokens == 0
-    assert embeddings.usage.prompt_tokens == 32
-    assert embeddings.usage.total_tokens == 32
+    assert embeddings["id"] is not None
+    assert len(embeddings["data"]) == 1
+    assert len(embeddings["data"][0]["embedding"]) == 4096
+    assert embeddings["usage"]["completion_tokens"] == 0
+    assert embeddings["usage"]["prompt_tokens"] == len(tokens)
+    assert embeddings["usage"]["total_tokens"] == len(tokens)
 
 
 @pytest.mark.asyncio
