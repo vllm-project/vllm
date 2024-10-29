@@ -4,8 +4,11 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, Field, PrivateAttr
 
 import vllm.envs as envs
+from vllm.logger import init_logger
 
 from .compile_context import get_compile_context
+
+logger = init_logger(__name__)
 
 
 class CompilationConfig(BaseModel):
@@ -17,13 +20,13 @@ class CompilationConfig(BaseModel):
             - False: cudagraph inside compilation is not used.
             - True: cudagraph inside compilation is used. It requires
                 that all input buffers have fixed addresses.
-        -
+        - capture_sizes: sizes to capture cudagraph.
+            - None: capture sizes are inferred from compilation context.
+            - List[int]: capture sizes are specified.
         - cudagraph_num_of_warmups: number of warmup runs for cudagraph.
             It means the first several runs will be treated as warmup runs.
             Only after that, the execution will be recorded, and the recorded
             cudagraph will be used for subsequent runs.
-        NOTE: `capture_sizes` is always inferred from
-        compilation context.
     - Inductor compilation:
         - use_inductor: whether to use inductor compilation.
             - False: inductor compilation is not used. graph runs in eager.
@@ -49,17 +52,21 @@ class CompilationConfig(BaseModel):
     use_cudagraph: bool = False
     non_cudagraph_ops: List[str] = Field(default_factory=list)
     cudagraph_num_of_warmups: int = 0
+    capture_sizes: Optional[List[int]] = None
 
     # not configurable, computed after init
-    capture_sizes: List[int] = PrivateAttr
     compile_sizes: List[int] = PrivateAttr
 
     def model_post_init(self, __context: Any) -> None:
         context = get_compile_context()
         context = copy.deepcopy(context) if context is not None else []
         sizes_to_specialize: List[int] = context
-        self.capture_sizes = sizes_to_specialize
-
+        if self.capture_sizes is None:
+            self.capture_sizes = sizes_to_specialize
+        else:
+            logger.info(("cudagraph sizes specified by model runner"
+                         " %s is overridden by config %s"),
+                        sizes_to_specialize, self.capture_sizes)
         if self.inductor_specialize_as_cudagraph:
             assert self.inductor_compile_sizes is None, (
                 "inductor_compile_sizes should be None when "

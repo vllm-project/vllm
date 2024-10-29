@@ -343,6 +343,7 @@ class PiecewiseBackend:
 
         self.compile_sizes: Set[int] = set(
             self.compilation_configs.compile_sizes)
+        assert self.compilation_configs.capture_sizes is not None
         self.capture_sizes: Set[int] = set(
             self.compilation_configs.capture_sizes)
 
