@@ -267,6 +267,11 @@ def run_qwen2_vl(question: str, modality: str):
         model=model_name,
         max_model_len=8192,
         max_num_seqs=5,
+        # Note - mm_processor_kwargs can also be passed to generate/chat calls
+        mm_processor_kwargs={
+            "min_pixels": 28 * 28,
+            "max_pixels": 1280 * 28 * 28,
+        },
     )
 
     prompt = ("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"

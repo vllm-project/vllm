@@ -26,15 +26,12 @@ from .clip import (CLIPVisionModel, dummy_image_for_clip,
                    dummy_seq_data_for_clip, get_clip_image_feature_size,
                    get_clip_patch_grid_length, input_processor_for_clip)
 from .interfaces import SupportsMultiModal, SupportsPP
-from .llava import LlavaMultiModalProjector
+from .llava import LlavaMultiModalProjector, init_vision_tower_for_llava
 from .siglip import (SiglipVisionModel, dummy_image_for_siglip,
                      dummy_seq_data_for_siglip, get_siglip_image_feature_size,
                      get_siglip_patch_grid_length, input_processor_for_siglip)
 from .utils import (AutoWeightsLoader, embed_multimodal, flatten_bn,
                     init_vllm_registered_model)
-
-# Result in the max possible feature size (2x2 grid of 336x336px tiles)
-MAX_IMAGE_FEATURE_SIZE_HEIGHT = MAX_IMAGE_FEATURE_SIZE_WIDTH = 448
 
 
 class LlavaNextImagePixelInputs(TypedDict):
@@ -149,11 +146,28 @@ def get_llava_next_image_feature_size(
 
 
 def get_max_llava_next_image_tokens(ctx: InputContext):
-    return get_llava_next_image_feature_size(
-        ctx.get_hf_config(LlavaNextConfig),
-        input_height=MAX_IMAGE_FEATURE_SIZE_HEIGHT,
-        input_width=MAX_IMAGE_FEATURE_SIZE_WIDTH,
-    )
+    """Compute the max feature size for all possible image grid pinpoints."""
+    return _get_pinpoint_with_largest_features(ctx)[0]
+
+
+def _get_pinpoint_with_largest_features(
+        ctx: InputContext) -> Tuple[int, Tuple[int, int]]:
+    """Get the grid pinpoint with the largest features & its feature size."""
+    hf_config = ctx.get_hf_config(LlavaNextConfig)
+    largest_feature_size = 0
+    largest_feature_pinpoint = None
+    for (height, width) in hf_config.image_grid_pinpoints:
+        feat_size = get_llava_next_image_feature_size(
+            hf_config,
+            input_height=height,
+            input_width=width,
+        )
+        if feat_size > largest_feature_size:
+            largest_feature_size = feat_size
+            largest_feature_pinpoint = (height, width)
+    if not largest_feature_size or largest_feature_pinpoint is None:
+        raise ValueError("Cannot have a largest feature size of 0!")
+    return largest_feature_size, largest_feature_pinpoint
 
 
 def dummy_data_for_llava_next(ctx: InputContext, seq_len: int,
@@ -162,7 +176,8 @@ def dummy_data_for_llava_next(ctx: InputContext, seq_len: int,
     vision_config = hf_config.vision_config
     num_images = mm_counts["image"]
 
-    image_feature_size = get_max_llava_next_image_tokens(ctx)
+    image_feature_size, pinpoint = _get_pinpoint_with_largest_features(ctx)
+    max_feat_height, max_feat_width = pinpoint
 
     if isinstance(vision_config, CLIPVisionConfig):
         seq_data = dummy_seq_data_for_clip(
@@ -176,8 +191,8 @@ def dummy_data_for_llava_next(ctx: InputContext, seq_len: int,
         mm_data = dummy_image_for_clip(
             vision_config,
             num_images,
-            image_width_override=MAX_IMAGE_FEATURE_SIZE_WIDTH,
-            image_height_override=MAX_IMAGE_FEATURE_SIZE_HEIGHT,
+            image_width_override=max_feat_width,
+            image_height_override=max_feat_height,
         )
 
         return seq_data, mm_data
@@ -193,8 +208,8 @@ def dummy_data_for_llava_next(ctx: InputContext, seq_len: int,
         mm_data = dummy_image_for_siglip(
             vision_config,
             num_images,
-            image_width_override=MAX_IMAGE_FEATURE_SIZE_WIDTH,
-            image_height_override=MAX_IMAGE_FEATURE_SIZE_HEIGHT,
+            image_width_override=max_feat_width,
+            image_height_override=max_feat_height,
         )
 
         return seq_data, mm_data
@@ -259,32 +274,6 @@ def input_processor_for_llava_next(ctx: InputContext,
     raise NotImplementedError(msg)
 
 
-def _init_vision_tower(hf_config: LlavaNextConfig):
-    vision_config = hf_config.vision_config
-
-    # Initialize the vision tower only up to the required feature layer
-    vision_feature_layer = hf_config.vision_feature_layer
-    if vision_feature_layer < 0:
-        num_hidden_layers = hf_config.vision_config.num_hidden_layers \
-            + vision_feature_layer + 1
-    else:
-        num_hidden_layers = vision_feature_layer + 1
-
-    if isinstance(vision_config, CLIPVisionConfig):
-        return CLIPVisionModel(
-            vision_config,
-            num_hidden_layers_override=num_hidden_layers,
-        )
-    elif isinstance(vision_config, SiglipVisionConfig):
-        return SiglipVisionModel(
-            vision_config,
-            num_hidden_layers_override=num_hidden_layers,
-        )
-
-    msg = f"Unsupported vision config: {type(vision_config)}"
-    raise NotImplementedError(msg)
-
-
 @MULTIMODAL_REGISTRY.register_image_input_mapper()
 @MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_llava_next_image_tokens)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_llava_next)
@@ -303,7 +292,8 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.multimodal_config = multimodal_config
 
         # TODO: Optionally initializes this for supporting embeddings.
-        self.vision_tower = _init_vision_tower(config)
+        self.vision_tower = init_vision_tower_for_llava(
+            config, quant_config, require_post_norm=False)
         self.image_newline = nn.Parameter(
             torch.empty(config.text_config.hidden_size))
         self.multi_modal_projector = LlavaMultiModalProjector(
