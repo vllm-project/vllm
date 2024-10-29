@@ -1008,7 +1008,9 @@ class Scheduler:
             # cached blocks that were in evictor might now become active again. 
             # Therefore, the actual number of tokens cached might have changed.
             self._update_prefix_cached_tokens(seq)
-            num_cached_tokens = max(num_cached_tokens, seq.get_num_cached_tokens())
+            num_new_tokens_exclude_cached = self._get_num_new_tokens_exclude_cached(
+                num_new_tokens, seq 
+            )
 
             if enable_chunking and self.scheduler_config.is_multi_step:
                 blocks_to_copy: List[Tuple[int, int]] = []
