@@ -10,6 +10,7 @@ from vllm.logger import init_logger
 from vllm.utils import weak_ref_tensors
 
 from .config import CompilationConfig
+from .counter import compilation_counter
 from .levels import CompilationLevel
 
 logger = init_logger(__name__)
@@ -168,6 +169,8 @@ def wrap_inductor(graph,
     if not use_inductor:
         return graph
 
+    compilation_counter.num_inductor_compilations += 1
+
     if do_logging:
         if runtime_shape is None:
             logger.info("Compiling a graph for general shape")
@@ -268,6 +271,8 @@ class VllmBackend:
 
     def __call__(self, graph: fx.GraphModule, example_inputs) -> Callable:
 
+        compilation_counter.num_graphs_seen += 1
+
         # we control the compilation process, each instance can only be
         # called once
         assert not self._called, "VllmBackend can only be called once"
@@ -289,6 +294,8 @@ class VllmBackend:
                                                  self.graph_pool,
                                                  is_first_graph=True)
         else:
+            compilation_counter.num_piecewise_graphs_seen += len(
+                self.piecewise_graphs)
             from torch._dynamo.utils import lazy_format_graph_code
             logger.debug(
                 "%s", lazy_format_graph_code("stiching module", self.split_gm))
@@ -445,6 +452,8 @@ class PiecewiseBackend:
             cudagraph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(cudagraph, pool=self.graph_pool):
                 entry.output = weak_ref_tensors(entry.runnable(*args))
+
+            compilation_counter.num_cudagraph_caputured += 1
 
             entry.cudagraph = cudagraph
             return entry.output
