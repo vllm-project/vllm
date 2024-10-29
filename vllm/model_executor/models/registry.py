@@ -95,6 +95,7 @@ _EMBEDDING_MODELS = {
     # [Text-only]
     "BertModel": ("bert", "BertEmbeddingModel"),
     "Gemma2Model": ("gemma2", "Gemma2EmbeddingModel"),
+    "LlamaModel": ("llama", "LlamaEmbeddingModel"),
     "MistralModel": ("llama", "LlamaEmbeddingModel"),
     "Qwen2ForRewardModel": ("qwen2_rm", "Qwen2ForRewardModel"),
     "Qwen2ForSequenceClassification": (
