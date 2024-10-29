@@ -439,7 +439,10 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
         )
 
         self.language_model = init_vllm_registered_model(
-            config.text_config, cache_config, quant_config)
+            config.text_config,
+            cache_config,
+            quant_config,
+            prefix="language_model")
 
         self.mlp1 = self._init_mlp1(config)
 
