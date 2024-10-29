@@ -385,7 +385,7 @@ class OpenAIServing:
                     truncate_prompt_tokens=truncate_prompt_tokens,
                 )
 
-    def _parse_completion_inputs(
+    def _preprocess_completion(
         self,
         request: CompletionLikeRequest,
         tokenizer: AnyTokenizer,
@@ -411,7 +411,7 @@ class OpenAIServing:
 
         return request_prompts, engine_prompts
 
-    async def _parse_chat_inputs(
+    async def _preprocess_chat(
         self,
         request: ChatLikeRequest,
         tokenizer: AnyTokenizer,

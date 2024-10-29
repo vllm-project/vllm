@@ -142,8 +142,6 @@ class OpenAIServingEmbedding(OpenAIServing):
                     "greater than max_model_len."
                     " Please, select a smaller truncation size.")
 
-        # Schedule the request and get the result generator.
-        generators: List[AsyncGenerator[EmbeddingRequestOutput, None]] = []
         try:
             (
                 lora_request,
@@ -153,7 +151,7 @@ class OpenAIServingEmbedding(OpenAIServing):
             tokenizer = await self.engine_client.get_tokenizer(lora_request)
 
             if isinstance(request, EmbeddingChatRequest):
-                request_prompts, engine_prompts = await self._parse_chat_inputs(
+                request_prompts, engine_prompts = await self._preprocess_chat(
                     request,
                     tokenizer,
                     request.messages,
@@ -164,7 +162,7 @@ class OpenAIServingEmbedding(OpenAIServing):
                     add_special_tokens=request.add_special_tokens,
                 )
             else:
-                request_prompts, engine_prompts = self._parse_completion_inputs(
+                request_prompts, engine_prompts = self._preprocess_completion(
                     request,
                     tokenizer,
                     request.input,
@@ -172,9 +170,11 @@ class OpenAIServingEmbedding(OpenAIServing):
                     add_special_tokens=request.add_special_tokens,
                 )
         except ValueError as e:
-            logger.exception("Error in applying extracting prompt inputs")
+            logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
 
+        # Schedule the request and get the result generator.
+        generators: List[AsyncGenerator[EmbeddingRequestOutput, None]] = []
         try:
             pooling_params = request.to_pooling_params()
 
