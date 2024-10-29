@@ -999,6 +999,7 @@ class AsyncLLMEngine(EngineClient):
             >>> # the complete example.
             >>>
             >>> # initialize the engine and the example input
+            >>> # note that engine_args here is AsyncEngineArgs instance
             >>> engine = AsyncLLMEngine.from_engine_args(engine_args)
             >>> example_input = {
             >>>     "prompt": "What is LLM?",
@@ -1082,6 +1083,7 @@ class AsyncLLMEngine(EngineClient):
             >>> # the complete example.
             >>>
             >>> # initialize the engine and the example input
+            >>> # note that engine_args here is AsyncEngineArgs instance
             >>> engine = AsyncLLMEngine.from_engine_args(engine_args)
             >>> example_input = {
             >>>     "input": "What is LLM?",
