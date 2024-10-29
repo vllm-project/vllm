@@ -19,7 +19,6 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
 from vllm.model_executor.models.mixtral import MixtralMoE
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
-from vllm.utils import seed_everything
 
 
 @pytest.mark.parametrize("m", [1024 * 128, 512, 222, 33, 1])
@@ -115,7 +114,7 @@ def test_fused_marlin_moe(
     num_bits: int,
     is_k_full: bool,
 ):
-    seed_everything(7)
+    current_platform.seed_everything(7)
 
     # Filter act_order
     if act_order:

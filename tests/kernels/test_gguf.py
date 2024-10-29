@@ -7,7 +7,7 @@ from gguf import GGMLQuantizationType, GGUFReader, ReaderTensor, dequantize
 from huggingface_hub import snapshot_download
 
 import vllm._custom_ops as ops
-from vllm.utils import seed_everything
+from vllm.platforms import current_platform
 
 GGUF_SAMPLE = snapshot_download("Isotr0py/test-gguf-sample")
 
@@ -75,7 +75,7 @@ def test_dequantize(hidden_size: int, dtype: torch.dtype,
 @torch.inference_mode()
 def test_mmvq(hidden_size: int, dtype: torch.dtype,
               quant_type: GGMLQuantizationType):
-    seed_everything(0)
+    current_platform.seed_everything(0)
 
     tensors = get_gguf_sample_tensors(hidden_size, quant_type)
     x = torch.rand((1, hidden_size), dtype=dtype, device="cuda")
@@ -111,7 +111,7 @@ def test_mmvq(hidden_size: int, dtype: torch.dtype,
 @torch.inference_mode()
 def test_mmq(num_tokens: int, hidden_size: int, dtype: torch.dtype,
              quant_type: GGMLQuantizationType):
-    seed_everything(0)
+    current_platform.seed_everything(0)
 
     tensors = get_gguf_sample_tensors(hidden_size, quant_type)
     x = torch.rand((num_tokens, hidden_size), dtype=dtype, device="cuda")
