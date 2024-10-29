@@ -423,7 +423,7 @@ class PyObjectCache:
 
 @lru_cache(maxsize=None)
 def is_mi250() -> bool:
-    if not is_hip() or not torch.cuda.is_available():
+    if not current_platform.is_rocm() or not torch.cuda.is_available():
         return False
     archName = torch.cuda.get_device_properties('cuda').gcnArchName
     return (archName is not None) and \
