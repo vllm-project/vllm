@@ -293,7 +293,10 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         # TODO: Optionally initializes this for supporting embeddings.
         self.vision_tower = init_vision_tower_for_llava(
-            config, quant_config, require_post_norm=False)
+            config,
+            quant_config,
+            require_post_norm=False,
+            prefix="vision_tower")
         self.image_newline = nn.Parameter(
             torch.empty(config.text_config.hidden_size))
         self.multi_modal_projector = LlavaMultiModalProjector(
@@ -302,7 +305,10 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
             projector_hidden_act=config.projector_hidden_act)
 
         self.language_model = init_vllm_registered_model(
-            config.text_config, cache_config, quant_config)
+            config.text_config,
+            cache_config,
+            quant_config,
+            prefix="language_model")
 
         # The same model class supports both language generation and embedding
         # because the architecture name is the same

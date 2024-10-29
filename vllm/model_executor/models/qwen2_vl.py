@@ -938,7 +938,10 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             quant_config=None,
         )
 
-        self.model = Qwen2Model(config, cache_config, quant_config)
+        self.model = Qwen2Model(config,
+                                cache_config,
+                                quant_config,
+                                prefix="model")
 
         if get_pp_group().is_last_rank:
             if config.tie_word_embeddings:
@@ -946,7 +949,8 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             else:
                 self.lm_head = ParallelLMHead(config.vocab_size,
                                               config.hidden_size,
-                                              quant_config=quant_config)
+                                              quant_config=quant_config,
+                                              prefix="lm_head")
         else:
             self.lm_head = PPMissingLayer()
 
