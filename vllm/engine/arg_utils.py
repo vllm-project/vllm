@@ -865,13 +865,29 @@ class EngineArgs:
         )
 
         parser.add_argument('--pooling-norm',
+                            default=None,
                             action='store_true',
                             help="Used to determine whether to normalize "
                             "the pooled data in the embedding model.")
 
-        parser.add_argument('--pooling-softmax',
-                            action='store_true',
+        parser.add_argument('--no-pooling-norm',
+                            default=None,
+                            action='store_false',
+                            dest='pooling_norm',
                             help="Used to determine whether to normalize "
+                            "the pooled data in the embedding model.")
+
+        parser.add_argument('--pooling-softmax',
+                            default=None,
+                            action='store_true',
+                            help="Used to determine whether to softmax "
+                            "the pooled data in the embedding model.")
+
+        parser.add_argument('--no-pooling-softmax',
+                            default=None,
+                            action='store_false',
+                            dest='pooling_softmax',
+                            help="Used to determine whether to softmax "
                             "the pooled data in the embedding model.")
 
         parser.add_argument(
