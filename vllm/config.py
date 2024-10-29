@@ -5,9 +5,9 @@ from typing import (TYPE_CHECKING, Any, ClassVar, Dict, Final, List, Literal,
                     Mapping, Optional, Set, Tuple, Type, Union)
 
 import torch
+from transformers import PretrainedConfig
 
 import vllm.envs as envs
-from transformers import PretrainedConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.pooler import PoolingConfig, PoolingType
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
@@ -420,7 +420,8 @@ class ModelConfig:
                 "fallback to the eager mode.")
             self.enforce_eager = True
 
-    def get_pooling_type(self, pooling_type_name: str) -> PoolingType:
+    def get_pooling_type(self,
+                         pooling_type_name: str) -> Optional[PoolingType]:
         pooling_types = {i.name: i for i in PoolingType}
         return pooling_types.get(pooling_type_name)
 

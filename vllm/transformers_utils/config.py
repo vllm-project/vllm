@@ -9,13 +9,13 @@ from huggingface_hub import (file_exists, hf_hub_download,
 from huggingface_hub.utils import (EntryNotFoundError, LocalEntryNotFoundError,
                                    RepositoryNotFoundError,
                                    RevisionNotFoundError)
+from transformers import GenerationConfig, PretrainedConfig
 from transformers.models.auto.image_processing_auto import (
     get_image_processor_config)
 from transformers.models.auto.modeling_auto import (
     MODEL_FOR_CAUSAL_LM_MAPPING_NAMES)
 from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
 
-from transformers import GenerationConfig, PretrainedConfig
 from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
 from vllm.model_executor.layers.pooler import PoolingType
