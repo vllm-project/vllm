@@ -17,6 +17,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.usage.usage_lib import UsageContext
 
 from vllm.v1.engine.llm_engine import LLMEngine
+from vllm.v1.engine import LLM_ENGINE_CORE_READY_STR
 from vllm.v1.engine.async_stream import AsyncStream
 
 logger = init_logger(__name__)
@@ -31,6 +32,21 @@ class _AsyncLLMEngine(LLMEngine):
                          **kwargs,
                          use_async_sockets=True)
 
+    async def wait_for_startup(self):
+        try:
+            ready_socket = self.ctx.socket(zmq.constants.PULL)
+            ready_socket.connect(self.readiness_ipc_path)
+            while await ready_socket.poll(timeout=5000) == 0:
+                logger.debug("Waiting for LLMEngineCore to startup.")
+                if not self.engine_core.is_alive():
+                    raise RuntimeError("LLMEngineCore process failed to start")
+
+            message = await ready_socket.recv_string()
+            assert message == LLM_ENGINE_CORE_READY_STR
+
+        finally:
+            ready_socket.close(linger=0)
+        
     async def add_request_async(
         self,
         request_id: str,
@@ -95,7 +111,6 @@ class AsyncLLMEngine(EngineClient):
 
         # TODO: add background loop sheilding
         # TODO: add AsyncEngineDeadError
-
     
     @classmethod
     def from_engine_args(
@@ -125,6 +140,9 @@ class AsyncLLMEngine(EngineClient):
             stat_loggers=stat_loggers,
         )
         return engine
+
+    async def wait_for_startup(self):
+        self.engine.wait_for_startup()
 
     async def add_request(
         self,

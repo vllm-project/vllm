@@ -114,6 +114,9 @@ async def init_app(
               if llm_engine is not None else AsyncLLMEngine.from_engine_args(
                   engine_args, usage_context=UsageContext.API_SERVER))
 
+    if VLLM_USE_V1:
+        await engine.wait_for_startup()
+
     return app
 
 

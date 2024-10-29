@@ -194,7 +194,11 @@ class LLMEngine:
             prompt_adapter_config=self.prompt_adapter_config,
         )
         self.engine_core.start()
-        self._wait_for_engine_core(core_ready_ipc_path)
+
+        if not use_async_sockets:
+            self._wait_for_engine_core(core_ready_ipc_path)
+        else:
+            self.readiness_ipc_path = core_ready_ipc_path
 
     def __del__(self):
         logger.debug("Shutting down LLMEngineCore.")
