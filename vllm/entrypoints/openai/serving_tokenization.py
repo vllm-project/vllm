@@ -62,59 +62,48 @@ class OpenAIServingTokenization(OpenAIServing):
 
         request_id = f"tokn-{random_uuid()}"
 
-        (
-            lora_request,
-            prompt_adapter_request,
-        ) = self._maybe_get_adapters(request)
+        try:
+            (
+                lora_request,
+                prompt_adapter_request,
+            ) = self._maybe_get_adapters(request)
 
-        tokenizer = await self.engine_client.get_tokenizer(lora_request)
+            tokenizer = await self.engine_client.get_tokenizer(lora_request)
 
-        prompt: Union[str, List[int]]
-        if isinstance(request, TokenizeChatRequest):
-            model_config = self.model_config
-
-            conversation, mm_data_future = parse_chat_messages_futures(
-                request.messages, model_config, tokenizer)
-
-            if isinstance(tokenizer, MistralTokenizer):
-                prompt = apply_mistral_chat_template(
+            if isinstance(request, TokenizeChatRequest):
+                request_prompts, engine_prompts = await self._preprocess_chat(
+                    request,
                     tokenizer,
-                    messages=request.messages,
+                    request.messages,
                     chat_template=self.chat_template,
                     add_generation_prompt=request.add_generation_prompt,
                     continue_final_message=request.continue_final_message,
+                    add_special_tokens=request.add_special_tokens,
                 )
             else:
-                prompt = apply_hf_chat_template(
+                request_prompts, engine_prompts = self._preprocess_completion(
+                    request,
                     tokenizer,
-                    conversation=conversation,
-                    chat_template=self.chat_template,
-                    add_generation_prompt=request.add_generation_prompt,
-                    continue_final_message=request.continue_final_message,
+                    request.prompt,
+                    add_special_tokens=request.add_special_tokens,
                 )
+        except ValueError as e:
+            logger.exception("Error in preprocessing prompt inputs")
+            return self.create_error_response(str(e))
+    
 
-            mm_data = await mm_data_future
-            if mm_data:
-                logger.warning(
-                    "Multi-modal inputs are ignored during tokenization")
-        else:
-            prompt = request.prompt
+        input_ids: List[int] = []
+        for i, engine_prompt in enumerate(engine_prompts):
+            self._log_inputs(request_id,
+                             request_prompts[i],
+                             params=None,
+                             lora_request=lora_request,
+                             prompt_adapter_request=prompt_adapter_request)
 
-        self._log_inputs(request_id,
-                         prompt,
-                         params=None,
-                         lora_request=lora_request,
-                         prompt_adapter_request=prompt_adapter_request)
+            # Silently ignore prompt adapter since it does not affect tokenization
+            # (Unlike in Embeddings API where an error is raised)
 
-        # Silently ignore prompt adapter since it does not affect tokenization
-
-        prompt_input = self._tokenize_prompt_input(
-            request,
-            tokenizer,
-            prompt,
-            add_special_tokens=request.add_special_tokens,
-        )
-        input_ids = prompt_input["prompt_token_ids"]
+            input_ids.extend(engine_prompt["prompt_token_ids"])
 
         return TokenizeResponse(tokens=input_ids,
                                 count=len(input_ids),
@@ -143,9 +132,8 @@ class OpenAIServingTokenization(OpenAIServing):
                          lora_request=lora_request,
                          prompt_adapter_request=prompt_adapter_request)
 
-        if prompt_adapter_request is not None:
-            raise NotImplementedError("Prompt adapter is not supported "
-                                      "for tokenization")
+        # Silently ignore prompt adapter since it does not affect tokenization
+        # (Unlike in Embeddings API where an error is raised)
 
         prompt_input = self._tokenize_prompt_input(
             request,
