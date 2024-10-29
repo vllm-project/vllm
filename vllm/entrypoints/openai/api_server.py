@@ -541,7 +541,7 @@ async def run_server(args, **uvicorn_kwargs) -> None:
     # This avoids race conditions with ray.
     # see https://github.com/vllm-project/vllm/issues/8204
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.bind(("", args.port))
+    sock.bind((args.host, args.port))
 
     def signal_handler(*_) -> None:
         # Interrupt server on sigterm while initializing
