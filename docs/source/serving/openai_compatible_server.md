@@ -26,13 +26,17 @@ print(completion.choices[0].message)
 ```
 
 ## API Reference
-Please see the [OpenAI API Reference](https://platform.openai.com/docs/api-reference) for more information on the API. We support all parameters except:
-- Chat: `tools`, and `tool_choice`.
-- Completions: `suffix`.
+
+Please see the [OpenAI API Reference](https://platform.openai.com/docs/api-reference) for more information on the API. We currently support the following APIs:
+
+- Completions API (except for `suffix` parameter)
+- Chat Completions API (except for `parallel_tool_calls` and `user` parameter)
+- Embeddings API
 
 vLLM also provides experimental support for OpenAI Vision API compatible inference. See more details in [Using VLMs](../models/vlm.rst).
 
 ## Extra Parameters
+
 vLLM supports a set of parameters that are not part of the OpenAI API.
 In order to use them, you can pass them as extra parameters in the OpenAI client.
 Or directly merge them into the JSON payload if you are using HTTP call directly.
@@ -47,23 +51,6 @@ completion = client.chat.completions.create(
     "guided_choice": ["positive", "negative"]
   }
 )
-```
-
-### Extra Parameters for Chat Completions API
-The following [sampling parameters (click through to see documentation)](../dev/sampling_params.rst) are supported.
-
-```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
-:language: python
-:start-after: begin-chat-completion-sampling-params
-:end-before: end-chat-completion-sampling-params
-```
-
-The following extra parameters are supported:
-
-```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
-:language: python
-:start-after: begin-chat-completion-extra-params
-:end-before: end-chat-completion-extra-params
 ```
 
 ### Extra Parameters for Completions API
@@ -81,6 +68,42 @@ The following extra parameters are supported:
 :language: python
 :start-after: begin-completion-extra-params
 :end-before: end-completion-extra-params
+```
+
+### Extra Parameters for Chat Completions API
+
+The following [sampling parameters (click through to see documentation)](../dev/sampling_params.rst) are supported.
+
+```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
+:language: python
+:start-after: begin-chat-completion-sampling-params
+:end-before: end-chat-completion-sampling-params
+```
+
+The following extra parameters are supported:
+
+```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
+:language: python
+:start-after: begin-chat-completion-extra-params
+:end-before: end-chat-completion-extra-params
+```
+
+### Extra Parameters for Embeddings API
+
+The following [pooling parameters (click through to see documentation)](../dev/pooling_params.rst) are supported.
+
+```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
+:language: python
+:start-after: begin-embedding-sampling-params
+:end-before: end-embedding-sampling-params
+```
+
+The following extra parameters are supported:
+
+```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
+:language: python
+:start-after: begin-embedding-extra-params
+:end-before: end-embedding-extra-params
 ```
 
 ## Chat Template
