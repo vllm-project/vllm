@@ -22,6 +22,8 @@ class CompilationConfig(BaseModel):
                 that all input buffers have fixed addresses.
             Note that this is orthogonal to the cudagraph capture out
             side of compilation.
+            TODO: move outside cudagraph logic into compilation.
+            torch.compile will handle cudagraph capture logic in the future.
         - cudagraph_capture_sizes: sizes to capture cudagraph.
             - None: capture sizes are inferred from compilation context.
             - List[int]: capture sizes are specified.
