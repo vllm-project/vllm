@@ -67,7 +67,11 @@ class OpenAIServingTokenization(OpenAIServing):
             tokenizer = await self.engine_client.get_tokenizer(lora_request)
 
             if isinstance(request, TokenizeChatRequest):
-                request_prompts, engine_prompts = await self._preprocess_chat(
+                (
+                    conversation,
+                    request_prompts,
+                    engine_prompts,
+                ) = await self._preprocess_chat(
                     request,
                     tokenizer,
                     request.messages,

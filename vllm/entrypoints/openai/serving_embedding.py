@@ -151,7 +151,11 @@ class OpenAIServingEmbedding(OpenAIServing):
             tokenizer = await self.engine_client.get_tokenizer(lora_request)
 
             if isinstance(request, EmbeddingChatRequest):
-                request_prompts, engine_prompts = await self._preprocess_chat(
+                (
+                    conversation,
+                    request_prompts,
+                    engine_prompts,
+                ) = await self._preprocess_chat(
                     request,
                     tokenizer,
                     request.messages,
@@ -210,9 +214,11 @@ class OpenAIServingEmbedding(OpenAIServing):
             is_cancelled=raw_request.is_disconnected if raw_request else None,
         )
 
+        num_prompts = len(engine_prompts)
+
         # Non-streaming response
         final_res_batch: List[Optional[EmbeddingRequestOutput]]
-        final_res_batch = [None] * len(request_prompts)
+        final_res_batch = [None] * num_prompts
         try:
             async for i, res in result_generator:
                 final_res_batch[i] = res

@@ -11,6 +11,7 @@ from typing_extensions import Annotated
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
+                                         ConversationMessage,
                                          apply_hf_chat_template,
                                          apply_mistral_chat_template,
                                          parse_chat_messages_futures)
@@ -392,7 +393,7 @@ class OpenAIServing:
         input_or_inputs: Union[str, List[str], List[int], List[List[int]]],
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
         add_special_tokens: bool = True,
-    ) -> Tuple[Sequence[RequestPrompt], List[TokensPrompt]]:
+    ) -> Tuple[Sequence[TextTokensPrompt], List[TokensPrompt]]:
         request_prompts = [
             request_prompt
             for request_prompt in self._tokenize_prompt_input_or_inputs(
@@ -425,7 +426,8 @@ class OpenAIServing:
         tool_parser: Optional[Callable[[AnyTokenizer], ToolParser]] = None,
         truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
         add_special_tokens: bool = False,
-    ) -> Tuple[Sequence[RequestPrompt], List[TokensPrompt]]:
+    ) -> Tuple[List[ConversationMessage], Sequence[RequestPrompt],
+               List[TokensPrompt]]:
         conversation, mm_data_future = parse_chat_messages_futures(
             messages,
             self.model_config,
@@ -487,7 +489,7 @@ class OpenAIServing:
         if mm_data is not None:
             engine_prompt["multi_modal_data"] = mm_data
 
-        return [request_prompt], [engine_prompt]
+        return conversation, [request_prompt], [engine_prompt]
 
     def _log_inputs(
         self,
