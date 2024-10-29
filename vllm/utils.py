@@ -488,6 +488,15 @@ def is_xpu() -> bool:
 
 
 @lru_cache(maxsize=None)
+def is_mi250() -> bool:
+    if not is_hip() or not torch.cuda.is_available():
+        return False
+    archName = torch.cuda.get_device_properties('cuda').gcnArchName
+    return (archName is not None) and \
+        ("gfx90a" in archName)
+
+
+@lru_cache(maxsize=None)
 def get_max_shared_memory_bytes(gpu: int = 0) -> int:
     """Returns the maximum shared memory per thread block in bytes."""
     from vllm import _custom_ops as ops
