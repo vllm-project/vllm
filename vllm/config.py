@@ -284,7 +284,7 @@ class ModelConfig:
                 pooling_softmax=pooling_softmax,
                 pooling_step_tag_id=pooling_step_tag_id,
                 pooling_returned_token_ids=pooling_returned_token_ids)
-        return None
+        return PoolerConfig()
 
     def _init_attention_free(self) -> bool:
         architectures = getattr(self.hf_config, "architectures", [])
