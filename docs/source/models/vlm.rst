@@ -243,6 +243,9 @@ To consume the server, you can use the OpenAI client like in the example below:
 
 A full code example can be found in `examples/openai_api_client_for_multimodal.py <https://github.com/vllm-project/vllm/blob/main/examples/openai_api_client_for_multimodal.py>`_.
 
+.. tip::
+    There is no need to format the prompt in the API request since it will be handled by the server.
+
 .. note::
 
     By default, the timeout for fetching images through http url is ``5`` seconds. You can override this by setting the environment variable:
@@ -251,16 +254,13 @@ A full code example can be found in `examples/openai_api_client_for_multimodal.p
 
         $ export VLLM_IMAGE_FETCH_TIMEOUT=<timeout>
 
-.. note::
-    There is no need to format the prompt in the API request since it will be handled by the server.
-
 Chat Embeddings API
 ^^^^^^^^^^^^^^^^^^^
 
 vLLM's Chat Embeddings API is a superset of OpenAI's `Embeddings API <https://platform.openai.com/docs/api-reference/embeddings>`_,
 where a list of ``messages`` can be passed instead of batched ``inputs``. This enables multi-modal inputs to be passed to embedding models.
 
-.. note::
+.. tip::
     The schema of ``messages`` is exactly the same as in Chat Completions API.
 
 In this example, we will serve the ``TIGER-Lab/VLM2Vec-Full`` model.
