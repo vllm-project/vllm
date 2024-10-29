@@ -61,7 +61,7 @@ class SchedulingBudget:
     _num_curr_seqs: int = 0
 
     def can_schedule(self, *, num_new_tokens: int, num_new_seqs: int):
-        assert num_new_tokens != 0
+        # assert num_new_tokens != 0
         assert num_new_seqs != 0
         return (self.num_batched_tokens + num_new_tokens <= self.token_budget
                 and self.num_curr_seqs + num_new_seqs <= self.max_num_seqs)
@@ -659,6 +659,7 @@ class Scheduler:
                 if enable_chunking:
                     num_running_seqs = seq_group.get_max_num_running_seqs()
                     budget.add_num_seqs(seq_group.request_id, num_running_seqs)
+                    assert budget.num_curr_seqs <= self.scheduler_config.max_num_seqs
                 if curr_loras is not None and seq_group.lora_int_id > 0:
                     curr_loras.add(seq_group.lora_int_id)
 
@@ -763,6 +764,7 @@ class Scheduler:
                     ScheduledSequenceGroup(seq_group, token_chunk_size=1))
             budget.add_num_batched_tokens(seq_group.request_id, num_new_tokens)
             budget.add_num_seqs(seq_group.request_id, num_new_seqs)
+            assert budget.num_curr_seqs <= self.scheduler_config.max_num_seqs
 
         swapped_queue.extendleft(leftover_swapped)
 
@@ -910,7 +912,6 @@ class Scheduler:
                 "sequence.")
             seq = waiting_seqs[0]
             self._update_prefix_cached_tokens(seq)
-            num_cached_tokens = seq.get_num_cached_tokens()
             num_new_tokens = self._get_num_new_tokens(
                 seq_group,
                 SequenceStatus.WAITING,
@@ -988,7 +989,7 @@ class Scheduler:
 
             assert num_new_tokens > 0
             # We have new tokens but they might be cached.
-            if num_new_tokens_exclude_cached > 0 and not budget.can_schedule(
+            if not budget.can_schedule(
                 num_new_tokens=num_new_tokens_exclude_cached,
                 num_new_seqs=num_new_seqs,
             ):
@@ -1068,6 +1069,8 @@ class Scheduler:
         for seq_group in self.running:
             budget.add_num_seqs(seq_group.request_id,
                                 seq_group.get_max_num_running_seqs())
+            assert budget.num_curr_seqs <= self.scheduler_config.max_num_seqs
+
         curr_loras = set(
             seq_group.lora_int_id for seq_group in self.running
             if seq_group.lora_int_id > 0) if self.lora_enabled else None
