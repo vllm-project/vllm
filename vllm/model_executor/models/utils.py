@@ -242,6 +242,7 @@ def init_vllm_registered_model(
     lora_config: Optional[LoRAConfig] = None,
     multimodal_config: Optional[MultiModalConfig] = None,
     scheduler_config: Optional[SchedulerConfig] = None,
+    prefix: str = "",
 ) -> nn.Module:
     """
     Helper function to initialize an inner model registered to vLLM,
@@ -257,6 +258,7 @@ def init_vllm_registered_model(
         lora_config=lora_config,
         multimodal_config=multimodal_config,
         scheduler_config=scheduler_config,
+        prefix=prefix,
     )
 
 
@@ -610,3 +612,16 @@ def get_vit_attn_backend() -> _Backend:
         else:
             selected_backend = _Backend.XFORMERS
     return selected_backend
+
+
+def maybe_prefix(prefix: str, name: str) -> str:
+    """Add a prefix to a name if the prefix is non-empty.
+
+    Args:
+        prefix: The prefix to add. If empty, no prefix will be added.
+        name: The name to potentially prefix.
+
+    Returns:
+        The string "prefix.name" if prefix was non-empty, otherwise just "name".
+    """
+    return name if not prefix else f"{prefix}.{name}"
