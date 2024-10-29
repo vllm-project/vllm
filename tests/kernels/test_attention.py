@@ -7,7 +7,7 @@ import torch
 from tests.kernels.utils import opcheck
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
-from vllm.utils import get_max_shared_memory_bytes, seed_everything
+from vllm.utils import get_max_shared_memory_bytes
 
 from .allclose_default import get_default_atol, get_default_rtol
 
@@ -144,7 +144,7 @@ def test_paged_attention(
             or (version == "rocm" and head_size not in (64, 128))):
         pytest.skip()
 
-    seed_everything(seed)
+    current_platform.seed_everything(seed)
     torch.set_default_device(device)
     scale = float(1.0 / (head_size**0.5))
     num_query_heads, num_kv_heads = num_heads
@@ -385,7 +385,7 @@ def test_multi_query_kv_attention(
     seed: int,
     device: str,
 ) -> None:
-    seed_everything(seed)
+    current_platform.seed_everything(seed)
     torch.set_default_device(device)
     # MAX_SEQ_LEN sometimes causes OOM in the reference implementation.
     # As the xformers library is already tested with its own tests, we can use
