@@ -10,7 +10,6 @@ from vllm.platforms import current_platform
 from vllm.sequence import SampleLogprobs
 
 from ....conftest import IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner
-from ....utils import fork_new_process_for_each_test
 from ...utils import check_logprobs_close
 
 HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
@@ -150,7 +149,6 @@ def run_test(
 @pytest.mark.parametrize("dtype", [target_dtype])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [10])
-@fork_new_process_for_each_test
 def test_models(hf_runner, vllm_runner, image_assets, model, size_factors,
                 dtype: str, max_tokens: int, num_logprobs: int) -> None:
     images = [asset.pil_image for asset in image_assets]
@@ -175,7 +173,6 @@ def test_models(hf_runner, vllm_runner, image_assets, model, size_factors,
 
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize("dtype", [target_dtype])
-@fork_new_process_for_each_test
 def test_regression_7840(hf_runner, vllm_runner, image_assets, model,
                          dtype) -> None:
     images = [asset.pil_image for asset in image_assets]
@@ -215,7 +212,6 @@ def test_regression_7840(hf_runner, vllm_runner, image_assets, model,
 @pytest.mark.parametrize("dtype", [target_dtype])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [10])
-@fork_new_process_for_each_test
 def test_multi_images_models(hf_runner, vllm_runner, image_assets, model,
                              size_factors, dtype: str, max_tokens: int,
                              num_logprobs: int) -> None:
