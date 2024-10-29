@@ -96,12 +96,7 @@ class OpenAIServingEmbedding(OpenAIServing):
                          prompt_adapters=None,
                          request_logger=request_logger)
 
-        # If this is None we use the tokenizer's default chat template
-        # the list of commonly-used chat template names for HF named templates
-        hf_chat_templates: List[str] = ['default', 'tool_use']
-        self.chat_template = chat_template \
-            if chat_template in hf_chat_templates \
-            else load_chat_template(chat_template)
+        self.chat_template = load_chat_template(chat_template)
 
         self._enabled = check_embedding_mode(model_config)
 
