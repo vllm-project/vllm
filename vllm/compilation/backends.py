@@ -1,7 +1,7 @@
 import copy
 import dataclasses
 import operator
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 
 import torch
 import torch.fx as fx
@@ -230,6 +230,9 @@ class VllmBackend:
     """The compilation backend for `torch.compile` with VLLM.
     It is used for compilation level of `CompilationLevel.PIECEWISE`,
     where we customize the compilation.
+
+    The major work of this backend is to split the graph into
+    piecewise graphs, and pass them to the piecewise backend.
     """
 
     compilation_configs: CompilationConfig
@@ -264,14 +267,13 @@ class VllmBackend:
         self.split_gm, self.piecewise_graphs = split_graph(
             graph, self.compilation_configs.non_cudagraph_ops)
 
-        self.returned_callable: Callable = None  # type: ignore
+        returned_callable: Callable  # type: ignore
 
         if len(self.piecewise_graphs) == 0:
-            self.returned_callable = piecewise_backend(
-                graph,
-                self.compilation_configs,
-                self.graph_pool,
-                is_first_graph=True)
+            returned_callable = PiecewiseBackend(graph,
+                                                 self.compilation_configs,
+                                                 self.graph_pool,
+                                                 is_first_graph=True)
         else:
             from torch._dynamo.utils import lazy_format_graph_code
             logger.debug(
@@ -284,12 +286,13 @@ class VllmBackend:
                     # cannot setattr to a module, so we need to set
                     # the attribute in the __dict__
                     self.split_gm.__dict__[
-                        item.submod_name] = piecewise_backend(
+                        item.submod_name] = PiecewiseBackend(
                             item.graph, self.compilation_configs,
                             self.graph_pool, is_first_graph)
                     is_first_graph = False
-            self.returned_callable = self.split_gm
+            returned_callable = self.split_gm
 
+        self.returned_callable = returned_callable
         # trigger the first compilation
         self.returned_callable(*example_inputs)
 
@@ -299,130 +302,125 @@ class VllmBackend:
 
 
 @dataclasses.dataclass
-class Entry:
-    runnable: Callable
-    use_cudagraph: bool
+class ConcreteSizeEntry:
+    runtime_shape: int
+    need_to_compile: bool  # the size is in compile_sizes
+    use_cudagraph: bool  # the size is in capture_sizes
+
+    compiled: bool = False
+    runnable: Callable = None  # type: ignore
     num_finished_warmup: int = 0
     cudagraph: Optional[torch.cuda.CUDAGraph] = None
     output: Optional[Any] = None
 
 
-def piecewise_backend(graph,
-                      compilation_configs: CompilationConfig,
-                      graph_pool,
-                      is_first_graph=False) -> Callable:
+class PiecewiseBackend:
 
-    # flags for all the seen shapes, whether we need to specialize
-    runtime_shapes_to_compile_flags: Dict[Tuple[int, ...], bool] = {}
+    def __init__(self,
+                 graph: fx.GraphModule,
+                 compilation_configs: CompilationConfig,
+                 graph_pool: Any,
+                 is_first_graph: bool = False):
+        self.graph = graph
+        self.compilation_configs = compilation_configs
+        self.graph_pool = graph_pool
+        self.is_first_graph = is_first_graph
 
-    # if we need to specialize, the compiled graph for that shape
-    runtime_shapes_to_compiled_entry: Dict[Tuple[int, ...], Entry] = {}
+        self.compile_sizes: Set[int] = set(
+            self.compilation_configs.compile_sizes)
+        self.capture_sizes: Set[int] = set(
+            self.compilation_configs.capture_sizes)
 
-    sym_shape_indices: List[int] = []
+        self.compile_finished = False
+        self.first_run_finished = False
 
-    compile_run = True
-    first_run = True
-    graph_for_symbolic_shape: Callable = None  # type: ignore
+        self.graph_for_symbolic_shape: Callable = None  # type: ignore
 
-    # this is the function we return to run finally
-    def compiled_graph_wrapper(*args):
-        nonlocal first_run, compile_run
-        nonlocal runtime_shapes_to_compile_flags
-        nonlocal runtime_shapes_to_compiled_entry
-        nonlocal graph_for_symbolic_shape
-        nonlocal sym_shape_indices
+        self.sym_shape_indices: List[int] = []
 
-        if compile_run:
-            compile_run = False
+        # the entries for different shapes that we need to either
+        # compile or capture cudagraph
+        self.entries: Dict[int, ConcreteSizeEntry] = {}
+
+    def __call__(self, *args) -> Any:
+
+        if not self.compile_finished:
+            self.compile_finished = True
 
             # this is the first compilation, we will compile a graph with
             # dynamic shape, as the caller will mark first dimension as dynamic
 
-            if compilation_configs.use_inductor:
-                if is_first_graph:
+            if self.compilation_configs.use_inductor:
+                if self.is_first_graph:
                     logger.info("Compiling a graph for general shape")
-                graph_for_symbolic_shape = wrap_inductor(
-                    graph, args, compilation_configs.inductor_compile_config)
+                self.graph_for_symbolic_shape = wrap_inductor(
+                    self.graph, args,
+                    self.compilation_configs.inductor_compile_config)
             else:
-                graph_for_symbolic_shape = graph
+                self.graph_for_symbolic_shape = self.graph
 
-            # TODO: Dynamo does not pass all dynamic shapes.
-            # Need to investigate why. It works now because all the dynamic
-            # shapes have the same value, and either of them can be used.
-            sym_shape_indices = [
+            for shape in self.compile_sizes.union(self.capture_sizes):
+                self.entries[shape] = ConcreteSizeEntry(
+                    runtime_shape=shape,
+                    need_to_compile=shape in self.compile_sizes,
+                    use_cudagraph=shape in self.capture_sizes,
+                )
+
+            self.sym_shape_indices = [
                 i for i, x in enumerate(args) if isinstance(x, torch.SymInt)
             ]
 
-            return graph(*args)
+            return self.graph(*args)
 
-        if first_run:
-            first_run = False
-            return graph_for_symbolic_shape(*args)
+        if not self.first_run_finished:
+            self.first_run_finished = True
+            return self.graph_for_symbolic_shape(*args)
 
-        runtime_shapes: Tuple[int,
-                              ...] = tuple(args[i] for i in sym_shape_indices)
+        runtime_shape = args[self.sym_shape_indices[0]]
+        if runtime_shape not in self.entries:
+            return self.graph_for_symbolic_shape(*args)
 
-        if runtime_shapes not in runtime_shapes_to_compile_flags:
-            # we haven't seen this shape before
-            # query if we need to specialize for this shape
-            # we only specialize for the first dimension.
-            # TODO: investigate if any model needs to specialize
-            # beyond the first dimension
+        entry = self.entries[runtime_shape]
 
-            runtime_shapes_to_compile_flags[runtime_shapes] = runtime_shapes[
-                0] in compilation_configs.compile_sizes or \
-                runtime_shapes[0] in compilation_configs.capture_sizes
-
-        if not runtime_shapes_to_compile_flags[runtime_shapes]:
-            # we don't need to specialize for this shape
-            return graph_for_symbolic_shape(*args)
-
-        if runtime_shapes not in runtime_shapes_to_compiled_entry:
-            # the first time we see this shape, we need to compile the graph
-            if compilation_configs.use_inductor and runtime_shapes[
-                    0] in compilation_configs.compile_sizes:
-                if is_first_graph:
+        if entry.need_to_compile and not entry.compiled:
+            entry.compiled = True
+            if self.compilation_configs.use_inductor:
+                if self.is_first_graph:
                     logger.info("Compiling a graph for shape %s",
-                                runtime_shapes)
-                runnable = wrap_inductor(
-                    graph, args, compilation_configs.inductor_compile_config)
+                                runtime_shape)
+                entry.runnable = wrap_inductor(
+                    self.graph, args,
+                    self.compilation_configs.inductor_compile_config)
             else:
-                runnable = graph
-            use_cudagraph = compilation_configs.use_cudagraph and \
-                runtime_shapes[0] in compilation_configs.capture_sizes # noqa
-            entry = Entry(
-                runnable=runnable,
-                use_cudagraph=use_cudagraph,
-            )
-            runtime_shapes_to_compiled_entry[runtime_shapes] = entry
-        else:
-            entry = runtime_shapes_to_compiled_entry[runtime_shapes]
+                entry.runnable = self.graph_for_symbolic_shape
 
         if not entry.use_cudagraph:
             return entry.runnable(*args)
 
-        if entry.num_finished_warmup < compilation_configs.cudagraph_num_of_warmups:  # noqa
-            entry.num_finished_warmup += 1
-            if is_first_graph:
-                logger.debug("Warming up %s/%s for shape %s",
-                             entry.num_finished_warmup,
-                             compilation_configs.cudagraph_num_of_warmups,
-                             runtime_shapes)
-            return entry.runnable(*args)
-
         if entry.cudagraph is None:
-            if is_first_graph:
+            if entry.num_finished_warmup < self.compilation_configs.cudagraph_num_of_warmups:  # noqa
+                entry.num_finished_warmup += 1
+                if self.is_first_graph:
+                    logger.debug(
+                        "Warming up %s/%s for shape %s",
+                        entry.num_finished_warmup,
+                        self.compilation_configs.cudagraph_num_of_warmups,
+                        runtime_shape)
+                return entry.runnable(*args)
+
+            if self.is_first_graph:
                 logger.info("Capturing a cudagraph for shape %s",
-                            runtime_shapes)
+                            runtime_shape)
+
             cudagraph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(cudagraph, pool=graph_pool):
+            with torch.cuda.graph(cudagraph, pool=self.graph_pool):
                 entry.output = weak_ref_tensors(entry.runnable(*args))
+
             entry.cudagraph = cudagraph
+            return entry.output
 
         entry.cudagraph.replay()
         return entry.output
-
-    return compiled_graph_wrapper
 
 
 def select_default_backend(level: int) -> Union[str, Callable]:
