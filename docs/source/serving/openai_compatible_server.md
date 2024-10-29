@@ -39,7 +39,7 @@ We currently support the following OpenAI APIs:
     - *TODO: Support `input_audio` content type as defined [here](https://github.com/openai/openai-python/blob/v1.52.2/src/openai/types/chat/chat_completion_content_part_input_audio_param.py).*
   - *Note: `parallel_tool_calls` and `user` parameters are ignored.*
 - [Embeddings API](https://platform.openai.com/docs/api-reference/embeddings)
-  - Instead of `inputs`, you can alternatively pass in a list of `messages` (same schema as Chat Completions API),
+  - Instead of `inputs`, you can pass in a list of `messages` (same schema as Chat Completions API),
     which will be treated as a single prompt to the model according to its chat template.
     - This enables multi-modal inputs to be passed to embedding models, see [Using VLMs](../models/vlm.rst).
   - *Note: You should run `vllm serve` with `--task embedding` to ensure that the model is being run in embedding mode.*
