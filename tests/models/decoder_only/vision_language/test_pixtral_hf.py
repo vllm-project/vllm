@@ -12,12 +12,15 @@ from ...utils import check_logprobs_close
 _LIMIT_IMAGE_PER_PROMPT = 4
 
 HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
-    "stop_sign": "<s>[INST]What's the content of the image?\n[IMG][/INST]",
-    "cherry_blossom": "<s>[INST]What is the season?\n[IMG][/INST]",
+    "stop_sign":
+    "<s>[INST]What's the content of the image?\n[IMG][/INST]",
+    "cherry_blossom":
+    "<s>[INST]What is the season?\n[IMG][/INST]",
 })
 
 models = [
     "mistral-community/pixtral-12b",
+    # "nm-testing/pixtral-12b-FP8-dynamic",
 ]
 
 
