@@ -290,7 +290,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "The request_id related to this request. If the caller does "
             "not set it, a random_uuid will be generated. This id is used "
             "through out the inference process and return in response."))
-
     # doc: end-chat-completion-extra-params
 
     def to_beam_search_params(self,
@@ -588,7 +587,6 @@ class CompletionRequest(OpenAIBaseModel):
             "The priority of the request (lower means earlier handling; "
             "default: 0). Any priority other than 0 will raise an error "
             "if the served model does not use priority scheduling."))
-
     # doc: end-completion-extra-params
 
     def to_beam_search_params(self,
@@ -713,7 +711,6 @@ class EmbeddingCompletionRequest(OpenAIBaseModel):
 
     # doc: begin-embedding-pooling-params
     additional_data: Optional[Any] = None
-
     # doc: end-embedding-pooling-params
 
     # doc: begin-embedding-extra-params
@@ -729,7 +726,6 @@ class EmbeddingCompletionRequest(OpenAIBaseModel):
             "The priority of the request (lower means earlier handling; "
             "default: 0). Any priority other than 0 will raise an error "
             "if the served model does not use priority scheduling."))
-
     # doc: end-embedding-extra-params
 
     def to_pooling_params(self):
@@ -747,6 +743,7 @@ class EmbeddingChatRequest(OpenAIBaseModel):
 
     # doc: begin-chat-embedding-pooling-params
     additional_data: Optional[Any] = None
+    # doc: end-chat-embedding-pooling-params
 
     # doc: begin-chat-embedding-extra-params
     add_generation_prompt: bool = Field(
@@ -793,7 +790,6 @@ class EmbeddingChatRequest(OpenAIBaseModel):
             "The priority of the request (lower means earlier handling; "
             "default: 0). Any priority other than 0 will raise an error "
             "if the served model does not use priority scheduling."))
-
     # doc: end-chat-embedding-extra-params
 
     @model_validator(mode="before")
