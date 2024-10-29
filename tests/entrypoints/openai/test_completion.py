@@ -157,15 +157,15 @@ async def test_added_lora_tokens(client: openai.AsyncOpenAI):
 @pytest.mark.asyncio
 async def test_added_lora_tokens_base_model(client: openai.AsyncOpenAI):
     # test using token IDs
-    completion = await client.completions.create(
-        model=MODEL_NAME,
-        prompt=[0, 0, 32000, 32001, 32002],
-        echo=True,
-        max_tokens=5,
-        temperature=0.0,
-    )
-    # Added tokens should not appear in tokenized prompt
-    assert "vllm" not in completion.choices[0].text
+    with pytest.raises(openai.BadRequestError, match="out of vocabulary"):
+        # Added tokens should be rejected by the base model
+        await client.completions.create(
+            model=MODEL_NAME,
+            prompt=[0, 0, 32000, 32001, 32002],
+            echo=True,
+            max_tokens=5,
+            temperature=0.0,
+        )
 
 
 @pytest.mark.asyncio
