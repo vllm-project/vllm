@@ -27,9 +27,7 @@ try:
             is_cuda = True
     finally:
         pynvml.nvmlShutdown()
-except ImportError:
-    pass
-except pynvml.NVMLError_LibraryNotFound:
+except Exception:
     # CUDA is supported on Jetson, but NVML is not.
     import os
 
@@ -40,8 +38,6 @@ except pynvml.NVMLError_LibraryNotFound:
     if cuda_is_jetson():
         is_cuda = True
         is_cuda_jetson = True
-except Exception:
-    pass
 
 is_rocm = False
 
