@@ -13,6 +13,8 @@ from vllm.attention.backends.utils import (PAD_SLOT_ID, CommonAttentionState,
                                            compute_slot_mapping,
                                            compute_slot_mapping_start_idx,
                                            get_seq_len_block_table_args,
+                                           is_all_cross_attn_metadata_set,
+                                           is_all_encoder_attn_metadata_set,
                                            is_block_tables_empty)
 from vllm.forward_context import get_forward_context
 from vllm.utils import async_tensor_h2d, make_tensor_with_pad
@@ -174,9 +176,7 @@ class FlashAttentionMetadata(AttentionMetadata):
         '''
         All attention metadata required for encoder attention is set.
         '''
-        return ((self.encoder_seq_lens is not None)
-                and (self.encoder_seq_lens_tensor is not None)
-                and (self.max_encoder_seq_len is not None))
+        return is_all_encoder_attn_metadata_set(self)
 
     @property
     def is_all_cross_attn_metadata_set(self):
@@ -185,9 +185,7 @@ class FlashAttentionMetadata(AttentionMetadata):
 
         Superset of encoder attention required metadata.
         '''
-        return (self.is_all_encoder_attn_metadata_set
-                and (self.cross_slot_mapping is not None)
-                and (self.cross_block_tables is not None))
+        return is_all_cross_attn_metadata_set(self)
 
     @property
     def prefill_metadata(self) -> Optional["FlashAttentionMetadata"]:
@@ -713,8 +711,11 @@ def _get_query_key_seq_metadata(
                 attn_metadata.seq_start_loc, max_seq_len)
 
     elif attn_type == AttentionType.ENCODER_DECODER:
-        # Enc/dec cross-attention KVs match encoder sequence length;
-        # cross-attention utilizes special "cross" block tables
+        # This is cross attention between the where the key
+        # is the precomputed encoder attention and query
+        # is the input sequence.
+        # Choose query max length based on whether it is prompt
+        # or not.
         if is_prompt:
             max_seq_len = attn_metadata.max_prefill_seq_len
         else:
@@ -723,6 +724,8 @@ def _get_query_key_seq_metadata(
                 attn_metadata.encoder_seq_start_loc,
                 attn_metadata.max_encoder_seq_len)
     elif attn_type == AttentionType.ENCODER:
+        # For encoder attention both the query and the key are same i.e the
+        # encoder sequence.
         return (attn_metadata.encoder_seq_start_loc,
                 attn_metadata.max_encoder_seq_len,
                 attn_metadata.encoder_seq_start_loc,
@@ -757,20 +760,20 @@ def _get_num_prefill_encode_decode_tokens(
         is `None` when required for the calculations.
     """
     if attn_type == AttentionType.ENCODER:
-        # Encoder attention - chunked prefill is not applicable;
+        # Encoder attention is only invoked during prefill phase.
         assert attn_metadata.num_encoder_tokens is not None
         num_prefill_tokens = attn_metadata.num_encoder_tokens
         num_encoder_tokens = attn_metadata.num_encoder_tokens
         num_decode_tokens = 0
     elif attn_type == AttentionType.ENCODER_DECODER:
-        # Encoder/decoder cross-attention requires no chunked
-        # prefill (100% prefill or 100% decode tokens, no mix)
         assert attn_metadata.num_encoder_tokens is not None
         num_prefill_tokens = attn_metadata.num_prefill_tokens
         num_encoder_tokens = attn_metadata.num_encoder_tokens
         num_decode_tokens = attn_metadata.num_decode_tokens
     else:  # attn_type == AttentionType.DECODER or
         # attn_type == AttentionType.ENCODER_ONLY
+        # There are no encoder tokens for DECODER and ENCODER_ONLY
+        # attention type.
         num_prefill_tokens = attn_metadata.num_prefill_tokens
         num_encoder_tokens = 0
         num_decode_tokens = attn_metadata.num_decode_tokens
@@ -839,7 +842,6 @@ def unified_flash_attention(
     if kv_cache.numel() > 0:
         key_cache = kv_cache[0]
         value_cache = kv_cache[1]
-
         if (attn_type != AttentionType.ENCODER) and (key is not None) and (
                 value is not None):
             if attn_type == AttentionType.ENCODER_DECODER:
@@ -936,6 +938,8 @@ def unified_flash_attention(
         # because different queries might have different lengths.
         assert decode_meta.max_decode_query_len is not None
         if decode_meta.max_decode_query_len > 1:
+            assert attn_type == AttentionType.DECODER, (
+                "Decoder only models support max_decode_query_len > 1")
             decode_output = flash_attn_varlen_func(
                 q=decode_query,
                 k=key_cache,

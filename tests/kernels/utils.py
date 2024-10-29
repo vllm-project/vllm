@@ -558,6 +558,8 @@ def _make_metadata_tensors(
     * max_context_len: max(context_lens)
     * max_seq_len: max(seq_lens)
     * seq_start_loc: start idx of each sequence
+    * encoder_seq_lens_tensor: encoder seq_lens list, as tensor
+    * encoder_seq_start_loc: start idx of each encoder sequence
     * max_encoder_seq_len: encoder seq_lens list, as tensor
     '''
     seq_lens_tensor = maybe_make_int_tensor(seq_lens, device)
@@ -615,6 +617,9 @@ def make_kv_cache(num_blocks: int,
     Returns:
 
     * kv_cache: 2 x num_blocks x (block_size * num_heads * head_size)
+    *     for backend 'XFORMERS' 
+    * kv_cache: 2 x num_blocks x block_size x num_heads x head_size
+    *     for backend 'FLASH_ATTN'  
     '''
     if backend == 'XFORMERS':
         kv_cache = torch.rand(
@@ -972,7 +977,8 @@ def make_test_metadata(
 
 
 def assert_actual_matches_ideal(test_params: PhaseTestParameters,
-                                output_under_test: torch.Tensor) -> None:
+                                output_under_test: torch.Tensor,
+                                backend: str) -> None:
     '''
     Assert that observed output matches the ideal output
     contained in the test parameters data structure.
@@ -983,10 +989,22 @@ def assert_actual_matches_ideal(test_params: PhaseTestParameters,
     * output_under_test: actually observed output value
     '''
     ideal_output = test_params.packed_qkvo.ideal_output
-    torch.testing.assert_close(ideal_output,
-                               output_under_test.view_as(ideal_output),
-                               atol=0.01,
-                               rtol=0.016)
+    if backend == 'XFORMERS':
+        torch.testing.assert_close(ideal_output,
+                                   output_under_test.view_as(ideal_output))
+
+    elif backend == 'FLASH_ATTN':
+        # For FlashAttention override the accuracy thresholds to non default
+        # values since we notice a higher difference between the ideal and
+        # actual output.
+        torch.testing.assert_close(ideal_output,
+                                   output_under_test.view_as(ideal_output),
+                                   atol=0.01,
+                                   rtol=0.016)
+    else:
+        raise ValueError(
+            f"Unknown backend value: '{backend}'. Expected 'XFORMERS' or "
+            f"'FLASH_ATTN'.")
 
 
 # Copied/modified from torch._refs.__init__.py

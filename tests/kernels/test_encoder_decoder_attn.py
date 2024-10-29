@@ -761,12 +761,13 @@ def _run_encoder_decoder_cross_attention_test(
 
 
 @pytest.fixture(autouse=True)
-def set_reset_environment():
+def set_reset_environment(attn_backend):
     # Set the default torch datatype to bfloat16 to enable
     # testing of the Flash Attention backend. Also clear the
     # cached value of the backend.
     default_dtype = torch.get_default_dtype()
-    torch.set_default_dtype(torch.bfloat16)
+    if attn_backend.name == 'FLASH_ATTN':
+        torch.set_default_dtype(torch.bfloat16)
     get_attn_backend.cache_clear()
     yield
     # Reset the torch datatype to what it was before the test
@@ -859,7 +860,8 @@ def test_encoder_only(
             test_pt=test_pt))
 
         # - Is encoder attention result correct?
-        assert_actual_matches_ideal(enc_test_params, enc_pckd_act_out)
+        assert_actual_matches_ideal(enc_test_params, enc_pckd_act_out,
+                                    attn_backend.name)
 
 
 @pytest.mark.skipif(current_platform.is_rocm(),
@@ -1006,7 +1008,8 @@ def test_e2e_enc_dec_attn(
                                                        test_pt=test_pt)
 
         # - Is encoder attention result correct?
-        assert_actual_matches_ideal(enc_test_params, enc_pckd_act_out)
+        assert_actual_matches_ideal(enc_test_params, enc_pckd_act_out,
+                                    attn_backend.name)
 
         # PREFILL: decoder self-attention test
 
@@ -1018,7 +1021,8 @@ def test_e2e_enc_dec_attn(
 
         # - Is prefill decoder self-attention correct?
         assert_actual_matches_ideal(prephase_dec_test_params,
-                                    prephase_dec_pckd_act_out)
+                                    prephase_dec_pckd_act_out,
+                                    attn_backend.name)
 
         # PREFILL: encoder/decoder cross-attention test
 
@@ -1031,7 +1035,8 @@ def test_e2e_enc_dec_attn(
 
         # - Is prefill encoder/decoder cross-attention correct?
         assert_actual_matches_ideal(prephase_cross_test_params,
-                                    prephase_cross_pckd_act_out)
+                                    prephase_cross_pckd_act_out,
+                                    attn_backend.name)
 
         # DECODE: build decode-phase attention metadata
 
@@ -1054,7 +1059,8 @@ def test_e2e_enc_dec_attn(
 
         # - Is decode-phase decoder self-attention correct?
         assert_actual_matches_ideal(decphase_dec_test_params,
-                                    decphase_dec_pckd_act_out)
+                                    decphase_dec_pckd_act_out,
+                                    attn_backend.name)
 
         # DECODE: encoder/decoder cross-attention test
 
@@ -1067,4 +1073,5 @@ def test_e2e_enc_dec_attn(
 
         # - Is decode-phase encoder/decoder cross-attention correct?
         assert_actual_matches_ideal(decphase_cross_test_params,
-                                    decphase_cross_pckd_act_out)
+                                    decphase_cross_pckd_act_out,
+                                    attn_backend.name)
