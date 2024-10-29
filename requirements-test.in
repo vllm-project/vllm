@@ -15,10 +15,10 @@ opencv-python # required for video tests
 peft
 requests
 ray[adag]==2.35
-transformers==4.45.2
 sentence-transformers # required for embedding
 soundfile # required for audio test
 timm # required for internvl test
+torch==2.5.0
 transformers_stream_generator # required for qwen-vl test
 matplotlib # required for qwen-vl test
 datamodel_code_generator # required for minicpm3 test
@@ -33,3 +33,5 @@ aiohttp
 # quantization
 bitsandbytes>=0.44.0
 buildkite-test-collector==0.1.8
+
+numpy < 2.0.0
