@@ -290,6 +290,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "The request_id related to this request. If the caller does "
             "not set it, a random_uuid will be generated. This id is used "
             "through out the inference process and return in response."))
+
     # doc: end-chat-completion-extra-params
 
     def to_beam_search_params(self,
@@ -587,6 +588,7 @@ class CompletionRequest(OpenAIBaseModel):
             "The priority of the request (lower means earlier handling; "
             "default: 0). Any priority other than 0 will raise an error "
             "if the served model does not use priority scheduling."))
+
     # doc: end-completion-extra-params
 
     def to_beam_search_params(self,
@@ -726,6 +728,7 @@ class EmbeddingCompletionRequest(OpenAIBaseModel):
             "The priority of the request (lower means earlier handling; "
             "default: 0). Any priority other than 0 will raise an error "
             "if the served model does not use priority scheduling."))
+
     # doc: end-embedding-extra-params
 
     def to_pooling_params(self):
