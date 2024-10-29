@@ -16,10 +16,12 @@ class CompilationConfig(BaseModel):
     Configuration for compilation.
     It has two parts:
     - CudaGraph capture:
-        - use_cudagraph: whether to use cudagraph.
+        - use_cudagraph: whether to use cudagraph inside compilation.
             - False: cudagraph inside compilation is not used.
             - True: cudagraph inside compilation is used. It requires
                 that all input buffers have fixed addresses.
+            Note that this is orthogonal to the cudagraph capture out
+            side of compilation.
         - cudagraph_capture_sizes: sizes to capture cudagraph.
             - None: capture sizes are inferred from compilation context.
             - List[int]: capture sizes are specified.

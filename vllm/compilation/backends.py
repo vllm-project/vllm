@@ -367,7 +367,8 @@ class PiecewiseBackend:
         self.compile_sizes: Set[int] = set(
             self.compilation_configs.compile_sizes)
         self.capture_sizes: Set[int] = set(
-            self.compilation_configs.capture_sizes)
+            self.compilation_configs.capture_sizes
+        ) if self.compilation_configs.use_cudagraph else set()
 
         self.compile_finished = False
         self.first_run_finished = False
