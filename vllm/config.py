@@ -17,7 +17,7 @@ from vllm.transformers_utils.config import (ConfigFormat, get_config,
                                             get_hf_image_processor_config,
                                             get_hf_text_config)
 from vllm.utils import (GiB_bytes, cuda_device_count_stateless, get_cpu_memory,
-                        print_warning_once)
+                        is_mi250, print_warning_once)
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
@@ -952,6 +952,12 @@ class ParallelConfig:
 
         self._verify_args()
         self.rank: int = 0
+
+        if is_mi250() and self.tensor_parallel_size > 1:
+            self.disable_custom_all_reduce = True
+            logger.info(
+                "Disabled the custom all-reduce kernel because it is not "
+                "working correctly on multi AMD MI250.")
 
     @property
     def use_ray(self) -> bool:
