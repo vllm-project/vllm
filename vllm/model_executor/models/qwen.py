@@ -40,8 +40,7 @@ from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.module_mapping import (ModelComposeMethod,
-                                                       MultiModelKeys)
+from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.base import MultiModalInputs
@@ -1042,8 +1041,7 @@ class QWenVL(QWenBaseModel):
         return MultiModelKeys.from_string_field(
             language_model="transformer.h",
             connector="transformer.visual.attn_pool",
-            tower_model="transformer.visual.transformer",
-            compose_type=ModelComposeMethod.Coupled)
+            tower_model="transformer.visual.transformer")
 
 
 @MULTIMODAL_REGISTRY.register_image_input_mapper(input_mapper_for_qwen)

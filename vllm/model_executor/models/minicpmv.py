@@ -48,8 +48,7 @@ from vllm.model_executor.model_loader.utils import set_default_torch_dtype
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.models.minicpm import MiniCPMModel
-from vllm.model_executor.models.module_mapping import (ModelComposeMethod,
-                                                       MultiModelKeys)
+from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.qwen2 import Qwen2Model
 from vllm.model_executor.models.utils import LLMWrapper
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -636,11 +635,9 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
         """
         Get the module prefix in multimodal models
         """
-        return MultiModelKeys.from_string_field(
-            language_model="llm",
-            connector="resampler",
-            tower_model="vpm",
-            compose_type=ModelComposeMethod.Decoupled)
+        return MultiModelKeys.from_string_field(language_model="llm",
+                                                connector="resampler",
+                                                tower_model="vpm")
 
     def init_llm(
         self,
