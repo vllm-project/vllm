@@ -68,7 +68,7 @@ class OpenAIServingTokenization(OpenAIServing):
 
             if isinstance(request, TokenizeChatRequest):
                 (
-                    conversation,
+                    _,
                     request_prompts,
                     engine_prompts,
                 ) = await self._preprocess_chat(

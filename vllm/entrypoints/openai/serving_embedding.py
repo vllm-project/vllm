@@ -156,7 +156,7 @@ class OpenAIServingEmbedding(OpenAIServing):
 
             if isinstance(request, EmbeddingChatRequest):
                 (
-                    conversation,
+                    _,
                     request_prompts,
                     engine_prompts,
                 ) = await self._preprocess_chat(
