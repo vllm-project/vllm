@@ -155,7 +155,7 @@ class OpenAIServingEmbedding(OpenAIServing):
                     request,
                     tokenizer,
                     request.messages,
-                    chat_template=self.chat_template,
+                    chat_template=request.chat_template or self.chat_template,
                     add_generation_prompt=request.add_generation_prompt,
                     continue_final_message=request.continue_final_message,
                     truncate_prompt_tokens=truncate_prompt_tokens,

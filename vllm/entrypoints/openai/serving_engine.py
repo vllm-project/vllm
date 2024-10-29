@@ -492,7 +492,7 @@ class OpenAIServing:
     def _log_inputs(
         self,
         request_id: str,
-        inputs: Union[str, List[int], TextTokensPrompt],
+        inputs: RequestPrompt,
         params: Optional[Union[SamplingParams, PoolingParams,
                                BeamSearchParams]],
         lora_request: Optional[LoRARequest],
