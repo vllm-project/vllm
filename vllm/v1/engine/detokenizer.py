@@ -167,7 +167,8 @@ class Detokenizer:
         # Return to EngineClient.
         return request_outputs
 
-    def step_streaming(self, encore_core_outputs: List[EngineCoreOutput]) -> None:
+    def step_streaming(self,
+                       encore_core_outputs: List[EngineCoreOutput]) -> None:
         """Update state and put the RequestOutput in the per request queues."""
 
         assert self.stream_mode

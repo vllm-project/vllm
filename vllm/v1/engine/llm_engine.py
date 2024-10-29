@@ -27,10 +27,8 @@ from vllm.transformers_utils.tokenizer_group import (
     BaseTokenizerGroup, init_tokenizer_from_configs)
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import get_open_zmq_ipc_path
-from vllm.v1.engine import (LLM_ENGINE_CORE_READY_STR,
-                            POLLING_TIMEOUT_MS,
-                            DetokenizerRequest,
-                            EngineCoreOutputs,
+from vllm.v1.engine import (LLM_ENGINE_CORE_READY_STR, POLLING_TIMEOUT_MS,
+                            DetokenizerRequest, EngineCoreOutputs,
                             EngineCoreRequest)
 from vllm.v1.engine.detokenizer import Detokenizer
 from vllm.v1.engine.llm_engine_core import LLMEngineCore

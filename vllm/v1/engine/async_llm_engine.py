@@ -31,7 +31,6 @@ class _AsyncLLMEngine(LLMEngine):
         super().__init__(*args, **kwargs, use_async_sockets=True)
 
     async def wait_for_startup(self):
-
         """Poll the ready socket until the LLMEngineCore is ready."""
         try:
             ready_socket = self.ctx.socket(zmq.constants.PULL)
@@ -40,7 +39,8 @@ class _AsyncLLMEngine(LLMEngine):
                 logger.debug("Waiting for LLMEngineCore to startup.")
 
                 if not self.engine_core.is_alive():
-                    raise RuntimeError("LLMEngineCore process failed to start.")
+                    raise RuntimeError(
+                        "LLMEngineCore process failed to start.")
 
             message = await ready_socket.recv_string()
             assert message == LLM_ENGINE_CORE_READY_STR
