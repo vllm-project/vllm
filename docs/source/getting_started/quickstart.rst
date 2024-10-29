@@ -157,7 +157,7 @@ You can use the `create chat completion <https://platform.openai.com/docs/api-re
     $         ]
     $     }'
 
-Alternatively, you can use the `openai` python package:
+Alternatively, you can use the ``openai`` python package:
 
 .. code-block:: python
 

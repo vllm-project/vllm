@@ -254,10 +254,10 @@ A full code example can be found in `examples/openai_api_client_for_multimodal.p
 .. note::
     There is no need to format the prompt in the API request since it will be handled by the server.
 
-vLLM Embedding API
-^^^^^^^^^^^^^^^^^^
+Chat Embeddings API
+^^^^^^^^^^^^^^^^^^^
 
-vLLM's Embedding API is a superset of OpenAI's `Embeddings API <https://platform.openai.com/docs/api-reference/embeddings>`_,
+vLLM's Chat Embeddings API is a superset of OpenAI's `Embeddings API <https://platform.openai.com/docs/api-reference/embeddings>`_,
 where chat conversations can be passed instead of batched inputs. This enables multi-modal inputs to be passed to embedding models.
 
 In this example, we will serve the ``TIGER-Lab/VLM2Vec-Full`` model.
@@ -280,20 +280,20 @@ Since this schema is not defined by OpenAI client, we have to post a request to 
 
     image_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
 
-    messages = [{
-        "role": "user",
-        "content": [
-            {"type": "image_url", "image_url": {"url": image_url}},
-            {"type": "text", "text": "Represent the given image."},
-        ],
-    }]
-
-    response = requests.post(server.url_for("v1/embeddings"),
-                             json={
-                                 "model": model_name,
-                                 "messages": messages,
-                                 "encoding_format": "float"
-                             })
+    response = requests.post(
+        server.url_for("v1/embeddings"),
+        json={
+            "model": model_name,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": image_url}},
+                    {"type": "text", "text": "Represent the given image."},
+                ],
+            }],
+            "encoding_format": "float"
+        },
+    )
     response.raise_for_status()
 
     embedding_json = response.json()
