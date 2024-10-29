@@ -182,7 +182,8 @@ async def build_async_engine_client_from_engine_args(
         # NOTE: Actually, this is not true yet. We still need to support
         # embedding models via RPC (see TODO above)
         engine_config = engine_args.create_engine_config()
-        mp_engine_client = MQLLMEngineClient(ipc_path, engine_config)
+        mp_engine_client = MQLLMEngineClient(ipc_path, engine_config,
+                                             engine_process.pid)
 
         try:
             while True:
