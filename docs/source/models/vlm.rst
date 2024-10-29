@@ -272,7 +272,7 @@ In this example, we will serve the ``TIGER-Lab/VLM2Vec-Full`` model.
 
 .. important::
 
-    Since ``VLM2Vec`` has the same model architecture as ``Phi-3.5-vision``, we have to explicitly pass ``--task embedding``
+    Since VLM2Vec has the same model architecture as Phi-3.5-Vision, we have to explicitly pass ``--task embedding``
     to run this model in embedding mode instead of text generation mode.
 
 Since this schema is not defined by OpenAI client, we post a request to the server using the lower-level ``requests`` library:
@@ -286,7 +286,7 @@ Since this schema is not defined by OpenAI client, we post a request to the serv
     response = requests.post(
         "http://localhost:8000/v1/embeddings",
         json={
-            "model": model_name,
+            "model": "TIGER-Lab/VLM2Vec-Full",
             "messages": [{
                 "role": "user",
                 "content": [
