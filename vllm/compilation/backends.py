@@ -9,7 +9,7 @@ import torch.fx as fx
 from vllm.logger import init_logger
 from vllm.utils import weak_ref_tensors
 
-from . import CompilationConfig
+from .config import CompilationConfig
 from .levels import CompilationLevel
 
 logger = init_logger(__name__)
