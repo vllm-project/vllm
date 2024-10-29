@@ -43,7 +43,9 @@ class CompilationConfig(BaseModel):
             - None: use default configurations.
         - inductor_passes: additional passes for inductor. It is a dictionary
             from pass name to pass function qualified name. We use function
-            name because the config uses json format.
+            name because the config uses json format. If we pass the config
+            from Python, functions can also be passed directly via Python object
+            constructor, e.g. `CompilationConfig(inductor_passes={"a": func})`
     
     Why we have different sizes for cudagraph and inductor:
     - cudagraph: a cudagraph captured for a specific size can only be used
@@ -94,6 +96,12 @@ class CompilationConfig(BaseModel):
             self.compile_sizes = self.inductor_compile_sizes
 
         for k, v in self.inductor_passes.items():
+            if not isinstance(v, str):
+                assert callable(v), (
+                    f"pass {k} should be a function or a qualified name")
+                self.inductor_passes[k] = v
+                continue
+
             # resolve function from qualified name
             names = v.split(".")
             module = ".".join(names[:-1])
