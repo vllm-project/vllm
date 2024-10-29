@@ -43,11 +43,7 @@ To run Meta-Llama-3.1, it is required to have access to the model on Hugging Fac
 
 ## Preparing the tt-metal models
 
-1. Create a symbolic link to the tt-metal models folder inside vLLM:
-    ```sh
-    cd tt_metal
-    ln -s <path/to/tt-metal>/models ./models
-    ```
+1. Ensure that `$PYTHONPATH` contains the path to tt-metal (should already have been done when installing tt-metal)
 2. For the desired model, follow the setup instructions (if any) for the corresponding tt-metal demo. E.g. For Llama-3.1-70B, follow the [demo instructions](https://github.com/tenstorrent/tt-metal/tree/main/models/demos/t3000/llama3_70b) for preparing the weights and environment variables.
 
 ## Running the offline inference example
