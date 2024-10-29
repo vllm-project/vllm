@@ -35,16 +35,28 @@ class CompilationConfig(BaseModel):
                 in inductor_compile_sizes, using configurations
                 in inductor_compile_config.
         - inductor_compile_sizes: sizes to compile for inductor.
-        - inductor_specialize_as_cudagraph: if True, `inductor_compile_sizes`
-            will be set to `capture_sizes`.
+        - inductor_specialize_for_cudagraph_no_more_than: an optional integer
+            to specialize inductor for cudagraph sizes no more than the
+            specified size. It is useful when we want to specialize inductor
+            with a subset of cudagraph sizes.
         - inductor_compile_config: additional configurations for inductor.
             - None: use default configurations.
         - inductor_passes: additional passes for inductor. It is a dictionary
             from pass name to pass function qualified name. We use function
             name because the config uses json format.
+    
+    Why we have different sizes for cudagraph and inductor:
+    - cudagraph: a cudagraph captured for a specific size can only be used
+        for the same size. We need to capture all the sizes we want to use.
+    - inductor: a graph compiled by inductor for a general shape can be used
+        for different sizes. Inductor can also compile for specific sizes,
+        where it can have more information to optimize the graph with fully
+        static shapes. However, we find the general shape compilation is
+        sufficient for most cases. It might be beneficial to compile for
+        certain small batchsizes, where inductor is good at optimizing.
     """
     use_inductor: bool = True
-    inductor_specialize_as_cudagraph: bool = False
+    inductor_specialize_for_cudagraph_no_more_than: Optional[int] = None
     inductor_compile_sizes: Optional[List[int]] = Field(default_factory=dict)
     inductor_compile_config: Dict = Field(default_factory=dict)
     inductor_passes: Dict[str, str] = Field(default_factory=dict)
@@ -67,15 +79,18 @@ class CompilationConfig(BaseModel):
             logger.info(("cudagraph sizes specified by model runner"
                          " %s is overridden by config %s"),
                         sizes_to_specialize, self.capture_sizes)
-        if self.inductor_specialize_as_cudagraph:
+        if self.inductor_specialize_for_cudagraph_no_more_than is not None:
             assert self.inductor_compile_sizes is None, (
                 "inductor_compile_sizes should be None when "
-                "inductor_specialize_as_cudagraph is True")
-            self.compile_sizes = self.capture_sizes
+                "inductor_specialize_for_cudagraph_no_more_than is not None")
+            self.compile_sizes = [
+                x for x in self.capture_sizes
+                if x <= self.inductor_specialize_for_cudagraph_no_more_than
+            ]
         else:
             assert self.inductor_compile_sizes is not None, (
                 "inductor_compile_sizes should not be None when "
-                "inductor_specialize_as_cudagraph is False")
+                "inductor_specialize_for_cudagraph_no_more_than is None")
             self.compile_sizes = self.inductor_compile_sizes
 
         for k, v in self.inductor_passes.items():
