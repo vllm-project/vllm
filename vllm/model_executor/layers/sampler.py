@@ -194,8 +194,8 @@ class Sampler(nn.Module):
         self._sampling_tensors = None
 
         # Initialize new sampling tensors
-        (sampling_tensors, do_penalties, do_top_p_top_k,
-         do_min_p, sampler_order) = SamplingTensors.from_sampling_metadata(
+        (sampling_tensors, do_penalties, do_top_p_top_k, do_min_p,
+         sampler_order) = SamplingTensors.from_sampling_metadata(
              sampling_metadata, vocab_size, logits.device, logits.dtype)
 
         self._sampling_tensors = sampling_tensors
@@ -268,7 +268,8 @@ class Sampler(nn.Module):
 
             elif sample_name == "top_p_top_k":
                 if do_top_p_top_k and flashinfer_top_k_top_p_sampling is None:
-                    logits = _apply_top_k_top_p(logits, sampling_tensors.top_ps,
+                    logits = _apply_top_k_top_p(logits,
+                                                sampling_tensors.top_ps,
                                                 sampling_tensors.top_ks)
             elif sample_name == "min_p" and do_min_p:
                 logits = _apply_min_p(logits, sampling_tensors.min_ps)

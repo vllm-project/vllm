@@ -455,8 +455,8 @@ class SamplingTensors:
         if do_penalties:
             for seq_group in sampling_metadata.seq_groups:
                 sampling_params = seq_group.sampling_params
-                repetition_penalty_range = (sampling_params.
-                                            repetition_penalty_range)
+                repetition_penalty_range = (
+                    sampling_params.repetition_penalty_range)
                 seq_ids = seq_group.seq_ids
                 if (seq_group.is_prompt
                         and sampling_params.prompt_logprobs is not None):
@@ -476,9 +476,11 @@ class SamplingTensors:
                                 and repetition_penalty_range > 0):
                             _range = int(repetition_penalty_range)
                             if len(prompt_token_ids_array) > _range:
-                                prompt_tokens.append(prompt_token_ids_array[-_range:])
+                                prompt_tokens.append(
+                                    prompt_token_ids_array[-_range:])
                         else:
-                            prompt_tokens.append(seq_data.prompt_token_ids_array)
+                            prompt_tokens.append(
+                                seq_data.prompt_token_ids_array)
                         output_tokens.append(seq_data.output_token_ids_array)
 
         sampling_tensors = SamplingTensors.from_lists(
@@ -495,10 +497,7 @@ class SamplingTensors:
             device,
             dtype,
         )
-        return (sampling_tensors,
-                do_penalties,
-                do_top_p_top_k,
-                do_min_p,
+        return (sampling_tensors, do_penalties, do_top_p_top_k, do_min_p,
                 sampler_order)
 
     @classmethod
@@ -519,6 +518,26 @@ class SamplingTensors:
     ) -> "SamplingTensors":
         # Note that the performance will be very bad without
         # pinned memory.
+        """
+        Create a SamplingTensors object from lists of values.
+
+        Args:
+            temperatures: List of temperatures to use for sampling.
+            top_ps: List of top-p values to use for sampling.
+            top_ks: List of top-k values to use for sampling.
+            min_ps: List of min-p values to use for sampling.
+            presence_penalties: List of presence penalties to use for sampling.
+            frequency_penalties: List of frequency penalties to use for sampling.
+            repetition_penalties: List of repetition penalties to use for sampling.
+            prompt_tokens: List of arrays of token ids for the prompts.
+            output_tokens: List of arrays of token ids for the outputs.
+            vocab_size: The size of the vocabulary.
+            device: The device to store the tensors on.
+            dtype: The type of the tensors.
+
+        Returns:
+            A SamplingTensors object.
+        """
         pin_memory = is_pin_memory_available()
 
         do_penalties = prompt_tokens or output_tokens
