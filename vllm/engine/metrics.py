@@ -1,3 +1,4 @@
+import time
 from typing import TYPE_CHECKING
 from typing import Counter as CollectionsCounter
 from typing import Dict, List, Optional, Type, Union, cast
@@ -253,6 +254,10 @@ class _RayGaugeWrapper:
     def set(self, value: Union[int, float]):
         return self._gauge.set(value)
 
+    def set_to_current_time(self):
+        # ray metrics doesn't have set_to_current time, https://docs.ray.io/en/latest/_modules/ray/util/metrics.html
+        return self._gauge.set(time.time())
+
 
 class _RayCounterWrapper:
     """Wraps around ray.util.metrics.Counter to provide same API as
@@ -479,7 +484,7 @@ class PrometheusStatLogger(StatLoggerBase):
             histogram.labels(**self.labels).observe(datum)
 
     def _log_gauge_string(self, gauge, data: Dict[str, str]) -> None:
-        gauge.labels(**data).set(1)
+        gauge.labels(**data).set_to_current_time()
 
     def _log_prometheus(self, stats: Stats) -> None:
         # System state data
