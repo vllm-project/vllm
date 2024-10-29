@@ -193,6 +193,7 @@ class CustomAllreduce:
         data = inp.untyped_storage()._share_cuda_()
         # https://github.com/pytorch/pytorch/pull/130890 changes
         # the binary format of the ipc handle
+        # it starts from pytorch 2.5
         if len(data[1]) > 64:
             assert len(data[1]) == 66
             # only support SHAREABLE_HANDLE_VERSION = 1
