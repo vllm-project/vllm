@@ -90,7 +90,6 @@ class OpenAIServingTokenization(OpenAIServing):
         except ValueError as e:
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
-    
 
         input_ids: List[int] = []
         for i, engine_prompt in enumerate(engine_prompts):
@@ -100,8 +99,8 @@ class OpenAIServingTokenization(OpenAIServing):
                              lora_request=lora_request,
                              prompt_adapter_request=prompt_adapter_request)
 
-            # Silently ignore prompt adapter since it does not affect tokenization
-            # (Unlike in Embeddings API where an error is raised)
+            # Silently ignore prompt adapter since it does not affect
+            # tokenization (Unlike in Embeddings API where an error is raised)
 
             input_ids.extend(engine_prompt["prompt_token_ids"])
 
