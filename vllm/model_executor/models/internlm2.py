@@ -217,8 +217,7 @@ class InternLMDecoderLayer(nn.Module):
             prefix=f"{prefix}.feed_forward",
         )
         self.attention_norm = RMSNorm(config.hidden_size,
-                                      eps=config.rms_norm_eps,
-                                      prefix=f"{prefix}.attention_norm")
+                                      eps=config.rms_norm_eps)
         self.ffn_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
