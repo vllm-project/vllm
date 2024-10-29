@@ -127,11 +127,13 @@ class FlashAttentionMetadata(AttentionMetadata):
     # in the kv cache. Each block can contain up to block_size tokens.
     # 2nd dimensions are padded up to max_blocks_per_seq if it is cuda-graph
     # captured.
+    
     block_tables: Optional[torch.Tensor]
 
     # Whether or not if cuda graph is enabled.
     # Cuda-graph is currently enabled for decoding only.
     # TODO(woosuk): Move `use_cuda_graph` out since it's unrelated to attention.
+
     use_cuda_graph: Optional[bool]
 
     # Maximum query length in the batch.
