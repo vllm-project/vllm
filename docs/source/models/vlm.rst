@@ -258,8 +258,10 @@ Chat Embeddings API
 ^^^^^^^^^^^^^^^^^^^
 
 vLLM's Chat Embeddings API is a superset of OpenAI's `Embeddings API <https://platform.openai.com/docs/api-reference/embeddings>`_,
-where a list of ``messages`` can be passed instead of batched ``inputs``. The format of ``messages`` is the same as in Chat Completions API.
-This enables multi-modal inputs to be passed to embedding models.
+where a list of ``messages`` can be passed instead of batched ``inputs``. This enables multi-modal inputs to be passed to embedding models.
+
+.. note::
+    The schema of ``messages`` is exactly the same as in Chat Completions API.
 
 In this example, we will serve the ``TIGER-Lab/VLM2Vec-Full`` model.
 
@@ -273,7 +275,7 @@ In this example, we will serve the ``TIGER-Lab/VLM2Vec-Full`` model.
     Since ``VLM2Vec`` has the same model architecture as ``Phi-3.5-vision``, we have to explicitly pass ``--task embedding``
     to run this model in embedding mode instead of text generation mode.
 
-Since this schema is not defined by OpenAI client, we have to post a request to the server using the lower-level ``requests`` library:
+Since this schema is not defined by OpenAI client, we post a request to the server using the lower-level ``requests`` library:
 
 .. code-block:: python
 
