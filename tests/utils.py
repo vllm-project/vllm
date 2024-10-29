@@ -18,12 +18,12 @@ from openai.types.completion import Completion
 from typing_extensions import ParamSpec, assert_never
 
 import vllm.envs as envs
-from vllm.logger import init_logger
 from tests.models.utils import TextTextLogprobs
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.openai.cli_args import make_arg_parser
+from vllm.logger import init_logger
 from vllm.model_executor.model_loader.loader import get_model_loader
 from vllm.platforms import current_platform
 from vllm.transformers_utils.tokenizer import get_tokenizer
@@ -146,7 +146,8 @@ class RemoteOpenAIServer:
 
                 time.sleep(0.5)
                 if time.time() - start > timeout:
-                    raise RuntimeError("Server failed to start in time.") from None
+                    raise RuntimeError(
+                        "Server failed to start in time.") from None
 
     @property
     def url_root(self) -> str:
