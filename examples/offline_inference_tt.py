@@ -15,8 +15,8 @@ from vllm.utils import merge_async_iterators
 from vllm.inputs.data import TokensPrompt
 from vllm.engine.multiprocessing.client import MQLLMEngineClient
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
-from tt_metal.models.demos.t3000.llama2_70b.tt.llama_generation import TtLlamaModelForGeneration
+# Import and register model from tt-metal
+from models.demos.t3000.llama2_70b.tt.llama_generation import TtLlamaModelForGeneration
 ModelRegistry.register_model("TTLlamaForCausalLM", TtLlamaModelForGeneration)
 
 
