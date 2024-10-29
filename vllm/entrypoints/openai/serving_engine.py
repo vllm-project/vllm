@@ -263,20 +263,26 @@ class OpenAIServing:
             return TextTokensPrompt(prompt=input_text,
                                     prompt_token_ids=input_ids)
 
-        if request.max_tokens is None:
+        # max_tokens is deprecated in favor of max_completion_tokens for the OpenAI chat completion endpoint
+        if isinstance(request, ChatCompletionRequest):
+            # TODO: remove self.max_tokens when deprecated field max_tokens is removed from OpenAI API
+            max_tokens = request.max_completion_tokens or request.max_tokens
+        else:
+            max_tokens = request.max_tokens
+        if max_tokens is None:
             if token_num >= self.max_model_len:
                 raise ValueError(
                     f"This model's maximum context length is "
                     f"{self.max_model_len} tokens. However, you requested "
                     f"{token_num} tokens in the messages, "
                     f"Please reduce the length of the messages.")
-        elif token_num + request.max_tokens > self.max_model_len:
+        elif token_num + max_tokens > self.max_model_len:
             raise ValueError(
                 f"This model's maximum context length is "
                 f"{self.max_model_len} tokens. However, you requested "
-                f"{request.max_tokens + token_num} tokens "
+                f"{max_tokens + token_num} tokens "
                 f"({token_num} in the messages, "
-                f"{request.max_tokens} in the completion). "
+                f"{max_tokens} in the completion). "
                 f"Please reduce the length of the messages or completion.")
 
         return TextTokensPrompt(prompt=input_text, prompt_token_ids=input_ids)
