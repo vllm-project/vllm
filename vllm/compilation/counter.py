@@ -21,8 +21,10 @@ class CompilationCounter:
         old = self.clone()
         yield
         for k, v in kwargs.items():
-            assert getattr(self, k) - getattr(old,
-                                              k) == v, f"{k} not as expected"
+            assert getattr(self, k) - getattr(old, k) == v, (
+                f"{k} not as expected, before it is {getattr(old, k)}"
+                f", after it is {getattr(self, k)}, "
+                f"expected diff is {v}")
 
 
 compilation_counter = CompilationCounter()
