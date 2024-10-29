@@ -162,7 +162,7 @@ class LLM:
         pooling_type: Optional[str] = None,
         pooling_norm: bool = False,
         pooling_softmax: bool = False,
-        pooling_step_tag_id: int = -1,
+        pooling_step_tag_id: Optional[int] = None,
         pooling_returned_token_ids: Optional[List[int]] = None,
         **kwargs,
     ) -> None:

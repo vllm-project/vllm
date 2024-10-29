@@ -33,9 +33,9 @@ class Pooler(nn.Module):
     def __init__(
         self,
         pooling_type: PoolingType,
-        normalize: bool,
+        normalize: bool = False,
         softmax: bool = False,
-        step_tag_id: int = -1,
+        step_tag_id: Optional[int] = None,
         returned_token_ids: Optional[List[int]] = None,
     ):
         super().__init__()
@@ -81,7 +81,7 @@ class Pooler(nn.Module):
             pooled_data = []
             for prompt_len, seq_data_i in zip(
                     prompt_lens, pooling_metadata.seq_data.values()):
-                if self.step_tag_id == -1:
+                if self.step_tag_id is None:
                     pooled_data.append(logits[offset:offset + prompt_len])
                 else:
                     step_idxs = torch.tensor(

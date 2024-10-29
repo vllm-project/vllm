@@ -188,7 +188,7 @@ class EngineArgs:
     pooling_type: Optional[str] = None
     pooling_norm: bool = False
     pooling_softmax: bool = False
-    pooling_step_tag_id: int = -1
+    pooling_step_tag_id: Optional[int] = None
     pooling_returned_token_ids: Optional[List[int]] = None
 
     def __post_init__(self):
@@ -860,7 +860,7 @@ class EngineArgs:
         parser.add_argument(
             '--pooling-type',
             choices=['LAST', 'ALL', 'CLS', 'STEP'],
-            default="LAST",
+            default=None,
             help='Used to configure the pooling method in the embedding model.'
         )
 
@@ -877,7 +877,7 @@ class EngineArgs:
         parser.add_argument(
             '--pooling-step-tag-id',
             type=int,
-            default=-1,
+            default=None,
             help="When pooling-step-tag-id is not -1, it indicates "
             "that the score corresponding to the step-tag-ids in the "
             "generated sentence should be returned. Otherwise, it "

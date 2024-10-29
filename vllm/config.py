@@ -162,7 +162,7 @@ class ModelConfig:
             pooling_type: Optional[str] = None,
             pooling_norm: bool = False,
             pooling_softmax: bool = False,
-            pooling_step_tag_id: int = -1,
+            pooling_step_tag_id: Optional[int] = None,
             pooling_returned_token_ids: Optional[List[int]] = None) -> None:
         self.model = model
         self.tokenizer = tokenizer
@@ -270,9 +270,13 @@ class ModelConfig:
         return None
 
     def _init_pooler_config(
-            self, pooling_type, pooling_norm, pooling_softmax,
-            pooling_step_tag_id,
-            pooling_returned_token_ids) -> Optional["PoolerConfig"]:
+        self,
+        pooling_type: Optional[str] = None,
+        pooling_norm: bool = False,
+        pooling_softmax: bool = False,
+        pooling_step_tag_id: Optional[int] = None,
+        pooling_returned_token_ids: Optional[List[int]] = None
+    ) -> Optional["PoolerConfig"]:
         if self.task == "embedding":
             return PoolerConfig(
                 pooling_type=pooling_type,
@@ -1694,7 +1698,7 @@ class PoolerConfig:
     pooling_type: Optional[str] = None
     pooling_norm: bool = False
     pooling_softmax: bool = False
-    pooling_step_tag_id: int = -1
+    pooling_step_tag_id: Optional[int] = None
     pooling_returned_token_ids: Optional[List[int]] = None
 
 
