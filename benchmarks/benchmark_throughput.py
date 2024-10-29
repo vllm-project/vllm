@@ -7,8 +7,8 @@ import time
 from typing import List, Optional
 
 import torch
-from PIL import Image
 import uvloop
+from PIL import Image
 from tqdm import tqdm
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           PreTrainedTokenizerBase)
