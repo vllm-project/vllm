@@ -199,7 +199,7 @@ class CustomAllreduce:
             # only support SHAREABLE_HANDLE_VERSION = 1
             assert int(data[1][0]) == 1
             # only support SHAREABLE_CUDA_MALLOC = 'c'
-            assert data[1][1] == b'c'
+            assert data[1][1] == ord("c")
             data[1] = data[1][2:]
             # TODO: support expandable segment
         shard_data = (
