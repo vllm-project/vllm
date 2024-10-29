@@ -2,6 +2,7 @@ import logging
 from typing import Callable, Optional, Union
 
 import vllm.envs as envs
+from vllm.compilation.config import CompilationConfig
 
 logger = logging.getLogger(__name__)
 
@@ -42,3 +43,15 @@ def set_torch_compile_backend(backend: Union[Callable, str]):
 
 def get_torch_compile_backend() -> Optional[Union[Callable, str]]:
     return _torch_compile_backend
+
+
+_compilation_config: Optional[CompilationConfig] = None
+
+
+def set_compilation_config(config: Optional[CompilationConfig]):
+    global _compilation_config
+    _compilation_config = config
+
+
+def get_compilation_config() -> Optional[CompilationConfig]:
+    return _compilation_config

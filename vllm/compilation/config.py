@@ -111,13 +111,21 @@ class CompilationConfig(BaseModel):
                 )
 
     @staticmethod
-    def default_config() -> "CompilationConfig":
+    def select_config() -> "CompilationConfig":
+        """The order of selecting config is:
+        1. Use the config specified in environment variable.
+        2. Use the config specified in plugins.
+        3. Use the default config.
+        """
         config_path = envs.VLLM_TORCH_COMPILE_CONFIG
         if config_path is not None:
             with open(config_path) as json_file:
                 config = CompilationConfig.model_validate_json(
                     json_file.read())
         else:
-            config = CompilationConfig()
+            from vllm.plugins import get_compilation_config
+            predefined_config = get_compilation_config()
+            config = predefined_config if predefined_config is not None else (
+                CompilationConfig())
 
         return config
