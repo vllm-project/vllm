@@ -9,13 +9,11 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata,
                                               AttentionMetadataBuilder,
                                               AttentionType)
-from vllm.attention.backends.utils import (PAD_SLOT_ID, CommonAttentionState,
-                                           compute_slot_mapping,
-                                           compute_slot_mapping_start_idx,
-                                           get_seq_len_block_table_args,
-                                           is_all_cross_attn_metadata_set,
-                                           is_all_encoder_attn_metadata_set,
-                                           is_block_tables_empty)
+from vllm.attention.backends.utils import (
+    PAD_SLOT_ID, CommonAttentionState, compute_slot_mapping,
+    compute_slot_mapping_start_idx, get_seq_len_block_table_args,
+    is_all_cross_attn_metadata_set, is_all_encoder_attn_metadata_set,
+    is_block_tables_empty)
 from vllm.forward_context import get_forward_context
 from vllm.utils import async_tensor_h2d, make_tensor_with_pad
 
@@ -127,7 +125,6 @@ class FlashAttentionMetadata(AttentionMetadata):
     # in the kv cache. Each block can contain up to block_size tokens.
     # 2nd dimensions are padded up to max_blocks_per_seq if it is cuda-graph
     # captured.
-    
     block_tables: Optional[torch.Tensor]
 
     # Whether or not if cuda graph is enabled.
