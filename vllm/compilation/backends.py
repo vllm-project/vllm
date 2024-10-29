@@ -159,7 +159,21 @@ def fix_functionalization(graph: fx.Graph):
     #     print(graph.python_code(root_module="self", verbose=True).src, file=f)
 
 
-def wrap_inductor(graph, example_inputs, additional_inductor_config):
+def wrap_inductor(graph,
+                  example_inputs,
+                  additional_inductor_config,
+                  do_logging=False,
+                  runtime_shape: Optional[int] = None,
+                  use_inductor: bool = True):
+    if not use_inductor:
+        return graph
+
+    if do_logging:
+        if runtime_shape is None:
+            logger.info("Compiling a graph for general shape")
+        else:
+            logger.info("Compiling a graph for shape %s", runtime_shape)
+
     from torch._inductor import config
     current_config = config.shallow_copy_dict()
     from torch._inductor.compile_fx import compile_fx
@@ -375,15 +389,13 @@ class PiecewiseBackend:
                 i for i, x in enumerate(args) if isinstance(x, torch.SymInt)
             ]
 
-            if self.compilation_configs.use_inductor:
-                # args here are example inputs (fake tensors)
-                if self.is_first_graph:
-                    logger.info("Compiling a graph for general shape")
-                self.compiled_graph_for_general_shape = wrap_inductor(
-                    self.graph, args,
-                    self.compilation_configs.inductor_compile_config)
-            else:
-                self.compiled_graph_for_general_shape = self.graph
+            self.compiled_graph_for_general_shape = wrap_inductor(
+                self.graph,
+                args,
+                self.compilation_configs.inductor_compile_config,
+                runtime_shape=None,
+                do_logging=self.is_first_graph,
+                use_inductor=self.compilation_configs.use_inductor)
 
             return self.graph(*args)
 
@@ -404,13 +416,13 @@ class PiecewiseBackend:
         if entry.need_to_compile and not entry.compiled:
             entry.compiled = True
             # args are real arguments
-            if self.compilation_configs.use_inductor:
-                if self.is_first_graph:
-                    logger.info("Compiling a graph for shape %s",
-                                runtime_shape)
-                entry.runnable = wrap_inductor(
-                    self.graph, args,
-                    self.compilation_configs.inductor_compile_config)
+            entry.runnable = wrap_inductor(
+                self.graph,
+                args,
+                self.compilation_configs.inductor_compile_config,
+                runtime_shape=runtime_shape,
+                do_logging=self.is_first_graph,
+                use_inductor=self.compilation_configs.use_inductor)
 
         if not entry.use_cudagraph:
             return entry.runnable(*args)
