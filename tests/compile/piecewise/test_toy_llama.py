@@ -198,6 +198,10 @@ def run_model(use_compile: bool, split_attn: bool = False) -> torch.Tensor:
     input_ids[:2].zero_()
     output = model(input_ids[:2], positions[:2])
 
+    # manual cleanup
+    del os.environ["VLLM_TORCH_COMPILE_LEVEL"]
+    set_compilation_config(None)
+
     return output.cpu()
 
 
