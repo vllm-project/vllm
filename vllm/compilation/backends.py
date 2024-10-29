@@ -342,10 +342,10 @@ def piecewise_backend(graph,
                 runnable = graph
             use_cudagraph = compilation_configs.use_cudagraph and \
                 runtime_shapes[0] in compilation_configs.capture_sizes # noqa
-            entry = Entry(
-                runnable=runnable,
-                use_cudagraph=use_cudagraph,
-                target_warmup_times=compilation_configs.cudagraph_warmup_times)
+            entry = Entry(runnable=runnable,
+                          use_cudagraph=use_cudagraph,
+                          target_warmup_times=compilation_configs.
+                          cudagraph_num_of_warmups)
             runtime_shapes_to_compiled_entry[runtime_shapes] = entry
         else:
             entry = runtime_shapes_to_compiled_entry[runtime_shapes]
