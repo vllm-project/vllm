@@ -294,7 +294,7 @@ Since this schema is not defined by OpenAI client, we post a request to the serv
                     {"type": "text", "text": "Represent the given image."},
                 ],
             }],
-            "encoding_format": "float"
+            "encoding_format": "float",
         },
     )
     response.raise_for_status()
