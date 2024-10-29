@@ -252,8 +252,7 @@ def vllm_backend(graph, example_inputs) -> Callable:
 class Entry:
     runnable: Callable
     use_cudagraph: bool
-    target_warmup_times: int
-    current_warmup_times: int = 0
+    num_finished_warmup: int = 0
     cudagraph: Optional[torch.cuda.CUDAGraph] = None
     output: Optional[Any] = None
 
@@ -341,10 +340,10 @@ def piecewise_backend(graph,
                 runnable = graph
             use_cudagraph = compilation_configs.use_cudagraph and \
                 runtime_shapes[0] in compilation_configs.capture_sizes # noqa
-            entry = Entry(runnable=runnable,
-                          use_cudagraph=use_cudagraph,
-                          target_warmup_times=compilation_configs.
-                          cudagraph_num_of_warmups)
+            entry = Entry(
+                runnable=runnable,
+                use_cudagraph=use_cudagraph,
+            )
             runtime_shapes_to_compiled_entry[runtime_shapes] = entry
         else:
             entry = runtime_shapes_to_compiled_entry[runtime_shapes]
@@ -352,12 +351,13 @@ def piecewise_backend(graph,
         if not entry.use_cudagraph:
             return entry.runnable(*args)
 
-        if entry.current_warmup_times < entry.target_warmup_times:
-            entry.current_warmup_times += 1
+        if entry.num_finished_warmup < compilation_configs.cudagraph_num_of_warmups:  # noqa
+            entry.num_finished_warmup += 1
             if is_first_graph:
                 logger.debug("Warming up %s/%s for shape %s",
-                             entry.current_warmup_times,
-                             entry.target_warmup_times, runtime_shapes)
+                             entry.num_finished_warmup,
+                             compilation_configs.cudagraph_num_of_warmups,
+                             runtime_shapes)
             return entry.runnable(*args)
 
         if entry.cudagraph is None:
