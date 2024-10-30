@@ -99,7 +99,7 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
     def process_prompt_logprob(self, seq_group: SequenceGroup,
                                outputs: List[SequenceGroupOutput]) -> None:
         """Process prompt logprobs associated with one step of a single-step-
-        scheduled computation.c
+        scheduled computation.
         
         Args:
           seq_group: the output is associated with this :class:`SequenceGroup`

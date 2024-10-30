@@ -218,6 +218,7 @@ class RequestOutput:
                 output.stop_reason = seq.stop_reason
 
             else:
+                output_hidden_states = [hidden_state.tolist() for hidden_state in output_hidden_states]
                 output = CompletionOutput(
                     index = top_n_seqs.index(seq), 
                     text = output_text, 

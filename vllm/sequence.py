@@ -134,7 +134,7 @@ class SequenceDataDelta(
     # A new token to be appended to existing SequenceData.
     new_output_token_ids: List[int]
     # A new token hidden states to be appended to existing SequenceData.
-    new_output_token_ids_hidden_states: List[List[float]]
+    new_output_token_ids_hidden_states: List[torch.Tensor]
     # Overwriting existing `cumulative_logprob`
     new_cumulative_logprob: float
     # Overwriting existing `num_computed_tokens`.
@@ -163,8 +163,8 @@ class SequenceData(msgspec.Struct,
     _output_token_ids: array = msgspec.field(
         default_factory=lambda: array(VLLM_TOKEN_ID_ARRAY_TYPE, []))
     
-    _prompt_token_ids_hiddenstates: List[List[float]] = msgspec.field(default_factory=list)
-    _output_token_ids_hiddenstates: List[List[float]] = msgspec.field(default_factory=list)
+    _prompt_token_ids_hiddenstates: List[torch.Tensor] = msgspec.field(default_factory=list)
+    _output_token_ids_hiddenstates: List[torch.Tensor] = msgspec.field(default_factory=list)
 
     ### The below fields should not be passed as an argument ###
     _cumulative_logprob: float = 0.0
@@ -174,18 +174,18 @@ class SequenceData(msgspec.Struct,
     _num_computed_tokens: int = 0
     _stage: SequenceStage = SequenceStage.PREFILL
     _cached_all_token_ids: List[int] = msgspec.field(default_factory=list)
-    _cached_all_token_ids_hiddenstates: List[List[float]] = msgspec.field(default_factory=list)
+    _cached_all_token_ids_hiddenstates: List[torch.Tensor] = msgspec.field(default_factory=list)
 
     # It is used to get delta input. It is reset when `get_delta_and_reset`
     # is called.
     _new_appended_tokens: List[int] = msgspec.field(default_factory=list)
-    _new_appended_tokens_hiddenstates: List[List[float]] = msgspec.field(default_factory=list)
+    _new_appended_tokens_hiddenstates: List[torch.Tensor] = msgspec.field(default_factory=list)
 
     # It is used to compute mrope_position_ids.
     _mrope_position_delta: Optional[int] = None
 
     @staticmethod
-    def from_prompt_token_counts(input_embedding_matrix, 
+    def from_prompt_token_counts(pad_hiddenstate, 
             *token_counts: Tuple[int, int]) -> "SequenceData":
         """
         Construct a :class:`SequenceData` instance by concatenating
@@ -203,8 +203,7 @@ class SequenceData(msgspec.Struct,
         )
         
         prompt_token_ids = prompt_token_ids_arr.tolist()
-        hidden_states = input_embedding_matrix(torch.tensor(prompt_token_ids))
-        hidden_states = hidden_states.tolist()
+        hidden_states = [pad_hiddenstate] * len(prompt_token_ids)
 
         return SequenceData(_prompt_token_ids = prompt_token_ids_arr,
                             _prompt_token_ids_hiddenstates = hidden_states)
@@ -213,7 +212,7 @@ class SequenceData(msgspec.Struct,
     def from_seqs(
         prompt_token_ids: GenericSequence[int],
         output_token_ids: Optional[GenericSequence[int]] = None,
-        hidden_states: Optional[List[List[int]]] = None,
+        hidden_states: Optional[List[torch.Tensor]] = None,
         
     ) -> "SequenceData":
         """
@@ -246,7 +245,7 @@ class SequenceData(msgspec.Struct,
         assert isinstance(self._prompt_token_ids, array)
         assert isinstance(self._output_token_ids, array)
         self._cached_all_token_ids: List[int] = list(self._prompt_token_ids + self._output_token_ids)
-        self._cached_all_token_ids_hiddenstates: List[List[float]] = list(self._prompt_token_ids_hiddenstates + self._output_token_ids_hiddenstates)
+        self._cached_all_token_ids_hiddenstates: List[torch.Tensor] = list(self._prompt_token_ids_hiddenstates + self._output_token_ids_hiddenstates)
 
     @property
     def cumulative_logprob(self) -> float:
@@ -274,7 +273,7 @@ class SequenceData(msgspec.Struct,
         return tuple(self._output_token_ids)
 
     @output_token_ids.setter
-    def output_token_ids(self, new_output_token_ids: List[int], new_output_token_ids_hiddenstates: List[List[float]]) -> None:
+    def output_token_ids(self, new_output_token_ids: List[int], new_output_token_ids_hiddenstates: List[torch.Tensor]) -> None:
         self._output_token_ids = array(VLLM_TOKEN_ID_ARRAY_TYPE, new_output_token_ids)
         self._output_token_ids_hiddenstates = new_output_token_ids_hiddenstates
         self._update_cached_all_tokens()
@@ -297,7 +296,7 @@ class SequenceData(msgspec.Struct,
     def mrope_position_delta(self, new_mrope_position_delta):
         self._mrope_position_delta = new_mrope_position_delta
 
-    def append_token_id(self, token_id: int, logprob: float, hidden_states: List[float]) -> None:
+    def append_token_id(self, token_id: int, logprob: float, hidden_states: torch.Tensor) -> None:
         self._output_token_ids.append(token_id)
         self._new_appended_tokens.append(token_id)
         self._cached_all_token_ids.append(token_id)
@@ -320,7 +319,7 @@ class SequenceData(msgspec.Struct,
     def get_token_ids(self) -> List[int]:
         return self._cached_all_token_ids
     
-    def get_token_ids_hiddenstates(self) -> List[List[float]]:
+    def get_token_ids_hiddenstates(self) -> List[torch.Tensor]:
         return self._cached_all_token_ids_hiddenstates
 
     def get_prefix_token_ids(
@@ -442,7 +441,7 @@ class Sequence:
         lora_request: Optional[LoRARequest] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         from_decoder_prompt: bool = True,
-        hidden_states: List[List[float]] = None,
+        hidden_states: List[torch.Tensor] = None,
     ) -> None:
         self.seq_id = seq_id
         self.inputs = inputs
@@ -1184,7 +1183,7 @@ class CompletionSequenceGroupOutput(
     # Prompt logprob for each prompt query token.
     prompt_logprobs: Optional[PromptLogprobs]
     # last token hidden states
-    hidden_state: List[float]
+    hidden_state: torch.Tensor
 
     def __repr__(self) -> str:
         return (f"CompletionSequenceGroupOutput(samples={self.samples}, "

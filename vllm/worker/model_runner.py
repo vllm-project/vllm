@@ -84,7 +84,6 @@ TModelInputForGPU = TypeVar('TModelInputForGPU', bound="ModelInputForGPU")
 torch._dynamo.config.cache_size_limit = 128
 torch._dynamo.config.accumulated_cache_size_limit = 128
 
-
 @dataclass(frozen=True)
 class ModelInputForGPU(ModelRunnerInputBase):
     """
@@ -220,7 +219,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
 
             # Input tokens and positions.
             input_tokens: Optional[List[List[int]]] = None,
-            input_tokens_hiddenstates: Optional[List[List[List[float]]]] = None,
+            input_tokens_hiddenstates: Optional[List[List[torch.Tensor]]] = None,
             input_positions: Optional[List[List[int]]] = None,
             mrope_input_positions: Optional[List[List[List[int]]]] = None,
 
@@ -876,9 +875,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         input_tokens_tensor = async_tensor_h2d(input_tokens, torch.long,
                                                self.runner.device,
                                                self.runner.pin_memory)
-        input_tokens_hiddenstates_tensor = async_tensor_h2d(input_tokens_hiddenstates, torch.float,
-                                               self.runner.device,
-                                               self.runner.pin_memory)
+        
+        input_tokens_hiddenstates_tensor = torch.stack(input_tokens_hiddenstates).cuda()
         
         if mrope_input_positions is not None:
             for idx in range(3):
@@ -1231,7 +1229,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         return builder.build()  # type: ignore
 
     @torch.inference_mode()
-    def profile_run(self, input_embedding_matrix) -> None:
+    def profile_run(self, pad_hiddenstate) -> None:
         # Enable top-k sampling to reflect the accurate memory usage.
         sampling_params = SamplingParams(top_p=0.99, top_k=self.vocab_size - 1)
         max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
@@ -1294,7 +1292,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 .dummy_data_for_profiling(model_config=self.model_config,
                                           seq_len=seq_len,
                                           mm_registry=self.mm_registry,
-                                          input_embedding_matrix=input_embedding_matrix)
+                                          pad_hiddenstate=pad_hiddenstate)
 
             seq = SequenceGroupMetadata(
                 request_id=str(group_id),
@@ -1694,6 +1692,10 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             
         with set_forward_context(model_input.attn_metadata):
             
+            
+            import time
+            
+            
             if self.model_config.forward_hidden_state == True:
                 inputs_embeds = model_input.input_tokens_hiddenstates.half()
             else:
@@ -1756,11 +1758,11 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             hidden_states = hidden_or_intermediate_states[:len(indices)]
         else:
             hidden_states = hidden_or_intermediate_states
-        hidden_states = hidden_states.tolist()
+        hidden_states = hidden_states.cpu()
         
         assert len(hidden_states) == len(output.outputs), "output hidden states length != len(output.outputs)"
         for i in range(len(hidden_states)):
-            output.outputs[i].hidden_state = copy.deepcopy(hidden_states[i])
+            output.outputs[i].hidden_state = hidden_states[i,:].clone()
         
         if (self.observability_config is not None
                 and self.observability_config.collect_model_forward_time

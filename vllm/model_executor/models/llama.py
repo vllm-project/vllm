@@ -327,7 +327,11 @@ class LlamaModel(nn.Module):
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
-                hidden_states = inputs_embeds
+                tokenid_hidden_states = self.embed_tokens(input_ids)
+                forward_hidden_states = inputs_embeds
+                
+                is_pad = (forward_hidden_states == -123.0).all(dim=1) # prompt token: dummy hidden state
+                hidden_states = torch.where(is_pad.unsqueeze(1), tokenid_hidden_states, forward_hidden_states)
             else:
                 hidden_states = self.get_input_embeddings(input_ids)
             residual = None

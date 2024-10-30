@@ -107,11 +107,11 @@ class GPUExecutor(ExecutorBase):
             rank=rank,
             distributed_init_method=distributed_init_method))
 
-    def determine_num_available_blocks(self, input_embedding_matrix) -> Tuple[int, int]:
+    def determine_num_available_blocks(self, pad_hiddenstate) -> Tuple[int, int]:
         """Determine the number of available KV blocks by invoking the
         underlying worker.
         """
-        return self.driver_worker.determine_num_available_blocks(input_embedding_matrix)
+        return self.driver_worker.determine_num_available_blocks(pad_hiddenstate)
 
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks) -> None:
         """Initialize the KV cache by invoking the underlying worker.

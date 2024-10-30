@@ -325,13 +325,13 @@ class LLMEngine:
                                      "make sure skip_tokenizer_init is False")
             return tokenizer_group.get_lora_tokenizer(sequence.lora_request)
 
-        from transformers import AutoModelForCausalLM
-        model = AutoModelForCausalLM.from_pretrained(
-            model_config.model,
-            trust_remote_code=True,
-            device_map="cpu")
-        self.input_embedding_matrix = model.get_input_embeddings()
-        print(f"Load Model {type(model)} input_embedding_matrix. Size: {self.input_embedding_matrix.weight.size()}; Type: { self.input_embedding_matrix.weight.dtype}")
+        from transformers import AutoConfig
+        config = AutoConfig.from_pretrained(model_config.model, trust_remote_code=True)
+        self.pad_hiddenstate = torch.full(size=[config.hidden_size], 
+                                          fill_value=-123.0, 
+                                          dtype=torch.float, 
+                                          device="cpu")
+        print(f"Load Model hidden_size: {config.hidden_size}")
 
         self.seq_counter = Counter()
         self.generation_config_fields = _load_generation_config_dict(
@@ -495,7 +495,7 @@ class LLMEngine:
         and the swap CPU cache.
         """
         num_gpu_blocks, num_cpu_blocks = (
-            self.model_executor.determine_num_available_blocks(self.input_embedding_matrix))
+            self.model_executor.determine_num_available_blocks(self.pad_hiddenstate))
 
         if self.cache_config.num_gpu_blocks_override is not None:
             num_gpu_blocks_override = self.cache_config.num_gpu_blocks_override
@@ -666,9 +666,7 @@ class LLMEngine:
         seq_id = next(self.seq_counter)
         eos_token_id = self.input_preprocessor.get_eos_token_id(lora_request)
         
-        token_ids_tensor = torch.tensor(processed_inputs["prompt_token_ids"])
-        hidden_states = self.input_embedding_matrix(token_ids_tensor)
-        hidden_states = hidden_states.tolist()
+        hidden_states = [self.pad_hiddenstate] * len(processed_inputs["prompt_token_ids"])
     
         seq = Sequence(seq_id, processed_inputs, block_size, eos_token_id,
                        lora_request, prompt_adapter_request, hidden_states=hidden_states)
