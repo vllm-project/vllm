@@ -10,6 +10,7 @@ from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor.pattern_matcher import PatternMatcherPass, register_replacement, fwd_only, joint_fwd_bwd, Match
 
 from vllm.distributed.parallel_state import get_tp_group, get_tensor_model_parallel_world_size, get_tensor_model_parallel_rank
+from vllm.distributed import tensor_model_parallel_all_reduce
 
 from vllm.logger import init_logger
 
@@ -18,7 +19,6 @@ from .levels import CompilationLevel
 
 logger = init_logger(__name__)
 
-aten = torch.ops.aten
 
 FILENO=0
 
@@ -90,17 +90,21 @@ def gemm_rs_ag_gemm(residual: torch.Tensor,
         slice_size = residual.shape[0]
 
     if not should_slice(residual.shape):
+        # this branch probably broken
         print("NAIVE")
         permute_3 = torch.ops.aten.permute.default(gemm_1_weights, [1, 0])
         output = torch.matmul(gemm_1_activations, permute_3)
-        # all reduce?
+
+        output = tensor_model_parallel_all_reduce(output)  ###
+
         auto_functionalized_4 = torch.ops.higher_order.auto_functionalized(torch.ops._C.fused_add_rms_norm.default, input=output, residual=getitem_26, weight=rms_norm_weight, epsilon=1e-05)
         getitem_29 = auto_functionalized_4[1]
         getitem_30 = auto_functionalized_4[2]
+
         permute_5 = torch.ops.aten.permute.default(gemm_2_weights, [1, 0])
         getitem_35 = torch.matmul(getitem_29, permute_5)
         getitem_30a = getitem_30.clone()
-        print(f"DONE CUSTOM NAIVE {getitem_30.shape}")
+        print(f"DONE CUSTOM NAIVE {getitem_35.shape}, {getitem_30.shape}, {getitem_30a.shape}")
         return getitem_35, getitem_30, getitem_30a
     else:
         group_name = torch.distributed.group.WORLD.group_name # TODO: factor out to setup
@@ -185,7 +189,8 @@ def replace_final(arg227_1, getitem_1215, getitem_1209, arg228_1):
 
     if should_slice(getitem_1209.shape):
         group_name = torch.distributed.group.WORLD.group_name # factor out?
-        all_gather_into_tensor = torch.ops._c10d_functional.all_gather_into_tensor.default(getitem_1209, 2, group_name)
+        world_size = 2 # factor out
+        all_gather_into_tensor = torch.ops._c10d_functional.all_gather_into_tensor.default(getitem_1209, world_size, group_name)
         wait_tensor = torch.ops._c10d_functional.wait_tensor.default(all_gather_into_tensor)
     else:
         wait_tensor = getitem_1209
@@ -197,12 +202,13 @@ def replace_final(arg227_1, getitem_1215, getitem_1209, arg228_1):
 
 my_patterns: Optional[PatternMatcherPass] = None
 my_patterns2: Optional[PatternMatcherPass] = None
+matches: List[Match] = []
 
 def get_matches():
-    global my_patterns, my_patterns2
-    matches = []
+    global my_patterns, my_patterns2, matches
 
     def record_match_fn(match: Match):
+        print(f"MATCHED {len(matches)}, {id(matches)}")
         matches.append(match)
         return False
 
@@ -231,7 +237,6 @@ def get_matches():
                              fwd_only,
                              [my_patterns2])
 
-    return matches
 
 
 # find the output and the residual
@@ -316,11 +321,13 @@ def dump_graph(graph: torch.fx.Graph, stage: str):
 
 
 def async_rewrite(graph: fx.Graph):
-    matches = get_matches()
+    global matches
+    rank = get_tensor_model_parallel_rank()
+    get_matches()
     matches.clear()
 
     count = my_patterns.apply(graph)
-    print(f"fused gemm match count = {len(matches)}")
+    print(f"fused gemm match count = {len(matches)} {id(matches)}")
 
     # a bit hacky
     if len(matches) > 0:
