@@ -446,9 +446,12 @@ void causal_conv1d_fwd_kernel(ConvParamsBase params) {
         }
         else {
             // in case the final state is in between the threads data
-            reinterpret_cast<vec_t *>(x_vals_load)[1] = smem_exchange[last_thread + 1];
-            reinterpret_cast<vec_t *>(x_vals_load)[0] = smem_exchange[last_thread];
             const int offset = ((seqlen - (kWidth - 1)) % (kNElts));
+            if ((offset + kWidth - 2) >= kNElts){
+                // do not load to index 1 if we're not gonna read from there
+                reinterpret_cast<vec_t *>(x_vals_load)[1] = smem_exchange[last_thread + 1];
+            }
+            reinterpret_cast<vec_t *>(x_vals_load)[0] = smem_exchange[last_thread];
             #pragma unroll
             for (int w = 0; w < kWidth - 1; ++w){
                 conv_states[w] = x_vals_load[offset + w ];
