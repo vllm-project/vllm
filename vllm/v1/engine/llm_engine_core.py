@@ -73,12 +73,11 @@ class LLMEngineCore:
         # Setup scheduler.
         self.scheduler = Scheduler(self.scheduler_config, self.cache_config,
                                    self.lora_config)
-        
+
         # Setup IPC if running in async mode.
         if async_mode:
-            assert (input_path is not None and
-                    output_path is not None and
-                    ready_path is not None)
+            assert (input_path is not None and output_path is not None
+                    and ready_path is not None)
 
             self.msgpack_encoder = msgspec.msgpack.Encoder()
             self.msgpack_decoder = msgspec.msgpack.Decoder(EngineCoreRequest)
@@ -92,7 +91,7 @@ class LLMEngineCore:
             # Send EngineCoreOutput to the LLMEngine.
             self.output_socket = self.ctx.socket(zmq.constants.PUSH)
             self.output_socket.bind(output_path)
-            
+
             # Send Readiness signal to LLMEngine.
             try:
                 ready_socket = self.ctx.socket(zmq.constants.PUSH)
@@ -100,7 +99,6 @@ class LLMEngineCore:
                 ready_socket.send_string(LLM_ENGINE_CORE_READY_STR)
             finally:
                 ready_socket.close(linger=0)
-
 
     def _initialize_kv_caches(self) -> None:
         num_gpu_blocks, _ = self.model_executor.determine_num_available_blocks(
@@ -176,9 +174,8 @@ class LLMEngineCore:
             # TODO: handle gracefully
             raise e
 
-    def _send_outputs(
-            self,
-            engine_core_outputs: List[EngineCoreOutput]) -> None:
+    def _send_outputs(self,
+                      engine_core_outputs: List[EngineCoreOutput]) -> None:
         """Serialize and send output to the LLMEngine for async mode."""
 
         if len(engine_core_outputs) == 0:

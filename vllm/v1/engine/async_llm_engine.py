@@ -18,7 +18,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine import LLM_ENGINE_CORE_READY_STR
 from vllm.v1.engine.async_stream import AsyncStream
-from vllm.v1.engine.llm_engine import LLMEngine
+from vllm.v1.engine.protocol import LLMEngineProtocol
 
 logger = init_logger(__name__)
 
