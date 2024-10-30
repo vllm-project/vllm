@@ -11,11 +11,13 @@ We also believe in the power of community support; thus, answering queries, offe
 
 Finally, one of the most impactful ways to support us is by raising awareness about vLLM. Talk about it in your blog posts and highlight how it's driving your incredible projects. Express your support on social media if you're using vLLM, or simply offer your appreciation by starring our repository!
 
+## License
+
+See [LICENSE](LICENSE).
 
 ## Developing
 
 Depending on the kind of development you'd like to do (e.g. Python, CUDA), you can choose to build vLLM with or without compilation. Check out the [building from source](https://docs.vllm.ai/en/latest/getting_started/installation.html#build-from-source) documentation for details.
-
 
 ## Testing
 
@@ -32,6 +34,14 @@ pytest tests/
 **Note:** Currently, the repository does not pass the ``mypy`` tests.
 
 ## Contribution Guidelines
+
+### DCO and Signed-off-by
+
+When contributing changes to this project, you must agree to the [DCO](DCO).
+Commits must include a `Signed-off-by:` header which certifies agreement with
+the terms of the [DCO](DCO).
+
+Using `-s` with `git commit` will automatically add this header.
 
 ### Issues
 
