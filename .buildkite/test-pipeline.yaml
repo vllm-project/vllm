@@ -338,7 +338,10 @@ steps:
   - tests/models/decoder_only/vision_language
   commands:
     - pytest -v -s models/decoder_only/audio_language
-    - pytest -v -s models/decoder_only/vision_language
+    # HACK - run phi3v tests separately to sidestep this transformers bug
+    # https://github.com/huggingface/transformers/issues/34307
+    - pytest -v -s models/decoder_only/vision_language/test_phi3v.py
+    - pytest -v -s --ignore models/decoder_only/vision_language/test_phi3v.py models/decoder_only/vision_language
 
 - label: Other Models Test # 6min
   #mirror_hardwares: [amd]
@@ -413,7 +416,7 @@ steps:
   # Avoid importing model tests that cause CUDA reinitialization error
   - pytest models/encoder_decoder/language/test_bart.py -v -s -m distributed_2_gpus
   - pytest models/encoder_decoder/vision_language/test_broadcast.py -v -s -m distributed_2_gpus
-  - pytest models/decoder_only/vision_language/test_broadcast.py -v -s -m distributed_2_gpus
+  - pytest models/decoder_only/vision_language/test_models.py -v -s -m distributed_2_gpus
   - pytest -v -s spec_decode/e2e/test_integration_dist_tp2.py
   - pip install -e ./plugins/vllm_add_dummy_model
   - pytest -v -s distributed/test_distributed_oot.py
