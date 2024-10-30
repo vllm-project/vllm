@@ -26,7 +26,7 @@ from vllm.model_executor.model_loader.loader import get_model_loader
 from vllm.platforms import current_platform
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.utils import (FlexibleArgumentParser, GB_bytes,
-                        cuda_device_count_stateless, get_open_port, is_hip)
+                        cuda_device_count_stateless, get_open_port)
 
 if current_platform.is_rocm():
     from amdsmi import (amdsmi_get_gpu_vram_usage,
@@ -487,7 +487,7 @@ def wait_for_gpu_memory_to_clear(devices: List[int],
         output: Dict[int, str] = {}
         output_raw: Dict[int, float] = {}
         for device in devices:
-            if is_hip():
+            if current_platform.is_rocm():
                 dev_handle = amdsmi_get_processor_handles()[device]
                 mem_info = amdsmi_get_gpu_vram_usage(dev_handle)
                 gb_used = mem_info["vram_used"] / 2**10

@@ -50,12 +50,13 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, kv_cache_scales_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors, PoolerOutput
-from vllm.utils import is_hip
 
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (AutoWeightsLoader, PPMissingLayer, is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, make_layers)
+                    make_empty_intermediate_tensors_factory, make_layers,
+                    maybe_prefix)
 
 
 class LlamaMLP(nn.Module):
@@ -423,7 +424,7 @@ class LlamaModel(nn.Module):
             if not isinstance(self.layers[layer_idx], nn.Identity):
                 layer_self_attn = self.layers[layer_idx].self_attn
 
-            if is_hip():
+            if current_platform.is_rocm():
                 # The scaling factor convention we are assuming is
                 # quantized_value * scaling_factor ~= true_value
                 # which is consistent with the practice of setting
@@ -500,6 +501,7 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
 
@@ -510,7 +512,7 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                                 cache_config,
                                 quant_config,
                                 lora_config=lora_config,
-                                prefix="model")
+                                prefix=maybe_prefix(prefix, "model"))
         if get_pp_group().is_last_rank:
             self.unpadded_vocab_size = config.vocab_size
             if lora_config:
@@ -526,6 +528,7 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                     if not lora_config else
                     lora_config.lora_vocab_padding_size),
                 quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
             )
             if config.tie_word_embeddings:
                 self.lm_head = self.lm_head.tie_weights(
