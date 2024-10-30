@@ -265,7 +265,7 @@ class OpenAIServing:
 
         # chat completion endpoint supports max_completion_tokens
         if isinstance(request, ChatCompletionRequest):
-            # TODO: remove max_tokens when field is removed from OpenAI API
+            # TODO(#9845): remove max_tokens when field dropped from OpenAI API
             max_tokens = request.max_completion_tokens or request.max_tokens
         else:
             max_tokens = request.max_tokens
