@@ -19,14 +19,10 @@ from vllm.v1.request import Request
 logger = init_logger(__name__)
 
 
-# TODO: better name? LLMEngineProc?
-class LLMEngineCore(multiprocessing.Process):
+class LLMEngineCore:
 
     def __init__(
         self,
-        input_path: str,
-        output_path: str,
-        core_ready_path: str,
         executor_class: Type[GPUExecutor],
         model_config: ModelConfig,
         cache_config: CacheConfig,
@@ -38,11 +34,11 @@ class LLMEngineCore(multiprocessing.Process):
         speculative_config: Optional[SpeculativeConfig],
         observability_config: Optional[ObservabilityConfig],
         prompt_adapter_config: Optional[PromptAdapterConfig],
+        async_mode: bool = False,
+        input_path: Optional[str] = None,
+        output_path: Optional[str] = None,
+        ready_path: Optional[str] = None,
     ):
-        super().__init__()
-        self.input_path = input_path
-        self.output_path = output_path
-        self.core_ready_path = core_ready_path
         self.executor_class = executor_class
         self.model_config = model_config
         self.cache_config = cache_config
@@ -54,21 +50,6 @@ class LLMEngineCore(multiprocessing.Process):
         self.lora_config = lora_config
         self.observability_config = observability_config
         self.prompt_adapter_config = prompt_adapter_config
-
-    def run(self):
-        # Initialize these objects after the process is forked.
-        self.msgpack_encoder = msgspec.msgpack.Encoder()
-        self.msgpack_decoder = msgspec.msgpack.Decoder(EngineCoreRequest)
-
-        self.ctx = zmq.Context()  # type: ignore[attr-defined]
-
-        # Get EngineCoreRequests from the LLMEngine.
-        self.input_socket = self.ctx.socket(zmq.constants.PULL)
-        self.input_socket.connect(self.input_path)
-
-        # Send EngineCoreOutput to the LLMEngine.
-        self.output_socket = self.ctx.socket(zmq.constants.PUSH)
-        self.output_socket.bind(self.output_path)
 
         # Setup Model.
         self.model_executor = self.executor_class(
@@ -89,22 +70,37 @@ class LLMEngineCore(multiprocessing.Process):
         # blocks, which are profiled in the distributed executor.
         self._initialize_kv_caches()
 
-        # Setup Scheduler.
+        # Setup scheduler.
         self.scheduler = Scheduler(self.scheduler_config, self.cache_config,
                                    self.lora_config)
+        
+        # Setup IPC if running in async mode.
+        if async_mode:
+            assert (input_path is not None and
+                    output_path is not None and
+                    ready_path is not None)
 
-        # TODO: add heartbeat thread.
+            self.msgpack_encoder = msgspec.msgpack.Encoder()
+            self.msgpack_decoder = msgspec.msgpack.Decoder(EngineCoreRequest)
 
-        # Send LLM_ENGINE_CORE_READY_STR.
-        try:
-            ready_socket = self.ctx.socket(zmq.constants.PUSH)
-            ready_socket.bind(self.core_ready_path)
-            ready_socket.send_string(LLM_ENGINE_CORE_READY_STR)
-        finally:
-            ready_socket.close(linger=0)
+            self.ctx = zmq.Context()  # type: ignore[attr-defined]
 
-        # Kickoff the busy loop.
-        self.core_loop()
+            # Get EngineCoreRequests from the LLMEngine.
+            self.input_socket = self.ctx.socket(zmq.constants.PULL)
+            self.input_socket.connect(input_path)
+
+            # Send EngineCoreOutput to the LLMEngine.
+            self.output_socket = self.ctx.socket(zmq.constants.PUSH)
+            self.output_socket.bind(output_path)
+            
+            # Send Readiness signal to LLMEngine.
+            try:
+                ready_socket = self.ctx.socket(zmq.constants.PUSH)
+                ready_socket.bind(ready_path)
+                ready_socket.send_string(LLM_ENGINE_CORE_READY_STR)
+            finally:
+                ready_socket.close(linger=0)
+
 
     def _initialize_kv_caches(self) -> None:
         num_gpu_blocks, _ = self.model_executor.determine_num_available_blocks(
@@ -122,8 +118,29 @@ class LLMEngineCore(multiprocessing.Process):
         self.cache_config.num_cpu_blocks = 0
         self.model_executor.initialize_cache(num_gpu_blocks)
 
-    def core_loop(self):
-        """Core busy loop of the LLMEngineCore."""
+    def add_request(self, engine_core_request: EngineCoreRequest):
+        """Add request to the scheduler."""
+
+        request = Request.from_engine_core_request(engine_core_request)
+        self.scheduler.add_request(request)
+
+    def step(self) -> List[EngineCoreOutputs]:
+        """Schedule, execute, and make output."""
+
+        if not self.scheduler.has_unfinished_requests():
+            return []
+
+        scheduler_output = self.scheduler.schedule()
+        output = self.model_executor.execute_model(scheduler_output)
+        engine_core_outputs = self.scheduler.update_from_output(
+            scheduler_output, output)
+        return engine_core_outputs
+
+    def check_health(self):
+        self.model_executor.check_health()
+
+    def run_busy_loop(self):
+        """Core busy loop of the LLMEngineCore for async mode."""
 
         while True:
             # Poll the input socket until there is work to do.
@@ -135,32 +152,21 @@ class LLMEngineCore(multiprocessing.Process):
             self._handle_new_input()
 
             # Forward pass.
-            outputs = self._step()
+            outputs = self.step()
 
-            # Stream outputs to the LLMEngine.
+            # Send outputs to the LLMEngine.
             self._send_outputs(outputs)
 
-    def _step(self) -> Optional[List[EngineCoreOutputs]]:
-        """Schedule, execute, and make output."""
-
-        if not self.scheduler.has_unfinished_requests():
-            return None
-
-        scheduler_output = self.scheduler.schedule()
-        output = self.model_executor.execute_model(scheduler_output)
-        engine_core_outputs = self.scheduler.update_from_output(
-            scheduler_output, output)
-        return engine_core_outputs
-
     def _handle_new_input(self):
-        """Handle new input from the LLMEngine."""
+        """Handle new input from the LLMEngine for async mode."""
+
         try:
-            while self.input_socket.poll(timeout=0) != 0:
+            if self.input_socket.poll(timeout=0) != 0:
                 frames = self.input_socket.recv_multipart(copy=False)
                 engine_core_request = self.msgpack_decoder.decode(
                     frames[0].buffer)
                 request = Request.from_engine_core_request(engine_core_request)
-                self.scheduler.add_request(request)
+                self.add_request(request)
 
                 # TODO: handle abort via another socket
                 # TODO: handle logits processors via cloudpickle
@@ -172,10 +178,10 @@ class LLMEngineCore(multiprocessing.Process):
 
     def _send_outputs(
             self,
-            engine_core_outputs: Optional[List[EngineCoreOutput]]) -> None:
-        """Serialize and send output to the LLMEngine."""
+            engine_core_outputs: List[EngineCoreOutput]) -> None:
+        """Serialize and send output to the LLMEngine for async mode."""
 
-        if engine_core_outputs is None:
+        if len(engine_core_outputs) == 0:
             return
 
         outputs = EngineCoreOutputs(outputs=engine_core_outputs)

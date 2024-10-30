@@ -24,6 +24,28 @@ logger = init_logger(__name__)
 
 POLL_TIMEOUT_MS = 5000
 
+        # IPC path setup
+        if use_async_sockets:
+            import zmq.asyncio
+            self.ctx = zmq.asyncio.Context()  # type: ignore[attr-defined]
+        else:
+            self.ctx = zmq.Context()  # type: ignore[attr-defined]
+        output_path = get_open_zmq_ipc_path()
+        input_path = get_open_zmq_ipc_path()
+        ready_path = get_open_zmq_ipc_path()
+
+        # Get output (EngineCoreOutput) from LLMEngineCore.
+        self.output_socket = self.ctx.socket(zmq.constants.PULL)
+        self.output_socket.connect(output_path)
+
+        # Send input (EngineCoreRequest) to LLMEngineCore.
+        self.input_socket = self.ctx.socket(zmq.constants.PUSH)
+        self.input_socket.bind(input_path)
+
+         # IPC serialization / deserialization
+        self.encoder = msgspec.msgpack.Encoder()
+        self.decoder = msgspec.msgpack.Decoder(EngineCoreOutputs)
+
 
 class _AsyncLLMEngine(LLMEngine):
 
