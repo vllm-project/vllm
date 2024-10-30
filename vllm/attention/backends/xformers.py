@@ -536,7 +536,7 @@ class XFormersMetadataBuilder(AttentionMetadataBuilder[XFormersMetadata]):
                      dtype=query_start_loc.dtype,
                      out=query_start_loc[1:])
 
-        return self._metadata_cls(  # type: ignore
+        return XFormersMetadata(
             num_prefills=self.num_prefills,
             slot_mapping=slot_mapping_tensor,
             num_prefill_tokens=self.num_prefill_tokens,
