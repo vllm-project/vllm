@@ -462,8 +462,7 @@ class LoRAModelManager(AdapterModelManager):
                 self.scaling_factor_to_offset = \
                     new_module.scaling_factor_to_offset
             # (yard1): TODO make this more robust
-            # TODO(sergeykochetkov): check that functionality of
-            # adding tokens/packing logits_processor is working
+            # replace lm_head by A*B lora if needed
             if ("lm_head" in module_name) and not isinstance(
                     new_module, ModulesToSaveWrapper):
                 logits_processor_module = self.model.get_submodule(
