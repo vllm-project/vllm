@@ -60,7 +60,6 @@ steps:
         environment:
         - VLLM_USAGE_SOURCE
         - HF_TOKEN
-        - NCCL_PXN_DISABLE=1
 
 
   # - label: "H100"
