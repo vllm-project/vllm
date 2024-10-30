@@ -1,105 +1,214 @@
 # The vLLM Dockerfile is used to construct vLLM image that can be directly used
 # to run the OpenAI compatible server.
 
-#################### BASE BUILD IMAGE ####################
-FROM nvidia/cuda:12.1.0-devel-ubuntu22.04 AS dev
+# Please update any changes made here to
+# docs/source/dev/dockerfile/dockerfile.rst and
+# docs/source/assets/dev/dockerfile-stages-dependency.png
 
-RUN apt-get update -y \
-    && apt-get install -y python3-pip git
+ARG CUDA_VERSION=12.4.1
+#################### BASE BUILD IMAGE ####################
+# prepare basic build environment
+FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu20.04 AS base
+ARG CUDA_VERSION=12.4.1
+ARG PYTHON_VERSION=3.12
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install Python and other dependencies
+RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
+    && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections \
+    && apt-get update -y \
+    && apt-get install -y ccache software-properties-common git curl sudo \
+    && add-apt-repository ppa:deadsnakes/ppa \
+    && apt-get update -y \
+    && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv \
+    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
+    && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} \
+    && ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config \
+    && curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION} \
+    && python3 --version && python3 -m pip --version
+
+# Upgrade to GCC 10 to avoid https://gcc.gnu.org/bugzilla/show_bug.cgi?id=92519
+# as it was causing spam when compiling the CUTLASS kernels
+RUN apt-get install -y gcc-10 g++-10
+RUN update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-10 110 --slave /usr/bin/g++ g++ /usr/bin/g++-10
+RUN <<EOF
+gcc --version
+EOF
 
 # Workaround for https://github.com/openai/triton/issues/2507 and
 # https://github.com/pytorch/pytorch/issues/107960 -- hopefully
 # this won't be needed for future versions of this docker image
 # or future versions of triton.
-RUN ldconfig /usr/local/cuda-12.1/compat/
+RUN ldconfig /usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/
 
 WORKDIR /workspace
 
 # install build and runtime dependencies
-COPY requirements.txt requirements.txt
+COPY requirements-common.txt requirements-common.txt
+COPY requirements-cuda.txt requirements-cuda.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -r requirements.txt
+    python3 -m pip install -r requirements-cuda.txt
 
-# install development dependencies
-COPY requirements-dev.txt requirements-dev.txt
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -r requirements-dev.txt
+
+# cuda arch list used by torch
+# can be useful for both `dev` and `test`
+# explicitly set the list to avoid issues with torch 2.2
+# see https://github.com/pytorch/pytorch/pull/123243
+ARG torch_cuda_arch_list='7.0 7.5 8.0 8.6 8.9 9.0+PTX'
+ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
+# Override the arch list for flash-attn to reduce the binary size
+ARG vllm_fa_cmake_gpu_arches='80-real;90-real'
+ENV VLLM_FA_CMAKE_GPU_ARCHES=${vllm_fa_cmake_gpu_arches}
 #################### BASE BUILD IMAGE ####################
 
-
-#################### EXTENSION BUILD IMAGE ####################
-FROM dev AS build
+#################### WHEEL BUILD IMAGE ####################
+FROM base AS build
 
 # install build dependencies
 COPY requirements-build.txt requirements-build.txt
+
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -r requirements-build.txt
+    python3 -m pip install -r requirements-build.txt
 
-# copy input files
-COPY csrc csrc
-COPY setup.py setup.py
-COPY requirements.txt requirements.txt
-COPY pyproject.toml pyproject.toml
-COPY vllm/__init__.py vllm/__init__.py
+COPY . .
+ARG GIT_REPO_CHECK=0
+RUN --mount=type=bind,source=.git,target=.git \
+    if [ "$GIT_REPO_CHECK" != 0 ]; then bash tools/check_repo.sh ; fi
 
-# cuda arch list used by torch
-ARG torch_cuda_arch_list='7.0 7.5 8.0 8.6 8.9 9.0+PTX'
-ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 # max jobs used by Ninja to build extensions
 ARG max_jobs=2
 ENV MAX_JOBS=${max_jobs}
 # number of threads used by nvcc
 ARG nvcc_threads=8
 ENV NVCC_THREADS=$nvcc_threads
-# make sure punica kernels are built (for LoRA)
-ENV VLLM_INSTALL_PUNICA_KERNELS=1
 
-RUN python3 setup.py build_ext --inplace
+ARG USE_SCCACHE
+ARG SCCACHE_BUCKET_NAME=vllm-build-sccache
+ARG SCCACHE_REGION_NAME=us-west-2
+ARG SCCACHE_S3_NO_CREDENTIALS=0
+# if USE_SCCACHE is set, use sccache to speed up compilation
+RUN --mount=type=cache,target=/root/.cache/pip \
+    --mount=type=bind,source=.git,target=.git \
+    if [ "$USE_SCCACHE" = "1" ]; then \
+        echo "Installing sccache..." \
+        && curl -L -o sccache.tar.gz https://github.com/mozilla/sccache/releases/download/v0.8.1/sccache-v0.8.1-x86_64-unknown-linux-musl.tar.gz \
+        && tar -xzf sccache.tar.gz \
+        && sudo mv sccache-v0.8.1-x86_64-unknown-linux-musl/sccache /usr/bin/sccache \
+        && rm -rf sccache.tar.gz sccache-v0.8.1-x86_64-unknown-linux-musl \
+        && export SCCACHE_BUCKET=${SCCACHE_BUCKET_NAME} \
+        && export SCCACHE_REGION=${SCCACHE_REGION_NAME} \
+        && export SCCACHE_S3_NO_CREDENTIALS=${SCCACHE_S3_NO_CREDENTIALS} \
+        && export SCCACHE_IDLE_TIMEOUT=0 \
+        && export CMAKE_BUILD_TYPE=Release \
+        && sccache --show-stats \
+        && python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38 \
+        && sccache --show-stats; \
+    fi
+
+ENV CCACHE_DIR=/root/.cache/ccache
+RUN --mount=type=cache,target=/root/.cache/ccache \
+    --mount=type=cache,target=/root/.cache/pip \
+    --mount=type=bind,source=.git,target=.git  \
+    if [ "$USE_SCCACHE" != "1" ]; then \
+        python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38; \
+    fi
+
+# Check the size of the wheel if RUN_WHEEL_CHECK is true
+COPY .buildkite/check-wheel-size.py check-wheel-size.py
+# Default max size of the wheel is 250MB
+ARG VLLM_MAX_SIZE_MB=250
+ENV VLLM_MAX_SIZE_MB=$VLLM_MAX_SIZE_MB
+ARG RUN_WHEEL_CHECK=true
+RUN if [ "$RUN_WHEEL_CHECK" = "true" ]; then \
+        python3 check-wheel-size.py dist; \
+    else \
+        echo "Skipping wheel size check."; \
+    fi
 #################### EXTENSION Build IMAGE ####################
+
+#################### DEV IMAGE ####################
+FROM base as dev
+
+COPY requirements-lint.txt requirements-lint.txt
+COPY requirements-test.txt requirements-test.txt
+COPY requirements-dev.txt requirements-dev.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python3 -m pip install -r requirements-dev.txt
+
+#################### DEV IMAGE ####################
+#################### vLLM installation IMAGE ####################
+# image with vLLM installed
+FROM nvidia/cuda:${CUDA_VERSION}-base-ubuntu22.04 AS vllm-base
+ARG CUDA_VERSION=12.4.1
+ARG PYTHON_VERSION=3.12
+WORKDIR /vllm-workspace
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN PYTHON_VERSION_STR=$(echo ${PYTHON_VERSION} | sed 's/\.//g') && \
+    echo "export PYTHON_VERSION_STR=${PYTHON_VERSION_STR}" >> /etc/environment
+
+# Install Python and other dependencies
+RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
+    && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections \
+    && apt-get update -y \
+    && apt-get install -y ccache software-properties-common git curl sudo vim python3-pip \
+    && apt-get install -y ffmpeg libsm6 libxext6 libgl1 \
+    && add-apt-repository ppa:deadsnakes/ppa \
+    && apt-get update -y \
+    && apt-get install -y python${PYTHON_VERSION} python${PYTHON_VERSION}-dev python${PYTHON_VERSION}-venv libibverbs-dev \
+    && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
+    && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} \
+    && ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config \
+    && curl -sS https://bootstrap.pypa.io/get-pip.py | python${PYTHON_VERSION} \
+    && python3 --version && python3 -m pip --version
+
+# Workaround for https://github.com/openai/triton/issues/2507 and
+# https://github.com/pytorch/pytorch/issues/107960 -- hopefully
+# this won't be needed for future versions of this docker image
+# or future versions of triton.
+RUN ldconfig /usr/local/cuda-$(echo $CUDA_VERSION | cut -d. -f1,2)/compat/
+
+# install vllm wheel first, so that torch etc will be installed
+RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
+    --mount=type=cache,target=/root/.cache/pip \
+    python3 -m pip install dist/*.whl --verbose
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    . /etc/environment && \
+    python3 -m pip install https://github.com/flashinfer-ai/flashinfer/releases/download/v0.1.6/flashinfer-0.1.6+cu121torch2.4-cp${PYTHON_VERSION_STR}-cp${PYTHON_VERSION_STR}-linux_x86_64.whl
+COPY examples examples
+#################### vLLM installation IMAGE ####################
 
 
 #################### TEST IMAGE ####################
 # image to run unit testing suite
-FROM dev AS test
+# note that this uses vllm installed by `pip`
+FROM vllm-base AS test
 
-# copy pytorch extensions separately to avoid having to rebuild
-# when python code changes
-WORKDIR /vllm-workspace
-# ADD is used to preserve directory structure
 ADD . /vllm-workspace/
-COPY --from=build /workspace/vllm/*.so /vllm-workspace/vllm/
-# ignore build dependencies installation because we are using pre-complied extensions
-RUN rm pyproject.toml
-RUN --mount=type=cache,target=/root/.cache/pip VLLM_USE_PRECOMPILED=1 pip install . --verbose
-#################### TEST IMAGE ####################
 
-
-#################### RUNTIME BASE IMAGE ####################
-# We used base cuda image because pytorch installs its own cuda libraries.
-# However cupy depends on cuda libraries so we had to switch to the runtime image
-# In the future it would be nice to get a container with pytorch and cuda without duplicating cuda
-FROM nvidia/cuda:12.1.0-runtime-ubuntu22.04 AS vllm-base
-
-# libnccl required for ray
-RUN apt-get update -y \
-    && apt-get install -y python3-pip
-
-WORKDIR /workspace
-COPY requirements.txt requirements.txt
+# install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -r requirements.txt
-#################### RUNTIME BASE IMAGE ####################
+    python3 -m pip install -r requirements-dev.txt
 
+# doc requires source code
+# we hide them inside `test_docs/` , so that this source code
+# will not be imported by other tests
+RUN mkdir test_docs
+RUN mv docs test_docs/
+RUN mv vllm test_docs/
+
+#################### TEST IMAGE ####################
 
 #################### OPENAI API SERVER ####################
 # openai api server alternative
 FROM vllm-base AS vllm-openai
+
 # install additional dependencies for openai api server
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install accelerate
+    pip install accelerate hf_transfer 'modelscope!=1.15.0' bitsandbytes>=0.44.0 timm==0.9.10
 
-COPY --from=build /workspace/vllm/*.so /workspace/vllm/
-COPY vllm vllm
+ENV VLLM_USAGE_SOURCE production-docker-image
 
 ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
 #################### OPENAI API SERVER ####################

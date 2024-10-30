@@ -46,6 +46,8 @@ class ChatGLMConfig(PretrainedConfig):
         self.kv_channels = kv_channels
         self.num_attention_heads = num_attention_heads
         self.seq_length = seq_length
+        # It is to be compatible with long lora.
+        self.max_position_embeddings = seq_length
         self.hidden_dropout = hidden_dropout
         self.attention_dropout = attention_dropout
         self.layernorm_epsilon = layernorm_epsilon

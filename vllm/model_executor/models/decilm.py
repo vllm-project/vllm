@@ -23,16 +23,17 @@
 # limitations under the License.
 """Inference-only DeciLM model compatible with HuggingFace weights."""
 
-from typing import Optional
+from typing import Iterable, Optional, Tuple
 
 import torch
-from transformers import PretrainedConfig
+from transformers import LlamaConfig
 
-from vllm.config import LoRAConfig
-from vllm.model_executor.layers.linear import LinearMethodBase
+from vllm.config import CacheConfig, LoRAConfig
+from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.llama import LlamaForCausalLM
-from vllm.model_executor.weight_utils import (default_weight_loader,
-                                              hf_model_weights_iterator)
+
+from .utils import is_pp_missing_parameter
 
 
 class DeciLMForCausalLM(LlamaForCausalLM):
@@ -55,21 +56,19 @@ class DeciLMForCausalLM(LlamaForCausalLM):
 
     def __init__(
         self,
-        config: Optional[PretrainedConfig] = None,
-        linear_method: Optional[LinearMethodBase] = None,
+        config: LlamaConfig,
+        cache_config: Optional[CacheConfig] = None,
+        quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
     ) -> None:
         config.num_key_value_heads = max(config.num_key_value_heads_per_layer)
         delattr(config, "num_key_value_heads_per_layer")
         super().__init__(config=config,
-                         linear_method=linear_method,
+                         cache_config=cache_config,
+                         quant_config=quant_config,
                          lora_config=lora_config)
 
-    def load_weights(self,
-                     model_name_or_path: str,
-                     cache_dir: Optional[str] = None,
-                     load_format: str = "auto",
-                     revision: Optional[str] = None):
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -79,8 +78,7 @@ class DeciLMForCausalLM(LlamaForCausalLM):
             ("gate_up_proj", "up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
-        for name, loaded_weight in hf_model_weights_iterator(
-                model_name_or_path, cache_dir, load_format, revision):
+        for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
 
@@ -94,6 +92,8 @@ class DeciLMForCausalLM(LlamaForCausalLM):
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
+                if is_pp_missing_parameter(name, self):
+                    continue
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
@@ -101,6 +101,8 @@ class DeciLMForCausalLM(LlamaForCausalLM):
             else:
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
+                    continue
+                if is_pp_missing_parameter(name, self):
                     continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",

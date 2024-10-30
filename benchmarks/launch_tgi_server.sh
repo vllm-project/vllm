@@ -4,9 +4,9 @@ PORT=8000
 MODEL=$1
 TOKENS=$2
 
-docker run --gpus all --shm-size 1g -p $PORT:80 \
+docker run -e HF_TOKEN=$HF_TOKEN --gpus all --shm-size 1g -p $PORT:80 \
            -v $PWD/data:/data \
-           ghcr.io/huggingface/text-generation-inference:1.4.0 \
+           ghcr.io/huggingface/text-generation-inference:2.2.0 \
            --model-id $MODEL \
            --sharded false  \
            --max-input-length 1024 \

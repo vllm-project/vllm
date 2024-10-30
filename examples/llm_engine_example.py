@@ -1,7 +1,8 @@
 import argparse
 from typing import List, Tuple
 
-from vllm import EngineArgs, LLMEngine, SamplingParams, RequestOutput
+from vllm import EngineArgs, LLMEngine, RequestOutput, SamplingParams
+from vllm.utils import FlexibleArgumentParser
 
 
 def create_test_prompts() -> List[Tuple[str, SamplingParams]]:
@@ -17,9 +18,6 @@ def create_test_prompts() -> List[Tuple[str, SamplingParams]]:
                         temperature=0.8,
                         top_p=0.95,
                         frequency_penalty=0.1)),
-        ("It is only with the heart that one can see rightly",
-         SamplingParams(n=3, best_of=3, use_beam_search=True,
-                        temperature=0.0)),
     ]
 
 
@@ -55,7 +53,7 @@ def main(args: argparse.Namespace):
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(
+    parser = FlexibleArgumentParser(
         description='Demo on using the LLMEngine class directly')
     parser = EngineArgs.add_cli_args(parser)
     args = parser.parse_args()

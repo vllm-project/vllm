@@ -4,38 +4,56 @@ Run `pytest tests/prefix_caching/test_prefix_caching.py`.
 """
 import pytest
 
-from vllm import LLM, SamplingParams
+from tests.kernels.utils import override_backend_env_variable
 
-prefix = (
-    "You are an expert school principal, skilled in effectively managing "
-    "faculty and staff. Draft 10-15 questions for a potential first grade "
-    "Head Teacher for my K-12, all-girls', independent school that emphasizes "
-    "community, joyful discovery, and life-long learning. The candidate is "
-    "coming in for a first-round panel interview for a 8th grade Math "
-    "teaching role. They have 5 years of previous teaching experience "
-    "as an assistant teacher at a co-ed, public school with experience "
-    "in middle school math teaching. Based on these information, fulfill "
-    "the following paragraph: ")
+from ..models.utils import check_outputs_equal
+
+MODELS = [
+    "facebook/opt-125m",
+]
 
 
-@pytest.mark.parametrize("model", ["facebook/opt-125m"])
-@pytest.mark.parametrize("max_tokens", [16])
-def test_prefix_caching(
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("backend", ["FLASH_ATTN", "FLASHINFER", "XFORMERS"])
+@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("max_tokens", [5])
+@pytest.mark.parametrize("cached_position", [0, 1])
+def test_mixed_requests(
+    hf_runner,
+    vllm_runner,
     example_prompts,
     model: str,
+    backend: str,
+    dtype: str,
     max_tokens: int,
-):
-    llm = LLM(model=model)
-    # -1 since the last token can change when concatenating prompts.
-    prefix_pos = len(llm.llm_engine.tokenizer.encode(prefix)) - 1
-    prompts = [prefix + prompt for prompt in example_prompts]
-    sampling_params = SamplingParams(temperature=0.0, max_tokens=max_tokens)
-    outputs_without_prefix = llm.generate(prompts, sampling_params)
-    outputs_with_prefix = llm.generate(prompts,
-                                       sampling_params,
-                                       prefix_pos=[prefix_pos] * len(prompts))
-    for output_without_prefix, output_with_prefix in zip(
-            outputs_without_prefix, outputs_with_prefix):
-        assert (output_without_prefix.outputs[0].token_ids ==
-                output_with_prefix.outputs[0].token_ids)
-    assert len(llm.llm_engine.scheduler.prefix_pool.prefixes) == 1
+    cached_position: int,
+    monkeypatch,
+) -> None:
+    """
+    Test the case when some sequences have the prefix cache hit
+    and the others don't. The cached position determines where 
+    the sequence is at among the batch of prefills.
+    """
+    override_backend_env_variable(monkeypatch, backend)
+
+    with hf_runner(model, dtype=dtype) as hf_model:
+        hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
+
+    cached_prompt = example_prompts[cached_position]
+    with vllm_runner(
+            model,
+            dtype=dtype,
+            enable_prefix_caching=True,
+    ) as vllm_model:
+        # Run the first prompt so the cache is populated
+        vllm_outputs = vllm_model.generate_greedy([cached_prompt], max_tokens)
+
+        # Run all the promopts
+        vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
+
+    check_outputs_equal(
+        outputs_0_lst=hf_outputs,
+        outputs_1_lst=vllm_outputs,
+        name_0="hf",
+        name_1="vllm",
+    )

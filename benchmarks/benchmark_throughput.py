@@ -1,14 +1,22 @@
 """Benchmark offline inference throughput."""
 import argparse
+import dataclasses
 import json
 import random
 import time
 from typing import List, Optional, Tuple
 
 import torch
+import uvloop
+from tqdm import tqdm
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           PreTrainedTokenizerBase)
-from tqdm import tqdm
+
+from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
+from vllm.entrypoints.openai.api_server import (
+    build_async_engine_client_from_engine_args)
+from vllm.sampling_params import BeamSearchParams
+from vllm.utils import FlexibleArgumentParser, merge_async_iterators
 
 
 def sample_requests(
@@ -29,22 +37,23 @@ def sample_requests(
     dataset = [(data["conversations"][0]["value"],
                 data["conversations"][1]["value"]) for data in dataset]
 
-    # Tokenize the prompts and completions.
-    prompts = [prompt for prompt, _ in dataset]
-    prompt_token_ids = tokenizer(prompts).input_ids
-    completions = [completion for _, completion in dataset]
-    completion_token_ids = tokenizer(completions).input_ids
-    tokenized_dataset = []
-    for i in range(len(dataset)):
-        output_len = len(completion_token_ids[i])
-        if fixed_output_len is not None:
-            output_len = fixed_output_len
-        tokenized_dataset.append((prompts[i], prompt_token_ids[i], output_len))
+    # Shuffle the dataset.
+    random.shuffle(dataset)
 
-    # Filter out too long sequences.
+    # Filter out sequences that are too long or too short
     filtered_dataset: List[Tuple[str, int, int]] = []
-    for prompt, prompt_token_ids, output_len in tokenized_dataset:
+    for i in range(len(dataset)):
+        if len(filtered_dataset) == num_requests:
+            break
+
+        # Tokenize the prompts and completions.
+        prompt = dataset[i][0]
+        prompt_token_ids = tokenizer(prompt).input_ids
+        completion = dataset[i][1]
+        completion_token_ids = tokenizer(completion).input_ids
         prompt_len = len(prompt_token_ids)
+        output_len = len(completion_token_ids
+                         ) if fixed_output_len is None else fixed_output_len
         if prompt_len < 4 or output_len < 4:
             # Prune too short sequences.
             continue
@@ -53,64 +62,90 @@ def sample_requests(
             continue
         filtered_dataset.append((prompt, prompt_len, output_len))
 
-    # Sample the requests.
-    sampled_requests = random.sample(filtered_dataset, num_requests)
-    return sampled_requests
+    return filtered_dataset
 
 
 def run_vllm(
     requests: List[Tuple[str, int, int]],
-    model: str,
-    tokenizer: str,
-    quantization: Optional[str],
-    tensor_parallel_size: int,
-    seed: int,
     n: int,
-    use_beam_search: bool,
-    trust_remote_code: bool,
-    dtype: str,
-    max_model_len: Optional[int],
-    enforce_eager: bool,
-    kv_cache_dtype: str,
-    device: str,
+    engine_args: EngineArgs,
 ) -> float:
     from vllm import LLM, SamplingParams
-    llm = LLM(
-        model=model,
-        tokenizer=tokenizer,
-        quantization=quantization,
-        tensor_parallel_size=tensor_parallel_size,
-        seed=seed,
-        trust_remote_code=trust_remote_code,
-        dtype=dtype,
-        max_model_len=max_model_len,
-        enforce_eager=enforce_eager,
-        kv_cache_dtype=kv_cache_dtype,
-        device=device,
-    )
+    llm = LLM(**dataclasses.asdict(engine_args))
 
     # Add the requests to the engine.
+    prompts: List[str] = []
+    sampling_params: List[SamplingParams] = []
     for prompt, _, output_len in requests:
-        sampling_params = SamplingParams(
-            n=n,
-            temperature=0.0 if use_beam_search else 1.0,
-            top_p=1.0,
-            use_beam_search=use_beam_search,
-            ignore_eos=True,
-            max_tokens=output_len,
-        )
-        # FIXME(woosuk): Do not use internal method.
-        llm._add_request(
-            prompt=prompt,
-            prompt_token_ids=None,
-            sampling_params=sampling_params,
-        )
+        prompts.append(prompt)
+        sampling_params.append(
+            SamplingParams(
+                n=n,
+                temperature=1.0,
+                top_p=1.0,
+                ignore_eos=True,
+                max_tokens=output_len,
+            ))
 
-    start = time.perf_counter()
-    # FIXME(woosuk): Do not use internal method.
-    llm._run_engine(use_tqdm=True)
-    end = time.perf_counter()
+    use_beam_search = False
+
+    if not use_beam_search:
+        start = time.perf_counter()
+        llm.generate(prompts, sampling_params, use_tqdm=True)
+        end = time.perf_counter()
+    else:
+        prompts = [prompt for prompt, _, _ in requests]
+        # output_len should be the same for all requests.
+        output_len = requests[0][2]
+        for prompt, input_len, _output_len in requests:
+            assert _output_len == output_len
+        start = time.perf_counter()
+        llm.beam_search(
+            prompts,
+            BeamSearchParams(
+                beam_width=n,
+                max_tokens=output_len,
+                ignore_eos=True,
+            ))
+        end = time.perf_counter()
     return end - start
+
+
+async def run_vllm_async(
+    requests: List[Tuple[str, int, int]],
+    n: int,
+    engine_args: AsyncEngineArgs,
+    disable_frontend_multiprocessing: bool = False,
+) -> float:
+    from vllm import SamplingParams
+
+    async with build_async_engine_client_from_engine_args(
+            engine_args, disable_frontend_multiprocessing) as llm:
+
+        # Add the requests to the engine.
+        prompts: List[str] = []
+        sampling_params: List[SamplingParams] = []
+        for prompt, _, output_len in requests:
+            prompts.append(prompt)
+            sampling_params.append(
+                SamplingParams(
+                    n=n,
+                    temperature=1.0,
+                    top_p=1.0,
+                    ignore_eos=True,
+                    max_tokens=output_len,
+                ))
+
+        generators = []
+        start = time.perf_counter()
+        for i, (prompt, sp) in enumerate(zip(prompts, sampling_params)):
+            generator = llm.generate(prompt, sp, request_id=f"test{i}")
+            generators.append(generator)
+        all_gens = merge_async_iterators(*generators)
+        async for i, res in all_gens:
+            pass
+        end = time.perf_counter()
+        return end - start
 
 
 def run_hf(
@@ -118,11 +153,9 @@ def run_hf(
     model: str,
     tokenizer: PreTrainedTokenizerBase,
     n: int,
-    use_beam_search: bool,
     max_batch_size: int,
     trust_remote_code: bool,
 ) -> float:
-    assert not use_beam_search
     llm = AutoModelForCausalLM.from_pretrained(
         model, torch_dtype=torch.float16, trust_remote_code=trust_remote_code)
     if llm.config.model_type == "llama":
@@ -154,7 +187,7 @@ def run_hf(
                               padding=True).input_ids
         llm_outputs = llm.generate(
             input_ids=input_ids.cuda(),
-            do_sample=not use_beam_search,
+            do_sample=True,
             num_return_sequences=n,
             temperature=1.0,
             top_p=1.0,
@@ -179,13 +212,15 @@ def run_mii(
     tensor_parallel_size: int,
     output_len: int,
 ) -> float:
-    from mii import pipeline
-    llm = pipeline(model, tensor_parallel=tensor_parallel_size)
+    from mii import client, serve
+    llm = serve(model, tensor_parallel=tensor_parallel_size)
     prompts = [prompt for prompt, _, _ in requests]
 
     start = time.perf_counter()
-    llm(prompts, max_new_tokens=output_len)
+    llm.generate(prompts, max_new_tokens=output_len)
     end = time.perf_counter()
+    client = client(model)
+    client.terminate_server()
     return end - start
 
 
@@ -198,7 +233,16 @@ def main(args: argparse.Namespace):
         args.tokenizer, trust_remote_code=args.trust_remote_code)
     if args.dataset is None:
         # Synthesize a prompt with the given input length.
-        prompt = "hi" * (args.input_len - 1)
+        # As tokenizer may add additional tokens like BOS, we need to try
+        # different lengths to get the desired input length.
+        for i in range(-10, 10):
+            prompt = "hi " * (args.input_len + i)
+            tokenized_prompt = tokenizer(prompt).input_ids
+            if len(tokenized_prompt) == args.input_len:
+                break
+        else:
+            raise ValueError(
+                f"Failed to synthesize a prompt with {args.input_len} tokens.")
         requests = [(prompt, args.input_len, args.output_len)
                     for _ in range(args.num_prompts)]
     else:
@@ -206,17 +250,21 @@ def main(args: argparse.Namespace):
                                    args.output_len)
 
     if args.backend == "vllm":
-        elapsed_time = run_vllm(requests, args.model, args.tokenizer,
-                                args.quantization, args.tensor_parallel_size,
-                                args.seed, args.n, args.use_beam_search,
-                                args.trust_remote_code, args.dtype,
-                                args.max_model_len, args.enforce_eager,
-                                args.kv_cache_dtype, args.device)
+        if args.async_engine:
+            elapsed_time = uvloop.run(
+                run_vllm_async(
+                    requests,
+                    args.n,
+                    AsyncEngineArgs.from_cli_args(args),
+                    args.disable_frontend_multiprocessing,
+                ))
+        else:
+            elapsed_time = run_vllm(requests, args.n,
+                                    EngineArgs.from_cli_args(args))
     elif args.backend == "hf":
         assert args.tensor_parallel_size == 1
         elapsed_time = run_hf(requests, args.model, tokenizer, args.n,
-                              args.use_beam_search, args.hf_max_batch_size,
-                              args.trust_remote_code)
+                              args.hf_max_batch_size, args.trust_remote_code)
     elif args.backend == "mii":
         elapsed_time = run_mii(requests, args.model, args.tensor_parallel_size,
                                args.output_len)
@@ -224,12 +272,26 @@ def main(args: argparse.Namespace):
         raise ValueError(f"Unknown backend: {args.backend}")
     total_num_tokens = sum(prompt_len + output_len
                            for _, prompt_len, output_len in requests)
+    total_output_tokens = sum(output_len for _, _, output_len in requests)
     print(f"Throughput: {len(requests) / elapsed_time:.2f} requests/s, "
-          f"{total_num_tokens / elapsed_time:.2f} tokens/s")
+          f"{total_num_tokens / elapsed_time:.2f} total tokens/s, "
+          f"{total_output_tokens / elapsed_time:.2f} output tokens/s")
+
+    # Output JSON results if specified
+    if args.output_json:
+        results = {
+            "elapsed_time": elapsed_time,
+            "num_requests": len(requests),
+            "total_num_tokens": total_num_tokens,
+            "requests_per_second": len(requests) / elapsed_time,
+            "tokens_per_second": total_num_tokens / elapsed_time,
+        }
+        with open(args.output_json, "w") as f:
+            json.dump(results, f, indent=4)
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Benchmark the throughput.")
+    parser = FlexibleArgumentParser(description="Benchmark the throughput.")
     parser.add_argument("--backend",
                         type=str,
                         choices=["vllm", "hf", "mii"],
@@ -247,61 +309,32 @@ if __name__ == "__main__":
                         default=None,
                         help="Output length for each request. Overrides the "
                         "output length from the dataset.")
-    parser.add_argument("--model", type=str, default="facebook/opt-125m")
-    parser.add_argument("--tokenizer", type=str, default=None)
-    parser.add_argument('--quantization',
-                        '-q',
-                        choices=['awq', 'gptq', 'squeezellm', None],
-                        default=None)
-    parser.add_argument("--tensor-parallel-size", "-tp", type=int, default=1)
     parser.add_argument("--n",
                         type=int,
                         default=1,
                         help="Number of generated sequences per prompt.")
-    parser.add_argument("--use-beam-search", action="store_true")
     parser.add_argument("--num-prompts",
                         type=int,
                         default=1000,
                         help="Number of prompts to process.")
-    parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--hf-max-batch-size",
                         type=int,
                         default=None,
                         help="Maximum batch size for HF backend.")
-    parser.add_argument('--trust-remote-code',
-                        action='store_true',
-                        help='trust remote code from huggingface')
     parser.add_argument(
-        '--max-model-len',
-        type=int,
+        '--output-json',
+        type=str,
         default=None,
-        help='Maximum length of a sequence (including prompt and output). '
-        'If None, will be derived from the model.')
-    parser.add_argument(
-        '--dtype',
-        type=str,
-        default='auto',
-        choices=['auto', 'half', 'float16', 'bfloat16', 'float', 'float32'],
-        help='data type for model weights and activations. '
-        'The "auto" option will use FP16 precision '
-        'for FP32 and FP16 models, and BF16 precision '
-        'for BF16 models.')
-    parser.add_argument("--enforce-eager",
-                        action="store_true",
-                        help="enforce eager execution")
-    parser.add_argument(
-        "--kv-cache-dtype",
-        type=str,
-        choices=["auto", "fp8_e5m2"],
-        default="auto",
-        help=
-        'Data type for kv cache storage. If "auto", will use model data type.')
-    parser.add_argument(
-        "--device",
-        type=str,
-        default="cuda",
-        choices=["cuda"],
-        help='device type for vLLM execution, supporting CUDA only currently.')
+        help='Path to save the throughput results in JSON format.')
+    parser.add_argument("--async-engine",
+                        action='store_true',
+                        default=False,
+                        help="Use vLLM async engine rather than LLM class.")
+    parser.add_argument("--disable-frontend-multiprocessing",
+                        action='store_true',
+                        default=False,
+                        help="Disable decoupled async engine frontend.")
+    parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args()
     if args.tokenizer is None:
         args.tokenizer = args.model
@@ -324,8 +357,6 @@ if __name__ == "__main__":
             raise ValueError("dtype must be auto for MII backend.")
         if args.n != 1:
             raise ValueError("n must be 1 for MII backend.")
-        if args.use_beam_search:
-            raise ValueError("Beam search is not supported for MII backend.")
         if args.quantization is not None:
             raise ValueError("Quantization is only for vLLM backend.")
         if args.hf_max_batch_size is not None:

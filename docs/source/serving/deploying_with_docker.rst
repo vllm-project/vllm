@@ -3,9 +3,8 @@
 Deploying with Docker
 ============================
 
-vLLM offers official docker image for deployment.
-The image can be used to run OpenAI compatible server.
-The image is available on Docker Hub as `vllm/vllm-openai <https://hub.docker.com/r/vllm/vllm-openai/tags>`_.
+vLLM offers an official Docker image for deployment.
+The image can be used to run OpenAI compatible server and is available on Docker Hub as `vllm/vllm-openai <https://hub.docker.com/r/vllm/vllm-openai/tags>`_.
 
 .. code-block:: console
 
@@ -25,7 +24,7 @@ The image is available on Docker Hub as `vllm/vllm-openai <https://hub.docker.co
         memory to share data between processes under the hood, particularly for tensor parallel inference.
 
 
-You can build and run vLLM from source via the provided dockerfile. To build vLLM:
+You can build and run vLLM from source via the provided `Dockerfile <https://github.com/vllm-project/vllm/blob/main/Dockerfile>`_. To build vLLM:
 
 .. code-block:: console
 
@@ -49,3 +48,6 @@ To run vLLM:
         --env "HUGGING_FACE_HUB_TOKEN=<secret>" \
         vllm/vllm-openai <args...>
 
+.. note::
+
+        **For `v0.4.1` and `v0.4.2` only** - the vLLM docker images under these versions are supposed to be run under the root user since a library under the root user's home directory, i.e. ``/root/.config/vllm/nccl/cu12/libnccl.so.2.18.1`` is required to be loaded during runtime. If you are running the container under a different user, you may need to first change the permissions of the library (and all the parent directories) to allow the user to access it, then run vLLM with environment variable ``VLLM_NCCL_SO_PATH=/root/.config/vllm/nccl/cu12/libnccl.so.2.18.1`` .

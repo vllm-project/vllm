@@ -1,13 +1,31 @@
 [build-system]
 # Should be mirrored in requirements-build.txt
 requires = [
+    "cmake>=3.26",
     "ninja",
     "packaging",
-    "setuptools >= 49.4.0",
-    "torch == 2.1.2",
+    "setuptools>=61",
+    "setuptools-scm>=8.0",
+    "torch == 2.5.0",
     "wheel",
+    "jinja2",
 ]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools_scm]
+# version_file = "vllm/_version.py" # currently handled by `setup.py:get_version()`
+
+[tool.ruff]
+# Allow lines to be as long as 80.
+line-length = 80
+exclude = [
+    # External file, leaving license intact
+    "examples/fp8/quantizer/quantize.py"
+]
+
+[tool.ruff.lint.per-file-ignores]
+"vllm/version.py" = ["F401"]
+"vllm/_version.py" = ["ALL"]
 
 [tool.ruff.lint]
 select = [
@@ -23,30 +41,60 @@ select = [
     "SIM",
     # isort
     # "I",
+    "G",
 ]
 ignore = [
     # star imports
     "F405", "F403",
     # lambda expression assignment
     "E731",
-    # line too long, handled by black formatting
-    "E501",
-    # .strip() with multi-character strings
-    "B005",
     # Loop control variable not used within loop body
     "B007",
+    # f-string format
+    "UP032",
 ]
 
 [tool.mypy]
 python_version = "3.8"
 
 ignore_missing_imports = true
+check_untyped_defs = true
+follow_imports = "silent"
 
-files = "vllm"
+# After fixing type errors resulting from follow_imports: "skip" -> "silent",
+# move the directory here and remove it from format.sh and mypy.yaml
+files = [
+    "vllm/*.py",
+    "vllm/adapter_commons",
+    "vllm/assets",
+    "vllm/entrypoints",
+    "vllm/core",
+    "vllm/inputs",
+    "vllm/logging",
+    "vllm/multimodal",
+    "vllm/platforms",
+    "vllm/transformers_utils",
+    "vllm/triton_utils",
+    "vllm/usage",
+]
 # TODO(woosuk): Include the code from Megatron and HuggingFace.
-exclude = "vllm/model_executor/parallel_utils/|vllm/model_executor/models/"
-
+exclude = [
+    "vllm/model_executor/parallel_utils/|vllm/model_executor/models/",
+    # Ignore triton kernels in ops.
+    'vllm/attention/ops/.*\.py$'
+]
 
 [tool.codespell]
-ignore-words-list = "dout, te, indicies"
-skip = "./tests/prompts"
+ignore-words-list = "dout, te, indicies, subtile"
+skip = "./tests/models/fixtures,./tests/prompts,./benchmarks/sonnet.txt,./tests/lora/data,./build"
+
+[tool.isort]
+use_parentheses = true
+skip_gitignore = true
+
+[tool.pytest.ini_options]
+markers = [
+    "skip_global_cleanup",
+    "core_model: run this model test in each PR instead of just daily",
+    "distributed_2_gpus: run this test only in distributed tests for 2 GPUs",
+]
