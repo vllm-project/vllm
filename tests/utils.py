@@ -8,14 +8,14 @@ import time
 import warnings
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Literal, Optional, Type, Union
+from typing import Any, Callable, Dict, List, Optional, Type, Union
 
 import openai
 import pytest
 import requests
 import torch
 from openai.types.completion import Completion
-from typing_extensions import ParamSpec, assert_never
+from typing_extensions import ParamSpec
 
 import vllm.envs as envs
 from tests.models.utils import TextTextLogprobs
@@ -369,7 +369,7 @@ def compare_two_settings(model: str,
                          env1: Optional[Dict[str, str]] = None,
                          env2: Optional[Dict[str, str]] = None,
                          *,
-                         method: Literal["generate", "encode"] = "generate",
+                         method: str = "generate",
                          max_wait_seconds: Optional[float] = None) -> None:
     """
     Launch API server with two different sets of arguments/environments
@@ -396,7 +396,7 @@ def compare_all_settings(model: str,
                          all_args: List[List[str]],
                          all_envs: List[Optional[Dict[str, str]]],
                          *,
-                         method: Literal["generate", "encode"] = "generate",
+                         method: str = "generate",
                          max_wait_seconds: Optional[float] = None) -> None:
     """
     Launch API server with several different sets of arguments/environments
@@ -473,7 +473,7 @@ def compare_all_settings(model: str,
             elif method == "encode":
                 results += _test_embeddings(client, model, prompt)
             else:
-                assert_never(method)
+                raise ValueError(f"Unknown method: {method}")
 
             if i > 0:
                 # if any setting fails, raise an error early
