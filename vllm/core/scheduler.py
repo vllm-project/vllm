@@ -75,6 +75,7 @@ class SchedulingBudget:
         num_batched_tokens: int,
         num_batched_and_cached_tokens: Optional[int] = None,
     ):
+        assert num_batched_tokens >= 0
         if req_id in self._request_ids_num_batched_tokens:
             return
 
@@ -83,6 +84,8 @@ class SchedulingBudget:
         if num_batched_and_cached_tokens is None:
             num_batched_and_cached_tokens = num_batched_tokens
         self._num_batched_and_cached_tokens += num_batched_and_cached_tokens
+
+        assert self._num_batched_tokens <= self.token_budget, f"{self._num_batched_tokens} > {self.token_budget}"
 
     def subtract_num_batched_tokens(
         self,
@@ -923,6 +926,7 @@ class Scheduler:
                 num_new_tokens, seq 
             )
 
+            # print(f"[{seq_group.request_id=}] {num_new_tokens=} {num_new_tokens_exclude_cached}, budget: {budget.num_batched_tokens}")
             if not enable_chunking:
                 num_prompt_tokens = seq.get_len()
                 assert num_new_tokens == num_prompt_tokens
@@ -1009,6 +1013,12 @@ class Scheduler:
             # cached blocks that were in evictor might now become active again. 
             # Therefore, the actual number of tokens cached might have changed.
             self._update_prefix_cached_tokens(seq)
+            num_new_tokens = self._get_num_new_tokens(
+                seq_group,
+                SequenceStatus.RUNNING,
+                enable_chunking,
+                budget,
+            )
             num_new_tokens_exclude_cached = self._get_num_new_tokens_exclude_cached(
                 num_new_tokens, seq 
             )
@@ -1033,6 +1043,7 @@ class Scheduler:
             seq_groups.append(
                 ScheduledSequenceGroup(seq_group=seq_group,
                                        token_chunk_size=num_new_tokens))
+            # print(f"[{seq_group.request_id}] {num_new_tokens=} {num_new_tokens_exclude_cached=}, budget: {budget.num_batched_tokens}")
             budget.add_num_batched_tokens(
                 seq_group.request_id,
                 num_batched_tokens=num_new_tokens_exclude_cached,
@@ -1203,7 +1214,7 @@ class Scheduler:
                                            enable_chunking=True)
 
         assert (budget.num_batched_tokens <=
-                self.scheduler_config.max_num_batched_tokens)
+                self.scheduler_config.max_num_batched_tokens), f"{budget.num_batched_tokens=}, {self.scheduler_config.max_num_batched_tokens=}"
         assert budget.num_curr_seqs <= self.scheduler_config.max_num_seqs
 
         # Update waiting requests.
@@ -1696,6 +1707,7 @@ class Scheduler:
         # in a decode phase. Do not chunk.
         if enable_chunking and len(seqs) == 1:
             remaining_token_budget = budget.remaining_token_budget()
+            seq = seqs[0]
             if self.scheduler_config.is_multi_step:
                 # The current multi-step + chunked prefill capability does
                 # not actually support chunking prompts.
@@ -1728,9 +1740,15 @@ class Scheduler:
                                      "block size, but got chunk_size "
                                      f"({budget.token_budget}) % block_size "
                                      f"({block_size}) = {remainder}")
-                if remaining_token_budget < num_new_tokens:
-                    num_new_tokens = (remaining_token_budget //
-                                      block_size) * block_size
+                num_new_tokens_cached = seq.get_num_cached_tokens() - seq.get_num_computed_tokens()
+                num_new_tokens_cached = max(0, num_new_tokens_cached)
+                # Round down to block
+                remaining_token_budget = remaining_token_budget // block_size * block_size
+
+                # Calculate the number of new tokens that are not cached with chunk cap.
+                num_new_tokens_uncached = min(num_new_tokens - num_new_tokens_cached, remaining_token_budget)
+                num_new_tokens = num_new_tokens_uncached + num_new_tokens_cached
+                # print(f"[{seq_group.request_id}] {num_new_tokens=} {num_new_tokens_uncached=} {num_new_tokens_cached=}, budget: {budget.num_batched_tokens}")
             else:
                 num_new_tokens = min(num_new_tokens, remaining_token_budget)
         return num_new_tokens
