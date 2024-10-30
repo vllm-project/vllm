@@ -65,15 +65,19 @@ def test_semi_structured_fp8_compress(size):
 @pytest.mark.parametrize("mnk", MNK)
 @pytest.mark.parametrize("dtype", DTYPES)
 def test_torch_semi_structured_sparse_dense_matmul(mnk, dtype):
-    if dtype is torch.int8:
-        pytest.skip("cusparse does not support sparse x non transposed dense")
+    # if dtype is torch.int8:
+    #     pytest.skip("cusparse does not support sparse x non transposed dense")
     M, N, K = mnk
     A_pruned = generate_pruned_semi_structured_mat(M, K, dtype)
     A = compress_to_torch_sparse_semi_structured_mat(A_pruned)
     B = get_random_mat(K, N, dtype)
-    C_sparse = semi_structured_sparse_dense_gemm(A, B)
-    C = dense_matmul(A_pruned, B, dtype)
-    torch.testing.assert_close(C, C_sparse)
+    if dtype is torch.int8:
+        with pytest.raises(ValueError) as e:
+            C_sparse = semi_structured_sparse_dense_gemm(A, B)
+    else:
+        C_sparse = semi_structured_sparse_dense_gemm(A, B)
+        C = dense_matmul(A_pruned, B, dtype)
+        torch.testing.assert_close(C, C_sparse)
 
 
 @pytest.mark.skipif(

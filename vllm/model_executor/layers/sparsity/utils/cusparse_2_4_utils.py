@@ -66,7 +66,8 @@ def semi_structured_sparse_dense_gemm(a_packed: torch.Tensor,
                                       b_dense: torch.Tensor,
                                       bias: torch.Tensor = None):
     '''
-    Performs matrix multiplication (A @ B) of semi-structured sparse (A) and dense (B) matrices
+    Performs matrix multiplication (A @ B) of semi-structured sparse (A) and dense (B) matrices.
+    In case of int8 and fp8 types, dense matrix B has to be non-contiguous.
     Args:
         a_packed (torch.Tensor) - torch wrapped cusparseLt-packed tensor. Result of compress_to_torch_sparse_semi_structured_mat.
         b_dense (torch.Tensor) - dense matrix tensor.
@@ -77,6 +78,8 @@ def semi_structured_sparse_dense_gemm(a_packed: torch.Tensor,
     assert a_packed.dtype in [
         torch.float16, torch.bfloat16, torch.int8, torch.float8_e4m3fn
     ], f"Semi structured sparse-dense matmul does not support {a_packed.dtype}"
+    if b_dense.is_contiguous() and a_packed.dtype in [torch.int8, torch.float8_e4m3fn]:
+        raise ValueError("cuSparseLt does not support contiguous dense matrix for int8 and fp8 types")
     if a_packed.dtype == torch.float8_e4m3fn:
         return semi_structured_fp8_mm(a_packed.packed,
                                       b_dense,
