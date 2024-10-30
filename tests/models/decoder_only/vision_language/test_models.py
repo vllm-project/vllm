@@ -278,7 +278,7 @@ VLM_TEST_SETTINGS = {
         prompt_path_encoder=model_utils.qwen_prompt_path_encoder,
     ),
     "qwen2vl": VLMTestInfo(
-        models=["Qwen/Qwen2-VL-7B-Instruct"],
+        models=["Qwen/Qwen2-VL-2B-Instruct"],
         test_type=(
             VLMTestType.IMAGE,
             VLMTestType.MULTI_IMAGE,
@@ -288,6 +288,7 @@ VLM_TEST_SETTINGS = {
         img_idx_to_prompt=lambda idx: "<|vision_start|><|image_pad|><|vision_end|>", # noqa: E501
         video_idx_to_prompt=lambda idx: "<|vision_start|><|video_pad|><|vision_end|>", # noqa: E501
         max_model_len=8192,
+        max_num_seqs=2,
         auto_cls=AutoModelForVision2Seq,
         vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
     ),
