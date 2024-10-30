@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
@@ -13,8 +13,9 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
 from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
     MarlinWorkspace)
 from vllm.model_executor.layers.quantization.utils.quant_utils import gptq_pack
-from vllm.model_executor.parameter import (GroupQuantScaleParameter,
-                                           ModelWeightParameter)
+from vllm.model_executor.parameter import (HQQQweightParameter,
+                                           HQQZeroScaleParameter)
+from vllm.model_executor.utils import set_weight_attrs
 from vllm.scalar_type import scalar_types
 
 logger = init_logger(__name__)
@@ -34,7 +35,7 @@ class HQQMarlinConfig(QuantizationConfig):
         weight_bits: int,
         group_size: int,
     ) -> None:
-        self.pack_factor = 32 // weight_bits  # packed into int32
+        self.pack_factor = 8 // weight_bits  # packed into uint8
         self.group_size = group_size
         self.quant_type = self.TYPE_MAP[(weight_bits)]
 
@@ -110,32 +111,41 @@ class HQQMarlinMethod(LinearMethodBase):
                                    self.quant_config.group_size)
 
         # Quantized weights
-        qweight = ModelWeightParameter(data=torch.empty(
+        qweight = HQQQweightParameter(
+            data=torch.empty(
+                self.output_size_per_partition //
+                self.quant_config.pack_factor,
+                input_size_per_partition,
+                dtype=torch.uint8,
+            ),
+            input_dim=1,
+            output_dim=0,
+            packed_dim=0,
+            packed_factor=self.quant_config.pack_factor,
+            weight_loader=weight_loader)
+
+        set_weight_attrs(qweight, {
+            "is_hqq_weight": True,
+            "shard_offsets:": [],
+        })
+
+        zeros = HQQZeroScaleParameter(data=torch.empty(
             self.output_size_per_partition,
-            input_size_per_partition,
-            dtype=torch.uint8,
+            self.scales_and_zp_size,
+            dtype=params_dtype,
+        ),
+                                      input_dim=1,
+                                      output_dim=0,
+                                      weight_loader=weight_loader)
+
+        scales = HQQZeroScaleParameter(data=torch.empty(
+            self.output_size_per_partition,
+            self.scales_and_zp_size,
+            dtype=params_dtype,
         ),
                                        input_dim=1,
                                        output_dim=0,
                                        weight_loader=weight_loader)
-
-        zeros = GroupQuantScaleParameter(data=torch.empty(
-            self.output_size_per_partition,
-            self.scales_and_zp_size,
-            dtype=params_dtype,
-        ),
-                                         input_dim=1,
-                                         output_dim=0,
-                                         weight_loader=weight_loader)
-
-        scales = GroupQuantScaleParameter(data=torch.empty(
-            self.output_size_per_partition,
-            self.scales_and_zp_size,
-            dtype=params_dtype,
-        ),
-                                          input_dim=1,
-                                          output_dim=0,
-                                          weight_loader=weight_loader)
 
         layer.register_parameter("W_q", qweight)
         layer.register_parameter("zero", zeros)
@@ -143,7 +153,26 @@ class HQQMarlinMethod(LinearMethodBase):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         dev = layer.W_q.device
-        qweight_t = layer.W_q.transpose(1, 0)
+
+        # unpack function from https://github.com/mobiusml/hqq
+        def unpack_4bit_u8(
+            W_q: torch.Tensor,
+            shard_offsets: List[Tuple[int, int]],
+        ) -> torch.Tensor:  # uint8/2 > uint8
+            dtype = torch.uint8
+            tmp = torch.empty([2 * W_q.shape[0], W_q.shape[1]],
+                              dtype=dtype,
+                              device=W_q.device)
+            for (offset, size) in shard_offsets:
+                tmp_offset = 2 * offset
+                tmp[tmp_offset:tmp_offset +
+                    size] = (W_q[offset:offset + size] & 0b11110000) >> 4
+                tmp[tmp_offset + size:tmp_offset +
+                    2 * size] = (W_q[offset:offset + size] & 0b00001111)
+            return tmp
+
+        shard_offsets = getattr(layer.W_q, "shard_offsets", [])
+        qweight_t = unpack_4bit_u8(layer.W_q, shard_offsets).transpose(1, 0)
 
         gptq_w_q = gptq_pack(qweight_t, 4, self.input_size_per_partition,
                              self.output_size_per_partition)

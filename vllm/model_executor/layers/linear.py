@@ -27,7 +27,7 @@ WEIGHT_LOADER_V2_SUPPORTED = [
     "AWQLinearMethod", "GPTQMarlinLinearMethod", "Fp8LinearMethod",
     "MarlinLinearMethod", "QQQLinearMethod", "GPTQMarlin24LinearMethod",
     "TPUInt8LinearMethod", "GPTQLinearMethod", "FBGEMMFp8LinearMethod",
-    "ModelOptFp8LinearMethod", "IPEXAWQLinearMethod"
+    "ModelOptFp8LinearMethod", "IPEXAWQLinearMethod", "HQQMarlinMethod"
 ]
 
 
@@ -1052,8 +1052,10 @@ class RowParallelLinear(LinearBase):
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
 
-    def weight_loader_v2(self, param: BasevLLMParameter,
-                         loaded_weight: torch.Tensor):
+    def weight_loader_v2(self,
+                         param: BasevLLMParameter,
+                         loaded_weight: torch.Tensor,
+                         loaded_shard_id: Optional[int] = None):
 
         # Special case for loading scales off disk, which often do not
         # have a shape (such as in the case of AutoFP8).
@@ -1061,7 +1063,19 @@ class RowParallelLinear(LinearBase):
             assert loaded_weight.numel() == 1
             loaded_weight = loaded_weight.reshape(1)
 
-        param.load_row_parallel_weight(loaded_weight=loaded_weight)
+        if loaded_shard_id is None:
+            param.load_row_parallel_weight(loaded_weight=loaded_weight)
+            return
+
+        assert loaded_shard_id < len(self.output_sizes)
+        tp_size = get_tensor_model_parallel_world_size()
+        shard_offset = sum(self.output_sizes[:loaded_shard_id]) // tp_size
+        shard_size = self.output_sizes[loaded_shard_id] // tp_size
+
+        param.load_merged_column_weight(loaded_weight=loaded_weight,
+                                        shard_id=loaded_shard_id,
+                                        shard_offset=shard_offset,
+                                        shard_size=shard_size)
 
     def forward(self, input_):
         if self.input_is_parallel:
