@@ -127,7 +127,7 @@ class ResponseFormat(OpenAIBaseModel):
 
 class StreamOptions(OpenAIBaseModel):
     include_usage: Optional[bool] = True
-    continuous_usage_stats: Optional[bool] = True
+    continuous_usage_stats: Optional[bool] = False
 
 
 class FunctionDefinition(OpenAIBaseModel):
@@ -308,7 +308,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             ignore_eos=self.ignore_eos,
             temperature=temperature,
             length_penalty=self.length_penalty,
-        )
+            include_stop_str_in_output=self.include_stop_str_in_output)
 
     def to_sampling_params(self, default_max_tokens: int) -> SamplingParams:
         max_tokens = self.max_tokens
@@ -606,7 +606,7 @@ class CompletionRequest(OpenAIBaseModel):
             ignore_eos=self.ignore_eos,
             temperature=temperature,
             length_penalty=self.length_penalty,
-        )
+            include_stop_str_in_output=self.include_stop_str_in_output)
 
     def to_sampling_params(self, default_max_tokens: int) -> SamplingParams:
         max_tokens = self.max_tokens
