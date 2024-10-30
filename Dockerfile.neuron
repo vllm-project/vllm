@@ -36,6 +36,6 @@ RUN python3 -m pip install -U \
 
 ENV VLLM_TARGET_DEVICE neuron
 RUN --mount=type=bind,source=.git,target=.git \
-    pip install --no-build-isolation -v -e . \
+    pip install --no-build-isolation -v -e .
 
 CMD ["/bin/bash"]
