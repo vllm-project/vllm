@@ -15,7 +15,7 @@ Easy, fast, and cheap LLM serving for everyone
 
 ---
 
-**vLLM x Snowfkale Meetup (Wednesday, November 13th, 5:30-8PM PT) at Snowfkale HQ, San Mateo**
+**vLLM x Snowflake Meetup (Wednesday, November 13th, 5:30-8PM PT) at Snowflake HQ, San Mateo**
 
 We are excited to announce the last in-person vLLM meetup of the year!
 Join the vLLM developers and engineers from Snowflake AI Research to chat about the latest LLM inference optimizations and your 2025 vLLM wishlist!
