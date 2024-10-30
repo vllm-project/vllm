@@ -13,7 +13,8 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
 from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
     MarlinWorkspace)
 from vllm.model_executor.layers.quantization.utils.quant_utils import gptq_pack
-from vllm.model_executor.parameter import (HQQQweightParameter,
+from vllm.model_executor.parameter import (BasevLLMParameter,
+                                           HQQQweightParameter,
                                            HQQZeroScaleParameter)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.scalar_type import scalar_types
@@ -79,6 +80,19 @@ class HQQMarlinConfig(QuantizationConfig):
 
     def get_scaled_act_names(self) -> List[str]:
         return []
+
+
+# Empty HQQ parameter, will be ignored during loading
+class HQQEmptyParameter(BasevLLMParameter):
+
+    def load_merged_column_weight(self, loaded_weight: torch.Tensor, **kwargs):
+        pass
+
+    def load_row_parallel_weight(self, loaded_weight: torch.Tensor):
+        pass
+
+    def load_qkv_weight(self, loaded_weight: torch.Tensor, **kwargs):
+        pass
 
 
 class HQQMarlinMethod(LinearMethodBase):
@@ -150,6 +164,20 @@ class HQQMarlinMethod(LinearMethodBase):
         layer.register_parameter("W_q", qweight)
         layer.register_parameter("zero", zeros)
         layer.register_parameter("scale", scales)
+
+        # Ignore extra parameters in the HQQ model.
+        # To be added as needed.
+        ignore_parameters = ("axis", "channel_wise", "compute_dtype",
+                             "encoded_state_dict", "group_size", "nbits",
+                             "offload_meta", "optimize", "packing",
+                             "quant_scale", "quant_zero", "round_zero",
+                             "shape", "stores_quant_config",
+                             "unpack_view_dtype", "view_as_float")
+        for name in ignore_parameters:
+            layer.register_parameter(
+                name,
+                HQQEmptyParameter(data=torch.empty(0),
+                                  weight_loader=weight_loader))
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         dev = layer.W_q.device

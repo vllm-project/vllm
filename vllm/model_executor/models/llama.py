@@ -388,16 +388,6 @@ class LlamaModel(nn.Module):
                 if is_pp_missing_parameter(name, self):
                     continue
 
-                # TODO should input/output dim in hqq_marlin.py depend on this?
-                ignore_hqq = (".axis", ".channel_wise", ".compute_dtype",
-                              ".encoded_state_dict", ".group_size", ".nbits",
-                              ".offload_meta", ".optimize", ".packing",
-                              ".quant_scale", ".quant_zero", ".round_zero",
-                              ".shape", ".stores_quant_config",
-                              ".unpack_view_dtype", ".view_as_float")
-                if name.endswith(ignore_hqq) and name not in params_dict:
-                    continue
-
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
@@ -413,16 +403,6 @@ class LlamaModel(nn.Module):
                     continue
 
                 if is_pp_missing_parameter(name, self):
-                    continue
-
-                # TODO should input/output dim in hqq_marlin.py depend on this?
-                ignore_hqq = (".axis", ".channel_wise", ".compute_dtype",
-                              ".encoded_state_dict", ".group_size", ".nbits",
-                              ".offload_meta", ".optimize", ".packing",
-                              ".quant_scale", ".quant_zero", ".round_zero",
-                              ".shape", ".stores_quant_config",
-                              ".unpack_view_dtype", ".view_as_float")
-                if name.endswith(ignore_hqq) and name not in params_dict:
                     continue
 
                 param = params_dict[name]
