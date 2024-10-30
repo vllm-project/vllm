@@ -196,9 +196,6 @@ class BlockPool:
                                    allocator=self._allocator,
                                    block_id=None))
 
-    # TODO(rickyx): This should take in kwargs for flexible initialization of different types of blocks
-    # Right now, we update explicitly blocks with other args after initialization, e.g. block_hash
-    # computed for the prefix caching block.
     def init_block(
         self,
         prev_block: Optional[Block],
@@ -206,15 +203,6 @@ class BlockPool:
         block_size: int,
         physical_block_id: Optional[int],
     ) -> Block:
-        """Initializes a block with the given parameters.
-
-        Args:
-            prev_block (Optional[Block]): The previous block in the sequence.
-            token_ids (List[int]): The token IDs to be stored in the block.
-            block_size (int): The size of the block.
-            physical_block_id (Optional[int]): The physical block ID.
-            block_hash (Optional[int]): The hash of the block's content.
-        """
         if len(self._free_ids) == 0:
             self.increase_pool()
             assert len(self._free_ids) > 0

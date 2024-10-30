@@ -140,7 +140,6 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         prev_block: Optional[Block],
         token_ids: List[int],
         block_hash: Optional[int] = None,
-        device: Optional[Device] = None,
     ) -> Block:
         """Allocates an immutable block with the given token IDs, reusing cached
         blocks if possible.
@@ -153,7 +152,6 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         Returns:
             Block: The allocated immutable block.
         """
-        assert device is None
         assert len(token_ids) == self._block_size, "An immutable block should be full"
         assert (
             block_hash is not None
@@ -163,9 +161,6 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         cached_block_id = self._cached_blocks.get(block_hash, None)
         if cached_block_id is not None:
             # Initialize a block that points to cached data
-            # print(
-            #     f"reuse block_hash={block_hash} from cached_block_id: {cached_block_id}"
-            # )
             block: Block = self._block_pool.init_block(
                 prev_block=prev_block,
                 token_ids=token_ids,
@@ -177,9 +172,6 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             self._incr_refcount_cached_block(block)
             return block
 
-        # print(
-        #     f"alloc from new block(block_hash: {block_hash}), get_num_free_blocks: {self.get_num_free_blocks()}"
-        # )
         self.metric_data.query(hit=False)
 
         # No cached block => Allocate a new block
@@ -192,7 +184,6 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         prev_block: Optional[Block],
         block_token_ids: List[List[int]],
         block_hashes: Optional[List[int]] = None,
-        device: Optional[Device] = None,
     ) -> List[Block]:
         blocks = []
         assert (
@@ -204,7 +195,6 @@ class PrefixCachingBlockAllocator(BlockAllocator):
                 prev_block=prev_block,
                 token_ids=token_ids,
                 block_hash=block_hash,
-                device=device,
             )
             blocks.append(prev_block)
         return blocks
@@ -224,9 +214,6 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         """
         assert device is None
         assert_prefix_caching_block_or_none(prev_block)
-        # print(
-        #     f"Allocating mutable block: get_num_free_blocks: {self.get_num_free_blocks()}"
-        # )
         block_id = self._allocate_block_id()
         block = self._block_pool.init_block(prev_block=prev_block,
                                             token_ids=[],
@@ -297,7 +284,6 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         """First tries to allocate a block id from the hashless allocator,
         and if there are no blocks, then tries to evict an unused cached block.
         """
-        # print(f"allocating block_id: get_num_free_blocks: {self.get_num_free_blocks()}")
         hashless_block_id = self._maybe_allocate_hashless_block_id()
         if hashless_block_id is not None:
             return hashless_block_id
@@ -418,9 +404,7 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         assert device is None
         # The number of free blocks is the number of hashless free blocks
         # plus the number of blocks evictor could free from its list.
-        return self._hashless_allocator.get_num_free_blocks() + (
-            self.evictor.num_blocks
-        )
+        return self._hashless_allocator.get_num_free_blocks() + self.evictor.num_blocks
 
     def get_num_total_blocks(self) -> int:
         return self._hashless_allocator.get_num_total_blocks()
@@ -511,9 +495,6 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             return src_block_id
 
         self._free_block_id(block)
-        # print(
-        #     f"Allocating block for COW: get_num_free_blocks: {self.get_num_free_blocks()}"
-        # )
         trg_block_id = self._allocate_block_id()
 
         self._cow_tracker.record_cow(src_block_id, trg_block_id)
@@ -878,38 +859,6 @@ class PrefixCachingBlock(Block):
     def prev_block(self) -> Optional[Block]:
         return self._prev_block
 
-    # @property
-    # def content_hash(self) -> Optional[int]:
-    #     """Return the content-based hash of the current block, or None if it is
-    #     not yet defined.
-
-    #     For the content-based hash to be defined, the current block must be
-    #     full.
-    #     """
-    #     # If the hash is already computed, return it.
-    #     if self._cached_content_hash is not None:    #         return self._cached_content_hash
-
-    #     # We cannot compute a hash for the current block because it is not full.
-    #     if not self.is_full:
-    #         return None
-
-    #     is_first_block = self._prev_block is None
-    #     prev_block_hash = (
-    #         None if is_first_block else
-    #         self._prev_block.content_hash  # type: ignore
-    #     )
-
-    #     # Previous block exists but does not yet have a hash.
-    #     # Return no hash in this case.
-    #     if prev_block_hash is None and not is_first_block:
-    #         return None
-
-    #     self._cached_content_hash = PrefixCachingBlock.hash_block_tokens(
-    #         is_first_block,
-    #         prev_block_hash,
-    #         cur_block_token_ids=self.token_ids)
-    #     return self._cached_content_hash
-
     @property
     def content_hash(self) -> Optional[int]:
         return self._cached_content_hash
@@ -952,7 +901,9 @@ class PrefixCachingBlock(Block):
         assert (prev_block_hash is None) == is_first_block
         return hash((is_first_block, prev_block_hash, *cur_block_token_ids))
 
-
+# TODO(rickyx): This is not used anymore. Or it could be used to track 
+# cached blocks for a sequence, so the sequence would be decoupled from the computed
+# block hash calculation.
 class ComputedBlocksTracker:
     """Handles caching of per-sequence computed block ids. 
         When a sequence appears for the first time, it traverses all of the 
@@ -988,54 +939,6 @@ class ComputedBlocksTracker:
         """
         assert seq_id in self._cached_computed_seq_blocks
         del self._cached_computed_seq_blocks[seq_id]
-
-    def get_cached_computed_blocks_and_update(
-            self, seq_id: int, block_ids: List[int]) -> List[int]:
-        """ Look at the class documentation for details
-        """
-        # Ensure seq_id is already tracked
-        assert seq_id in self._cached_computed_seq_blocks
-
-        # Get cached data (may be empty on the first time)
-        prev_computed_block_ids, has_gap = self._cached_computed_seq_blocks[
-            seq_id]
-
-        if has_gap:
-            # When gap is detected, we do not add more computed blocks at this
-            # sequence iteration
-            return prev_computed_block_ids
-
-        # We do not consider the last block id for caching purposes.
-        num_cur_blocks = len(block_ids) - 1
-        assert num_cur_blocks >= 0
-
-        if len(prev_computed_block_ids) >= num_cur_blocks:
-            # Cache HIT
-            assert len(prev_computed_block_ids) == num_cur_blocks
-            return prev_computed_block_ids
-
-        # If here, then we may possibly add more computed blocks. As a result,
-        # traverse the additional blocks after prev_computed_block_ids to
-        # detect more computed blocks and add them.
-
-        # Incremental init for seq_id => Look only at the new blocks
-        computed_block_ids = self._allocator.get_computed_block_ids(  # noqa: E501
-            prev_computed_block_ids,
-            block_ids,
-            skip_last_block_id=
-            True,  # We skip last block id to avoid caching of full seq
-        )
-
-        # QQ(rickyx): why is it possible to actually have a gap?
-
-        # Detect if there is a "gap"
-        has_gap = len(computed_block_ids) < num_cur_blocks
-
-        # Record
-        self._cached_computed_seq_blocks[seq_id] = (computed_block_ids,
-                                                    has_gap)
-
-        return computed_block_ids
 
 
 class LastAccessBlocksTracker:

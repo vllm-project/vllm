@@ -132,18 +132,18 @@ def main(args):
         filtered_datasets = [(PROMPT, prompt_len, args.output_len)
                              ] * args.num_prompts
 
-    # llm = LLM(
-    #     model=args.model,
-    #     tokenizer_mode="auto",
-    #     trust_remote_code=True,
-    #     enforce_eager=True,
-    #     use_v2_block_manager=args.use_v2_block_manager,
-    #     tensor_parallel_size=args.tensor_parallel_size,
-    #     enable_prefix_caching=args.enable_prefix_caching,
-    #     disable_log_stats=False,
-    #     max_num_batched_tokens=4096 * 2,
-    #     enable_chunked_prefill=True,
-    # )
+    llm = LLM(
+        model=args.model,
+        tokenizer_mode="auto",
+        trust_remote_code=True,
+        enforce_eager=True,
+        use_v2_block_manager=args.use_v2_block_manager,
+        tensor_parallel_size=args.tensor_parallel_size,
+        enable_prefix_caching=args.enable_prefix_caching,
+        disable_log_stats=False,
+        max_num_batched_tokens=4096 * 2,
+        enable_chunked_prefill=True,
+    )
     engine_args = EngineArgs.from_cli_args(args)
 
     llm = LLM(**dataclasses.asdict(engine_args))

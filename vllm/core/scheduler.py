@@ -56,12 +56,14 @@ class SchedulingBudget:
     max_num_seqs: int
     _request_ids_num_batched_tokens: Set[str] = field(default_factory=set)
     _request_ids_num_curr_seqs: Set[str] = field(default_factory=set)
+    # Number of batched tokens that are strictly not cached.
     _num_batched_tokens: int = 0
-    _num_batched_and_cached_tokens: int = 0
+    # Number of batched tokens that are cached.
+    _num_cached_tokens: int = 0
     _num_curr_seqs: int = 0
 
     def can_schedule(self, *, num_new_tokens: int, num_new_seqs: int):
-        # assert num_new_tokens != 0
+        assert num_new_tokens >= 0
         assert num_new_seqs != 0
         return (self.num_batched_tokens + num_new_tokens <= self.token_budget
                 and self.num_curr_seqs + num_new_seqs <= self.max_num_seqs)
@@ -73,32 +75,25 @@ class SchedulingBudget:
         self,
         req_id: str,
         num_batched_tokens: int,
-        num_batched_and_cached_tokens: Optional[int] = None,
+        num_cached_tokens: int = 0,
     ):
         assert num_batched_tokens >= 0
+        assert num_cached_tokens >= 0
         if req_id in self._request_ids_num_batched_tokens:
             return
 
         self._request_ids_num_batched_tokens.add(req_id)
         self._num_batched_tokens += num_batched_tokens
-        if num_batched_and_cached_tokens is None:
-            num_batched_and_cached_tokens = num_batched_tokens
-        self._num_batched_and_cached_tokens += num_batched_and_cached_tokens
-
-        assert self._num_batched_tokens <= self.token_budget, f"{self._num_batched_tokens} > {self.token_budget}"
+        self._num_cached_tokens += num_cached_tokens
 
     def subtract_num_batched_tokens(
         self,
         req_id: str,
         num_batched_tokens: int,
-        num_batched_and_cached_tokens: Optional[int] = None,
     ):
         if req_id in self._request_ids_num_batched_tokens:
             self._request_ids_num_batched_tokens.remove(req_id)
             self._num_batched_tokens -= num_batched_tokens
-            if num_batched_and_cached_tokens is None:
-                num_batched_and_cached_tokens = num_batched_tokens
-            self._num_batched_and_cached_tokens -= num_batched_and_cached_tokens
 
     def add_num_seqs(self, req_id: str, num_curr_seqs: int):
         if req_id in self._request_ids_num_curr_seqs:
@@ -118,7 +113,7 @@ class SchedulingBudget:
 
     @property
     def num_batched_and_cached_tokens(self):
-        return self._num_batched_and_cached_tokens
+        return self._num_batched_tokens + self._num_cached_tokens
 
     @property
     def num_curr_seqs(self):
@@ -638,9 +633,6 @@ class Scheduler:
                 self._append_slots(seq_group, blocks_to_copy, enable_chunking)
                 is_prefill = seq_group.is_prefill()
 
-                if seq_group.is_prefill() and not enable_chunking:
-                    breakpoint()
-
                 scheduled_seq_group: ScheduledSequenceGroup = \
                     self._scheduled_seq_group_cache[self.cache_id].get_object()
                 scheduled_seq_group.seq_group = seq_group
@@ -840,7 +832,6 @@ class Scheduler:
             while running_queue and self._get_priority(
                     running_queue[-1]) > self._get_priority(seq_group):
                 # Only preempt if waiting sequence cannot be allocated
-                assert False
                 can_allocate = self.block_manager.can_allocate(seq_group)
                 if (num_new_tokens and can_allocate == AllocStatus.OK
                         and budget.can_schedule(num_new_tokens=num_new_tokens,
@@ -926,7 +917,6 @@ class Scheduler:
                 num_new_tokens, seq 
             )
 
-            # print(f"[{seq_group.request_id=}] {num_new_tokens=} {num_new_tokens_exclude_cached}, budget: {budget.num_batched_tokens}")
             if not enable_chunking:
                 num_prompt_tokens = seq.get_len()
                 assert num_new_tokens == num_prompt_tokens
@@ -949,15 +939,6 @@ class Scheduler:
             # If the sequence group cannot be allocated, stop.
             can_allocate = self.block_manager.can_allocate(
                 seq_group, num_lookahead_slots=num_lookahead_slots)
-
-            old_can_allocate = self.block_manager.can_allocate_old(
-                seq_group, num_lookahead_slots=num_lookahead_slots
-            )
-
-            if can_allocate != old_can_allocate:
-                print(
-                    f"can_allocate: {can_allocate}, old_can_allocate: {old_can_allocate}"
-                )
 
             if can_allocate == AllocStatus.LATER:
                 break
@@ -1004,13 +985,10 @@ class Scheduler:
             if curr_loras is not None and lora_int_id > 0:
                 curr_loras.add(lora_int_id)
             waiting_queue.popleft()
-            try:
-                self._allocate_and_set_running(seq_group)
-            except Exception as e:
-                breakpoint()
+            self._allocate_and_set_running(seq_group)
 
             # NOTE(rickyx): We are updating this again since some of the previously
-            # cached blocks that were in evictor might now become active again. 
+            # cached blocks that were in evictor might now become active again.
             # Therefore, the actual number of tokens cached might have changed.
             self._update_prefix_cached_tokens(seq)
             num_new_tokens = self._get_num_new_tokens(
@@ -1019,8 +997,8 @@ class Scheduler:
                 enable_chunking,
                 budget,
             )
-            num_new_tokens_exclude_cached = self._get_num_new_tokens_exclude_cached(
-                num_new_tokens, seq 
+            num_new_tokens_uncached = self._get_num_new_tokens_exclude_cached(
+                num_new_tokens, seq
             )
 
             if enable_chunking and self.scheduler_config.is_multi_step:
@@ -1041,13 +1019,14 @@ class Scheduler:
                     enable_chunking=enable_chunking)
 
             seq_groups.append(
-                ScheduledSequenceGroup(seq_group=seq_group,
-                                       token_chunk_size=num_new_tokens))
-            # print(f"[{seq_group.request_id}] {num_new_tokens=} {num_new_tokens_exclude_cached=}, budget: {budget.num_batched_tokens}")
+                ScheduledSequenceGroup(
+                    seq_group=seq_group, token_chunk_size=num_new_tokens
+                )
+            )
             budget.add_num_batched_tokens(
                 seq_group.request_id,
-                num_batched_tokens=num_new_tokens_exclude_cached,
-                num_batched_and_cached_tokens=num_new_tokens,
+                num_batched_tokens=num_new_tokens_uncached,
+                num_cached_tokens=num_new_tokens - num_new_tokens_uncached,
             )
             budget.add_num_seqs(seq_group.request_id, num_new_seqs)
 
@@ -1137,11 +1116,6 @@ class Scheduler:
 
         # There should be no prefill from running queue because this policy
         # doesn't allow chunked prefills.
-        if len(running_scheduled.prefill_seq_groups) > 0:
-            print(
-                f"running_scheduled.prefill_seq_groups: {running_scheduled.prefill_seq_groups}"
-            )
-            breakpoint()
         assert len(running_scheduled.prefill_seq_groups) == 0
         assert len(swapped_in.prefill_seq_groups) == 0
 
@@ -1572,7 +1546,7 @@ class Scheduler:
         else:
             preemption_mode = PreemptionMode.RECOMPUTE
 
-        if self.num_cumulative_preemption % 5 == 0:
+        if self.num_cumulative_preemption % 50 == 0:
             logger.warning(
                 "Sequence group %s is preempted by %s mode because there is "
                 "not enough KV cache space. This can affect the end-to-end "
@@ -1699,7 +1673,6 @@ class Scheduler:
         num_new_tokens = 0
         seqs = seq_group.get_seqs(status=status)
         for seq in seqs:
-            # self._update_prefix_cached_tokens(seq)
             num_new_tokens += seq.get_num_new_tokens()
         assert num_new_tokens > 0
         # Chunk if a running request cannot fit in the given budget.
@@ -1751,18 +1724,34 @@ class Scheduler:
                     # No more budget for new tokens, don't include any cached tokens too.
                     return 0
                 num_new_tokens = num_new_tokens_uncached + num_new_tokens_cached
-                # print(f"[{seq_group.request_id}] {num_new_tokens=} {num_new_tokens_uncached=} {num_new_tokens_cached=}, budget: {budget.num_batched_tokens}")
             else:
                 num_new_tokens = min(num_new_tokens, remaining_token_budget)
         return num_new_tokens
 
     def _update_prefix_cached_tokens(self, seq: Sequence):
+        """
+        Update the number of prefix cached tokens for a sequence.
+
+        This function takes O(log(n)) time, where n is the number of blocks
+        in the sequence.
+        """
         num_prefix_cached_tokens = self.block_manager.get_num_computed_tokens(seq)
         seq.set_num_prefix_cached_tokens(num_prefix_cached_tokens)
 
     def _get_num_new_tokens_exclude_cached(
         self, num_new_tokens: int, seq: Sequence
     ) -> int:
+        """
+        Get the number of new tokens to compute for a sequence, excluding
+        cached tokens.
+
+        Args:
+            num_new_tokens: The number of new tokens to compute.
+            seq: The sequence to compute the new tokens for.
+
+        Returns:
+            Given `num_new_tokens`, returns the number of uncached tokens.
+        """
 
         # If a decode sequence, new tokens are always not computed/cached.
         if not seq.is_prefill():

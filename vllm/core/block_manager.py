@@ -108,6 +108,16 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
     def _get_num_blocks_to_allocate(
         self, seq: Sequence, num_lookahead_slots: int = 0
     ) -> int:
+        """
+        Get the number of new blocks to allocate for a sequence.
+
+        Args:
+            seq (Sequence): The sequence to allocate blocks for.
+            num_lookahead_slots (int): The number of lookahead slots to allocate.
+
+        Returns:
+            int: The number of new blocks to allocate.
+        """
         num_cached_tokens = seq.get_num_cached_tokens()
 
         assert (
@@ -119,58 +129,23 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         return num_required_blocks - num_cached_blocks
 
     def get_num_computed_tokens(self, seq: Sequence) -> int:
+        """
+        Get the number of computed tokens for a sequence.
+
+        NOTE: This only returns tokens in blocks that are BOTH cached and allocated (active).
+
+        Args:
+            seq (Sequence): The sequence to get the number of computed tokens for.
+
+        Returns:
+            int: The number of allocated and cached computed tokens.
+        """
         seq_blocks = seq.get_block_hashes()
         cached_seq_blocks = self.block_allocator.get_allocated_cached_blocks(
             block_hashes=seq_blocks,
             device=Device.GPU,
         )
         return len(cached_seq_blocks) * self.block_size
-
-    # def get_num_computed_blocks(self, seq_group: SequenceGroup) -> Dict[SeqId, int]:
-    #     num_computed_blocks = {}
-    #     for seq in seq_group.get_seqs():
-    #         num_computed_blocks[seq.seq_id] = self._get_num_computed_tokens(seq)
-    #     return num_computed_blocks
-
-    def can_allocate_old(
-        self, seq_group: SequenceGroup, num_lookahead_slots: int = 0
-    ) -> AllocStatus:
-        # FIXME(woosuk): Here we assume that all sequences in the group share
-        # the same prompt. This may not be true for preempted sequences.
-
-        check_no_caching_or_swa_for_blockmgr_encdec(self, seq_group)
-
-        seq = seq_group.get_seqs(status=SequenceStatus.WAITING)[0]
-        num_required_blocks = BlockTable.get_num_required_blocks(
-            seq.get_token_ids(),
-            block_size=self.block_size,
-            num_lookahead_slots=num_lookahead_slots,
-        )
-
-        if seq_group.is_encoder_decoder():
-            encoder_seq = seq_group.get_encoder_seq()
-            assert encoder_seq is not None
-            num_required_blocks += BlockTable.get_num_required_blocks(
-                encoder_seq.get_token_ids(),
-                block_size=self.block_size,
-            )
-
-        if self.max_block_sliding_window is not None:
-            num_required_blocks = min(
-                num_required_blocks, self.max_block_sliding_window
-            )
-
-        num_free_gpu_blocks = self.block_allocator.get_num_free_blocks(
-            device=Device.GPU
-        )
-
-        # Use watermark to avoid frequent cache eviction.
-        if self.num_total_gpu_blocks - num_required_blocks < self.watermark_blocks:
-            return AllocStatus.NEVER
-        if num_free_gpu_blocks - num_required_blocks >= self.watermark_blocks:
-            return AllocStatus.OK
-        else:
-            return AllocStatus.LATER
 
     def can_allocate(self,
                      seq_group: SequenceGroup,
@@ -200,25 +175,12 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         num_free_gpu_blocks = self.block_allocator.get_num_free_blocks(
             device=Device.GPU
         )
-        # print(f"num_blocks_to_allocate: {num_blocks_to_allocate}")
-        # print(f"num_free_gpu_blocks: {num_free_gpu_blocks}")
-        # print(f"watermark_blocks: {self.watermark_blocks}")
-
-        # Use watermark to avoid frequent cache eviction.
-        # old_can_allocate = self.can_allocate_old(seq_group, num_lookahead_slots)
-
-        can_allocate = None
         if self.num_total_gpu_blocks - num_blocks_to_allocate < self.watermark_blocks:
             return AllocStatus.NEVER
         if num_free_gpu_blocks - num_blocks_to_allocate >= self.watermark_blocks:
             return AllocStatus.OK
         else:
             return AllocStatus.LATER
-
-        # if old_can_allocate != can_allocate:
-        #     print(f"old_can_allocate: {old_can_allocate}, can_allocate: {can_allocate}")
-
-        return can_allocate
 
     def _allocate_sequence(self, seq: Sequence) -> BlockTable:
         block_table = BlockTable(
@@ -399,17 +361,6 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
             num_cached_block = num_cached_token // self.block_size
             computed_block_ids = all_blocks[:num_cached_block]
             computed_seq_block_ids.append(computed_block_ids)
-
-            # old_computed_block_ids = (
-            #     self._computed_blocks_tracker.get_cached_computed_blocks_and_update(
-            #         seq.seq_id, all_blocks
-            #     )
-            # )
-            # if old_computed_block_ids != computed_block_ids:
-            #     print(
-            #         f"old_computed_block_ids: \n{old_computed_block_ids}\n, computed_block_ids: \n{computed_block_ids}\n"
-            #     )
-            #     print(f"seq: {seq}")
 
         # NOTE(sang): This assumes seq_block_ids doesn't contain any None.
         return self.block_allocator.get_common_computed_block_ids(

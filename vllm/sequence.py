@@ -566,8 +566,11 @@ class Sequence:
 
         return self.data._cached_all_token_ids[-num_new_tokens:]
 
-    def get_block_hash(self, block_idx: int) -> Optional[int]:
-
+    def update_and_get_block_hash(self, block_idx: int) -> Optional[int]:
+        """
+        Get the block hash for a given block index.
+        Optionally update the block hashes if not computed yet.
+        """
         # Lazy update the block hashes on the first invocation.
         if block_idx >= len(self._computed_block_hashes):
             self._update_block_hashes()
@@ -577,14 +580,12 @@ class Sequence:
         return None
 
     def get_block_hashes(self) -> List[int]:
-        # TODO(rickyx): maybe better to have an API to track if the computed hash is updated.
         self._update_block_hashes()
         return self._computed_block_hashes
 
     def _update_block_hashes(self):
         """
         Update the block hashes for all the full blocks in the sequence.
-
         It skips the blocks that have already been computed.
         """
         token_ids = self.get_token_ids()  # All token ids in the sequence
@@ -697,8 +698,7 @@ class Sequence:
         if self.data.stage == SequenceStage.DECODE:
             return 1
 
-        num_computed_tokens = self.data.get_num_computed_tokens()
-        return self.data.get_len() - num_computed_tokens
+        return self.data.get_num_uncomputed_tokens()
 
     def get_num_cached_tokens(self) -> int:
         return self.data.get_num_prefix_cached_tokens()

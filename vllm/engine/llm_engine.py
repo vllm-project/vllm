@@ -1637,7 +1637,6 @@ class LLMEngine:
         # Iteration stats
         num_prompt_tokens_iter = 0
         num_generation_tokens_iter = 0
-        num_extra_batched_tokens_iter = 0
         time_to_first_tokens_iter: List[float] = []
         time_per_output_tokens_iter: List[float] = []
         num_preemption_iter = (0 if scheduler_outputs is None else
@@ -1677,17 +1676,6 @@ class LLMEngine:
             # For async postprocessor, already finished sequences need to be
             # not counted (to avoid double counting)
             actual_num_batched_tokens = scheduler_outputs.num_batched_tokens  # type: ignore
-
-            num_extra_batched_tokens_iter = (
-                actual_num_batched_tokens
-                - scheduler_outputs.num_batched_tokens_from_budget
-            )
-            if num_extra_batched_tokens_iter > 0:
-                print(
-                    f"num_extra_batched_tokens_iter: {num_extra_batched_tokens_iter}, "
-                    f"actual_num_batched_tokens: {actual_num_batched_tokens}, "
-                    f"num_batched_tokens_from_budget: {scheduler_outputs.num_batched_tokens_from_budget}"
-                )
 
             num_generation_tokens_from_prefill_groups = 0.
             # NOTE: if scheduler_outputs.num_prefill_groups > 0 and
@@ -1802,7 +1790,6 @@ class LLMEngine:
             time_per_output_tokens_iter=time_per_output_tokens_iter,
             spec_decode_metrics=spec_decode_metrics,
             num_preemption_iter=num_preemption_iter,
-            num_extra_batched_tokens_iter=num_extra_batched_tokens_iter,
             # Request stats
             #   Latency
             time_e2e_requests=time_e2e_requests,
@@ -1813,7 +1800,8 @@ class LLMEngine:
             finished_reason_requests=finished_reason_requests,
             max_lora=str(max_lora_stat),
             waiting_lora_adapters=list(waiting_lora_adapters.keys()),
-            running_lora_adapters=list(running_lora_adapters.keys()))
+            running_lora_adapters=list(running_lora_adapters.keys()),
+        )
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_executor.add_lora(lora_request)

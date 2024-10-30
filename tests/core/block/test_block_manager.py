@@ -235,7 +235,7 @@ def test_can_allocate_with_prefix_cache(
     # Num blocks needed for 2 seqs, minus the number of blocks shared.
     num_blocks_required_with_sharing = 2 * num_blocks_required_seq - num_blocks_shared
 
-    block_manager = BlockSpaceManagerV2(
+    block_manager = SelfAttnBlockSpaceManager(
         block_size=block_size,
         num_gpu_blocks=num_gpu_blocks,
         num_cpu_blocks=0,
@@ -299,7 +299,7 @@ def test_can_append_with_prefix_cache(
     print(f"num_gpu_blocks: {num_gpu_blocks}")
 
     num_blocks_required_with_sharing = 2 * num_blocks_required_seq_1 - num_blocks_shared
-    block_manager = BlockSpaceManagerV2(
+    block_manager = SelfAttnBlockSpaceManager(
         block_size=block_size,
         num_gpu_blocks=num_gpu_blocks,
         num_cpu_blocks=0,

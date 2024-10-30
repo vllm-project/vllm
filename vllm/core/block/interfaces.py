@@ -99,7 +99,7 @@ class Block(ABC):
         return None
 
     @abstractmethod
-    def set_content_hash(self, content_hash: int) -> None:
+    def set_content_hash(self, content_hash: Optional[int]) -> None:
         pass
 
 

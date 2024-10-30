@@ -164,7 +164,9 @@ class BlockTable:
 
         for i, token_block in enumerate(token_blocks):
             if self._enable_prefix_caching:
-                block_hash: Optional[int] = seq.get_block_hash(first_block_idx + i)
+                block_hash: Optional[int] = seq.update_and_get_block_hash(
+                    first_block_idx + i
+                )
             else:
                 block_hash = None
             self._blocks.append_token_ids(first_block_idx + i, token_block, block_hash)
@@ -286,7 +288,7 @@ class BlockTable:
             if len(cur_token_ids) == self._block_size:
                 block_token_ids.append(cur_token_ids)
                 if self._enable_prefix_caching:
-                    block_hashes.append(seq.get_block_hash(block_idx))
+                    block_hashes.append(seq.update_and_get_block_hash(block_idx))
                 else:
                     block_hashes.append(None)
             else:
@@ -308,12 +310,9 @@ class BlockTable:
             assert len(tail_token_ids) == 1
             assert block_hashes[-1] is None
             cur_token_ids = tail_token_ids[0]
-            try:
-                block = self._allocator.allocate_mutable_block(
-                    prev_block=prev_block, device=device
-                )
-            except Exception as e:
-                breakpoint()
+            block = self._allocator.allocate_mutable_block(
+                prev_block=prev_block, device=device
+            )
             block.append_token_ids(cur_token_ids, block_hash=None)
 
             blocks.append(block)
