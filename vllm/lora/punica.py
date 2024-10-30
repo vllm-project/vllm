@@ -649,7 +649,7 @@ class PunicaWrapper:
         hidden_dim=embed_tokens_all.size(-1)
         embeddings=torch.zeros(num_tokens, hidden_dim, device=masked_input.device, dtype=embed_tokens_all.dtype)
         for i, lora_ind in enumerate(indices):
-            if lora_ind==-1:
+            if True: #lora_ind==-1:
                 embed=embed_tokens_base[masked_input[i]]
             else:
                 embed=embed_tokens_all[lora_ind, masked_input[i]]

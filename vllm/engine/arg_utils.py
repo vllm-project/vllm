@@ -111,6 +111,7 @@ class EngineArgs:
     enable_lora: bool = False
     max_loras: int = 1
     max_lora_rank: int = 16
+    enable_lora_modules_to_save: bool = False, # if True fully trained lm_head and embed_tokens in LoRA will be used instead of A*B-style adapters
     enable_prompt_adapter: bool = False
     max_prompt_adapters: int = 1
     max_prompt_adapter_token: int = 0
@@ -967,6 +968,7 @@ class EngineArgs:
             lora_extra_vocab_size=self.lora_extra_vocab_size,
             long_lora_scaling_factors=self.long_lora_scaling_factors,
             lora_dtype=self.lora_dtype,
+            enable_lora_modules_to_save=self.enable_lora_modules_to_save,
             max_cpu_loras=self.max_cpu_loras if self.max_cpu_loras
             and self.max_cpu_loras > 0 else None) if self.enable_lora else None
 

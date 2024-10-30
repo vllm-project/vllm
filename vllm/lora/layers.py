@@ -276,6 +276,9 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA, TensorPropertiesMixin):
         packed_modules_list: List,
         model_config: Optional[PretrainedConfig],
     ) -> bool:
+        # do not use A*B-style LoRA, try to use modules_to_save
+        if lora_config.enable_lora_modules_to_save:
+            return False
         return type(source_layer) is VocabParallelEmbedding
 
 
@@ -1402,8 +1405,6 @@ class ModulesToSaveWrapper(BaseLayerWithLoRA, TensorPropertiesMixin):
                                                  self._lora_tensors,
                                                  self.base_layer.weight,
                                                  masked_input)
-        
-        #embeddings= self.base_layer.linear_method.embedding(self.base_layer, masked_input)
         return embeddings
 
 

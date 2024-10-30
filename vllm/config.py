@@ -1510,6 +1510,7 @@ class LoRAConfig:
     # This is a constant.
     lora_vocab_padding_size: ClassVar[int] = 256
     long_lora_scaling_factors: Optional[Tuple[float]] = None
+    enable_lora_modules_to_save: bool = False
 
     def __post_init__(self):
         # Setting the maximum rank to 256 should be able to satisfy the vast

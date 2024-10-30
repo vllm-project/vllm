@@ -463,8 +463,7 @@ class LoRAModelManager(AdapterModelManager):
                     new_module.scaling_factor_to_offset
             # (yard1): TODO make this more robust
             # replace lm_head by A*B lora if needed
-            if ("lm_head" in module_name) and not isinstance(
-                    new_module, ModulesToSaveWrapper):
+            if (("lm_head" in module_name) and not self.lora_config.enable_lora_modules_to_save):
                 logits_processor_module = self.model.get_submodule(
                     "logits_processor")
                 new_module = replace_submodule(
