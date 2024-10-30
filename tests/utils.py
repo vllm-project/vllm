@@ -13,6 +13,7 @@ from typing import Any, Callable, Dict, List, Literal, Optional, Type, Union
 import openai
 import pytest
 import requests
+import torch
 from openai.types.completion import Completion
 from typing_extensions import ParamSpec, assert_never
 
@@ -482,6 +483,16 @@ def compare_all_settings(model: str,
                 compare_envs = all_envs[i]
                 for ref_result, compare_result in zip(ref_results,
                                                       compare_results):
+                    if "embedding" in ref_result and method == "encode":
+                        ref_embedding = torch.tensor(ref_result["embedding"])
+                        compare_embedding = torch.tensor(
+                            compare_result["embedding"])
+                        mse = ((ref_embedding - compare_embedding)**2).mean()
+                        assert mse < 1e-6, (
+                            f"Embedding for {model=} are not the same.\n"
+                            f"mse={mse}\n")
+                        del ref_result["embedding"]
+                        del compare_result["embedding"]
                     assert ref_result == compare_result, (
                         f"Results for {model=} are not the same.\n"
                         f"{ref_args=} {ref_envs=}\n"
