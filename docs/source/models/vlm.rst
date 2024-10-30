@@ -57,12 +57,19 @@ To pass an image to the model, note the following in :class:`vllm.inputs.PromptT
         print(generated_text)
 
     # Inference with image embeddings as input with additional parameters
-    # Specifically, we are conducting a trial run of Qwen2VL with the new input format, as the model utilizes additional parameters for calculating positional encoding.
-    image_embeds = torch.load(...) # torch.Tensor of shape (1, image_feature_size, hidden_size of LM)
-    image_grid_thw = torch.load(...) # torch.Tensor of shape (1, 3)
+    # Specifically, we are conducting a trial run of Qwen2VL and MiniCPM-V with the new input format, which utilizes additional parameters.
+    mm_data = {}
+
+    image_embeds = torch.load(...) # torch.Tensor of shape (num_images, image_feature_size, hidden_size of LM)
+    # For Qwen2VL, image_grid_thw is needed to calculate positional encoding.
     mm_data['image'] = {
         "image_embeds": image_embeds,
-        "image_grid_thw":  image_grid_thw,
+        "image_grid_thw": torch.load(...) # torch.Tensor of shape (1, 3),
+    }
+    # For MiniCPM-V, image_size_list is needed to calculate details of the sliced image.
+    mm_data['image'] = {
+        "image_embeds": image_embeds,
+        "image_size_list": [image.size] # list of image sizes
     }
     outputs = llm.generate({
         "prompt": prompt,
@@ -174,8 +181,8 @@ Below is an example on how to launch the same ``microsoft/Phi-3.5-vision-instruc
 
 .. code-block:: bash
 
-    vllm serve microsoft/Phi-3.5-vision-instruct --max-model-len 4096 \
-      --trust-remote-code --limit-mm-per-prompt image=2
+    vllm serve microsoft/Phi-3.5-vision-instruct --task generate \
+      --trust-remote-code --max-model-len 4096 --limit-mm-per-prompt image=2
 
 .. important::
     Since OpenAI Vision API is based on `Chat Completions <https://platform.openai.com/docs/api-reference/chat>`_ API,
@@ -234,15 +241,15 @@ To consume the server, you can use the OpenAI client like in the example below:
     print("Chat completion output:", chat_response.choices[0].message.content)
 
 
-A full code example can be found in `examples/openai_vision_api_client.py <https://github.com/vllm-project/vllm/blob/main/examples/openai_vision_api_client.py>`_.
+A full code example can be found in `examples/openai_api_client_for_multimodal.py <https://github.com/vllm-project/vllm/blob/main/examples/openai_api_client_for_multimodal.py>`_.
 
 .. note::
 
     By default, the timeout for fetching images through http url is ``5`` seconds. You can override this by setting the environment variable:
 
-    .. code-block:: shell
+    .. code-block:: console
 
-        export VLLM_IMAGE_FETCH_TIMEOUT=<timeout>
+        $ export VLLM_IMAGE_FETCH_TIMEOUT=<timeout>
 
 .. note::
     There is no need to format the prompt in the API request since it will be handled by the server.

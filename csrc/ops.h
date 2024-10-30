@@ -5,6 +5,30 @@
 
 #include "core/scalar_type.hpp"
 
+#include <vector>
+
+torch::Tensor weak_ref_tensor(torch::Tensor& tensor) {
+  // Ensure tensor is on CUDA
+  if (!tensor.is_cuda()) {
+    throw std::runtime_error("Tensor must be on CUDA device");
+  }
+
+  // Get the raw data pointer
+  void* data_ptr = tensor.data_ptr();
+
+  // Get tensor sizes and strides
+  std::vector<int64_t> sizes = tensor.sizes().vec();
+  std::vector<int64_t> strides = tensor.strides().vec();
+
+  // Get tensor options (dtype, device)
+  auto options = tensor.options();
+
+  // Create a new tensor from the raw data pointer
+  auto new_tensor = torch::from_blob(data_ptr, sizes, strides, options);
+
+  return new_tensor;
+}
+
 void paged_attention_v1(
     torch::Tensor& out, torch::Tensor& query, torch::Tensor& key_cache,
     torch::Tensor& value_cache, int64_t num_kv_heads, double scale,
@@ -47,6 +71,9 @@ void silu_and_mul(torch::Tensor& out, torch::Tensor& input);
 void gelu_and_mul(torch::Tensor& out, torch::Tensor& input);
 
 void gelu_tanh_and_mul(torch::Tensor& out, torch::Tensor& input);
+
+void fatrelu_and_mul(torch::Tensor& out, torch::Tensor& input,
+                     double threshold);
 
 void gelu_new(torch::Tensor& out, torch::Tensor& input);
 
@@ -142,11 +169,6 @@ void dynamic_per_token_scaled_fp8_quant(
     torch::Tensor& out, torch::Tensor const& input, torch::Tensor& scale,
     c10::optional<torch::Tensor> const& scale_ub);
 
-void moe_align_block_size(torch::Tensor topk_ids, int64_t num_experts,
-                          int64_t block_size, torch::Tensor sorted_token_ids,
-                          torch::Tensor experts_ids,
-                          torch::Tensor num_tokens_post_pad);
-
 void selective_scan_fwd(const torch::Tensor& u, const torch::Tensor& delta,
                         const torch::Tensor& A, const torch::Tensor& B,
                         const torch::Tensor& C,
@@ -157,21 +179,23 @@ void selective_scan_fwd(const torch::Tensor& u, const torch::Tensor& delta,
                         const c10::optional<torch::Tensor>& query_start_loc,
                         const c10::optional<torch::Tensor>& cache_indices,
                         const c10::optional<torch::Tensor>& has_initial_state,
-                        const torch::Tensor& ssm_states);
+                        const torch::Tensor& ssm_states, int64_t pad_slot_id);
 
-at::Tensor causal_conv1d_update(
-    const at::Tensor& x, const at::Tensor& conv_state, const at::Tensor& weight,
-    const c10::optional<at::Tensor>& bias_, bool silu_activation,
-    const c10::optional<at::Tensor>& cache_seqlens_,
-    const c10::optional<at::Tensor>& conv_state_indices_);
+void causal_conv1d_update(const at::Tensor& x, const at::Tensor& conv_state,
+                          const at::Tensor& weight,
+                          const c10::optional<at::Tensor>& bias_,
+                          bool silu_activation,
+                          const c10::optional<at::Tensor>& cache_seqlens_,
+                          const c10::optional<at::Tensor>& conv_state_indices_,
+                          int64_t pad_slot_id);
 
-at::Tensor causal_conv1d_fwd(const at::Tensor& x, const at::Tensor& weight,
-                             const c10::optional<at::Tensor>& bias_,
-                             const c10::optional<at::Tensor>& conv_states,
-                             const c10::optional<at::Tensor>& query_start_loc,
-                             const c10::optional<at::Tensor>& cache_indices,
-                             const c10::optional<at::Tensor>& has_initial_state,
-                             bool silu_activation);
+void causal_conv1d_fwd(const at::Tensor& x, const at::Tensor& weight,
+                       const c10::optional<at::Tensor>& bias_,
+                       const c10::optional<at::Tensor>& conv_states,
+                       const c10::optional<at::Tensor>& query_start_loc,
+                       const c10::optional<at::Tensor>& cache_indices,
+                       const c10::optional<at::Tensor>& has_initial_state,
+                       bool silu_activation, int64_t pad_slot_id);
 
 #ifndef USE_ROCM
 using fptr_t = int64_t;
