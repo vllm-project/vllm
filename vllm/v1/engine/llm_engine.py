@@ -1,10 +1,8 @@
-from typing import (Any, Dict, Iterable, List, Mapping, Optional, Tuple, Type,
-                    Union)
+from typing import Dict, Iterable, List, Mapping, Optional, Type, Union
 
-from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
-                         EngineConfig, LoadConfig, LoRAConfig, ModelConfig,
-                         ObservabilityConfig, ParallelConfig,
-                         PromptAdapterConfig, SchedulerConfig,
+from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig, LoadConfig,
+                         LoRAConfig, ModelConfig, ObservabilityConfig,
+                         ParallelConfig, PromptAdapterConfig, SchedulerConfig,
                          SpeculativeConfig)
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics_types import StatLoggerBase
@@ -16,10 +14,9 @@ from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.usage.usage_lib import UsageContext
-from vllm.v1.engine.protocol import LLMEngineProtocol
 from vllm.v1.engine.llm_engine_core import LLMEngineCore
+from vllm.v1.engine.protocol import LLMEngineProtocol
 from vllm.v1.executor.gpu_executor import GPUExecutor
-
 
 logger = init_logger(__name__)
 
@@ -76,7 +73,7 @@ class LLMEngine(LLMEngineProtocol):
         )
 
         # TODO: some of these configs will be mutated by
-        # EngineCore (e.g. cache_config). It would be better 
+        # EngineCore (e.g. cache_config). It would be better
         # if we had one source of truth.
         self.engine_core = LLMEngineCore(
             executor_class=executor_class,
@@ -142,7 +139,7 @@ class LLMEngine(LLMEngineProtocol):
         raise NotImplementedError
 
     def step(self) -> List[RequestOutput]:
-        
+
         # 1) Step the LLMEngineCore.
         engine_core_outputs = self.engine_core.step()
 

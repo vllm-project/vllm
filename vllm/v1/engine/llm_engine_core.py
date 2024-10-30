@@ -1,4 +1,3 @@
-import multiprocessing
 from typing import List, Optional, Type
 
 import msgspec
