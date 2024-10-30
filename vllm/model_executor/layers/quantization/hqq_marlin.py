@@ -13,6 +13,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
 from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
     MarlinWorkspace)
 from vllm.model_executor.layers.quantization.utils.quant_utils import gptq_pack
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.parameter import (BasevLLMParameter,
                                            HQQQweightParameter,
                                            HQQZeroScaleParameter)
@@ -119,7 +120,8 @@ class HQQMarlinMethod(LinearMethodBase):
 
         self.input_size_per_partition = input_size_per_partition
 
-        weight_loader = extra_weight_attrs.get("weight_loader")
+        weight_loader = extra_weight_attrs.get("weight_loader",
+                                               default_weight_loader)
 
         self.scales_and_zp_size = (input_size_per_partition //
                                    self.quant_config.group_size)
