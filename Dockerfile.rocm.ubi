@@ -183,7 +183,12 @@ RUN curl -LO https://github.com/jedisct1/libsodium/releases/download/${LIBSODIUM
     && rm -f libsodium*.tar.gz \
     && mv libsodium*/* ./
 
-RUN CFLAGS="-O3 -Wall -Werror=format-security -Wno-unused-function -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -fstack-clash-protection -fcf-protection"\    ./configure --prefix="/usr/" --libdir=/usr/lib64 && make -j $MAX_JOBS && make check
+RUN CFLAGS="-O3 -Wall -Werror=format-security -Wno-unused-function -Wp,-D_GLIBCXX_ASSERTIONS -fstack-protector-strong -fstack-clash-protection -fcf-protection" \
+    ./configure \
+        --prefix="/usr/" \
+        --libdir=/usr/lib64 && \
+    make -j $(nproc) && \
+    make check
 
 ##################################################################################################
 
