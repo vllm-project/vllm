@@ -81,20 +81,7 @@ class _AsyncLLMEngine(LLMEngine):
             copy=False,
             flags=zmq.NOBLOCK)
 
-        return stream
-
-    async def step_async(self) -> None:
-
-        while await self.from_core.poll(timeout=POLL_TIMEOUT_MS) == 0:
-            logger.debug("Waiting for output from LLMCore.")
-        frames = await self.from_core.recv_multipart(copy=False)
-        engine_core_outputs = self.decoder.decode(frames[0].buffer).outputs
-
-        # Make RequestOutputs and push to the per-client output queues
-        # NOTE: we could simplify the Detokenizer code by returning the full
-        # List[RequestOutput] rather than pushing to the Queue at the expense
-        # of doing another loop through List[RequestOutput] here.
-        self.detokenizer.step_streaming(engine_core_outputs)
+        return stream        
 
 
 class AsyncLLMEngine(EngineClient):
@@ -107,10 +94,9 @@ class AsyncLLMEngine(EngineClient):
 
         self.log_requests = log_requests
         self.engine = _AsyncLLMEngine(*args, **kwargs)
-        self.output_queues: Dict[str, asyncio.Queue] = {}
 
         assert start_engine_loop
-        self.background_loop = asyncio.create_task(self.run_engine_loop())
+        self.output_handler = asyncio.create_task(self.run_output_handler())
 
         # TODO: add background loop shielding
         # TODO: add AsyncEngineDeadError
@@ -194,13 +180,21 @@ class AsyncLLMEngine(EngineClient):
         ):
             yield output
 
-    async def run_engine_loop(self):
+    async def run_output_handler(self):
         # TODO: add weakref from current AsyncLLMEngine
         # TODO: shutdown remote worker execution loop.
-        # TODO: add PP
 
         while True:
-            await self.engine.step_async()
+            while await self.from_core.poll(timeout=POLL_TIMEOUT_MS) == 0:
+                logger.debug("Waiting for output from LLMCore.")
+                frames = await self.from_core.recv_multipart(copy=False)
+                engine_core_outputs = self.decoder.decode(frames[0].buffer).outputs
+
+                # Make RequestOutputs and push to the per-client output queues
+                # NOTE: we could simplify the Detokenizer code by returning the full
+                # List[RequestOutput] rather than pushing to the Queue at the expense
+                # of doing another loop through List[RequestOutput] here.
+                self.detokenizer.step_streaming(engine_core_outputs)
 
     async def abort(self):
         pass
