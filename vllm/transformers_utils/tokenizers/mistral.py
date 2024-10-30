@@ -82,6 +82,10 @@ class MistralTokenizer:
             raise TypeError(f"Unsupported tokenizer: {type(tokenizer_)}")
 
         self._vocab = tokenizer_.vocab()
+        # Convert to a Dict[str, int] to match protocol, but this is a lossy
+        # conversion. There may be multiple token ids that decode to the same
+        # string due to partial UTF-8 byte sequences being converted to �
+        self.vocab_dict = {token: idx for idx, token in enumerate(self._vocab)}
         self.tokenizer = tokenizer_
         self._max_token_id = max(self._vocab.values())
 
@@ -180,10 +184,7 @@ class MistralTokenizer:
         return Encoding(input_ids=input_ids)
 
     def get_vocab(self) -> Dict[str, int]:
-        # Convert to a Dict[str, int] to match protocol, but this is a lossy
-        # conversion. There may be multiple token ids that decode to the same
-        # string due to partial UTF-8 byte sequences being converted to �
-        return {token: idx for idx, token in enumerate(self._vocab)}
+        return self.vocab_dict
 
     def get_added_vocab(self) -> Dict[str, int]:
         # Mistral tokenizers have no added vocabulary
