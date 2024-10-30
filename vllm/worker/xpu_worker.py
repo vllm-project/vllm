@@ -14,7 +14,6 @@ from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
                          SpeculativeConfig)
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
-from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
 from vllm.platforms import current_platform
@@ -183,11 +182,10 @@ class XPUWorker(LoraNotSupportedWorkerBase, Worker):
             # use sockets as default Level zero IPC exchange backend. By
             # default oneccl will use `drmfd` as mechanism which need extra
             # dependency (libdrm and drm headers) on your system.
-            ENV_CCL_ZE_IPC_EXCHANGE = os.getenv("CCL_ZE_IPC_EXCHANGE",
-                                                "sockets")
+            ENV_CCL_ATL_TRANSPORT = os.getenv("CCL_ATL_TRANSPORT", "ofi")
             ENV_LOCAL_WORLD_SIZE = os.getenv("LOCAL_WORLD_SIZE",
                                              str(parallel_config.world_size))
-            os.environ['CCL_ZE_IPC_EXCHANGE'] = ENV_CCL_ZE_IPC_EXCHANGE
+            os.environ["CCL_ATL_TRANSPORT"] = ENV_CCL_ATL_TRANSPORT
             os.environ["LOCAL_WORLD_SIZE"] = ENV_LOCAL_WORLD_SIZE
             os.environ["LOCAL_RANK"] = str(self.local_rank)
             init_distributed_environment(
@@ -200,8 +198,5 @@ class XPUWorker(LoraNotSupportedWorkerBase, Worker):
         ensure_model_parallel_initialized(
             parallel_config.tensor_parallel_size,
             parallel_config.pipeline_parallel_size)
-
-        if parallel_config.pipeline_parallel_size > 1:
-            # torch-ccl xpu need a collective API warm up
-            # before calling send/recv API
-            get_pp_group().all_reduce(torch.zeros(1).xpu())
+        # global all_reduce needed for overall oneccl warm up
+        torch.distributed.all_reduce(torch.zeros(1).xpu())
