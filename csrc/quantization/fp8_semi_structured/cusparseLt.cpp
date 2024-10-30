@@ -16,7 +16,7 @@
                                                                              \
   torch::Tensor cslt_mm_fp8_semi_structured(                                 \
       const torch::Tensor& compressed_A, const torch::Tensor& dense_B,       \
-      const c10::optional<torch::Tensor>& bias_opt, bool transpose_result) { \
+      const c10::optional<torch::Tensor>& bias_opt) {                        \
     TORCH_CHECK(false,                                                       \
                 "Unsupported dtype for compressed matrix multiplication in " \
                 "current version of cuSPARSELt.");                           \
@@ -63,30 +63,8 @@
 namespace vllm {
 namespace cusparseLt {
 
+
 struct cusparseLtEntry {
-  // cusparseLtEntry() {}
-  // void operator=(const cusparseLtEntry& entry) {
-  //   sparse_input_descriptor = entry.sparse_input_descriptor;
-  //   dense_input_descriptor = entry.dense_input_descriptor;
-  //   res_descriptor = entry.res_descriptor;
-  //   C_descriptor = entry.C_descriptor;
-  //   matmul = entry.matmul;
-  //   plan = entry.plan;
-
-  //   sparse_mat_ptr = entry.sparse_mat_ptr;    
-  //   dense_mat_ptr = entry.dense_mat_ptr;
-
-  //   device = std::move(entry.device);
-  //   allocator = entry.allocator;
-  //   out_dtype = std::move(entry.out_dtype);
-
-  //   workspace_ptr = std::move(entry.workspace_ptr);
-
-  //   m = entry.m;
-  //   n = entry.n;
-  //   k = entry.k;
-  // }
-
   cusparseLtMatDescriptor_t sparse_input_descriptor;
   cusparseLtMatDescriptor_t dense_input_descriptor;
   cusparseLtMatDescriptor_t res_descriptor;
@@ -101,9 +79,7 @@ struct cusparseLtEntry {
 
   torch::Device device = torch::kCUDA;
   torch::Dtype out_dtype;
-
-  c10::cuda::CUDACachingAllocator::CUDAAllocator* allocator;
-  c10::DataPtr workspace_ptr;
+  void* workspace_ptr;
 
   int m;
   int n;
@@ -157,7 +133,7 @@ torch::Tensor cslt_compress_fp8_semi_structured(const torch::Tensor& input) {
 
 vllm::cusparseLt::cacheID cslt_prepare_mm_fp8_semi_structured(const torch::Tensor& compressed_A,
                                             const torch::Tensor& dense_B, 
-                                            const c10::optional<torch::Tensor>& bias_opt, bool transpose_result) {
+                                            const c10::optional<torch::Tensor>& bias_opt) {
   TORCH_CHECK(compressed_A.scalar_type() == at::ScalarType::Float8_e4m3fn,
               "Only float8 e4m3 is supported in vllm:cslt_compress");
   namespace vc = vllm::cusparseLt;
@@ -173,7 +149,6 @@ vllm::cusparseLt::cacheID cslt_prepare_mm_fp8_semi_structured(const torch::Tenso
   }
 
   vc::cusparseLtEntry& entry = vc::cusparseLt_cache[id];
-  // vc::cusparseLtEntry entry;
 
   float alpha = 1.0;
   float beta = 0.0;
@@ -186,6 +161,11 @@ vllm::cusparseLt::cacheID cslt_prepare_mm_fp8_semi_structured(const torch::Tenso
   int64_t k = dense_B.size(0);
   int64_t n = dense_B.size(1);
   int64_t m = (compressed_A.numel() * 16 / compression_factor) / k;
+
+  cusparseLtMatDescriptor_t sparse_input_descriptor;
+  cusparseLtMatDescriptor_t dense_input_descriptor;
+  cusparseLtMatDescriptor_t res_descriptor;
+  cusparseLtMatDescriptor_t C_descriptor;
 
   switch (out_dtype) {
     case at::ScalarType::Float8_e4m3fn:
@@ -212,43 +192,43 @@ vllm::cusparseLt::cacheID cslt_prepare_mm_fp8_semi_structured(const torch::Tenso
   }
   // initialize sparse descriptor
   TORCH_CUDASPARSE_CHECK(cusparseLtStructuredDescriptorInit(
-      &vc::handle, &(entry.sparse_input_descriptor), m, k, k, 16, input_type,
+      &vc::handle, &sparse_input_descriptor, m, k, k, 16, input_type,
       CUSPARSE_ORDER_ROW, CUSPARSELT_SPARSITY_50_PERCENT));
 
   // initialize dense descriptor
   TORCH_CUDASPARSE_CHECK(cusparseLtDenseDescriptorInit(
-      &vc::handle, &entry.dense_input_descriptor,
+      &vc::handle, &dense_input_descriptor,
       (dense_B.is_contiguous()) ? k : n, (dense_B.is_contiguous()) ? n : k,
       (dense_B.is_contiguous()) ? n : k, 16, input_type, CUSPARSE_ORDER_ROW));
 
   // initialize result descriptor
- TORCH_CUDASPARSE_CHECK(cusparseLtDenseDescriptorInit(
-      &vc::handle, &entry.res_descriptor, m, n, (transpose_result) ? m : n, 16,
-      output_type,
-      (transpose_result) ? CUSPARSE_ORDER_COL : CUSPARSE_ORDER_ROW));
   TORCH_CUDASPARSE_CHECK(cusparseLtDenseDescriptorInit(
-      &vc::handle, &entry.C_descriptor, m, n, (transpose_result) ? m : n, 16, C_type,
-      (transpose_result) ? CUSPARSE_ORDER_COL : CUSPARSE_ORDER_ROW));
+      &vc::handle, &res_descriptor, m, n, n, 16,
+      output_type,
+      CUSPARSE_ORDER_ROW));
+  TORCH_CUDASPARSE_CHECK(cusparseLtDenseDescriptorInit(
+      &vc::handle, &C_descriptor, m, n, n, 16, C_type,
+      CUSPARSE_ORDER_ROW));
 
+  cusparseLtMatmulPlan_t plan;
   cusparseLtMatmulAlgSelection_t alg_sel;
 
   TORCH_CUDASPARSE_CHECK(cusparseLtMatmulDescriptorInit(
       &vc::handle, &entry.matmul, CUSPARSE_OPERATION_NON_TRANSPOSE,
       (dense_B.is_contiguous()) ? CUSPARSE_OPERATION_NON_TRANSPOSE
                                 : CUSPARSE_OPERATION_TRANSPOSE,
-      &entry.sparse_input_descriptor, &entry.dense_input_descriptor,
-      &entry.C_descriptor, &entry.res_descriptor, compute_type));
+      &sparse_input_descriptor, &dense_input_descriptor,
+      &C_descriptor, &res_descriptor, compute_type));
   TORCH_CUDASPARSE_CHECK(cusparseLtMatmulAlgSelectionInit(
       &vc::handle, &alg_sel, &entry.matmul,
       CUSPARSELT_MATMUL_ALG_DEFAULT));
   TORCH_CUDASPARSE_CHECK(cusparseLtMatmulPlanInit(
-      &vc::handle, &entry.plan, &entry.matmul, &alg_sel));
+      &vc::handle, &plan, &entry.matmul, &alg_sel));
   size_t workspace_size;
   TORCH_CUDASPARSE_CHECK(
-      cusparseLtMatmulGetWorkspace(&vc::handle, &entry.plan, &workspace_size));
+      cusparseLtMatmulGetWorkspace(&vc::handle, &plan, &workspace_size));
+  AT_CUDA_CHECK(cudaMalloc((void**) &entry.workspace_ptr, workspace_size));
 
-  entry.allocator = c10::cuda::CUDACachingAllocator::get();
-  entry.workspace_ptr = entry.allocator->allocate(workspace_size);
   entry.device = dense_B.device();
   entry.out_dtype = out_dtype;
   entry.m = m;
@@ -256,16 +236,19 @@ vllm::cusparseLt::cacheID cslt_prepare_mm_fp8_semi_structured(const torch::Tenso
   entry.k = k;
   entry.sparse_mat_ptr = compressed_A.data_ptr();
   entry.dense_mat_ptr = dense_B.data_ptr();
+  entry.plan = plan;
+  entry.sparse_input_descriptor = sparse_input_descriptor;
+  entry.dense_input_descriptor = dense_input_descriptor;
+  entry.C_descriptor = C_descriptor;
+  entry.res_descriptor = res_descriptor;
+
   return id;
 }
 
-torch::Tensor cslt_mm_fp8_semi_structured_prepared(
-    const torch::Tensor& id_tensor) {
+torch::Tensor cslt_mm_fp8_semi_structured_prepared(vllm::cusparseLt::cacheID id) {
   namespace vc = vllm::cusparseLt;
   TORCH_CHECK(vc::handle_initialized,
               "Call of matmul with unintialized matmul");
-  TORCH_CHECK(id_tensor.numel() == 1, "ID has to be single valued");
-  auto id = id_tensor.item<vc::cacheID>();
   if (vc::cusparseLt_cache.count(id) == 0) {
     TORCH_CHECK(false, "cusparse matmul Id is not found");
   }
@@ -281,17 +264,15 @@ torch::Tensor cslt_mm_fp8_semi_structured_prepared(
   TORCH_CUDASPARSE_CHECK(
       cusparseLtMatmul(&vc::handle, &entry.plan, &alpha, entry.sparse_mat_ptr,
                        entry.dense_mat_ptr, &beta, res.data_ptr(),
-                       res.data_ptr(), entry.workspace_ptr.get(), &stream, 1));
+                       res.data_ptr(), entry.workspace_ptr, &stream, 1));
 
   return res;
 }
 
-void cslt_fp8_semi_structured_destroy(const torch::Tensor& id_tensor) {
+void cslt_fp8_semi_structured_destroy(vllm::cusparseLt::cacheID id) {
   namespace vc = vllm::cusparseLt;
   TORCH_CHECK(vc::handle_initialized,
               "Call of destroy cusparseId with unintialized cusparseLt");
-  TORCH_CHECK(id_tensor.numel() == 1, "ID has to be single valued");
-  auto id = id_tensor.item<vc::cacheID>();
   if (vc::cusparseLt_cache.count(id) == 0) {
     TORCH_CHECK(false, "cusparse matmul Id is not found");
   }
@@ -301,9 +282,12 @@ void cslt_fp8_semi_structured_destroy(const torch::Tensor& id_tensor) {
       cusparseLtMatDescriptorDestroy(&entry.sparse_input_descriptor));
   TORCH_CUDASPARSE_CHECK(
       cusparseLtMatDescriptorDestroy(&entry.dense_input_descriptor));
+  TORCH_CUDASPARSE_CHECK(cusparseLtMatDescriptorDestroy(&entry.C_descriptor));
   TORCH_CUDASPARSE_CHECK(cusparseLtMatDescriptorDestroy(&entry.res_descriptor));
   // Destroy plan
   TORCH_CUDASPARSE_CHECK(cusparseLtMatmulPlanDestroy(&entry.plan));
+  AT_CUDA_CHECK(cudaFree(entry.workspace_ptr));
+  vc::cusparseLt_cache.erase(id);
 }
 
 torch::Tensor cslt_mm_fp8_semi_structured(
@@ -377,19 +361,18 @@ torch::Tensor cslt_mm_fp8_semi_structured(
   // create result tensor
   auto res_tensor_options =
       c10::TensorOptions().dtype(out_dtype).device(dense_B.device());
-  at::Tensor res = (transpose_result) ? at::empty({n, m}, res_tensor_options)
-                                      : at::empty({m, n}, res_tensor_options);
+  at::Tensor res = at::empty({m, n}, res_tensor_options);
 
   cusparseLtMatDescriptor_t res_descriptor;
   TORCH_CUDASPARSE_CHECK(cusparseLtDenseDescriptorInit(
-      &vc::handle, &res_descriptor, m, n, (transpose_result) ? m : n, 16,
+      &vc::handle, &res_descriptor, m, n, n, 16,
       output_type,
-      (transpose_result) ? CUSPARSE_ORDER_COL : CUSPARSE_ORDER_ROW));
+      CUSPARSE_ORDER_ROW));
 
   cusparseLtMatDescriptor_t C_descriptor;
   TORCH_CUDASPARSE_CHECK(cusparseLtDenseDescriptorInit(
-      &vc::handle, &C_descriptor, m, n, (transpose_result) ? m : n, 16, C_type,
-      (transpose_result) ? CUSPARSE_ORDER_COL : CUSPARSE_ORDER_ROW));
+      &vc::handle, &C_descriptor, m, n, n, 16, C_type,
+      CUSPARSE_ORDER_ROW));
 
   TORCH_CUDASPARSE_CHECK(cusparseLtMatmulDescriptorInit(
       &vc::handle, &matmul, CUSPARSE_OPERATION_NON_TRANSPOSE,

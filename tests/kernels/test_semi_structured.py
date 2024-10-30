@@ -9,6 +9,9 @@ from vllm.model_executor.layers.sparsity.utils.cusparse_2_4_utils import (
     is_semi_structured_supported, semi_structured_dense_sparse_T_gemm,
     semi_structured_sparse_dense_gemm,
     semi_structured_sparse_dense_gemm_scaled)
+from vllm._custom_ops import (semi_structured_fp8_prepare_mm,
+                              semi_structured_fp8_mm_prepared)
+
 
 DTYPES = [torch.float16, torch.bfloat16, torch.int8]
 SIZES = [(128, 128), (1024, 8192)]
@@ -137,6 +140,22 @@ def test_torch_semi_structured_sparse_dense_T_fp8_scaled_matmul():
                                                         scale_b=scale_B).to(
                                                             torch.float32)
     torch.testing.assert_close(C, C_sparse, rtol=7e-2, atol=7e-2)
+
+@pytest.mark.skipif(
+    not is_semi_structured_supported()
+    or not is_quant_method_supported("modelopt"),
+    reason="Semi structured fp8 matmul is not supported on this GPU type.")
+def test_torch_semi_structured_sparse_dense_T_fp8_matmul_prepared():
+    M, N, K = (32, 64, 32)
+    dtype = torch.float8_e4m3fn
+    A_pruned = generate_pruned_semi_structured_mat(M, N, dtype=dtype)
+    A = compress_to_torch_sparse_semi_structured_mat(A_pruned)
+    B = torch.full((K, N), .25, device='cuda', dtype=dtype).t()
+    handle = semi_structured_fp8_prepare_mm(A.packed, B)
+
+    C = dense_matmul(A_pruned, B, dtype=dtype).to(torch.float32)
+    C_sparse = semi_structured_fp8_mm_prepared(int(handle)).to(torch.float32)
+    torch.testing.assert_close(C, C_sparse, rtol=1e-1, atol=1e-1)
 
 
 @pytest.mark.skipif(
