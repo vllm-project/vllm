@@ -9,6 +9,7 @@ from vllm._custom_ops import (semi_structured_fp8_compress,
                               semi_structured_fp8_mm)
 from vllm.platforms import current_platform
 
+SparseSemiStructuredTensor._FORCE_CUTLASS = False
 
 def compress_to_torch_sparse_semi_structured_mat(pruned_tensor: torch.Tensor):
     '''
