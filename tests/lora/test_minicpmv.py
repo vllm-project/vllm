@@ -5,7 +5,7 @@ import pytest
 import vllm
 from vllm.assets.image import ImageAsset
 from vllm.lora.request import LoRARequest
-from vllm.utils import is_hip
+from vllm.platforms import current_platform
 
 MODEL_PATH = "openbmb/MiniCPM-Llama3-V-2_5"
 
@@ -57,7 +57,7 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> List[str]:
 
 
 @pytest.mark.xfail(
-    is_hip(), reason="MiniCPM-V dependency xformers incompatible with ROCm")
+    current_platform.is_rocm(), reason="MiniCPM-V dependency xformers incompatible with ROCm")
 def test_minicpmv_lora(minicpmv_lora_files):
     llm = vllm.LLM(
         MODEL_PATH,
