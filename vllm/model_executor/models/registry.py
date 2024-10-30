@@ -1,4 +1,5 @@
 import importlib
+import os
 import pickle
 import subprocess
 import sys
@@ -94,6 +95,7 @@ _EMBEDDING_MODELS = {
     # [Text-only]
     "BertModel": ("bert", "BertEmbeddingModel"),
     "Gemma2Model": ("gemma2", "Gemma2EmbeddingModel"),
+    "LlamaModel": ("llama", "LlamaEmbeddingModel"),
     "MistralModel": ("llama", "LlamaEmbeddingModel"),
     "Qwen2ForRewardModel": ("qwen2_rm", "Qwen2ForRewardModel"),
     "Qwen2ForSequenceClassification": (
@@ -423,9 +425,13 @@ _T = TypeVar("_T")
 
 
 def _run_in_subprocess(fn: Callable[[], _T]) -> _T:
-    with tempfile.NamedTemporaryFile() as output_file:
+    # NOTE: We use a temporary directory instead of a temporary file to avoid
+    # issues like https://stackoverflow.com/questions/23212435/permission-denied-to-write-to-my-temporary-file
+    with tempfile.TemporaryDirectory() as tempdir:
+        output_filepath = os.path.join(tempdir, "registry_output.tmp")
+
         # `cloudpickle` allows pickling lambda functions directly
-        input_bytes = cloudpickle.dumps((fn, output_file.name))
+        input_bytes = cloudpickle.dumps((fn, output_filepath))
 
         # cannot use `sys.executable __file__` here because the script
         # contains relative imports
@@ -442,7 +448,7 @@ def _run_in_subprocess(fn: Callable[[], _T]) -> _T:
             raise RuntimeError(f"Error raised in subprocess:\n"
                                f"{returned.stderr.decode()}") from e
 
-        with open(output_file.name, "rb") as f:
+        with open(output_filepath, "rb") as f:
             return pickle.load(f)
 
 

@@ -18,7 +18,6 @@ from vllm.lora.request import LoRARequest
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import RequestOutputKind, SamplingParams
-from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
 
 if TYPE_CHECKING:
     from vllm.inputs import SingletonInputs
@@ -1132,6 +1131,8 @@ class PoolerOutput(
     """The output from a pooling operation in the embedding model."""
     outputs: List[EmbeddingSequenceGroupOutput]
 
+    # lazy import to avoid circular import
+    from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
     spec_decode_worker_metrics: Optional[SpecDecodeWorkerMetrics] = None
 
     def __getitem__(self, idx: int) -> EmbeddingSequenceGroupOutput:

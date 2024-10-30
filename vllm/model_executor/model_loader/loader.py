@@ -147,15 +147,20 @@ def _get_model_initialization_kwargs(
     return extra_kwargs
 
 
-def build_model(model_class: Type[nn.Module], hf_config: PretrainedConfig,
+def build_model(model_class: Type[nn.Module],
+                hf_config: PretrainedConfig,
                 cache_config: Optional[CacheConfig],
-                quant_config: Optional[QuantizationConfig], *,
+                quant_config: Optional[QuantizationConfig],
+                *,
                 lora_config: Optional[LoRAConfig],
                 multimodal_config: Optional[MultiModalConfig],
-                scheduler_config: Optional[SchedulerConfig]) -> nn.Module:
+                scheduler_config: Optional[SchedulerConfig],
+                prefix: Optional[str] = None) -> nn.Module:
     extra_kwargs = _get_model_initialization_kwargs(model_class, lora_config,
                                                     multimodal_config,
                                                     scheduler_config)
+    if prefix:
+        extra_kwargs["prefix"] = prefix
 
     return model_class(config=hf_config,
                        cache_config=cache_config,
@@ -899,6 +904,19 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         return self._unquantized_generator(hf_weights_files, use_safetensors,
                                            quant_state_dict), quant_state_dict
 
+    def _is_8bit_weight_name(self, weight_name: str):
+        quantized_suffix = {".scb", ".weight_format"}
+        return any(weight_name.lower().endswith(suffix)
+                   for suffix in quantized_suffix)
+
+    def _is_4bit_weight_name(self, weight_name: str):
+        quantized_suffix = {
+            "absmax", "quant_map", "nested_absmax", "nested_quant_map",
+            "bitsandbytes"
+        }
+        suffix = weight_name.split(".")[-1]
+        return any(q_suffix in suffix for q_suffix in quantized_suffix)
+
     def _quantized_8bit_generator(self, hf_weights_files, use_safetensors,
                                   quant_state_dict) -> Generator:
         for weight_name, weight_tensor in self._hf_weight_iter(
@@ -912,7 +930,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         for weight_name, weight_tensor in self._hf_weight_iter(
                 hf_weights_files, use_safetensors):
 
-            if not weight_name.endswith((".weight", ".bias")):
+            if self._is_8bit_weight_name(weight_name):
                 continue
 
             qweight_name = weight_name.replace(".weight", ".qweight")
@@ -932,7 +950,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                                                use_safetensors)
         temp_state_dict = {}
         for weight_name, weight_tensor in weight_iterator:
-            if weight_name.endswith((".weight", ".bias")):
+            if not self._is_4bit_weight_name(weight_name):
                 continue
             # bitsandbytes library requires
             # weight.quant_state.bitsandbytes__* in CPU
@@ -956,7 +974,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         for weight_name, weight_tensor in self._hf_weight_iter(
                 hf_weights_files, use_safetensors):
 
-            if not weight_name.endswith((".weight", ".bias")):
+            if self._is_4bit_weight_name(weight_name):
                 continue
 
             if (f"{weight_name}.quant_state.bitsandbytes__nf4" \
