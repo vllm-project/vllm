@@ -11,12 +11,10 @@ from xformers.ops.fmha.attn_bias import (AttentionBias,
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
-from vllm.attention.backends.utils import (CommonAttentionState,
-                                           CommonMetadataBuilder,
-                                           get_seq_len_block_table_args,
-                                           is_all_cross_attn_metadata_set,
-                                           get_num_prefill_encode_decode_tokens,
-                                           is_all_encoder_attn_metadata_set)
+from vllm.attention.backends.utils import (
+    CommonAttentionState, CommonMetadataBuilder,
+    get_num_prefill_encode_decode_tokens, get_seq_len_block_table_args,
+    is_all_cross_attn_metadata_set, is_all_encoder_attn_metadata_set)
 from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
 from vllm.logger import init_logger

@@ -9,15 +9,13 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata,
                                               AttentionMetadataBuilder,
                                               AttentionType)
+from vllm.attention.backends.utils import (
+    PAD_SLOT_ID, CommonAttentionState, compute_slot_mapping,
+    compute_slot_mapping_start_idx, get_num_prefill_encode_decode_tokens,
+    get_seq_len_block_table_args, is_all_cross_attn_metadata_set,
+    is_all_encoder_attn_metadata_set, is_block_tables_empty)
 from vllm.forward_context import get_forward_context
 from vllm.utils import async_tensor_h2d, make_tensor_with_pad
-
-from .utils import (PAD_SLOT_ID, CommonAttentionState, compute_slot_mapping,
-                    compute_slot_mapping_start_idx,
-                    get_seq_len_block_table_args,
-                    get_num_prefill_encode_decode_tokens,
-                    is_all_cross_attn_metadata_set,
-                    is_all_encoder_attn_metadata_set, is_block_tables_empty)
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import (ModelInputForGPUBuilder,

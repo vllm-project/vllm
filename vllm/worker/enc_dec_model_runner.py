@@ -18,8 +18,8 @@ from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
-from vllm.model_executor.model_loader.utils import get_architecture_class_name
 from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.model_executor.model_loader.utils import get_architecture_class_name
 from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalInputs,
                              MultiModalRegistry)
 from vllm.sampling_params import SamplingParams
@@ -120,8 +120,10 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         # Crash for unsupported encoder/scenarios
         assert_enc_dec_mr_supported_scenario(self)
 
-    def _is_xformers_only_encoder_decoder_model(self, model: ModelConfig) -> bool:
-        return get_architecture_class_name(model) in _XFORMERS_ONLY_ENCODER_DECODER_ARCHS
+    def _is_xformers_only_encoder_decoder_model(self,
+                                                model: ModelConfig) -> bool:
+        return get_architecture_class_name(
+            model) in _XFORMERS_ONLY_ENCODER_DECODER_ARCHS
 
     def _maybe_force_supported_attention_backend(self, model: ModelConfig):
         '''
