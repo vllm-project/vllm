@@ -1002,3 +1002,22 @@ def dummy_gemma2_embedding_path():
         with open(json_path, "w") as f:
             json.dump(config, f)
     return _dummy_gemma2_embedding_path
+
+
+# Add the flag `--optional` to allow run tests
+# that are marked with @pytest.mark.optional
+def pytest_addoption(parser):
+    parser.addoption("--optional",
+                     action="store_true",
+                     default=False,
+                     help="run optional test")
+
+
+def pytest_collection_modifyitems(config, items):
+    if config.getoption("--optional"):
+        # --optional given in cli: do not skip optional tests
+        return
+    skip_optional = pytest.mark.skip(reason="need --optional option to run")
+    for item in items:
+        if "optional" in item.keywords:
+            item.add_marker(skip_optional)

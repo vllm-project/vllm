@@ -1928,6 +1928,15 @@ class EngineConfig:
             self.prompt_adapter_config.verify_with_model_config(
                 self.model_config)
 
+        # Special case for Turing architecture
+        if self.scheduler_config.chunked_prefill_enabled and \
+            self.model_config.dtype == torch.float32 and \
+            current_platform.get_device_capability() == (7, 5):
+            print_warning_once(
+                "Turing devices tensor cores do not support float32 matmul. "
+                "To workaround this limitation, vLLM will set 'ieee' input "
+                "precision for chunked prefill triton kernels.")
+
     def to_dict(self):
         """Return the configs as a dictionary, for use in **kwargs.
         """
