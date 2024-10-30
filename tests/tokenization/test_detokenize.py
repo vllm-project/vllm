@@ -13,8 +13,11 @@ TRUTH = [
     "Hello here, this is a simple test",
     "vLLM is a high-throughput and memory-efficient inference and serving engine for LLMs. It is designed to be used in production environments, where inference and serving",  # noqa
     "我很感谢你的热情",
+    # Burmese text triggers an edge-case for Mistral's V3-Tekken tokenizer (eg.
+    # for mistralai/Pixtral-12B-2409) where tokens may map to bytes with
+    # incomplete UTF-8 characters
     # see https://github.com/vllm-project/vllm/pull/9625
-    "THIS IS AN URGENCY",
+    "ပုံပြင်လေးပြောပြပါ်",
 ]
 TOKENIZERS = [
     "facebook/opt-125m",
@@ -60,12 +63,29 @@ def tokenizer(tokenizer_name):
             AutoTokenizer.from_pretrained(tokenizer_name))
 
 
-# see https://github.com/vllm-project/vllm/pull/9625
 @pytest.mark.parametrize("tokenizer_name", ["mistralai/Pixtral-12B-2409"])
-def test_mistral_edge_case(tokenizer):
-    assert (_run_incremental_decode(tokenizer, [1492, 1176, 115679],
-                                    skip_special_tokens=True,
-                                    starting_index=0) == " ð")
+@pytest.mark.parametrize(
+    "truth",
+    [
+        # Burmese text triggers an edge-case where tokens may map to bytes with
+        # incomplete UTF-8 characters
+        "ပုံပြင်လေးပြောပြပါ",
+        # Using "URGENCY" since "CY" has token id 130282
+        "URGENCY🌶️",
+    ])
+def test_mistral_edge_case(tokenizer, truth):
+    """Test for a specific edge cases with V3-Tekken MistralTokenizer.
+
+    See https://github.com/vllm-project/vllm/pull/9625
+    """
+    starting_index = 0
+    all_input_ids = tokenizer(truth, add_special_tokens=False).input_ids
+
+    decoded_text = _run_incremental_decode(tokenizer,
+                                           all_input_ids,
+                                           skip_special_tokens=True,
+                                           starting_index=starting_index)
+    assert decoded_text == truth
 
 
 @pytest.fixture

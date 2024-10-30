@@ -85,7 +85,10 @@ class MistralTokenizer:
         # Convert to a Dict[str, int] to match protocol, but this is a lossy
         # conversion. There may be multiple token ids that decode to the same
         # string due to partial UTF-8 byte sequences being converted to �
-        self.vocab_dict = {token: idx for idx, token in enumerate(self._vocab)}
+        self._vocab_dict = {
+            token: idx
+            for idx, token in enumerate(self._vocab)
+        }
         self.tokenizer = tokenizer_
         self._max_token_id = max(self._vocab.values())
 
@@ -184,7 +187,9 @@ class MistralTokenizer:
         return Encoding(input_ids=input_ids)
 
     def get_vocab(self) -> Dict[str, int]:
-        return self.vocab_dict
+        # NB: the dictionary form of the vocabulary collapses token ids that map
+        # to the same string but have different bytes
+        return self._vocab_dict
 
     def get_added_vocab(self) -> Dict[str, int]:
         # Mistral tokenizers have no added vocabulary
@@ -273,9 +278,9 @@ class MistralTokenizer:
 
         if any("�" in t for t in tokens):
             # if a decoded token contains the replacement character, then the
-            # token has an incomplete UTF-8 character so we must use a byte
-            # string to avoid losing information
+            # token has an incomplete UTF-8 character so we must use bytes
             # See: https://github.com/vllm-project/vllm/pull/8640
+            #      https://github.com/vllm-project/vllm/pull/9625
             tokens = [self.tokenizer.id_to_byte_piece(id) for id in ids]
 
         return tokens
