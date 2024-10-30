@@ -141,7 +141,7 @@ class GPTQHPULinearMethod(LinearMethodBase):
             group_size = self.quant_config.group_size
         else:
             group_size = input_size
-        exllama_state = ExllamaState.UNUSED # HPU does not support Exllama
+        exllama_state = ExllamaState.UNUSED # HPU does not use Exllama
         scale_and_zero_size = input_size // group_size
         scale_and_zero_input_dim = None
         if (input_size != input_size_per_partition
@@ -263,7 +263,13 @@ class GPTQHPULinearMethod(LinearMethodBase):
               layer: torch.nn.Module,
               x: torch.Tensor,
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-        out_shape = x.shape[:-1] + (layer.output_size , )
+        
+        out_shape = x.shape[:-1]
+        if hasattr(layer, 'output_size_per_partition'):
+            out_shape += (layer.output_size_per_partition , )
+        else:
+            out_shape += (layer.output_size , )
+
         reshaped_x = x.reshape(-1, x.shape[-1])
 
         output = ops.gptq_hpu_gemm(reshaped_x, layer.qweight, layer.qzeros,
@@ -277,7 +283,11 @@ class GPTQHPULinearMethod(LinearMethodBase):
 
     def pack_tensor(self, input, bits = 4):
         normal = input.to(torch.int32)
-        q = torch.sum(torch.bitwise_left_shift(normal.reshape(normal.shape[0], -1, (32 // bits)), self.wf.unsqueeze(0)), dim=-1).to(torch.int32)
+        q = torch.sum(torch.bitwise_left_shift(
+            normal.reshape(normal.shape[0], -1, (32 // bits)),
+            self.wf.unsqueeze(0)), dim=-1
+            ).to(torch.int32)
+        
         return q
     
     def unpack_zeros_from_cuda_old_format(self, layer):
