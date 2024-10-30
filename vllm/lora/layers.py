@@ -1387,7 +1387,10 @@ class ModulesToSaveWrapper(BaseLayerWithLoRA, TensorPropertiesMixin):
     def apply(self, lm_head: 'ModulesToSaveWrapper',
               hidden_states: torch.Tensor,
               bias: Optional[torch.Tensor]) -> torch.Tensor:
+        
+        assert type(self.base_layer)==ParallelLMHead
 
+        # TODO  implement embed_tokens
         logits = self.punica_wrapper.bgmv_sample(hidden_states,
                                                  self.lm_head_tensors,
                                                  self.base_layer.weight)
@@ -1396,6 +1399,18 @@ class ModulesToSaveWrapper(BaseLayerWithLoRA, TensorPropertiesMixin):
             logits += bias
 
         return logits
+    
+    def embedding(self, embed_tokens: 'ModulesToSaveWrapper', masked_input: torch.LongTensor):
+        assert type(self.base_layer)==VocabParallelEmbedding
+        ''' TODO implement punica
+        embeddings = self.punica_wrapper.bgmv_embedding(
+                                                 self.embed_tokens_tensors,
+                                                 masked_input)
+        '''
+        embeddings= self.base_layer.linear_method.embedding(self.base_layer, masked_input)
+        return embeddings
+
+
 
     def create_lora_weights(
         self,
@@ -1440,5 +1455,4 @@ class ModulesToSaveWrapper(BaseLayerWithLoRA, TensorPropertiesMixin):
         packed_modules_list: List,
         model_config: Optional[PretrainedConfig],
     ) -> bool:
-        #TODO(sergeykochetkov) add VocabParallelEmbedding
-        return type(source_layer) in (ParallelLMHead, )
+        return type(source_layer) in (ParallelLMHead, VocabParallelEmbedding)
