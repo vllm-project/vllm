@@ -57,7 +57,8 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> List[str]:
 
 
 @pytest.mark.xfail(
-    current_platform.is_rocm(), reason="MiniCPM-V dependency xformers incompatible with ROCm")
+    current_platform.is_rocm(),
+    reason="MiniCPM-V dependency xformers incompatible with ROCm")
 def test_minicpmv_lora(minicpmv_lora_files):
     llm = vllm.LLM(
         MODEL_PATH,
