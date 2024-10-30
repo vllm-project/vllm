@@ -978,7 +978,6 @@ def init_distributed_environment(
             init_method=distributed_init_method,
             world_size=world_size,
             rank=rank)
-        print(f"INIT {backend}, {distributed_init_method}, {world_size}, {rank}")
     # set the local rank
     # local_rank is not available in torch ProcessGroup,
     # see https://github.com/pytorch/pytorch/issues/122816
@@ -998,7 +997,6 @@ def init_distributed_environment(
             "world group already initialized with a different world size")
 
     group_name = torch.distributed.group.WORLD.group_name
-    print(f"WORLD! {group_name}")
     _symmetric_memory.enable_symm_mem_for_group(group_name)
 
 
