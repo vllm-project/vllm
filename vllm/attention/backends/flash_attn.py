@@ -798,12 +798,17 @@ def unified_flash_attention(
     if kv_cache.numel() > 0:
         key_cache = kv_cache[0]
         value_cache = kv_cache[1]
+        # We skip updating the KV cache under two conditions:
+        #  a. When the Attention Type is ENCODER. In this phase, we compute
+        #     only the encoder attention without updating the cache.
+        #  b. When both Key and Value are None. This occurs during
+        #     cross-attention computation in the decoding phase, where the KV
+        #     cache is already populated with the cross-attention tensor.
+        #     Thus, we skip cache updates during this time.
         if (attn_type != AttentionType.ENCODER) and (key is not None) and (
                 value is not None):
             if attn_type == AttentionType.ENCODER_DECODER:
                 # Update cross-attention KV cache (prefill-only)
-                # During cross-attention decode, key & value will be None,
-                # preventing this IF-statement branch from running
                 updated_slot_mapping = attn_metadata.cross_slot_mapping
             else:
                 # Update self-attention KV cache (prefill/decode)
@@ -817,8 +822,7 @@ def unified_flash_attention(
                 value,
                 kv_cache[0],
                 kv_cache[1],
-                updated_slot_mapping.flatten()
-                if updated_slot_mapping is not None else None,
+                updated_slot_mapping.flatten(),  # type: ignore[union-attr]
                 kv_cache_dtype,
                 k_scale,
                 v_scale,

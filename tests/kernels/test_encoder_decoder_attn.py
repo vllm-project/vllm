@@ -612,6 +612,8 @@ def _run_encoder_attention_test(
                            (number_of_tokens x num_heads x head_size)
                            query/key/value fields
     * attn_metadata: attention metadata for encoder/decoder-self attention
+    * test_pt: The TestPoint object containing test details like number of
+               model heads, head size, name of the backend being used etc.
 
     Returns:
     * Attention.forward() applied to packed {query,key,value} and
@@ -663,6 +665,8 @@ def _run_decoder_self_attention_test(
                            query/key/value fields
     * attn_metadata: attention metadata for decoder-self attention
                      (contains KV cache memory-mapping)
+    * test_pt: The TestPoint object containing test details like number of
+               model heads, head size, name of the backend being used etc.
 
     Returns:
     * Attention.forward() applied to packed_{query,key,value}, kv_cache
@@ -725,6 +729,8 @@ def _run_encoder_decoder_cross_attention_test(
                          (number_of_tokens x num_heads x head_size)
                          key/value fields
     * attn_metadata: attention metadata for encoder/decoder-self attention
+    * test_pt: The TestPoint object containing test details like number of
+               model heads, head size, name of the backend being used etc.
 
     Returns:
     * Attention.forward() applied to packed_{query,key,value}, kv_cache

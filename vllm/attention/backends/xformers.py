@@ -329,37 +329,6 @@ def _set_attn_bias(
         raise AttributeError(f"Invalid attention type {str(attn_type)}")
 
 
-def _get_seq_len_block_table_args(
-    attn_metadata: XFormersMetadata,
-    is_prompt: bool,
-    attn_type: AttentionType,
-) -> tuple:
-    '''
-    The particular choice of sequence-length- and block-table-related
-    attributes which should be extracted from attn_metadata is dependent
-    on the type of attention operation.
-
-    Decoder attn -> select entirely decoder self-attention-related fields
-    Encoder/decoder cross-attn -> select encoder sequence lengths & 
-                                  cross-attn block-tables fields
-    Encoder attn -> select encoder sequence lengths fields & no block tables
-    
-    Arguments:
-
-    * attn_metadata: Attention metadata structure associated with attention op
-    * is_prompt: True if prefill, False otherwise
-    * attn_type: encoder attention, decoder self-attention,
-                 encoder/decoder cross-attention
-
-    Returns:
-
-    * Appropriate sequence-lengths tensor
-    * Appropriate max sequence-length scalar
-    * Appropriate block tables (or None)
-    '''
-    return get_seq_len_block_table_args(attn_metadata, is_prompt, attn_type)
-
-
 class XFormersMetadataBuilder(CommonMetadataBuilder[XFormersMetadata]):
 
     _metadata_cls = XFormersMetadata
@@ -616,7 +585,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 seq_lens_arg,
                 max_seq_len_arg,
                 block_tables_arg,
-            ) = _get_seq_len_block_table_args(decode_meta, False, attn_type)
+            ) = get_seq_len_block_table_args(decode_meta, False, attn_type)
 
             output[num_prefill_tokens:] = PagedAttention.forward_decode(
                 decode_query,
