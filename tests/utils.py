@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import functools
 import os
 import signal
@@ -483,6 +484,8 @@ def compare_all_settings(model: str,
                 compare_envs = all_envs[i]
                 for ref_result, compare_result in zip(ref_results,
                                                       compare_results):
+                    ref_result = copy.deepcopy(ref_result)
+                    compare_result = copy.deepcopy(compare_result)
                     if "embedding" in ref_result and method == "encode":
                         ref_embedding = torch.tensor(ref_result["embedding"])
                         compare_embedding = torch.tensor(
