@@ -244,7 +244,13 @@ class MistralTokenizer:
 
         return decoded
 
-    def decode(self, ids: Union[List[int], int]) -> str:
+    def decode(self,
+               ids: Union[List[int], int],
+               skip_special_tokens: bool = True) -> str:
+        assert (
+            skip_special_tokens
+        ), "Skipping special tokens is not supported for Mistral tokenizers."
+
         if isinstance(ids, int):
             ids = [ids]
         return self.tokenizer.decode(ids)
