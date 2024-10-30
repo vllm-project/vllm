@@ -317,9 +317,20 @@ class VllmBackend:
 
         self.returned_callable = returned_callable
         # trigger the first compilation
-        # TODO: if we can get the example inputs for each subgraph,
-        # we don't need to call it here
-        self.returned_callable(*example_inputs)
+        # code borrowed from https://github.com/pytorch/pytorch/blob/4e3e08b71171fa34172b2362ff668553fac75f27/torch/_dynamo/backends/distributed.py#L206 # noqa
+        # to turn the inputs into fake tensors
+        import torch._guards
+        from torch._guards import detect_fake_mode
+        fake_mode = detect_fake_mode(example_inputs)
+        fake_args = []
+        for arg in example_inputs:
+            if isinstance(arg, torch.Tensor) and not isinstance(
+                    arg, torch._subclasses.FakeTensor):
+                fake_args.append(
+                    torch._dynamo.utils.to_fake_tensor(arg, fake_mode))
+            else:
+                fake_args.append(arg)
+        self.returned_callable(*fake_args)
 
         self._called = True
 
