@@ -202,10 +202,11 @@ def generate_decode_buckets(bs_bucket_config, blocks_bucket_config,
     bs_buckets = warmup_range(bs_bucket_config)
     block_buckets = warmup_range(blocks_bucket_config)
     bmin, bstep, bmax = blocks_bucket_config
-    last_bucket = round_up(max_blocks, bstep)
+    last_bucket = max_blocks
     for bs in bs_buckets:
         for blocks in block_buckets:
-            if blocks > last_bucket:
+            if blocks >= last_bucket:
+                buckets.append((bs, last_bucket))
                 break
             buckets.append((bs, blocks))
     return list(sorted(buckets, key=lambda b: (b[0] * b[1], b[1], b[0])))
@@ -621,7 +622,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         self.bucketing_global_state = HPUBucketingGlobalState()
         self._setup_buckets()
         self._set_gc_threshold()
-
+        self.use_contiguous_pa = os.environ.get('VLLM_CONTIGUOUS_PA',
+                                                'false').lower() == 'true'
         # For multi-step scheduling
         self.cached_step_outputs: List[torch.Tensor] = []
 
@@ -1087,39 +1089,78 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
 
         num_decode_tokens = sum(seq_lens)
 
-        blocks_used = [len(bt) for bt in block_tables if bt]
-        block_list = []
-        block_scales = []
-        for bt in block_tables:
-            block_list.extend(bt)
-            blocks_in_group = len(bt)
-            if blocks_in_group > 0:
-                scale = 1.0 / blocks_in_group
-                block_scales.extend([scale] * blocks_in_group)
+        block_mapping: Union[List[Union[None, int]], torch.Tensor]
+        block_usage: Union[List[Union[None, int]], torch.Tensor]
+        block_scales: Union[List[Union[None, float]], torch.Tensor]
+        block_list: Union[List[int], torch.Tensor]
 
-        block_mapping_nested: List[List[int]] = [
-            [i] * b_u for i, b_u in enumerate(blocks_used)
-        ]
-        block_mapping: List[int] = list(
-            itertools.chain.from_iterable(block_mapping_nested))
+        if self.use_contiguous_pa:
+            block_list = list(itertools.chain(*block_tables))
+            max_idx = max(block_list)
+            max_blocks = max(max_idx + 1, len(block_list))
+            block_bucket_size = find_bucket(
+                max_blocks,
+                self.bucketing_global_state.decode_block_bucket_cfg)
+            block_bucket_size = min(block_bucket_size,
+                                    self.cache_config.num_gpu_blocks)
 
-        last_block = [
-            sl % self.block_size + 1 for sl in itertools.chain(*slot_mapping)
-        ]
-        block_usage = [[self.block_size] * (b_u - 1) + [lb]
-                       for b_u, lb in zip(blocks_used, last_block)]
-        block_usage = list(itertools.chain(*block_usage))
+            block_mapping = [None] * block_bucket_size
+            block_usage = [None] * block_bucket_size
+            block_scales = [None] * block_bucket_size
 
-        block_bucket_size = find_bucket(
-            len(block_list),
-            self.bucketing_global_state.decode_block_bucket_cfg)
+            for i, bt in enumerate(block_tables):
+                if bt:
+                    blocks_in_group = len(bt)
+                    scale = 1.0 / blocks_in_group
+                    for b in bt:
+                        if block_mapping[b] is None:
+                            block_mapping[b] = i
+                            block_usage[b] = self.block_size
+                            block_scales[b] = scale
+
+            block_mapping = [b if b is not None else -1 for b in block_mapping]
+            block_scales = [b if b is not None else 0.0 for b in block_scales]
+
+            for bt, sl in zip(block_tables, slot_mapping):
+                if bt:
+                    block_usage[bt[-1]] = sl[-1] % self.block_size + 1
+            block_usage = [u if u is not None else 1 for u in block_usage]
+
+        else:
+            blocks_used = [len(bt) for bt in block_tables if bt]
+            block_list = []
+            block_scales = []
+            for bt in block_tables:
+                block_list.extend(bt)
+                blocks_in_group = len(bt)
+                if blocks_in_group > 0:
+                    scale = 1.0 / blocks_in_group
+                    block_scales.extend([scale] * blocks_in_group)
+
+            block_mapping_nested: List[List[int]] = [
+                [i] * b_u for i, b_u in enumerate(blocks_used)
+            ]
+            block_mapping = list(
+                itertools.chain.from_iterable(block_mapping_nested))
+
+            last_block = [
+                sl % self.block_size + 1
+                for sl in itertools.chain(*slot_mapping)
+            ]
+            block_usage_ = [[self.block_size] * (b_u - 1) + [lb]
+                            for b_u, lb in zip(blocks_used, last_block)]
+            block_usage = list(itertools.chain(*block_usage_))
+
+            block_bucket_size = find_bucket(
+                len(block_list),
+                self.bucketing_global_state.decode_block_bucket_cfg)
+            block_mapping = pad_list(block_mapping, block_bucket_size, -1)
+            block_usage = pad_list(block_usage, block_bucket_size, 1)
+            block_scales = pad_list(block_scales, block_bucket_size, 0.0)
+
         block_list = pad_list(block_list, block_bucket_size, _PAD_BLOCK_ID)
         block_groups = pad_list(block_mapping, block_bucket_size,
                                 len(block_tables))
-        block_mapping = pad_list(block_mapping, block_bucket_size, -1)
-        block_usage = pad_list(block_usage, block_bucket_size, 1)
-        block_scales = pad_list(block_scales, block_bucket_size, 0.0)
-
         block_list = torch.tensor(block_list,
                                   dtype=torch.int,
                                   device=self.device)
@@ -1132,7 +1173,6 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         block_usage = torch.tensor(block_usage,
                                    dtype=self.model_config.dtype,
                                    device=self.device)
-
         slot_mapping = torch.tensor(slot_mapping,
                                     dtype=torch.long,
                                     device=self.device)
