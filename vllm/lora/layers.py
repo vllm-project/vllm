@@ -1439,8 +1439,6 @@ class ModulesToSaveWrapper(BaseLayerWithLoRA, TensorPropertiesMixin):
                                                  self._lora_tensors,
                                                  self.base_layer.weight,
                                                  masked_input)
-        
-        #embeddings= self.base_layer.linear_method.embedding(self.base_layer, masked_input)
         return embeddings
 
 

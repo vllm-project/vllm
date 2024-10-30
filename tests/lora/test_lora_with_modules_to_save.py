@@ -48,7 +48,6 @@ def test_llama3_models(
 @pytest.mark.parametrize("num_logprobs", [5])
 def test_lora_with_modules_to_save(
     peft_runner,
-    hf_runner,
     vllm_runner,
     example_prompts,
     model: str,
@@ -63,6 +62,7 @@ def test_lora_with_modules_to_save(
                      enable_lora=True,
                      max_loras = 4,
                      max_lora_rank = 32,
+                     enable_lora_modules_to_save=True,
                      gpu_memory_utilization=0.5) as vllm_lora_model:
         vllm_outputs = []
         lora_request = LoRARequest(
