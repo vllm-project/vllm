@@ -1,17 +1,18 @@
 import copy
 import dataclasses
 import operator
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
+from typing import (Any, Callable, Dict, List, Optional, Sequence, Set, Tuple,
+                    Union)
 
 import torch
 import torch.fx as fx
 
 from vllm.logger import init_logger
-from vllm.utils import weak_ref_tensors
+from vllm.utils import combine_fx_passes, weak_ref_tensors
 
-from .fusion import FusionPass
 from .config import CompilationConfig
 from .counter import compilation_counter
+from .fusion import FusionPass
 from .levels import CompilationLevel
 
 logger = init_logger(__name__)
@@ -206,6 +207,7 @@ def fix_functionalization(graph: fx.Graph):
     # with open("after.py", "w") as f:
     #     print(graph.python_code(root_module="self", verbose=True).src, file=f)
 
+
 def wrap_inductor(graph,
                   example_inputs,
                   additional_inductor_config,
@@ -296,6 +298,13 @@ class VllmBackend:
 
     The major work of this backend is to split the graph into
     piecewise graphs, and pass them to the piecewise backend.
+
+    This backend also handles custom passes and adds them to Inductor config.
+    The order of the post-grad post-passes is:
+    1. post_grad_passes (constructor parameter)
+    2. config["post_grad_custom_post_pass"]
+    3. fix_functionalization
+    This way, all passes operate on a functionalized graph.
     """
 
     compilation_configs: CompilationConfig
@@ -307,13 +316,26 @@ class VllmBackend:
     split_gm: fx.GraphModule
     piecewise_graphs: List[SplitItem]
     returned_callable: Callable
+    # Inductor passes to run on the graph pre-defunctionalization
+    post_grad_passes: Sequence[Callable]
 
-    def __init__(self, ):
+    def __init__(self, post_grad_passes: Sequence[Callable]):
         # every instance of VllmBackend has its own graph pool
         self.graph_pool = torch.cuda.graph_pool_handle()
+        self.post_grad_passes = post_grad_passes
 
         # `torch.compile` is JIT compiled, so we don't need to
         # do anything here
+
+    def add_passes_to_config(self):
+        config = self.compilation_configs.inductor_compile_config
+        custom_postgrad_pass = config["post_grad_custom_post_pass"]
+        passes = list(self.post_grad_passes)
+        if custom_postgrad_pass is not None:
+            passes = passes + [custom_postgrad_pass]
+
+        passes = passes + [fix_functionalization]
+        config["post_grad_custom_post_pass"] = combine_fx_passes(passes)
 
     def __call__(self, graph: fx.GraphModule, example_inputs) -> Callable:
 
@@ -328,6 +350,7 @@ class VllmBackend:
         # we get the sizes to capture for cudagraph
         # from compilation context
         self.compilation_configs = CompilationConfig.select_and_init_config()
+        self.add_passes_to_config()
 
         self.split_gm, self.piecewise_graphs = split_graph(
             graph, self.compilation_configs.non_cudagraph_ops)
@@ -528,4 +551,5 @@ def select_default_backend(level: int) -> Union[str, Callable]:
         return backend_str
     assert level == CompilationLevel.PIECEWISE
 
-    return VllmBackend()
+    passes = [FusionPass()]
+    return VllmBackend(passes)

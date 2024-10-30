@@ -81,7 +81,7 @@ class CompilationConfig(BaseModel):
             if not isinstance(v, str):
                 assert callable(v), (
                     f"pass {k} should be a function or a qualified name")
-                self.inductor_passes[k] = v
+                self.inductor_compile_config[k] = v
                 continue
 
             # resolve function from qualified name
@@ -90,18 +90,6 @@ class CompilationConfig(BaseModel):
             func_name = names[-1]
             func = __import__(module).__dict__[func_name]
             self.inductor_compile_config[k] = func
-
-        from vllm.compilation.backends import fix_functionalization
-        from vllm.utils import combine_fx_passes
-        if "post_grad_custom_post_pass" in self.inductor_compile_config:
-            self.inductor_compile_config[
-                "post_grad_custom_post_pass"] = combine_fx_passes(
-                    fix_functionalization,
-                    self.inductor_compile_config["post_grad_custom_post_pass"],
-                )
-        else:
-            self.inductor_compile_config[
-                "post_grad_custom_post_pass"] = fix_functionalization
 
     def init_during_runtime(self):
         """To complete the initialization of config,
