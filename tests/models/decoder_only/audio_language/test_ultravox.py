@@ -92,7 +92,7 @@ def run_test(
             for vllm_prompt, _, audio in prompts_and_audios
         ]
 
-    def process(hf_inputs: BatchEncoding):
+    def process(hf_inputs: BatchEncoding, **kwargs):
         hf_inputs["audio_values"] = hf_inputs["audio_values"] \
             .to(torch_dtype)  # type: ignore
         return hf_inputs
