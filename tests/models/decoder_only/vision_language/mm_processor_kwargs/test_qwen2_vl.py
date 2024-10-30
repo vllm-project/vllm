@@ -8,8 +8,8 @@ from transformers import AutoTokenizer
 from vllm.inputs import InputContext, token_inputs
 from vllm.multimodal import MultiModalRegistry
 
-from ....conftest import _ImageAssets
-from ...utils import build_model_context
+from .....conftest import _ImageAssets
+from ....utils import build_model_context
 
 MODEL = "Qwen/Qwen2-VL-2B-Instruct"
 MIN_PIXELS = "min_pixels"
