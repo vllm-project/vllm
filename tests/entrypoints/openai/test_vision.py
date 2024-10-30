@@ -78,11 +78,12 @@ async def test_single_chat_session_image(client: openai.AsyncOpenAI,
     }]
 
     # test single completion
-    chat_completion = await client.chat.completions.create(model=model_name,
-                                                           messages=messages,
-                                                           max_completion_tokens=10,
-                                                           logprobs=True,
-                                                           top_logprobs=5)
+    chat_completion = await client.chat.completions.create(
+        model=model_name,
+        messages=messages,
+        max_completion_tokens=10,
+        logprobs=True,
+        top_logprobs=5)
     assert len(chat_completion.choices) == 1
 
     choice = chat_completion.choices[0]
@@ -169,11 +170,12 @@ async def test_single_chat_session_image_base64encoded(
     }]
 
     # test single completion
-    chat_completion = await client.chat.completions.create(model=model_name,
-                                                           messages=messages,
-                                                           max_completion_tokens=10,
-                                                           logprobs=True,
-                                                           top_logprobs=5)
+    chat_completion = await client.chat.completions.create(
+        model=model_name,
+        messages=messages,
+        max_completion_tokens=10,
+        logprobs=True,
+        top_logprobs=5)
     assert len(chat_completion.choices) == 1
 
     choice = chat_completion.choices[0]

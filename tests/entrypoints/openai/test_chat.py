@@ -65,11 +65,12 @@ async def test_no_logprobs_chat(client: openai.AsyncOpenAI, model_name: str):
         "content": "what is 1+1?"
     }]
 
-    chat_completion = await client.chat.completions.create(model=model_name,
-                                                           messages=messages,
-                                                           max_completion_tokens=5,
-                                                           temperature=0.0,
-                                                           logprobs=False)
+    chat_completion = await client.chat.completions.create(
+        model=model_name,
+        messages=messages,
+        max_completion_tokens=5,
+        temperature=0.0,
+        logprobs=False)
 
     choice = chat_completion.choices[0]
     assert choice.logprobs is None
@@ -90,12 +91,13 @@ async def test_zero_logprobs_chat(client: openai.AsyncOpenAI, model_name: str):
         "content": "what is 1+1?"
     }]
 
-    chat_completion = await client.chat.completions.create(model=model_name,
-                                                           messages=messages,
-                                                           max_completion_tokens=5,
-                                                           temperature=0.0,
-                                                           logprobs=True,
-                                                           top_logprobs=0)
+    chat_completion = await client.chat.completions.create(
+        model=model_name,
+        messages=messages,
+        max_completion_tokens=5,
+        temperature=0.0,
+        logprobs=True,
+        top_logprobs=0)
 
     choice = chat_completion.choices[0]
     assert choice.logprobs is not None
@@ -117,12 +119,13 @@ async def test_some_logprobs_chat(client: openai.AsyncOpenAI, model_name: str):
         "content": "what is 1+1?"
     }]
 
-    chat_completion = await client.chat.completions.create(model=model_name,
-                                                           messages=messages,
-                                                           max_completion_tokens=5,
-                                                           temperature=0.0,
-                                                           logprobs=True,
-                                                           top_logprobs=5)
+    chat_completion = await client.chat.completions.create(
+        model=model_name,
+        messages=messages,
+        max_completion_tokens=5,
+        temperature=0.0,
+        logprobs=True,
+        top_logprobs=5)
 
     choice = chat_completion.choices[0]
     assert choice.logprobs is not None
@@ -165,10 +168,11 @@ async def test_too_many_chat_logprobs(client: openai.AsyncOpenAI,
                                              stream=False)
 
     # the server should still work afterwards
-    chat_completion = await client.chat.completions.create(model=model_name,
-                                                           messages=messages,
-                                                           max_completion_tokens=10,
-                                                           stream=False)
+    chat_completion = await client.chat.completions.create(
+        model=model_name,
+        messages=messages,
+        max_completion_tokens=10,
+        stream=False)
     message = chat_completion.choices[0].message
     assert message.content is not None and len(message.content) >= 0
 
@@ -271,11 +275,12 @@ async def test_single_chat_session(client: openai.AsyncOpenAI,
     }]
 
     # test single completion
-    chat_completion = await client.chat.completions.create(model=model_name,
-                                                           messages=messages,
-                                                           max_completion_tokens=10,
-                                                           logprobs=True,
-                                                           top_logprobs=5)
+    chat_completion = await client.chat.completions.create(
+        model=model_name,
+        messages=messages,
+        max_completion_tokens=10,
+        logprobs=True,
+        top_logprobs=5)
     assert chat_completion.id is not None
     assert len(chat_completion.choices) == 1
 

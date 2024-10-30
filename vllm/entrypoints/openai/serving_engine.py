@@ -263,9 +263,9 @@ class OpenAIServing:
             return TextTokensPrompt(prompt=input_text,
                                     prompt_token_ids=input_ids)
 
-        # max_tokens is deprecated in favor of max_completion_tokens for the OpenAI chat completion endpoint
+        # chat completion endpoint supports max_completion_tokens
         if isinstance(request, ChatCompletionRequest):
-            # TODO: remove self.max_tokens when deprecated field max_tokens is removed from OpenAI API
+            # TODO: remove max_tokens when field is removed from OpenAI API
             max_tokens = request.max_completion_tokens or request.max_tokens
         else:
             max_tokens = request.max_tokens
