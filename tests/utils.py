@@ -5,7 +5,6 @@ import signal
 import subprocess
 import sys
 import time
-import traceback
 import warnings
 from contextlib import contextmanager
 from pathlib import Path
@@ -23,14 +22,11 @@ from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.openai.cli_args import make_arg_parser
-from vllm.logger import init_logger
 from vllm.model_executor.model_loader.loader import get_model_loader
 from vllm.platforms import current_platform
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.utils import (FlexibleArgumentParser, GB_bytes,
                         cuda_device_count_stateless, get_open_port)
-
-logger = init_logger(__name__)
 
 if current_platform.is_rocm():
     from amdsmi import (amdsmi_get_gpu_vram_usage,
@@ -138,8 +134,10 @@ class RemoteOpenAIServer:
                 if requests.get(url).status_code == 200:
                     break
             except Exception:
-                # For full exception trace, please set the logger level to DEBUG
-                logger.debug(traceback.format_exc())
+                # this exception can only be raised by requests.get,
+                # which means the server is not ready yet.
+                # the stack trace is not useful, so we suppress it
+                # by using `raise from None`.
                 result = self.proc.poll()
                 if result is not None and result != 0:
                     raise RuntimeError("Server exited unexpectedly.") from None
