@@ -1387,9 +1387,8 @@ class ModulesToSaveWrapper(BaseLayerWithLoRA, TensorPropertiesMixin):
         
         assert type(self.base_layer)==ParallelLMHead
 
-        # TODO  implement embed_tokens
         logits = self.punica_wrapper.bgmv_sample(hidden_states,
-                                                 self.lm_head_tensors,
+                                                 self._lora_tensors,
                                                  self.base_layer.weight)
 
         if bias is not None:
@@ -1399,12 +1398,12 @@ class ModulesToSaveWrapper(BaseLayerWithLoRA, TensorPropertiesMixin):
     
     def embedding(self, embed_tokens: 'ModulesToSaveWrapper', masked_input: torch.LongTensor):
         assert type(self.base_layer)==VocabParallelEmbedding
-        ''' TODO implement punica
         embeddings = self.punica_wrapper.bgmv_embedding(
-                                                 self.embed_tokens_tensors,
+                                                 self._lora_tensors,
+                                                 self.base_layer.weight,
                                                  masked_input)
-        '''
-        embeddings= self.base_layer.linear_method.embedding(self.base_layer, masked_input)
+        
+        #embeddings= self.base_layer.linear_method.embedding(self.base_layer, masked_input)
         return embeddings
 
 
@@ -1418,14 +1417,18 @@ class ModulesToSaveWrapper(BaseLayerWithLoRA, TensorPropertiesMixin):
 
         self.dtype = lora_config.lora_dtype
 
-        self.lm_head_tensors = torch.zeros(
+        # lora_tensors - lm_head tensors in case of ParallelLMHead base 
+        # or embed_tokens tensors in case of VocabParallelEmbedding
+        self._lora_tensors = torch.zeros(
             (max_loras, self.padded_vocab_size, self.base_layer.embedding_dim),
             dtype=lora_config.lora_dtype,
             device=self.device,
         )
+        
+            
 
     def reset_lora(self, index: int):
-        self.lm_head_tensors[index] = 0
+        self._lora_tensors[index] = 0
 
     def set_lora(
         self,
@@ -1438,7 +1441,7 @@ class ModulesToSaveWrapper(BaseLayerWithLoRA, TensorPropertiesMixin):
         assert embeddings_tensor is None
 
         self.reset_lora(index)
-        self.lm_head_tensors[index, :lora_b.shape[0], :lora_b.shape[1]].copy_(
+        self._lora_tensors[index, :lora_b.shape[0], :lora_b.shape[1]].copy_(
             lora_b, non_blocking=True)
 
     def forward(self, *args, **kwargs):
