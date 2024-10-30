@@ -1251,7 +1251,6 @@ class GGUFModelLoader(BaseModelLoader):
             model.load_weights(
                 self._get_weights_iterator(local_model_path, gguf_weights_map))
         return model
-
 try:
     from runai_model_streamer import SafetensorsStreamer
 except ImportError:
@@ -1259,6 +1258,8 @@ except ImportError:
         "Please install runai-model-streamer to use RunAIStreamerLoader. "
         "You can install it with: pip install runai-model-streamer"
     )
+
+logger = init_logger(__name__)
 
 class RunAIStreamerLoader(BaseModelLoader):
     """Model loader that uses Run:ai Model Streamer for efficient loading from filesystem or S3."""
@@ -1346,7 +1347,7 @@ class RunAIStreamerLoader(BaseModelLoader):
         scheduler_config: Optional[SchedulerConfig] = None
     ) -> nn.Module:
         """Initialize the model architecture."""
-        from vllm.model_executor.model_loader.model_loader import _initialize_model
+        # from vllm.model_executor.model_loader.model_loader import _initialize_model
         return _initialize_model(
             model_config=model_config,
             load_config=self.load_config,
@@ -1366,7 +1367,7 @@ class RunAIStreamerLoader(BaseModelLoader):
         cache_config: CacheConfig
     ) -> nn.Module:
         """Load a model using Run:ai Model Streamer."""
-        from vllm.model_executor.utils import set_default_torch_dtype
+        # from vllm.model_executor.utils import set_default_torch_dtype
         
         # Get model path
         model_path = self._get_model_path(model_config)
@@ -1381,7 +1382,6 @@ class RunAIStreamerLoader(BaseModelLoader):
                     cache_config=cache_config,
                     scheduler_config=scheduler_config
                 )
-                
             # Load weights
             model.load_weights(self._get_weights_iterator(model_path))
             
@@ -1389,7 +1389,7 @@ class RunAIStreamerLoader(BaseModelLoader):
             for _, module in model.named_modules():
                 quant_method = getattr(module, "quant_method", None)
                 if quant_method is not None:
-                    from vllm.model_executor.model_loader import device_loading_context
+                    # from vllm.model_executor.model_loader.model_loader import device_loading_context
                     with device_loading_context(module, torch.device(device_config.device)):
                         quant_method.process_weights_after_loading(module)
                         
@@ -1415,7 +1415,6 @@ def get_model_loader(load_config: LoadConfig) -> BaseModelLoader:
 
     if load_config.load_format == LoadFormat.GGUF:
         return GGUFModelLoader(load_config)
-    
     if load_config.load_format == LoadFormat.RUNAI_STREAMER:
         return RunAIStreamerLoader(load_config)
 
