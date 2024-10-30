@@ -133,15 +133,19 @@ class RemoteOpenAIServer:
             try:
                 if requests.get(url).status_code == 200:
                     break
-            except Exception as err:
+            except Exception:
+                # this exception can only be raised by requests.get,
+                # which means the server is not ready yet.
+                # the stack trace is not useful, so we suppress it
+                # by using `raise from None`.
                 result = self.proc.poll()
                 if result is not None and result != 0:
-                    raise RuntimeError("Server exited unexpectedly.") from err
+                    raise RuntimeError("Server exited unexpectedly.") from None
 
                 time.sleep(0.5)
                 if time.time() - start > timeout:
                     raise RuntimeError(
-                        "Server failed to start in time.") from err
+                        "Server failed to start in time.") from None
 
     @property
     def url_root(self) -> str:
