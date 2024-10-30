@@ -21,7 +21,7 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils import FlexibleArgumentParser
 
 MODEL = "google/gemma-1.1-2b-it"
-ENGINE_ARGS = AsyncEngineArgs(model=MODEL)
+ENGINE_ARGS = AsyncEngineArgs(model=MODEL, enforce_eager=True)
 RAISED_ERROR = KeyError
 RAISED_VALUE = "foo"
 
@@ -266,3 +266,28 @@ async def test_mp_cuda_init():
 
     async with build_async_engine_client(args):
         pass
+
+
+@pytest.mark.asyncio
+async def test_engine_process_death(tmp_socket):
+    with RemoteMQLLMEngine(engine_args=ENGINE_ARGS,
+                           ipc_path=tmp_socket) as engine:
+
+        client = await engine.make_client()
+        assert client.is_running
+
+        # kill the engine process
+        engine.proc.kill()
+
+        # Generate call should fail
+        with pytest.raises(MQEngineDeadError):
+            async for _ in client.generate(prompt="Hello my name is",
+                                           sampling_params=SamplingParams(),
+                                           request_id=uuid.uuid4()):
+                pass
+
+        # And the health check should show the engine is dead
+        with pytest.raises(RuntimeError, match="Engine process .* died"):
+            await client.check_health()
+
+        client.close()

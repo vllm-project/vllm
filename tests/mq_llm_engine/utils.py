@@ -68,7 +68,7 @@ class RemoteMQLLMEngine:
 
     async def make_client(self) -> MQLLMEngineClient:
         engine_config = self.engine_args.create_engine_config()
-        client = MQLLMEngineClient(self.ipc_path, engine_config)
+        client = MQLLMEngineClient(self.ipc_path, engine_config, self.proc.pid)
         while True:
             try:
                 await client.setup()
