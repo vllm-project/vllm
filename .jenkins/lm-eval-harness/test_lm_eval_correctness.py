@@ -42,6 +42,8 @@ def launch_lm_eval(eval_config):
                  f"max_model_len=4096," \
                  f"max_num_seqs={max_num_seqs}," \
                  f"trust_remote_code={trust_remote_code}"
+    if eval_config.get("num_scheduled_steps"):
+        model_args += f",num_scheduled_steps={eval_config.get('num_scheduled_steps')}"
     kwargs = {}
     if 'fewshot_as_multiturn' in eval_config:
         kwargs['fewshot_as_multiturn'] = eval_config['fewshot_as_multiturn']
