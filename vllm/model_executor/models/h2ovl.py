@@ -175,13 +175,15 @@ def image_to_pixel_values(
 
 
 def image_to_pixel_values_wrapper(hf_config: PretrainedConfig,
-                                  max_dynamic_patch: Optional[int] = None):
+                                  max_dynamic_patch: Optional[int] = None,
+                                  use_MSAC: Optional[bool] = None):
     image_size = hf_config.vision_config.image_size
     min_num = hf_config.min_dynamic_patch
     if max_dynamic_patch is None:
         max_dynamic_patch = hf_config.max_dynamic_patch
+    if use_MSAC is None:
+        use_MSAC = hf_config.use_msac
     use_thumbnail = hf_config.use_thumbnail
-    use_MSAC = hf_config.use_msac
     return partial(
         image_to_pixel_values,
         input_size=image_size,
@@ -218,9 +220,6 @@ class H2OVLInputPipeline(InternVLInputPipeline):
     Input pipeline for processing image and text data for the H2OVL model.
     """
 
-    def __init__(self):
-        super().__init__(IMG_START, IMG_END, IMG_CONTEXT)
-
     def input_processor(
         self,
         ctx: InputContext,
@@ -235,6 +234,7 @@ class H2OVLInputPipeline(InternVLInputPipeline):
 
         model_config = ctx.model_config
         hf_config = ctx.get_hf_config()
+        use_MSAC = hf_config.use_msac
 
         image_data = multi_modal_data["image"]
         num_patches = get_internvl_num_patches(hf_config)
@@ -244,7 +244,8 @@ class H2OVLInputPipeline(InternVLInputPipeline):
 
         # single image
         if isinstance(image_data, Image.Image):
-            pixel_values = image_pixel_values_mapper(image_data)
+            pixel_values = image_pixel_values_mapper(image_data,
+                                                     use_MSAC=use_MSAC)
             num_blocks = pixel_values.shape[0]
             image_feature_sizes = [num_blocks * num_patches]
             pixel_values = pixel_values.unsqueeze(0)
@@ -252,10 +253,10 @@ class H2OVLInputPipeline(InternVLInputPipeline):
         # multi images
         elif is_list_of(image_data, Image.Image):
             # Do not use MSAC for multi images
-            hf_config.use_msac = False
             image_feature_sizes = []
             pixel_values = [
-                image_pixel_values_mapper(image) for image in image_data
+                image_pixel_values_mapper(image, use_MSAC=False)
+                for image in image_data
             ]
             for pixel_value in pixel_values:
                 num_blocks = pixel_value.shape[0]
@@ -348,7 +349,7 @@ class H2OVLInputPipeline(InternVLInputPipeline):
         })
 
 
-input_pipeline = H2OVLInputPipeline()
+input_pipeline = H2OVLInputPipeline(IMG_START, IMG_END, IMG_CONTEXT)
 
 
 @MULTIMODAL_REGISTRY.register_image_input_mapper(input_pipeline.input_mapper)
