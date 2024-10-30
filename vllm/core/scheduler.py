@@ -1747,6 +1747,9 @@ class Scheduler:
 
                 # Calculate the number of new tokens that are not cached with chunk cap.
                 num_new_tokens_uncached = min(num_new_tokens - num_new_tokens_cached, remaining_token_budget)
+                if num_new_tokens_uncached == 0:
+                    # No more budget for new tokens, don't include any cached tokens too.
+                    return 0
                 num_new_tokens = num_new_tokens_uncached + num_new_tokens_cached
                 # print(f"[{seq_group.request_id}] {num_new_tokens=} {num_new_tokens_uncached=} {num_new_tokens_cached=}, budget: {budget.num_batched_tokens}")
             else:
