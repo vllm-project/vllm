@@ -50,7 +50,9 @@ bool sparsify_and_compress(torch::Tensor& a_compressed, torch::Tensor& e, torch:
 {
   // Checks for conformality
   TORCH_CHECK(a.dtype() == torch::kInt8 ||
-              a.dtype() == torch::kFloat8_e4m3fn);
+              a.dtype() == torch::kFloat8_e4m3fn ||
+              a.dtype() == torch::kFloat16 ||
+              a.dtype() == torch::kBFloat16);
   TORCH_CHECK(a.dim() == 2)
   // Check for strides and alignment
   TORCH_CHECK(a.stride(1) == 1)
@@ -67,12 +69,21 @@ bool sparsify_and_compress(torch::Tensor& a_compressed, torch::Tensor& e, torch:
   using StrideE = StrideA;
 
   using Gemm =
-      typename std::conditional<std::is_same_v<ElementA, int8_t>,
-        typename sm90_int8_config_default<int8_t, cutlass::half_t,
-                                          ScaledEpilogue>::Cutlass3xGemm,
+    typename std::conditional<std::is_same_v<ElementA, int8_t>,
+      typename sm90_int8_config_default<int8_t, cutlass::half_t,
+                                        ScaledEpilogue>::Cutlass3xGemm,
+      typename std::conditional<std::is_same_v<ElementA, cutlass::float_e4m3_t>,
         typename sm90_fp8_config_default<cutlass::float_e4m3_t, cutlass::half_t,
-                                         ScaledEpilogue>::Cutlass3xGemm
-      >::type;
+                                          ScaledEpilogue>::Cutlass3xGemm,
+        typename std::conditional<std::is_same_v<ElementA, cutlass::half_t>,
+          typename sm90_fp16_config_default<cutlass::half_t, cutlass::half_t,
+                                            ScaledEpilogue>::Cutlass3xGemm,
+          typename sm90_bf16_config_default<cutlass::bfloat16_t,
+                                            cutlass::half_t,
+                                            ScaledEpilogue>::Cutlass3xGemm
+        >::type
+      >::type
+    >::type;
 
   using ElementAB = typename Gemm::ElementAB;
   using ElementD = typename Gemm::ElementD;
@@ -178,12 +189,11 @@ bool sparsify_and_compress(torch::Tensor& a_compressed, torch::Tensor& e, torch:
 
 bool cutlass_sparsify_and_compress_entry(torch::Tensor& a_compressed, torch::Tensor& e, torch::Tensor const& a)
 {
-  // if (a.dtype() == torch::kBFloat16) {
-  //   return sparsify_and_compress<cutlass::bfloat16_t>(a_compressed, e, a);
-  // } else if (a.dtype() == torch::kFloat16) {
-  //   return sparsify_and_compress<cutlass::half_t>(a_compressed, e, a);
-  // } else
-  if (a.dtype() == torch::kFloat8_e4m3fn) {
+  if (a.dtype() == torch::kBFloat16) {
+    return sparsify_and_compress<cutlass::bfloat16_t>(a_compressed, e, a);
+  } else if (a.dtype() == torch::kFloat16) {
+    return sparsify_and_compress<cutlass::half_t>(a_compressed, e, a);
+  } else if (a.dtype() == torch::kFloat8_e4m3fn) {
     return sparsify_and_compress<cutlass::float_e4m3_t>(a_compressed, e, a);
   }
   else if (a.dtype() == torch::kInt8) {

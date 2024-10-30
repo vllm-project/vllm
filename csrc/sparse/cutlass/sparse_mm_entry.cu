@@ -4,7 +4,7 @@
 #include <torch/all.h>
 
 #if defined ENABLE_SCALED_MM_C3X && ENABLE_SCALED_MM_C3X
-void cutlass_scaled_test_mm_sm90(torch::Tensor& c, torch::Tensor const& a,
+void cutlass_scaled_sparse_mm_sm90(torch::Tensor& c, torch::Tensor const& a,
                             torch::Tensor const& e,
                             torch::Tensor const& b,
                             torch::Tensor const& a_scales,
@@ -12,7 +12,7 @@ void cutlass_scaled_test_mm_sm90(torch::Tensor& c, torch::Tensor const& a,
                             c10::optional<torch::Tensor> const& bias);
 #endif
 
-bool cutlass_scaled_test_mm_supports_fp8(int64_t cuda_device_capability) {
+bool cutlass_scaled_sparse_mm_supports_fp8(int64_t cuda_device_capability) {
   // CUTLASS FP8 kernels need at least
   //   CUDA 12.0 on SM90 systems (Hopper)
   //   CUDA 12.4 on SM89 systems (Lovelace)
@@ -38,7 +38,7 @@ int32_t test_get_sm_version_num() {
   return version_num;
 }
 
-void cutlass_scaled_test_mm(torch::Tensor& c, torch::Tensor const& a,
+void cutlass_scaled_sparse_mm(torch::Tensor& c, torch::Tensor const& a,
                        torch::Tensor const& e,
                        torch::Tensor const& b, torch::Tensor const& a_scales,
                        torch::Tensor const& b_scales,
@@ -69,14 +69,14 @@ void cutlass_scaled_test_mm(torch::Tensor& c, torch::Tensor const& a,
   // Guard against compilation issues for sm90 kernels
 #if defined ENABLE_SCALED_MM_C3X && ENABLE_SCALED_MM_C3X
   if (version_num >= 90) {
-    cutlass_scaled_test_mm_sm90(c, a, e, b, a_scales, b_scales, bias);
+    cutlass_scaled_sparse_mm_sm90(c, a, e, b, a_scales, b_scales, bias);
     return;
   }
 #endif
 
   TORCH_CHECK_NOT_IMPLEMENTED(
       false,
-      "No compiled cutlass_scaled_test_mm for a compute capability less than "
+      "No compiled cutlass_scaled_sparse_mm for a compute capability less than "
       "CUDA device capability: ",
       version_num);
 }

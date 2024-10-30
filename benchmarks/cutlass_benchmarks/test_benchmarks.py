@@ -25,9 +25,14 @@ def to_fp8(tensor: torch.Tensor) -> torch.Tensor:
     return torch.round(tensor.clamp(
         min=finfo.min, max=finfo.max)).to(dtype=torch.float8_e4m3fn)
 
-
 def to_int8(tensor: torch.Tensor) -> torch.Tensor:
     return torch.round(tensor.clamp(min=-128, max=127)).to(dtype=torch.int8)
+
+def to_bf16(tensor: torch.Tensor) -> torch.Tensor:
+    return tensor.to(dtype=torch.bfloat16)
+
+def to_fp16(tensor: torch.Tensor) -> torch.Tensor:
+    return tensor.to(dtype=torch.float16)
 
 
 def make_rand_tensors(dtype: torch.dtype, m: int, n: int,
@@ -43,6 +48,10 @@ def make_rand_tensors(dtype: torch.dtype, m: int, n: int,
         return to_int8(a), to_int8(b)
     if dtype == torch.float8_e4m3fn:
         return to_fp8(a), to_fp8(b)
+    if dtype == torch.float16:
+        return to_fp16(a), to_fp16(b)
+    if dtype == torch.bfloat16:
+        return to_bf16(a), to_bf16(b)
 
     raise ValueError("unsupported dtype")
 
@@ -82,7 +91,7 @@ def bench_int8(dtype: torch.dtype, m: int, k: int, n: int, label: str,
     bias = torch.zeros((n, ), device="cuda", dtype=torch.bfloat16)
 
     print(f'Default matmul: {torch.mm(a.to(dtype=torch.float16, device="cuda"), b.to(dtype=torch.float16, device="cuda"))[0:2, :12]}')
-    print(f'Cutlass matmul: {ops.cutlass_scaled_test_mm(a_compressed, e, b, scale_a, scale_b, torch.float16)[0:2, :12]}')
+    print(f'Cutlass matmul: {ops.cutlass_scaled_sparse_mm(a_compressed, e, b, scale_a, scale_b, torch.float16)[0:2, :12]}')
 
     timers = []
     # pytorch impl - bfloat16
@@ -100,25 +109,25 @@ def bench_int8(dtype: torch.dtype, m: int, k: int, n: int, label: str,
     # cutlass impl: bf16 output
     timers.append(
         bench_fn(label, sub_label, "cutlass_i8_i8_bf16_scaled_mm",
-                 ops.cutlass_scaled_test_mm, a_compressed, e, b, scale_a, scale_b,
+                 ops.cutlass_scaled_sparse_mm, a_compressed, e, b, scale_a, scale_b,
                  torch.bfloat16))
 
     # cutlass with bias: bf16 output
     timers.append(
         bench_fn(label, sub_label, "cutlass_i8_i8_bf16_scaled_mm_bias",
-                 ops.cutlass_scaled_test_mm, a_compressed, e, b, scale_a, scale_b, torch.bfloat16,
+                 ops.cutlass_scaled_sparse_mm, a_compressed, e, b, scale_a, scale_b, torch.bfloat16,
                  bias))
     
     # cutlass impl: fp16 output
     timers.append(
         bench_fn(label, sub_label, "cutlass_i8_i8_fp16_scaled_mm",
-                 ops.cutlass_scaled_test_mm, a_compressed, e, b, scale_a, scale_b,
+                 ops.cutlass_scaled_sparse_mm, a_compressed, e, b, scale_a, scale_b,
                  torch.float16))
 
     # cutlass with bias: fp16 output
     timers.append(
         bench_fn(label, sub_label, "cutlass_i8_i8_fp16_scaled_mm_bias",
-                 ops.cutlass_scaled_test_mm, a_compressed, e, b, scale_a, scale_b, torch.float16,
+                 ops.cutlass_scaled_sparse_mm, a_compressed, e, b, scale_a, scale_b, torch.float16,
                  bias.to(dtype=torch.float16)))
 
     return timers
@@ -140,7 +149,7 @@ def bench_fp8(dtype: torch.dtype, m: int, k: int, n: int, label: str,
     bias = torch.zeros((n, ), device="cuda", dtype=torch.bfloat16)
 
     print(f'Default matmul: {torch.mm(a.to(dtype=torch.float16, device="cuda"), b.to(dtype=torch.float16, device="cuda"))[0:2, :12]}')
-    print(f'Cutlass matmul: {ops.cutlass_scaled_test_mm(a_compressed, e, b, scale_a, scale_b, torch.float16)[0:2, :12]}')
+    print(f'Cutlass matmul: {ops.cutlass_scaled_sparse_mm(a_compressed, e, b, scale_a, scale_b, torch.float16)[0:2, :12]}')
 
     timers = []
 
@@ -203,23 +212,175 @@ def bench_fp8(dtype: torch.dtype, m: int, k: int, n: int, label: str,
     # cutlass impl: bf16 output
     timers.append(
         bench_fn(label, sub_label, "cutlass_fp8_fp8_bf16_scaled_mm",
-                 ops.cutlass_scaled_test_mm, a_compressed, e, b, scale_a, scale_b,
+                 ops.cutlass_scaled_sparse_mm, a_compressed, e, b, scale_a, scale_b,
                  torch.bfloat16))
     # cutlass impl: fp16 output
     timers.append(
         bench_fn(label, sub_label, "cutlass_fp8_fp8_fp16_scaled_mm",
-                 ops.cutlass_scaled_test_mm, a_compressed, e, b, scale_a, scale_b, torch.float16))
+                 ops.cutlass_scaled_sparse_mm, a_compressed, e, b, scale_a, scale_b, torch.float16))
 
     # cutlass impl: bf16 output, with bias
     timers.append(
         bench_fn(label, sub_label, "cutlass_fp8_fp8_bf16_scaled_mm_bias",
-                 ops.cutlass_scaled_test_mm, a_compressed, e, b, scale_a, scale_b, torch.bfloat16,
+                 ops.cutlass_scaled_sparse_mm, a_compressed, e, b, scale_a, scale_b, torch.bfloat16,
                  bias))
 
     # cutlass impl: fp16 output, with bias
     timers.append(
         bench_fn(label, sub_label, "cutlass_fp8_fp8_fp16_scaled_mm_bias",
-                 ops.cutlass_scaled_test_mm, a_compressed, e, b, scale_a, scale_b, torch.float16,
+                 ops.cutlass_scaled_sparse_mm, a_compressed, e, b, scale_a, scale_b, torch.float16,
+                 bias.to(dtype=torch.float16)))
+
+    return timers
+
+
+def bench_fp16(dtype: torch.dtype, m: int, k: int, n: int, label: str,
+              sub_label: str) -> Iterable[TMeasurement]:
+    assert dtype == torch.float16
+    a, b = make_rand_tensors(torch.float16, m, n, k)
+    a_compressed, e = ops.cutlass_sparsify_and_compress_entry(a)
+
+    print(f'Default shape: {a.shape}, compressed shape: {a_compressed.shape}, e shape: {e.shape}')
+    print(f'a: {a[-1, -23:]}')
+    print(f'a_compressed: {a_compressed[0, :12]}')
+    print(f'e: {e[-1, -23:]}')
+
+    scale_a = torch.tensor(1.0, device="cuda", dtype=torch.float32)
+    scale_b = torch.tensor(1.0, device="cuda", dtype=torch.float32)
+    bias = torch.zeros((n, ), device="cuda", dtype=torch.bfloat16)
+
+    print(f'Default matmul: {torch.mm(a.to(dtype=torch.float16, device="cuda"), b.to(dtype=torch.float16, device="cuda"))[0:2, :12]}')
+    print(f'Cutlass matmul: {ops.cutlass_scaled_sparse_mm(a_compressed, e, b, scale_a, scale_b, torch.float16)[0:2, :12]}')
+
+    timers = []
+
+    # # pytorch impl w. bf16
+    # timers.append(
+    #     bench_fn(label, sub_label, "pytorch_bf16_bf16_bf16_matmul-no-scales",
+    #              torch.mm, a.to(dtype=torch.bfloat16, device="cuda"),
+    #              b.to(dtype=torch.bfloat16, device="cuda")))
+
+    # # pytorch impl: bf16 output
+    # timers.append(
+    #     bench_fn(label,
+    #              sub_label,
+    #              "pytorch_fp16_fp16_bf16_scaled_mm",
+    #              torch._scaled_mm,
+    #              a,
+    #              b,
+    #              scale_a=scale_a,
+    #              scale_b=scale_b,
+    #              out_dtype=torch.bfloat16))
+
+    # # pytorch impl: fp16 output
+    # timers.append(
+    #     bench_fn(label,
+    #              sub_label,
+    #              "pytorch_fp16_fp16_fp16_scaled_mm",
+    #              torch._scaled_mm,
+    #              a,
+    #              b,
+    #              scale_a=scale_a,
+    #              scale_b=scale_b,
+    #              out_dtype=torch.float16))
+
+    # cutlass impl: bf16 output
+    timers.append(
+        bench_fn(label, sub_label, "cutlass_fp16_fp16_bf16_scaled_mm",
+                 ops.cutlass_scaled_sparse_mm, a_compressed, e, b, scale_a, scale_b,
+                 torch.bfloat16))
+
+    # cutlass impl: fp16 output
+    timers.append(
+        bench_fn(label, sub_label, "cutlass_fp16_fp16_fp16_scaled_mm",
+                 ops.cutlass_scaled_sparse_mm, a_compressed, e, b, scale_a, scale_b, torch.float16))
+
+    # cutlass impl: bf16 output, with bias
+    timers.append(
+        bench_fn(label, sub_label, "cutlass_fp16_fp16_bf16_scaled_mm_bias",
+                 ops.cutlass_scaled_sparse_mm, a_compressed, e, b, scale_a, scale_b, torch.bfloat16,
+                 bias))
+
+    # cutlass impl: fp16 output, with bias
+    timers.append(
+        bench_fn(label, sub_label, "cutlass_fp16_fp16_fp16_scaled_mm_bias",
+                 ops.cutlass_scaled_sparse_mm, a_compressed, e, b, scale_a, scale_b, torch.float16,
+                 bias.to(dtype=torch.float16)))
+
+    return timers
+
+
+def bench_bf16(dtype: torch.dtype, m: int, k: int, n: int, label: str,
+              sub_label: str) -> Iterable[TMeasurement]:
+    assert dtype == torch.bfloat16
+    a, b = make_rand_tensors(torch.bfloat16, m, n, k)
+    a_compressed, e = ops.cutlass_sparsify_and_compress_entry(a)
+
+    print(f'Default shape: {a.shape}, compressed shape: {a_compressed.shape}, e shape: {e.shape}')
+    print(f'a: {a[-1, -23:]}')
+    print(f'a_compressed: {a_compressed[0, :12]}')
+    print(f'e: {e[-1, -23:]}')
+
+    scale_a = torch.tensor(1.0, device="cuda", dtype=torch.float32)
+    scale_b = torch.tensor(1.0, device="cuda", dtype=torch.float32)
+    bias = torch.zeros((n, ), device="cuda", dtype=torch.bfloat16)
+
+    print(f'Default matmul: {torch.mm(a.to(dtype=torch.float16, device="cuda"), b.to(dtype=torch.float16, device="cuda"))[0:2, :12]}')
+    print(f'Cutlass matmul: {ops.cutlass_scaled_sparse_mm(a_compressed, e, b, scale_a, scale_b, torch.float16)[0:2, :12]}')
+
+    timers = []
+
+    # # pytorch impl w. bf16
+    # timers.append(
+    #     bench_fn(label, sub_label, "pytorch_bf16_bf16_bf16_matmul-no-scales",
+    #              torch.mm, a.to(dtype=torch.bfloat16, device="cuda"),
+    #              b.to(dtype=torch.bfloat16, device="cuda")))
+
+    # # pytorch impl: bf16 output
+    # timers.append(
+    #     bench_fn(label,
+    #              sub_label,
+    #              "pytorch_fp16_fp16_bf16_scaled_mm",
+    #              torch._scaled_mm,
+    #              a,
+    #              b,
+    #              scale_a=scale_a,
+    #              scale_b=scale_b,
+    #              out_dtype=torch.bfloat16))
+
+    # # pytorch impl: fp16 output
+    # timers.append(
+    #     bench_fn(label,
+    #              sub_label,
+    #              "pytorch_fp16_fp16_fp16_scaled_mm",
+    #              torch._scaled_mm,
+    #              a,
+    #              b,
+    #              scale_a=scale_a,
+    #              scale_b=scale_b,
+    #              out_dtype=torch.float16))
+
+    # cutlass impl: bf16 output
+    timers.append(
+        bench_fn(label, sub_label, "cutlass_bf16_bf16_bf16_scaled_mm",
+                 ops.cutlass_scaled_sparse_mm, a_compressed, e, b, scale_a, scale_b,
+                 torch.bfloat16))
+
+    # cutlass impl: fp16 output
+    timers.append(
+        bench_fn(label, sub_label, "cutlass_bf16_bf16_fp16_scaled_mm",
+                 ops.cutlass_scaled_sparse_mm, a_compressed, e, b, scale_a, scale_b, torch.float16))
+
+    # cutlass impl: bf16 output, with bias
+    timers.append(
+        bench_fn(label, sub_label, "cutlass_bf16_bf16_bf16_scaled_mm_bias",
+                 ops.cutlass_scaled_sparse_mm, a_compressed, e, b, scale_a, scale_b, torch.bfloat16,
+                 bias))
+
+    # cutlass impl: fp16 output, with bias
+    timers.append(
+        bench_fn(label, sub_label, "cutlass_bf16_bf16_fp16_scaled_mm_bias",
+                 ops.cutlass_scaled_sparse_mm, a_compressed, e, b, scale_a, scale_b, torch.float16,
                  bias.to(dtype=torch.float16)))
 
     return timers
@@ -231,6 +392,10 @@ def bench(dtype: torch.dtype, m: int, k: int, n: int, label: str,
         return bench_int8(dtype, m, k, n, label, sub_label)
     if dtype == torch.float8_e4m3fn:
         return bench_fp8(dtype, m, k, n, label, sub_label)
+    if dtype == torch.float16:
+        return bench_fp16(dtype, m, k, n, label, sub_label)
+    if dtype == torch.bfloat16:
+        return bench_bf16(dtype, m, k, n, label, sub_label)
     raise ValueError("unsupported type")
 
 
@@ -338,6 +503,10 @@ if __name__ == '__main__':
             return torch.int8
         if dt == "fp8":
             return torch.float8_e4m3fn
+        if dt == "fp16":
+            return torch.float16
+        if dt == "bf16":
+            return torch.bfloat16
         raise ValueError("unsupported dtype")
 
     parser = FlexibleArgumentParser(
@@ -361,7 +530,7 @@ Benchmark Cutlass GEMM.
     parser.add_argument("--dtype",
                         type=to_torch_dtype,
                         required=True,
-                        help="Available options are ['int8', 'fp8']")
+                        help="Available options are ['int8', 'fp8', 'fp16', 'bf16']")
     subparsers = parser.add_subparsers(dest="cmd")
 
     square_parser = subparsers.add_parser("square_bench")

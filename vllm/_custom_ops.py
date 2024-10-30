@@ -509,13 +509,14 @@ def cutlass_scaled_mm_azp(a: torch.Tensor,
     return out
 
 
-def cutlass_scaled_test_mm_supports_fp8(cuda_device_capability: int) -> bool:
-    return torch.ops._C.cutlass_scaled_test_mm_supports_fp8(cuda_device_capability)
+def cutlass_scaled_sparse_mm_supports_fp8(cuda_device_capability: int) -> bool:
+    return torch.ops._C.cutlass_scaled_sparse_mm_supports_fp8(cuda_device_capability)
 
 
 def cutlass_sparsify_and_compress_entry(a: torch.Tensor) \
     -> Tuple[torch.Tensor, torch.Tensor]:
-    assert (a.dtype is torch.int8 or a.dtype is torch.float8_e4m3fn)
+    assert (a.dtype is torch.int8 or a.dtype is torch.float8_e4m3fn or \
+            a.dtype is torch.bfloat16 or a.dtype is torch.float16)
 
     # Not exactly sure what the right value would be based on cutlass definitions
     # Let's assume e.dtype: torch.uint8 so elemsPerElemE = 8b / 2b_per_nz = 4
@@ -532,7 +533,7 @@ def cutlass_sparsify_and_compress_entry(a: torch.Tensor) \
     return a_compressed, e
 
 
-def cutlass_scaled_test_mm(a: torch.Tensor,
+def cutlass_scaled_sparse_mm(a: torch.Tensor,
                       e: torch.Tensor,
                       b: torch.Tensor,
                       scale_a: torch.Tensor,
@@ -548,7 +549,7 @@ def cutlass_scaled_test_mm(a: torch.Tensor,
     n = b.shape[1]
     out = torch.empty((m, n), dtype=out_dtype, device=a.device)
 
-    torch.ops._C.cutlass_scaled_test_mm(out, a, e, b, scale_a, scale_b, bias)
+    torch.ops._C.cutlass_scaled_sparse_mm(out, a, e, b, scale_a, scale_b, bias)
 
     return out
 
