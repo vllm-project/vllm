@@ -1294,18 +1294,30 @@ class RunAIStreamerLoader(BaseModelLoader):
         """Get the path to the model file."""
         model_path = model_config.model
         
-        # Handle S3 paths
+        # If it's an S3 path, return directly
         if model_path.startswith("s3://"):
             return model_path
             
-        # Handle local paths
+        # If it's a local file, return the path
         if os.path.isfile(model_path):
             return model_path
-            
-        raise ValueError(
-            f"Model path {model_path} is invalid. It should be either an S3 URI "
-            "or a local file path pointing to a .safetensors file"
+        
+        # If it's a HuggingFace model, download it first
+        # Use vLLM's existing download functionality
+        hf_folder = download_weights_from_hf(
+            model_name_or_path=model_path,
+            cache_dir=self.load_config.download_dir,
+            allow_patterns=["*.safetensors"],
+            revision=model_config.revision,
+            ignore_patterns=self.load_config.ignore_patterns,
         )
+        
+        # Find the safetensors file
+        safetensors_files = glob.glob(os.path.join(hf_folder, "*.safetensors"))
+        if not safetensors_files:
+            raise ValueError(f"No safetensors file found in {hf_folder}")
+        
+        return safetensors_files[0]
 
     def _get_weights_iterator(
         self, model_path: str
