@@ -70,7 +70,7 @@ async def test_single_chat_session_audio(client: openai.AsyncOpenAI,
     # test single completion
     chat_completion = await client.chat.completions.create(model=model_name,
                                                            messages=messages,
-                                                           max_tokens=10,
+                                                           max_completion_tokens=10,
                                                            logprobs=True,
                                                            top_logprobs=5)
     assert len(chat_completion.choices) == 1
@@ -91,7 +91,7 @@ async def test_single_chat_session_audio(client: openai.AsyncOpenAI,
     chat_completion = await client.chat.completions.create(
         model=model_name,
         messages=messages,
-        max_tokens=10,
+        max_completion_tokens=10,
     )
     message = chat_completion.choices[0].message
     assert message.content is not None and len(message.content) >= 0
@@ -125,7 +125,7 @@ async def test_single_chat_session_audio_base64encoded(
     # test single completion
     chat_completion = await client.chat.completions.create(model=model_name,
                                                            messages=messages,
-                                                           max_tokens=10,
+                                                           max_completion_tokens=10,
                                                            logprobs=True,
                                                            top_logprobs=5)
     assert len(chat_completion.choices) == 1
@@ -146,7 +146,7 @@ async def test_single_chat_session_audio_base64encoded(
     chat_completion = await client.chat.completions.create(
         model=model_name,
         messages=messages,
-        max_tokens=10,
+        max_completion_tokens=10,
     )
     message = chat_completion.choices[0].message
     assert message.content is not None and len(message.content) >= 0
@@ -178,7 +178,7 @@ async def test_chat_streaming_audio(client: openai.AsyncOpenAI,
     chat_completion = await client.chat.completions.create(
         model=model_name,
         messages=messages,
-        max_tokens=10,
+        max_completion_tokens=10,
         temperature=0.0,
     )
     output = chat_completion.choices[0].message.content
@@ -188,7 +188,7 @@ async def test_chat_streaming_audio(client: openai.AsyncOpenAI,
     stream = await client.chat.completions.create(
         model=model_name,
         messages=messages,
-        max_tokens=10,
+        max_completion_tokens=10,
         temperature=0.0,
         stream=True,
     )
@@ -242,7 +242,7 @@ async def test_multi_audio_input(client: openai.AsyncOpenAI, model_name: str,
         await client.chat.completions.create(
             model=model_name,
             messages=messages,
-            max_tokens=10,
+            max_completion_tokens=10,
             temperature=0.0,
         )
 
