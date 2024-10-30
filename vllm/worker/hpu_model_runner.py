@@ -282,7 +282,8 @@ class HpuModelAdapter():
     def __init__(self, model, block_size, dtype, enforce_eager):
         self.model = model
         self.prefill_use_fusedsdpa = os.getenv('VLLM_PROMPT_USE_FUSEDSDPA',
-                                               '0').lower() in ['1', 'true']
+                                               '1').lower() in ['1', 'true'] \
+                                                and not is_fake_hpu()
         self.block_size = block_size
         self.dtype = dtype
         if not is_fake_hpu() and not htorch.utils.internal.is_lazy(
