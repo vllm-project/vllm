@@ -37,6 +37,9 @@ from vllm.worker.utils import assert_enc_dec_mr_supported_scenario
 
 logger = init_logger(__name__)
 
+# The Mllama model has PagedAttention specific logic because of which it
+# can only be run with the XFORMERS backend
+# TODO Make Mllama model work with Flash Attention backend.
 _XFORMERS_ONLY_ENCODER_DECODER_ARCHS = ["MllamaForConditionalGeneration"]
 
 
