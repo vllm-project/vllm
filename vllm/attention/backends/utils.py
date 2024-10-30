@@ -1,6 +1,6 @@
 """Attention backend utils"""
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, Dict, List, Type, TypeVar, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Tuple, Type, TypeVar, Union
 
 import numpy as np
 import torch
@@ -512,3 +512,46 @@ def get_seq_len_block_table_args(
                 attn_metadata.max_encoder_seq_len, None)
     else:
         raise AttributeError(f"Invalid attention type {str(attn_type)}")
+
+
+def get_num_prefill_encode_decode_tokens(
+    attn_metadata,
+    attn_type: AttentionType,
+) -> Tuple[int, int, int]:
+    """
+    Calculate the number of prefill, encoder, and decode tokens based on the 
+    attention metadata and the specified attention type.
+
+    Args:
+        attn_metadata (FlashAttentionMetadata): Attention Metadata object.
+        attn_type (AttentionType): The type of attention being used.
+    Returns:
+        Tuple[int, int, int]: A tuple containing three integers:
+            - The number of prefill tokens.
+            - The number of encoder tokens.
+            - The number of decode tokens.
+
+    Raises:
+        AssertionError: If the number of encoder tokens in `attn_metadata` 
+        is `None` when required for the calculations.
+    """
+    if attn_type == AttentionType.ENCODER:
+        # Encoder attention is only invoked during prefill phase.
+        assert attn_metadata.num_encoder_tokens is not None
+        num_prefill_tokens = attn_metadata.num_encoder_tokens
+        num_encoder_tokens = attn_metadata.num_encoder_tokens
+        num_decode_tokens = 0
+    elif attn_type == AttentionType.ENCODER_DECODER:
+        assert attn_metadata.num_encoder_tokens is not None
+        num_prefill_tokens = attn_metadata.num_prefill_tokens
+        num_encoder_tokens = attn_metadata.num_encoder_tokens
+        num_decode_tokens = attn_metadata.num_decode_tokens
+    else:  # attn_type == AttentionType.DECODER or
+        # attn_type == AttentionType.ENCODER_ONLY
+        # There are no encoder tokens for DECODER and ENCODER_ONLY
+        # attention type.
+        num_prefill_tokens = attn_metadata.num_prefill_tokens
+        num_encoder_tokens = 0
+        num_decode_tokens = attn_metadata.num_decode_tokens
+
+    return (num_prefill_tokens, num_encoder_tokens, num_decode_tokens)

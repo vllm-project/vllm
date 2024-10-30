@@ -15,6 +15,7 @@ from vllm.utils import async_tensor_h2d, make_tensor_with_pad
 from .utils import (PAD_SLOT_ID, CommonAttentionState, compute_slot_mapping,
                     compute_slot_mapping_start_idx,
                     get_seq_len_block_table_args,
+                    get_num_prefill_encode_decode_tokens,
                     is_all_cross_attn_metadata_set,
                     is_all_encoder_attn_metadata_set, is_block_tables_empty)
 
@@ -132,7 +133,7 @@ class FlashAttentionMetadata(AttentionMetadata):
     # Cuda-graph is currently enabled for decoding only.
     # TODO(woosuk): Move `use_cuda_graph` out since it's unrelated to attention.
 
-    use_cuda_graph: Optional[bool]
+    use_cuda_graph: bool
 
     # Maximum query length in the batch.
     max_query_len: Optional[int] = None
@@ -664,10 +665,10 @@ class FlashAttentionImpl(AttentionImpl):
             k_scale,
             v_scale,
             self.scale,
+            attn_type.value,
             self.sliding_window,
             self.alibi_slopes,
             self.logits_soft_cap,
-            attn_type.value,
         )
 
         return output
@@ -738,49 +739,6 @@ def _get_query_key_seq_metadata(
         raise AttributeError(f"Invalid attention type {str(attn_type)}")
 
 
-def _get_num_prefill_encode_decode_tokens(
-    attn_metadata: FlashAttentionMetadata,
-    attn_type: AttentionType,
-) -> Tuple[int, int, int]:
-    """
-    Calculate the number of prefill, encoder, and decode tokens based on the 
-    attention metadata and the specified attention type.
-
-    Args:
-        attn_metadata (FlashAttentionMetadata): Attention Metadata object.
-        attn_type (AttentionType): The type of attention being used.
-    Returns:
-        Tuple[int, int, int]: A tuple containing three integers:
-            - The number of prefill tokens.
-            - The number of encoder tokens.
-            - The number of decode tokens.
-
-    Raises:
-        AssertionError: If the number of encoder tokens in `attn_metadata` 
-        is `None` when required for the calculations.
-    """
-    if attn_type == AttentionType.ENCODER:
-        # Encoder attention is only invoked during prefill phase.
-        assert attn_metadata.num_encoder_tokens is not None
-        num_prefill_tokens = attn_metadata.num_encoder_tokens
-        num_encoder_tokens = attn_metadata.num_encoder_tokens
-        num_decode_tokens = 0
-    elif attn_type == AttentionType.ENCODER_DECODER:
-        assert attn_metadata.num_encoder_tokens is not None
-        num_prefill_tokens = attn_metadata.num_prefill_tokens
-        num_encoder_tokens = attn_metadata.num_encoder_tokens
-        num_decode_tokens = attn_metadata.num_decode_tokens
-    else:  # attn_type == AttentionType.DECODER or
-        # attn_type == AttentionType.ENCODER_ONLY
-        # There are no encoder tokens for DECODER and ENCODER_ONLY
-        # attention type.
-        num_prefill_tokens = attn_metadata.num_prefill_tokens
-        num_encoder_tokens = 0
-        num_decode_tokens = attn_metadata.num_decode_tokens
-
-    return (num_prefill_tokens, num_encoder_tokens, num_decode_tokens)
-
-
 def _get_causal_option(attn_type: AttentionType) -> bool:
     """
     Determine whether the given attention type is suitable for causal 
@@ -813,10 +771,10 @@ def unified_flash_attention(
     k_scale: float,
     v_scale: float,
     softmax_scale: float,
+    attn_type_int_val: int,
     window_size: Optional[List[int]] = None,
     alibi_slopes: Optional[torch.Tensor] = None,
     logits_soft_cap: Optional[float] = None,
-    attn_type_int_val: int = AttentionType.DECODER.value,
 ) -> torch.Tensor:
 
     # Convert integer attn_type to enum
@@ -869,7 +827,7 @@ def unified_flash_attention(
             )
 
     num_prefill_tokens, num_encoder_tokens,  num_decode_tokens = \
-        _get_num_prefill_encode_decode_tokens(attn_metadata, attn_type)
+        get_num_prefill_encode_decode_tokens(attn_metadata, attn_type)
     decode_query = query[num_prefill_tokens:]
     # QKV for prefill.
     query = query[:num_prefill_tokens]
@@ -913,7 +871,7 @@ def unified_flash_attention(
         else:
             # prefix-enabled attention
             assert attn_type == AttentionType.DECODER, (
-                "Decoder only models currently support prefix caching")
+                "Only decoder-only models support prefix caching")
             assert prefill_meta.seq_lens is not None
             max_seq_len = max(prefill_meta.seq_lens)
             prefill_output = flash_attn_varlen_func(  # noqa
@@ -939,7 +897,7 @@ def unified_flash_attention(
         assert decode_meta.max_decode_query_len is not None
         if decode_meta.max_decode_query_len > 1:
             assert attn_type == AttentionType.DECODER, (
-                "Decoder only models support max_decode_query_len > 1")
+                "Only decoder-only models support max_decode_query_len > 1")
             decode_output = flash_attn_varlen_func(
                 q=decode_query,
                 k=key_cache,
@@ -1003,9 +961,9 @@ def _(
     k_scale: float,
     v_scale: float,
     softmax_scale: float,
+    attn_type_int_val: int,
     window_size: Optional[List[int]] = None,
     alibi_slopes: Optional[torch.Tensor] = None,
     logits_soft_cap: Optional[float] = None,
-    attn_type_int_val: int = AttentionType.DECODER.value,
 ) -> torch.Tensor:
     return torch.empty_like(query)

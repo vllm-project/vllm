@@ -15,6 +15,7 @@ from vllm.attention.backends.utils import (CommonAttentionState,
                                            CommonMetadataBuilder,
                                            get_seq_len_block_table_args,
                                            is_all_cross_attn_metadata_set,
+                                           get_num_prefill_encode_decode_tokens,
                                            is_all_encoder_attn_metadata_set)
 from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
@@ -548,33 +549,8 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                                                     updated_slot_mapping,
                                                     self.kv_cache_dtype,
                                                     k_scale, v_scale)
-
-        if attn_type == AttentionType.ENCODER:
-            # Encoder attention - chunked prefill is not applicable;
-            # derive token-count from query shape & and treat them
-            # as 100% prefill tokens
-            assert attn_metadata.num_encoder_tokens is not None
-            num_prefill_tokens = attn_metadata.num_encoder_tokens
-            num_encoder_tokens = attn_metadata.num_encoder_tokens
-            num_decode_tokens = 0
-        elif attn_type == AttentionType.DECODER:
-            # Decoder self-attention supports chunked prefill.
-            num_prefill_tokens = attn_metadata.num_prefill_tokens
-            num_encoder_tokens = attn_metadata.num_prefill_tokens
-            num_decode_tokens = attn_metadata.num_decode_tokens
-            # Only enforce this shape-constraint for decoder
-            # self-attention
-            assert key.shape[0] == num_prefill_tokens + num_decode_tokens
-            assert value.shape[0] == num_prefill_tokens + num_decode_tokens
-        else:  # attn_type == AttentionType.ENCODER_DECODER
-            # Encoder/decoder cross-attention requires no chunked
-            # prefill (100% prefill or 100% decode tokens, no mix)
-            num_prefill_tokens = attn_metadata.num_prefill_tokens
-            if attn_metadata.num_encoder_tokens is not None:
-                num_encoder_tokens = attn_metadata.num_encoder_tokens
-            else:
-                num_encoder_tokens = attn_metadata.num_prefill_tokens
-            num_decode_tokens = attn_metadata.num_decode_tokens
+        num_prefill_tokens, num_encoder_tokens,  num_decode_tokens = \
+            get_num_prefill_encode_decode_tokens(attn_metadata, attn_type)
 
         output = torch.empty_like(query)
         # Query for decode. KV is not needed because it is already cached.
@@ -582,8 +558,13 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         # QKV for prefill.
         query = query[:num_prefill_tokens]
         if key is not None and value is not None:
-            key = key[:num_encoder_tokens]
-            value = value[:num_encoder_tokens]
+            if (attn_type == AttentionType.ENCODER or \
+                attn_type == AttentionType.ENCODER_DECODER):
+                key = key[:num_encoder_tokens]
+                value = value[:num_encoder_tokens]
+            else:
+                key = key[:num_prefill_tokens]
+                value = value[:num_prefill_tokens]
 
         assert query.shape[0] == num_prefill_tokens
         assert decode_query.shape[0] == num_decode_tokens

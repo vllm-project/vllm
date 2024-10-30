@@ -13,7 +13,6 @@ from vllm.worker.model_runner import _get_graph_batch_size
 
 BATCH_SIZES = [1, 4, 16, 64, 256]
 
-
 def _create_model_runner(model: str, *args,
                          **kwargs) -> EncoderDecoderModelRunner:
     engine_args = EngineArgs(model, *args, **kwargs)
