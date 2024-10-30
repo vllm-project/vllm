@@ -121,6 +121,8 @@ ARG GIT_REPO_CHECK=0
 RUN --mount=type=bind,source=.git,target=.git \
     if [ "$GIT_REPO_CHECK" != 0 ]; then bash tools/check_repo.sh ; fi
 
+RUN python3 -m pip install --upgrade pip
+
 # Package upgrades for useful functionality or to avoid dependency issues
 RUN --mount=type=cache,target=/root/.cache/pip \
     python3 -m pip install --upgrade numba scipy huggingface-hub[cli] pytest-shard
