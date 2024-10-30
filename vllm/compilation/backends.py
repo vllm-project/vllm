@@ -10,7 +10,7 @@ from vllm.logger import init_logger
 
 from .compile_context import get_compile_context
 from .levels import CompilationLevel
-from .collective_fusion import collective_fusion
+from .collective_fusion import CollectiveFusionPass
 
 logger = init_logger(__name__)
 

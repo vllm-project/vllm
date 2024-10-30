@@ -7,8 +7,10 @@ import torch.fx as fx
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor.pattern_matcher import PatternMatcherPass, register_replacement, fwd_only, joint_fwd_bwd, Match
 
+from vllm.compilation.inductor_pass import InductorPass
 from vllm.distributed.parallel_state import get_tp_group, get_tensor_model_parallel_world_size, get_tensor_model_parallel_rank
 from vllm.distributed import tensor_model_parallel_all_reduce
+from vllm.model_executor.layers.linear import should_slice
 
 from vllm.logger import init_logger
 
@@ -18,12 +20,6 @@ logger = init_logger(__name__)
 def pprint(x):
     #print(x)
     pass
-
-
-# This check is a hack, copied from linear.py
-def should_slice(shape) -> bool:
-    n_slices = get_tensor_model_parallel_world_size()
-    return (shape[0] % n_slices == 0 and shape[0] >= 128)
 
 
 def match_gemm_rs_ag_gemm(residual,
@@ -59,17 +55,17 @@ def gemm_rs_ag_gemm(residual: torch.Tensor,
                     rms_norm_weight: torch.Tensor,
                     gemm_2_weights: torch.Tensor,
                     first_layer: bool) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    print(f"CUSTOM {residual.shape}({my_residual.shape}), should_slice={should_slice(residual.shape)}, first={first_layer}")
+    pprint(f"CUSTOM {residual.shape}({my_residual.shape}), should_slice={should_slice(residual.shape)}, first={first_layer}")
 
     ####
     # this is terrible
     res_slices = slices(residual)
     slice_size = res_slices[get_tensor_model_parallel_rank()].shape[0]
     ####
-    print(f"SLICE_SIZE = {slice_size}, orig_shape={residual.shape}, slice_shapes=[{[x.shape for x in res_slices]}]")
+    pprint(f"SLICE_SIZE = {slice_size}, orig_shape={residual.shape}, slice_shapes=[{[x.shape for x in res_slices]}]")
 
     if should_slice(residual.shape) and first_layer:
-        print(f"FIRST! rank={get_tensor_model_parallel_rank()}")
+        pprint(f"FIRST! rank={get_tensor_model_parallel_rank()}")
         split_1 = torch.ops.aten.split.Tensor(residual, slice_size)
         getitem_26 = split_1[0];  split_1 = None
     else:
@@ -79,7 +75,7 @@ def gemm_rs_ag_gemm(residual: torch.Tensor,
 
     if not should_slice(residual.shape):
         # this branch probably broken
-        print("NAIVE")
+        pprint("NAIVE")
         permute_3 = torch.ops.aten.permute.default(gemm_1_weights, [1, 0])
         output = torch.matmul(gemm_1_activations, permute_3)
 
@@ -92,7 +88,7 @@ def gemm_rs_ag_gemm(residual: torch.Tensor,
         permute_5 = torch.ops.aten.permute.default(gemm_2_weights, [1, 0])
         getitem_35 = torch.matmul(getitem_29, permute_5)
         getitem_30a = getitem_30.clone()
-        print(f"DONE CUSTOM NAIVE {getitem_35.shape}, {getitem_30.shape}, {getitem_30a.shape} {first_layer}")
+        pprint(f"DONE CUSTOM NAIVE {getitem_35.shape}, {getitem_30.shape}, {getitem_30a.shape} {first_layer}")
         return getitem_35, getitem_30, getitem_30a
     else:
         group_name = torch.distributed.group.WORLD.group_name # TODO: factor out to setup
@@ -112,7 +108,8 @@ def gemm_rs_ag_gemm(residual: torch.Tensor,
         getitem_34 = fused_all_gather_matmul[1]
         getitem_35 = getitem_34[0]
 
-        print(f"DONE CUSTOM {getitem_35.shape}, {getitem_31.shape}, {slice_scatter_2.shape} {first_layer}")
+        pprint(f"DONE CUSTOM {getitem_35.shape}, {getitem_31.shape}, {slice_scatter_2.shape} {first_layer}")
+        # TODO: can we avoid clone here?
         return getitem_35, getitem_31.clone(), slice_scatter_2   # check if clones are needed
 
 
@@ -133,18 +130,16 @@ def gemm_rs_ag_gemm_fake(residual: torch.Tensor,
 
 #    if should_slice(residual.shape) and first_layer:
     if should_slice(gemm_1_activations.shape) and first_layer:
-        print(f"FIRST! rank={get_tensor_model_parallel_rank()}")
+        pprint(f"FIRST! rank={get_tensor_model_parallel_rank()}")
         split_1 = torch.ops.aten.split.Tensor(residual, slice_size)
         my_residual = split_1[0];  split_1 = None
     else:
-        #residual = my_residual
-        #slice_size = residual.shape[0]
         my_residual = residual
 
     # verify the type is always correct
     mm_res = torch.empty((gemm_1_activations.shape[0], gemm_2_weights.shape[0]), device=gemm_1_activations.device, dtype=gemm_1_activations.dtype)
 
-    print(f"DONE FAKE = {mm_res.shape}, {my_residual.shape}, {residual.shape} {first_layer}")
+    pprint(f"DONE FAKE = {mm_res.shape}, {my_residual.shape}, {residual.shape} {first_layer}")
 
     return (mm_res, my_residual, residual)
 
@@ -209,20 +204,34 @@ def replace_final(my_residual, gemm_1_weights, gemm_1_activations, rms_norm_weig
     return getitem_1219
 
 
-my_patterns: Optional[PatternMatcherPass] = None
-my_patterns2: Optional[PatternMatcherPass] = None
-matches: List[Match] = []
 
-def get_matches():
-    global my_patterns, my_patterns2, matches
+# find the output and the residual
+def find_fn(nodes, op):
+    for node in reversed(nodes):
+        if node.op == "call_function" and node.target == op:
+            return node
+    return None
 
-    def record_match_fn(match: Match):
-        matches.append(match)
-        return False
 
-    if not my_patterns:
-        my_patterns = PatternMatcherPass()
-        my_patterns2 = PatternMatcherPass()
+def find_auto_fn(nodes, op):
+    for node in reversed(nodes):
+        if node.op == "call_function" and node.target == auto_functionalized and node.args[0] == op:
+            return node
+    return None
+
+
+def find_getitem(node, idx):
+    for user in reversed(node.users):
+        if user.op == "call_function" and user.target == operator.getitem and user.args[1] == idx:
+            return user
+    return None
+
+
+class CollectiveFusionPass(InductorPass):
+    def __init__(self):
+        self.my_patterns = PatternMatcherPass()
+        self.my_patterns2 = PatternMatcherPass()
+        self.matches: List[Match] = []
 
         x = torch.empty([4,4], device='cuda')
         w = torch.empty([4,4], device='cuda')
@@ -235,107 +244,88 @@ def get_matches():
                              match_gemm_rs_ag_gemm,
                              inputs,
                              fwd_only,
-                             [my_patterns],
-                             extra_check=record_match_fn)
+                             [self.my_patterns],
+                             extra_check=lambda m: self.record_match(m))
 
         final_inputs = [x, w, resid, resid_w]
         register_replacement(match_final,
                              replace_final,
                              final_inputs,
                              fwd_only,
-                             [my_patterns2])
+                             [self.my_patterns2])
 
+    def record_match(self, match: Match) -> bool:
+        # Hijack the extra_check to record the match and
+        # save it for post-processing.
+        self.matches.append(match)
 
+        # Return False to prevent automatic replacement.
+        return False
 
-# find the output and the residual
-def find_fn(nodes, op):
-    for node in reversed(nodes):
-        if node.op == "call_function" and node.target == op:
-            return node
-    return None
+    def process_matches(self, graph: fx.Graph):
+        pprint(f"len = {len(self.matches)}")
 
-def find_auto_fn(nodes, op):
-    for node in reversed(nodes):
-        if node.op == "call_function" and node.target == auto_functionalized and node.args[0] == op:
-            return node
-    return None
+        nodes = list(graph.nodes)
+        first_match = None
 
-def find_getitem(node, idx):
-    for user in reversed(node.users):
-        if user.op == "call_function" and user.target == operator.getitem and user.args[1] == idx:
-            return user
-    return None
+        def find_min_index(match) -> int:
+            return min(match.nodes, key=lambda x: nodes.index(x))
 
-def process_matches(graph: fx.Graph, matches):
-    print(f"len = {len(matches)}")
+        # "sort" matches in topo order.
+        matches = sorted(self.matches, key=lambda x: find_min_index(x))
 
-    nodes = list(graph.nodes)
-    first_match = None
+        res_replacements = []
+        my_res_replacements = []
 
-    def find_min_index(match) -> int:
-        return min(match.nodes, key=lambda x: nodes.index(x))
+        for match in matches:
+            last_node_in_match = match.nodes[-1] #max(match.nodes, key=lambda x: nodes.index(x))
 
-    # "sort" matches in topo order
-    matches = sorted(matches, key=lambda x: find_min_index(x))
+            with graph.inserting_after(last_node_in_match):
+                kwargs = match.kwargs
+                kwargs["first_layer"] = match == matches[0]
+                kwargs["residual"] = res_replacements[-1] if len(res_replacements) > 0 else match.kwargs["residual"]
+                kwargs["my_residual"] = my_res_replacements[-1] if len(my_res_replacements) > 0 else match.kwargs["residual"]
+                fused_node = graph.call_function(torch.ops.vllm.gemm_rs_ag_gemm.default, kwargs=kwargs)
 
-    # this is pretty hacky since the order doesn't necessarily encode the dependency.
-    res_replacements = []
-    my_res_replacements = []
+                graph.inserting_after(fused_node)
+                result_node_new = graph.call_function(operator.getitem, (fused_node, 0))
+                residual_node_new = graph.call_function(operator.getitem, (fused_node, 1))
+                my_residual_node_new = graph.call_function(operator.getitem, (fused_node, 2))
+                res_replacements.append(residual_node_new)
+                my_res_replacements.append(my_residual_node_new)
 
-    for match in matches:
-        last_node_in_match = match.nodes[-1] #max(match.nodes, key=lambda x: nodes.index(x))
+            rms_node = find_auto_fn(match.nodes, torch.ops._C.fused_add_rms_norm.default)
+            gemm_node = find_fn(match.nodes, torch.ops.aten.mm.default)
+            if gemm_node is None:
+                gemm_node = find_fn(match.nodes, torch.ops.symm_mem.fused_all_gather_matmul.default)
+            assert rms_node is not None
+            assert gemm_node is not None
 
-        with graph.inserting_after(last_node_in_match):
-            kwargs = match.kwargs
-            kwargs["first_layer"] = match == matches[0]
-            kwargs["residual"] = res_replacements[-1] if len(res_replacements) > 0 else match.kwargs["residual"]
-            kwargs["my_residual"] = my_res_replacements[-1] if len(my_res_replacements) > 0 else match.kwargs["residual"]
-            fused_node = graph.call_function(torch.ops.vllm.gemm_rs_ag_gemm.default, kwargs=kwargs)
+            #assert len(rms_node.users) == 2
+            #assert len(gemm_node.users) == 1
 
-            graph.inserting_after(fused_node)
-            result_node_new = graph.call_function(operator.getitem, (fused_node, 0))
-            residual_node_new = graph.call_function(operator.getitem, (fused_node, 1))
-            my_residual_node_new = graph.call_function(operator.getitem, (fused_node, 2))
-            res_replacements.append(residual_node_new)
-            my_res_replacements.append(my_residual_node_new)
+            # meta["val"] is used by de-functionalization
+            rms_val = rms_node.meta["val"]
+            gemm_val = gemm_node.meta["val"]
+            fused_node.meta["val"] = (gemm_val, rms_val[2])
 
-        rms_node = find_auto_fn(match.nodes, torch.ops._C.fused_add_rms_norm.default)
-        gemm_node = find_fn(match.nodes, torch.ops.aten.mm.default)
-        if gemm_node is None:
-            gemm_node = find_fn(match.nodes, torch.ops.symm_mem.fused_all_gather_matmul.default)
-        assert rms_node is not None
-        assert gemm_node is not None
+            find_getitem(rms_node, 2).replace_all_uses_with(residual_node_new)
+            gemm_node.replace_all_uses_with(result_node_new)
 
-        #assert len(rms_node.users) == 2
-        #assert len(gemm_node.users) == 1
+        # Finally, remove matched nodes
+        graph.eliminate_dead_code()
+        assert all(node not in graph.nodes for match in matches for node in match.nodes)
 
-        # meta["val"] is used by de-functionalization
-        rms_val = rms_node.meta["val"]
-        gemm_val = gemm_node.meta["val"]
-        fused_node.meta["val"] = (gemm_val, rms_val[2])
+    def __call__(self, graph: torch.fx.Graph):
+        self.dump_graph(graph, "before_collective_fusion")
+        count = self.my_patterns.apply(graph)
+        logger.info(f"fused gemm match count = {len(self.matches)}")
 
-        find_getitem(rms_node, 2).replace_all_uses_with(residual_node_new)
-        gemm_node.replace_all_uses_with(result_node_new)
+        # Don't apply final pattern unless we've matched and replaced the gemm+collective ops.
+        if len(self.matches) > 0:
+            count =self. my_patterns2.apply(graph)
+            logger.info(f"final match count = {count}")
+            self.process_matches(graph)
 
-    # Finally, remove matched nodes
-    graph.eliminate_dead_code()
-    assert all(node not in graph.nodes for match in matches for node in match.nodes)
-
-
-def collective_fusion(graph: fx.Graph):
-    global matches
-    rank = get_tensor_model_parallel_rank()
-    get_matches()
-    matches.clear()
-
-    count = my_patterns.apply(graph)
-    print(f"fused gemm match count = {len(matches)} {id(matches)}")
-
-    # a bit hacky
-    if len(matches) > 0:
-        count = my_patterns2.apply(graph)
-        print(f"final match count = {count}")
-        process_matches(graph, matches)
-
-    return graph
-
+        self.dump_graph(graph, "after_collective_fusion")
+        self.matches.clear()

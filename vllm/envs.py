@@ -233,6 +233,11 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_ENGINE_ITERATION_TIMEOUT_S":
     lambda: int(os.environ.get("VLLM_ENGINE_ITERATION_TIMEOUT_S", "60")),
 
+    # Internal flag for dumping the model graph at different stages of
+    # custom pass compilation
+    "VLLM_TORCH_COMPILE_DUMP":
+    lambda: list(os.environ.get("VLLM_TORCH_COMPILE_DUMP", "").split(",")),
+
     # API key for VLLM API server
     "VLLM_API_KEY":
     lambda: os.environ.get("VLLM_API_KEY", None),
