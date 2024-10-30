@@ -4,6 +4,7 @@ import tempfile
 import time
 from http import HTTPStatus
 
+import openai
 import pytest
 import pytest_asyncio
 import requests
@@ -78,7 +79,8 @@ EXPECTED_VALUES = {
 
 
 @pytest.mark.asyncio
-async def test_metrics_counts(server: RemoteOpenAIServer):
+async def test_metrics_counts(server: RemoteOpenAIServer,
+                              client: openai.AsyncClient):
     for _ in range(_NUM_REQUESTS):
         # sending a request triggers the metrics to be logged.
         await client.completions.create(
@@ -167,7 +169,8 @@ EXPECTED_METRICS = [
 
 
 @pytest.mark.asyncio
-async def test_metrics_exist(server: RemoteOpenAIServer):
+async def test_metrics_exist(server: RemoteOpenAIServer,
+                             client: openai.AsyncClient):
     # sending a request triggers the metrics to be logged.
     await client.completions.create(model=MODEL_NAME,
                                     prompt="Hello, my name is",
