@@ -295,6 +295,73 @@ def _test_embeddings(
     return results
 
 
+def _test_image_text(
+    client: openai.OpenAI,
+    model_name: str,
+    image_url: str,
+):
+    results = []
+
+    # test pure text input
+    messages = [{
+        "role":
+        "user",
+        "content": [
+            {
+                "type": "text",
+                "text": "How do you feel today?"
+            },
+        ],
+    }]
+
+    chat_completion = client.chat.completions.create(model=model_name,
+                                                     messages=messages,
+                                                     max_tokens=10,
+                                                     logprobs=True,
+                                                     top_logprobs=5)
+    choice = chat_completion.choices[0]
+    message = choice.message
+    message = chat_completion.choices[0].message
+
+    results.append({
+        "test": "pure_text",
+        "output": message.content,
+    })
+
+    messages.append({"role": "assistant", "content": message.content})
+
+    messages += [{
+        "role":
+        "user",
+        "content": [
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": image_url
+                }
+            },
+            {
+                "type": "text",
+                "text": "What's in this image?"
+            },
+        ],
+    }]
+
+    chat_completion = client.chat.completions.create(
+        model=model_name,
+        messages=messages,
+        max_tokens=10,
+    )
+    message = chat_completion.choices[0].message
+
+    results.append({
+        "test": "text_image",
+        "output": message.content,
+    })
+
+    return results
+
+
 def compare_two_settings(model: str,
                          arg1: List[str],
                          arg2: List[str],
@@ -397,6 +464,11 @@ def compare_all_settings(model: str,
 
             if method == "generate":
                 results += _test_completion(client, model, prompt, token_ids)
+            elif method == "generate_with_image":
+                results += _test_image_text(
+                    client, model,
+                    "https://upload.wikimedia.org/wikipedia/commons/0/0b/RGBA_comp.png"
+                )
             elif method == "encode":
                 results += _test_embeddings(client, model, prompt)
             else:

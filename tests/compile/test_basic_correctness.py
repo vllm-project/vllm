@@ -12,15 +12,14 @@ from ..utils import compare_all_settings
 # of all models and all levels
 @pytest.mark.parametrize(
     "model, model_args, pp_size, tp_size, attn_backend, method, fullgraph",
-    [
-        ("meta-llama/Llama-3.2-1B", [], 2, 2, "FLASHINFER", "generate", True),
-        ("nm-testing/Meta-Llama-3-8B-Instruct-W8A8-Dyn-Per-Token-2048-Samples",
-         ["--quantization", "compressed-tensors"
-          ], 1, 1, "FLASH_ATTN", "generate", True),
-        ("ibm/PowerMoE-3b", [], 1, 2, "FLASH_ATTN", "generate", True),
-        # TODO: add multi-modality test for llava
-        ("llava-hf/llava-1.5-7b-hf", [], 2, 1, "FLASHINFER", "generate", False)
-    ])
+    [("meta-llama/Llama-3.2-1B", [], 2, 2, "FLASHINFER", "generate", True),
+     ("nm-testing/Meta-Llama-3-8B-Instruct-W8A8-Dyn-Per-Token-2048-Samples", [
+         "--quantization", "compressed-tensors"
+     ], 1, 1, "FLASH_ATTN", "generate", True),
+     ("ibm/PowerMoE-3b", [], 1, 2, "FLASH_ATTN", "generate", True),
+     ("BAAI/bge-multilingual-gemma2", [], 2, 1, "FLASHINFER", "encode", True),
+     ("llava-hf/llava-1.5-7b-hf", [], 2, 1, "FLASH_ATTN",
+      "generate_with_image", False)])
 def test_compile_correctness(model, model_args, pp_size, tp_size, attn_backend,
                              method, fullgraph):
     # this test is run under multiple suits, with different GPUs.
