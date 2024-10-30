@@ -162,8 +162,7 @@ class LLMEngineCore:
                 frames = self.input_socket.recv_multipart(copy=False)
                 engine_core_request = self.msgpack_decoder.decode(
                     frames[0].buffer)
-                request = Request.from_engine_core_request(engine_core_request)
-                self.add_request(request)
+                self.add_request(engine_core_request)
 
                 # TODO: handle abort via another socket
                 # TODO: handle logits processors via cloudpickle

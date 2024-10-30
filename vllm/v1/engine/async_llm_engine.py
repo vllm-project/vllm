@@ -84,6 +84,8 @@ class AsyncLLMEngine(LLMEngineProtocol):
             input_registry,
             use_cached_outputs,
         )
+
+        # TODO: remove
         self.detokenizer.stream_mode = True
         self.log_requests = log_requests
 
@@ -134,6 +136,7 @@ class AsyncLLMEngine(LLMEngineProtocol):
                                                        "ready_path":
                                                        self.ready_path,
                                                    })
+        self.engine_core_process.start()
 
         # TODO: add background loop shielding
         # TODO: add AsyncEngineDeadError
@@ -143,13 +146,14 @@ class AsyncLLMEngine(LLMEngineProtocol):
         # Hack.
         self.engine_core_process.kill()
 
-    def run_engine_core(self, *args, **kwargs):
+    @staticmethod
+    def run_engine_core(*args, **kwargs):
         """Launch EngineCore busy loop in background process."""
 
         logger.debug("Initializing LLMEngineCore in background process.")
         engine_core = LLMEngineCore(*args, **kwargs)
 
-        logger.debug("Starting LLMEngineCore busy loop in bavkgroudn process.")
+        logger.debug("Starting LLMEngineCore busy loop in background process.")
         engine_core.run_busy_loop()
 
     @classmethod
