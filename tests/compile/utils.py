@@ -5,21 +5,23 @@ import torch
 from tests.quantization.utils import is_quant_method_supported
 from vllm import LLM, SamplingParams
 from vllm.compilation.levels import CompilationLevel
-from vllm.utils import is_hip
+from vllm.platforms import current_platform
 
 TEST_MODELS = [
     ("facebook/opt-125m", {}),
-    ("nm-testing/tinyllama-oneshot-w8w8-test-static-shape-change", {
-        "dtype": torch.float16,
-        "quantization": "compressed-tensors"
-    }),
+    # TODO: add fake implementation for compressed-tensors
+    # ("nm-testing/tinyllama-oneshot-w8w8-test-static-shape-change", {
+    #     "dtype": torch.float16,
+    #     "quantization": "compressed-tensors"
+    # }),
     ("neuralmagic/Meta-Llama-3-8B-Instruct-FP8", {
         "dtype": torch.float16,
         "quantization": "fp8"
     }),
-    ("nm-testing/Meta-Llama-3-8B-Instruct-W8A8-Dyn-Per-Token-2048-Samples", {
-        "quantization": "compressed-tensors"
-    }),
+    # TODO: add fake implementation for compressed-tensors
+    # ("nm-testing/Meta-Llama-3-8B-Instruct-W8A8-Dyn-Per-Token-2048-Samples", {
+    #     "quantization": "compressed-tensors"
+    # }),
     ("meta-llama/Meta-Llama-3-8B", {}),
 ]
 
@@ -55,7 +57,7 @@ if is_quant_method_supported("marlin"):
         "quantization": "marlin"
     }))
 
-if not is_hip() and is_quant_method_supported("awq"):
+if not current_platform.is_rocm() and is_quant_method_supported("awq"):
     TEST_MODELS.append(("TheBloke/TinyLlama-1.1B-Chat-v0.3-AWQ", {
         "quantization": "AWQ"
     }))
@@ -73,7 +75,7 @@ def check_full_graph_support(model,
     # much memory.
     quantization = model_kwargs.get("quantization")
     if ((quantization == "fp8" or model == "meta-llama/Meta-Llama-3-8B")
-            and optimization_level >= CompilationLevel.INDUCTOR):
+            and optimization_level >= CompilationLevel.PIECEWISE):
         return
 
     prompts = [

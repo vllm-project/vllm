@@ -19,7 +19,7 @@ from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.transformers_utils.utils import check_gguf_file
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils import FlexibleArgumentParser, StoreBoolean
 
 if TYPE_CHECKING:
     from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
@@ -183,6 +183,13 @@ class EngineArgs:
     override_neuron_config: Optional[Dict[str, Any]] = None
     mm_processor_kwargs: Optional[Dict[str, Any]] = None
     scheduling_policy: Literal["fcfs", "priority"] = "fcfs"
+
+    # Pooling configuration.
+    pooling_type: Optional[str] = None
+    pooling_norm: Optional[bool] = None
+    pooling_softmax: Optional[bool] = None
+    pooling_step_tag_id: Optional[int] = None
+    pooling_returned_token_ids: Optional[List[int]] = None
 
     def __post_init__(self):
         if not self.tokenizer:
@@ -850,6 +857,58 @@ class EngineArgs:
             'priority (lower value means earlier handling) and time of '
             'arrival deciding any ties).')
 
+        parser.add_argument(
+            '--pooling-type',
+            choices=['LAST', 'ALL', 'CLS', 'STEP'],
+            default=None,
+            help='Used to configure the pooling method in the embedding model.'
+        )
+
+        parser.add_argument('--pooling-norm',
+                            default=None,
+                            action='store_true',
+                            help="Used to determine whether to normalize "
+                            "the pooled data in the embedding model.")
+
+        parser.add_argument('--no-pooling-norm',
+                            default=None,
+                            action='store_false',
+                            dest='pooling_norm',
+                            help="Used to determine whether to normalize "
+                            "the pooled data in the embedding model.")
+
+        parser.add_argument('--pooling-softmax',
+                            default=None,
+                            action='store_true',
+                            help="Used to determine whether to softmax "
+                            "the pooled data in the embedding model.")
+
+        parser.add_argument('--no-pooling-softmax',
+                            default=None,
+                            action='store_false',
+                            dest='pooling_softmax',
+                            help="Used to determine whether to softmax "
+                            "the pooled data in the embedding model.")
+
+        parser.add_argument(
+            '--pooling-step-tag-id',
+            type=int,
+            default=None,
+            help="When pooling-step-tag-id is not -1, it indicates "
+            "that the score corresponding to the step-tag-ids in the "
+            "generated sentence should be returned. Otherwise, it "
+            "returns the scores for all tokens.")
+
+        parser.add_argument(
+            '--pooling-returned-token-ids',
+            nargs='+',
+            type=int,
+            default=None,
+            help="pooling-returned-token-ids represents a list of "
+            "indices for the vocabulary dimensions to be extracted, "
+            "such as the token IDs of good_token and bad_token in "
+            "the math-shepherd-mistral-7b-prm model.")
+
         return parser
 
     @classmethod
@@ -891,6 +950,11 @@ class EngineArgs:
             override_neuron_config=self.override_neuron_config,
             config_format=self.config_format,
             mm_processor_kwargs=self.mm_processor_kwargs,
+            pooling_type=self.pooling_type,
+            pooling_norm=self.pooling_norm,
+            pooling_softmax=self.pooling_softmax,
+            pooling_step_tag_id=self.pooling_step_tag_id,
+            pooling_returned_token_ids=self.pooling_returned_token_ids,
         )
 
     def create_load_config(self) -> LoadConfig:
@@ -1142,18 +1206,6 @@ class AsyncEngineArgs(EngineArgs):
                             action='store_true',
                             help='Disable logging requests.')
         return parser
-
-
-class StoreBoolean(argparse.Action):
-
-    def __call__(self, parser, namespace, values, option_string=None):
-        if values.lower() == "true":
-            setattr(namespace, self.dest, True)
-        elif values.lower() == "false":
-            setattr(namespace, self.dest, False)
-        else:
-            raise ValueError(f"Invalid boolean value: {values}. "
-                             "Expected 'true' or 'false'.")
 
 
 # These functions are used by sphinx to build the documentation

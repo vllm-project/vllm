@@ -7,7 +7,7 @@ import vllm.envs as envs
 from vllm.compilation.levels import CompilationLevel
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import is_hip, print_warning_once
+from vllm.utils import print_warning_once
 
 logger = init_logger(__name__)
 
@@ -72,7 +72,7 @@ class CustomOp(nn.Module):
         if not enabled:
             return self.forward_native
 
-        if is_hip():
+        if current_platform.is_rocm():
             return self.forward_hip
         elif current_platform.is_cpu():
             return self.forward_cpu
@@ -100,7 +100,7 @@ class CustomOp(nn.Module):
 
         return (CustomOp.default_on() or enabled) and not disabled
 
-    # On by default if VLLM_TORCH_COMPILE_LEVEL < CompilationLevel.INDUCTOR
+    # On by default if VLLM_TORCH_COMPILE_LEVEL < CompilationLevel.PIECEWISE
     # Specifying 'all' or 'none' in VLLM_CUSTOM_OPS takes precedence.
     @staticmethod
     @lru_cache()
@@ -108,7 +108,7 @@ class CustomOp(nn.Module):
         count_none = envs.VLLM_CUSTOM_OPS.count("none")
         count_all = envs.VLLM_CUSTOM_OPS.count("all")
         assert count_none + count_all <= 1, "Can only specify 'none' or 'all'"
-        return envs.VLLM_TORCH_COMPILE_LEVEL < CompilationLevel.INDUCTOR and \
+        return envs.VLLM_TORCH_COMPILE_LEVEL < CompilationLevel.PIECEWISE and \
             not count_none > 0 or count_all > 0
 
     # Dictionary of all custom ops (classes, indexed by registered name).

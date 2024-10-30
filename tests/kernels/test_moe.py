@@ -7,19 +7,18 @@ import torch
 from transformers import MixtralConfig
 from transformers.models.mixtral.modeling_mixtral import MixtralSparseMoeBlock
 
+import vllm.model_executor.layers.fused_moe  # noqa
 from tests.kernels.utils import (compute_max_diff, opcheck, stack_and_dev,
                                  torch_moe, torch_moe_single)
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.fused_moe import fused_moe
-from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
-    fused_marlin_moe, single_marlin_moe)
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     fused_topk, moe_align_block_size)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
     marlin_quantize)
 from vllm.model_executor.models.mixtral import MixtralMoE
+from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
-from vllm.utils import is_hip, seed_everything
 
 
 @pytest.mark.parametrize("m", [1024 * 128, 512, 222, 33, 1])
@@ -103,7 +102,7 @@ def test_mixtral_moe(dtype: torch.dtype):
 @pytest.mark.parametrize("act_order", [True, False])
 @pytest.mark.parametrize("num_bits", [4, 8])
 @pytest.mark.parametrize("is_k_full", [True, False])
-@pytest.mark.skipif(is_hip(), reason="Skip for rocm")
+@pytest.mark.skipif(current_platform.is_rocm(), reason="Skip for rocm")
 def test_fused_marlin_moe(
     m: int,
     n: int,
@@ -115,7 +114,7 @@ def test_fused_marlin_moe(
     num_bits: int,
     is_k_full: bool,
 ):
-    seed_everything(7)
+    current_platform.seed_everything(7)
 
     # Filter act_order
     if act_order:
@@ -192,7 +191,7 @@ def test_fused_marlin_moe(
         topk,
         renormalize=False,
     )
-    marlin_output = fused_marlin_moe(
+    marlin_output = torch.ops.vllm.fused_marlin_moe(
         a,
         qweight1,
         qweight2,
@@ -256,7 +255,7 @@ def test_fused_marlin_moe(
 @pytest.mark.parametrize("act_order", [True, False])
 @pytest.mark.parametrize("num_bits", [4, 8])
 @pytest.mark.parametrize("is_k_full", [True, False])
-@pytest.mark.skipif(is_hip(), reason="Skip for rocm")
+@pytest.mark.skipif(current_platform.is_rocm(), reason="Skip for rocm")
 def test_single_marlin_moe_multiply(
     m: int,
     n: int,
@@ -308,7 +307,7 @@ def test_single_marlin_moe_multiply(
     sort_indices = stack_and_dev(sort_indices_l)
 
     score = torch.randn((m, e), device="cuda", dtype=dtype)
-    marlin_output = single_marlin_moe(
+    marlin_output = torch.ops.vllm.single_marlin_moe(
         a,
         qweight,
         scales,
