@@ -32,8 +32,12 @@ def to_int8(tensor: torch.Tensor) -> torch.Tensor:
 
 def make_rand_tensors(dtype: torch.dtype, m: int, n: int,
                       k: int) -> Tuple[torch.Tensor, torch.Tensor]:
-    a = torch.randn((m, k), device='cuda') * 5
-    b = torch.randn((n, k), device='cuda').t() * 5
+    # a = torch.randn((m, k), device='cuda') * 5
+    # b = torch.randn((n, k), device='cuda').t() * 5
+
+    # Create ones
+    a = torch.ones((m, k), device='cuda') * 2
+    b = torch.ones((n, k), device='cuda').t() * 3
 
     if dtype == torch.int8:
         return to_int8(a), to_int8(b)
@@ -66,12 +70,19 @@ def bench_int8(dtype: torch.dtype, m: int, k: int, n: int, label: str,
                sub_label: str) -> Iterable[TMeasurement]:
     assert dtype == torch.int8
     a, b = make_rand_tensors(torch.int8, m, n, k)
-    a_compressed, e = cutlass_sparsify_and_compress_entry(a)
+    a_compressed, e = ops.cutlass_sparsify_and_compress_entry(a)
+
+    print(f'Default shape: {a.shape}, compressed shape: {a_compressed.shape}, e shape: {e.shape}')
+    print(f'a: {a[-1, -23:]}')
+    print(f'a_compressed: {a_compressed[0, :12]}')
+    print(f'e: {e[-1, -23:]}')
+
     scale_a = torch.tensor(1.0, device="cuda", dtype=torch.float32)
     scale_b = torch.tensor(1.0, device="cuda", dtype=torch.float32)
     bias = torch.zeros((n, ), device="cuda", dtype=torch.bfloat16)
-    azp = torch.zeros((m, ), device="cuda", dtype=torch.int32)
-    azp_adj = torch.zeros((n, ), device="cuda", dtype=torch.int32)
+
+    print(f'Default matmul: {torch.mm(a.to(dtype=torch.float16, device="cuda"), b.to(dtype=torch.float16, device="cuda"))[0:2, :12]}')
+    print(f'Cutlass matmul: {ops.cutlass_scaled_test_mm(a_compressed, e, b, scale_a, scale_b, torch.float16)[0:2, :12]}')
 
     timers = []
     # pytorch impl - bfloat16
@@ -86,17 +97,29 @@ def bench_int8(dtype: torch.dtype, m: int, k: int, n: int, label: str,
                  "pytorch_fp16_fp16_fp16_matmul-no-scales", torch.mm,
                  a.to(dtype=torch.float16), b.to(dtype=torch.float16)))
 
-    # cutlass impl
+    # cutlass impl: bf16 output
     timers.append(
         bench_fn(label, sub_label, "cutlass_i8_i8_bf16_scaled_mm",
                  ops.cutlass_scaled_test_mm, a_compressed, e, b, scale_a, scale_b,
                  torch.bfloat16))
 
-    # cutlass with bias
+    # cutlass with bias: bf16 output
     timers.append(
         bench_fn(label, sub_label, "cutlass_i8_i8_bf16_scaled_mm_bias",
                  ops.cutlass_scaled_test_mm, a_compressed, e, b, scale_a, scale_b, torch.bfloat16,
                  bias))
+    
+    # cutlass impl: fp16 output
+    timers.append(
+        bench_fn(label, sub_label, "cutlass_i8_i8_fp16_scaled_mm",
+                 ops.cutlass_scaled_test_mm, a_compressed, e, b, scale_a, scale_b,
+                 torch.float16))
+
+    # cutlass with bias: fp16 output
+    timers.append(
+        bench_fn(label, sub_label, "cutlass_i8_i8_fp16_scaled_mm_bias",
+                 ops.cutlass_scaled_test_mm, a_compressed, e, b, scale_a, scale_b, torch.float16,
+                 bias.to(dtype=torch.float16)))
 
     return timers
 
@@ -105,10 +128,19 @@ def bench_fp8(dtype: torch.dtype, m: int, k: int, n: int, label: str,
               sub_label: str) -> Iterable[TMeasurement]:
     assert dtype == torch.float8_e4m3fn
     a, b = make_rand_tensors(torch.float8_e4m3fn, m, n, k)
-    a_compressed, e = cutlass_sparsify_and_compress_entry(a)
+    a_compressed, e = ops.cutlass_sparsify_and_compress_entry(a)
+
+    print(f'Default shape: {a.shape}, compressed shape: {a_compressed.shape}, e shape: {e.shape}')
+    print(f'a: {a[-1, -23:]}')
+    print(f'a_compressed: {a_compressed[0, :12]}')
+    print(f'e: {e[-1, -23:]}')
+
     scale_a = torch.tensor(1.0, device="cuda", dtype=torch.float32)
     scale_b = torch.tensor(1.0, device="cuda", dtype=torch.float32)
     bias = torch.zeros((n, ), device="cuda", dtype=torch.bfloat16)
+
+    print(f'Default matmul: {torch.mm(a.to(dtype=torch.float16, device="cuda"), b.to(dtype=torch.float16, device="cuda"))[0:2, :12]}')
+    print(f'Cutlass matmul: {ops.cutlass_scaled_test_mm(a_compressed, e, b, scale_a, scale_b, torch.float16)[0:2, :12]}')
 
     timers = []
 

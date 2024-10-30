@@ -17,8 +17,8 @@
 #include "cutlass/numeric_conversion.h"
 #include "cutlass/detail/dependent_false.hpp"
 
-#include "broadcast_load_epilogue_c3x.hpp"
-#include "common.hpp"
+#include "util/broadcast_load_epilogue_c3x.hpp"
+#include "util/common.hpp"
 
 #include "cutlass/transform/device/transform_universal_adapter.hpp"
 #include "cutlass/transform/kernel/sparse_gemm_compressor.hpp"
@@ -37,12 +37,12 @@
 #include "cutlass/epilogue/collective/collective_builder.hpp"
 #include "cutlass/gemm/dispatch_policy.hpp"
 
-#include "host_tensor.h"
-#include "packed_stride.hpp"
+#include "util/host_tensor.h"
+#include "util/packed_stride.hpp"
 
-#include "helper.h"
+#include "util/helper.h"
 
-#include "common_gemm.cuh"
+#include "util/common_gemm.cuh"
 
 /// Make A structured sparse by replacing elements with 0 and compress it
 template<typename ElementA_>
@@ -66,47 +66,41 @@ bool sparsify_and_compress(torch::Tensor& a_compressed, torch::Tensor& e, torch:
   using StrideA = cutlass::gemm::TagToStrideA_t<LayoutTagA>;
   using StrideE = StrideA;
 
-  using KernelSchedule =
-      cutlass::gemm::KernelTmaWarpSpecializedFP8FastAccum;
-  using EpilogueSchedule = typename cutlass::epilogue::TmaWarpSpecialized;
-  using TileShape = Shape<_128, _128, _128>;
-  using ClusterShape = Shape<_1, _2, _1>;
-  using CollectiveEpilogue = typename cutlass::epilogue::collective::CollectiveBuilder<
-    cutlass::arch::Sm90, cutlass::arch::OpClassTensorOp,
-    TileShape, ClusterShape,
-    cutlass::epilogue::collective::EpilogueTileAuto,
-    float, float,
-    float, LayoutTagA, 4,
-    float, LayoutTagA, 4,
-    EpilogueSchedule
-  >::CollectiveOp;
+  using Gemm =
+      typename std::conditional<std::is_same_v<ElementA, int8_t>,
+        typename sm90_int8_config_default<int8_t, cutlass::half_t,
+                                          ScaledEpilogue>::Cutlass3xGemm,
+        typename sm90_fp8_config_default<cutlass::float_e4m3_t, cutlass::half_t,
+                                         ScaledEpilogue>::Cutlass3xGemm
+      >::type;
 
-  // static constexpr size_t CEStorageSize =
-  //     sizeof(typename CollectiveEpilogue::SharedStorage);
-  // using Stages = typename cutlass::gemm::collective::StageCountAutoCarveout<
-  //     static_cast<int>(CEStorageSize)>;
+  using ElementAB = typename Gemm::ElementAB;
+  using ElementD = typename Gemm::ElementD;
 
-  using CollectiveMainloop = typename cutlass::gemm::collective::CollectiveBuilder<
-    cutlass::arch::Sm90, cutlass::arch::OpClassSparseTensorOp,
-    ElementA, LayoutTagA, 32, // Assuming 8 bits - TODO: Extend to other types
-    ElementA, cutlass::layout::ColumnMajor, 16,
-    float,
-    TileShape, ClusterShape,
-    typename cutlass::gemm::collective::StageCountAutoCarveout<
-      static_cast<int>(sizeof(typename CollectiveEpilogue::SharedStorage))>,
-    KernelSchedule
-  >::CollectiveOp;
-  using GemmKernel = cutlass::gemm::kernel::GemmUniversal<
-    ProblemShape,
-    CollectiveMainloop,
-    CollectiveEpilogue
-  >;
-  using Gemm = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
+  // Just a dummy value
+  int32_t n = 128;
 
-  using ElementE = typename Gemm::GemmKernel::CollectiveMainloop::ElementE;
-  using SparseConfig = typename Gemm::GemmKernel::CollectiveMainloop::SparseConfig;
+  int64_t lda = a.stride(0);
 
-  typename Gemm::GemmKernel::ProblemShape prob_shape{m, 1, k, 1};
+  using StrideA = Stride<int64_t, Int<1>, int64_t>;
+  using StrideB = Stride<int64_t, Int<1>, int64_t>;
+  using StrideC = typename Gemm::StrideC;
+
+  StrideA a_stride{lda, Int<1>{}, 0};
+
+  using GemmKernel = typename Gemm::GemmKernel;
+  typename GemmKernel::ProblemShape prob_shape{m, n, k, 1};
+
+  using LayoutA = typename GemmKernel::CollectiveMainloop::LayoutA;
+  using LayoutE = typename GemmKernel::CollectiveMainloop::LayoutE;
+
+  using ElementE = typename GemmKernel::CollectiveMainloop::ElementE;
+  using SparseConfig = typename GemmKernel::CollectiveMainloop::SparseConfig;
+
+  LayoutA a_layout = SparseConfig::fill_layoutA(prob_shape);
+  LayoutE e_layout = SparseConfig::fill_layoutE(prob_shape);
+
+  // typename Gemm::GemmKernel::ProblemShape prob_shape{m, 1, k, 1};
 
   // Offline compressor kernel
   using CompressorUtility = cutlass::transform::kernel::StructuredSparseCompressorUtility<
@@ -138,13 +132,13 @@ bool sparsify_and_compress(torch::Tensor& a_compressed, torch::Tensor& e, torch:
   int KE = compressor_utility.get_metadata_k_physical();
   int KC = compressor_utility.get_tensorA_k_physical();
 
-  auto a_ptr = static_cast<typename Gemm::ElementA*>(a.data_ptr());
+  auto a_ptr = static_cast<ElementA*>(a.data_ptr());
 
   // cutlass::DeviceAllocation<typename Gemm::ElementA> block_A;
   // cutlass::DeviceAllocation<typename Gemm::ElementA> block_A_compressed;
   // cutlass::DeviceAllocation<typename Gemm::CollectiveMainloop::ElementE> block_E;
 
-  auto a_compressed_ptr = static_cast<typename Gemm::ElementA*>(a_compressed.data_ptr());
+  auto a_compressed_ptr = static_cast<ElementA*>(a_compressed.data_ptr());
   auto e_ptr = static_cast<typename Gemm::CollectiveMainloop::ElementE*>(e.data_ptr());
 
   // block_A_compressed.reset(M * KC * L);
@@ -192,8 +186,8 @@ bool cutlass_sparsify_and_compress_entry(torch::Tensor& a_compressed, torch::Ten
   if (a.dtype() == torch::kFloat8_e4m3fn) {
     return sparsify_and_compress<cutlass::float_e4m3_t>(a_compressed, e, a);
   }
-  // else if (a.dtype() == torch::kInt8) {
-  //   return sparsify_and_compress<int8_t>(a_compressed, e, a);
-  // }
+  else if (a.dtype() == torch::kInt8) {
+    return sparsify_and_compress<int8_t>(a_compressed, e, a);
+  }
   return false;
 }

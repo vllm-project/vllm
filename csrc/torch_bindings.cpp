@@ -281,13 +281,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
           " Tensor a) -> bool");
   ops.impl("cutlass_sparsify_and_compress_entry", &cutlass_sparsify_and_compress_entry);
 
-  // CUTLASS sparse GEMM, supporting semi-structured sparsity
-  ops.def(
-      "cutlass_semi_structured_mm(Tensor! out, Tensor a,"
-      "                  Tensor b) -> ()");
-  ops.impl("cutlass_semi_structured_mm", torch::kCUDA,
-    &cutlass_semi_structured_mm);
-
   // Mamba selective scan kernel
   ops.def(
       "selective_scan_fwd(Tensor! u, Tensor! delta,"

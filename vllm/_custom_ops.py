@@ -515,12 +515,16 @@ def cutlass_scaled_test_mm_supports_fp8(cuda_device_capability: int) -> bool:
 
 def cutlass_sparsify_and_compress_entry(a: torch.Tensor) \
     -> Tuple[torch.Tensor, torch.Tensor]:
-    assert (a.dtype is torch.int8 or a.dtype is torch.int8)
+    assert (a.dtype is torch.int8 or a.dtype is torch.float8_e4m3fn)
+
+    # Not exactly sure what the right value would be based on cutlass definitions
+    # Let's assume e.dtype: torch.uint8 so elemsPerElemE = 8b / 2b_per_nz = 4
+    elemsPerElemE = 4
 
     m = a.shape[0]
     k = a.shape[1]
-    a_compressed = torch.empty((m, k), dtype=a.dtype, device=a.device)
-    e = torch.empty((m, k), dtype=torch.uint8, device=a.device)
+    a_compressed = torch.empty((m, k // 2), dtype=a.dtype, device=a.device)
+    e = torch.empty((m, k // 2 // elemsPerElemE), dtype=torch.uint8, device=a.device)
 
     if not (torch.ops._C.cutlass_sparsify_and_compress_entry(a_compressed, e, a)):
         raise ValueError
@@ -545,21 +549,6 @@ def cutlass_scaled_test_mm(a: torch.Tensor,
     out = torch.empty((m, n), dtype=out_dtype, device=a.device)
 
     torch.ops._C.cutlass_scaled_test_mm(out, a, e, b, scale_a, scale_b, bias)
-
-    return out
-
-
-def cutlass_semi_structured_mm(a: torch.Tensor,
-                      b: torch.Tensor,
-                      out_dtype: torch.dtype) -> torch.Tensor:
-    assert (b.shape[0] % 16 == 0 and b.shape[1] % 16 == 0)
-    assert (out_dtype is torch.bfloat16 or out_dtype is torch.float16 or out_dtype is torch.float)
-
-    m = a.shape[0]
-    n = b.shape[1]
-    out = torch.empty((m, n), dtype=out_dtype, device=a.device)
-
-    torch.ops._C.cutlass_semi_structured_mm(out, a, b)
 
     return out
 

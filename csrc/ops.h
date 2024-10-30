@@ -126,9 +126,6 @@ void cutlass_scaled_test_mm(torch::Tensor& out, torch::Tensor const& a,
 
 bool cutlass_sparsify_and_compress_entry(torch::Tensor& a_compressed, torch::Tensor& e,
                                  torch::Tensor const& a);
-
-void cutlass_semi_structured_mm(torch::Tensor& out, torch::Tensor const& a,
-                                torch::Tensor const& b);
 #endif
 
 void static_scaled_int8_quant(torch::Tensor& out, torch::Tensor const& input,

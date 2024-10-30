@@ -23,11 +23,11 @@
 #include "cutlass/epilogue/collective/collective_builder.hpp"
 #include "cutlass/gemm/collective/collective_builder.hpp"
 
-#include "broadcast_load_epilogue_c3x.hpp"
-#include "common.hpp"
+#include "util/broadcast_load_epilogue_c3x.hpp"
+#include "util/common.hpp"
 // clang-format on
 
-#include "common_gemm.cuh"
+#include "util/common_gemm.cuh"
 
 template <typename InType, typename OutType,
           template <typename, typename, typename> typename Epilogue,
