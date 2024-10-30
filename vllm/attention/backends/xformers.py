@@ -403,7 +403,6 @@ class XFormersMetadataBuilder(AttentionMetadataBuilder[XFormersMetadata]):
         self.num_prefills = 0
         self.num_prefill_tokens = 0
         self.num_decode_tokens = 0
-        self.has_prefix_cache_hit = False
 
         self.input_builder = input_builder
         self.runner = input_builder.runner
@@ -413,7 +412,7 @@ class XFormersMetadataBuilder(AttentionMetadataBuilder[XFormersMetadata]):
 
     def _add_seq_group(
             self, inter_data: "ModelInputForGPUBuilder.InterDataForSeqGroup",
-            chunked_prefill_enabled: bool, prefix_cache_hit: bool):
+            chunked_prefill_enabled: bool):
         is_prompt = inter_data.is_prompt
         block_tables = inter_data.block_tables
 
@@ -440,7 +439,7 @@ class XFormersMetadataBuilder(AttentionMetadataBuilder[XFormersMetadata]):
             # only allowing multiple of block_size chunk size.
             # NOTE: This only works for oooooooxxx style attention.
             block_table = []
-            if prefix_cache_hit:
+            if inter_data.prefix_cache_hit:
                 # NOTE(woosuk): For xformers, the block table should
                 # include the entries for the incoming prefill tokens.
                 block_table = block_tables[seq_id]
@@ -473,14 +472,9 @@ class XFormersMetadataBuilder(AttentionMetadataBuilder[XFormersMetadata]):
                                  -1 if cuda graph is not used.
             batch_size: The maybe padded batch size.
         """
-        prefix_cache_hit = any([
-            inter_data.prefix_cache_hit
-            for inter_data in self.input_builder.inter_data_list
-        ])
         for inter_data in self.input_builder.inter_data_list:
             self._add_seq_group(inter_data,
-                                self.input_builder.chunked_prefill_enabled,
-                                prefix_cache_hit)
+                                self.input_builder.chunked_prefill_enabled)
 
         device = self.runner.device
         use_captured_graph = cuda_graph_pad_size != -1
