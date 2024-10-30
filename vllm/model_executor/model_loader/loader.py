@@ -166,7 +166,7 @@ def build_model(model_class: Type[nn.Module],
                                                     multimodal_config,
                                                     scheduler_config,
                                                     pooling_config)
-    
+
     if prefix:
         extra_kwargs["prefix"] = prefix
 
