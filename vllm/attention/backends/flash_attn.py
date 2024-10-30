@@ -203,7 +203,11 @@ class FlashAttentionMetadata(AttentionMetadata):
             max_query_len=self.max_query_len,
             max_prefill_seq_len=0,
             max_decode_seq_len=self.max_decode_seq_len,
-            query_start_loc=self.query_start_loc[self.num_prefills:]
+            # Batch may be composed of prefill|decodes, adjust query start
+            # indices to refer to the start of decodes. E.g.
+            # in tokens:[3 prefills|6 decodes], query_start_loc=[3,9] => [0,6].
+            query_start_loc=(self.query_start_loc[self.num_prefills:] -
+                             self.query_start_loc[self.num_prefills])
             if self.query_start_loc is not None else None,
             seq_start_loc=self.seq_start_loc[self.num_prefills:]
             if self.seq_start_loc is not None else None,
@@ -211,12 +215,6 @@ class FlashAttentionMetadata(AttentionMetadata):
             block_tables=self.block_tables[self.num_prefills:],
             use_cuda_graph=self.use_cuda_graph,
         )
-        # Batch may be composed of prefill|decodes, adjust query start indices
-        # to refer to the start of decodes when the two are split apart.
-        # E.g. in tokens:[3 prefills|6 decodes], query_start_loc=[3,9] => [0,6].
-        if self._cached_decode_metadata.query_start_loc is not None:
-            qs = self._cached_decode_metadata.query_start_loc
-            self._cached_decode_metadata.query_start_loc = qs - qs[0]
         return self._cached_decode_metadata
 
     def advance_step(self,
@@ -754,7 +752,7 @@ def unified_flash_attention(
     if decode_output is None:
         assert prefill_output is not None
         return prefill_output.view(num_prefill_tokens, hidden_size)
-    
+
     assert decode_meta is not None
     decode_output = decode_output.squeeze(1)
     output = torch.cat([prefill_output, decode_output], dim=0)
