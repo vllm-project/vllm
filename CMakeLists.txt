@@ -50,7 +50,7 @@ set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx940;gfx941;gfx942;gfx1030;gfx11
 # versions are derived from Dockerfile.rocm
 #
 set(TORCH_SUPPORTED_VERSION_CUDA "2.4.0")
-set(TORCH_SUPPORTED_VERSION_ROCM "2.5.0")
+set(TORCH_SUPPORTED_VERSION_ROCM "2.6.0")
 
 #
 # Try to find python package with an executable that exactly matches
