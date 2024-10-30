@@ -64,7 +64,23 @@ RUN rpm -ivh https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.
     microdnf -y install \
         ccache \
         git \
-        rocm \
+        # packages required to build vllm
+        amd-smi \
+        rocm-device-libs \
+        rocrand-devel \
+        hiprand-devel \
+        rocblas-devel \
+        hipblas-devel \
+        hipblaslt-devel \
+        miopen-hip-devel \
+        hipfft-devel \
+        hipsparse-devel \
+        rocprim-devel \
+        hipcub-devel \
+        rocthrust-devel \
+        hipsolver-devel \
+        rccl-devel \
+        # end packages required to build vllm
         hipcc \
         wget \
         which && \
