@@ -112,38 +112,58 @@ class ModelConfig:
             Defaults to 'auto' which defaults to 'hf'.
         mm_processor_kwargs: Arguments to be forwarded to the model's processor
             for multi-modal data, e.g., image processor.
+        pooling_type: Used to configure the pooling method in the embedding 
+            model.
+        pooling_norm: Used to determine whether to normalize the pooled 
+            data in the embedding model.
+        pooling_softmax: Used to determine whether to softmax the pooled 
+            data in the embedding model.
+        pooling_step_tag_id: When pooling_step_tag_id is not -1, it indicates 
+            that the score corresponding to the pooling_step_tag_id in the 
+            generated sentence should be returned. Otherwise, it returns 
+            the scores for all tokens.
+        pooling_returned_token_ids: pooling_returned_token_ids represents a 
+            list of indices for the vocabulary dimensions to be extracted, 
+            such as the token IDs of good_token and bad_token in the 
+            math-shepherd-mistral-7b-prm model.
     """
 
-    def __init__(self,
-                 model: str,
-                 task: Union[TaskOption, _Task],
-                 tokenizer: str,
-                 tokenizer_mode: str,
-                 trust_remote_code: bool,
-                 dtype: Union[str, torch.dtype],
-                 seed: int,
-                 revision: Optional[str] = None,
-                 code_revision: Optional[str] = None,
-                 rope_scaling: Optional[dict] = None,
-                 rope_theta: Optional[float] = None,
-                 tokenizer_revision: Optional[str] = None,
-                 max_model_len: Optional[int] = None,
-                 spec_target_max_model_len: Optional[int] = None,
-                 quantization: Optional[str] = None,
-                 quantization_param_path: Optional[str] = None,
-                 enforce_eager: Optional[bool] = None,
-                 max_context_len_to_capture: Optional[int] = None,
-                 max_seq_len_to_capture: Optional[int] = None,
-                 max_logprobs: int = 20,
-                 disable_sliding_window: bool = False,
-                 skip_tokenizer_init: bool = False,
-                 served_model_name: Optional[Union[str, List[str]]] = None,
-                 limit_mm_per_prompt: Optional[Mapping[str, int]] = None,
-                 use_async_output_proc: bool = True,
-                 override_neuron_config: Optional[Dict[str, Any]] = None,
-                 config_format: ConfigFormat = ConfigFormat.AUTO,
-                 chat_template_text_format: str = "string",
-                 mm_processor_kwargs: Optional[Dict[str, Any]] = None) -> None:
+    def __init__(
+            self,
+            model: str,
+            task: Union[TaskOption, _Task],
+            tokenizer: str,
+            tokenizer_mode: str,
+            trust_remote_code: bool,
+            dtype: Union[str, torch.dtype],
+            seed: int,
+            revision: Optional[str] = None,
+            code_revision: Optional[str] = None,
+            rope_scaling: Optional[dict] = None,
+            rope_theta: Optional[float] = None,
+            tokenizer_revision: Optional[str] = None,
+            max_model_len: Optional[int] = None,
+            spec_target_max_model_len: Optional[int] = None,
+            quantization: Optional[str] = None,
+            quantization_param_path: Optional[str] = None,
+            enforce_eager: Optional[bool] = None,
+            max_context_len_to_capture: Optional[int] = None,
+            max_seq_len_to_capture: Optional[int] = None,
+            max_logprobs: int = 20,
+            disable_sliding_window: bool = False,
+            skip_tokenizer_init: bool = False,
+            served_model_name: Optional[Union[str, List[str]]] = None,
+            limit_mm_per_prompt: Optional[Mapping[str, int]] = None,
+            use_async_output_proc: bool = True,
+            override_neuron_config: Optional[Dict[str, Any]] = None,
+            config_format: ConfigFormat = ConfigFormat.AUTO,
+            chat_template_text_format: str = "string",
+            mm_processor_kwargs: Optional[Dict[str, Any]] = None,
+            pooling_type: Optional[str] = None,
+            pooling_norm: Optional[bool] = None,
+            pooling_softmax: Optional[bool] = None,
+            pooling_step_tag_id: Optional[int] = None,
+            pooling_returned_token_ids: Optional[List[int]] = None) -> None:
         self.model = model
         self.tokenizer = tokenizer
         self.tokenizer_mode = tokenizer_mode
@@ -224,6 +244,13 @@ class ModelConfig:
         supported_tasks, task = self._resolve_task(task, self.hf_config)
         self.supported_tasks = supported_tasks
         self.task: Final = task
+        self.pooler_config = self._init_pooler_config(
+            pooling_type,
+            pooling_norm,
+            pooling_softmax,
+            pooling_step_tag_id,
+            pooling_returned_token_ids,
+        )
 
         self._verify_quantization()
         self._verify_cuda_graph()
@@ -240,6 +267,23 @@ class ModelConfig:
             raise ValueError("`limit_mm_per_prompt` is only supported for "
                              "multimodal models.")
 
+        return None
+
+    def _init_pooler_config(
+        self,
+        pooling_type: Optional[str] = None,
+        pooling_norm: Optional[bool] = None,
+        pooling_softmax: Optional[bool] = None,
+        pooling_step_tag_id: Optional[int] = None,
+        pooling_returned_token_ids: Optional[List[int]] = None
+    ) -> Optional["PoolerConfig"]:
+        if self.task == "embedding":
+            return PoolerConfig(
+                pooling_type=pooling_type,
+                pooling_norm=pooling_norm,
+                pooling_softmax=pooling_softmax,
+                pooling_step_tag_id=pooling_step_tag_id,
+                pooling_returned_token_ids=pooling_returned_token_ids)
         return None
 
     def _init_attention_free(self) -> bool:
@@ -1645,6 +1689,17 @@ class MultiModalConfig:
     """
 
     # TODO: Add configs to init vision tower or not.
+
+
+@dataclass
+class PoolerConfig:
+    """Controls the behavior of pooler in embedding model"""
+
+    pooling_type: Optional[str] = None
+    pooling_norm: Optional[bool] = None
+    pooling_softmax: Optional[bool] = None
+    pooling_step_tag_id: Optional[int] = None
+    pooling_returned_token_ids: Optional[List[int]] = None
 
 
 _STR_DTYPE_TO_TORCH_DTYPE = {

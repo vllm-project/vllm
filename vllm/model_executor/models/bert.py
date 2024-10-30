@@ -6,7 +6,7 @@ from transformers import BertConfig
 
 from vllm.attention import Attention, AttentionMetadata, AttentionType
 from vllm.attention.backends.xformers import XFormersImpl
-from vllm.config import CacheConfig
+from vllm.config import CacheConfig, PoolerConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -387,10 +387,15 @@ class BertEmbeddingModel(nn.Module):
         config: BertConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        pooler_config: Optional[PoolerConfig] = None,
     ) -> None:
         super().__init__()
         self.model = BertModel(config, cache_config, quant_config)
-        self._pooler = Pooler(pooling_type=PoolingType.CLS, normalize=True)
+        self._pooler = Pooler.from_config_with_defaults(
+            pooler_config,
+            pooling_type=PoolingType.CLS,
+            normalize=True,
+            softmax=False)
 
     def forward(
         self,
