@@ -29,18 +29,20 @@ def test_compile_correctness(model, model_args, pp_size, tp_size, attn_backend,
         pytest.skip("Not correct CUDA devices for the test.")
     import os
     os.environ["VLLM_ATTENTION_BACKEND"] = attn_backend
-    if not fullgraph:
-        os.environ["VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE"] = "0"
-    all_args = [["--enforce-eager"] + model_args + ["--max_model_len", "1024"]
-                + ["-pp", str(pp_size)] + ["-tp", str(tp_size)]] * 3
+    all_args = [["--enforce-eager"] + model_args + ["-pp", str(pp_size)] +
+                ["-tp", str(tp_size)]] * 3
     # don't test VLLM_TORCH_COMPILE_LEVEL == 3 case
     # inductor will change the output, so we cannot compare them.
-    all_envs: List[Optional[Dict[str, str]]] = [{
-        "VLLM_TORCH_COMPILE_LEVEL":
-        str(level)
-    } for level in [
-        CompilationLevel.NO_COMPILATION,
-        CompilationLevel.DYNAMO_AS_IS,
-        CompilationLevel.DYNAMO_ONCE,
-    ]]
+    all_envs: List[Optional[Dict[str, str]]] = []
+    for level in [
+            CompilationLevel.NO_COMPILATION,
+            CompilationLevel.DYNAMO_AS_IS,
+            CompilationLevel.DYNAMO_ONCE,
+    ]:
+        all_envs.append({"VLLM_TORCH_COMPILE_LEVEL": str(level)})
+        if level != CompilationLevel.DYNAMO_ONCE and not fullgraph:
+            # "DYNAMO_ONCE" will always use fullgraph
+            all_envs[-1][
+                "VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE"] = "0"  # type: ignore
+
     compare_all_settings(model, all_args, all_envs, method=method)
