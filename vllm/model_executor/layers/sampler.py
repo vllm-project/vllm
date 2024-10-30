@@ -267,12 +267,13 @@ class Sampler(nn.Module):
 
         if do_top_p_top_k and flashinfer_top_k_top_p_sampling is None:
             # If we have a scalar p and k, we can use the optimized version.
-            logits = torch.where(
-                self._scalar_p_and_k,
-                self._apply_top_k_top_p_opt(logits, self._top_p_scalar,
-                                            self._top_k_scalar),
-                _apply_top_k_top_p(logits, sampling_tensors.top_ps,
-                                   sampling_tensors.top_ks))
+            if self._scalar_p_and_k.any():
+                logits = self._apply_top_k_top_p_opt(logits,
+                                                     self._top_p_scalar.item(),
+                                                     self._top_k_scalar.item())
+            else:
+                logits = _apply_top_k_top_p(logits, sampling_tensors.top_ps,
+                                            sampling_tensors.top_ks)
 
         if do_min_p:
             logits = _apply_min_p(logits, sampling_tensors.min_ps)
