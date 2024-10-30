@@ -106,9 +106,6 @@ class _ColumnvLLMParameter(BasevLLMParameter):
         loaded_weight = loaded_weight.narrow(self.output_dim,
                                              tp_rank * shard_size, shard_size)
         assert param_data.shape == loaded_weight.shape
-        # if isinstance(self,(PackedColumnParameter,PackedvLLMParameter)):
-        #     print("load merged", loaded_weight.shape, "->", self.data.shape,
-        #         shard_offset, shard_size, self.output_dim, self.packed_dim)
         param_data.copy_(loaded_weight)
 
     def load_qkv_weight(self, loaded_weight: torch.Tensor, **kwargs):
@@ -134,9 +131,6 @@ class _ColumnvLLMParameter(BasevLLMParameter):
                                              shard_id * shard_size, shard_size)
 
         assert param_data.shape == loaded_weight.shape
-        # if isinstance(self,(PackedColumnParameter,PackedvLLMParameter)):
-        #     print("load qkv", loaded_weight.shape, "->", self.data.shape,
-        #         shard_offset, shard_size, self.output_dim, self.packed_dim)
         param_data.copy_(loaded_weight)
 
 
@@ -166,9 +160,6 @@ class RowvLLMParameter(BasevLLMParameter):
             loaded_weight = loaded_weight.reshape(1)
 
         assert self.data.shape == loaded_weight.shape
-        # if isinstance(self,(PackedColumnParameter,PackedvLLMParameter)):
-        #     print("load rp", loaded_weight.shape, "->", self.data.shape,
-        #         0, shard_size, self.output_dim, self.packed_dim)
         self.data.copy_(loaded_weight)
 
 
