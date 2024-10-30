@@ -12,7 +12,7 @@ from torch import nn
 from transformers import Qwen2Config
 
 from vllm.attention import AttentionMetadata
-from vllm.config import CacheConfig, LoRAConfig
+from vllm.config import CacheConfig, LoRAConfig, PoolerConfig
 from vllm.model_executor.layers.linear import RowParallelLinear
 from vllm.model_executor.layers.pooler import Pooler, PoolingType
 from vllm.model_executor.layers.quantization.base_config import (
@@ -53,6 +53,7 @@ class Qwen2ForSequenceClassification(nn.Module):
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
+        pooler_config: Optional[PoolerConfig] = None,
     ) -> None:
         # TODO (@robertgshaw2): see if this can be moved out
         if (cache_config.sliding_window is not None
@@ -77,9 +78,11 @@ class Qwen2ForSequenceClassification(nn.Module):
         self.score = RowParallelLinear(config.hidden_size,
                                        config.num_labels,
                                        quant_config=quant_config)
-        self._pooler = Pooler(pooling_type=PoolingType.LAST,
-                              normalize=False,
-                              softmax=True)
+        self._pooler = Pooler.from_config_with_defaults(
+            pooler_config,
+            pooling_type=PoolingType.LAST,
+            normalize=False,
+            softmax=True)
 
     def forward(
         self,
