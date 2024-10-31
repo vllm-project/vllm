@@ -237,11 +237,11 @@ class InputPreprocessor:
             )
 
         if parsed["type"] == "tokens":
-            content = parsed["content"]
+            tokens_content = parsed["content"]
 
-            prompt_token_ids = content["prompt_token_ids"]
-            multi_modal_data = content.get("multi_modal_data")
-            mm_processor_kwargs = content.get("mm_processor_kwargs")
+            prompt_token_ids = tokens_content["prompt_token_ids"]
+            multi_modal_data = tokens_content.get("multi_modal_data")
+            mm_processor_kwargs = tokens_content.get("mm_processor_kwargs")
 
             return token_inputs(
                 prompt_token_ids=prompt_token_ids,
@@ -250,16 +250,16 @@ class InputPreprocessor:
             )
 
         if parsed["type"] == "text":
-            content = parsed["content"]
+            text_content = parsed["content"]
 
-            prompt_text = content["prompt"]
+            prompt_text = text_content["prompt"]
             prompt_token_ids = self._tokenize_prompt(
                 prompt_text,
                 request_id=request_id,
                 lora_request=lora_request,
             )
-            multi_modal_data = content.get("multi_modal_data")
-            mm_processor_kwargs = content.get("mm_processor_kwargs")
+            multi_modal_data = text_content.get("multi_modal_data")
+            mm_processor_kwargs = text_content.get("mm_processor_kwargs")
 
             return token_inputs(
                 prompt=prompt_text,
@@ -293,11 +293,11 @@ class InputPreprocessor:
             )
 
         if parsed["type"] == "tokens":
-            content = parsed["content"]
+            tokens_content = parsed["content"]
 
-            prompt_token_ids = content["prompt_token_ids"]
-            multi_modal_data = content.get("multi_modal_data")
-            mm_processor_kwargs = content.get("mm_processor_kwargs")
+            prompt_token_ids = tokens_content["prompt_token_ids"]
+            multi_modal_data = tokens_content.get("multi_modal_data")
+            mm_processor_kwargs = tokens_content.get("mm_processor_kwargs")
 
             return token_inputs(
                 prompt_token_ids=prompt_token_ids,
@@ -306,16 +306,16 @@ class InputPreprocessor:
             )
 
         if parsed["type"] == "text":
-            content = parsed["content"]
+            text_content = parsed["content"]
 
-            prompt_text = content["prompt"]
+            prompt_text = text_content["prompt"]
             prompt_token_ids = await self._tokenize_prompt_async(
                 prompt_text,
                 request_id=request_id,
                 lora_request=lora_request,
             )
-            multi_modal_data = content.get("multi_modal_data")
-            mm_processor_kwargs = content.get("mm_processor_kwargs")
+            multi_modal_data = text_content.get("multi_modal_data")
+            mm_processor_kwargs = text_content.get("mm_processor_kwargs")
 
             return token_inputs(
                 prompt=prompt_text,
