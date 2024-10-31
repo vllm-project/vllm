@@ -98,8 +98,9 @@ class Processor:
 
         # Make Request for EngineCore.
         engine_core_request = EngineCoreRequest(
-            request_id, processed_inputs.get("prompt_token_ids"),
-            sampling_params, eos_token_id, arrival_time, lora_request)
+            request_id, processed_inputs.get("prompt"),
+            processed_inputs.get("prompt_token_ids"), sampling_params,
+            eos_token_id, arrival_time, lora_request)
 
         return detokenizer_request, engine_core_request
 

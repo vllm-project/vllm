@@ -153,13 +153,14 @@ class AsyncLLMEngine(LLMEngineProtocol):
         )
         return engine
 
-    async def wait_for_engine_core(self, ready_path: str):
+    def wait_for_engine_core(self, ready_path: str):
         """Wait until the LLMEngineCore is ready."""
 
         try:
             # Non-asyncio context so this can run in __init__
             sync_ctx = zmq.Context()  # type: ignore[attr-defined]
-            socket = sync_ctx.connect(ready_path)
+            socket = sync_ctx.socket(zmq.constants.PULL)
+            socket.connect(ready_path)
 
             # Poll ready socket socket until
             while socket.poll(timeout=POLL_TIMEOUT_MS) == 0:
@@ -171,6 +172,10 @@ class AsyncLLMEngine(LLMEngineProtocol):
 
             message = socket.recv_string()
             assert message == LLM_ENGINE_CORE_READY_STR
+
+        except BaseException as e:
+            logger.exception(e)
+            raise e
 
         finally:
             sync_ctx.destroy(linger=0)

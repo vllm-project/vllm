@@ -35,7 +35,7 @@ class EngineCoreRequest(msgspec.Struct):
     request_id: str
     #NOTE(Nick): I don't think we need to pass prompt here since it should
     # always be tokenized?
-    #    prompt: Optional[str]
+    prompt: Optional[str]
     prompt_token_ids: List[int]
     sampling_params: SamplingParams
     eos_token_id: Optional[int]

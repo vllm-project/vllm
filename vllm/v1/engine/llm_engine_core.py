@@ -167,16 +167,14 @@ class LLMEngineCoreProcess(LLMEngineCore):
 
     def __init__(
         self,
-        input_path: Optional[str] = None,
-        output_path: Optional[str] = None,
-        ready_path: Optional[str] = None,
         *args,
+        input_path: str,
+        output_path: str,
+        ready_path: str,
         **kwargs,
     ):
+        print("HERE HERE HERE")
         super().__init__(*args, **kwargs)
-
-        assert (input_path is not None and output_path is not None
-                and ready_path is not None)
 
         self.msgpack_encoder = msgspec.msgpack.Encoder()
         self.msgpack_decoder = msgspec.msgpack.Decoder(EngineCoreRequest)
