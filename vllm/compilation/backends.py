@@ -351,6 +351,10 @@ class VllmBackend:
         self.split_gm, self.piecewise_graphs = split_graph(
             graph, self.compilation_configs.non_cudagraph_ops)
 
+        from torch._dynamo.utils import lazy_format_graph_code
+        logger.debug("%s",
+                     lazy_format_graph_code("stiching module", self.split_gm))
+
         compilation_counter.num_piecewise_graphs_seen += len(
             self.piecewise_graphs)
         submod_names_to_compile = [
@@ -363,10 +367,6 @@ class VllmBackend:
         PiecewiseCompileInterpreter(self.split_gm, submod_names_to_compile,
                                     self.compilation_configs,
                                     self.graph_pool).run(*example_inputs)
-
-        from torch._dynamo.utils import lazy_format_graph_code
-        logger.debug("%s",
-                     lazy_format_graph_code("stiching module", self.split_gm))
 
         self._called = True
 
