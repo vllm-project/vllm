@@ -298,8 +298,8 @@ def input_processor_for_idefics3(ctx: InputContext, inputs: DecoderOnlyInputs):
 
 
 def get_max_idefics3_image_tokens(ctx: InputContext,
-                               *,
-                               num_crops: Optional[int] = None):
+                                  *,
+                                  num_crops: Optional[int] = None):
     model_config = ctx.model_config
     processor = cached_get_processor(model_config.model)
     image_seq_len = processor.image_seq_len
