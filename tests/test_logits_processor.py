@@ -69,7 +69,7 @@ def test_logits_processors(seed: int, device: str):
             SequenceGroupMetadata(
                 request_id=f"test_{i}",
                 is_prompt=True,
-                seq_data={0: SequenceData([1, 2, 3])},
+                seq_data={0: SequenceData.from_seqs([1, 2, 3])},
                 sampling_params=SamplingParams(temperature=0,
                                                logits_processors=[pick_ith]),
                 block_tables={0: [1]},
@@ -83,12 +83,14 @@ def test_logits_processors(seed: int, device: str):
         device=device,
         pin_memory=is_pin_memory_available())
     logits_processor_output = logits_processor(
-        embedding=None,
+        lm_head=None,
         hidden_states=input_tensor,
         sampling_metadata=sampling_metadata)
 
     assert torch.isinf(logits_processor_output[:, 0]).all()
 
     fake_logits *= logits_processor.scale
-    assert torch.allclose(logits_processor_output[:, 1], fake_logits[:, 1],
-                          1e-4)
+    torch.testing.assert_close(logits_processor_output[:, 1],
+                               fake_logits[:, 1],
+                               rtol=1e-4,
+                               atol=0.0)

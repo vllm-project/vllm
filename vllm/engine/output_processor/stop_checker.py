@@ -1,10 +1,9 @@
 from typing import Callable, Optional
 
-from transformers import PreTrainedTokenizer
-
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import Sequence, SequenceStatus
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 
 class StopChecker:
@@ -15,8 +14,7 @@ class StopChecker:
     """
 
     def __init__(self, max_model_len: int,
-                 get_tokenizer_for_seq: Callable[[Sequence],
-                                                 PreTrainedTokenizer]):
+                 get_tokenizer_for_seq: Callable[[Sequence], AnyTokenizer]):
         # Do not use it directly, but use `self._get_max_model_len`.
         self._max_model_len = max_model_len
         self.get_tokenizer_for_seq = get_tokenizer_for_seq
@@ -59,7 +57,7 @@ class StopChecker:
         # Check if a stop token was encountered.
         # This assumes a single token produced per step.
         last_token_id = seq.get_last_token_id()
-        if last_token_id in sampling_params.stop_token_ids:
+        if last_token_id in (sampling_params.stop_token_ids or ()):
             if new_char_count and (
                     not sampling_params.include_stop_str_in_output):
                 # Remove last token
@@ -94,7 +92,7 @@ class StopChecker:
 
         Returns the stop string if matched or else None.
         """
-        if not new_char_count:
+        if not new_char_count or not sampling_params.stop:
             return None
 
         for stop_str in sampling_params.stop:

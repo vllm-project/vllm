@@ -12,8 +12,7 @@ from vllm.distributed.parallel_state import (get_tensor_model_parallel_group,
                                              get_tp_group, graph_capture)
 
 from ..utils import (ensure_model_parallel_initialized,
-                     init_test_distributed_environment,
-                     multi_process_tensor_parallel)
+                     init_test_distributed_environment, multi_process_parallel)
 
 random.seed(42)
 test_sizes = [random.randint(1024, 2048 * 1024) for _ in range(8)]
@@ -73,8 +72,8 @@ def graph_allreduce(tp_size, pp_size, rank, distributed_init_port):
                         out2 = tensor_model_parallel_all_reduce(inp2)
                         dist.all_reduce(inp2, group=group)
             graph.replay()
-            assert torch.allclose(out1, inp1)
-            assert torch.allclose(out2, inp2)
+            torch.testing.assert_close(out1, inp1)
+            torch.testing.assert_close(out2, inp2)
 
 
 @ray.remote(num_gpus=1, max_calls=1)
@@ -97,13 +96,13 @@ def eager_allreduce(tp_size, pp_size, rank, distributed_init_port):
     out = inp
     for _ in range(num_communication):
         out = fa.all_reduce_unreg(out)
-    assert torch.allclose(out, inp * (tp_size**num_communication))
+    torch.testing.assert_close(out, inp * (tp_size**num_communication))
 
     inp = torch.ones(sz * 4, dtype=torch.bfloat16, device=device)
     out = inp
     for _ in range(num_communication):
         out = fa.all_reduce_unreg(out)
-    assert torch.allclose(out, inp * (tp_size**num_communication))
+    torch.testing.assert_close(out, inp * (tp_size**num_communication))
 
 
 @pytest.mark.parametrize("tp_size", [2])
@@ -113,4 +112,4 @@ def test_custom_allreduce(tp_size, pipeline_parallel_size, test_target):
     world_size = tp_size * pipeline_parallel_size
     if world_size > torch.cuda.device_count():
         pytest.skip("Not enough GPUs to run the test.")
-    multi_process_tensor_parallel(tp_size, pipeline_parallel_size, test_target)
+    multi_process_parallel(tp_size, pipeline_parallel_size, test_target)

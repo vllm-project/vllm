@@ -4,14 +4,16 @@ from typing import List, Tuple
 import pytest
 import torch
 
+from tests.kernels.utils import DEFAULT_OPCHECK_TEST_UTILS, opcheck
 from vllm import _custom_ops as ops
+from vllm.platforms import current_platform
 
 COPYING_DIRECTION = [('cuda', 'cpu'), ('cuda', 'cuda'), ('cpu', 'cuda')]
 DTYPES = [torch.half, torch.bfloat16, torch.float]
 NUM_TOKENS = [42]  # Arbitrary values for testing
 NUM_LAYERS = [1]  # Arbitrary values for testing
 NUM_HEADS = [8]  # Arbitrary values for testing
-HEAD_SIZES = [64, 80, 96, 112, 128, 192, 256]
+HEAD_SIZES = [64, 80, 96, 112, 120, 128, 192, 256]
 BLOCK_SIZES = [8, 16, 32]
 
 # Arbitrary values for testing
@@ -52,10 +54,9 @@ def test_copy_blocks(
     kv_cache_dtype: str,
     device: str,
 ) -> None:
-    random.seed(seed)
-    torch.random.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
+    if kv_cache_dtype == "fp8" and head_size % 16:
+        pytest.skip()
+    current_platform.seed_everything(seed)
     torch.set_default_device(device)
     # Generate random block mappings where each source block is mapped to two
     # destination blocks.
@@ -85,6 +86,11 @@ def test_copy_blocks(
     block_mapping_tensor = torch.tensor(block_mapping,
                                         dtype=torch.int64,
                                         device=device).view(-1, 2)
+
+    opcheck(torch.ops._C_cache_ops.copy_blocks,
+            (key_caches, value_caches, block_mapping_tensor),
+            test_utils=DEFAULT_OPCHECK_TEST_UTILS,
+            cond=(head_size == HEAD_SIZES[0]))
     ops.copy_blocks(key_caches, value_caches, block_mapping_tensor)
 
     # Run the reference implementation.
@@ -96,10 +102,10 @@ def test_copy_blocks(
 
     # Compare the results.
     for key_cache, cloned_key_cache in zip(key_caches, cloned_key_caches):
-        assert torch.allclose(key_cache, cloned_key_cache)
+        torch.testing.assert_close(key_cache, cloned_key_cache)
     for value_cache, cloned_value_cache in zip(value_caches,
                                                cloned_value_caches):
-        assert torch.allclose(value_cache, cloned_value_cache)
+        torch.testing.assert_close(value_cache, cloned_value_cache)
 
 
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
@@ -124,10 +130,9 @@ def test_reshape_and_cache(
     device: str,
     kv_cache_dtype: str,
 ) -> None:
-    random.seed(seed)
-    torch.random.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
+    if kv_cache_dtype == "fp8" and head_size % 16:
+        pytest.skip()
+    current_platform.seed_everything(seed)
     torch.set_default_device(device)
     # Create a random slot mapping.
     num_slots = block_size * num_blocks
@@ -155,11 +160,15 @@ def test_reshape_and_cache(
         cloned_value_cache = value_cache.clone()
 
     # Using default kv_scale
-    kv_scale = 1.0
+    k_scale = v_scale = 1.0
 
     # Call the reshape_and_cache kernel.
+    opcheck(torch.ops._C_cache_ops.reshape_and_cache,
+            (key, value, key_cache, value_cache, slot_mapping, kv_cache_dtype,
+             k_scale, v_scale),
+            cond=(head_size == HEAD_SIZES[0]))
     ops.reshape_and_cache(key, value, key_cache, value_cache, slot_mapping,
-                          kv_cache_dtype, kv_scale)
+                          kv_cache_dtype, k_scale, v_scale)
 
     if kv_cache_dtype == "fp8":
         result_key_cache = torch.empty_like(key_cache, dtype=torch.float16)
@@ -180,17 +189,17 @@ def test_reshape_and_cache(
         cloned_value_cache[block_idx, :, :, block_offset] = value[i]
 
     if kv_cache_dtype == "fp8":
-        assert torch.allclose(result_key_cache,
-                              cloned_key_cache,
-                              atol=0.001,
-                              rtol=0.1)
-        assert torch.allclose(result_value_cache,
-                              cloned_value_cache,
-                              atol=0.001,
-                              rtol=0.1)
+        torch.testing.assert_close(result_key_cache,
+                                   cloned_key_cache,
+                                   atol=0.001,
+                                   rtol=0.1)
+        torch.testing.assert_close(result_value_cache,
+                                   cloned_value_cache,
+                                   atol=0.001,
+                                   rtol=0.1)
     else:
-        assert torch.allclose(key_cache, cloned_key_cache)
-        assert torch.allclose(value_cache, cloned_value_cache)
+        torch.testing.assert_close(key_cache, cloned_key_cache)
+        torch.testing.assert_close(value_cache, cloned_value_cache)
 
 
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
@@ -215,11 +224,7 @@ def test_reshape_and_cache_flash(
     device: str,
     kv_cache_dtype: str,
 ) -> None:
-    if kv_cache_dtype == "fp8":
-        pytest.skip()
-    random.seed(seed)
-    torch.random.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
+    current_platform.seed_everything(seed)
     torch.set_default_device(device)
 
     # Create a random slot mapping.
@@ -248,15 +253,37 @@ def test_reshape_and_cache_flash(
         dtype,
         device=device,
     )
-    key_cache, value_cache = key_caches[0], value_caches[0]
+    key_cache, value_cache = key_caches[0].contiguous(
+    ), value_caches[0].contiguous()
+    del key_caches
+    del value_caches
 
     # Clone the KV caches.
-    cloned_key_cache = key_cache.clone()
-    cloned_value_cache = value_cache.clone()
+    if kv_cache_dtype == "fp8":
+        cloned_key_cache = torch.empty_like(key_cache, dtype=torch.float16)
+        ops.convert_fp8(cloned_key_cache, key_cache)
+        cloned_value_cache = torch.empty_like(value_cache, dtype=torch.float16)
+        ops.convert_fp8(cloned_value_cache, value_cache)
+    else:
+        cloned_key_cache = key_cache.clone()
+        cloned_value_cache = value_cache.clone()
+
+    # Using default kv_scale
+    k_scale = v_scale = 1.0
 
     # Call the reshape_and_cache kernel.
+    opcheck(torch.ops._C_cache_ops.reshape_and_cache_flash,
+            (key, value, key_cache, value_cache, slot_mapping, kv_cache_dtype,
+             k_scale, v_scale),
+            cond=(head_size == HEAD_SIZES[0]))
     ops.reshape_and_cache_flash(key, value, key_cache, value_cache,
-                                slot_mapping, kv_cache_dtype)
+                                slot_mapping, kv_cache_dtype, k_scale, v_scale)
+
+    if kv_cache_dtype == "fp8":
+        result_key_cache = torch.empty_like(key_cache, dtype=torch.float16)
+        ops.convert_fp8(result_key_cache, key_cache)
+        result_value_cache = torch.empty_like(value_cache, dtype=torch.float16)
+        ops.convert_fp8(result_value_cache, value_cache)
 
     # Run the reference implementation.
     block_indicies = torch.div(slot_mapping, block_size, rounding_mode="floor")
@@ -269,8 +296,18 @@ def test_reshape_and_cache_flash(
         cloned_key_cache[block_idx, block_offset, :, :] = key[i]
         cloned_value_cache[block_idx, block_offset, :, :] = value[i]
 
-    assert torch.allclose(key_cache, cloned_key_cache)
-    assert torch.allclose(value_cache, cloned_value_cache)
+    if kv_cache_dtype == "fp8":
+        torch.testing.assert_close(result_key_cache,
+                                   cloned_key_cache,
+                                   atol=0.001,
+                                   rtol=0.1)
+        torch.testing.assert_close(result_value_cache,
+                                   cloned_value_cache,
+                                   atol=0.001,
+                                   rtol=0.1)
+    else:
+        torch.testing.assert_close(key_cache, cloned_key_cache)
+        torch.testing.assert_close(value_cache, cloned_value_cache)
 
 
 @pytest.mark.parametrize("direction", COPYING_DIRECTION)
@@ -299,10 +336,10 @@ def test_swap_blocks(
 ) -> None:
     if kv_cache_dtype == "fp8" and "cpu" in direction:
         pytest.skip()
-    random.seed(seed)
-    torch.random.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
+    if kv_cache_dtype == "fp8" and head_size % 16:
+        pytest.skip()
+
+    current_platform.seed_everything(seed)
 
     src_device = device if direction[0] == "cuda" else 'cpu'
     dst_device = device if direction[1] == "cuda" else 'cpu'
@@ -334,16 +371,24 @@ def test_swap_blocks(
     src_value_caches_clone = src_value_caches[0].clone()
 
     # Call the swap_blocks kernel.
+    do_opcheck = (head_size == HEAD_SIZES[0])
+    opcheck(torch.ops._C_cache_ops.swap_blocks,
+            (src_key_caches[0], dist_key_caches[0], block_mapping_tensor),
+            cond=do_opcheck)
+    opcheck(torch.ops._C_cache_ops.swap_blocks,
+            (src_value_caches[0], dist_value_caches[0], block_mapping_tensor),
+            cond=do_opcheck)
+
     ops.swap_blocks(src_key_caches[0], dist_key_caches[0],
                     block_mapping_tensor)
     ops.swap_blocks(src_value_caches[0], dist_value_caches[0],
                     block_mapping_tensor)
 
     for src, dst in block_mapping:
-        assert torch.allclose(src_key_caches_clone[src].cpu(),
-                              dist_key_caches[0][dst].cpu())
-        assert torch.allclose(src_value_caches_clone[src].cpu(),
-                              dist_value_caches[0][dst].cpu())
+        torch.testing.assert_close(src_key_caches_clone[src].cpu(),
+                                   dist_key_caches[0][dst].cpu())
+        torch.testing.assert_close(src_value_caches_clone[src].cpu(),
+                                   dist_value_caches[0][dst].cpu())
 
 
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
@@ -363,9 +408,7 @@ def test_fp8_e4m3_conversion(
     seed: int,
     device: str,
 ) -> None:
-    random.seed(seed)
-    torch.random.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
+    current_platform.seed_everything(seed)
 
     low = -224.0
     high = 224.0
@@ -379,4 +422,4 @@ def test_fp8_e4m3_conversion(
     converted_cache = torch.empty_like(cache)
     ops.convert_fp8(converted_cache, cache_fp8)
 
-    assert torch.allclose(cache, converted_cache, atol=0.001, rtol=0.1)
+    torch.testing.assert_close(cache, converted_cache, atol=0.001, rtol=0.1)

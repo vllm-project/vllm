@@ -11,41 +11,26 @@ on:
       - main
 
 jobs:
-  ruff:
+  mypy:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.8", "3.9", "3.10", "3.11"]
+        python-version: ["3.8", "3.9", "3.10", "3.11", "3.12"]
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@eef61447b9ff4aafe5dcd4e0bbf5d482be7e7871 # v4.2.1
     - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@v2
+      uses: actions/setup-python@f677139bbe7f9c59b41e40162b753c062f5d49a3 # v5.2.0
       with:
         python-version: ${{ matrix.python-version }}
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install mypy==1.9.0
+        pip install mypy==1.11.1
         pip install types-setuptools
         pip install types-PyYAML
         pip install types-requests
         pip install types-setuptools
     - name: Mypy
       run: |
-        mypy vllm/attention --config-file pyproject.toml
-        mypy vllm/core --config-file pyproject.toml
-        mypy vllm/distributed --config-file pyproject.toml
-        mypy vllm/entrypoints --config-file pyproject.toml
-        mypy vllm/executor --config-file pyproject.toml
-        mypy vllm/multimodal --config-file pyproject.toml
-        mypy vllm/usage --config-file pyproject.toml
-        mypy vllm/*.py --config-file pyproject.toml
-        mypy vllm/transformers_utils --config-file pyproject.toml
-        mypy vllm/engine  --config-file pyproject.toml
-        mypy vllm/worker --config-file pyproject.toml
-        mypy vllm/spec_decode --config-file pyproject.toml
-        mypy vllm/model_executor  --config-file pyproject.toml
-        mypy vllm/lora --config-file pyproject.toml
-        mypy vllm/logging --config-file pyproject.toml
-        mypy tests --config-file pyproject.toml
-
+        echo "::add-matcher::.github/workflows/matchers/mypy.json"
+        tools/mypy.sh 1

@@ -23,6 +23,8 @@ def _create_model_runner(model: str, *args, **kwargs) -> ModelRunner:
         cache_config=engine_config.cache_config,
         load_config=engine_config.load_config,
         lora_config=engine_config.lora_config,
+        prompt_adapter_config=engine_config.prompt_adapter_config,
+        observability_config=engine_config.observability_config,
         is_driver_worker=True,
     )
     return model_runner
@@ -44,7 +46,7 @@ def test_prepare_prompt(batch_size):
         # make sure all tokens fit into one block
         seq_len = i % (model_runner.block_size - 1) + 1
         seq_lens.append(seq_len)
-        seq_data = SequenceData(list(range(seq_len)))
+        seq_data = SequenceData.from_seqs(range(seq_len))
         seq_group_metadata = SequenceGroupMetadata(
             request_id=f"test_{i}",
             is_prompt=True,
@@ -61,12 +63,13 @@ def test_prepare_prompt(batch_size):
         expected_selected_token_indices.append(selected_token_start_idx +
                                                seq_len - 1)
         selected_token_start_idx += seq_len
-    model_input = model_runner._prepare_model_input(seq_group_metadata_list)
+    model_input = model_runner._prepare_model_input_tensors(
+        seq_group_metadata_list)
     input_tokens = model_input.input_tokens
     input_positions = model_input.input_positions
     attn_metadata = model_input.attn_metadata
     return_seq_lens = model_input.seq_lens
-    slot_mapping = model_input.slot_mapping
+    slot_mapping = attn_metadata.slot_mapping
     assert return_seq_lens == seq_lens
     assert len(slot_mapping) == len(input_tokens)
 
@@ -74,7 +77,7 @@ def test_prepare_prompt(batch_size):
     device = model_runner.device
     assert attn_metadata.num_prefills > 0
     assert attn_metadata.num_decode_tokens == 0
-    assert torch.allclose(
+    torch.testing.assert_close(
         attn_metadata.seq_lens_tensor,
         torch.tensor(seq_lens, device=device, dtype=torch.int))
     assert attn_metadata.seq_lens == seq_lens
@@ -87,7 +90,7 @@ def test_prepare_prompt(batch_size):
     for seq_len in seq_lens:
         start_idx += seq_len
         start_loc.append(start_idx)
-    assert torch.allclose(
+    torch.testing.assert_close(
         attn_metadata.query_start_loc,
         torch.tensor(start_loc, dtype=torch.int32, device=device))
 
@@ -99,10 +102,10 @@ def test_prepare_prompt(batch_size):
         start_idx += seq_len
         seq_start_loc.append(start_idx)
 
-    assert torch.allclose(
+    torch.testing.assert_close(
         attn_metadata.seq_start_loc,
         torch.tensor(start_loc, dtype=torch.int32, device=device))
-    assert torch.allclose(
+    torch.testing.assert_close(
         attn_metadata.context_lens_tensor,
         torch.zeros(attn_metadata.context_lens_tensor.shape[0],
                     dtype=torch.int,
@@ -111,7 +114,7 @@ def test_prepare_prompt(batch_size):
     expected = torch.tensor([[] for _ in range(len(seq_group_metadata_list))],
                             dtype=torch.int32,
                             device=model_runner.device)
-    assert torch.allclose(attn_metadata.block_tables, expected)
+    torch.testing.assert_close(attn_metadata.block_tables, expected)
     # Cuda graph should not be used for prerill.
     assert attn_metadata.use_cuda_graph is False
 
@@ -160,7 +163,7 @@ def test_prepare_decode_cuda_graph(batch_size):
         # make sure all tokens fit into one block
         context_len = i % (model_runner.block_size - 1) + 1
         context_lens.append(context_len)
-        seq_data = SequenceData(list(range(context_len)))
+        seq_data = SequenceData.from_seqs(range(context_len))
         seq_data.update_num_computed_tokens(context_len)
         # Append one token ID since prefill is finished.
         seq_data.append_token_id(1, 0)
@@ -174,10 +177,11 @@ def test_prepare_decode_cuda_graph(batch_size):
         assert seq_group_metadata.token_chunk_size == 1
         seq_group_metadata_list.append(seq_group_metadata)
 
-    model_input = model_runner._prepare_model_input(seq_group_metadata_list)
+    model_input = model_runner._prepare_model_input_tensors(
+        seq_group_metadata_list)
     input_tokens, input_positions, attn_metadata, slot_mapping = (
         model_input.input_tokens, model_input.input_positions,
-        model_input.attn_metadata, model_input.slot_mapping)
+        model_input.attn_metadata, model_input.attn_metadata.slot_mapping)
     assert len(slot_mapping) == len(input_tokens)
 
     expected_bs = _get_graph_batch_size(len(seq_group_metadata_list))
@@ -190,13 +194,14 @@ def test_prepare_decode_cuda_graph(batch_size):
     for _ in range(expected_bs - len(seq_lens)):
         seq_lens.append(1)
     assert attn_metadata.seq_lens == seq_lens
+    assert attn_metadata.num_decode_tokens == len(seq_lens)
     start_idx = 0
     start_loc = [start_idx]
     for _ in context_lens:
         # decode has only 1 token for query.
         start_idx += 1
         start_loc.append(start_idx)
-    assert torch.allclose(
+    torch.testing.assert_close(
         attn_metadata.query_start_loc,
         torch.tensor(start_loc, dtype=torch.int32, device=device))
 
@@ -205,15 +210,15 @@ def test_prepare_decode_cuda_graph(batch_size):
     for seq_len in seq_lens:
         start_idx += seq_len
         seq_start_loc.append(start_idx)
-    assert torch.allclose(
+    torch.testing.assert_close(
         attn_metadata.seq_start_loc,
         torch.tensor(seq_start_loc, dtype=torch.int32, device=device))
 
-    assert torch.allclose(
+    torch.testing.assert_close(
         attn_metadata.context_lens_tensor,
         torch.tensor(context_lens, dtype=torch.int, device=device))
     assert attn_metadata.max_decode_seq_len == max(seq_lens)
-    assert torch.allclose(
+    torch.testing.assert_close(
         attn_metadata.seq_lens_tensor[:len(seq_lens)],
         torch.tensor(seq_lens, dtype=torch.int, device=device))
 
@@ -232,10 +237,8 @@ def test_prepare_decode_cuda_graph(batch_size):
 
     # Verify Sampling
     expected_selected_token_indices = []
-    selected_token_start_idx = 0
-    for _ in context_lens:
+    for selected_token_start_idx, _ in enumerate(context_lens):
         expected_selected_token_indices.append(selected_token_start_idx)
-        selected_token_start_idx += 1
     sampling_metadata = SamplingMetadata.prepare(
         seq_group_metadata_list,
         seq_lens,
@@ -259,32 +262,29 @@ def test_empty_seq_group():
         enforce_eager=False,
     )
     seq_group_metadata_list: List[SequenceGroupMetadata] = []
-    model_input = model_runner._prepare_model_input(seq_group_metadata_list)
-    input_tokens, input_positions, attn_metadata, slot_mapping = (
+    model_input = model_runner._prepare_model_input_tensors(
+        seq_group_metadata_list)
+    input_tokens, input_positions, attn_metadata = (
         model_input.input_tokens,
         model_input.input_positions,
         model_input.attn_metadata,
-        model_input.slot_mapping,
     )
-    assert len(input_tokens) == 0
-    assert len(input_positions) == 0
+    assert input_tokens is None
+    assert input_positions is None
     assert attn_metadata is None
-    assert len(slot_mapping) == 0
 
-    model_input = model_runner._prepare_model_input(seq_group_metadata_list)
-    (input_tokens, input_positions, attn_metadata, slot_mapping,
-     return_seq_lens) = (
-         model_input.input_tokens,
-         model_input.input_positions,
-         model_input.attn_metadata,
-         model_input.slot_mapping,
-         model_input.seq_lens,
-     )
-    assert len(input_tokens) == 0
-    assert len(input_positions) == 0
+    model_input = model_runner._prepare_model_input_tensors(
+        seq_group_metadata_list)
+    (input_tokens, input_positions, attn_metadata, return_seq_lens) = (
+        model_input.input_tokens,
+        model_input.input_positions,
+        model_input.attn_metadata,
+        model_input.seq_lens,
+    )
+    assert input_tokens is None
+    assert input_positions is None
     assert attn_metadata is None
-    assert len(slot_mapping) == 0
-    assert len(return_seq_lens) == 0
+    assert return_seq_lens is None
 
 
 @pytest.fixture
@@ -322,7 +322,7 @@ def test_hybrid_batches(batch_size, enforce_eager, distributed_init):
         # make sure all tokens fit into one block
         seq_len = i % (model_runner.block_size - 1) + 1
         seq_lens.append(seq_len)
-        seq_data = SequenceData(list(range(seq_len)))
+        seq_data = SequenceData.from_seqs(range(seq_len))
         seq_group_metadata = SequenceGroupMetadata(
             request_id=f"test_{i}",
             is_prompt=True,
@@ -338,8 +338,7 @@ def test_hybrid_batches(batch_size, enforce_eager, distributed_init):
     for i in range(prefill_batch_size, batch_size):
         # make sure all tokens fit into one block
         context_len = i % (model_runner.block_size - 1) + 1
-        prompt_toks = list(range(context_len))
-        seq_data = SequenceData(prompt_toks)
+        seq_data = SequenceData.from_seqs(range(context_len))
         seq_data.append_token_id(1, 0)
         seq_data.update_num_computed_tokens(context_len)
         seq_group_metadata = SequenceGroupMetadata(
@@ -353,8 +352,12 @@ def test_hybrid_batches(batch_size, enforce_eager, distributed_init):
         seq_group_metadata_list.append(seq_group_metadata)
         decode_metadata_list.append(seq_group_metadata)
 
-    (input_tokens, input_positions, attn_metadata, _, _, _,
-     _) = model_runner.prepare_input_tensors(seq_group_metadata_list)
+    model_input = model_runner.prepare_model_input(seq_group_metadata_list)
+    (input_tokens, input_positions, attn_metadata) = (
+        model_input.input_tokens,
+        model_input.input_positions,
+        model_input.attn_metadata,
+    )
 
     prefill_meta_actual = attn_metadata.prefill_metadata
     decode_meta_actual = attn_metadata.decode_metadata
@@ -367,7 +370,7 @@ def test_hybrid_batches(batch_size, enforce_eager, distributed_init):
 
     # Verify attn metadata is consistent. We don't need to test individual
     # values here because they are tested above.
-    attn_metadata = model_runner._prepare_model_input(
+    attn_metadata = model_runner._prepare_model_input_tensors(
         seq_group_metadata_list).attn_metadata
 
     for attr_expected, attr_actual in zip(vars(attn_metadata.prefill_metadata),

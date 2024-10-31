@@ -9,75 +9,38 @@ import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.distributed.device_communicators.custom_all_reduce_utils import (
     gpu_p2p_access_check)
-from vllm.distributed.parallel_state import is_in_the_same_node
+from vllm.distributed.parallel_state import in_the_same_node_as
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils import cuda_device_count_stateless
 
 try:
-    import pynvml
-
-    # Simulate ImportError if custom_ar ops are not supported.
-    if not ops.is_custom_op_supported("_C_custom_ar::meta_size"):
-        raise ImportError("custom_ar", __file__)
-
+    ops.meta_size()
     custom_ar = True
-
-    @contextmanager
-    def _nvml():
-        try:
-            pynvml.nvmlInit()
-            yield
-        finally:
-            pynvml.nvmlShutdown()
-
-except ImportError:
-    # For AMD GPUs
+except Exception:
+    # For AMD GPUs and CPUs
     custom_ar = False
-    pynvml = None
-
-    @contextmanager
-    def _nvml():
-        try:
-            yield
-        finally:
-            pass
-
 
 logger = init_logger(__name__)
-
-
-@_nvml()
-def _is_full_nvlink(device_ids: List[int]) -> bool:
-    """
-    query if the set of gpus are fully connected by nvlink (1 hop)
-    Note that `pynvml` is not affected by `CUDA_VISIBLE_DEVICES`,
-    so it works on real physical device ids.
-    """
-    handles = [pynvml.nvmlDeviceGetHandleByIndex(i) for i in device_ids]
-    for i, handle in enumerate(handles):
-        for j, peer_handle in enumerate(handles):
-            if i < j:
-                try:
-                    p2p_status = pynvml.nvmlDeviceGetP2PStatus(
-                        handle, peer_handle, pynvml.NVML_P2P_CAPS_INDEX_NVLINK)
-                    if p2p_status != pynvml.NVML_P2P_STATUS_OK:
-                        return False
-                except pynvml.NVMLError as error:
-                    logger.error(
-                        "NVLink detection failed. This is normal if your"
-                        " machine has no NVLink equipped.",
-                        exc_info=error)
-                    return False
-    return True
 
 
 def _can_p2p(rank: int, world_size: int) -> bool:
     for i in range(world_size):
         if i == rank:
             continue
+        if envs.VLLM_SKIP_P2P_CHECK:
+            logger.info(
+                "Skipping P2P check and trusting the driver's P2P report.")
+            return torch.cuda.can_device_access_peer(rank, i)
         if not gpu_p2p_access_check(rank, i):
             return False
     return True
+
+
+def is_weak_contiguous(inp: torch.Tensor):
+    return inp.is_contiguous() or (inp.storage().nbytes() -
+                                   inp.storage_offset() * inp.element_size()
+                                   == inp.numel() * inp.element_size())
 
 
 class CustomAllreduce:
@@ -112,7 +75,7 @@ class CustomAllreduce:
         assert dist.get_backend(group) != dist.Backend.NCCL, (
             "CustomAllreduce should be attached to a non-NCCL group.")
 
-        if not is_in_the_same_node(group):
+        if not all(in_the_same_node_as(group, source_rank=0)):
             # No need to initialize custom allreduce for multi-node case.
             logger.warning(
                 "Custom allreduce is disabled because this process group"
@@ -161,7 +124,10 @@ class CustomAllreduce:
         # test nvlink first, this will filter out most of the cases
         # where custom allreduce is not supported
         # this checks hardware and driver support for NVLink
-        full_nvlink = _is_full_nvlink(physical_device_ids)
+        assert current_platform.is_cuda()
+        from vllm.platforms.cuda import CudaPlatform
+        cuda_platform: CudaPlatform = current_platform
+        full_nvlink = cuda_platform.is_full_nvlink(physical_device_ids)
         if world_size > 2 and not full_nvlink:
             logger.warning(
                 "Custom allreduce is disabled because it's not supported on"
@@ -225,8 +191,20 @@ class CustomAllreduce:
 
     def _get_ipc_meta(self, inp: torch.Tensor):
         data = inp.untyped_storage()._share_cuda_()
+        handle = data[1]
+        # https://github.com/pytorch/pytorch/pull/130890 changes
+        # the binary format of the ipc handle
+        # it starts from pytorch 2.5
+        if len(handle) > 64:
+            assert len(handle) == 66
+            # only support SHAREABLE_HANDLE_VERSION = 1
+            assert int(handle[0]) == 1
+            # only support SHAREABLE_CUDA_MALLOC = 'c'
+            assert handle[1] == ord("c")
+            handle = handle[2:]
+            # TODO: support expandable segment
         shard_data = (
-            data[1],  # ipc handle to base ptr
+            handle,  # ipc handle to base ptr
             data[3],  # offset of base ptr
         )
         return self._gather_ipc_meta(shard_data)
@@ -268,8 +246,19 @@ class CustomAllreduce:
         ops.register_graph_buffers(self._ptr, handles, offsets)
 
     def should_custom_ar(self, inp: torch.Tensor):
-        return ops.should_custom_ar(inp, self.max_size, self.world_size,
-                                    self.full_nvlink)
+        if self.disabled:
+            return False
+        inp_size = inp.numel() * inp.element_size()
+        # custom allreduce requires input byte size to be multiples of 16
+        if inp_size % 16 != 0:
+            return False
+        if not is_weak_contiguous(inp):
+            return False
+        # for 4 or more non NVLink-capable GPUs, custom allreduce provides
+        # little performance improvement over NCCL.
+        if self.world_size == 2 or self.full_nvlink:
+            return inp_size < self.max_size
+        return False
 
     # all reduce, assuming inp tensor is IPC registered with register_buffer,
     # or, in the context of cuda graphs, register_graph_buffers
@@ -288,24 +277,21 @@ class CustomAllreduce:
 
     def custom_all_reduce(self, input: torch.Tensor) -> Optional[torch.Tensor]:
         # when custom allreduce is disabled, this will be None
-        if self.disabled:
+        if self.disabled or not self.should_custom_ar(input):
             return None
         if self._IS_CAPTURING:
             if torch.cuda.is_current_stream_capturing():
-                if self.should_custom_ar(input):
-                    return self.all_reduce_reg(input)
+                return self.all_reduce_reg(input)
             else:
-                if self.should_custom_ar(input):
-                    # if warm up, mimic the allocation pattern
-                    # since custom allreduce is out-of-place
-                    return torch.empty_like(input)
+                # if warm up, mimic the allocation pattern
+                # since custom allreduce is out-of-place
+                return torch.empty_like(input)
         else:
             # note: outside of cuda graph context,
             # custom allreduce incurs a cost of cudaMemcpy, which should
             # be small(<=1% of overall latency) compared to the performance
             # gains of using custom kernels
-            if self.should_custom_ar(input):
-                return self.all_reduce_unreg(input)
+            return self.all_reduce_unreg(input)
 
         return None
 

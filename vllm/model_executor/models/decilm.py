@@ -26,13 +26,14 @@
 from typing import Iterable, Optional, Tuple
 
 import torch
-from transformers import PretrainedConfig
+from transformers import LlamaConfig
 
 from vllm.config import CacheConfig, LoRAConfig
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.llama import LlamaForCausalLM
+
+from .utils import is_pp_missing_parameter
 
 
 class DeciLMForCausalLM(LlamaForCausalLM):
@@ -55,7 +56,7 @@ class DeciLMForCausalLM(LlamaForCausalLM):
 
     def __init__(
         self,
-        config: Optional[PretrainedConfig] = None,
+        config: LlamaConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
@@ -91,6 +92,8 @@ class DeciLMForCausalLM(LlamaForCausalLM):
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
+                if is_pp_missing_parameter(name, self):
+                    continue
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
@@ -98,6 +101,8 @@ class DeciLMForCausalLM(LlamaForCausalLM):
             else:
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
+                    continue
+                if is_pp_missing_parameter(name, self):
                     continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",

@@ -40,7 +40,7 @@ Next, to provision a VM instance with LLM of your choice(`NousResearch/Llama-2-7
         gpu: 24GB
     commands:
         - pip install vllm
-        - python -m vllm.entrypoints.openai.api_server --model $MODEL --port 8000
+        - vllm serve $MODEL --port 8000
     model:
         format: openai
         type: chat
