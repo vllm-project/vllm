@@ -25,7 +25,6 @@ from vllm.executor.gpu_executor import GPUExecutor
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.usage.usage_lib import UsageContext
-from vllm.v1.engine.llm_engine import LLMEngine as V1LLMEngine
 
 CONFIG_TYPE = Union[ModelConfig, DecodingConfig, ParallelConfig,
                     SchedulerConfig, LoRAConfig]
@@ -119,7 +118,12 @@ class MQLLMEngine:
         load_general_plugins()
 
         engine_config = engine_args.create_engine_config()
-        engine_class = V1LLMEngine if vllm.envs.VLLM_USE_V1 else LLMEngine
+        if vllm.envs.VLLM_USE_V1:
+            # Lazy import: the v1 package isn't distributed
+            from vllm.v1.engine.llm_engine import LLMEngine as V1LLMEngine
+            engine_class = V1LLMEngine
+        else:
+            engine_class = LLMEngine
 
         executor_class = engine_class._get_executor_cls(engine_config)
 

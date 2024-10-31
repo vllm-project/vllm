@@ -31,7 +31,6 @@ from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter, deprecate_args, deprecate_kwargs, is_list_of
-from vllm.v1.engine.llm_engine import LLMEngine as V1LLMEngine
 
 logger = init_logger(__name__)
 
@@ -204,12 +203,18 @@ class LLM:
         )
         # Logic to switch between engines is done at runtime instead of import
         # to avoid import order issues
-        self.engine_class: Union[
-            Type[V1LLMEngine],
-            Type[LLMEngine]] = V1LLMEngine if envs.VLLM_USE_V1 else LLMEngine
+        self.engine_class = self.get_engine_class()
         self.llm_engine = self.engine_class.from_engine_args(
             engine_args, usage_context=UsageContext.LLM_CLASS)
         self.request_counter = Counter()
+
+    @staticmethod
+    def get_engine_class() -> Type[LLMEngine]:
+        if envs.VLLM_USE_V1:
+            # Lazy import: the v1 package isn't distributed
+            from vllm.v1.engine.llm_engine import LLMEngine as V1LLMEngine
+            return V1LLMEngine  # type: ignore
+        return LLMEngine
 
     def get_tokenizer(self) -> AnyTokenizer:
         return self.llm_engine.get_tokenizer_group(TokenizerGroup).tokenizer

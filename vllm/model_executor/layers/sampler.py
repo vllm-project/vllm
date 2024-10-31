@@ -19,7 +19,6 @@ from vllm.sequence import (VLLM_INVALID_TOKEN_ID,
                            CompletionSequenceGroupOutput, Logprob,
                            PromptLogprobs, SampleLogprobs, SequenceOutput)
 from vllm.spec_decode.metrics import SpecDecodeWorkerMetrics
-from vllm.v1.sample.sampler import Sampler as V1Sampler
 
 if envs.VLLM_USE_FLASHINFER_SAMPLER and find_spec("flashinfer"):
     import flashinfer.sampling
@@ -34,6 +33,8 @@ else:
 
 def get_sampler() -> torch.nn.Module:
     if envs.VLLM_USE_V1:
+        # Lazy import: the v1 package isn't distributed
+        from vllm.v1.sample.sampler import Sampler as V1Sampler
         return V1Sampler()
     return Sampler()
 
