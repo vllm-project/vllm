@@ -209,6 +209,11 @@ environment_variables: Dict[str, Callable[[], Any]] = {
         os.environ.get("VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE", "1") != "0"),
     "VLLM_TORCH_COMPILE_LEVEL":
     lambda: int(os.environ.get("VLLM_TORCH_COMPILE_LEVEL", "0")),
+
+    # Path to the config file for torch compile
+    "VLLM_TORCH_COMPILE_CONFIG":
+    lambda: os.environ.get("VLLM_TORCH_COMPILE_CONFIG", None),
+
     # Fine-grained control over which custom ops to enable/disable.
     # Use 'all' to enable all, 'none' to disable all.
     # Also specify a list of custom op names to enable (prefixed with a '+'),
