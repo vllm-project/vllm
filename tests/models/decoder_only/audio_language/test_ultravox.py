@@ -160,7 +160,7 @@ def run_multi_audio_test(
 
 
 # TODO: remove this after CPU float16 support ready
-target_dtype = "float" if current_platform.is_cpu() else "half"
+target_dtype = "bfloat16" if current_platform.is_cpu() else "half"
 
 
 @pytest.mark.core_model

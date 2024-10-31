@@ -29,7 +29,7 @@ if not current_platform.is_cpu():
     ]
 
 # TODO: remove this after CPU float16 support ready
-target_dtype = "float" if current_platform.is_cpu() else "half"
+target_dtype = "bfloat16" if current_platform.is_cpu() else "half"
 
 
 @pytest.mark.parametrize("model", MODELS)
