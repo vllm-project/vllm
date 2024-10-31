@@ -541,8 +541,7 @@ Text Generation
 | :sup:`+` Multiple items can be inputted per text prompt for this modality.
 
 .. note::
-  Regarding multimodal models, vLLM currently only supports adding LoRA to language model.               
-
+  vLLM currently only supports adding LoRA to the language backbone of multimodal models.               
 
 .. note::
   For :code:`openbmb/MiniCPM-V-2`, the official repo doesn't work yet, so we need to use a fork (:code:`HwwwH/MiniCPM-V-2`) for now.
