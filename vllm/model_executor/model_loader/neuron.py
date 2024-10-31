@@ -37,7 +37,7 @@ _NEURON_SUPPORTED_MODELS: Dict[str, Tuple[str, str, str]] = {
 }
 
 
-class NeuronCasualLM(nn.Module):
+class NeuronCausalLM(nn.Module):
 
     def __init__(self,
                  config: PretrainedConfig,
@@ -184,7 +184,7 @@ def get_neuron_model(model_config: ModelConfig,
                      scheduler_config: SchedulerConfig) -> nn.Module:
 
     # Create a model instance.
-    model = NeuronCasualLM(
+    model = NeuronCausalLM(
         model_config.hf_config,
         _is_neuron_on_device_sampling_disabled(model_config))
 
