@@ -1,5 +1,4 @@
 import asyncio
-import multiprocessing
 from typing import AsyncGenerator, Dict, Mapping, Optional, Type, Union
 
 import msgspec
@@ -25,7 +24,7 @@ from vllm.utils import get_open_zmq_ipc_path
 from vllm.v1.engine import LLM_ENGINE_CORE_READY_STR, EngineCoreOutputs
 from vllm.v1.engine.async_stream import AsyncStream
 from vllm.v1.engine.detokenizer import Detokenizer
-from vllm.v1.engine.llm_engine_core import LLMEngineCore
+from vllm.v1.engine.llm_engine_core import LLMEngineCoreProcess
 from vllm.v1.engine.processor import Processor
 from vllm.v1.engine.protocol import LLMEngineProtocol
 from vllm.v1.executor.gpu_executor import GPUExecutor
@@ -77,7 +76,7 @@ class AsyncLLMEngine(LLMEngineProtocol):
         # Detokenizer (converts EngineCoreOutputs --> RequestOutput)
         self.detokenizer = Detokenizer(model_config.tokenizer,
                                        stream_mode=True)
-        
+
         # IPC Setup
         self.ctx = zmq.asyncio.Context()  # type: ignore[attr-defined]
         self.encoder = msgspec.msgpack.Encoder()
@@ -96,32 +95,23 @@ class AsyncLLMEngine(LLMEngineProtocol):
         self.input_socket = self.ctx.socket(zmq.constants.PUSH)
         self.input_socket.bind(input_path)
 
-        # The current process might have CUDA context,
-        # so we need to spawn a new process
-        context = multiprocessing.get_context("spawn")
-
-        # Run LLMEngineCore busy loop in background process.
-        self.engine_core = context.Process(target=self.run_engine_core,
-                                           args=(
-                                               executor_class,
-                                               model_config,
-                                               cache_config,
-                                               parallel_config,
-                                               scheduler_config,
-                                               device_config,
-                                               load_config,
-                                               lora_config,
-                                               speculative_config,
-                                               decoding_config,
-                                               observability_config,
-                                               prompt_adapter_config,
-                                           ),
-                                           kwargs={
-                                               "async_mode": True,
-                                               "input_path": input_path,
-                                               "output_path": output_path,
-                                               "ready_path": self.ready_path,
-                                           })
+        self.engine_core = LLMEngineCoreProcess.from_config(
+            executor_class,
+            model_config,
+            cache_config,
+            parallel_config,
+            scheduler_config,
+            device_config,
+            load_config,
+            lora_config,
+            speculative_config,
+            decoding_config,
+            observability_config,
+            prompt_adapter_config,
+            input_path=input_path,
+            output_path=output_path,
+            ready_path=self.ready_path,
+        )
         self.engine_core.start()
 
         # TODO: add background loop shielding
@@ -131,16 +121,6 @@ class AsyncLLMEngine(LLMEngineProtocol):
     def __del__(self):
         # Hack.
         self.engine_core.kill()
-
-    @staticmethod
-    def run_engine_core(*args, **kwargs):
-        """Launch EngineCore busy loop in background process."""
-
-        logger.debug("Initializing LLMEngineCore in background process.")
-        engine_core = LLMEngineCore(*args, **kwargs)
-
-        logger.debug("Starting LLMEngineCore busy loop in background process.")
-        engine_core.run_busy_loop()
 
     @classmethod
     def from_engine_args(

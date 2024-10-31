@@ -1,5 +1,5 @@
 import multiprocessing
-from abc import ABC, abstractmethod
+from abc import ABC
 from typing import Union
 
 from vllm.config import (DecodingConfig, EngineConfig, LoRAConfig, ModelConfig,
@@ -21,7 +21,7 @@ class LLMEngineProtocol(ABC):
     processor: Processor
 
     # TODO: These are needed for the get_xxx_config methods
-    # I think these are basically dead code (other than 
+    # I think these are basically dead code (other than
     # get_model_config and mock testing)
 
     model_config: ModelConfig

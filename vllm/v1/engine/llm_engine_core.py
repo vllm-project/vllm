@@ -1,3 +1,5 @@
+import multiprocessing
+from multiprocessing.process import BaseProcess
 from typing import List, Optional, Tuple, Type
 
 import msgspec
@@ -35,10 +37,6 @@ class LLMEngineCore:
         decoding_config: Optional[DecodingConfig],
         observability_config: Optional[ObservabilityConfig],
         prompt_adapter_config: Optional[PromptAdapterConfig],
-        async_mode: bool = False,
-        input_path: Optional[str] = None,
-        output_path: Optional[str] = None,
-        ready_path: Optional[str] = None,
     ):
         assert model_config.task != "embedding"
 
@@ -100,32 +98,6 @@ class LLMEngineCore:
         # Setup scheduler.
         self.scheduler = Scheduler(scheduler_config, cache_config, lora_config)
 
-        # Setup IPC if running in async mode.
-        if async_mode:
-            assert (input_path is not None and output_path is not None
-                    and ready_path is not None)
-
-            self.msgpack_encoder = msgspec.msgpack.Encoder()
-            self.msgpack_decoder = msgspec.msgpack.Decoder(EngineCoreRequest)
-
-            self.ctx = zmq.Context()  # type: ignore[attr-defined]
-
-            # Get EngineCoreRequests from the LLMEngine.
-            self.input_socket = self.ctx.socket(zmq.constants.PULL)
-            self.input_socket.connect(input_path)
-
-            # Send EngineCoreOutput to the LLMEngine.
-            self.output_socket = self.ctx.socket(zmq.constants.PUSH)
-            self.output_socket.bind(output_path)
-
-            # Send Readiness signal to LLMEngine.
-            try:
-                ready_socket = self.ctx.socket(zmq.constants.PUSH)
-                ready_socket.bind(ready_path)
-                ready_socket.send_string(LLM_ENGINE_CORE_READY_STR)
-            finally:
-                ready_socket.close(linger=0)
-
     def _initialize_kv_caches(self,
                               cache_config: CacheConfig) -> Tuple[int, int]:
         num_gpu_blocks, _ = self.model_executor.determine_num_available_blocks(
@@ -143,16 +115,13 @@ class LLMEngineCore:
         self.model_executor.initialize_cache(num_gpu_blocks)
         return num_gpu_blocks, num_cpu_blocks
 
-    def check_health(self):
-        self.model_executor.check_health()
-
     def add_request(self, engine_core_request: EngineCoreRequest):
         """Add request to the scheduler."""
 
         request = Request.from_engine_core_request(engine_core_request)
         self.scheduler.add_request(request)
 
-    def step(self) -> List[EngineCoreOutputs]:
+    def step(self) -> List[EngineCoreOutput]:
         """Schedule, execute, and make output."""
 
         if not self.scheduler.has_unfinished_requests():
@@ -163,6 +132,74 @@ class LLMEngineCore:
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, output)
         return engine_core_outputs
+
+    def check_health(self):
+        self.model_executor.check_health()
+
+
+class LLMEngineCoreProcess(LLMEngineCore):
+
+    @staticmethod
+    def from_config(*config_args, input_path: str, output_path: str,
+                    ready_path: str) -> BaseProcess:
+        # The current process might have CUDA context,
+        # so we need to spawn a new process
+        context = multiprocessing.get_context("spawn")
+
+        # Run LLMEngineCore busy loop in background process.
+        return context.Process(target=LLMEngineCoreProcess.run_engine_core,
+                               args=config_args,
+                               kwargs={
+                                   "input_path": input_path,
+                                   "output_path": output_path,
+                                   "ready_path": ready_path,
+                               })
+
+    @staticmethod
+    def run_engine_core(*args, **kwargs):
+        """Launch EngineCore busy loop in background process."""
+
+        logger.debug("Initializing LLMEngineCore in background process.")
+        engine_core = LLMEngineCoreProcess(*args, **kwargs)
+
+        logger.debug("Starting LLMEngineCore busy loop in background process.")
+        engine_core.run_busy_loop()
+
+    def __init__(
+        self,
+        input_path: Optional[str] = None,
+        output_path: Optional[str] = None,
+        ready_path: Optional[str] = None,
+        *args,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+
+        assert (input_path is not None and output_path is not None
+                and ready_path is not None)
+
+        self.msgpack_encoder = msgspec.msgpack.Encoder()
+        self.msgpack_decoder = msgspec.msgpack.Decoder(EngineCoreRequest)
+
+        self.ctx = zmq.Context()  # type: ignore[attr-defined]
+
+        # Get EngineCoreRequests from the LLMEngine.
+        self.input_socket = self.ctx.socket(zmq.constants.PULL)
+        self.input_socket.connect(input_path)
+
+        # Send EngineCoreOutput to the LLMEngine.
+        self.output_socket = self.ctx.socket(zmq.constants.PUSH)
+        self.output_socket.bind(output_path)
+
+        # Send Readiness signal to LLMEngine.
+        ready_socket = None
+        try:
+            ready_socket = self.ctx.socket(zmq.constants.PUSH)
+            ready_socket.bind(ready_path)
+            ready_socket.send_string(LLM_ENGINE_CORE_READY_STR)
+        finally:
+            if ready_socket:
+                ready_socket.close(linger=0)
 
     def run_busy_loop(self):
         """Core busy loop of the LLMEngineCore for async mode."""
@@ -204,7 +241,7 @@ class LLMEngineCore:
                       engine_core_outputs: List[EngineCoreOutput]) -> None:
         """Serialize and send output to the AsyncLLMEngine for async mode."""
 
-        if len(engine_core_outputs) == 0:
+        if not engine_core_outputs:
             return
 
         outputs = EngineCoreOutputs(outputs=engine_core_outputs)
