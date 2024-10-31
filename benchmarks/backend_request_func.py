@@ -324,7 +324,7 @@ async def async_request_openai_chat_completions(
                 },
             ],
             "temperature": 0.0,
-            "max_tokens": request_func_input.output_len,
+            "max_completion_tokens": request_func_input.output_len,
             "stream": True,
             "ignore_eos": request_func_input.ignore_eos,
         }

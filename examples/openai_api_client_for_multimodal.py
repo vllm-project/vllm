@@ -53,7 +53,7 @@ def run_text_only() -> None:
             "content": "What's the capital of France?"
         }],
         model=model,
-        max_tokens=64,
+        max_completion_tokens=64,
     )
 
     result = chat_completion.choices[0].message.content
@@ -83,7 +83,7 @@ def run_single_image() -> None:
             ],
         }],
         model=model,
-        max_tokens=64,
+        max_completion_tokens=64,
     )
 
     result = chat_completion_from_url.choices[0].message.content
@@ -109,7 +109,7 @@ def run_single_image() -> None:
             ],
         }],
         model=model,
-        max_tokens=64,
+        max_completion_tokens=64,
     )
 
     result = chat_completion_from_base64.choices[0].message.content
@@ -144,7 +144,7 @@ def run_multi_image() -> None:
             ],
         }],
         model=model,
-        max_tokens=64,
+        max_completion_tokens=64,
     )
 
     result = chat_completion_from_url.choices[0].message.content
@@ -175,7 +175,7 @@ def run_audio() -> None:
             ],
         }],
         model=model,
-        max_tokens=64,
+        max_completion_tokens=64,
     )
 
     result = chat_completion_from_url.choices[0].message.content
@@ -201,7 +201,7 @@ def run_audio() -> None:
             ],
         }],
         model=model,
-        max_tokens=64,
+        max_completion_tokens=64,
     )
 
     result = chat_completion_from_base64.choices[0].message.content
