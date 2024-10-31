@@ -10,7 +10,7 @@ from typing import Sequence as GenericSequence
 from typing import Set, Type, Union, cast, overload
 
 import torch
-from typing_extensions import TypeIs, TypeVar
+from typing_extensions import TypeVar
 
 import vllm.envs as envs
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
