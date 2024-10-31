@@ -84,15 +84,15 @@ class AsyncLLMEngine(LLMEngineProtocol):
         self.decoder = msgspec.msgpack.Decoder(EngineCoreOutputs)
 
         # Path for IPC.
-        self.ready_path = get_open_zmq_ipc_path()
+        ready_path = get_open_zmq_ipc_path()
+        output_path = get_open_zmq_ipc_path()
+        input_path = get_open_zmq_ipc_path()
 
         # Get output (EngineCoreOutput) from LLMEngineCore.
-        output_path = get_open_zmq_ipc_path()
         self.output_socket = self.ctx.socket(zmq.constants.PULL)
         self.output_socket.connect(output_path)
 
         # Send input (EngineCoreRequest) to LLMEngineCore.
-        input_path = get_open_zmq_ipc_path()
         self.input_socket = self.ctx.socket(zmq.constants.PUSH)
         self.input_socket.bind(input_path)
 
@@ -111,9 +111,10 @@ class AsyncLLMEngine(LLMEngineProtocol):
             prompt_adapter_config,
             input_path=input_path,
             output_path=output_path,
-            ready_path=self.ready_path,
+            ready_path=ready_path,
         )
         self.engine_core.start()
+        self.wait_for_engine_core(ready_path)
 
         # TODO: add background loop shielding
         # TODO: add AsyncEngineDeadError
@@ -152,24 +153,27 @@ class AsyncLLMEngine(LLMEngineProtocol):
         )
         return engine
 
-    async def wait_for_startup(self):
-        """Poll the ready socket until the LLMEngineCore is ready."""
+    async def wait_for_engine_core(self, ready_path: str):
+        """Wait until the LLMEngineCore is ready."""
 
         try:
-            ready_socket = self.ctx.socket(zmq.constants.PULL)
-            ready_socket.connect(self.ready_path)
-            while await ready_socket.poll(timeout=5000) == 0:
+            # Non-asyncio context so this can run in __init__
+            sync_ctx = zmq.Context()  # type: ignore[attr-defined]
+            socket = sync_ctx.connect(ready_path)
+
+            # Poll ready socket socket until
+            while socket.poll(timeout=POLL_TIMEOUT_MS) == 0:
                 logger.debug("Waiting for LLMEngineCore to startup.")
 
                 if not self.engine_core.is_alive():
                     raise RuntimeError(
                         "LLMEngineCore process failed to start.")
 
-            message = await ready_socket.recv_string()
+            message = socket.recv_string()
             assert message == LLM_ENGINE_CORE_READY_STR
 
         finally:
-            ready_socket.close(linger=0)
+            sync_ctx.destroy(linger=0)
 
     async def add_request(
         self,

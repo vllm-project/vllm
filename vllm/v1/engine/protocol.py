@@ -1,6 +1,4 @@
-import multiprocessing
 from abc import ABC
-from typing import Union
 
 from vllm.config import (DecodingConfig, EngineConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig)
@@ -16,7 +14,7 @@ logger = init_logger(__name__)
 class LLMEngineProtocol(ABC):
     """Protocol for LLMEngine and AsyncLLMEngine"""
 
-    engine_core: Union[LLMEngineCore, multiprocessing.Process]
+    engine_core: LLMEngineCore
     detokenizer: Detokenizer
     processor: Processor
 
