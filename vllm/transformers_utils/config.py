@@ -187,6 +187,7 @@ def get_config(
                     code_revision=code_revision,
                     **kwargs,
                 )
+                config.__class__ = PretrainedConfig
             except ValueError as e:
                 if (not trust_remote_code
                         and "requires you to execute the configuration file"
