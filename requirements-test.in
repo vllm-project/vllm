@@ -11,9 +11,7 @@ awscli
 einops # required for MPT, qwen-vl and Mamba
 httpx
 librosa # required for audio tests
-opencv-python # required for video tests
 peft
-requests
 ray[adag]==2.35
 sentence-transformers # required for embedding
 soundfile # required for audio test
@@ -26,9 +24,6 @@ lm-eval[api]==0.4.4 # required for model evaluation test
 
 # TODO: Add this after fully implementing llava(mantis)
 # git+https://github.com/TIGER-AI-Lab/Mantis.git # required for llava(mantis) test
-
-# Benchmarking
-aiohttp
 
 # quantization
 bitsandbytes>=0.44.0

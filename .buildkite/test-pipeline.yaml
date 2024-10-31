@@ -268,7 +268,6 @@ steps:
   source_file_dependencies:
   - benchmarks/
   commands:
-  - pip install aiohttp
   - bash run-benchmarks.sh
 
 - label: Quantization Test # 33min

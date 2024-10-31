@@ -18,7 +18,7 @@ docker run -itd --entrypoint /bin/bash -v ~/.cache/huggingface:/root/.cache/hugg
 # Run basic model test
 docker exec cpu-test bash -c "
   pip install pytest matplotlib einops transformers_stream_generator datamodel_code_generator
-  pip install Pillow
+  pip install Pillow librosa
   pip install torchvision --index-url https://download.pytorch.org/whl/cpu
   pytest -v -s tests/models/embedding/language
   pytest -v -s tests/models/encoder_decoder/language
