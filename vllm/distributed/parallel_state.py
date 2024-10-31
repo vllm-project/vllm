@@ -33,12 +33,11 @@ from unittest.mock import patch
 import torch
 import torch.distributed
 from torch.distributed import Backend, ProcessGroup
-from torch.library import Library
 
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import supports_custom_op
+from vllm.utils import supports_custom_op, direct_register_custom_op
 
 
 @dataclass
@@ -110,12 +109,13 @@ if supports_custom_op():
     def inplace_all_reduce_fake(tensor: torch.Tensor, group_name: str) -> None:
         return
 
-    my_lib = Library("vllm", "FRAGMENT")
-    my_lib.define(
-        "inplace_all_reduce(Tensor(a0!) tensor, str group_name) -> ()"  # noqa
+    direct_register_custom_op(
+        library_name="vllm",
+        op_name="inplace_all_reduce",
+        op_func=inplace_all_reduce,
+        mutates_args=["tensor"],
+        fake_impl=inplace_all_reduce_fake,
     )
-    my_lib.impl("inplace_all_reduce", inplace_all_reduce, "CUDA")
-    my_lib._register_fake("inplace_all_reduce", inplace_all_reduce_fake)
 
     def outplace_all_reduce(tensor: torch.Tensor,
                             group_name: str) -> torch.Tensor:
@@ -129,12 +129,13 @@ if supports_custom_op():
                                  group_name: str) -> torch.Tensor:
         return torch.empty_like(tensor)
 
-    my_lib = Library("vllm", "FRAGMENT")
-    my_lib.define(
-        "outplace_all_reduce(Tensor tensor, str group_name) -> Tensor"  # noqa
+    direct_register_custom_op(
+        library_name="vllm",
+        op_name="outplace_all_reduce",
+        op_func=outplace_all_reduce,
+        mutates_args=[],
+        fake_impl=outplace_all_reduce_fake,
     )
-    my_lib.impl("outplace_all_reduce", outplace_all_reduce, "CUDA")
-    my_lib._register_fake("outplace_all_reduce", outplace_all_reduce_fake)
 
 
 class GroupCoordinator:
