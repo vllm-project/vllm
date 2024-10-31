@@ -15,6 +15,7 @@ if HAS_TRITON:
     from vllm.lora.ops.bgmv_expand import bgmv_expand
     from vllm.lora.ops.bgmv_expand_slice import bgmv_expand_slice
     from vllm.lora.ops.bgmv_sample import bgmv_sample
+    from vllm.lora.ops.bgmv_embed import bgmv_embed
     from vllm.lora.ops.bgmv_shrink import bgmv_shrink
     from vllm.lora.ops.sgmv_expand import sgmv_expand
     from vllm.lora.ops.sgmv_expand_slice import sgmv_expand_slice
@@ -633,25 +634,17 @@ class PunicaWrapper:
                              indices)
         return logits
 
-    def bgmv_embedding(self, embed_tokens_all: torch.Tensor, embed_tokens_base: torch.Tensor, masked_input: torch.LongTensor)->torch.Tensor:
+    def bgmv_embedding(self, tokens: torch.LongTensor, embed_tokens_all: torch.Tensor, embed_tokens_base: torch.Tensor)->torch.Tensor:
         '''
         embed_tokens_all - [num_loras, vocab_size, hidden_dim] - modules_to_save embeddings
         embed_tokens_base - [vocab_size, hidden_dim] - base layer embeddings will be applied to tokens with index=-1
-        masked_input - [num_tokens]
+        tokens - [num_tokens]
 
         returns:
         embeddings: [num_tokens, hidden_dim]
         
         '''
-        # TODO implement triton optimization
-        indices=self.token_lora_indices
-        num_tokens=masked_input.size(0)
-        hidden_dim=embed_tokens_all.size(-1)
-        embeddings=torch.zeros(num_tokens, hidden_dim, device=masked_input.device, dtype=embed_tokens_all.dtype)
-        for i, lora_ind in enumerate(indices):
-            if lora_ind==-1:
-                embed=embed_tokens_base[masked_input[i]]
-            else:
-                embed=embed_tokens_all[lora_ind, masked_input[i]]
-            embeddings[i]=embed
+
+        embeddings = bgmv_embed(tokens, embed_tokens_all,embed_tokens_base, token_indices=self.token_lora_indices.long())
+        
         return embeddings

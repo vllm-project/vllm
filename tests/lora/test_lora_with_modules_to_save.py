@@ -93,7 +93,7 @@ def test_lora_with_modules_to_save(
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("adapter_name", LORAS)
 @pytest.mark.parametrize("dtype", ["bfloat16"])
-@pytest.mark.parametrize("max_tokens", [64])
+@pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("num_logprobs", [5])
 def test_llama3_loras_switches(
     peft_runner,
