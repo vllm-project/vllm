@@ -3,6 +3,7 @@ import functools
 from typing import Optional
 
 import torch
+from torch.library import Library
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.fused_moe.fused_moe import (
@@ -18,7 +19,6 @@ def get_scalar_type(num_bits: int, has_zp: bool):
         return scalar_types.uint4b8 if num_bits == 4 else scalar_types.uint8b128
 
 
-@torch.library.custom_op("vllm::single_marlin_moe", mutates_args=[])
 def single_marlin_moe(
     hidden_states: torch.Tensor,
     w: torch.Tensor,
@@ -119,8 +119,7 @@ def single_marlin_moe(
     return torch.sum(intermediate_cache.view(*intermediate_cache.shape), dim=1)
 
 
-@single_marlin_moe.register_fake
-def _(
+def single_marlin_moe_fake(
     hidden_states: torch.Tensor,
     w: torch.Tensor,
     scales: torch.Tensor,
@@ -136,7 +135,14 @@ def _(
     return torch.empty_like(hidden_states)
 
 
-@torch.library.custom_op("vllm::fused_marlin_moe", mutates_args=[])
+my_lib = Library("vllm", "FRAGMENT")
+my_lib.define(
+    "single_marlin_moe(Tensor hidden_states, Tensor w, Tensor scales, Tensor gating_output, SymInt topk, bool renormalize, Tensor? g_idx=None, Tensor? sort_indices=None, Tensor? w_zeros=None, SymInt num_bits=8, bool is_k_full=True) -> Tensor"  # noqa
+)
+my_lib.impl("single_marlin_moe", single_marlin_moe, "CUDA")
+my_lib._register_fake("single_marlin_moe", single_marlin_moe_fake)
+
+
 def fused_marlin_moe(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
@@ -324,8 +330,7 @@ def fused_marlin_moe(
                      dim=1)
 
 
-@fused_marlin_moe.register_fake
-def _(
+def fused_marlin_moe_fake(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
     w2: torch.Tensor,
@@ -344,3 +349,11 @@ def _(
     is_k_full: bool = True,
 ) -> torch.Tensor:
     return torch.empty_like(hidden_states)
+
+
+my_lib = Library("vllm", "FRAGMENT")
+my_lib.define(
+    "fused_marlin_moe(Tensor hidden_states, Tensor w1, Tensor w2, Tensor w1_scale, Tensor w2_scale, Tensor gating_output, Tensor topk_weights, Tensor topk_ids, Tensor? g_idx1=None, Tensor? g_idx2=None, Tensor? sort_indices1=None, Tensor? sort_indices2=None, Tensor? w1_zeros=None, Tensor? w2_zeros=None, SymInt num_bits=8, bool is_k_full=True) -> Tensor"  # noqa
+)
+my_lib.impl("fused_marlin_moe", fused_marlin_moe, "CUDA")
+my_lib._register_fake("fused_marlin_moe", fused_marlin_moe_fake)
