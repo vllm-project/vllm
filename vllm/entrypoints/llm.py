@@ -1,7 +1,7 @@
 import itertools
 import warnings
 from contextlib import contextmanager
-from typing import (Any, ClassVar, Dict, List, Optional, Sequence, Tuple,
+from typing import (Any, ClassVar, Dict, List, Optional, Sequence, Tuple, Type,
                     Union, cast, overload)
 
 from tqdm import tqdm
@@ -204,7 +204,9 @@ class LLM:
         )
         # Logic to switch between engines is done at runtime instead of import
         # to avoid import order issues
-        self.engine_class = V1LLMEngine if envs.VLLM_USE_V1 else LLMEngine
+        self.engine_class: Union[
+            Type[V1LLMEngine],
+            Type[LLMEngine]] = V1LLMEngine if envs.VLLM_USE_V1 else LLMEngine
         self.llm_engine = self.engine_class.from_engine_args(
             engine_args, usage_context=UsageContext.LLM_CLASS)
         self.request_counter = Counter()
