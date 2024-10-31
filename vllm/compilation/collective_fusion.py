@@ -7,7 +7,7 @@ import torch.fx as fx
 from torch._inductor.pattern_matcher import PatternMatcherPass, register_replacement, fwd_only, joint_fwd_bwd, Match
 
 from vllm.compilation.inductor_pass import InductorPass
-from vllm.compilation.utils import find_fn, find_auto_fn, find_getitem
+from vllm.compilation.utils import find_fn, find_auto_fn, find_getitem, last_node_in_match
 from vllm.distributed.parallel_state import get_tp_group, get_tensor_model_parallel_world_size, get_tensor_model_parallel_rank
 from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.model_executor.layers.linear import should_slice, slice_residual
@@ -238,9 +238,9 @@ class CollectiveFusionPass(InductorPass):
         my_res_replacements = []
 
         for match in matches:
-            last_node_in_match = match.nodes[-1] #max(match.nodes, key=lambda x: nodes.index(x))
+            last_node = last_node_in_match(match)
 
-            with graph.inserting_after(last_node_in_match):
+            with graph.inserting_after(last_node):
                 kwargs = match.kwargs
                 kwargs["first_layer"] = match == matches[0]
                 kwargs["residual"] = res_replacements[-1] if len(res_replacements) > 0 else match.kwargs["residual"]
