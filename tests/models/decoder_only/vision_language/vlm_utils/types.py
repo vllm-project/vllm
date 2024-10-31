@@ -52,6 +52,8 @@ class SizeType(Enum):
 class CustomTestOptions(NamedTuple):
     inputs: List[Tuple[List[str], List[Union[List[Image], Image]]]]
     limit_mm_per_prompt: Dict[str, int]
+    # kwarg to pass multimodal data in as to vllm/hf runner instances.
+    runner_mm_key: str = "images"
 
 
 class ImageSizeWrapper(NamedTuple):
@@ -141,9 +143,6 @@ class VLMTestInfo(NamedTuple):
         Callable[[PosixPath, str, Union[List[ImageAsset], _ImageAssets]],
                  str]] = None  # noqa: E501
 
-    # kwarg to pass multimodal data in as to vllm/hf runner instances
-    runner_mm_key: str = "images"
-
     # Allows configuring a test to run with custom inputs
     custom_test_opts: Optional[List[CustomTestOptions]] = None
 
@@ -168,7 +167,6 @@ class VLMTestInfo(NamedTuple):
             "get_stop_token_ids": self.get_stop_token_ids,
             "model_kwargs": self.model_kwargs,
             "patch_hf_runner": self.patch_hf_runner,
-            "runner_mm_key": self.runner_mm_key,
         }
 
 

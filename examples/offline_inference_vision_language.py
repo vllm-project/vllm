@@ -262,10 +262,9 @@ def run_qwen2_vl(question: str, modality: str):
 
     model_name = "Qwen/Qwen2-VL-7B-Instruct"
 
-    # Tested on L40
     llm = LLM(
         model=model_name,
-        max_model_len=8192,
+        max_model_len=4096,
         max_num_seqs=5,
         # Note - mm_processor_kwargs can also be passed to generate/chat calls
         mm_processor_kwargs={
