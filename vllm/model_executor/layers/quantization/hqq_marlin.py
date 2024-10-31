@@ -62,8 +62,9 @@ class HQQMarlinConfig(QuantizationConfig):
 
     @classmethod
     def from_config(cls, config: Dict[str, Any]) -> "HQQMarlinConfig":
-        weight_bits = cls.get_from_keys(config, ["nbits"])
-        group_size = cls.get_from_keys(config, ["group_size"])
+        wq_params = (config["quant_config"]["weight_quant_params"])
+        weight_bits = cls.get_from_keys(wq_params, ["nbits"])
+        group_size = cls.get_from_keys(wq_params, ["group_size"])
         return cls(weight_bits, group_size)
 
     @classmethod
@@ -183,6 +184,7 @@ class HQQMarlinMethod(LinearMethodBase):
                 HQQEmptyParameter(data=torch.empty(0),
                                   weight_loader=weight_loader))
 
+    # Unpack weights from the HQQ format and repack them to GPTQ -> Marlin
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         dev = layer.W_q.device
 
@@ -203,12 +205,15 @@ class HQQMarlinMethod(LinearMethodBase):
                     2 * size] = (W_q[offset:offset + size] & 0b00001111)
             return tmp
 
+        # Unpack from 4-bit to 8-bit
         shard_offsets = getattr(layer.W_q, "shard_offsets", [])
         qweight_t = unpack_4bit_u8(layer.W_q, shard_offsets).transpose(1, 0)
 
+        # Repack to GPTQ
         gptq_w_q = gptq_pack(qweight_t, 4, self.input_size_per_partition,
                              self.output_size_per_partition)
 
+        # Repack to Marlin
         sort_indices = torch.empty(0, dtype=torch.int, device=gptq_w_q.device)
         marlin_w_q = ops.gptq_marlin_repack(
             gptq_w_q,
