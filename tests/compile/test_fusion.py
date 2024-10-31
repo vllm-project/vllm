@@ -6,6 +6,7 @@ import vllm.envs as envs
 from vllm.compilation.config import CompilationConfig
 from vllm.compilation.fusion import (FusionPass, find_auto_fn,
                                      find_auto_fn_maybe)
+from vllm.compilation.reshapes import RedundantReshapesPass
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     apply_fp8_linear)
@@ -38,7 +39,9 @@ class TestModel(torch.nn.Module):
 
 
 # Init does pattern registration, which can only happen once
-fusion_pass = FusionPass(CompilationConfig(enable_fusion=True))
+config = CompilationConfig(enable_fusion=True)
+reshape_pass = RedundantReshapesPass(config)
+fusion_pass = FusionPass(config)
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
@@ -54,10 +57,14 @@ def test_fusion_rmsnorm_quant(dtype, hidden_size, num_tokens, eps):
     if eps != 1e-5:
         pytest.skip("Only test eps=1e-5 for now")
 
-    backend = TestBackend(fusion_pass)
+    # Reshape pass is needed for the fusion pass to work
+    backend = TestBackend(reshape_pass, fusion_pass)
     model = TestModel(hidden_size, eps)
 
+    # First dimension dynamic
     x = torch.rand(num_tokens, hidden_size)
+    torch._dynamo.mark_dynamic(x, 0)
+
     result = model(x)
 
     model2 = torch.compile(model, backend=backend)

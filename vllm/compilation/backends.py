@@ -14,6 +14,7 @@ from .config import CompilationConfig
 from .counter import compilation_counter
 from .fusion import FusionPass
 from .levels import CompilationLevel
+from .reshapes import RedundantReshapesPass
 
 logger = init_logger(__name__)
 
@@ -330,6 +331,8 @@ class VllmBackend:
     def add_passes_to_config(self):
         config = self.compilation_configs
         passes = list(self.post_grad_passes)
+
+        passes = passes + [RedundantReshapesPass(config)]
 
         if config.enable_fusion:
             passes = passes + [FusionPass(config)]
