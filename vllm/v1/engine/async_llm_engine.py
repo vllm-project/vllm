@@ -59,6 +59,7 @@ class AsyncLLMEngine(LLMEngineProtocol):
         log_requests: bool = True,
         start_engine_loop: bool = True,
     ) -> None:
+        assert start_engine_loop
 
         if usage_context == UsageContext.LLM_CLASS:
             scheduler_config.max_num_seqs = 1024
@@ -254,7 +255,7 @@ class AsyncLLMEngine(LLMEngineProtocol):
 
     async def run_output_handler(self):
         # TODO: add weakref from current AsyncLLMEngine
-        # TODO: shutdown remote worker execution loop.
+        # TODO: shutdown remote worker execution loop
 
         while True:
             while await self.output_socket.poll(timeout=POLL_TIMEOUT_MS) == 0:
