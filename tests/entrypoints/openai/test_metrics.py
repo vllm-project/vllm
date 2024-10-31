@@ -75,8 +75,9 @@ EXPECTED_VALUES = {
      ("_count", _NUM_REQUESTS)],
     "vllm:prompt_tokens": [("_total",
                             _NUM_REQUESTS * _NUM_PROMPT_TOKENS_PER_REQUEST)],
-    "vllm:generation_tokens":
-    [("_total", _NUM_REQUESTS * _NUM_PROMPT_TOKENS_PER_REQUEST)],
+    "vllm:generation_tokens": [
+        ("_total", _NUM_REQUESTS * _NUM_PROMPT_TOKENS_PER_REQUEST)
+    ],
     "vllm:request_success": [("_total", _NUM_REQUESTS)],
 }
 

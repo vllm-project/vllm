@@ -1793,7 +1793,8 @@ class LLMEngine:
                     ])
                     if seq_group.sampling_params is not None:
                         n_requests.append(seq_group.sampling_params.n)
-                        max_tokens_requests.append(seq_group.sampling_params.max_tokens)
+                        max_tokens_requests.append(
+                            seq_group.sampling_params.max_tokens)
                     finished_reason_requests.extend([
                         SequenceStatus.get_finished_reason(seq.status)
                         for seq in seq_group.get_finished_seqs()
