@@ -30,6 +30,10 @@ ENV PYTORCH_ROCM_ARCH=${ARG_PYTORCH_ROCM_ARCH}
 RUN apt-get update -q -y && apt-get install -q -y python3 python3-pip
 RUN apt-get update -q -y && apt-get install -q -y \
     sqlite3 libsqlite3-dev libfmt-dev libmsgpack-dev libsuitesparse-dev
+# Remove sccache    
+RUN python3 -m pip install --upgrade pip
+RUN apt-get purge -y sccache; python3 -m pip uninstall -y sccache; rm -f "$(which sccache)"
+
 
 ENV LLVM_SYMBOLIZER_PATH=/opt/rocm/llvm/bin/llvm-symbolizer
 ENV PATH=$PATH:/opt/rocm/bin:/opt/conda/envs/py_3.9/lib/python3.9/site-packages/torch/bin:
@@ -46,7 +50,7 @@ RUN apt-get purge -y hipblaslt \
     && git clone https://github.com/ROCm/hipBLASLt.git \
     && cd hipBLASLt \
     && git checkout ${HIPBLASLT_BRANCH} \
-    && SCCACHE_IDLE_TIMEOUT=1800 ./install.sh --architecture ${PYTORCH_ROCM_ARCH} --legacy_hipblas_direct \
+    && ./install.sh --architecture ${PYTORCH_ROCM_ARCH} --legacy_hipblas_direct \
     && cd build/release \
     && make package
 FROM scratch AS export_hipblaslt_1
@@ -174,7 +178,7 @@ RUN cd vllm \
     && python3 -m pip install -r requirements-rocm.txt \
     && python3 setup.py clean --all  \
     && if [ ${USE_CYTHON} -eq "1" ]; then python3 setup_cython.py build_ext --inplace; fi \
-    && SCCACHE_IDLE_TIMEOUT=1800 python3 setup.py bdist_wheel --dist-dir=dist
+    && python3 setup.py bdist_wheel --dist-dir=dist
 # Build gradlib
 RUN cd vllm/gradlib \
     && python3 setup.py clean --all && python3 setup.py bdist_wheel --dist-dir=dist
