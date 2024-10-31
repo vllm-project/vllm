@@ -1134,7 +1134,6 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         if envs.VLLM_TORCH_COMPILE_LEVEL == CompilationLevel.DYNAMO_AS_IS \
             and supports_dynamo():
             from vllm.compilation.backends import wrap_inductor
-
             #from vllm.plugins import get_torch_compile_backend
             backend = wrap_inductor  #get_torch_compile_backend() or "eager"
             self.model = torch.compile(
