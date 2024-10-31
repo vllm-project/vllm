@@ -1,15 +1,14 @@
 import multiprocessing
-
 from abc import ABC, abstractmethod
 from typing import Union
 
 from vllm.config import (DecodingConfig, EngineConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig)
 from vllm.logger import init_logger
-from vllm.v1.executor.gpu_executor import GPUExecutor
 from vllm.v1.engine.detokenizer import Detokenizer
-from vllm.v1.engine.processor import Processor
 from vllm.v1.engine.llm_engine_core import LLMEngineCore
+from vllm.v1.engine.processor import Processor
+from vllm.v1.executor.gpu_executor import GPUExecutor
 
 logger = init_logger(__name__)
 

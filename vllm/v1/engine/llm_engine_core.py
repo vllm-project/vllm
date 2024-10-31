@@ -3,7 +3,7 @@ from typing import List, Optional, Tuple, Type
 import msgspec
 import zmq
 
-from vllm.config import (CacheConfig, DeviceConfig, DecodingConfig, LoadConfig,
+from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig, LoadConfig,
                          LoRAConfig, ModelConfig, ObservabilityConfig,
                          ParallelConfig, PromptAdapterConfig, SchedulerConfig,
                          SpeculativeConfig)

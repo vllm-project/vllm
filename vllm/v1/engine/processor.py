@@ -1,18 +1,18 @@
 import time
 from typing import Any, Dict, Mapping, Optional, Tuple, Union
 
-from vllm.config import ModelConfig, LoRAConfig, SchedulerConfig, ParallelConfig
+from vllm.config import (LoRAConfig, ModelConfig, ParallelConfig,
+                         SchedulerConfig)
 from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs,
                          EncoderDecoderLLMInputs, InputRegistry, PromptType)
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.lora.request import LoRARequest
-from vllm.transformers_utils.config import try_get_generation_config
-from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
-
-from vllm.v1.engine import (DetokenizerRequest, EngineCoreRequest)
+from vllm.transformers_utils.config import try_get_generation_config
+from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
+from vllm.v1.engine import DetokenizerRequest, EngineCoreRequest
 
 
 class Processor:
