@@ -146,11 +146,12 @@ ENV VLLM_INSTALL_PUNICA_KERNELS=1
 RUN --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=cache,target=/root/.cache/pip \
     --mount=type=cache,target=/root/.cache/uv \
+    ln -s /opt/vllm/lib64/python3.12/site-packages/torch/lib/libroctx64.so /opt/rocm/lib/libroctx64.so && \
+    uv pip install -v -U \
+        ninja setuptools-scm>=8 "cmake>=3.26" packaging && \
     env CFLAGS="-march=haswell" \
         CXXFLAGS="$CFLAGS $CXXFLAGS" \
         CMAKE_BUILD_TYPE=Release \
-    uv pip install -v -U \
-        ninja setuptools-scm>=8 "cmake>=3.26" packaging && \
     python3 setup.py bdist_wheel --dist-dir=dist
 
 #################### libsodium Build IMAGE ####################
