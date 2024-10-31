@@ -7,12 +7,12 @@ from typing import Any, Callable, Dict, Optional, Tuple
 import torch
 import triton
 import triton.language as tl
-from torch.library import Library
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils import direct_register_custom_op
 
 logger = init_logger(__name__)
 
@@ -498,12 +498,13 @@ def inplace_fused_experts_fake(
     pass
 
 
-my_lib = Library("vllm", "FRAGMENT")
-my_lib.define(
-    "inplace_fused_experts(Tensor(a0!) hidden_states, Tensor w1, Tensor w2, Tensor topk_weights, Tensor topk_ids, bool use_fp8_w8a8=False, bool use_int8_w8a16=False, Tensor? w1_scale=None, Tensor? w2_scale=None, Tensor? a1_scale=None, Tensor? a2_scale=None) -> ()"  # noqa
+direct_register_custom_op(
+    library_name="vllm",
+    op_name="inplace_fused_experts",
+    op_func=inplace_fused_experts,
+    mutates_args=["hidden_states"],
+    fake_impl=inplace_fused_experts_fake,
 )
-my_lib.impl("inplace_fused_experts", inplace_fused_experts, "CUDA")
-my_lib._register_fake("inplace_fused_experts", inplace_fused_experts_fake)
 
 
 def outplace_fused_experts(
@@ -538,12 +539,13 @@ def outplace_fused_experts_fake(
     return torch.empty_like(hidden_states)
 
 
-my_lib = Library("vllm", "FRAGMENT")
-my_lib.define(
-    "outplace_fused_experts(Tensor hidden_states, Tensor w1, Tensor w2, Tensor topk_weights, Tensor topk_ids, bool use_fp8_w8a8=False, bool use_int8_w8a16=False, Tensor? w1_scale=None, Tensor? w2_scale=None, Tensor? a1_scale=None, Tensor? a2_scale=None) -> Tensor"  # noqa
+direct_register_custom_op(
+    library_name="vllm",
+    op_name="outplace_fused_experts",
+    op_func=outplace_fused_experts,
+    mutates_args=[],
+    fake_impl=outplace_fused_experts_fake,
 )
-my_lib.impl("outplace_fused_experts", outplace_fused_experts, "CUDA")
-my_lib._register_fake("outplace_fused_experts", outplace_fused_experts_fake)
 
 
 def fused_experts(hidden_states: torch.Tensor,
