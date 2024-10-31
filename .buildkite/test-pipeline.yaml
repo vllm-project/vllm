@@ -295,7 +295,8 @@ steps:
     - pytest -v -s encoder_decoder
 
 - label: OpenAI-Compatible Tool Use # 20 min
-  fast_check: false
+  # Temporarily enabled to force the CI tests
+  fast_check: true
   mirror_hardwares: [ amd ]
   source_file_dependencies:
     - vllm/
