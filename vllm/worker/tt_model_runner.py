@@ -351,7 +351,7 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
         zero_logprob = Logprob(0.0)
         sampler_outputs = []
         for batch_idx, seq_id in enumerate(seq_groups):
-            next_token_id = next_token_ids[batch_idx]
+            next_token_id = int(next_token_ids[batch_idx])
             seq_outputs = [SequenceOutput(seq_id, next_token_id,
                                 {next_token_id: zero_logprob})]
             sampler_outputs.append(
