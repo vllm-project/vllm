@@ -349,6 +349,11 @@ class GroupCoordinator:
         if self.world_size == 1:
             return input_
 
+        if input_.is_cpu:
+            import intel_extension_for_pytorch as ipex
+            ipex.distributed.all_reduce(input_, group=self.device_group)
+            return input_
+
         if not supports_custom_op():
             self._all_reduce_in_place(input_)
             return input_
@@ -380,9 +385,6 @@ class GroupCoordinator:
         pynccl_comm = self.pynccl_comm
         if (pynccl_comm is not None and not pynccl_comm.disabled):
             pynccl_comm.all_reduce(input_)
-        elif input_.is_cpu:
-            import intel_extension_for_pytorch as ipex
-            ipex.distributed.all_reduce(input_, group=self.device_group)
         else:
             torch.distributed.all_reduce(input_, group=self.device_group)
 
