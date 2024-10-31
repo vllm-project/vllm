@@ -1,4 +1,5 @@
 import asyncio
+from multiprocessing.process import BaseProcess
 from typing import AsyncGenerator, Dict, Mapping, Optional, Type, Union
 
 import msgspec
@@ -21,7 +22,7 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import get_open_zmq_ipc_path
-from vllm.v1.engine import LLM_ENGINE_CORE_READY_STR, EngineCoreOutputs
+from vllm.v1.engine import POLLING_TIMEOUT_MS, EngineCoreOutputs
 from vllm.v1.engine.async_stream import AsyncStream
 from vllm.v1.engine.detokenizer import Detokenizer
 from vllm.v1.engine.llm_engine_core import LLMEngineCoreProcess
@@ -30,8 +31,6 @@ from vllm.v1.engine.protocol import LLMEngineProtocol
 from vllm.v1.executor.gpu_executor import GPUExecutor
 
 logger = init_logger(__name__)
-
-POLL_TIMEOUT_MS = 5000
 
 
 class AsyncLLMEngine(LLMEngineProtocol):
@@ -108,7 +107,9 @@ class AsyncLLMEngine(LLMEngineProtocol):
             ready_path=ready_path,
         )
         self.engine_core.start()
-        self.wait_for_engine_core(ready_path)
+        LLMEngineCoreProcess.wait_for_engine_core(
+            engine_core_process=self.engine_core, 
+            ready_path=ready_path)
 
         # TODO: add background loop shielding
         # TODO: add AsyncEngineDeadError
@@ -135,7 +136,7 @@ class AsyncLLMEngine(LLMEngineProtocol):
 
         executor_class = cls._get_executor_cls(engine_config)
 
-        # Create the async LLM engine.
+        # Create the AsyncLLMEngine.
         engine = cls(
             **engine_config.to_dict(),
             executor_class=executor_class,
@@ -147,32 +148,6 @@ class AsyncLLMEngine(LLMEngineProtocol):
         )
         return engine
 
-    def wait_for_engine_core(self, ready_path: str):
-        """Wait until the LLMEngineCore is ready."""
-
-        try:
-            # Non-asyncio context so this can run in __init__
-            sync_ctx = zmq.Context()  # type: ignore[attr-defined]
-            socket = sync_ctx.socket(zmq.constants.PULL)
-            socket.connect(ready_path)
-
-            # Poll ready socket socket until
-            while socket.poll(timeout=POLL_TIMEOUT_MS) == 0:
-                logger.debug("Waiting for LLMEngineCore to startup.")
-
-                if not self.engine_core.is_alive():
-                    raise RuntimeError(
-                        "LLMEngineCore process failed to start.")
-
-            message = socket.recv_string()
-            assert message == LLM_ENGINE_CORE_READY_STR
-
-        except BaseException as e:
-            logger.exception(e)
-            raise e
-
-        finally:
-            sync_ctx.destroy(linger=0)
 
     async def add_request(
         self,
@@ -241,7 +216,7 @@ class AsyncLLMEngine(LLMEngineProtocol):
         # TODO: shutdown remote worker execution loop
 
         while True:
-            while await self.output_socket.poll(timeout=POLL_TIMEOUT_MS) == 0:
+            while await self.output_socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
                 logger.debug("Waiting for output from LLMCore.")
 
             frames = await self.output_socket.recv_multipart(copy=False)

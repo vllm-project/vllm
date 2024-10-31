@@ -12,15 +12,15 @@ from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig, LoadConfig,
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.core.scheduler import Scheduler
-from vllm.v1.engine import (LLM_ENGINE_CORE_READY_STR, POLLING_TIMEOUT_MS,
-                            EngineCoreOutput, EngineCoreOutputs,
-                            EngineCoreRequest)
+from vllm.v1.engine import (POLLING_TIMEOUT_MS, EngineCoreOutput,
+                            EngineCoreOutputs, EngineCoreRequest)
 from vllm.v1.executor.gpu_executor import GPUExecutor
 from vllm.v1.request import Request
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
 
+LLM_ENGINE_CORE_READY_STR = "READY"
 
 class LLMEngineCore:
 
@@ -149,6 +149,37 @@ class LLMEngineCore:
 
 
 class LLMEngineCoreProcess(LLMEngineCore):
+        
+    @staticmethod
+    def wait_for_engine_core(
+        engine_core_process: BaseProcess,
+        ready_path: str,
+    ) -> None:
+        """Wait until the LLMEngineCore is ready."""
+
+        try:
+            # Non-asyncio context so this can run in __init__
+            sync_ctx = zmq.Context()  # type: ignore[attr-defined]
+            socket = sync_ctx.socket(zmq.constants.PULL)
+            socket.connect(ready_path)
+
+            # Poll ready socket socket until
+            while socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
+                logger.debug("Waiting for LLMEngineCore to startup.")
+
+                if not engine_core_process.is_alive():
+                    raise RuntimeError(
+                        "LLMEngineCore process failed to start.")
+
+            message = socket.recv_string()
+            assert message == LLM_ENGINE_CORE_READY_STR
+
+        except BaseException as e:
+            logger.exception(e)
+            raise e
+
+        finally:
+            sync_ctx.destroy(linger=0)
 
     @staticmethod
     def from_config(*config_args, input_path: str, output_path: str,
