@@ -97,5 +97,4 @@ markers = [
     "skip_global_cleanup",
     "core_model: run this model test in each PR instead of just daily",
     "distributed_2_gpus: run this test only in distributed tests for 2 GPUs",
-    "core_mm_model_test: run this vlm test in the core decoder only mm tests",
 ]

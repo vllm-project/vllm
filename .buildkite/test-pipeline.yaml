@@ -337,8 +337,8 @@ steps:
   - tests/models/decoder_only/audio_language
   - tests/models/decoder_only/vision_language
   commands:
-    - pytest -v -s models/decoder_only/audio_language -m core_mm_model_test
-    - pytest -v -s --ignore models/decoder_only/vision_language/test_phi3v.py models/decoder_only/vision_language -m core_mm_model_test
+    - pytest -v -s models/decoder_only/audio_language -m core_model
+    - pytest -v -s --ignore models/decoder_only/vision_language/test_phi3v.py models/decoder_only/vision_language -m core_model
 
 - label: Decoder-only Multi-Modal Models Test (Extended)
   #mirror_hardwares: [amd]
@@ -347,11 +347,11 @@ steps:
   - tests/models/decoder_only/audio_language
   - tests/models/decoder_only/vision_language
   commands:
-    - pytest -v -s models/decoder_only/audio_language -m 'not core_mm_model_test'
+    - pytest -v -s models/decoder_only/audio_language -m 'not core_model'
     # HACK - run phi3v tests separately to sidestep this transformers bug
     # https://github.com/huggingface/transformers/issues/34307
     - pytest -v -s models/decoder_only/vision_language/test_phi3v.py
-    - pytest -v -s --ignore models/decoder_only/vision_language/test_phi3v.py models/decoder_only/vision_language -m 'not core_mm_model_test'
+    - pytest -v -s --ignore models/decoder_only/vision_language/test_phi3v.py models/decoder_only/vision_language -m 'not core_model'
 
 - label: Other Models Test # 6min
   #mirror_hardwares: [amd]
