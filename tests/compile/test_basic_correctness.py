@@ -59,7 +59,7 @@ test_settings = [
         fullgraph=True,
     ),
     TestSetting(
-        model="llava-hf/llava-1.5-7b-hf",
+        model="microsoft/Phi-3.5-vision-instruct",
         model_args=[],
         pp_size=2,
         tp_size=1,
