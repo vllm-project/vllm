@@ -88,11 +88,25 @@ def test_compile_correctness(test_setting: TestSetting):
         pytest.skip("Not correct CUDA devices for the test.")
     import os
     os.environ["VLLM_ATTENTION_BACKEND"] = attn_backend
-    all_args = [["--enforce-eager"] + model_args + ["-pp", str(pp_size)] +
-                ["-tp", str(tp_size)]] * 3
-    # don't test VLLM_TORCH_COMPILE_LEVEL == 3 case
-    # inductor will change the output, so we cannot compare them.
+    final_args = ["--enforce-eager"] + model_args + ["-pp", str(pp_size)] + \
+                ["-tp", str(tp_size)]
+
     all_envs: List[Optional[Dict[str, str]]] = []
+
+    for level in [
+            CompilationLevel.NO_COMPILATION,
+            CompilationLevel.PIECEWISE,
+    ]:
+        all_envs.append({"VLLM_TORCH_COMPILE_LEVEL": str(level)})
+
+    # inductor will change the output, so we only compare if the output
+    # is close, not exactly the same.
+    compare_all_settings(
+        model, [final_args] * 2,
+        all_envs,
+        method=method if method != "generate" else "generate_close")
+    all_envs.clear()
+
     for level in [
             CompilationLevel.NO_COMPILATION,
             CompilationLevel.DYNAMO_AS_IS,
@@ -104,4 +118,4 @@ def test_compile_correctness(test_setting: TestSetting):
             all_envs[-1][
                 "VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE"] = "0"  # type: ignore
 
-    compare_all_settings(model, all_args, all_envs, method=method)
+    compare_all_settings(model, [final_args] * 3, all_envs, method=method)
