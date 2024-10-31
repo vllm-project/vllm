@@ -38,7 +38,7 @@ def match_gemm_rs_ag_gemm(
     all_reduce = torch.ops.higher_order.auto_functionalized(
         torch.ops.vllm.inplace_all_reduce.default,
         tensor = mm_1,
-        group_name = TP_GROUP_NAME  # how to deal with groupname?  capture w/lambda
+        group_name = TP_GROUP_NAME
     )
     all_reduce = all_reduce[1]
 
@@ -71,44 +71,48 @@ def gemm_rs_ag_gemm(residual: torch.Tensor,
         res_slices = slice_residual(residual)
         slice_size = res_slices[get_tensor_model_parallel_rank()].shape[0]
         split_1 = torch.ops.aten.split.Tensor(residual, slice_size)
-        getitem_26 = split_1[0];  split_1 = None
+        getitem_26 = split_1[0]
     else:
         getitem_26 = residual
         slice_size = residual.shape[0]
 
+    gemm_1_w_perm = torch.ops.aten.permute.default(gemm_1_weights, [1, 0])
+
     if not should_slice(residual.shape):
-        permute_3 = torch.ops.aten.permute.default(gemm_1_weights, [1, 0])
-        output = torch.matmul(gemm_1_activations, permute_3)
-        output = tensor_model_parallel_all_reduce(output)
+        output = torch.matmul(gemm_1_activations, gemm_1_w_perm)
+        reduced_output = tensor_model_parallel_all_reduce(output)
 
-        auto_functionalized_4 = torch.ops.higher_order.auto_functionalized(torch.ops._C.fused_add_rms_norm.default, input=output, residual=getitem_26, weight=rms_norm_weight, epsilon=1e-05)
-        getitem_29 = auto_functionalized_4[1]
-        getitem_30 = auto_functionalized_4[2]
+        norm_res = torch.ops.higher_order.auto_functionalized(
+            torch.ops._C.fused_add_rms_norm.default,
+            input=reduced_output,
+            residual=getitem_26,
+            weight=rms_norm_weight,
+            epsilon=1e-05
+        )
+        normalized = norm_res[1]
+        new_residual = norm_res[2]
 
-        permute_5 = torch.ops.aten.permute.default(gemm_2_weights, [1, 0])
-        getitem_35 = torch.matmul(getitem_29, permute_5)
-        getitem_30a = getitem_30.clone()
-        return getitem_35, getitem_30, getitem_30a
+        gemm_2_w_perm = torch.ops.aten.permute.default(gemm_2_weights, [1, 0])
+        mm_2 = torch.matmul(normalized, gemm_2_w_perm)
+        return mm_2, new_residual, new_residual.clone()
     else:
         group_name = get_world_name()
-        permute_3 = torch.ops.aten.permute.default(gemm_1_weights, [1, 0])
-        clone = torch.ops.aten.clone.default(permute_3, memory_format = torch.contiguous_format)
-        output = torch.ops.symm_mem.fused_matmul_reduce_scatter.default(gemm_1_activations, clone, 'avg', 0, group_name)
-        auto_functionalized_4 = torch.ops.higher_order.auto_functionalized(torch.ops._C.fused_add_rms_norm.default, input=output, residual=getitem_26, weight=rms_norm_weight, epsilon=1e-05)
-        getitem_29 = auto_functionalized_4[1]
-        getitem_30 = auto_functionalized_4[2]
+        output = torch.ops.symm_mem.fused_matmul_reduce_scatter.default(gemm_1_activations, gemm_1_w_perm, 'avg', 0, group_name)
+
+        norm_res = torch.ops.higher_order.auto_functionalized(torch.ops._C.fused_add_rms_norm.default, input=output, residual=getitem_26, weight=rms_norm_weight, epsilon=1e-05)
+        getitem_29 = norm_res[1]
+        getitem_30 = norm_res[2]
         residual_1 = residual if first_layer else my_residual
         slice_scatter_2 = torch.ops.aten.slice_scatter.default(residual_1, getitem_30, 0, 0, slice_size)
         split_2 = torch.ops.aten.split.Tensor(slice_scatter_2, slice_size)
         getitem_31 = split_2[0]
-        permute_5 = torch.ops.aten.permute.default(gemm_2_weights, [1, 0])
-        clone_1 = torch.ops.aten.clone.default(permute_5, memory_format = torch.contiguous_format)
-        fused_all_gather_matmul = torch.ops.symm_mem.fused_all_gather_matmul.default(getitem_29, [clone_1], 0, group_name)
-        getitem_34 = fused_all_gather_matmul[1]
-        getitem_35 = getitem_34[0]
+
+        gemm_2_w_perm = torch.ops.aten.permute.default(gemm_2_weights, [1, 0])
+        fused_all_gather_matmul = torch.ops.symm_mem.fused_all_gather_matmul.default(getitem_29, [gemm_2_w_perm], 0, group_name)
+        mm_2 = fused_all_gather_matmul[1]
 
         # TODO: can we avoid clone here?
-        return getitem_35, getitem_31.clone(), slice_scatter_2
+        return mm_2[0], getitem_31.clone(), slice_scatter_2
 
 
 @torch.library.register_fake("vllm::gemm_rs_ag_gemm")
