@@ -90,7 +90,7 @@ class MistralTokenizer:
             for idx, token in enumerate(self._vocab)
         }
         self.tokenizer = tokenizer_
-        self._max_token_id = max(self._vocab.values())
+        self._max_token_id = self.vocab_size - 1
 
     @classmethod
     def from_pretrained(cls,
