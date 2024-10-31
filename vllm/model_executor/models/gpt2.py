@@ -300,7 +300,7 @@ class GPT2LMHeadModel(nn.Module, SupportsPP):
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         for name, loaded_weight in weights:
-            if "lm_head" in name:
+            if name.startswith("lm_head"):
                 # GPT-2 ties the weights of the embedding layer and the final
                 # linear layer.
                 continue
