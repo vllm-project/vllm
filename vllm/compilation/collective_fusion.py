@@ -106,10 +106,10 @@ def gemm_rs_ag_gemm(
         new_residual = norm_res[2]
 
         residual_1 = residual if first_layer else old_my_residual
-        slice_scatter_2 = torch.ops.aten.slice_scatter.default(
+        slice_scatter = torch.ops.aten.slice_scatter.default(
             residual_1, new_residual, 0, 0, slice_size)
-        split_2 = torch.ops.aten.split.Tensor(slice_scatter_2, slice_size)
-        getitem_31 = split_2[0]
+        split_2 = torch.ops.aten.split.Tensor(slice_scatter, slice_size)
+        new_residual = split_2[0]
 
         gemm_2_w_perm = torch.ops.aten.permute.default(gemm_2_weights, [1, 0])
         fused_all_gather_matmul = (
@@ -118,7 +118,7 @@ def gemm_rs_ag_gemm(
         mm_2 = fused_all_gather_matmul[1]
 
         # TODO: can we avoid clone here?
-        return mm_2[0], getitem_31.clone(), slice_scatter_2
+        return mm_2[0], new_residual.clone(), slice_scatter
 
 
 @torch.library.register_fake("vllm::gemm_rs_ag_gemm")
