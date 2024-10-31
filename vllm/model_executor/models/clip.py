@@ -421,7 +421,6 @@ class CLIPVisionTransformer(nn.Module):
         else:
             self.post_layernorm = None
 
-    @torch.compile
     def forward(
         self,
         pixel_values: torch.Tensor,

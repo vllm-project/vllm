@@ -695,6 +695,7 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
         # always pass the input via `inputs_embeds`
         # to make sure the computation graph is consistent
+        # for `torch.compile` integration
         input_ids = None
 
         hidden_states = self.language_model.model(input_ids,
