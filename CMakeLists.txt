@@ -49,7 +49,7 @@ set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx940;gfx941;gfx942;gfx1030;gfx11
 # requirements.txt files and should be kept consistent.  The ROCm torch
 # versions are derived from Dockerfile.rocm
 #
-set(TORCH_SUPPORTED_VERSION_CUDA "2.4.0")
+set(TORCH_SUPPORTED_VERSION_CUDA "2.5.0")
 set(TORCH_SUPPORTED_VERSION_ROCM "2.5.0")
 
 #
@@ -507,7 +507,7 @@ else()
   FetchContent_Declare(
           vllm-flash-attn
           GIT_REPOSITORY https://github.com/vllm-project/flash-attention.git
-          GIT_TAG 013f0c4fc47e6574060879d9734c1df8c5c273bd
+          GIT_TAG 5259c586c403a4e4d8bf69973c159b40cc346fb9
           GIT_PROGRESS TRUE
           # Don't share the vllm-flash-attn build between build types
           BINARY_DIR ${CMAKE_BINARY_DIR}/vllm-flash-attn

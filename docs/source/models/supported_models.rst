@@ -277,7 +277,7 @@ Text Generation
   * - :code:`QWenLMHeadModel`
     - Qwen
     - :code:`Qwen/Qwen-7B`, :code:`Qwen/Qwen-7B-Chat`, etc.
-    -
+    - ✅︎
     - ✅︎
   * - :code:`Qwen2ForCausalLM`
     - Qwen2
@@ -360,6 +360,28 @@ Reward Modeling
 
 .. note::
     As an interim measure, these models are supported via Embeddings API. See `this RFC <https://github.com/vllm-project/vllm/issues/8967>`_ for upcoming changes.
+
+Classification
+---------------
+
+.. list-table::
+  :widths: 25 25 50 5 5
+  :header-rows: 1
+
+  * - Architecture
+    - Models
+    - Example HF Models
+    - :ref:`LoRA <lora>`
+    - :ref:`PP <distributed_serving>`
+  * - :code:`Qwen2ForSequenceClassification`
+    - Qwen2-based
+    - :code:`jason9693/Qwen2.5-1.5B-apeach`, etc.
+    - 
+    - ✅︎
+
+.. note::
+    As an interim measure, these models are supported via Embeddings API. It will be supported via Classification API in the future (no reference APIs exist now).
+
 
 Multimodal Language Models
 ^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -494,7 +516,7 @@ Text Generation
     - Qwen-VL
     - T + I\ :sup:`E+`
     - :code:`Qwen/Qwen-VL`, :code:`Qwen/Qwen-VL-Chat`, etc.
-    -
+    - ✅︎
     - ✅︎
   * - :code:`Qwen2AudioForConditionalGeneration`
     - Qwen2-Audio
@@ -517,6 +539,9 @@ Text Generation
 
 | :sup:`E` Pre-computed embeddings can be inputted for this modality.
 | :sup:`+` Multiple items can be inputted per text prompt for this modality.
+
+.. note::
+  vLLM currently only supports adding LoRA to the language backbone of multimodal models.               
 
 .. note::
   For :code:`openbmb/MiniCPM-V-2`, the official repo doesn't work yet, so we need to use a fork (:code:`HwwwH/MiniCPM-V-2`) for now.

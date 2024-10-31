@@ -26,7 +26,7 @@ from vllm.model_executor.model_loader.loader import get_model_loader
 from vllm.platforms import current_platform
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.utils import (FlexibleArgumentParser, GB_bytes,
-                        cuda_device_count_stateless, get_open_port, is_hip)
+                        cuda_device_count_stateless, get_open_port)
 
 if current_platform.is_rocm():
     from amdsmi import (amdsmi_get_gpu_vram_usage,
@@ -133,15 +133,19 @@ class RemoteOpenAIServer:
             try:
                 if requests.get(url).status_code == 200:
                     break
-            except Exception as err:
+            except Exception:
+                # this exception can only be raised by requests.get,
+                # which means the server is not ready yet.
+                # the stack trace is not useful, so we suppress it
+                # by using `raise from None`.
                 result = self.proc.poll()
                 if result is not None and result != 0:
-                    raise RuntimeError("Server exited unexpectedly.") from err
+                    raise RuntimeError("Server exited unexpectedly.") from None
 
                 time.sleep(0.5)
                 if time.time() - start > timeout:
                     raise RuntimeError(
-                        "Server failed to start in time.") from err
+                        "Server failed to start in time.") from None
 
     @property
     def url_root(self) -> str:
@@ -487,7 +491,7 @@ def wait_for_gpu_memory_to_clear(devices: List[int],
         output: Dict[int, str] = {}
         output_raw: Dict[int, float] = {}
         for device in devices:
-            if is_hip():
+            if current_platform.is_rocm():
                 dev_handle = amdsmi_get_processor_handles()[device]
                 mem_info = amdsmi_get_gpu_vram_usage(dev_handle)
                 gb_used = mem_info["vram_used"] / 2**10
@@ -561,12 +565,11 @@ def fork_new_process_for_each_test(
     return wrapper
 
 
-def large_gpu_test(*, min_gb: int):
-    """
-    Decorate a test to be skipped if no GPU is available or it does not have
-    sufficient memory.
-
-    Currently, the CI machine uses L4 GPU which has 24 GB VRAM.
+def large_gpu_mark(min_gb: int) -> pytest.MarkDecorator:
+    """Gets a pytest skipif mark, which triggers ig the the device doesn't have
+    meet a minimum memory requirement in gb; can be leveraged via 
+    @large_gpu_test to skip tests in environments without enough resources, or
+    called when filtering tests to run directly.
     """
     try:
         if current_platform.is_cpu():
@@ -578,13 +581,22 @@ def large_gpu_test(*, min_gb: int):
             f"An error occurred when finding the available memory: {e}",
             stacklevel=2,
         )
-
         memory_gb = 0
 
-    test_skipif = pytest.mark.skipif(
+    return pytest.mark.skipif(
         memory_gb < min_gb,
         reason=f"Need at least {memory_gb}GB GPU memory to run the test.",
     )
+
+
+def large_gpu_test(*, min_gb: int):
+    """
+    Decorate a test to be skipped if no GPU is available or it does not have
+    sufficient memory.
+
+    Currently, the CI machine uses L4 GPU which has 24 GB VRAM.
+    """
+    test_skipif = large_gpu_mark(min_gb)
 
     def wrapper(f: Callable[_P, None]) -> Callable[_P, None]:
         return test_skipif(f)

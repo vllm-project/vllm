@@ -164,7 +164,10 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         # init MistralForCausalLM
         self.language_model = init_vllm_registered_model(
-            config.text_config, cache_config, quant_config)
+            config.text_config,
+            cache_config,
+            quant_config,
+            prefix="language_model")
 
         self.vision_encoder = VisionTransformer(self.vision_args)
         self.vision_language_adapter = VisionLanguageAdapter(

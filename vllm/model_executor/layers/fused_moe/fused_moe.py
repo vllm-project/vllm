@@ -358,9 +358,10 @@ def try_get_optimal_moe_config(
     top_k: int,
     dtype: Optional[str],
     M: int,
-    override_config: Optional[Dict[str, Any]] = None,
     is_marlin: bool = False,
 ):
+    from vllm.model_executor.layers.fused_moe import get_config
+    override_config = get_config()
     if override_config:
         config = override_config
     else:
@@ -465,19 +466,109 @@ def get_config_dtype_str(dtype: torch.dtype,
     return None
 
 
+@torch.library.custom_op("vllm::inplace_fused_experts",
+                         mutates_args=["hidden_states"])
+def inplace_fused_experts(hidden_states: torch.Tensor,
+                          w1: torch.Tensor,
+                          w2: torch.Tensor,
+                          topk_weights: torch.Tensor,
+                          topk_ids: torch.Tensor,
+                          use_fp8_w8a8: bool = False,
+                          use_int8_w8a16: bool = False,
+                          w1_scale: Optional[torch.Tensor] = None,
+                          w2_scale: Optional[torch.Tensor] = None,
+                          a1_scale: Optional[torch.Tensor] = None,
+                          a2_scale: Optional[torch.Tensor] = None) -> None:
+    fused_experts_impl(hidden_states, w1, w2, topk_weights, topk_ids, True,
+                       use_fp8_w8a8, use_int8_w8a16, w1_scale, w2_scale,
+                       a1_scale, a2_scale)
+
+
+@inplace_fused_experts.register_fake
+def _(hidden_states: torch.Tensor,
+      w1: torch.Tensor,
+      w2: torch.Tensor,
+      topk_weights: torch.Tensor,
+      topk_ids: torch.Tensor,
+      use_fp8_w8a8: bool = False,
+      use_int8_w8a16: bool = False,
+      w1_scale: Optional[torch.Tensor] = None,
+      w2_scale: Optional[torch.Tensor] = None,
+      a1_scale: Optional[torch.Tensor] = None,
+      a2_scale: Optional[torch.Tensor] = None) -> None:
+    pass
+
+
+@torch.library.custom_op("vllm::outplace_fused_experts", mutates_args=[])
+def outplace_fused_experts(
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        use_fp8_w8a8: bool = False,
+        use_int8_w8a16: bool = False,
+        w1_scale: Optional[torch.Tensor] = None,
+        w2_scale: Optional[torch.Tensor] = None,
+        a1_scale: Optional[torch.Tensor] = None,
+        a2_scale: Optional[torch.Tensor] = None) -> torch.Tensor:
+    return fused_experts_impl(hidden_states, w1, w2, topk_weights, topk_ids,
+                              False, use_fp8_w8a8, use_int8_w8a16, w1_scale,
+                              w2_scale, a1_scale, a2_scale)
+
+
+@outplace_fused_experts.register_fake
+def _(hidden_states: torch.Tensor,
+      w1: torch.Tensor,
+      w2: torch.Tensor,
+      topk_weights: torch.Tensor,
+      topk_ids: torch.Tensor,
+      use_fp8_w8a8: bool = False,
+      use_int8_w8a16: bool = False,
+      w1_scale: Optional[torch.Tensor] = None,
+      w2_scale: Optional[torch.Tensor] = None,
+      a1_scale: Optional[torch.Tensor] = None,
+      a2_scale: Optional[torch.Tensor] = None) -> torch.Tensor:
+    return torch.empty_like(hidden_states)
+
+
 def fused_experts(hidden_states: torch.Tensor,
                   w1: torch.Tensor,
                   w2: torch.Tensor,
                   topk_weights: torch.Tensor,
                   topk_ids: torch.Tensor,
                   inplace: bool = False,
-                  override_config: Optional[Dict[str, Any]] = None,
                   use_fp8_w8a8: bool = False,
                   use_int8_w8a16: bool = False,
                   w1_scale: Optional[torch.Tensor] = None,
                   w2_scale: Optional[torch.Tensor] = None,
                   a1_scale: Optional[torch.Tensor] = None,
                   a2_scale: Optional[torch.Tensor] = None):
+    if inplace:
+        torch.ops.vllm.inplace_fused_experts(hidden_states, w1, w2,
+                                             topk_weights, topk_ids,
+                                             use_fp8_w8a8, use_int8_w8a16,
+                                             w1_scale, w2_scale, a1_scale,
+                                             a2_scale)
+        return hidden_states
+    else:
+        return torch.ops.vllm.outplace_fused_experts(
+            hidden_states, w1, w2, topk_weights, topk_ids, use_fp8_w8a8,
+            use_int8_w8a16, w1_scale, w2_scale, a1_scale, a2_scale)
+
+
+def fused_experts_impl(hidden_states: torch.Tensor,
+                       w1: torch.Tensor,
+                       w2: torch.Tensor,
+                       topk_weights: torch.Tensor,
+                       topk_ids: torch.Tensor,
+                       inplace: bool = False,
+                       use_fp8_w8a8: bool = False,
+                       use_int8_w8a16: bool = False,
+                       w1_scale: Optional[torch.Tensor] = None,
+                       w2_scale: Optional[torch.Tensor] = None,
+                       a1_scale: Optional[torch.Tensor] = None,
+                       a2_scale: Optional[torch.Tensor] = None):
     # Check constraints.
     assert hidden_states.shape[1] == w1.shape[2], "Hidden size mismatch"
     assert topk_weights.shape == topk_ids.shape, "topk shape mismatch"
@@ -504,7 +595,6 @@ def fused_experts(hidden_states: torch.Tensor,
         w2.shape,
         topk_ids.shape[1],
         config_dtype,
-        override_config=override_config,
     )
 
     config = get_config_func(M)
@@ -602,7 +692,6 @@ def fused_moe(
     topk: int,
     renormalize: bool,
     inplace: bool = False,
-    override_config: Optional[Dict[str, Any]] = None,
     use_grouped_topk: bool = False,
     num_expert_group: Optional[int] = None,
     topk_group: Optional[int] = None,
@@ -628,8 +717,6 @@ def fused_moe(
     - renormalize (bool): If True, renormalize the top-k weights to sum to 1.
     - inplace (bool): If True, perform the operation in-place.
         Defaults to False.
-    - override_config (Optional[Dict[str, Any]]): Optional override
-        for the kernel configuration.
     - num_expert_group: Optional[int]: additional parameter for grouped_topk
     - topk_group: Optional[int]: additional parameter for grouped_topk
     - use_grouped_topk: If True, use grouped_topk instead of fused_topk
@@ -667,7 +754,6 @@ def fused_moe(
                          topk_weights,
                          topk_ids,
                          inplace=inplace,
-                         override_config=override_config,
                          use_fp8_w8a8=use_fp8_w8a8,
                          use_int8_w8a16=use_int8_w8a16,
                          w1_scale=w1_scale,
