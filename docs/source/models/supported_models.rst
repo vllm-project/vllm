@@ -414,7 +414,7 @@ Text Generation
     - Models
     - Inputs
     - Example HF Models
-    - :ref:`LoRA (see note) <lora>`
+    - :ref:`LoRA <lora>` (see note)
     - :ref:`PP <distributed_serving>`
   * - :code:`Blip2ForConditionalGeneration`
     - BLIP-2
