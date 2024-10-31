@@ -114,7 +114,7 @@ VLM_TEST_SETTINGS = {
         dtype="half" if current_platform.is_rocm() else ("half", "float"),
         marks=[pytest.mark.core_model],
     ),
-    "qwen2vl": VLMTestInfo(
+    "qwen2_vl": VLMTestInfo(
         models=["Qwen/Qwen2-VL-2B-Instruct"],
         test_type=(
             VLMTestType.IMAGE,

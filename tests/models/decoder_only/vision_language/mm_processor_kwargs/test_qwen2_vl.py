@@ -17,7 +17,7 @@ MAX_PIXELS = "max_pixels"
 
 
 # Fixtures lazy import to avoid initializing CUDA during test collection
-# NOTE: Qwen2vl supports multiple input modalities, so it registers multiple
+# NOTE: Qwen2VL supports multiple input modalities, so it registers multiple
 # input mappers.
 @pytest.fixture()
 def image_input_mapper_for_qwen2_vl():
