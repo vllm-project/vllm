@@ -33,7 +33,9 @@ class EngineCoreRequest(msgspec.Struct):
     # due to circular imports and typing we have in data.py
 
     request_id: str
-    prompt: Optional[str]
+    #NOTE(Nick): I don't think we need to pass prompt here since it should
+    # always be tokenized?
+    #    prompt: Optional[str]
     prompt_token_ids: List[int]
     sampling_params: SamplingParams
     eos_token_id: Optional[int]
@@ -52,6 +54,9 @@ class EngineCoreOutput:
 
 
 class EngineCoreOutputs(msgspec.Struct):
+
+    #NOTE(Nick): We could consider ways to make this more compact,
+    # e.g. columnwise layout and using an int enum for finish/stop reason
 
     # [num_reqs]
     outputs: List[EngineCoreOutput]
