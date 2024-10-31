@@ -98,6 +98,10 @@ def parse_singleton_prompt(
     raise TypeError("inputs must be a string, TextPrompt, or TokensPrompt")
 
 
+def is_token_prompt(prompt: PromptType) -> TypeIs[TokensPrompt]:
+    return isinstance(prompt, dict) and "prompt_token_ids" in prompt
+
+
 def is_explicit_encoder_decoder_prompt(
         prompt: PromptType) -> TypeIs[ExplicitEncoderDecoderPrompt]:
     return isinstance(prompt, dict) and "encoder_prompt" in prompt
