@@ -319,21 +319,20 @@ def _test_image_text(
     chat_completion = client.chat.completions.create(model=model_name,
                                                      messages=messages,
                                                      temperature=0.0,
-                                                     max_tokens=10,
-                                                     logprobs=True,
+                                                     max_tokens=1,
                                                      top_logprobs=5)
     choice = chat_completion.choices[0]
-    message = choice.message
-    message = chat_completion.choices[0].message
+    top_logprobs = chat_completion.choices[0].logprobs.content[0].top_logprobs
+
+    for x in top_logprobs:
+        x.logprob = round(x.logprob, 2)
 
     results.append({
         "test": "pure_text",
-        "output": message.content,
+        "logprobs": top_logprobs,
     })
 
-    messages.append({"role": "assistant", "content": message.content})
-
-    messages += [{
+    messages = [{
         "role":
         "user",
         "content": [
@@ -353,14 +352,13 @@ def _test_image_text(
     chat_completion = client.chat.completions.create(model=model_name,
                                                      messages=messages,
                                                      temperature=0.0,
-                                                     max_tokens=10,
-                                                     logprobs=True,
+                                                     max_tokens=1,
                                                      top_logprobs=5)
-    message = chat_completion.choices[0].message
+    top_logprobs = chat_completion.choices[0].logprobs.content[0].top_logprobs
 
     results.append({
         "test": "text_image",
-        "output": message.content,
+        "logprobs": top_logprobs,
     })
 
     return results
