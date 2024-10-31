@@ -6,9 +6,11 @@ from typing import Iterator, List, Optional, Union
 import cloudpickle
 import zmq
 
+import vllm.envs
 from vllm import AsyncEngineArgs, SamplingParams
 from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig)
+from vllm.engine.llm_engine import LLMEngine
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
@@ -19,16 +21,11 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          RPCStartupRequest, RPCStartupResponse,
                                          RPCUProfileRequest)
 # yapf: enable
-from vllm.envs import VLLM_USE_V1
 from vllm.executor.gpu_executor import GPUExecutor
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.usage.usage_lib import UsageContext
-
-if VLLM_USE_V1:
-    from vllm.v1.engine.llm_engine import LLMEngine
-else:
-    from vllm.engine.llm_engine import LLMEngine
+from vllm.v1.engine.llm_engine import LLMEngine as V1LLMEngine
 
 CONFIG_TYPE = Union[ModelConfig, DecodingConfig, ParallelConfig,
                     SchedulerConfig, LoRAConfig]
@@ -122,11 +119,12 @@ class MQLLMEngine:
         load_general_plugins()
 
         engine_config = engine_args.create_engine_config()
+        engine_class = V1LLMEngine if vllm.envs.VLLM_USE_V1 else LLMEngine
 
-        executor_class = LLMEngine._get_executor_cls(engine_config)
+        executor_class = engine_class._get_executor_cls(engine_config)
 
         use_async_sockets = (engine_config.model_config.use_async_output_proc
-                             and not VLLM_USE_V1)
+                             and not vllm.envs.VLLM_USE_V1)
 
         return cls(ipc_path=ipc_path,
                    use_async_sockets=use_async_sockets,

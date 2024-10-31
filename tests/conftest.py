@@ -6,6 +6,7 @@ from collections import UserList
 from enum import Enum
 from typing import (Any, Callable, Dict, List, Optional, Tuple, Type,
                     TypedDict, TypeVar, Union)
+from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -119,6 +120,23 @@ IMAGE_ASSETS = _ImageAssets()
 """Singleton instance of :class:`_ImageAssets`."""
 VIDEO_ASSETS = _VideoAssets()
 """Singleton instance of :class:`_VideoAssets`."""
+
+
+@pytest.fixture(params=[True, False])
+def run_with_both_engines(request):
+    # Automatically runs tests twice, once with V1 and once without
+    use_v1 = request.param
+    # Tests decorated with `@skip_v1` are only run without v1
+    skip_v1 = request.node.get_closest_marker("skip_v1")
+
+    if use_v1:
+        if skip_v1:
+            pytest.skip("Skipping test on vllm V1")
+        with patch('vllm.envs.VLLM_USE_V1', True):
+            yield
+    else:
+        with patch('vllm.envs.VLLM_USE_V1', False):
+            yield
 
 
 @pytest.fixture(autouse=True)

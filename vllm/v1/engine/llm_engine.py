@@ -174,6 +174,12 @@ class LLMEngine:
         # GPU and CPU blocks, which are profiled in the distributed executor.
         self.scheduler = Scheduler(scheduler_config, cache_config, lora_config)
 
+    def __del__(self):
+        # Small hack- implicit clean up of resources on garbage collect
+        # TODO: this should probably be explicitly invoked when we're done with
+        # the engine
+        self.terminate_detokenizer()
+
     def _initialize_kv_caches(self) -> None:
         num_gpu_blocks, _ = self.model_executor.determine_num_available_blocks(
         )

@@ -10,6 +10,7 @@ from vllm import envs
 from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
                               BeamSearchSequence, get_beam_search_score)
 from vllm.engine.arg_utils import EngineArgs, TaskOption
+from vllm.engine.llm_engine import LLMEngine
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          apply_hf_chat_template,
                                          apply_mistral_chat_template,
@@ -30,11 +31,7 @@ from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter, deprecate_args, deprecate_kwargs, is_list_of
-
-if envs.VLLM_USE_V1:
-    from vllm.v1.engine.llm_engine import LLMEngine  # type: ignore
-else:
-    from vllm.engine.llm_engine import LLMEngine  # type: ignore
+from vllm.v1.engine.llm_engine import LLMEngine as V1LLMEngine
 
 logger = init_logger(__name__)
 
@@ -205,7 +202,10 @@ class LLM:
             pooling_returned_token_ids=pooling_returned_token_ids,
             **kwargs,
         )
-        self.llm_engine = LLMEngine.from_engine_args(
+        # Logic to switch between engines is done at runtime instead of import
+        # to avoid import order issues
+        self.engine_class = V1LLMEngine if envs.VLLM_USE_V1 else LLMEngine
+        self.llm_engine = self.engine_class.from_engine_args(
             engine_args, usage_context=UsageContext.LLM_CLASS)
         self.request_counter = Counter()
 
@@ -393,7 +393,7 @@ class LLM:
             priority=priority)
 
         outputs = self._run_engine(use_tqdm=use_tqdm)
-        return LLMEngine.validate_outputs(outputs, RequestOutput)
+        return self.engine_class.validate_outputs(outputs, RequestOutput)
 
     def beam_search(
         self,
@@ -768,7 +768,8 @@ class LLM:
         )
 
         outputs = self._run_engine(use_tqdm=use_tqdm)
-        return LLMEngine.validate_outputs(outputs, EmbeddingRequestOutput)
+        return self.engine_class.validate_outputs(outputs,
+                                                  EmbeddingRequestOutput)
 
     def start_profile(self) -> None:
         self.llm_engine.start_profile()
