@@ -16,10 +16,15 @@ from .backend import TestBackend
 
 class TestModel(torch.nn.Module):
 
-    def __init__(self, hidden_size: int, eps: float, *args, **kwargs):
+    def __init__(self, hidden_size: int, eps: float, static: bool, *args,
+                 **kwargs):
         super().__init__(*args, **kwargs)
         self.norm = [RMSNorm(hidden_size, eps) for _ in range(3)]
-        self.scale = [torch.rand(1, dtype=torch.float32) for _ in range(4)]
+        self.wscale = [torch.rand(1, dtype=torch.float32) for _ in range(2)]
+        if static:
+            self.scale = [torch.rand(1, dtype=torch.float32) for _ in range(2)]
+        else:
+            self.scale = [None for _ in range(2)]
         self.w = [
             torch.rand(hidden_size, hidden_size).to(dtype=FP8_DTYPE).t()
             for _ in range(2)
@@ -29,11 +34,11 @@ class TestModel(torch.nn.Module):
         resid = torch.relu(x)
         y = self.norm[0](x)
 
-        x2 = apply_fp8_linear(y, self.w[0], self.scale[0], self.scale[1])
+        x2 = apply_fp8_linear(y, self.w[0], self.wscale[0], self.scale[0])
         # make sure resid is used for replacement to work
         y2, resid = self.norm[1](x2, resid)
 
-        x3 = apply_fp8_linear(y2, self.w[1], self.scale[2], self.scale[3])
+        x3 = apply_fp8_linear(y2, self.w[1], self.wscale[1], self.scale[1])
         y3, resid = self.norm[2](x3, resid)  # use resid here
         return y3
 
@@ -42,9 +47,10 @@ class TestModel(torch.nn.Module):
 @pytest.mark.parametrize("hidden_size", [64, 3392, 4096])
 @pytest.mark.parametrize("num_tokens", [7, 256, 533, 2048, 2049])
 @pytest.mark.parametrize("eps", [1e-5, 1e-6])
+@pytest.mark.parametrize("static", [True, False])
 @pytest.mark.skipif(envs.VLLM_TARGET_DEVICE != "cuda",
                     reason="Only test on CUDA")
-def test_fusion_rmsnorm_quant(dtype, hidden_size, num_tokens, eps):
+def test_fusion_rmsnorm_quant(dtype, hidden_size, num_tokens, eps, static):
     torch.set_default_device("cuda")
     torch.set_default_dtype(torch.float16)
 
@@ -55,7 +61,7 @@ def test_fusion_rmsnorm_quant(dtype, hidden_size, num_tokens, eps):
     fusion_pass = FusionPass.instance(config)
 
     backend = TestBackend(reshape_pass, fusion_pass)
-    model = TestModel(hidden_size, eps)
+    model = TestModel(hidden_size, eps, static)
 
     # First dimension dynamic
     x = torch.rand(num_tokens, hidden_size)
@@ -73,9 +79,14 @@ def test_fusion_rmsnorm_quant(dtype, hidden_size, num_tokens, eps):
     pre_nodes = backend.graph_pre_pass.nodes
     post_nodes = backend.graph_post_pass.nodes
 
-    rms_quant = torch.ops._C.rms_norm_static_fp8_quant.default
-    add_rms_quant = torch.ops._C.fused_add_rms_norm_static_fp8_quant.default
-    fp8_quant = torch.ops._C.static_scaled_fp8_quant.default
+    if static:
+        rms_quant = torch.ops._C.rms_norm_static_fp8_quant.default
+        add_rms_quant = torch.ops._C.fused_add_rms_norm_static_fp8_quant.default  # noqa: E501
+        fp8_quant = torch.ops._C.static_scaled_fp8_quant.default
+    else:
+        rms_quant = torch.ops._C.rms_norm_dynamic_fp8_quant.default
+        add_rms_quant = torch.ops._C.fused_add_rms_norm_dynamic_fp8_quant.default  # noqa: E501
+        fp8_quant = torch.ops._C.dynamic_scaled_fp8_quant.default
 
     # In pre-nodes, fp8 quant should be present and fused kernels should not
     assert find_auto_fn_maybe(pre_nodes, rms_quant) is None
