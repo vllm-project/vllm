@@ -36,7 +36,7 @@ def ensure_system_prompt(messages: List[Dict[str, Any]],
 
 # universal args for all models go here. also good if you need to test locally
 # and change type or KV cache quantization or something.
-ARGS: List[str] = ["--enable-auto-tool-choice", "--max-model-len", "8096"]
+ARGS: List[str] = ["--enable-auto-tool-choice", "--max-model-len", "1024"]
 
 CONFIGS: Dict[str, ServerConfig] = {
     "hermes": {
@@ -95,8 +95,7 @@ CONFIGS: Dict[str, ServerConfig] = {
             "--tool-call-parser", "granite-20b-fc", "--chat-template",
             str(VLLM_PATH /
                 "examples/tool_chat_template_granite_20b_fc.jinja"),
-            "--max_num_seqs", "1", "--max-model-len", "1024",
-            "--enforce-eager", "--cpu-offload-gb", "20"
+            "--max_num_seqs", "1", "--enforce-eager", "--cpu-offload-gb", "20"
         ],
         "supports_parallel":
         False,
