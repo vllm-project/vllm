@@ -995,7 +995,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         # Python can be expensive. To optimize this, we cache the block table
         # in numpy and only copy the actual input content at every iteration.
         # The shape of the cached block table will be
-        # (max batch size to capture, max context len to capture / block size).
+        # (max batch size to capture, max seq len to capture / block size).
         self.graph_block_tables = np.zeros(
             (self.max_batchsize_to_capture, self.get_max_block_per_batch()),
             dtype=np.int32)
