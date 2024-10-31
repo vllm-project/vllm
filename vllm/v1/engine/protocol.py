@@ -3,8 +3,8 @@ import multiprocessing
 from abc import ABC, abstractmethod
 from typing import Union
 
-from vllm.config import (DecodingConfig, EngineConfig, LoRAConfig, 
-                         ModelConfig, ParallelConfig, SchedulerConfig)
+from vllm.config import (DecodingConfig, EngineConfig, LoRAConfig, ModelConfig,
+                         ParallelConfig, SchedulerConfig)
 from vllm.logger import init_logger
 from vllm.v1.executor.gpu_executor import GPUExecutor
 from vllm.v1.engine.detokenizer import Detokenizer
@@ -20,7 +20,7 @@ class LLMEngineProtocol(ABC):
     engine_core: Union[LLMEngineCore, multiprocessing.Process]
     detokenizer: Detokenizer
     processor: Processor
-    
+
     # TODO: These are needed for the get_xxx_config methods
     # I think these are basically dead code. Will see if this
     # can be removed

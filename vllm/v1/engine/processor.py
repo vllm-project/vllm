@@ -12,12 +12,13 @@ from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 
-from vllm.v1.engine import (DetokenizerRequest,
-                            EngineCoreRequest)
+from vllm.v1.engine import (DetokenizerRequest, EngineCoreRequest)
+
 
 class Processor:
+
     def __init__(
-        self, 
+        self,
         model_config: ModelConfig,
         parallel_config: ParallelConfig,
         scheduler_config: SchedulerConfig,
@@ -35,7 +36,7 @@ class Processor:
             scheduler_config=scheduler_config,
             parallel_config=parallel_config,
             enable_lora=bool(lora_config))
-        
+
         # Ping the tokenizer to ensure liveness if it runs in a
         # different process.
         self.tokenizer.ping()
@@ -46,7 +47,7 @@ class Processor:
                                                     self.tokenizer)
         self.input_processor = input_registry.create_input_processor(
             model_config)
-    
+
     def process_inputs(
         self,
         request_id: str,
@@ -102,7 +103,7 @@ class Processor:
             eos_token_id, arrival_time, lora_request)
 
         return detokenizer_request, engine_core_request
-    
+
     def _validate_model_inputs(self, inputs: Union[DecoderOnlyInputs,
                                                    EncoderDecoderLLMInputs]):
         prompt_ids = inputs.get("prompt_token_ids")
@@ -120,6 +121,7 @@ class Processor:
                     "number of text tokens plus multimodal tokens. For image "
                     "inputs, the number of image tokens depends on the number "
                     "of images, and possibly their aspect ratios as well.")
+
 
 def _load_generation_config_dict(model_config: ModelConfig) -> Dict[str, Any]:
     config = try_get_generation_config(

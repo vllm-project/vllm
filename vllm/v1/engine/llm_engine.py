@@ -117,15 +117,15 @@ class LLMEngine:
     ) -> None:
 
         # 1) Process raw inputs into the request.
-        detokenizer_request, engine_core_request = self.processor.process_inputs(
+        detokenizer_req, engine_core_req = self.processor.process_inputs(
             request_id, prompt, params, arrival_time, lora_request,
             trace_headers, prompt_adapter_request, priority)
 
         # 2) Add the request to Detokenizer.
-        self.detokenizer.add_request(detokenizer_request)
+        self.detokenizer.add_request(detokenizer_req)
 
         # 3) Add the request to EngineCore.
-        self.engine_core.add_request(engine_core_request)
+        self.engine_core.add_request(engine_core_req)
 
     def abort_request(self, request_id: Union[str, Iterable[str]]) -> None:
         # TODO: send to EngineCore

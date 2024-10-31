@@ -113,30 +113,26 @@ class AsyncLLMEngine(LLMEngineProtocol):
 
         # Run LLMEngineCore busy loop in background process.
         self.engine_core = context.Process(target=self.run_engine_core,
-                                                   args=(
-                                                       executor_class,
-                                                       model_config,
-                                                       cache_config,
-                                                       parallel_config,
-                                                       scheduler_config,
-                                                       device_config,
-                                                       load_config,
-                                                       lora_config,
-                                                       speculative_config,
-                                                       decoding_config,
-                                                       observability_config,
-                                                       prompt_adapter_config,
-                                                   ),
-                                                   kwargs={
-                                                       "async_mode":
-                                                       True,
-                                                       "input_path":
-                                                       input_path,
-                                                       "output_path":
-                                                       output_path,
-                                                       "ready_path":
-                                                       self.ready_path,
-                                                   })
+                                           args=(
+                                               executor_class,
+                                               model_config,
+                                               cache_config,
+                                               parallel_config,
+                                               scheduler_config,
+                                               device_config,
+                                               load_config,
+                                               lora_config,
+                                               speculative_config,
+                                               decoding_config,
+                                               observability_config,
+                                               prompt_adapter_config,
+                                           ),
+                                           kwargs={
+                                               "async_mode": True,
+                                               "input_path": input_path,
+                                               "output_path": output_path,
+                                               "ready_path": self.ready_path,
+                                           })
         self.engine_core.start()
 
         # TODO: add background loop shielding
@@ -228,16 +224,16 @@ class AsyncLLMEngine(LLMEngineProtocol):
         stream = AsyncStream(request_id, _abort)
 
         # 1) Process raw inputs into the request.
-        detokenizer_request, engine_core_request = self.processor.process_inputs(
+        detokenizer_req, engine_core_req = self.processor.process_inputs(
             request_id, prompt, params, arrival_time, lora_request,
             trace_headers, prompt_adapter_request, priority)
 
         # 2) Add the request to Detokenizer (this process).
-        self.detokenizer.add_request(detokenizer_request, stream)
+        self.detokenizer.add_request(detokenizer_req, stream)
 
         # 3) Add the EngineCoreRequest to EngineCore (separate process).
         await self.input_socket.send_multipart(
-            (self.encoder.encode(engine_core_request), ),
+            (self.encoder.encode(engine_core_req), ),
             copy=False,
             flags=zmq.NOBLOCK)
 
