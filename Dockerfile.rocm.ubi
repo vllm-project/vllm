@@ -54,6 +54,12 @@ RUN --mount=type=cache,target=/root/.cache/pip \
         torch==2.6.0.dev20240918+rocm${version}\
         torchvision==0.20.0.dev20240918+rocm${version}
 
+
+ENV LD_LIBRARY_PATH="$VIRTUAL_ENV/lib/python3.12/site-packages/numpy.libs:$LD_LIBRARY_PATH"
+ENV LD_LIBRARY_PATH="$VIRTUAL_ENV/lib/python3.12/site-packages/pillow.libs:$LD_LIBRARY_PATH"
+ENV LD_LIBRARY_PATH="$VIRTUAL_ENV/lib/python3.12/site-packages/triton/backends/amd/lib:$LD_LIBRARY_PATH"
+ENV LD_LIBRARY_PATH="$VIRTUAL_ENV/lib/python3.12/site-packages/torch/lib:$LD_LIBRARY_PATH"
+
 FROM rocm_base as rocm_devel
 
 ENV CCACHE_DIR=/root/.cache/ccache
@@ -89,8 +95,8 @@ RUN rpm -ivh https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.
 WORKDIR /workspace
 
 ENV LLVM_SYMBOLIZER_PATH=/opt/rocm/llvm/bin/llvm-symbolizer
-ENV PATH=$PATH:/opt/rocm/bin:/libtorch/bin
-ENV CPLUS_INCLUDE_PATH=$CPLUS_INCLUDE_PATH:/libtorch/include:/libtorch/include/torch/csrc/api/include:/opt/rocm/include
+ENV PATH=$PATH:/opt/rocm/bin
+ENV CPLUS_INCLUDE_PATH=$VIRTUAL_ENV/lib/python3.12/site-packages/torch/include:/opt/rocm/include
 
 
 FROM rocm_devel AS build_amdsmi
@@ -232,8 +238,7 @@ ENV HF_HUB_OFFLINE=1 \
     FLASH_ATTENTION_USE_TRITON_ROCM="TRUE" \
     OUTLINES_CACHE_DIR=/tmp/outlines \
     NUMBA_CACHE_DIR=/tmp/numba \
-    TRITON_CACHE_DIR=/tmp/triton \
-    LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/opt/vllm/lib/python3.12/site-packages/pillow.libs/:/opt/vllm/lib/python3.12/site-packages/numpy.libs/"
+    TRITON_CACHE_DIR=/tmp/triton
 
 # Switch to the non-root user
 USER 2000
