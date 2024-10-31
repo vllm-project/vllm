@@ -9,6 +9,7 @@
 # label(str): the name of the test. emoji allowed.
 # fast_check(bool): whether to run this on each commit on fastcheck pipeline.
 # fast_check_only(bool): run this test on fastcheck pipeline only
+# nightly(bool): run this test in nightly pipeline only
 # optional(bool): never run this test by default (i.e. need to unblock manually)
 # command(str): the single command to run for tests. incompatible with commands.
 # commands(list): the list of commands to run for test. incompatbile with command.
@@ -330,18 +331,28 @@ steps:
   commands:
     - pytest -v -s models/decoder_only/language --ignore=models/decoder_only/language/test_models.py --ignore=models/decoder_only/language/test_big_models.py
 
-- label: Decoder-only Multi-Modal Models Test # 1h31min
+- label: Decoder-only Multi-Modal Models Test (Standard)
   #mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
   - tests/models/decoder_only/audio_language
   - tests/models/decoder_only/vision_language
   commands:
-    - pytest -v -s models/decoder_only/audio_language
+    - pytest -v -s models/decoder_only/audio_language -m core_model
+    - pytest -v -s --ignore models/decoder_only/vision_language/test_phi3v.py models/decoder_only/vision_language -m core_model
+
+- label: Decoder-only Multi-Modal Models Test (Extended)
+  nightly: true
+  source_file_dependencies:
+  - vllm/
+  - tests/models/decoder_only/audio_language
+  - tests/models/decoder_only/vision_language
+  commands:
+    - pytest -v -s models/decoder_only/audio_language -m 'not core_model'
     # HACK - run phi3v tests separately to sidestep this transformers bug
     # https://github.com/huggingface/transformers/issues/34307
     - pytest -v -s models/decoder_only/vision_language/test_phi3v.py
-    - pytest -v -s --ignore models/decoder_only/vision_language/test_phi3v.py models/decoder_only/vision_language
+    - pytest -v -s --ignore models/decoder_only/vision_language/test_phi3v.py models/decoder_only/vision_language -m 'not core_model'
 
 - label: Other Models Test # 6min
   #mirror_hardwares: [amd]
