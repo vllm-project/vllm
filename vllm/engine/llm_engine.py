@@ -257,16 +257,25 @@ class LLMEngine:
             "num_scheduler_steps=%d, chunked_prefill_enabled=%s "
             "multi_step_stream_outputs=%s, enable_prefix_caching=%s, "
             "use_async_output_proc=%s, use_cached_outputs=%s, "
-            "pooling_config_type=%s, normalize=%s, "
-            "chat_template_text_format=%s, mm_processor_kwargs=%s)",
-            VLLM_VERSION, model_config.model, speculative_config,
-            model_config.tokenizer, model_config.skip_tokenizer_init,
-            model_config.tokenizer_mode, model_config.revision,
-            model_config.override_neuron_config, model_config.rope_scaling,
-            model_config.rope_theta, model_config.tokenizer_revision,
-            model_config.trust_remote_code, model_config.dtype,
-            model_config.max_model_len, load_config.download_dir,
-            load_config.load_format, parallel_config.tensor_parallel_size,
+            "chat_template_text_format=%s, mm_processor_kwargs=%s, "
+            "pooler_config=%r)",
+            VLLM_VERSION,
+            model_config.model,
+            speculative_config,
+            model_config.tokenizer,
+            model_config.skip_tokenizer_init,
+            model_config.tokenizer_mode,
+            model_config.revision,
+            model_config.override_neuron_config,
+            model_config.rope_scaling,
+            model_config.rope_theta,
+            model_config.tokenizer_revision,
+            model_config.trust_remote_code,
+            model_config.dtype,
+            model_config.max_model_len,
+            load_config.download_dir,
+            load_config.load_format,
+            parallel_config.tensor_parallel_size,
             parallel_config.pipeline_parallel_size,
             parallel_config.disable_custom_all_reduce,
             model_config.quantization, model_config.enforce_eager,
@@ -278,12 +287,10 @@ class LLMEngine:
             scheduler_config.multi_step_stream_outputs,
             cache_config.enable_prefix_caching,
             model_config.use_async_output_proc, use_cached_outputs,
-            model_config.pooling_config.pooling_type
-            if model_config.pooling_config is not None else None,
-            model_config.pooling_config.normalize
-            if model_config.pooling_config is not None else None,
             model_config.chat_template_text_format,
-            model_config.mm_processor_kwargs)
+            model_config.mm_processor_kwargs,
+            model_config.pooler_config,
+        )
         # TODO(woosuk): Print more configs in debug mode.
         self.model_config = model_config
         self.cache_config = cache_config

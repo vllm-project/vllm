@@ -23,12 +23,11 @@ from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoadFormat,
                          LoRAConfig, ModelConfig, MultiModalConfig,
-                         ParallelConfig, SchedulerConfig)
+                         ParallelConfig, PoolerConfig, SchedulerConfig)
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
-from vllm.model_executor.layers.pooler import PoolingConfig
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.model_loader.tensorizer import (
@@ -124,7 +123,7 @@ def _get_model_initialization_kwargs(
         lora_config: Optional[LoRAConfig],
         multimodal_config: Optional[MultiModalConfig],
         scheduler_config: Optional[SchedulerConfig] = None,
-        pooling_config: Optional[PoolingConfig] = None) -> Dict[str, Any]:
+        pooler_config: Optional[PoolerConfig] = None) -> Dict[str, Any]:
     """Get extra kwargs for model initialization."""
     extra_kwargs: Dict[str, Any] = {}
 
@@ -145,10 +144,8 @@ def _get_model_initialization_kwargs(
 
     if has_inner_state(model_class) and scheduler_config:
         extra_kwargs["scheduler_config"] = scheduler_config
-
-    if pooling_config is not None:
-        extra_kwargs["pooling_config"] = pooling_config
-
+    if pooler_config:
+        extra_kwargs["pooler_config"] = pooler_config
     return extra_kwargs
 
 
@@ -160,13 +157,12 @@ def build_model(model_class: Type[nn.Module],
                 lora_config: Optional[LoRAConfig],
                 multimodal_config: Optional[MultiModalConfig],
                 scheduler_config: Optional[SchedulerConfig],
-                pooling_config: Optional[PoolingConfig] = None,
-                prefix: Optional[str] = None) -> nn.Module:
+                prefix: Optional[str] = None,
+                pooler_config: Optional[PoolerConfig] = None) -> nn.Module:
     extra_kwargs = _get_model_initialization_kwargs(model_class, lora_config,
                                                     multimodal_config,
                                                     scheduler_config,
-                                                    pooling_config)
-
+                                                    pooler_config)
     if prefix:
         extra_kwargs["prefix"] = prefix
 
@@ -185,15 +181,16 @@ def _initialize_model(
     """Initialize a model with the given configurations."""
     model_class, _ = get_model_architecture(model_config)
 
-    return build_model(model_class,
-                       model_config.hf_config,
-                       cache_config=cache_config,
-                       quant_config=_get_quantization_config(
-                           model_config, load_config),
-                       lora_config=lora_config,
-                       multimodal_config=model_config.multimodal_config,
-                       scheduler_config=scheduler_config,
-                       pooling_config=model_config.pooling_config)
+    return build_model(
+        model_class,
+        model_config.hf_config,
+        cache_config=cache_config,
+        quant_config=_get_quantization_config(model_config, load_config),
+        lora_config=lora_config,
+        multimodal_config=model_config.multimodal_config,
+        scheduler_config=scheduler_config,
+        pooler_config=model_config.pooler_config,
+    )
 
 
 class BaseModelLoader(ABC):

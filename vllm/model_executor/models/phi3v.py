@@ -26,12 +26,12 @@ from PIL import Image
 from transformers import CLIPVisionConfig, PretrainedConfig
 
 from vllm.attention import AttentionMetadata
-from vllm.config import CacheConfig, ModelConfig, MultiModalConfig
+from vllm.config import (CacheConfig, ModelConfig, MultiModalConfig,
+                         PoolerConfig)
 from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, InputContext,
                          token_inputs)
 from vllm.logger import init_logger
-from vllm.model_executor.layers.pooler import (Pooler, PoolingConfig,
-                                               PoolingType)
+from vllm.model_executor.layers.pooler import Pooler, PoolingType
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -532,7 +532,7 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                  multimodal_config: MultiModalConfig,
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None,
-                 pooling_config: Optional[PoolingConfig] = None) -> None:
+                 pooler_config: Optional[PoolerConfig] = None) -> None:
         super().__init__()
 
         self.config = config
@@ -558,13 +558,11 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
         # The same model class supports both language generation and embedding
         # because the architecture name is the same
-        if pooling_config is not None:
-            self._pooler = Pooler(pooling_config.pooling_type,
-                                  pooling_config.normalize)
-        else:
-            self._pooler = Pooler(pooling_type=PoolingType.LAST,
-                                  normalize=True)
-
+        self._pooler = Pooler.from_config_with_defaults(
+            pooler_config,
+            pooling_type=PoolingType.LAST,
+            normalize=True,
+            softmax=False)
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
 

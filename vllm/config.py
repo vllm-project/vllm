@@ -9,7 +9,6 @@ from transformers import PretrainedConfig
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.model_executor.layers.pooler import PoolingConfig, PoolingType
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.model_executor.models import ModelRegistry
 from vllm.platforms import current_platform
@@ -86,9 +85,6 @@ class ModelConfig:
             disable CUDA graph and always execute the model in eager mode.
             If False, we will use CUDA graph and eager execution in hybrid.
             If None, the user did not specify, so default to False.
-        max_context_len_to_capture: Maximum context len covered by CUDA graphs.
-            When a sequence has context length larger than this, we fall back
-            to eager mode (DEPRECATED. Use max_seq_len_to_capture instead).
         max_seq_len_to_capture: Maximum sequence len covered by CUDA graphs.
             When a sequence has context length larger than this, we fall back
             to eager mode. Additionally for encoder-decoder models, if the
@@ -118,40 +114,57 @@ class ModelConfig:
             Sentence Transformer BERT model.
         mm_processor_kwargs: Arguments to be forwarded to the model's processor
             for multi-modal data, e.g., image processor.
+        pooling_type: Used to configure the pooling method in the embedding 
+            model.
+        pooling_norm: Used to determine whether to normalize the pooled 
+            data in the embedding model.
+        pooling_softmax: Used to determine whether to softmax the pooled 
+            data in the embedding model.
+        pooling_step_tag_id: When pooling_step_tag_id is not -1, it indicates 
+            that the score corresponding to the pooling_step_tag_id in the 
+            generated sentence should be returned. Otherwise, it returns 
+            the scores for all tokens.
+        pooling_returned_token_ids: pooling_returned_token_ids represents a 
+            list of indices for the vocabulary dimensions to be extracted, 
+            such as the token IDs of good_token and bad_token in the 
+            math-shepherd-mistral-7b-prm model.
     """
 
-    def __init__(self,
-                 model: str,
-                 task: Union[TaskOption, _Task],
-                 tokenizer: str,
-                 tokenizer_mode: str,
-                 trust_remote_code: bool,
-                 dtype: Union[str, torch.dtype],
-                 seed: int,
-                 revision: Optional[str] = None,
-                 code_revision: Optional[str] = None,
-                 rope_scaling: Optional[dict] = None,
-                 rope_theta: Optional[float] = None,
-                 tokenizer_revision: Optional[str] = None,
-                 max_model_len: Optional[int] = None,
-                 spec_target_max_model_len: Optional[int] = None,
-                 quantization: Optional[str] = None,
-                 quantization_param_path: Optional[str] = None,
-                 enforce_eager: Optional[bool] = None,
-                 max_context_len_to_capture: Optional[int] = None,
-                 max_seq_len_to_capture: Optional[int] = None,
-                 max_logprobs: int = 20,
-                 disable_sliding_window: bool = False,
-                 skip_tokenizer_init: bool = False,
-                 served_model_name: Optional[Union[str, List[str]]] = None,
-                 limit_mm_per_prompt: Optional[Mapping[str, int]] = None,
-                 use_async_output_proc: bool = True,
-                 override_neuron_config: Optional[Dict[str, Any]] = None,
-                 config_format: ConfigFormat = ConfigFormat.AUTO,
-                 chat_template_text_format: str = "string",
-                 pooling_type: Optional[str] = None,
-                 normalize: Optional[bool] = None,
-                 mm_processor_kwargs: Optional[Dict[str, Any]] = None) -> None:
+    def __init__(
+            self,
+            model: str,
+            task: Union[TaskOption, _Task],
+            tokenizer: str,
+            tokenizer_mode: str,
+            trust_remote_code: bool,
+            dtype: Union[str, torch.dtype],
+            seed: int,
+            revision: Optional[str] = None,
+            code_revision: Optional[str] = None,
+            rope_scaling: Optional[dict] = None,
+            rope_theta: Optional[float] = None,
+            tokenizer_revision: Optional[str] = None,
+            max_model_len: Optional[int] = None,
+            spec_target_max_model_len: Optional[int] = None,
+            quantization: Optional[str] = None,
+            quantization_param_path: Optional[str] = None,
+            enforce_eager: Optional[bool] = None,
+            max_seq_len_to_capture: Optional[int] = None,
+            max_logprobs: int = 20,
+            disable_sliding_window: bool = False,
+            skip_tokenizer_init: bool = False,
+            served_model_name: Optional[Union[str, List[str]]] = None,
+            limit_mm_per_prompt: Optional[Mapping[str, int]] = None,
+            use_async_output_proc: bool = True,
+            override_neuron_config: Optional[Dict[str, Any]] = None,
+            config_format: ConfigFormat = ConfigFormat.AUTO,
+            chat_template_text_format: str = "string",
+            mm_processor_kwargs: Optional[Dict[str, Any]] = None,
+            pooling_type: Optional[str] = None,
+            pooling_norm: Optional[bool] = None,
+            pooling_softmax: Optional[bool] = None,
+            pooling_step_tag_id: Optional[int] = None,
+            pooling_returned_token_ids: Optional[List[int]] = None) -> None:
         self.model = model
         self.tokenizer = tokenizer
         self.tokenizer_mode = tokenizer_mode
@@ -169,9 +182,6 @@ class ModelConfig:
         self.quantization = quantization
         self.quantization_param_path = quantization_param_path
         self.enforce_eager = enforce_eager
-        if max_context_len_to_capture is not None:
-            raise ValueError("`max_context_len_to_capture` is deprecated. "
-                             "Use `max_seq_len_to_capture` instead.")
         self.max_seq_len_to_capture = max_seq_len_to_capture
         self.max_logprobs = max_logprobs
         self.disable_sliding_window = disable_sliding_window
@@ -181,7 +191,6 @@ class ModelConfig:
                                     code_revision, rope_scaling, rope_theta,
                                     config_format)
         self.hf_text_config = get_hf_text_config(self.hf_config)
-        self.pooling_config = self.get_pooling_config(pooling_type, normalize)
         self.bert_config = self._get_bert_config()
         self.hf_image_processor_config = get_hf_image_processor_config(
             self.model, revision)
@@ -235,6 +244,13 @@ class ModelConfig:
         supported_tasks, task = self._resolve_task(task, self.hf_config)
         self.supported_tasks = supported_tasks
         self.task: Final = task
+        self.pooler_config = self._init_pooler_config(
+            pooling_type,
+            pooling_norm,
+            pooling_softmax,
+            pooling_step_tag_id,
+            pooling_returned_token_ids,
+        )
 
         self._verify_quantization()
         self._verify_cuda_graph()
@@ -256,6 +272,23 @@ class ModelConfig:
     def _get_bert_config(self):
         return get_sentence_transformer_tokenizer_config(
             self.model, self.revision)
+
+    def _init_pooler_config(
+        self,
+        pooling_type: Optional[str] = None,
+        pooling_norm: Optional[bool] = None,
+        pooling_softmax: Optional[bool] = None,
+        pooling_step_tag_id: Optional[int] = None,
+        pooling_returned_token_ids: Optional[List[int]] = None
+    ) -> Optional["PoolerConfig"]:
+        if self.task == "embedding":
+            return PoolerConfig(
+                pooling_type=pooling_type,
+                pooling_norm=pooling_norm,
+                pooling_softmax=pooling_softmax,
+                pooling_step_tag_id=pooling_step_tag_id,
+                pooling_returned_token_ids=pooling_returned_token_ids)
+        return None
 
     def _init_attention_free(self) -> bool:
         architectures = getattr(self.hf_config, "architectures", [])
@@ -419,31 +452,6 @@ class ModelConfig:
                 "CUDA graph is not supported on BitAndBytes 8bit yet, "
                 "fallback to the eager mode.")
             self.enforce_eager = True
-
-    def get_pooling_type(self,
-                         pooling_type_name: str) -> Union[PoolingType, None]:
-        pooling_types = {i.name: i for i in PoolingType}
-        return pooling_types.get(pooling_type_name)
-
-    def get_pooling_config(
-            self, pooling_type_arg: Optional[str],
-            normalize_arg: Optional[bool]) -> Optional[PoolingConfig]:
-        pooling_config = get_pooling_config(self.model, self.revision)
-        if pooling_config is not None:
-            pooling_type = self.get_pooling_type(
-                pooling_config["pooling_type"])
-            normalize = pooling_config["normalize"]
-            pooling_config = PoolingConfig(
-                pooling_type=pooling_type,  # type: ignore
-                normalize=normalize)
-            if pooling_type_arg is not None:
-                pooling_config.pooling_type = self.get_pooling_type(
-                    pooling_type_arg)
-            if normalize_arg is not None:
-                pooling_config.normalize = normalize_arg
-            return pooling_config
-        else:
-            return None
 
     def verify_async_output_proc(self, parallel_config, speculative_config,
                                  device_config) -> None:
@@ -1685,6 +1693,17 @@ class MultiModalConfig:
     """
 
     # TODO: Add configs to init vision tower or not.
+
+
+@dataclass
+class PoolerConfig:
+    """Controls the behavior of pooler in embedding model"""
+
+    pooling_type: Optional[str] = None
+    pooling_norm: Optional[bool] = None
+    pooling_softmax: Optional[bool] = None
+    pooling_step_tag_id: Optional[int] = None
+    pooling_returned_token_ids: Optional[List[int]] = None
 
 
 _STR_DTYPE_TO_TORCH_DTYPE = {
