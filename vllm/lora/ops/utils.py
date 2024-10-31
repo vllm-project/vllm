@@ -23,6 +23,9 @@ def _check_divisibility(hidden_size: int):
 def _get_default_config(op_type: str, batch: int, hidden_size: int):
     if op_type == "sample":
         return {"BLOCK_N": 2}
+    
+    if op_type == "embed":
+        return {"BLOCK_N": 1}
 
     if op_type == "expand":
         return {
