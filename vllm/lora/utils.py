@@ -103,7 +103,7 @@ def parse_fine_tuned_lora_name(name: str) -> Tuple[str, Optional[bool]]:
             if parts[-2] == "lora_A" or parts[-2] == "lora_B":
                 return ".".join(parts[2:-2]), parts[-2] == "lora_A"
             if parts[-2] in ModulesToSaveWrapper.implemented_layers:
-                return parts[-2], None
+                return '.'.join(parts[2:-1]), None
         elif parts[-1] == "lora_embedding_A" or parts[-1] == "lora_embedding_B":
             return ".".join(parts[2:-1]), parts[-1] == "lora_embedding_A"
 

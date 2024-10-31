@@ -60,6 +60,7 @@ def test_lora_with_modules_to_save(
     with vllm_runner(model,
                      dtype=dtype,
                      enable_lora=True,
+                     #enforce_eager=True,
                      max_loras = 4,
                      max_lora_rank = 32,
                      enable_lora_modules_to_save=True,
