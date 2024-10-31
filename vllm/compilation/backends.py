@@ -243,6 +243,10 @@ def split_graph(graph: fx.GraphModule,
     return split_gm, outputs
 
 
+# we share the global graph pool among all the backends
+global_graph_pool = None
+
+
 class VllmBackend:
     """The compilation backend for `torch.compile` with VLLM.
     It is used for compilation level of `CompilationLevel.PIECEWISE`,
@@ -263,8 +267,14 @@ class VllmBackend:
     returned_callable: Callable
 
     def __init__(self, ):
-        # every instance of VllmBackend has its own graph pool
-        self.graph_pool = torch.cuda.graph_pool_handle()
+        global global_graph_pool
+        if global_graph_pool is None:
+            global_graph_pool = torch.cuda.graph_pool_handle()
+
+        # TODO: in the future, if we want to use multiple
+        # streams, it might not be safe to share a global pool.
+        # only investigate this when we use multiple streams
+        self.graph_pool = global_graph_pool
 
         # `torch.compile` is JIT compiled, so we don't need to
         # do anything here
