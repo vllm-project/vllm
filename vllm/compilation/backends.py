@@ -158,10 +158,13 @@ def fix_functionalization(graph: fx.Graph):
     #     print(graph.python_code(root_module="self", verbose=True).src, file=f)
 
 
-collective_fusion_pass = CollectiveFusionPass()
+collective_fusion_pass: Optional[CollectiveFusionPass] = None
 
 
 def custom_passes(graph):
+    global collective_fusion_pass
+    if not collective_fusion_pass:
+        collective_fusion_pass = CollectiveFusionPass()
     collective_fusion_pass(graph)
     fix_functionalization(graph)
 

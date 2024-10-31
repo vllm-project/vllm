@@ -225,10 +225,13 @@ class CollectiveFusionPass(InductorPass):
                              extra_check=lambda m: self.record_match(m))
 
         final_inputs = [x, w, resid, resid_w]
-        register_replacement(match_final,
-                             #torch.ops.vllm.gemm_ag_final,
-                             replace_final,
-                             final_inputs, fwd_only, [self.final_pattern])
+        register_replacement(
+            match_final,
+            #torch.ops.vllm.gemm_ag_final,
+            replace_final,
+            final_inputs,
+            fwd_only,
+            [self.final_pattern])
 
     def record_match(self, match: Match) -> bool:
         # Hijack the extra_check to record the match and
