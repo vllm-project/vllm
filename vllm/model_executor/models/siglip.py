@@ -521,6 +521,7 @@ class SiglipVisionTransformer(nn.Module):
                 prefix=f"{prefix}.head",
             )
 
+    @torch.compile
     def forward(
         self,
         pixel_values: torch.Tensor,
