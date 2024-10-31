@@ -4,6 +4,7 @@ from compressed_tensors.quantization import FP8_DTYPE
 
 import vllm.envs as envs
 from vllm._custom_ops import cutlass_scaled_mm, scaled_fp8_quant
+from vllm.compilation.config import CompilationConfig
 from vllm.compilation.fusion import (FusionPass, find_auto_fn,
                                      find_auto_fn_maybe)
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -44,7 +45,7 @@ class TestModel(torch.nn.Module):
 
 
 # Init does pattern registration, which can only happen once
-fusion_pass = FusionPass()
+fusion_pass = FusionPass(CompilationConfig(enable_fusion=True))
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
