@@ -318,6 +318,7 @@ def _test_image_text(
 
     chat_completion = client.chat.completions.create(model=model_name,
                                                      messages=messages,
+                                                     temperature=0.0,
                                                      max_tokens=10,
                                                      logprobs=True,
                                                      top_logprobs=5)
@@ -349,11 +350,12 @@ def _test_image_text(
         ],
     }]
 
-    chat_completion = client.chat.completions.create(
-        model=model_name,
-        messages=messages,
-        max_tokens=10,
-    )
+    chat_completion = client.chat.completions.create(model=model_name,
+                                                     messages=messages,
+                                                     temperature=0.0,
+                                                     max_tokens=10,
+                                                     logprobs=True,
+                                                     top_logprobs=5)
     message = chat_completion.choices[0].message
 
     results.append({
