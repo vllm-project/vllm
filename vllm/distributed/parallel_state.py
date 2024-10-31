@@ -33,6 +33,7 @@ from unittest.mock import patch
 import torch
 import torch.distributed
 from torch.distributed import Backend, ProcessGroup
+from torch.library import Library
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -99,8 +100,6 @@ def _register_group(group: "GroupCoordinator") -> None:
 
 if supports_custom_op():
 
-    @torch.library.custom_op("vllm::inplace_all_reduce",
-                             mutates_args=["tensor"])
     def inplace_all_reduce(tensor: torch.Tensor, group_name: str) -> None:
         assert group_name in _groups, f"Group {group_name} is not found."
         group = _groups[group_name]()
@@ -108,11 +107,16 @@ if supports_custom_op():
             raise ValueError(f"Group {group_name} is destroyed.")
         group._all_reduce_in_place(tensor)
 
-    @inplace_all_reduce.register_fake
-    def _(tensor: torch.Tensor, group_name: str) -> None:
+    def inplace_all_reduce_fake(tensor: torch.Tensor, group_name: str) -> None:
         return
 
-    @torch.library.custom_op("vllm::outplace_all_reduce", mutates_args=[])
+    my_lib = Library("vllm", "FRAGMENT")
+    my_lib.define(
+        "inplace_all_reduce(Tensor(a0!) tensor, str group_name) -> ()"  # noqa
+    )
+    my_lib.impl("inplace_all_reduce", inplace_all_reduce, "CUDA")
+    my_lib._register_fake("inplace_all_reduce", inplace_all_reduce_fake)
+
     def outplace_all_reduce(tensor: torch.Tensor,
                             group_name: str) -> torch.Tensor:
         assert group_name in _groups, f"Group {group_name} is not found."
@@ -121,9 +125,16 @@ if supports_custom_op():
             raise ValueError(f"Group {group_name} is destroyed.")
         return group._all_reduce_out_place(tensor)
 
-    @outplace_all_reduce.register_fake
-    def _(tensor: torch.Tensor, group_name: str) -> torch.Tensor:
+    def outplace_all_reduce_fake(tensor: torch.Tensor,
+                                 group_name: str) -> torch.Tensor:
         return torch.empty_like(tensor)
+
+    my_lib = Library("vllm", "FRAGMENT")
+    my_lib.define(
+        "outplace_all_reduce(Tensor tensor, str group_name) -> Tensor"  # noqa
+    )
+    my_lib.impl("outplace_all_reduce", outplace_all_reduce, "CUDA")
+    my_lib._register_fake("outplace_all_reduce", outplace_all_reduce_fake)
 
 
 class GroupCoordinator:
