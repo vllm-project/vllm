@@ -7,6 +7,7 @@ from typing import Any, Callable, Dict, Optional, Tuple
 import torch
 import triton
 import triton.language as tl
+from torch.library import Library
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
@@ -466,8 +467,6 @@ def get_config_dtype_str(dtype: torch.dtype,
     return None
 
 
-@torch.library.custom_op("vllm::inplace_fused_experts",
-                         mutates_args=["hidden_states"])
 def inplace_fused_experts(hidden_states: torch.Tensor,
                           w1: torch.Tensor,
                           w2: torch.Tensor,
@@ -484,22 +483,29 @@ def inplace_fused_experts(hidden_states: torch.Tensor,
                        a1_scale, a2_scale)
 
 
-@inplace_fused_experts.register_fake
-def _(hidden_states: torch.Tensor,
-      w1: torch.Tensor,
-      w2: torch.Tensor,
-      topk_weights: torch.Tensor,
-      topk_ids: torch.Tensor,
-      use_fp8_w8a8: bool = False,
-      use_int8_w8a16: bool = False,
-      w1_scale: Optional[torch.Tensor] = None,
-      w2_scale: Optional[torch.Tensor] = None,
-      a1_scale: Optional[torch.Tensor] = None,
-      a2_scale: Optional[torch.Tensor] = None) -> None:
+def inplace_fused_experts_fake(
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        use_fp8_w8a8: bool = False,
+        use_int8_w8a16: bool = False,
+        w1_scale: Optional[torch.Tensor] = None,
+        w2_scale: Optional[torch.Tensor] = None,
+        a1_scale: Optional[torch.Tensor] = None,
+        a2_scale: Optional[torch.Tensor] = None) -> None:
     pass
 
 
-@torch.library.custom_op("vllm::outplace_fused_experts", mutates_args=[])
+my_lib = Library("vllm", "FRAGMENT")
+my_lib.define(
+    "inplace_fused_experts(Tensor(a0!) hidden_states, Tensor w1, Tensor w2, Tensor topk_weights, Tensor topk_ids, bool use_fp8_w8a8=False, bool use_int8_w8a16=False, Tensor? w1_scale=None, Tensor? w2_scale=None, Tensor? a1_scale=None, Tensor? a2_scale=None) -> ()"  # noqa
+)
+my_lib.impl("inplace_fused_experts", inplace_fused_experts, "CUDA")
+my_lib._register_fake("inplace_fused_experts", inplace_fused_experts_fake)
+
+
 def outplace_fused_experts(
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
@@ -517,19 +523,27 @@ def outplace_fused_experts(
                               w2_scale, a1_scale, a2_scale)
 
 
-@outplace_fused_experts.register_fake
-def _(hidden_states: torch.Tensor,
-      w1: torch.Tensor,
-      w2: torch.Tensor,
-      topk_weights: torch.Tensor,
-      topk_ids: torch.Tensor,
-      use_fp8_w8a8: bool = False,
-      use_int8_w8a16: bool = False,
-      w1_scale: Optional[torch.Tensor] = None,
-      w2_scale: Optional[torch.Tensor] = None,
-      a1_scale: Optional[torch.Tensor] = None,
-      a2_scale: Optional[torch.Tensor] = None) -> torch.Tensor:
+def outplace_fused_experts_fake(
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        use_fp8_w8a8: bool = False,
+        use_int8_w8a16: bool = False,
+        w1_scale: Optional[torch.Tensor] = None,
+        w2_scale: Optional[torch.Tensor] = None,
+        a1_scale: Optional[torch.Tensor] = None,
+        a2_scale: Optional[torch.Tensor] = None) -> torch.Tensor:
     return torch.empty_like(hidden_states)
+
+
+my_lib = Library("vllm", "FRAGMENT")
+my_lib.define(
+    "outplace_fused_experts(Tensor hidden_states, Tensor w1, Tensor w2, Tensor topk_weights, Tensor topk_ids, bool use_fp8_w8a8=False, bool use_int8_w8a16=False, Tensor? w1_scale=None, Tensor? w2_scale=None, Tensor? a1_scale=None, Tensor? a2_scale=None) -> Tensor"  # noqa
+)
+my_lib.impl("outplace_fused_experts", outplace_fused_experts, "CUDA")
+my_lib._register_fake("outplace_fused_experts", outplace_fused_experts_fake)
 
 
 def fused_experts(hidden_states: torch.Tensor,
