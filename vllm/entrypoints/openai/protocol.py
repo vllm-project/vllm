@@ -159,7 +159,12 @@ class ChatCompletionRequest(OpenAIBaseModel):
     logit_bias: Optional[Dict[str, float]] = None
     logprobs: Optional[bool] = False
     top_logprobs: Optional[int] = 0
-    max_tokens: Optional[int] = None
+    # TODO(#9845): remove max_tokens when field is removed from OpenAI API
+    max_tokens: Optional[int] = Field(
+        default=None,
+        deprecated=
+        'max_tokens is deprecated in favor of the max_completion_tokens field')
+    max_completion_tokens: Optional[int] = None
     n: Optional[int] = 1
     presence_penalty: Optional[float] = 0.0
     response_format: Optional[ResponseFormat] = None
@@ -295,7 +300,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
     def to_beam_search_params(self,
                               default_max_tokens: int) -> BeamSearchParams:
-        max_tokens = self.max_tokens
+        # TODO(#9845): remove max_tokens when field is removed from OpenAI API
+        max_tokens = self.max_completion_tokens or self.max_tokens
         if max_tokens is None:
             max_tokens = default_max_tokens
 
@@ -311,7 +317,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
             include_stop_str_in_output=self.include_stop_str_in_output)
 
     def to_sampling_params(self, default_max_tokens: int) -> SamplingParams:
-        max_tokens = self.max_tokens
+        # TODO(#9845): remove max_tokens when field is removed from OpenAI API
+        max_tokens = self.max_completion_tokens or self.max_tokens
         if max_tokens is None:
             max_tokens = default_max_tokens
 
