@@ -9,8 +9,8 @@ from typing import List, NamedTuple, Type
 import pytest
 import transformers
 from huggingface_hub import hf_hub_download
-from transformers import AutoTokenizer
 from packaging.version import parse
+from transformers import AutoTokenizer
 
 from tests.quantization.utils import is_quant_method_supported
 
