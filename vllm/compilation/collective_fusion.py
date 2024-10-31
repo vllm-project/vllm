@@ -4,10 +4,10 @@ from typing import Callable, Dict, List, Optional, Tuple, Union, Iterable
 import torch
 import torch.fx as fx
 
-from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor.pattern_matcher import PatternMatcherPass, register_replacement, fwd_only, joint_fwd_bwd, Match
 
 from vllm.compilation.inductor_pass import InductorPass
+from vllm.compilation.utils import find_fn, find_auto_fn, find_getitem
 from vllm.distributed.parallel_state import get_tp_group, get_tensor_model_parallel_world_size, get_tensor_model_parallel_rank
 from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.model_executor.layers.linear import should_slice, slice_residual
@@ -189,27 +189,6 @@ def replace_final(my_residual: torch.Tensor,
     return getitem_1219
 
 
-def find_fn(nodes: Iterable[fx.Node], op):
-    for node in reversed(nodes):
-        if node.op == "call_function" and node.target == op:
-            return node
-    return None
-
-
-def find_auto_fn(nodes: Iterable[fx.Node], op):
-    for node in reversed(nodes):
-        if node.op == "call_function" and node.target == auto_functionalized and node.args[0] == op:
-            return node
-    return None
-
-
-def find_getitem(node: Iterable[fx.Node], idx):
-    for user in reversed(node.users):
-        if user.op == "call_function" and user.target == operator.getitem and user.args[1] == idx:
-            return user
-    return None
-
-
 class CollectiveFusionPass(InductorPass):
     def __init__(self):
         self.my_patterns = PatternMatcherPass()
@@ -275,20 +254,13 @@ class CollectiveFusionPass(InductorPass):
                 res_replacements.append(residual_node_new)
                 my_res_replacements.append(my_residual_node_new)
 
-            rms_node = find_auto_fn(match.nodes, torch.ops._C.fused_add_rms_norm.default)
-            gemm_node = find_fn(match.nodes, torch.ops.aten.mm.default)
-            if gemm_node is None:
-                gemm_node = find_fn(match.nodes, torch.ops.symm_mem.fused_all_gather_matmul.default)
+            rms_node = find_auto_fn(reversed(match.nodes), torch.ops._C.fused_add_rms_norm.default)
+            gemm_node = find_fn(reversed(match.nodes), torch.ops.aten.mm.default)
             assert rms_node is not None
             assert gemm_node is not None
 
-            #assert len(rms_node.users) == 2
-            #assert len(gemm_node.users) == 1
-
-            # meta["val"] is used by de-functionalization
-            rms_val = rms_node.meta["val"]
-            gemm_val = gemm_node.meta["val"]
-            fused_node.meta["val"] = (gemm_val, rms_val[2])
+            assert len(rms_node.users) == 2
+            assert len(gemm_node.users) == 1 or len(gemm_node.users) == 2
 
             find_getitem(rms_node, 2).replace_all_uses_with(residual_node_new)
             gemm_node.replace_all_uses_with(result_node_new)
@@ -302,7 +274,8 @@ class CollectiveFusionPass(InductorPass):
         count = self.my_patterns.apply(graph)
         logger.info(f"fused gemm match count = {len(self.matches)}")
 
-        # Don't apply final pattern unless we've matched and replaced the gemm+collective ops.
+        # Don't apply final pattern unless we've matched and replaced the
+        # gemm+collective ops.
         if len(self.matches) > 0:
             count =self. my_patterns2.apply(graph)
             logger.info(f"final match count = {count}")
