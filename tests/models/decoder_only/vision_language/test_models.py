@@ -114,7 +114,7 @@ VLM_TEST_SETTINGS = {
         ),
         vllm_output_post_proc=model_utils.paligemma_vllm_to_hf_output,
         # TODO: update this after CPU float16 support ready
-        dtype=("float" if current_platform.is_cpu()
+        dtype=("bfloat16" if current_platform.is_cpu()
                else "half" if current_platform.is_rocm()
                else ("half", "float")),
         marks=[pytest.mark.core_model],
