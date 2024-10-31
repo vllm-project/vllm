@@ -320,8 +320,8 @@ def _test_image_text(
                                                      messages=messages,
                                                      temperature=0.0,
                                                      max_tokens=1,
+                                                     logprobs=True,
                                                      top_logprobs=5)
-    choice = chat_completion.choices[0]
     top_logprobs = chat_completion.choices[0].logprobs.content[0].top_logprobs
 
     for x in top_logprobs:
@@ -353,6 +353,7 @@ def _test_image_text(
                                                      messages=messages,
                                                      temperature=0.0,
                                                      max_tokens=1,
+                                                     logprobs=True,
                                                      top_logprobs=5)
     top_logprobs = chat_completion.choices[0].logprobs.content[0].top_logprobs
 
