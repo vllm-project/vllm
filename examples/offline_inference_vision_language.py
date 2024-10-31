@@ -5,6 +5,8 @@ the correct prompt format on vision language models for text generation.
 For most models, the prompt format should follow corresponding examples
 on HuggingFace model repository.
 """
+import os
+os.environ['CUDA_VISIBLE_DEVICES'] = '7'
 from transformers import AutoTokenizer
 
 from vllm import LLM, SamplingParams
@@ -356,10 +358,10 @@ def run_glm4v(question: str, modality: str):
 # Idefics3-8B-Llama3
 def run_idefics3(question: str, modality: str):
     assert modality == "image"
-    model_name = ("HuggingFaceM4/Idefics3-8B-Llama3")
+    model_name = ("/home/sobey/Models/llm_models/BaseModel/idefics/Idefics3-8B-Llama3")
 
     llm = LLM(model=model_name,
-              max_model_len=2048,
+              max_model_len=8192,
               max_num_seqs=2,
               enforce_eager=True)
     prompt = (
@@ -476,12 +478,12 @@ if __name__ == "__main__":
     parser.add_argument('--model-type',
                         '-m',
                         type=str,
-                        default="llava",
+                        default="idefics3",
                         choices=model_example_map.keys(),
                         help='Huggingface "model_type".')
     parser.add_argument('--num-prompts',
                         type=int,
-                        default=4,
+                        default=1,
                         help='Number of prompts to run.')
     parser.add_argument('--modality',
                         type=str,

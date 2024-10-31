@@ -84,10 +84,12 @@ def input_mapper_for_idefics3(
         raise RuntimeError("No HuggingFace processor is available "
                            "to process the image object")
 
-    if isinstance(data, list):
+    if isinstance(data, Image.Image):
+        images = [[data]]
+    elif is_list_of(data, Image.Image):
         images = [data]
     else:
-        raise ValueError()
+        raise TypeError(f"Invalid image type: {type(data)}")
 
     try:
         batch_data = image_processor(images,
@@ -293,6 +295,24 @@ def input_processor_for_idefics3(ctx: InputContext, inputs: DecoderOnlyInputs):
             prompt=prompt_strings[0],
             multi_modal_data=multi_modal_data,
         )
+
+
+def get_max_idefics3_image_tokens(ctx: InputContext,
+                               *,
+                               num_crops: Optional[int] = None):
+    model_config = ctx.model_config
+    processor = cached_get_processor(model_config.model)
+    image_seq_len = processor.image_seq_len
+    image_processor = processor.image_processor
+
+    size = image_processor.size['longest_edge']
+    max_image_size = image_processor.max_image_size['longest_edge']
+    resized_height, resized_width = size, size
+
+    grid_h = resized_height // max_image_size
+    grid_w = resized_width // max_image_size
+
+    return (grid_h * grid_w + 1) * image_seq_len
 
 
 def dummy_data_for_idefics3(ctx: InputContext, seq_len: int,
@@ -574,7 +594,7 @@ class Idefics3Model(nn.Module):
 
 
 @MULTIMODAL_REGISTRY.register_image_input_mapper(input_mapper_for_idefics3)
-@MULTIMODAL_REGISTRY.register_max_image_tokens()
+@MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_idefics3_image_tokens)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_idefics3)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_idefics3)
 class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal):
