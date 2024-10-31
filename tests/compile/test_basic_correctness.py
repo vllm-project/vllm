@@ -31,9 +31,8 @@ test_settings = [
         fullgraph=True,
     ),
     TestSetting(
-        model=
-        "nm-testing/Meta-Llama-3-8B-Instruct-W8A8-Dyn-Per-Token-2048-Samples",
-        model_args=["--quantization", "compressed-tensors"],
+        model="TheBloke/TinyLlama-1.1B-Chat-v0.3-GPTQ",
+        model_args=["--quantization", "gptq"],
         pp_size=1,
         tp_size=1,
         attn_backend="FLASH_ATTN",
