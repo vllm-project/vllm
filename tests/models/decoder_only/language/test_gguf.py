@@ -10,6 +10,7 @@ import pytest
 import transformers
 from huggingface_hub import hf_hub_download
 from transformers import AutoTokenizer
+from packaging.version import parse
 
 from tests.quantization.utils import is_quant_method_supported
 
@@ -32,7 +33,7 @@ class GGUFTestConfig(NamedTuple):
         return hf_hub_download(self.gguf_repo, filename=self.gguf_filename)
 
 
-TRANSFORMERS_REQUIREMENT = transformers.__version__.startswith("4.46.0")
+TRANSFORMERS_REQUIREMENT = parse(transformers.__version__) >= parse("4.46.0")
 
 LLAMA_CONFIG = GGUFTestConfig(
     original_model="meta-llama/Llama-3.2-1B-Instruct",
