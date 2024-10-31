@@ -1,4 +1,4 @@
-from collections import deque
+import heapq
 from typing import Deque, FrozenSet, Iterable, List, Optional, Tuple
 
 from vllm.core.block.common import (BlockPool, CopyOnWriteTracker, RefCounter,
@@ -36,7 +36,8 @@ class NaiveBlockAllocator(BlockAllocator):
         if block_ids is None:
             block_ids = range(num_blocks)
 
-        self._free_block_indices: Deque[BlockId] = deque(block_ids)
+        self._free_block_indices: Deque[BlockId] = block_ids[:]
+        heapq.heapify(self._free_block_indices)
         self._all_block_indices = frozenset(block_ids)
         assert len(self._all_block_indices) == num_blocks
 
@@ -129,7 +130,7 @@ class NaiveBlockAllocator(BlockAllocator):
         if not self._free_block_indices:
             raise BlockAllocator.NoFreeBlocksError()
 
-        block_id = self._free_block_indices.popleft()
+        block_id = heapq.heappop(self._free_block_indices)
         self._refcounter.incr(block_id)
         return block_id
 
@@ -139,7 +140,7 @@ class NaiveBlockAllocator(BlockAllocator):
 
         refcount = self._refcounter.decr(block_id)
         if refcount == 0:
-            self._free_block_indices.appendleft(block_id)
+            heapq.heappush(self._free_block_indices, block_id)
 
         block.block_id = None
 
