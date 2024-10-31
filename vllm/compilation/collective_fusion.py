@@ -172,8 +172,6 @@ def match_final(my_residual: torch.Tensor, gemm_1_weights: torch.Tensor,
     return normalized
 
 
-# TODO: wrap in custom op to prevent infinite recursion in inductor logging
-# statement?
 def replace_final(my_residual: torch.Tensor, gemm_1_weights: torch.Tensor,
                   gemm_1_activations: torch.Tensor,
                   rms_norm_weights: torch.Tensor) -> torch.Tensor:
@@ -183,7 +181,7 @@ def replace_final(my_residual: torch.Tensor, gemm_1_weights: torch.Tensor,
         torch.ops.vllm.inplace_all_reduce.default,
         tensor=mm_1,
         group_name=TP_GROUP_NAME)
-    getitem_1217 = auto_functionalized_161[1]
+    reduced = auto_functionalized_161[1]
 
     # is this the right thing to call it on?
     if should_slice(gemm_1_activations.shape):
@@ -196,22 +194,21 @@ def replace_final(my_residual: torch.Tensor, gemm_1_weights: torch.Tensor,
     else:
         wait_tensor = my_residual
 
-    auto_functionalized_162 = torch.ops.higher_order.auto_functionalized(
+    norm_res = torch.ops.higher_order.auto_functionalized(
         torch.ops._C.fused_add_rms_norm.default,
-        input=getitem_1217,
+        input=reduced,
         residual=wait_tensor,
         weight=rms_norm_weights,
         epsilon=1e-05)
 
-    getitem_1219 = auto_functionalized_162[1]
-    return getitem_1219
+    return norm_res[1]
 
 
 class CollectiveFusionPass(InductorPass):
 
     def __init__(self):
-        self.my_patterns = PatternMatcherPass()
-        self.my_patterns2 = PatternMatcherPass()
+        self.gemm_rs_ag_gemm_pattern = PatternMatcherPass()
+        self.final_pattern = PatternMatcherPass()
         self.matches: List[Match] = []
 
         x = torch.empty([4, 4], device='cuda')
@@ -224,12 +221,14 @@ class CollectiveFusionPass(InductorPass):
         register_replacement(match_gemm_rs_ag_gemm,
                              match_gemm_rs_ag_gemm,
                              inputs,
-                             fwd_only, [self.my_patterns],
+                             fwd_only, [self.gemm_rs_ag_gemm_pattern],
                              extra_check=lambda m: self.record_match(m))
 
         final_inputs = [x, w, resid, resid_w]
-        register_replacement(match_final, replace_final, final_inputs,
-                             fwd_only, [self.my_patterns2])
+        register_replacement(match_final,
+                             #torch.ops.vllm.gemm_ag_final,
+                             replace_final,
+                             final_inputs, fwd_only, [self.final_pattern])
 
     def record_match(self, match: Match) -> bool:
         # Hijack the extra_check to record the match and
@@ -242,7 +241,7 @@ class CollectiveFusionPass(InductorPass):
     def process_matches(self, graph: fx.Graph):
         nodes = list(graph.nodes)
 
-        def find_min_index(match) -> int:
+        def find_min_index(match: Match) -> int:
             return min(match.nodes, key=lambda x: nodes.index(x))
 
         # "sort" matches in topo order.
@@ -296,13 +295,13 @@ class CollectiveFusionPass(InductorPass):
 
     def __call__(self, graph: fx.Graph):
         self.dump_graph(graph, "before_collective_fusion")
-        count = self.my_patterns.apply(graph)
+        count = self.gemm_rs_ag_gemm_pattern.apply(graph)
         logger.info("fused gemm match count = %d", len(self.matches))
 
         # Don't apply final pattern unless we've matched and replaced the
         # gemm+collective ops.
         if len(self.matches) > 0:
-            count = self.my_patterns2.apply(graph)
+            count = self.final_pattern.apply(graph)
             logger.info("final match count = %d", count)
             self.process_matches(graph)
 
