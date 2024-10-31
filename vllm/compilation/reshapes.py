@@ -38,6 +38,13 @@ class RedundantReshapesPass(InductorPass):
             if is_func(node, torch.ops.aten.reshape.default):
                 input, shape = node.args[:2]
                 input_shape = input.meta["val"].shape
+                if len(shape) != len(input_shape):
+                    # Reshape changing rank, skip
+                    continue
+
+                if shape.count(-1) > 1:
+                    # Invalid reshape args, skip
+                    continue
 
                 if all(
                         self.dims_equivalent(s, i_s)
