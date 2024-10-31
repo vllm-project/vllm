@@ -22,7 +22,6 @@
 """Inference-only LLaMA model compatible with HuggingFace weights."""
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Type, Union
 
-import os
 import torch
 from torch import nn
 from transformers import LlamaConfig
@@ -32,13 +31,12 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
-                              tensor_model_parallel_all_gather, get_tp_group)
+                              get_tp_group, tensor_model_parallel_all_gather)
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
-                                               RowParallelLinear,
-                                               should_slice,
+                                               RowParallelLinear, should_slice,
                                                slice_residual)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -77,7 +75,7 @@ class LlamaMLP(nn.Module):
         bias: bool = False,
         prefix: str = "",
         last_layer: bool = False,
-        fuse_gemms = True,
+        fuse_gemms=True,
     ) -> None:
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
@@ -235,7 +233,7 @@ class LlamaDecoderLayer(nn.Module):
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
-        fuse_gemms = True,
+        fuse_gemms=True,
     ) -> None:
         super().__init__()
         self.fuse_gemms = fuse_gemms
@@ -326,13 +324,17 @@ class LlamaDecoderLayer(nn.Module):
                                        attn_metadata=attn_metadata)
 
         # Fully Connected
-        assert (hidden_states.shape == my_residual.shape), f"{hidden_states.shape} != {my_residual.shape}"
+        assert (hidden_states.shape == my_residual.shape
+                ), f"{hidden_states.shape} != {my_residual.shape}"
         hidden_states, my_residual = self.post_attention_layernorm(
             hidden_states, my_residual)
         hidden_states = self.mlp(hidden_states)
 
-        pprint(f"LAST_LAYER = {self.last_layer}, #slices = {len(residual_slices)}")
-        if self.fuse_gemms and self.last_layer and should_slice(orig_residual_shape):
+        pprint(
+            f"LAST_LAYER = {self.last_layer}, #slices = {len(residual_slices)}"
+        )
+        if self.fuse_gemms and self.last_layer and should_slice(
+                orig_residual_shape):
             pprint(f"FINAL REDUCE {my_residual.shape}")
             if False:
                 residual = tensor_model_parallel_all_gather(my_residual, 0)
@@ -340,15 +342,15 @@ class LlamaDecoderLayer(nn.Module):
                 residual = torch.ops._c10d_functional.all_gather_into_tensor(
                     my_residual.contiguous(),
                     get_tp_group().world_size,
-                    torch.distributed.group.WORLD.group_name
-                )
+                    torch.distributed.group.WORLD.group_name)
                 residual = torch.ops._c10d_functional.wait_tensor(residual)
 
             pprint(f"GOT HERE2 {my_residual.shape}, {residual.shape}")
         else:
             residual = my_residual
 
-        assert (hidden_states.shape == residual.shape), f"{hidden_states.shape} != {residual.shape}"
+        assert (hidden_states.shape == residual.shape
+                ), f"{hidden_states.shape} != {residual.shape}"
         return hidden_states, residual
 
 

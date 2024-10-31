@@ -18,6 +18,7 @@ from vllm.config import CompilationConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.utils import weak_ref_tensors
 
+from .collective_fusion import CollectiveFusionPass
 from .counter import compilation_counter
 from .inductor_pass import InductorPass
 from .monitor import end_monitoring_torch_compile

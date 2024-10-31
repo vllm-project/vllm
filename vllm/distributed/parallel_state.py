@@ -212,7 +212,8 @@ class GroupCoordinator:
         self.use_xpu_communicator = use_xpu_communicator
 
         # Initialize pynvshmem
-        if has_flux and torch.distributed.get_world_size(self.device_group) > 1:
+        if has_flux and torch.distributed.get_world_size(
+                self.device_group) > 1:
             flux.init_flux_shm(self.device_group)
 
         # lazy import to avoid documentation build error
