@@ -877,7 +877,7 @@ def unified_flash_infer(
                 logits_soft_cap=logits_soft_cap,
                 causal=True,
                 k_scale=k_scale,
-                v_scale=v_scale) 
+                v_scale=v_scale)
     if decode_meta := attn_metadata.decode_metadata:
         assert attn_metadata.decode_metadata is not None
         assert attn_metadata.decode_metadata.decode_wrapper is not None
