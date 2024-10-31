@@ -219,7 +219,10 @@ VLM_TEST_SETTINGS = {
         vllm_output_post_proc=model_utils.llava_video_vllm_to_hf_output,
         image_sizes=[((1669, 2560), (2560, 1669), (183, 488), (488, 183))],
         marks=[
-            pytest.mark.skip(reason="LLava next video tests currently fail.")
+            pytest.mark.skipif(
+                transformers.__version__.startswith("4.46"),
+                reason="Model broken with changes in transformers 4.46"
+            )
         ],
     ),
     "minicpmv": VLMTestInfo(
