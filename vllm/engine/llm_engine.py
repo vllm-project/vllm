@@ -631,17 +631,6 @@ class LLMEngine:
             parallel_config=self.parallel_config,
             enable_lora=bool(self.lora_config))
 
-    def _verify_args(self) -> None:
-        self.model_config.verify_with_parallel_config(self.parallel_config)
-        self.cache_config.verify_with_parallel_config(self.parallel_config)
-        if self.lora_config:
-            self.lora_config.verify_with_model_config(self.model_config)
-            self.lora_config.verify_with_scheduler_config(
-                self.scheduler_config)
-        if self.prompt_adapter_config:
-            self.prompt_adapter_config.verify_with_model_config(
-                self.model_config)
-
     def _add_processed_request(
         self,
         request_id: str,
