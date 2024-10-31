@@ -28,8 +28,8 @@ from vllm.attention.backends.utils import (PAD_SLOT_ID, compute_slot_mapping,
                                            is_block_tables_empty)
 from vllm.attention.ops.paged_attn import PagedAttention
 from vllm.forward_context import get_forward_context
-from vllm.utils import (async_tensor_h2d, get_kv_cache_torch_dtype,
-                        make_tensor_with_pad, direct_register_custom_op)
+from vllm.utils import (async_tensor_h2d, direct_register_custom_op,
+                        get_kv_cache_torch_dtype, make_tensor_with_pad)
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import (ModelInputForGPUBuilder,
