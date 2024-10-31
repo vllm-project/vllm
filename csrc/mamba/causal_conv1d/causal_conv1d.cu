@@ -418,6 +418,31 @@ void causal_conv1d_fwd_kernel(ConvParamsBase params) {
             typename Ktraits::BlockStoreT(smem_store).Store(out, out_vals_store, seqlen - chunk * kChunkSize);
         }
         out += kChunkSize;
+
+        int final_state_position =  ((seqlen - (kWidth - 1)) - (n_chunks - 1) * kChunkSize);
+        // in case the final state is seperated between the last "smem_exchange" and 
+        // and the one before it (chunk = n_chunks - 1 and chunk = n_chunks - 2), 
+        // (which occurs when `final_state_position` is a non-positivie index)
+        // we load the correct data from smem_exchange from both chunks, the last chunk iteration and the one before it
+        if (final_state_position < 0 && seqlen > kWidth){
+            input_t vals_load[kNElts] = {0};
+            if ((chunk == n_chunks - 2) && (tidx == kNThreads - 1)){
+                // chunk = n_chunks - 2, a segment of the final state sits in the last index
+                reinterpret_cast<vec_t *>(vals_load)[0] = smem_exchange[kNThreads - 1];
+                #pragma unroll
+                for (int w = 0; w < -final_state_position; ++w){
+                    conv_states[w] = vals_load[kNElts + final_state_position + w];
+                }
+            }
+            if ((chunk == n_chunks - 1) && tidx == 0){
+                // chunk = n_chunks - 1, the second segment of the final state first positions
+                reinterpret_cast<vec_t *>(vals_load)[0] = smem_exchange[0];
+                for (int w = -final_state_position; w < kWidth - 1; ++w){
+                    conv_states[w] = vals_load[w + final_state_position];
+                }
+                return;
+            }
+        }
     }
     // Final state is stored in the smem_exchange last token slot,
     // in case seqlen < kWidth, we would need to take the final state from the 
