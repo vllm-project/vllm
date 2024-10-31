@@ -9,7 +9,6 @@ except ImportError:
 
 import torch
 import torch.nn.functional as F
-import torch.distributed as D
 from torch.nn.parameter import Parameter, UninitializedParameter
 
 from vllm.distributed import (divide, get_tensor_model_parallel_rank,
@@ -17,7 +16,7 @@ from vllm.distributed import (divide, get_tensor_model_parallel_rank,
                               split_tensor_along_last_dim,
                               tensor_model_parallel_all_gather,
                               tensor_model_parallel_all_reduce)
-from vllm.distributed.parallel_state import get_tp_group, get_world_group
+from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
@@ -37,11 +36,6 @@ WEIGHT_LOADER_V2_SUPPORTED = [
     "TPUInt8LinearMethod", "GPTQLinearMethod", "FBGEMMFp8LinearMethod",
     "ModelOptFp8LinearMethod", "IPEXAWQLinearMethod"
 ]
-
-
-def pprint(x):
-    #print(x)
-    pass
 
 
 def adjust_marlin_shard(param, shard_size, shard_offset):
@@ -262,6 +256,7 @@ class MatmulRS(LinearMethodBase):
 
     def __init__(self, separate_bias_add: bool = False):
         self.separate_bias_add = separate_bias_add
+        self.group_name = torch.distributed.group.WORLD.group_name
 
     def create_weights(self, layer: torch.nn.Module,
                        input_size_per_partition: int,
@@ -275,7 +270,6 @@ class MatmulRS(LinearMethodBase):
         set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0})
         layer.register_parameter("weight", weight)
         set_weight_attrs(weight, extra_weight_attrs)
-        pprint(f"inpp={input_size_per_partition}, output_part_siz={output_partition_sizes}, input_size={input_size}, output_size={output_size}")
 
     def apply(self,
               layer: torch.nn.Module,
@@ -283,26 +277,17 @@ class MatmulRS(LinearMethodBase):
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         assert bias is None
 
-        pprint(f"MATMUL_RS {get_tp_group().rank} {x.shape}, {layer.weight.transpose(1,0).shape}")
-
         if not should_slice(x.shape):
-            pprint("MATMUL_RS naive")
             output = torch.matmul(x, layer.weight.transpose(1, 0))
-            # total hack
-            output = tensor_model_parallel_all_reduce(output)
+            # This is a bit hacky
+            return tensor_model_parallel_all_reduce(output)
         else:
-            group_name = torch.distributed.group.WORLD.group_name # TODO: factor out to setup
-            output = torch.ops.symm_mem.fused_matmul_reduce_scatter(
+            return torch.ops.symm_mem.fused_matmul_reduce_scatter(
                 x,
                 layer.weight.transpose(1, 0).contiguous(),
                 "avg",
-                scatter_dim=0,  # ?
-                group_name=group_name
-            )
-
-        pprint(f"MATMUL_RS DONE {get_tp_group().rank} {output.shape}")
-
-        return output
+                scatter_dim=0,
+                group_name=self.group_name)
 
 
 class AGMatmul(LinearMethodBase):
@@ -310,6 +295,7 @@ class AGMatmul(LinearMethodBase):
 
     def __init__(self, separate_bias_add: bool = False):
         self.separate_bias_add = separate_bias_add
+        self.group_name = torch.distributed.group.WORLD.group_name
 
     def create_weights(self, layer: torch.nn.Module,
                        input_size_per_partition: int,
@@ -330,23 +316,16 @@ class AGMatmul(LinearMethodBase):
               bias: Optional[torch.Tensor] = None) -> torch.Tensor:
         assert bias is None
 
-        pprint(f"AG_MATMUL {get_tp_group().rank}, {x.shape}, {layer.weight.transpose(1,0).shape}")
-
         if not should_slice(x.shape):
-            output = torch.matmul(x, layer.weight.transpose(1,0))
+            return torch.matmul(x, layer.weight.transpose(1, 0))
         else:
-            group_name = torch.distributed.group.WORLD.group_name
             ag_output, mm_outputs = torch.ops.symm_mem.fused_all_gather_matmul(
                 x,
-                [layer.weight.transpose(1,0).contiguous()],
+                [layer.weight.transpose(1, 0).contiguous()],
                 gather_dim=0,
-                group_name=group_name,
+                group_name=self.group_name,
             )
-            output = mm_outputs[0]
-
-        pprint(f"AG_MATMUL DONE {get_tp_group().rank}, {output.shape}")
-
-        return output
+            return mm_outputs[0]
 
 
 class LinearBase(torch.nn.Module):

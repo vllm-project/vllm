@@ -7,9 +7,9 @@ import torch.fx as fx
 
 from vllm.logger import init_logger
 
+from .collective_fusion import CollectiveFusionPass
 from .compile_context import get_compile_context
 from .levels import CompilationLevel
-from .collective_fusion import CollectiveFusionPass
 
 logger = init_logger(__name__)
 
@@ -166,11 +166,9 @@ def custom_passes(graph):
     fix_functionalization(graph)
 
 
-def wrap_inductor(
-    graph,
-    example_inputs,
-    additional_inductor_config: Optional[Dict] = None
-):
+def wrap_inductor(graph,
+                  example_inputs,
+                  additional_inductor_config: Optional[Dict] = None):
     from torch._inductor import config
     torch._inductor.config._micro_pipeline_tp = True
     current_config = config.shallow_copy_dict()
