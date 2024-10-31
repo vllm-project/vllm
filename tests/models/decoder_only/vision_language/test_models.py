@@ -75,6 +75,63 @@ COMMON_BROADCAST_SETTINGS = {
 # this is a good idea for checking your command first, since tests are slow.
 
 VLM_TEST_SETTINGS = {
+    #### Core tests to always run in the CI
+    "llava": VLMTestInfo(
+        models=["llava-hf/llava-1.5-7b-hf"],
+        test_type=(
+            VLMTestType.EMBEDDING,
+            VLMTestType.IMAGE,
+            VLMTestType.CUSTOM_INPUTS
+        ),
+        prompt_formatter=lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:",
+        convert_assets_to_embeddings=model_utils.get_llava_embeddings,
+        max_model_len=4096,
+        auto_cls=AutoModelForVision2Seq,
+        vllm_output_post_proc=model_utils.llava_image_vllm_to_hf_output,
+        custom_test_opts=[CustomTestOptions(
+            inputs=custom_inputs.multi_image_multi_aspect_ratio_inputs(
+                formatter=lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:"
+            ),
+            limit_mm_per_prompt={"image": 4},
+        )],
+        marks=[pytest.mark.core_model],
+    ),
+    "paligemma": VLMTestInfo(
+        models=["google/paligemma-3b-mix-224"],
+        test_type=VLMTestType.IMAGE,
+        prompt_formatter=identity,
+        img_idx_to_prompt = lambda idx: "",
+        # Paligemma uses its own sample prompts because the default one fails
+        single_image_prompts=IMAGE_ASSETS.prompts({
+            "stop_sign": "caption es",
+            "cherry_blossom": "What is in the picture?",
+        }),
+        auto_cls=AutoModelForVision2Seq,
+        postprocess_inputs=model_utils.get_key_type_post_processor(
+            "pixel_values"
+        ),
+        vllm_output_post_proc=model_utils.paligemma_vllm_to_hf_output,
+        dtype="half" if current_platform.is_rocm() else ("half", "float"),
+        marks=[pytest.mark.core_model],
+    ),
+    "qwen2_vl": VLMTestInfo(
+        models=["Qwen/Qwen2-VL-2B-Instruct"],
+        test_type=(
+            VLMTestType.IMAGE,
+            VLMTestType.MULTI_IMAGE,
+            VLMTestType.VIDEO
+        ),
+        prompt_formatter=lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n", # noqa: E501
+        img_idx_to_prompt=lambda idx: "<|vision_start|><|image_pad|><|vision_end|>", # noqa: E501
+        video_idx_to_prompt=lambda idx: "<|vision_start|><|video_pad|><|vision_end|>", # noqa: E501
+        max_model_len=4096,
+        max_num_seqs=2,
+        auto_cls=AutoModelForVision2Seq,
+        vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
+        marks=[pytest.mark.core_model],
+        image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
+    ),
+    #### Extended model tests
     "blip2": VLMTestInfo(
         models=["Salesforce/blip2-opt-2.7b"],
         test_type=VLMTestType.IMAGE,
@@ -151,25 +208,6 @@ VLM_TEST_SETTINGS = {
         use_tokenizer_eos=True,
         patch_hf_runner=model_utils.internvl_patch_hf_runner,
     ),
-    "llava": VLMTestInfo(
-        models=["llava-hf/llava-1.5-7b-hf"],
-        test_type=(
-            VLMTestType.EMBEDDING,
-            VLMTestType.IMAGE,
-            VLMTestType.CUSTOM_INPUTS
-        ),
-        prompt_formatter=lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:",
-        convert_assets_to_embeddings=model_utils.get_llava_embeddings,
-        max_model_len=4096,
-        auto_cls=AutoModelForVision2Seq,
-        vllm_output_post_proc=model_utils.llava_image_vllm_to_hf_output,
-        custom_test_opts=[CustomTestOptions(
-            inputs=custom_inputs.multi_image_multi_aspect_ratio_inputs(
-                formatter=lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:"
-            ),
-            limit_mm_per_prompt={"image": 4},
-        )],
-    ),
     "llava_next": VLMTestInfo(
         models=["llava-hf/llava-v1.6-mistral-7b-hf"],
         test_type=(VLMTestType.IMAGE, VLMTestType.CUSTOM_INPUTS),
@@ -200,12 +238,12 @@ VLM_TEST_SETTINGS = {
         vllm_output_post_proc=model_utils.llava_onevision_vllm_to_hf_output,
         # Llava-one-vision tests fixed sizes & the default size factors
         image_sizes=[((1669, 2560), (2560, 1669), (183, 488), (488, 183))],
-        runner_mm_key="videos",
         custom_test_opts=[CustomTestOptions(
             inputs=custom_inputs.multi_video_multi_aspect_ratio_inputs(
                 formatter=lambda vid_prompt: f"<|im_start|>user\n{vid_prompt}<|im_end|>\n<|im_start|>assistant\n",   # noqa: E501
             ),
             limit_mm_per_prompt={"video": 4},
+            runner_mm_key="videos",
         )],
     ),
     # FIXME
@@ -218,9 +256,11 @@ VLM_TEST_SETTINGS = {
         auto_cls=AutoModelForVision2Seq,
         vllm_output_post_proc=model_utils.llava_video_vllm_to_hf_output,
         image_sizes=[((1669, 2560), (2560, 1669), (183, 488), (488, 183))],
-        runner_mm_key="videos",
         marks=[
-            pytest.mark.skip(reason="LLava next video tests currently fail.")
+            pytest.mark.skipif(
+                transformers.__version__.startswith("4.46"),
+                reason="Model broken with changes in transformers 4.46"
+            )
         ],
     ),
     "minicpmv": VLMTestInfo(
@@ -233,23 +273,6 @@ VLM_TEST_SETTINGS = {
         get_stop_token_ids=lambda tok: [tok.eos_id, tok.eot_id],
         postprocess_inputs=model_utils.wrap_inputs_post_processor,
         hf_output_post_proc=model_utils.minicmpv_trunc_hf_output,
-    ),
-    "paligemma": VLMTestInfo(
-        models=["google/paligemma-3b-mix-224"],
-        test_type=VLMTestType.IMAGE,
-        prompt_formatter=identity,
-        img_idx_to_prompt = lambda idx: "",
-        # Paligemma uses its own sample prompts because the default one fails
-        single_image_prompts=IMAGE_ASSETS.prompts({
-            "stop_sign": "caption es",
-            "cherry_blossom": "What is in the picture?",
-        }),
-        auto_cls=AutoModelForVision2Seq,
-        postprocess_inputs=model_utils.get_key_type_post_processor(
-            "pixel_values"
-        ),
-        vllm_output_post_proc=model_utils.paligemma_vllm_to_hf_output,
-        dtype="half" if current_platform.is_rocm() else ("half", "float"),
     ),
     # Tests for phi3v currently live in another file because of a bug in
     # transformers. Once this issue is fixed, we can enable them here instead.
