@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type
 
 import torch
+from torch.library import Library
 
 from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
@@ -595,8 +596,6 @@ class FlashAttentionImpl(AttentionImpl):
         return output
 
 
-@torch.library.custom_op("vllm::unified_flash_attention",
-                         mutates_args=["kv_cache"])
 def unified_flash_attention(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -755,8 +754,7 @@ def unified_flash_attention(
     return output.view(num_tokens, hidden_size)
 
 
-@unified_flash_attention.register_fake
-def _(
+def unified_flash_attention_fake(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
@@ -773,3 +771,11 @@ def _(
     logits_soft_cap: Optional[float] = None,
 ) -> torch.Tensor:
     return torch.empty_like(query)
+
+
+my_lib = Library("vllm", "FRAGMENT")
+my_lib.define(
+    "unified_flash_attention(Tensor query, Tensor key, Tensor value, SymInt num_heads, SymInt head_size, SymInt num_kv_heads, Tensor(a6!) kv_cache, str kv_cache_dtype, float k_scale, float v_scale, float softmax_scale, SymInt[]? window_size=None, Tensor? alibi_slopes=None, float? logits_soft_cap=None) -> Tensor"  # noqa
+)
+my_lib.impl("unified_flash_attention", unified_flash_attention, "CUDA")
+my_lib._register_fake("unified_flash_attention", unified_flash_attention_fake)
