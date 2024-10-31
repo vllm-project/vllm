@@ -328,6 +328,10 @@ class PackedvLLMParameter(ModelWeightParameter):
             marlin_tile_size=self.marlin_tile_size)
 
 
+# Qweights in HQQ need to be reshaped such that the shape of the stored tensors
+# is the actual shape used in weight multiplication. This is needed to correctly
+# repack to Marlin. We also store shard size and offsets in order to be able to
+# correctly unpack (shard by shard) from 4-bit to 8-bit.
 class HQQQweightParameter(PackedvLLMParameter):
 
     def __init__(self, packed_factor: int, packed_dim: int, **kwargs):
@@ -362,6 +366,7 @@ class HQQQweightParameter(PackedvLLMParameter):
         super().load_qkv_weight(loaded_weight, **kwargs)
 
 
+# Zero points and scales in HQQ must also be reshaped to their actual shapes.
 class HQQZeroScaleParameter(GroupQuantScaleParameter):
 
     def load_merged_column_weight(self, loaded_weight: torch.Tensor, **kwargs):
