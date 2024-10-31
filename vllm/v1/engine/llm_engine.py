@@ -17,13 +17,14 @@ from vllm.sampling_params import SamplingParams
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.detokenizer import Detokenizer
 from vllm.v1.engine.llm_engine_core import LLMEngineCore
+from vllm.v1.engine.protocol import LLMEngineProtocol
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.gpu_executor import GPUExecutor
 
 logger = init_logger(__name__)
 
 
-class LLMEngine:
+class LLMEngine(LLMEngineProtocol):
 
     def __init__(
         self,
@@ -141,9 +142,3 @@ class LLMEngine:
         request_outputs = self.detokenizer.step(engine_core_outputs)
 
         return request_outputs
-
-    def get_num_unfinished_requests(self) -> int:
-        return self.detokenizer.get_num_unfinished_requests()
-
-    def has_unfinished_requests(self) -> bool:
-        return self.detokenizer.has_unfinished_requests()
