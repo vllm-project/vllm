@@ -123,6 +123,7 @@ class AsyncLLMEngine(LLMEngineProtocol):
                                                        load_config,
                                                        lora_config,
                                                        speculative_config,
+                                                       decoding_config,
                                                        observability_config,
                                                        prompt_adapter_config,
                                                    ),
@@ -227,7 +228,7 @@ class AsyncLLMEngine(LLMEngineProtocol):
         stream = AsyncStream(request_id, _abort)
 
         # 1) Process raw inputs into the request.
-        detokenizer_request, engine_core_request = self._process_inputs(
+        detokenizer_request, engine_core_request = self.processor.process_inputs(
             request_id, prompt, params, arrival_time, lora_request,
             trace_headers, prompt_adapter_request, priority)
 
