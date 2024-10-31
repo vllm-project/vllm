@@ -472,8 +472,10 @@ void causal_conv1d_fwd_kernel(ConvParamsBase params) {
         else {
             // in case the final state is in between the threads data
             const int offset = ((seqlen - (kWidth - 1)) % (kNElts));
-            if ((offset + kWidth - 2) >= kNElts){
-                // do not load to index 1 if we're not gonna read from there
+            if ((offset + kWidth - 2) >= kNElts && (last_thread + 1 < kNThreads)){
+                // In case last_thread == kNThreads - 1, accessing last_thread + 1 will result in a 
+                // illegal access error on H100.
+                // Therefore, we access last_thread + 1, only if the final state data sits there
                 reinterpret_cast<vec_t *>(x_vals_load)[1] = smem_exchange[last_thread + 1];
             }
             reinterpret_cast<vec_t *>(x_vals_load)[0] = smem_exchange[last_thread];
