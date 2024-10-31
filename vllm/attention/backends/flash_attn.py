@@ -3,7 +3,6 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type
 
 import torch
-from torch.library import Library
 
 from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
@@ -15,7 +14,8 @@ from vllm.attention.backends.utils import (PAD_SLOT_ID, CommonAttentionState,
                                            compute_slot_mapping_start_idx,
                                            is_block_tables_empty)
 from vllm.forward_context import get_forward_context
-from vllm.utils import async_tensor_h2d, make_tensor_with_pad
+from vllm.utils import (async_tensor_h2d, direct_register_custom_op,
+                        make_tensor_with_pad)
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import (ModelInputForGPUBuilder,
@@ -773,9 +773,10 @@ def unified_flash_attention_fake(
     return torch.empty_like(query)
 
 
-my_lib = Library("vllm", "FRAGMENT")
-my_lib.define(
-    "unified_flash_attention(Tensor query, Tensor key, Tensor value, SymInt num_heads, SymInt head_size, SymInt num_kv_heads, Tensor(a6!) kv_cache, str kv_cache_dtype, float k_scale, float v_scale, float softmax_scale, SymInt[]? window_size=None, Tensor? alibi_slopes=None, float? logits_soft_cap=None) -> Tensor"  # noqa
+direct_register_custom_op(
+    library_name="vllm",
+    op_name="unified_flash_attention",
+    op_func=unified_flash_attention,
+    mutates_args=["kv_cache"],
+    fake_impl=unified_flash_attention_fake,
 )
-my_lib.impl("unified_flash_attention", unified_flash_attention, "CUDA")
-my_lib._register_fake("unified_flash_attention", unified_flash_attention_fake)
