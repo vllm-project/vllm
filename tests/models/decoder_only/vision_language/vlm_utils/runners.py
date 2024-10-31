@@ -29,6 +29,7 @@ def run_single_image_test(*, tmp_path: PosixPath, model_test_info: VLMTestInfo,
         num_logprobs=test_case.num_logprobs,
         limit_mm_per_prompt={"image": 1},
         distributed_executor_backend=test_case.distributed_executor_backend,
+        runner_mm_key="images",
         **model_test_info.get_non_parametrized_runner_kwargs())
 
 
@@ -51,6 +52,7 @@ def run_multi_image_test(*, tmp_path: PosixPath, model_test_info: VLMTestInfo,
         num_logprobs=test_case.num_logprobs,
         limit_mm_per_prompt={"image": len(image_assets)},
         distributed_executor_backend=test_case.distributed_executor_backend,
+        runner_mm_key="images",
         **model_test_info.get_non_parametrized_runner_kwargs())
 
 
@@ -74,6 +76,7 @@ def run_embedding_test(*, model_test_info: VLMTestInfo,
         limit_mm_per_prompt={"image": 1},
         vllm_embeddings=vllm_embeddings,
         distributed_executor_backend=test_case.distributed_executor_backend,
+        runner_mm_key="images",
         **model_test_info.get_non_parametrized_runner_kwargs())
 
 
@@ -101,6 +104,7 @@ def run_video_test(
         num_logprobs=test_case.num_logprobs,
         limit_mm_per_prompt={"video": len(video_assets)},
         distributed_executor_backend=test_case.distributed_executor_backend,
+        runner_mm_key="videos",
         **model_test_info.get_non_parametrized_runner_kwargs())
 
 
@@ -115,7 +119,11 @@ def run_custom_inputs_test(*, model_test_info: VLMTestInfo,
 
     inputs = test_case.custom_test_opts.inputs
     limit_mm_per_prompt = test_case.custom_test_opts.limit_mm_per_prompt
-    assert inputs is not None and limit_mm_per_prompt is not None
+    runner_mm_key = test_case.custom_test_opts.runner_mm_key
+    # Inputs, limit_mm_per_prompt, and runner_mm_key should all be set
+    assert inputs is not None
+    assert limit_mm_per_prompt is not None
+    assert runner_mm_key is not None
 
     core.run_test(
         hf_runner=hf_runner,
@@ -127,4 +135,5 @@ def run_custom_inputs_test(*, model_test_info: VLMTestInfo,
         num_logprobs=test_case.num_logprobs,
         limit_mm_per_prompt=limit_mm_per_prompt,
         distributed_executor_backend=test_case.distributed_executor_backend,
+        runner_mm_key=runner_mm_key,
         **model_test_info.get_non_parametrized_runner_kwargs())

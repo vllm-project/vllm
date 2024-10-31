@@ -56,6 +56,17 @@ def qwen_vllm_to_hf_output(
     return output_ids, hf_output_str, out_logprobs
 
 
+def qwen2_vllm_to_hf_output(
+        vllm_output: RunnerOutput,
+        model: str) -> Tuple[List[int], str, Optional[SampleLogprobs]]:
+    """Sanitize vllm output [qwen2 models] to be comparable with hf output."""
+    output_ids, output_str, out_logprobs = vllm_output
+
+    hf_output_str = output_str + "<|im_end|>"
+
+    return output_ids, hf_output_str, out_logprobs
+
+
 def llava_image_vllm_to_hf_output(vllm_output: RunnerOutput,
                                   model: str) -> RunnerOutput:
     config = AutoConfig.from_pretrained(model)
