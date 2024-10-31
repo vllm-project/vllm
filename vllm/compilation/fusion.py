@@ -1,12 +1,12 @@
 import operator
-from typing import Iterable, Optional
+from typing import Iterable, List, Optional
 
 import torch
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor.pattern_matcher import (Match, PatternMatcherPass,
                                              fwd_only, register_replacement)
 
-from vllm import envs
+from vllm.compilation.config import CompilationConfig
 from vllm.compilation.inductor_pass import InductorPass
 from vllm.logger import init_logger
 
@@ -129,9 +129,11 @@ def find_getitem(node: torch.fx.Node, idx: int) -> torch.fx.Node:
 
 class FusionPass(InductorPass):
 
-    def __init__(self):
+    def __init__(self, config: CompilationConfig):
+        super().__init__(config)
+
         self.my_patterns = PatternMatcherPass(pass_name="fusion_pass")
-        self.matches = []
+        self.matches: List[Match] = []
 
         # Fuse rms_norm + static_scaled_fp8_quant into
         # rms_norm_static_fp8_quant
@@ -248,9 +250,6 @@ class FusionPass(InductorPass):
                    for node in match.nodes)
 
     def __call__(self, graph: torch.fx.Graph):
-        if not envs.VLLM_TORCH_COMPILE_FUSION:
-            return
-
         self.dump_graph(graph, "before_fusion")
 
         count = self.my_patterns.apply(graph)

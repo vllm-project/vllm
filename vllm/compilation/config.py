@@ -1,4 +1,5 @@
 import copy
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, PrivateAttr
@@ -50,6 +51,12 @@ class CompilationConfig(BaseModel):
             name because the config uses json format. If we pass the config
             from Python, functions can also be passed directly via Python object
             constructor, e.g. `CompilationConfig(inductor_passes={"a": func})`
+    - Custom inductor passes:
+        - dump_graph_stages: list of stages for which we want to dump the graph.
+            Each pass defines its own stages (before, after, maybe in-between).
+        - dump_graph_dir: directory to dump the graph. Default is .
+        - enable_fusion: whether to enable the custom fusion pass.
+            TODO better pass enabling system.
     
     Why we have different sizes for cudagraph and inductor:
     - cudagraph: a cudagraph captured for a specific size can only be used
@@ -71,6 +78,10 @@ class CompilationConfig(BaseModel):
     non_cudagraph_ops: List[str] = Field(default_factory=list)
     cudagraph_num_of_warmups: int = 0
     cudagraph_capture_sizes: Optional[List[int]] = None
+
+    dump_graph_stages: List[str] = Field(default_factory=list)
+    dump_graph_dir: Path = Field(default=Path("."))
+    enable_fusion: bool = True
 
     # not configurable, computed after init
     compile_sizes: List[int] = PrivateAttr

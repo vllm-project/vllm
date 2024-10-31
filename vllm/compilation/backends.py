@@ -319,7 +319,7 @@ class VllmBackend:
     # Inductor passes to run on the graph pre-defunctionalization
     post_grad_passes: Sequence[Callable]
 
-    def __init__(self, post_grad_passes: Sequence[Callable]):
+    def __init__(self, post_grad_passes: Sequence[Callable] = ()):
         # every instance of VllmBackend has its own graph pool
         self.graph_pool = torch.cuda.graph_pool_handle()
         self.post_grad_passes = post_grad_passes
@@ -328,14 +328,21 @@ class VllmBackend:
         # do anything here
 
     def add_passes_to_config(self):
-        config = self.compilation_configs.inductor_compile_config
-        custom_postgrad_pass = config["post_grad_custom_post_pass"]
+        config = self.compilation_configs
         passes = list(self.post_grad_passes)
-        if custom_postgrad_pass is not None:
-            passes = passes + [custom_postgrad_pass]
 
+        if config.enable_fusion:
+            passes = passes + [FusionPass(config)]
+
+        inductor_config = config.inductor_compile_config
+        if "post_grad_custom_post_pass" in inductor_config:
+            passes = passes + [inductor_config["post_grad_custom_post_pass"]]
+
+        # add the fix_functionalization pass last, so that all other
+        # passes operate on a functionalized graph
         passes = passes + [fix_functionalization]
-        config["post_grad_custom_post_pass"] = combine_fx_passes(passes)
+        combined_pass = combine_fx_passes(passes)
+        inductor_config["post_grad_custom_post_pass"] = combined_pass
 
     def __call__(self, graph: fx.GraphModule, example_inputs) -> Callable:
 
@@ -551,5 +558,4 @@ def select_default_backend(level: int) -> Union[str, Callable]:
         return backend_str
     assert level == CompilationLevel.PIECEWISE
 
-    passes = [FusionPass()]
-    return VllmBackend(passes)
+    return VllmBackend()
