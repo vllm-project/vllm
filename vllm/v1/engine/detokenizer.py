@@ -137,7 +137,7 @@ class IncrementalDetokenizer:
         if self.stop:
             stop = StopChecker.check_stop_strings(
                 output_text=self.output_text,
-                new_char_count=666,
+                new_char_count=len(decoded_text),
                 stop=self.stop,
                 include_in_output=self.include_stop_str_in_output,
             )
