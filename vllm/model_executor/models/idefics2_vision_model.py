@@ -17,7 +17,7 @@
 # limitations under the License.
 """PyTorch Idefics2 model."""
 
-from typing import Optional, Iterable, Tuple
+from typing import Iterable, Optional, Tuple
 
 import torch
 from torch import nn
@@ -26,12 +26,12 @@ from transformers.models.idefics2.configuration_idefics2 import (
 from xformers import ops as xops
 
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
 
 class Idefics2VisionEmbeddings(nn.Module):

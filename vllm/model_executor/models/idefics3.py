@@ -14,57 +14,38 @@
 # limitations under the License.
 """Inference-only Idefics3 model compatible with HuggingFace weights."""
 
-from typing import (
-    Dict,
-    Iterable,
-    List,
-    Literal,
-    Mapping,
-    Optional,
-    Tuple,
-    TypedDict,
-    Union,
-)
-
 import math
+from typing import (Dict, Iterable, List, Literal, Mapping, Optional, Tuple,
+                    TypedDict, Union)
+
 import torch
 import torch.utils.checkpoint
-from torch import nn
-
-from transformers import Idefics3Config
 from PIL import Image
+from torch import nn
+from transformers import Idefics3Config
 
-from vllm.logger import init_logger
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
-from vllm.inputs import (
-    INPUT_REGISTRY,
-    InputContext,
-    DecoderOnlyInputs,
-    token_inputs,
-)
-from vllm.model_executor.layers.logits_processor import LogitsProcessor
-
+from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, InputContext,
+                         token_inputs)
+from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalInputs
 from vllm.multimodal.image import cached_get_image_processor
-from vllm.transformers_utils.processor import cached_get_processor
 from vllm.sequence import IntermediateTensors, SequenceData
+from vllm.transformers_utils.processor import cached_get_processor
 from vllm.utils import is_list_of
 
-from .llama import LlamaModel
 from .idefics2_vision_model import (
-    Idefics2VisionTransformer as Idefics3VisionTransformer, )
+    Idefics2VisionTransformer as Idefics3VisionTransformer)
 from .interfaces import SupportsMultiModal
-
-from .utils import (
-    AutoWeightsLoader,
-    flatten_bn,
-)
+from .llama import LlamaModel
+from .utils import AutoWeightsLoader, flatten_bn
 
 logger = init_logger(__name__)
 
@@ -72,7 +53,9 @@ logger = init_logger(__name__)
 class Idefics3ImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
     data: torch.Tensor
-    """Shape: `(batch_size * num_images, num_channels, height, width)`"""
+    """
+    Shape: `(batch_size * num_images, num_channels, height, width)`
+    """
     rows: List[int]
     cols: List[int]
     pixel_attention_mask: Optional[torch.BoolTensor]
@@ -81,8 +64,8 @@ class Idefics3ImagePixelInputs(TypedDict):
 class Idefics3ImageEmbeddingInputs(TypedDict):
     type: Literal["image_embeds"]
     data: torch.Tensor
-    """Shape: `(batch_size * num_images, image_feature_size, hidden_size)`
-
+    """
+    Shape: `(batch_size * num_images, image_feature_size, hidden_size)`
     `hidden_size` must match the hidden size of language model backbone.
     """
 
@@ -266,9 +249,8 @@ def input_processor_for_idefics3(ctx: InputContext, inputs: DecoderOnlyInputs):
         if isinstance(text, str):
             text = [text]
         elif not isinstance(text, list) and not isinstance(text[0], str):
-            raise ValueError(
-                "Invalid input text. Please provide a string, or a list of strings"
-            )
+            raise ValueError("Invalid input text. Please provide a string, "
+                             "or a list of strings")
 
         fake_image_token = processor.fake_image_token.content
         image_token = processor.image_token.content
@@ -540,8 +522,6 @@ class Idefics3Model(nn.Module):
     ):
         num_images, _, vision_hidden_size = vision_embeddings.shape
         special_image_token_mask = input_ids == self.image_token_id
-        #  Fixes RuntimeError: a leaf Variable that requires grad is being used
-        # in an in-place operation.
         new_inputs_embeds = inputs_embeds.clone()
         reshaped_vision_embeddings = vision_embeddings.view(
             -1, vision_hidden_size)
@@ -561,9 +541,6 @@ class Idefics3Model(nn.Module):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         **kwargs: object,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        r"""
-        TODO
-        ```"""
         if intermediate_tensors is not None:
             input_ids = None
             inputs_embeds = None
