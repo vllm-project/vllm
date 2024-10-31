@@ -122,7 +122,7 @@ async def test_new_requests_event():
     assert engine.engine.step_calls == old_step_calls + 1
 
     engine = MockAsyncLLMEngine()
-    assert engine.get_model_config() is not None
+    assert engine.model_config() is not None
     assert engine.get_tokenizer() is not None
     assert engine.get_decoding_config() is not None
 

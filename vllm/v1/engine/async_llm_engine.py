@@ -65,26 +65,6 @@ class AsyncLLMEngine(LLMEngineProtocol):
             scheduler_config.max_num_seqs = 1024
             scheduler_config.max_num_batched_tokens = 2048
 
-        super().__init__(
-            model_config,
-            cache_config,
-            parallel_config,
-            scheduler_config,
-            device_config,
-            load_config,
-            lora_config,
-            speculative_config,
-            decoding_config,
-            observability_config,
-            prompt_adapter_config,
-            executor_class,
-            log_stats,
-            usage_context,
-            stat_loggers,
-            input_registry,
-            use_cached_outputs,
-        )
-
         # TODO: remove
         self.detokenizer.stream_mode = True
         self.log_requests = log_requests
@@ -191,7 +171,7 @@ class AsyncLLMEngine(LLMEngineProtocol):
             while await ready_socket.poll(timeout=5000) == 0:
                 logger.debug("Waiting for LLMEngineCore to startup.")
 
-                if not self.engine_core_process.is_alive():
+                if not self.engine_core.is_alive():
                     raise RuntimeError(
                         "LLMEngineCore process failed to start.")
 
