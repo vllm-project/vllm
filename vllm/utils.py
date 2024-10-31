@@ -7,7 +7,6 @@ import gc
 import inspect
 import ipaddress
 import os
-import random
 import socket
 import subprocess
 import sys
@@ -331,22 +330,6 @@ def get_cpu_memory() -> int:
     return psutil.virtual_memory().total
 
 
-def seed_everything(seed: int) -> None:
-    """
-    Set the seed of each random module.
-
-    Loosely based on: https://github.com/Lightning-AI/pytorch-lightning/blob/2.4.0/src/lightning/fabric/utilities/seed.py#L20
-    """
-    random.seed(seed)
-    np.random.seed(seed)
-
-    if current_platform.is_cuda_alike():
-        torch.cuda.manual_seed_all(seed)
-
-    if current_platform.is_xpu():
-        torch.xpu.manual_seed_all(seed)
-
-
 def random_uuid() -> str:
     return str(uuid.uuid4().hex)
 
@@ -643,7 +626,7 @@ def create_kv_caches_with_random_flash(
     seed: int = 0,
     device: Optional[str] = "cuda",
 ) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
-    seed_everything(seed)
+    current_platform.seed_everything(seed)
 
     torch_dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
     key_value_cache_shape = (num_blocks, 2, block_size, num_heads, head_size)
@@ -685,7 +668,7 @@ def create_kv_caches_with_random(
             f"Does not support key cache of type fp8 with head_size {head_size}"
         )
 
-    seed_everything(seed)
+    current_platform.seed_everything(seed)
 
     torch_dtype = get_kv_cache_torch_dtype(cache_dtype, model_dtype)
 
@@ -994,7 +977,8 @@ def enable_trace_function_call_for_thread() -> None:
 
 
 # `functools` helpers
-def identity(value: T) -> T:
+def identity(value: T, **kwargs) -> T:
+    """Returns the first provided value."""
     return value
 
 
@@ -1496,6 +1480,15 @@ class LazyDict(Mapping, Generic[T]):
         return len(self._factory)
 
 
+def combine_fx_passes(passes: List[Callable]) -> Callable:
+
+    def combined_fx(graph) -> None:
+        for fx in passes:
+            fx(graph)
+
+    return combined_fx
+
+
 def weak_ref_tensor(tensor: torch.Tensor) -> torch.Tensor:
     """
     Create a weak reference to a tensor.
@@ -1503,3 +1496,19 @@ def weak_ref_tensor(tensor: torch.Tensor) -> torch.Tensor:
     but will not keep the original tensor alive.
     """
     return torch.ops._C.weak_ref_tensor(tensor)
+
+
+def weak_ref_tensors(
+    tensors: Union[torch.Tensor, List[torch.Tensor], Tuple[torch.Tensor]]
+) -> Union[torch.Tensor, List[torch.Tensor], Tuple[torch.Tensor]]:
+    """
+    Convenience function to create weak references to tensors,
+    for single tensor, list of tensors or tuple of tensors.
+    """
+    if isinstance(tensors, torch.Tensor):
+        return weak_ref_tensor(tensors)
+    if isinstance(tensors, list):
+        return [weak_ref_tensor(t) for t in tensors]
+    if isinstance(tensors, tuple):
+        return tuple(weak_ref_tensor(t) for t in tensors)
+    raise ValueError("Invalid type for tensors")

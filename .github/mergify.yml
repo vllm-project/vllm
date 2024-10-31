@@ -13,13 +13,14 @@ pull_request_rules:
 - name: label-ci-build
   description: Automatically apply ci/build label
   conditions:
-    - files~=^\.github/
-    - files~=\.buildkite/
-    - files~=^cmake/
-    - files=CMakeLists.txt
-    - files~=^Dockerfile
-    - files~=^requirements.*\.txt
-    - files=setup.py
+    - or:
+      - files~=^\.github/
+      - files~=\.buildkite/
+      - files~=^cmake/
+      - files=CMakeLists.txt
+      - files~=^Dockerfile
+      - files~=^requirements.*\.txt
+      - files=setup.py
   actions:
     label:
       add:
