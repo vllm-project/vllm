@@ -84,6 +84,7 @@ class Processor:
         eos_token_id = self.input_preprocessor.get_eos_token_id(lora_request)
 
         assert isinstance(params, SamplingParams)
+        # TODO: can we avoid cloning here in multiproc case
         sampling_params = params.clone()
         sampling_params.update_from_generation_config(
             self.generation_config_fields, eos_token_id)
@@ -94,7 +95,8 @@ class Processor:
             processed_inputs.get("prompt_token_ids"),
             sampling_params.skip_special_tokens,
             sampling_params.spaces_between_special_tokens,
-            sampling_params.output_kind)
+            sampling_params.output_kind, sampling_params.stop,
+            sampling_params.include_stop_str_in_output)
 
         # Make Request for EngineCore.
         engine_core_request = EngineCoreRequest(

@@ -131,6 +131,10 @@ class AsyncLLMEngine(LLMEngineProtocol):
             raise KeyError(f"Request {request_id} already exists.")
 
         # TODO: handle abort.
+        # IDEA(Nick): we could batch up aborts rather than sending
+        # them individually, so that we send at most one batch of
+        # aborts per step (added to any that we're doing due to
+        # stop string matches for that step)
         def _abort():
             pass
 
@@ -152,6 +156,11 @@ class AsyncLLMEngine(LLMEngineProtocol):
 
         return stream.generator()
 
+    # TODO: we should support multiple prompts in one call, as you
+    # can do with LLM.generate. So that for multi-prompt completion
+    # requests we don't need to send multiple messages to core proc,
+    # and so we don't need multiple streams which then get
+    # re-multiplexed in the API server anyhow.
     async def generate(
         self,
         prompt: PromptType,
@@ -188,7 +197,8 @@ class AsyncLLMEngine(LLMEngineProtocol):
                 # NOTE: we could simplify the Detokenizer code by returning full
                 # List[RequestOutput] rather than pushing to the Queue at the
                 # expense of doing another loop through List[RequestOutput].
-                self.detokenizer.step_streaming(outputs)
+                _to_abort = self.detokenizer.step_streaming(outputs)
 
+                # TODO: send aborts (in one message)
         except BaseException as e:
             logger.error(e)
