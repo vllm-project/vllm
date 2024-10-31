@@ -20,7 +20,9 @@ class TestSetting:
     fullgraph: bool
 
 
+# representative settings for testing
 test_settings = [
+    # basic llama model
     TestSetting(
         model="meta-llama/Llama-3.2-1B",
         model_args=[],
@@ -30,6 +32,7 @@ test_settings = [
         method="generate",
         fullgraph=True,
     ),
+    # llama model with quantization
     TestSetting(
         model="TheBloke/TinyLlama-1.1B-Chat-v0.3-GPTQ",
         model_args=["--quantization", "gptq"],
@@ -39,6 +42,7 @@ test_settings = [
         method="generate",
         fullgraph=True,
     ),
+    # MoE model
     TestSetting(
         model="ibm/PowerMoE-3b",
         model_args=[],
@@ -48,6 +52,7 @@ test_settings = [
         method="generate",
         fullgraph=True,
     ),
+    # embedding model
     TestSetting(
         model="BAAI/bge-multilingual-gemma2",
         model_args=["--task", "embedding"],
@@ -57,6 +62,7 @@ test_settings = [
         method="encode",
         fullgraph=True,
     ),
+    # vision language model
     TestSetting(
         model="microsoft/Phi-3.5-vision-instruct",
         model_args=["--trust-remote-code", "--max-model-len", "2048"],
