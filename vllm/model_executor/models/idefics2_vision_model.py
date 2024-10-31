@@ -17,7 +17,7 @@
 # limitations under the License.
 """PyTorch Idefics2 model."""
 
-from typing import Optional
+from typing import Optional, Iterable, Tuple
 
 import torch
 from torch import nn
@@ -26,6 +26,7 @@ from transformers.models.idefics2.configuration_idefics2 import (
 from xformers import ops as xops
 
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
@@ -331,3 +332,25 @@ class Idefics2VisionTransformer(nn.Module):
         encoder_outputs = self.encoder(hidden_states)
         last_hidden_state = self.post_layernorm(encoder_outputs)
         return last_hidden_state
+
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+        stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            ("qkv_proj", "q_proj", "q"),
+            ("qkv_proj", "k_proj", "k"),
+            ("qkv_proj", "v_proj", "v"),
+        ]
+        params_dict = dict(self.named_parameters())
+        for name, loaded_weight in weights:
+            for param_name, weight_name, shard_id in stacked_params_mapping:
+                if weight_name not in name:
+                    continue
+                param = params_dict[name.replace(weight_name, param_name)]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                weight_loader(param, loaded_weight)
