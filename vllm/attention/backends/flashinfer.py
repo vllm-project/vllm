@@ -926,7 +926,7 @@ def unified_flash_infer_fake(
 
 my_lib = Library("vllm", "FRAGMENT")
 my_lib.define(
-    "unified_flash_infer(Tensor query, Tensor key, Tensor value, SymInt num_heads, SymInt head_size, SymInt num_kv_heads, Tensor(a6!) kv_cache, str kv_cache_dtype, float k_scale, float v_scale, float softmax_scale, SymInt[]? window_size=None, Tensor? alibi_slopes=None, float? logits_soft_cap=None) -> Tensor"  # noqa
-)
+    "unified_flash_infer" +
+    torch.library.infer_schema(unified_flash_infer, mutates_args=["out"]))
 my_lib.impl("unified_flash_infer", unified_flash_infer, "CUDA")
 my_lib._register_fake("unified_flash_infer", unified_flash_infer_fake)
