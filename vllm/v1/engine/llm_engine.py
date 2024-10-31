@@ -16,7 +16,7 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.detokenizer import Detokenizer
-from vllm.v1.engine.llm_engine_core import LLMEngineCore
+from vllm.v1.engine.core import EngineCore
 from vllm.v1.engine.processor import Processor
 from vllm.v1.engine.protocol import LLMEngineProtocol
 from vllm.v1.executor.gpu_executor import GPUExecutor
@@ -58,8 +58,8 @@ class LLMEngine(LLMEngineProtocol):
         # Detokenizer (converts EngineCoreOutputs --> RequestOutput)
         self.detokenizer = Detokenizer(model_config.tokenizer)
 
-        # LLMEngineCore (core engine)
-        self.engine_core = LLMEngineCore(
+        # EngineCore
+        self.engine_core = EngineCore(
             executor_class=executor_class,
             model_config=model_config,
             cache_config=cache_config,
@@ -130,7 +130,7 @@ class LLMEngine(LLMEngineProtocol):
 
     def step(self) -> List[RequestOutput]:
 
-        # 1) Step the LLMEngineCore.
+        # 1) Step the EngineCore.
         engine_core_outputs = self.engine_core.step()
 
         # 2) Step the Detokenizer.

@@ -14,7 +14,7 @@ from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          apply_hf_chat_template,
                                          apply_mistral_chat_template,
                                          parse_chat_messages)
-from vllm.inputs import PromptType, TextPrompt, TokensPrompt
+from vllm.inputs import INPUT_REGISTRY, PromptType, TextPrompt, TokensPrompt
 from vllm.inputs.parse import parse_and_batch_prompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -33,6 +33,9 @@ from vllm.utils import Counter, deprecate_args, deprecate_kwargs, is_list_of
 
 if envs.VLLM_USE_V1:
     from vllm.v1.engine.llm_engine import LLMEngine  # type: ignore
+    from vllm.v1.engine.core import EngineCore  # type: ignore
+    from vllm.v1.engine.detokenizer import Detokenizer  # type: ignore
+    from vllm.v1.engine.processor import Processor  # type: ignore
 else:
     from vllm.engine.llm_engine import LLMEngine  # type: ignore
 
@@ -195,8 +198,29 @@ class LLM:
             mm_processor_kwargs=mm_processor_kwargs,
             **kwargs,
         )
-        self.llm_engine = LLMEngine.from_engine_args(
-            engine_args, usage_context=UsageContext.LLM_CLASS)
+
+        if envs.VLLM_USE_V1:
+
+            engine_config = engine_args.create_engine_config()
+            executor_class = LLMEngine._get_executor_cls(engine_config)
+
+            # Processor (converts Inputs --> EngineCoreRequests)
+            self.processor = Processor(engine_config.model_config,
+                                       engine_config.parallel_config,
+                                       engine_config.scheduler_config,
+                                       engine_config.lora_config,
+                                       INPUT_REGISTRY)
+
+            # Detokenizer (converts EngineCoreOutputs --> RequestOutput)
+            self.detokenizer = Detokenizer(
+                engine_config.model_config.tokenizer)
+
+            self.engine_core_cleint
+
+        else:
+            self.llm_engine = LLMEngine.from_engine_args(
+                engine_args, usage_context=UsageContext.LLM_CLASS)
+
         self.request_counter = Counter()
 
     def get_tokenizer(self) -> AnyTokenizer:

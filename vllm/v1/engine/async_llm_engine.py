@@ -1,10 +1,6 @@
 import asyncio
 from typing import AsyncGenerator, Dict, Mapping, Optional, Type, Union
 
-import msgspec
-import zmq
-import zmq.asyncio
-
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
                          EngineConfig, LoadConfig, LoRAConfig, ModelConfig,
                          ObservabilityConfig, ParallelConfig,
@@ -20,11 +16,9 @@ from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import get_open_zmq_ipc_path
-from vllm.v1.engine import POLLING_TIMEOUT_MS, EngineCoreOutputs
 from vllm.v1.engine.async_stream import AsyncStream
 from vllm.v1.engine.detokenizer import Detokenizer
-from vllm.v1.engine.llm_engine_core import LLMEngineCoreProcess
+from vllm.v1.engine.core import EngineCoreClient
 from vllm.v1.engine.processor import Processor
 from vllm.v1.engine.protocol import LLMEngineProtocol
 from vllm.v1.executor.gpu_executor import GPUExecutor
@@ -71,25 +65,8 @@ class AsyncLLMEngine(LLMEngineProtocol):
         self.detokenizer = Detokenizer(model_config.tokenizer,
                                        stream_mode=True)
 
-        # IPC Setup
-        self.ctx = zmq.asyncio.Context()  # type: ignore[attr-defined]
-        self.encoder = msgspec.msgpack.Encoder()
-        self.decoder = msgspec.msgpack.Decoder(EngineCoreOutputs)
-
-        # Path for IPC.
-        ready_path = get_open_zmq_ipc_path()
-        output_path = get_open_zmq_ipc_path()
-        input_path = get_open_zmq_ipc_path()
-
-        # Get output (EngineCoreOutput) from LLMEngineCore.
-        self.output_socket = self.ctx.socket(zmq.constants.PULL)
-        self.output_socket.connect(output_path)
-
-        # Send input (EngineCoreRequest) to LLMEngineCore.
-        self.input_socket = self.ctx.socket(zmq.constants.PUSH)
-        self.input_socket.bind(input_path)
-
-        self.engine_core = LLMEngineCoreProcess.from_config(
+        # EngineCore (starts the engine in background process).
+        self.engine_core_client = EngineCoreClient(
             executor_class,
             model_config,
             cache_config,
@@ -103,21 +80,11 @@ class AsyncLLMEngine(LLMEngineProtocol):
             observability_config,
             prompt_adapter_config,
             usage_context,
-            input_path=input_path,
-            output_path=output_path,
-            ready_path=ready_path,
         )
-        self.engine_core.start()
-        LLMEngineCoreProcess.wait_for_engine_core(
-            engine_core_process=self.engine_core, ready_path=ready_path)
 
         # TODO: add background loop shielding
         # TODO: add AsyncEngineDeadError
         self.output_handler = asyncio.create_task(self.run_output_handler())
-
-    def __del__(self):
-        # Hack.
-        self.engine_core.kill()
 
     @classmethod
     def from_engine_args(
@@ -179,10 +146,7 @@ class AsyncLLMEngine(LLMEngineProtocol):
         self.detokenizer.add_request(detokenizer_req, stream)
 
         # 3) Add the EngineCoreRequest to EngineCore (separate process).
-        await self.input_socket.send_multipart(
-            (self.encoder.encode(engine_core_req), ),
-            copy=False,
-            flags=zmq.NOBLOCK)
+        await self.engine_core_client.add_request_async(engine_core_req)
 
         logger.debug("Added request %s.", request_id)
 
@@ -214,16 +178,19 @@ class AsyncLLMEngine(LLMEngineProtocol):
         # TODO: add weakref from current AsyncLLMEngine
         # TODO: shutdown remote worker execution loop
 
-        while True:
-            while await self.output_socket.poll(timeout=POLLING_TIMEOUT_MS
-                                                ) == 0:
-                logger.debug("Waiting for output from LLMCore.")
+        logger.debug("Starting output handler busy loop in background loop.")
 
-            frames = await self.output_socket.recv_multipart(copy=False)
-            engine_core_outputs = self.decoder.decode(frames[0].buffer).outputs
+        try:
+            while True:
+                logger.debug("About call get_output_async")
+                outputs = await self.engine_core_client.get_output_async()
+                logger.debug("Got EngineRequestOutput from EngineCore")
 
-            # Make RequestOutputs and push to the per-client output queues
-            # NOTE: we could simplify the Detokenizer code by returning the full
-            # List[RequestOutput] rather than pushing to the Queue at the
-            # expense of doing another loop through List[RequestOutput] here.
-            self.detokenizer.step_streaming(engine_core_outputs)
+                # Make RequestOutputs and push to the per-client output queues
+                # NOTE: we could simplify the Detokenizer code by returning full
+                # List[RequestOutput] rather than pushing to the Queue at the
+                # expense of doing another loop through List[RequestOutput].
+                self.detokenizer.step_streaming(outputs)
+                logger.debug("Stepped the Detokenizer.")
+        except BaseException as e:
+            logger.error(e)
