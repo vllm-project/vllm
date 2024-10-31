@@ -252,6 +252,11 @@ def should_slice(shape) -> bool:
     return (shape[0] % n_slices == 0 and shape[0] >= 128)
 
 
+def slice_residual(residual) -> List[torch.Tensor]:
+    n_slices = get_tensor_model_parallel_world_size()
+    return torch.chunk(residual, n_slices, dim=0)
+
+
 class MatmulRS(LinearMethodBase):
     #Fused Gemm-ReduceScatter without quantization.
 

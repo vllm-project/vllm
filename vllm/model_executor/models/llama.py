@@ -39,7 +39,8 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear,
-                                               should_slice)
+                                               should_slice,
+                                               slice_residual)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.pooler import Pooler, PoolingType
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -289,15 +290,11 @@ class LlamaDecoderLayer(nn.Module):
 
         pprint(f"RESIDUAL SHAPE = {residual.shape}")
 
-        def slices(residual) -> List[torch.Tensor]:
+        def slices(residual: torch.Tensor) -> List[torch.Tensor]:
             if not self.fuse_gemms or not should_slice(residual.shape):
-                pprint(f"SLICES TOO SMALL {[residual.shape]}")
                 return []
-
-            n_slices = get_tensor_model_parallel_world_size()
-            residual_slices = torch.chunk(residual, n_slices, dim=0)
-            pprint(f"SLICES {[r.shape for r in residual_slices]}")
-            return residual_slices
+            else:
+                return slice_residual(residual)
 
         orig_residual_shape = residual.shape
 
