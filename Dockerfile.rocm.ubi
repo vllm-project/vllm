@@ -41,11 +41,6 @@ gpgcheck=1\n\
 gpgkey=https://repo.radeon.com/rocm/rocm.gpg.key" > /etc/yum.repos.d/amdgpu.repo
 
 
-RUN microdnf -y install \
-        rocm-hip-libraries rocm-hip-runtime \
-        miopen-hip && \
-    microdnf clean all
-
 RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=cache,target=/root/.cache/uv \
     export version="$(awk -F. '{print $1"."$2}' <<< $ROCM_VERSION)" && \
@@ -205,7 +200,7 @@ RUN --mount=type=bind,from=build_amdsmi,src=/install,target=/install/amdsmi/ \
     --mount=type=cache,target=/root/.cache/pip \
     --mount=type=cache,target=/root/.cache/uv \
     export version="$(awk -F. '{print $1"."$2}' <<< $ROCM_VERSION)" && \
-    uv pip install -v  \
+    uv pip install \
         --index-strategy=unsafe-best-match \
         --extra-index-url "https://download.pytorch.org/whl/nightly/rocm${version}" \
         /install/amdsmi/*.whl\
@@ -216,9 +211,7 @@ RUN --mount=type=bind,from=build_amdsmi,src=/install,target=/install/amdsmi/ \
 RUN umask 002 && \
     useradd --uid 2000 --gid 0 vllm && \
     mkdir -p /licenses && \
-    chmod g+rwx $HOME /usr/src /workspace && \
-    chmod 0775 /var/log/rocm_smi_lib && \
-    chmod 0664 /var/log/rocm_smi_lib/*
+    chmod g+rwx $HOME /usr/src /workspace
 
 COPY LICENSE /licenses/vllm.md
 COPY examples/*.jinja /app/data/template/
