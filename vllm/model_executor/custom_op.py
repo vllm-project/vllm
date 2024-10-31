@@ -101,7 +101,7 @@ class CustomOp(nn.Module):
 
         return (CustomOp.default_on() or enabled) and not disabled
 
-    # On by default if VLLM_TORCH_COMPILE_LEVEL < CompilationLevel.INDUCTOR
+    # On by default if VLLM_TORCH_COMPILE_LEVEL < CompilationLevel.PIECEWISE
     # Specifying 'all' or 'none' in VLLM_CUSTOM_OPS takes precedence.
     @staticmethod
     @lru_cache()
@@ -109,7 +109,7 @@ class CustomOp(nn.Module):
         count_none = envs.VLLM_CUSTOM_OPS.count("none")
         count_all = envs.VLLM_CUSTOM_OPS.count("all")
         assert count_none + count_all <= 1, "Can only specify 'none' or 'all'"
-        return envs.VLLM_TORCH_COMPILE_LEVEL < CompilationLevel.INDUCTOR and \
+        return envs.VLLM_TORCH_COMPILE_LEVEL < CompilationLevel.PIECEWISE and \
             not count_none > 0 or count_all > 0
 
     # Dictionary of all custom ops (classes, indexed by registered name).
