@@ -345,6 +345,7 @@ def async_rewrite(graph: fx.Graph):
 
     return graph
 
+collective_fusion_pass = CollectiveFusionPass()
 
 class InductorHashCache:
     """
