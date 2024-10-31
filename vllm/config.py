@@ -1678,14 +1678,10 @@ class LoRAConfig:
     bias_enabled: bool = False
 
     def __post_init__(self):
-        # Setting the maximum rank to 256 should be able to satisfy the vast
-        # majority of applications.
-        possible_max_ranks = (8, 16, 32, 64, 128, 256)
         possible_lora_extra_vocab_size = (0, 256, 512)
-        if self.max_lora_rank not in possible_max_ranks:
+        if self.max_lora_rank < 1:
             raise ValueError(
-                f"max_lora_rank ({self.max_lora_rank}) must be one of "
-                f"{possible_max_ranks}.")
+                f"max_lora_rank ({self.max_lora_rank}) must be >= 1.")
         if self.lora_extra_vocab_size not in possible_lora_extra_vocab_size:
             raise ValueError(
                 f"lora_extra_vocab_size ({self.lora_extra_vocab_size}) "
