@@ -5,7 +5,6 @@ from typing import Callable, Dict, List, Optional, Tuple, Union
 import torch
 import torch.fx as fx
 
-from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
 from vllm.logger import init_logger
 
 from .compile_context import get_compile_context
@@ -159,7 +158,19 @@ def fix_functionalization(graph: fx.Graph):
     #     print(graph.python_code(root_module="self", verbose=True).src, file=f)
 
 
-def wrap_inductor(graph, example_inputs, additional_inductor_config):
+collective_fusion_pass = CollectiveFusionPass()
+
+
+def custom_passes(graph):
+    collective_fusion_pass(graph)
+    fix_functionalization(graph)
+
+
+def wrap_inductor(
+    graph,
+    example_inputs,
+    additional_inductor_config: Optional[Dict] = None
+):
     from torch._inductor import config
     torch._inductor.config._micro_pipeline_tp = True
     current_config = config.shallow_copy_dict()
@@ -171,7 +182,7 @@ def wrap_inductor(graph, example_inputs, additional_inductor_config):
         logger.warning(
             "post_grad_custom_post_pass is already set in the config. "
             "Overwriting it with the fix_functionalization")
-    current_config['post_grad_custom_post_pass'] = fix_functionalization
+    current_config['post_grad_custom_post_pass'] = custom_passes
     return compile_fx(graph, example_inputs, config_patches=current_config)
 
 
