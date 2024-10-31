@@ -128,12 +128,27 @@ def find_getitem(node: torch.fx.Node, idx: int) -> torch.fx.Node:
 
 
 class FusionPass(InductorPass):
+    # Patterns can only be registered once, so we store them as a class variable
+    _patterns: PatternMatcherPass = None
 
     def __init__(self, config: CompilationConfig):
         super().__init__(config)
 
-        self.my_patterns = PatternMatcherPass(pass_name="fusion_pass")
         self.matches: List[Match] = []
+        self.register_patterns()
+
+    @property
+    def patterns(self) -> PatternMatcherPass:
+        assert self.__class__._patterns is not None, \
+            "Accessing patterns before they were registered"
+        return self.__class__._patterns
+
+    def register_patterns(self):
+        # Only register patterns once
+        if self.__class__._patterns is not None:
+            return
+
+        self.__class__._patterns = PatternMatcherPass(pass_name="fusion_pass")
 
         # Fuse rms_norm + static_scaled_fp8_quant into
         # rms_norm_static_fp8_quant
@@ -145,7 +160,7 @@ class FusionPass(InductorPass):
             empty_fp32(1, 1)
         ]
         register_replacement(rms_pattern_static, rms_replacement_static,
-                             inputs, fwd_only, self.my_patterns)
+                             inputs, fwd_only, self.patterns)
 
         # Fuse fused_add_rms_norm + static_scaled_fp8_quant into
         # fused_add_rms_norm_static_fp8_quant
@@ -162,7 +177,7 @@ class FusionPass(InductorPass):
                              rms_replacement_residual_static,
                              inputs,
                              fwd_only,
-                             self.my_patterns,
+                             self.patterns,
                              extra_check=lambda m: self.record_match(m))
 
     def record_match(self, match: Match) -> bool:
@@ -252,7 +267,7 @@ class FusionPass(InductorPass):
     def __call__(self, graph: torch.fx.Graph):
         self.dump_graph(graph, "before_fusion")
 
-        count = self.my_patterns.apply(graph)
+        count = self.patterns.apply(graph)
         logger.info("Replaced %s patterns", count)
         self.dump_graph(graph, "after_pattern_match")
 
