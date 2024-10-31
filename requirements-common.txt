@@ -10,7 +10,7 @@ protobuf # Required by LlamaTokenizer.
 fastapi >= 0.107.0, < 0.113.0; python_version < '3.9'
 fastapi >= 0.107.0, != 0.113.*, != 0.114.0; python_version >= '3.9'
 aiohttp
-openai >= 1.40.0 # Ensure modern openai package (ensure types module present)
+openai >= 1.45.0 # Ensure modern openai package (ensure types module present and max_completion_tokens field support)
 uvicorn[standard]
 pydantic >= 2.9  # Required for fastapi >= 0.113.0
 pillow  # Required for image processing
