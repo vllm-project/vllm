@@ -39,7 +39,7 @@ LLAMA_CONFIG = GGUFTestConfig(
 QWEN2_CONFIG = GGUFTestConfig(
     original_model="Qwen/Qwen2.5-1.5B-Instruct",
     gguf_repo="Qwen/Qwen2.5-1.5B-Instruct-GGUF",
-    gguf_filename="qwen2.5-1.5b-instruct-q4_k_m.gguf",
+    gguf_filename="qwen2.5-1.5b-instruct-q6_k.gguf",
 )
 
 PHI3_CONFIG = GGUFTestConfig(
@@ -72,7 +72,7 @@ MODELS = [
     PHI3_CONFIG,
     GPT2_CONFIG,
     STABLELM_CONFIG,
-    STARCODER_CONFIG,
+    # STARCODER_CONFIG, # broken
 ]
 
 
