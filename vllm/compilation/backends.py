@@ -170,7 +170,11 @@ def wrap_inductor(graph,
                   example_inputs,
                   additional_inductor_config: Optional[Dict] = None):
     from torch._inductor import config
+
     torch._inductor.config._micro_pipeline_tp = True
+    # Set to False to avoid infinite recursion logging
+    torch._inductor.config.implicit_fallbacks = True
+
     current_config = config.shallow_copy_dict()
     from torch._inductor.compile_fx import compile_fx
 

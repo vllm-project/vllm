@@ -210,7 +210,6 @@ class GroupCoordinator:
         self.use_custom_allreduce = use_custom_allreduce
         self.use_tpu_communicator = use_tpu_communicator
 
-        # Initialize pynvshmem
         if has_flux and torch.distributed.get_world_size(
                 self.device_group) > 1:
             flux.init_flux_shm(self.device_group)
