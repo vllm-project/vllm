@@ -17,7 +17,7 @@ async def test_tool_call_and_choice(client: openai.AsyncOpenAI):
     chat_completion = await client.chat.completions.create(
         messages=MESSAGES_ASKING_FOR_TOOLS,
         temperature=0,
-        max_tokens=100,
+        max_completion_tokens=100,
         model=model_name,
         tools=[WEATHER_TOOL, SEARCH_TOOL],
         logprobs=False)
@@ -61,7 +61,7 @@ async def test_tool_call_and_choice(client: openai.AsyncOpenAI):
         model=model_name,
         messages=MESSAGES_ASKING_FOR_TOOLS,
         temperature=0,
-        max_tokens=100,
+        max_completion_tokens=100,
         tools=[WEATHER_TOOL, SEARCH_TOOL],
         logprobs=False,
         stream=True)
@@ -142,7 +142,7 @@ async def test_tool_call_with_results(client: openai.AsyncOpenAI):
     chat_completion = await client.chat.completions.create(
         messages=MESSAGES_WITH_TOOL_RESPONSE,
         temperature=0,
-        max_tokens=100,
+        max_completion_tokens=100,
         model=model_name,
         tools=[WEATHER_TOOL, SEARCH_TOOL],
         logprobs=False)
@@ -159,7 +159,7 @@ async def test_tool_call_with_results(client: openai.AsyncOpenAI):
     stream = await client.chat.completions.create(
         messages=MESSAGES_WITH_TOOL_RESPONSE,
         temperature=0,
-        max_tokens=100,
+        max_completion_tokens=100,
         model=model_name,
         tools=[WEATHER_TOOL, SEARCH_TOOL],
         logprobs=False,
