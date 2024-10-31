@@ -112,7 +112,7 @@ class AsyncLLMEngine(LLMEngineProtocol):
         context = multiprocessing.get_context("spawn")
 
         # Run LLMEngineCore busy loop in background process.
-        self.engine_core_process = context.Process(target=self.run_engine_core,
+        self.engine_core = context.Process(target=self.run_engine_core,
                                                    args=(
                                                        executor_class,
                                                        model_config,
@@ -137,7 +137,7 @@ class AsyncLLMEngine(LLMEngineProtocol):
                                                        "ready_path":
                                                        self.ready_path,
                                                    })
-        self.engine_core_process.start()
+        self.engine_core.start()
 
         # TODO: add background loop shielding
         # TODO: add AsyncEngineDeadError
@@ -145,7 +145,7 @@ class AsyncLLMEngine(LLMEngineProtocol):
 
     def __del__(self):
         # Hack.
-        self.engine_core_process.kill()
+        self.engine_core.kill()
 
     @staticmethod
     def run_engine_core(*args, **kwargs):

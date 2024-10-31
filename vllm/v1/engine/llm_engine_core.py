@@ -40,6 +40,8 @@ class LLMEngineCore:
         output_path: Optional[str] = None,
         ready_path: Optional[str] = None,
     ):
+        assert model_config.task != "embedding"
+
         logger.info(
             "Initializing an LLM engine (v%s) with config: "
             "model=%r, speculative_config=%r, tokenizer=%r, "

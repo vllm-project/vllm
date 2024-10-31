@@ -1,8 +1,9 @@
 from typing import Dict, Iterable, List, Mapping, Optional, Type, Union
 
-from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig, LoadConfig,
-                         LoRAConfig, ModelConfig, ObservabilityConfig,
-                         ParallelConfig, PromptAdapterConfig, SchedulerConfig,
+from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
+                         EngineConfig, LoadConfig, LoRAConfig, ModelConfig,
+                         ObservabilityConfig, ParallelConfig,
+                         PromptAdapterConfig, SchedulerConfig,
                          SpeculativeConfig)
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics_types import StatLoggerBase
@@ -15,13 +16,14 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.llm_engine_core import LLMEngineCore
-from vllm.v1.engine.protocol import LLMEngineProtocol
+from vllm.v1.engine.detokenizer import Detokenizer
+from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.gpu_executor import GPUExecutor
 
 logger = init_logger(__name__)
 
 
-class LLMEngine(LLMEngineProtocol):
+class LLMEngine:
 
     def __init__(
         self,
@@ -52,42 +54,29 @@ class LLMEngine(LLMEngineProtocol):
             scheduler_config.max_num_seqs = 1024
             scheduler_config.max_num_batched_tokens = 2048
 
-        super().__init__(
-            model_config,
-            cache_config,
-            parallel_config,
-            scheduler_config,
-            device_config,
-            load_config,
-            lora_config,
-            speculative_config,
-            decoding_config,
-            observability_config,
-            prompt_adapter_config,
-            executor_class,
-            log_stats,
-            usage_context,
-            stat_loggers,
-            input_registry,
-            use_cached_outputs,
-        )
+        # Processor (convert Inputs --> EngineCoreRequests)
+        self.processor = Processor(model_config, parallel_config,
+                                   scheduler_config, lora_config,
+                                   input_registry)
 
-        # TODO: some of these configs will be mutated by
-        # EngineCore (e.g. cache_config). It would be better
-        # if we had one source of truth.
+        # Detokenizer (converts EngineCoreOutputs --> RequestOutput)
+        self.detokenizer = Detokenizer(model_config.tokenizer)
+
+        # LLMEngineCore (core engine)
         self.engine_core = LLMEngineCore(
             executor_class=executor_class,
-            model_config=self.model_config,
-            cache_config=self.cache_config,
-            parallel_config=self.parallel_config,
-            scheduler_config=self.scheduler_config,
-            device_config=self.device_config,
-            load_config=self.load_config,
-            lora_config=self.lora_config,
-            speculative_config=self.speculative_config,
-            decoding_config=self.decoding_config,
-            observability_config=self.observability_config,
-            prompt_adapter_config=self.prompt_adapter_config,
+            model_config=model_config,
+            cache_config=cache_config,
+            parallel_config=parallel_config,
+            scheduler_config=scheduler_config,
+            device_config=device_config,
+            load_config=load_config,
+            lora_config=lora_config,
+            speculative_config=speculative_config,
+            decoding_config=(decoding_config or DecodingConfig()),
+            observability_config=(observability_config
+                                  or ObservabilityConfig()),
+            prompt_adapter_config=prompt_adapter_config,
         )
 
     @classmethod
@@ -110,6 +99,10 @@ class LLMEngine(LLMEngineProtocol):
             stat_loggers=stat_loggers,
         )
         return engine
+
+    @classmethod
+    def _get_executor_cls(cls, engine_config: EngineConfig):
+        return GPUExecutor
 
     def add_request(
         self,
@@ -136,7 +129,7 @@ class LLMEngine(LLMEngineProtocol):
 
     def abort_request(self, request_id: Union[str, Iterable[str]]) -> None:
         # TODO: send to EngineCore
-        # TODO: send to Deoktenizer
+        # TODO: send to Detokenizer
         raise NotImplementedError
 
     def step(self) -> List[RequestOutput]:
@@ -148,3 +141,9 @@ class LLMEngine(LLMEngineProtocol):
         request_outputs = self.detokenizer.step(engine_core_outputs)
 
         return request_outputs
+
+    def get_num_unfinished_requests(self) -> int:
+        return self.detokenizer.get_num_unfinished_requests()
+
+    def has_unfinished_requests(self) -> bool:
+        return self.detokenizer.has_unfinished_requests()

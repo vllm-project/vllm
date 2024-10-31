@@ -1,20 +1,15 @@
-from abc import ABC
-import time
-from typing import Dict, Optional, Type
+import multiprocessing
 
-from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
-                         EngineConfig, LoadConfig, LoRAConfig, ModelConfig,
-                         ObservabilityConfig, ParallelConfig,
-                         PromptAdapterConfig, SchedulerConfig,
-                         SpeculativeConfig)
-from vllm.engine.metrics_types import StatLoggerBase
-from vllm.inputs import INPUT_REGISTRY, InputRegistry
+from abc import ABC, abstractmethod
+from typing import Union
+
+from vllm.config import (DecodingConfig, EngineConfig, LoRAConfig, 
+                         ModelConfig, ParallelConfig, SchedulerConfig)
 from vllm.logger import init_logger
-from vllm.usage.usage_lib import UsageContext
+from vllm.v1.executor.gpu_executor import GPUExecutor
 from vllm.v1.engine.detokenizer import Detokenizer
 from vllm.v1.engine.processor import Processor
-from vllm.v1.executor.gpu_executor import GPUExecutor
-from vllm.version import __version__ as VLLM_VERSION
+from vllm.v1.engine.llm_engine_core import LLMEngineCore
 
 logger = init_logger(__name__)
 
@@ -22,52 +17,28 @@ logger = init_logger(__name__)
 class LLMEngineProtocol(ABC):
     """Protocol for LLMEngine and AsyncLLMEngine"""
 
-    def __init__(
-        self,
-        model_config: ModelConfig,
-        cache_config: CacheConfig,
-        parallel_config: ParallelConfig,
-        scheduler_config: SchedulerConfig,
-        device_config: DeviceConfig,
-        load_config: LoadConfig,
-        lora_config: Optional[LoRAConfig],
-        speculative_config: Optional[SpeculativeConfig],
-        decoding_config: Optional[DecodingConfig],
-        observability_config: Optional[ObservabilityConfig],
-        prompt_adapter_config: Optional[PromptAdapterConfig],
-        executor_class: Type[GPUExecutor],
-        log_stats: bool,
-        usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
-        stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
-        input_registry: InputRegistry = INPUT_REGISTRY,
-        use_cached_outputs: bool = False,
-    ):
-        self.model_config = model_config
-        assert self.model_config.task != "embedding"
-        self.cache_config = cache_config
-        self.lora_config = lora_config
-        self.parallel_config = parallel_config
-        self.scheduler_config = scheduler_config
-        self.device_config = device_config
-        self.speculative_config = speculative_config
-        self.load_config = load_config
-        self.decoding_config = decoding_config or DecodingConfig()
-        self.prompt_adapter_config = prompt_adapter_config
-        self.observability_config = observability_config or ObservabilityConfig(
-        )
-        self.log_stats = log_stats
+    engine_core: Union[LLMEngineCore, multiprocessing.Process]
+    detokenizer: Detokenizer
+    processor: Processor
+    
+    # TODO: These are needed for the get_xxx_config methods
+    # I think these are basically dead code. Will see if this
+    # can be removed
 
-        self.processor = Processor(model_config, parallel_config,
-                                   scheduler_config, lora_config,
-                                   input_registry)
-        self.detokenizer = Detokenizer(self.model_config.tokenizer)
+    model_config: ModelConfig
+    parallel_config: ParallelConfig
+    decoding_config: DecodingConfig
+    scheduler_config: SchedulerConfig
+    lora_config: LoRAConfig
 
     def stop_remote_worker_execution_loop(self) -> None:
         raise NotImplementedError("TP not implemented yet.")
 
+    @abstractmethod
     def get_num_unfinished_requests(self) -> int:
         return self.detokenizer.get_num_unfinished_requests()
 
+    @abstractmethod
     def has_unfinished_requests(self) -> bool:
         return self.detokenizer.has_unfinished_requests()
 
