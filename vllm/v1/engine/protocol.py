@@ -1,4 +1,6 @@
+from multiprocessing.process import BaseProcess
 from abc import ABC
+from typing import Union
 
 from vllm.config import (DecodingConfig, EngineConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig)
@@ -14,9 +16,9 @@ logger = init_logger(__name__)
 class LLMEngineProtocol(ABC):
     """Protocol for LLMEngine and AsyncLLMEngine"""
 
-    engine_core: LLMEngineCore
     detokenizer: Detokenizer
     processor: Processor
+    engine_core: Union[LLMEngineCore, BaseProcess]
 
     # TODO: These are needed for the get_xxx_config methods
     # I think these are basically dead code (other than

@@ -60,13 +60,6 @@ class AsyncLLMEngine(LLMEngineProtocol):
     ) -> None:
         assert start_engine_loop
 
-        if usage_context == UsageContext.LLM_CLASS:
-            scheduler_config.max_num_seqs = 1024
-            scheduler_config.max_num_batched_tokens = 8192
-        elif usage_context == UsageContext.OPENAI_API_SERVER:
-            scheduler_config.max_num_seqs = 1024
-            scheduler_config.max_num_batched_tokens = 2048
-
         self.log_requests = log_requests
 
         # Processor (converts Inputs --> EngineCoreRequests)
@@ -109,6 +102,7 @@ class AsyncLLMEngine(LLMEngineProtocol):
             decoding_config,
             observability_config,
             prompt_adapter_config,
+            usage_context,
             input_path=input_path,
             output_path=output_path,
             ready_path=ready_path,

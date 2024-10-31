@@ -40,6 +40,8 @@ class LLMEngineCore:
         prompt_adapter_config: Optional[PromptAdapterConfig],
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
     ):
+        # Override the configs for V1.
+        # FIXME
         if usage_context == UsageContext.LLM_CLASS:
             scheduler_config.max_num_seqs = 1024
             scheduler_config.max_num_batched_tokens = 8192
