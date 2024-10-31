@@ -16,6 +16,7 @@ except ImportError:
     FLASHINFER_WORKSPACE_BUFFER_SIZE = 0
 
 import torch
+from torch.library import Library
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
@@ -785,8 +786,6 @@ class FlashInferImpl(AttentionImpl):
         )
 
 
-@torch.library.custom_op("vllm::unified_flash_infer",
-                         mutates_args=["kv_cache"])
 def unified_flash_infer(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -906,8 +905,7 @@ def unified_flash_infer(
     return output.view(num_tokens, hidden_size)
 
 
-@unified_flash_infer.register_fake
-def _(
+def unified_flash_infer_fake(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
@@ -924,3 +922,11 @@ def _(
     logits_soft_cap: Optional[float] = None,
 ) -> torch.Tensor:
     return torch.empty_like(query).contiguous()
+
+
+my_lib = Library("vllm", "FRAGMENT")
+my_lib.define(
+    "unified_flash_infer(Tensor query, Tensor key, Tensor value, SymInt num_heads, SymInt head_size, SymInt num_kv_heads, Tensor(a6!) kv_cache, str kv_cache_dtype, float k_scale, float v_scale, float softmax_scale, SymInt[]? window_size=None, Tensor? alibi_slopes=None, float? logits_soft_cap=None) -> Tensor"  # noqa
+)
+my_lib.impl("unified_flash_infer", unified_flash_infer, "CUDA")
+my_lib._register_fake("unified_flash_infer", unified_flash_infer_fake)
