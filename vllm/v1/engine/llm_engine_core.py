@@ -22,6 +22,7 @@ logger = init_logger(__name__)
 
 LLM_ENGINE_CORE_READY_STR = "READY"
 
+
 class LLMEngineCore:
 
     def __init__(
@@ -149,7 +150,7 @@ class LLMEngineCore:
 
 
 class LLMEngineCoreProcess(LLMEngineCore):
-        
+
     @staticmethod
     def wait_for_engine_core(
         engine_core_process: BaseProcess,
@@ -158,7 +159,6 @@ class LLMEngineCoreProcess(LLMEngineCore):
         """Wait until the LLMEngineCore is ready."""
 
         try:
-            # Non-asyncio context so this can run in __init__
             sync_ctx = zmq.Context()  # type: ignore[attr-defined]
             socket = sync_ctx.socket(zmq.constants.PULL)
             socket.connect(ready_path)

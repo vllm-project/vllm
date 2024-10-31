@@ -1,5 +1,4 @@
 import asyncio
-from multiprocessing.process import BaseProcess
 from typing import AsyncGenerator, Dict, Mapping, Optional, Type, Union
 
 import msgspec
@@ -108,8 +107,7 @@ class AsyncLLMEngine(LLMEngineProtocol):
         )
         self.engine_core.start()
         LLMEngineCoreProcess.wait_for_engine_core(
-            engine_core_process=self.engine_core, 
-            ready_path=ready_path)
+            engine_core_process=self.engine_core, ready_path=ready_path)
 
         # TODO: add background loop shielding
         # TODO: add AsyncEngineDeadError
@@ -147,7 +145,6 @@ class AsyncLLMEngine(LLMEngineProtocol):
             stat_loggers=stat_loggers,
         )
         return engine
-
 
     async def add_request(
         self,
@@ -216,7 +213,8 @@ class AsyncLLMEngine(LLMEngineProtocol):
         # TODO: shutdown remote worker execution loop
 
         while True:
-            while await self.output_socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
+            while await self.output_socket.poll(timeout=POLLING_TIMEOUT_MS
+                                                ) == 0:
                 logger.debug("Waiting for output from LLMCore.")
 
             frames = await self.output_socket.recv_multipart(copy=False)
