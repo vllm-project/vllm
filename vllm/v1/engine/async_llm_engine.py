@@ -24,7 +24,9 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils import get_open_zmq_ipc_path
 from vllm.v1.engine import LLM_ENGINE_CORE_READY_STR, EngineCoreOutputs
 from vllm.v1.engine.async_stream import AsyncStream
+from vllm.v1.engine.detokenizer import Detokenizer
 from vllm.v1.engine.llm_engine_core import LLMEngineCore
+from vllm.v1.engine.processor import Processor
 from vllm.v1.engine.protocol import LLMEngineProtocol
 from vllm.v1.executor.gpu_executor import GPUExecutor
 
@@ -65,10 +67,17 @@ class AsyncLLMEngine(LLMEngineProtocol):
             scheduler_config.max_num_seqs = 1024
             scheduler_config.max_num_batched_tokens = 2048
 
-        # TODO: remove
-        self.detokenizer.stream_mode = True
         self.log_requests = log_requests
 
+        # Processor (convert Inputs --> EngineCoreRequests)
+        self.processor = Processor(model_config, parallel_config,
+                                   scheduler_config, lora_config,
+                                   input_registry)
+
+        # Detokenizer (converts EngineCoreOutputs --> RequestOutput)
+        self.detokenizer = Detokenizer(model_config.tokenizer,
+                                       stream_mode=True)
+        
         # IPC Setup
         self.ctx = zmq.asyncio.Context()  # type: ignore[attr-defined]
         self.encoder = msgspec.msgpack.Encoder()

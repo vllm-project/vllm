@@ -21,8 +21,8 @@ class LLMEngineProtocol(ABC):
     processor: Processor
 
     # TODO: These are needed for the get_xxx_config methods
-    # I think these are basically dead code. Will see if this
-    # can be removed
+    # I think these are basically dead code (other than 
+    # get_model_config and mock testing)
 
     model_config: ModelConfig
     parallel_config: ParallelConfig
@@ -33,11 +33,9 @@ class LLMEngineProtocol(ABC):
     def stop_remote_worker_execution_loop(self) -> None:
         raise NotImplementedError("TP not implemented yet.")
 
-    @abstractmethod
     def get_num_unfinished_requests(self) -> int:
         return self.detokenizer.get_num_unfinished_requests()
 
-    @abstractmethod
     def has_unfinished_requests(self) -> bool:
         return self.detokenizer.has_unfinished_requests()
 
