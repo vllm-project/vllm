@@ -254,9 +254,10 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
     compilation configs.
     """
 
-    def __init__(self, gm, compile_submod_names: List[str],
+    def __init__(self, module: torch.fx.GraphModule,
+                 compile_submod_names: List[str],
                  compilation_configs: CompilationConfig, graph_pool):
-        super().__init__(gm)
+        super().__init__(module)
         from torch._guards import detect_fake_mode
         self.fake_mode = detect_fake_mode()
         self.compile_submod_names = compile_submod_names
@@ -290,7 +291,7 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
                 do_logging=not self.have_seen_first_graph,
                 use_inductor=self.compilation_configs.use_inductor)
 
-            self.gm.__dict__[target] = PiecewiseBackend(
+            self.module.__dict__[target] = PiecewiseBackend(
                 submod, self.compilation_configs, self.graph_pool,
                 not self.have_seen_first_graph, sym_shape_indices,
                 compiled_graph_for_general_shape)
