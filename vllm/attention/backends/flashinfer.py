@@ -16,7 +16,6 @@ except ImportError:
     FLASHINFER_WORKSPACE_BUFFER_SIZE = 0
 
 import torch
-from torch.library import Library
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
@@ -30,7 +29,7 @@ from vllm.attention.backends.utils import (PAD_SLOT_ID, compute_slot_mapping,
 from vllm.attention.ops.paged_attn import PagedAttention
 from vllm.forward_context import get_forward_context
 from vllm.utils import (async_tensor_h2d, get_kv_cache_torch_dtype,
-                        make_tensor_with_pad)
+                        make_tensor_with_pad, direct_register_custom_op)
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import (ModelInputForGPUBuilder,
@@ -924,9 +923,10 @@ def unified_flash_infer_fake(
     return torch.empty_like(query).contiguous()
 
 
-my_lib = Library("vllm", "FRAGMENT")
-my_lib.define(
-    "unified_flash_infer" +
-    torch.library.infer_schema(unified_flash_infer, mutates_args=["out"]))
-my_lib.impl("unified_flash_infer", unified_flash_infer, "CUDA")
-my_lib._register_fake("unified_flash_infer", unified_flash_infer_fake)
+direct_register_custom_op(
+    library_name="vllm",
+    op_name="unified_flash_infer",
+    op_func=unified_flash_infer,
+    mutates_args=["kv_cache"],
+    fake_impl=unified_flash_infer_fake,
+)
