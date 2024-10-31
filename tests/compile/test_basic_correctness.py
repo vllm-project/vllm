@@ -60,7 +60,7 @@ test_settings = [
     ),
     TestSetting(
         model="microsoft/Phi-3.5-vision-instruct",
-        model_args=["--trust-remote-code"],
+        model_args=["--trust-remote-code", "--max-model-len", "2048"],
         pp_size=2,
         tp_size=1,
         attn_backend="FLASH_ATTN",

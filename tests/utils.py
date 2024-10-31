@@ -274,6 +274,26 @@ def _test_completion(
     return results
 
 
+def _test_completion_close(
+    client: openai.OpenAI,
+    model: str,
+    prompt: str,
+):
+    results = []
+
+    # test with text prompt
+    completion = client.completions.create(model=model,
+                                           prompt=prompt,
+                                           max_tokens=1,
+                                           logprobs=5,
+                                           temperature=0.0)
+
+    results.append({
+        "test": "completion_close",
+        "logprobs": completion.choices[0].logprobs,
+    })
+
+
 def _test_embeddings(
     client: openai.OpenAI,
     model: str,
@@ -467,6 +487,8 @@ def compare_all_settings(model: str,
 
             if method == "generate":
                 results += _test_completion(client, model, prompt, token_ids)
+            elif method == "generate_close":
+                results += _test_completion_close(client, model, prompt)
             elif method == "generate_with_image":
                 results += _test_image_text(
                     client, model,
