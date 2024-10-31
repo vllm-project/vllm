@@ -7,6 +7,7 @@ import os
 from typing import List, NamedTuple, Type
 
 import pytest
+import transformers
 from huggingface_hub import hf_hub_download
 from transformers import AutoTokenizer
 
@@ -24,11 +25,14 @@ class GGUFTestConfig(NamedTuple):
     original_model: str
     gguf_repo: str
     gguf_filename: str
+    run_requirement: bool = True
 
     @property
     def gguf_model(self):
         return hf_hub_download(self.gguf_repo, filename=self.gguf_filename)
 
+
+TRANSFORMERS_REQUIREMENT = transformers.__version__.startswith("4.46.0")
 
 LLAMA_CONFIG = GGUFTestConfig(
     original_model="meta-llama/Llama-3.2-1B-Instruct",
@@ -46,24 +50,28 @@ PHI3_CONFIG = GGUFTestConfig(
     original_model="microsoft/Phi-3.5-mini-instruct",
     gguf_repo="bartowski/Phi-3.5-mini-instruct-GGUF",
     gguf_filename="Phi-3.5-mini-instruct-IQ4_XS.gguf",
+    run_requirement=TRANSFORMERS_REQUIREMENT,
 )
 
 GPT2_CONFIG = GGUFTestConfig(
     original_model="openai-community/gpt2-large",
     gguf_repo="QuantFactory/gpt2-large-GGUF",
     gguf_filename="gpt2-large.Q4_K_M.gguf",
+    run_requirement=TRANSFORMERS_REQUIREMENT,
 )
 
 STABLELM_CONFIG = GGUFTestConfig(
     original_model="stabilityai/stablelm-3b-4e1t",
     gguf_repo="afrideva/stablelm-3b-4e1t-GGUF",
     gguf_filename="stablelm-3b-4e1t.q4_k_m.gguf",
+    run_requirement=TRANSFORMERS_REQUIREMENT,
 )
 
 STARCODER_CONFIG = GGUFTestConfig(
     original_model="bigcode/starcoder2-3b",
     gguf_repo="QuantFactory/starcoder2-3b-GGUF",
     gguf_filename="starcoder2-3b.Q6_K.gguf",
+    run_requirement=TRANSFORMERS_REQUIREMENT,
 )
 
 MODELS = [
@@ -95,6 +103,10 @@ def test_models(
 ) -> None:
     if num_gpus_available < tp_size:
         pytest.skip(f"Not enough GPUs for tensor parallelism {tp_size}")
+
+    if not model.run_requirement:
+        pytest.skip(
+            f"Model not supported in transformers=={transformers.__version__}")
 
     tokenizer = AutoTokenizer.from_pretrained(model.original_model)
     if tokenizer.chat_template is not None:
