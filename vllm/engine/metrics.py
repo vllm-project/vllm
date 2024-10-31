@@ -179,6 +179,12 @@ class Metrics:
             labelnames=labelnames,
             buckets=[1, 2, 5, 10, 20],
         )
+        self.histogram_max_tokens_request = self._histogram_cls(
+            name="vllm:request_params_max_tokens",
+            documentation="Histogram of the max_tokens request parameter.",
+            labelnames=labelnames,
+            buckets=build_1_2_5_buckets(max_model_len),
+        )
         self.counter_request_success = self._counter_cls(
             name="vllm:request_success_total",
             documentation="Count of successfully processed requests.",
@@ -547,6 +553,8 @@ class PrometheusStatLogger(StatLoggerBase):
             self.metrics.histogram_num_generation_tokens_request,
             stats.num_generation_tokens_requests)
         self._log_histogram(self.metrics.histogram_n_request, stats.n_requests)
+        self._log_histogram(self.metrics.histogram_max_tokens_request,
+                            stats.max_tokens_requests)
 
     def _log_prometheus_interval(self, prompt_throughput: float,
                                  generation_throughput: float) -> None:

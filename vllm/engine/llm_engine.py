@@ -1685,6 +1685,7 @@ class LLMEngine:
         num_prompt_tokens_requests: List[int] = []
         num_generation_tokens_requests: List[int] = []
         n_requests: List[int] = []
+        max_tokens_requests: List[int] = []
         finished_reason_requests: List[str] = []
 
         # Lora requests
@@ -1792,6 +1793,7 @@ class LLMEngine:
                     ])
                     if seq_group.sampling_params is not None:
                         n_requests.append(seq_group.sampling_params.n)
+                        max_tokens_requests.append(seq_group.sampling_params.max_tokens)
                     finished_reason_requests.extend([
                         SequenceStatus.get_finished_reason(seq.status)
                         for seq in seq_group.get_finished_seqs()
@@ -1847,6 +1849,7 @@ class LLMEngine:
             num_prompt_tokens_requests=num_prompt_tokens_requests,
             num_generation_tokens_requests=num_generation_tokens_requests,
             n_requests=n_requests,
+            max_tokens_requests=max_tokens_requests,
             finished_reason_requests=finished_reason_requests,
             max_lora=str(max_lora_stat),
             waiting_lora_adapters=list(waiting_lora_adapters.keys()),
