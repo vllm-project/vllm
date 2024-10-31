@@ -52,6 +52,7 @@ find_isa(${CPUINFO} "avx2" AVX2_FOUND)
 find_isa(${CPUINFO} "avx512f" AVX512_FOUND)
 find_isa(${CPUINFO} "POWER10" POWER10_FOUND)
 find_isa(${CPUINFO} "POWER9" POWER9_FOUND)
+find_isa(${CPUINFO} "asimd" NEON_FOUND)
 
 if (AVX512_FOUND AND NOT AVX512_DISABLED)
     list(APPEND CXX_COMPILE_FLAGS
@@ -81,8 +82,13 @@ elseif (POWER9_FOUND OR POWER10_FOUND)
         "-mvsx"
         "-mcpu=native"
         "-mtune=native")
+elseif (NEON_FOUND)
+    message(STATUS "ARM NEON detected")
+    list(APPEND CXX_COMPILE_FLAGS
+        "-mcpu=native"
+        "-mtune=native")
 else()
-    message(FATAL_ERROR "vLLM CPU backend requires AVX512 or AVX2 or Power9+ ISA support.")
+    message(FATAL_ERROR "vLLM CPU backend requires AVX512 or AVX2 or Power9+ or NEON ISA support.")
 endif()
 
 #

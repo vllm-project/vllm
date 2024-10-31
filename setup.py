@@ -448,7 +448,12 @@ def get_requirements() -> List[str]:
     elif _is_tpu():
         requirements = _read_requirements("requirements-tpu.txt")
     elif _is_cpu():
-        requirements = _read_requirements("requirements-cpu.txt")
+        import platform
+        machine = platform.machine()
+        if machine == 'arm64' or machine == 'aarch64':
+            requirements = _read_requirements("requirements-arm.txt")
+        else:
+            requirements = _read_requirements("requirements-cpu.txt")
     elif _is_xpu():
         requirements = _read_requirements("requirements-xpu.txt")
     else:
