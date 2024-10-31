@@ -8,13 +8,21 @@ from torch._inductor.pattern_matcher import PatternMatcherPass, register_replace
 
 from vllm.compilation.inductor_pass import InductorPass
 from vllm.compilation.utils import find_fn, find_auto_fn, find_getitem, last_node_in_match
-from vllm.distributed.parallel_state import get_tp_group, get_tensor_model_parallel_world_size, get_tensor_model_parallel_rank
+from vllm.distributed.parallel_state import get_tp_group, get_world_group, get_tensor_model_parallel_world_size, get_tensor_model_parallel_rank
 from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.model_executor.layers.linear import should_slice, slice_residual
 
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
+
+# TODO: factor out somehow
+TP_GROUP_NAME = "tp:0"
+
+
+# how to do this properly?
+def get_world_name() -> str:
+    return torch.distributed.group.WORLD.group_name
 
 
 def match_gemm_rs_ag_gemm(
@@ -30,7 +38,7 @@ def match_gemm_rs_ag_gemm(
     all_reduce = torch.ops.higher_order.auto_functionalized(
         torch.ops.vllm.inplace_all_reduce.default,
         tensor = mm_1,
-        group_name = 'tp:0'  # how to deal with groupname?
+        group_name = TP_GROUP_NAME  # how to deal with groupname?  capture w/lambda
     )
     all_reduce = all_reduce[1]
 
@@ -82,7 +90,7 @@ def gemm_rs_ag_gemm(residual: torch.Tensor,
         getitem_30a = getitem_30.clone()
         return getitem_35, getitem_30, getitem_30a
     else:
-        group_name = torch.distributed.group.WORLD.group_name # TODO: factor out to setup
+        group_name = get_world_name()
         permute_3 = torch.ops.aten.permute.default(gemm_1_weights, [1, 0])
         clone = torch.ops.aten.clone.default(permute_3, memory_format = torch.contiguous_format)
         output = torch.ops.symm_mem.fused_matmul_reduce_scatter.default(gemm_1_activations, clone, 'avg', 0, group_name)
@@ -141,7 +149,7 @@ def match_final(my_residual: torch.Tensor,
     all_reduce = torch.ops.higher_order.auto_functionalized(
         torch.ops.vllm.inplace_all_reduce.default,
         tensor = mm_1,
-        group_name = 'tp:0' # TODO: not same as group name
+        group_name = TP_GROUP_NAME
     )
     all_reduce = all_reduce[1]
 
@@ -162,16 +170,14 @@ def replace_final(my_residual: torch.Tensor,
                   gemm_1_weights: torch.Tensor,
                   gemm_1_activations: torch.Tensor,
                   rms_norm_weights: torch.Tensor) -> torch.Tensor:
-    tp_group_name = "tp:0" # f"tp:{group_name}" # TODO: not same as group name
-
     permute_254 = torch.ops.aten.permute.default(gemm_1_weights, [1, 0])
     mm_1 = torch.ops.aten.mm.default(gemm_1_activations, permute_254)
-    auto_functionalized_161 = torch.ops.higher_order.auto_functionalized(torch.ops.vllm.inplace_all_reduce.default, tensor = mm_1, group_name = tp_group_name)
+    auto_functionalized_161 = torch.ops.higher_order.auto_functionalized(torch.ops.vllm.inplace_all_reduce.default, tensor = mm_1, group_name = TP_GROUP_NAME)
     getitem_1217 = auto_functionalized_161[1]
 
     # is this the right thing to call it on?
     if should_slice(gemm_1_activations.shape):
-        group_name = torch.distributed.group.WORLD.group_name
+        group_name = get_world_name()
         world_size = get_tensor_model_parallel_world_size()
         all_gather_into_tensor = torch.ops._c10d_functional.all_gather_into_tensor.default(my_residual, world_size, group_name)
         wait_tensor = torch.ops._c10d_functional.wait_tensor.default(all_gather_into_tensor)
