@@ -32,10 +32,9 @@ def test_limit_mm_per_prompt_parser(arg, expected):
 
 def test_valid_pooling_config():
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
-    args = parser.parse_args(["--pooling-type=MEAN", "--normalize=True"])
+    args = parser.parse_args(["--pooling-type=MEAN"])
     engine_args = EngineArgs.from_cli_args(args=args)
     assert engine_args.pooling_type == 'MEAN'
-    assert engine_args.normalize
 
 
 @pytest.mark.parametrize(

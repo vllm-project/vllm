@@ -18,7 +18,6 @@ from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
 
 from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
-from vllm.model_executor.layers.pooler import PoolingType
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.transformers_utils.configs import (ChatGLMConfig, DbrxConfig,
@@ -337,7 +336,7 @@ def get_pooling_config_name(pooling_name):
     if "lasttoken" in pooling_name:
         pooling_name = "last"
 
-    supported_pooling_types = [i.name for i in PoolingType]
+    supported_pooling_types = ['LAST', 'ALL', 'CLS', 'STEP', 'MEAN']
     pooling_type_name = pooling_name.upper()
 
     try:

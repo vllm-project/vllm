@@ -1,7 +1,7 @@
 import pytest
 
 from vllm.config import ModelConfig
-from vllm.model_executor.layers.pooler import PoolingConfig, PoolingType
+from vllm.model_executor.layers.pooler import PoolingType
 
 
 @pytest.mark.parametrize(("model_id", "expected_task"), [
@@ -116,12 +116,15 @@ def test_get_pooling_config():
         revision=None,
     )
 
-    minilm_pooling_config = minilm_model_config.get_pooling_config(None, None)
+    minilm_pooling_config = minilm_model_config._init_pooler_config(
+        pooling_type=None,
+        pooling_norm=None,
+        pooling_returned_token_ids=None,
+        pooling_softmax=None,
+        pooling_step_tag_id=None)
 
-    assert isinstance(minilm_model_config.pooling_config, PoolingConfig)
-    assert minilm_pooling_config.normalize
-    assert isinstance(minilm_pooling_config.pooling_type, PoolingType)
-    assert minilm_pooling_config.pooling_type == PoolingType.MEAN
+    assert minilm_pooling_config.pooling_norm
+    assert minilm_pooling_config.pooling_type == PoolingType.MEAN.name
 
 
 def test_get_pooling_config_from_args():
@@ -135,12 +138,15 @@ def test_get_pooling_config_from_args():
                                       dtype="float16",
                                       revision=None)
 
-    minilm_pooling_config = minilm_model_config.get_pooling_config('CLS', True)
+    minilm_pooling_config = minilm_model_config._init_pooler_config(
+        pooling_type='CLS',
+        pooling_norm=True,
+        pooling_returned_token_ids=None,
+        pooling_softmax=None,
+        pooling_step_tag_id=None)
 
-    assert isinstance(minilm_model_config.pooling_config, PoolingConfig)
-    assert minilm_pooling_config.normalize
-    assert isinstance(minilm_pooling_config.pooling_type, PoolingType)
-    assert minilm_pooling_config.pooling_type == PoolingType.CLS
+    assert minilm_pooling_config.pooling_norm
+    assert minilm_pooling_config.pooling_type == PoolingType.CLS.name
 
 
 def test_get_bert_tokenization_sentence_transformer_config():

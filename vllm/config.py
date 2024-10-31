@@ -108,8 +108,6 @@ class ModelConfig:
             can not be gathered from the vllm arguments.
         config_format: The config format which shall be loaded.
             Defaults to 'auto' which defaults to 'hf'.
-        pooling_config:  pooling and normalize config from the model - 
-            only applies to sentence-transformers models. 
         bert_config: tokenizationconfiguration dictionary for a given 
             Sentence Transformer BERT model.
         mm_processor_kwargs: Arguments to be forwarded to the model's processor
@@ -282,12 +280,28 @@ class ModelConfig:
         pooling_returned_token_ids: Optional[List[int]] = None
     ) -> Optional["PoolerConfig"]:
         if self.task == "embedding":
-            return PoolerConfig(
-                pooling_type=pooling_type,
-                pooling_norm=pooling_norm,
-                pooling_softmax=pooling_softmax,
-                pooling_step_tag_id=pooling_step_tag_id,
-                pooling_returned_token_ids=pooling_returned_token_ids)
+            pooling_config = get_pooling_config(self.model, self.revision)
+            if pooling_config is not None:
+                pooling_type_from_file = pooling_config["pooling_type"]
+                normalize_from_file = pooling_config["normalize"]
+                pooling_config_from_file = PoolerConfig(
+                    pooling_type=pooling_type_from_file,
+                    pooling_norm=normalize_from_file,
+                    pooling_softmax=pooling_softmax,
+                    pooling_step_tag_id=pooling_step_tag_id,
+                    pooling_returned_token_ids=pooling_returned_token_ids)
+                if pooling_type is not None:
+                    pooling_config_from_file.pooling_type = pooling_type
+                if pooling_norm is not None:
+                    pooling_config_from_file.pooling_norm = pooling_norm
+                return pooling_config_from_file
+            else:
+                return PoolerConfig(
+                    pooling_type=pooling_type,
+                    pooling_norm=pooling_norm,
+                    pooling_softmax=pooling_softmax,
+                    pooling_step_tag_id=pooling_step_tag_id,
+                    pooling_returned_token_ids=pooling_returned_token_ids)
         return None
 
     def _init_attention_free(self) -> bool:
