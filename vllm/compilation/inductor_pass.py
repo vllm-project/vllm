@@ -7,6 +7,7 @@ from vllm.compilation.config import CompilationConfig
 from vllm.distributed import get_tensor_model_parallel_rank as get_tp_rank
 from vllm.distributed import (
     get_tensor_model_parallel_world_size as get_tp_world_size)
+from vllm.distributed import model_parallel_is_initialized as p_is_init
 # yapf: enable
 from vllm.logger import init_logger
 
@@ -25,7 +26,8 @@ class InductorPass(ABC):
     def dump_graph(self, graph: torch.fx.Graph, stage: str):
         if stage in self.config.dump_graph_stages:
             # Make sure filename includes rank in the distributed setting
-            rank = f"-{get_tp_rank()}" if get_tp_world_size() > 1 else ""
+            parallel = p_is_init() and get_tp_world_size() > 1
+            rank = f"-{get_tp_rank()}" if parallel else ""
             filepath = self.config.dump_graph_dir / f"{stage}{rank}.py"
 
             logger.info("Printing graph to %s", filepath)
