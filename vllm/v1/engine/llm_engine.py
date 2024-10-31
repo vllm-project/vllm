@@ -47,6 +47,9 @@ class LLMEngine(LLMEngineProtocol):
         use_cached_outputs: bool = False,
     ) -> None:
 
+        # TODO: Avoid?
+        self.model_config = model_config
+
         # Processor (convert Inputs --> EngineCoreRequests)
         self.processor = Processor(model_config, parallel_config,
                                    scheduler_config, lora_config,

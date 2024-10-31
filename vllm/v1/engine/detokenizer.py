@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 from vllm.logger import init_logger
-from vllm.outputs import CompletionOutput, RequestOutput
+from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind
 from vllm.transformers_utils.detokenizer_utils import (
     AnyTokenizer, convert_prompt_ids_to_tokens, detokenize_incrementally)
@@ -50,7 +50,7 @@ class DetokenizerRequestState:
             skip_special_tokens=request.skip_special_tokens,
         )
 
-        request_output = cls._initialize_request_output(
+        request_output = RequestOutput.create_empty(
             request.request_id,
             request.prompt,
             request.prompt_token_ids,
@@ -69,37 +69,6 @@ class DetokenizerRequestState:
             output_kind=request.output_kind,
             request_output=request_output,
             stream=stream,
-        )
-
-    @staticmethod
-    def _initialize_request_output(
-            request_id: str, prompt: str,
-            prompt_token_ids: List[int]) -> RequestOutput:
-        """Initialize a new RequestOutput object."""
-
-        # TODO: Support `n` > 1.
-        completion_output = CompletionOutput(
-            index=0,
-            text="",
-            token_ids=[],
-            cumulative_logprob=None,
-            logprobs=None,  # TODO
-            finish_reason=None,
-            stop_reason=None,
-            lora_request=None,
-        )
-
-        return RequestOutput(
-            request_id=request_id,
-            prompt=prompt,
-            prompt_token_ids=prompt_token_ids,
-            prompt_logprobs=None,  # TODO
-            outputs=[completion_output],
-            finished=False,
-            metrics=None,
-            lora_request=None,
-            encoder_prompt=None,
-            encoder_prompt_token_ids=None,
         )
 
 

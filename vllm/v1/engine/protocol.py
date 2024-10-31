@@ -1,5 +1,5 @@
-from multiprocessing.process import BaseProcess
 from abc import ABC
+from multiprocessing.process import BaseProcess
 from typing import Union
 
 from vllm.config import (DecodingConfig, EngineConfig, LoRAConfig, ModelConfig,
@@ -43,6 +43,8 @@ class LLMEngineProtocol(ABC):
     def validate_outputs(cls, outputs, output_type):
         return outputs
 
+    # TODO: these seem to be used just for Mock testing
+    # Can these be removed?
     def get_model_config(self) -> ModelConfig:
         """Gets the model configuration."""
         return self.model_config

@@ -114,6 +114,36 @@ class RequestOutput:
         self.encoder_prompt_token_ids = encoder_prompt_token_ids
 
     @classmethod
+    def create_empty(cls, request_id: str, prompt: Optional[str],
+                     prompt_token_ids: Optional[List[int]]) -> "RequestOutput":
+        """Initialize a new "empty" RequestOutput object."""
+
+        # TODO: Support `n` > 1.
+        completion_output = CompletionOutput(
+            index=0,
+            text="",
+            token_ids=[],
+            cumulative_logprob=None,
+            logprobs=None,  # TODO
+            finish_reason=None,
+            stop_reason=None,
+            lora_request=None,
+        )
+
+        return RequestOutput(
+            request_id=request_id,
+            prompt=prompt,
+            prompt_token_ids=prompt_token_ids,
+            prompt_logprobs=None,  # TODO
+            outputs=[completion_output],
+            finished=False,
+            metrics=None,
+            lora_request=None,
+            encoder_prompt=None,
+            encoder_prompt_token_ids=None,
+        )
+
+    @classmethod
     def from_seq_group(
         cls, seq_group: SequenceGroup, use_cache: bool,
         seq_id_to_seq_group: Dict[str, SequenceGroupBase]
