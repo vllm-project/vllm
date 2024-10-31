@@ -1522,6 +1522,13 @@ def direct_register_custom_op(
     mutates_args: List[str],
     fake_impl: Optional[Callable] = None,
 ):
+    """
+    `torch.library.custom_op` can have significant overhead because it
+    needs to consider complicated dispatching logic. This function
+    directly registers a custom op and dispatches it to the CUDA backend.
+    See https://gist.github.com/youkaichao/ecbea9ec9fc79a45d2adce1784d7a9a5
+    for more details.
+    """
     schema_str = torch.library.infer_schema(op_func, mutates_args=mutates_args)
     my_lib = Library(library_name, "FRAGMENT")
     my_lib.define(op_name + schema_str)
