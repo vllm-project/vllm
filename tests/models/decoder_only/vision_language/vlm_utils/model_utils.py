@@ -280,10 +280,8 @@ def h2ovl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
 
         def __call__(self, text: str, images: Union[Image, List[Image]],
                      **kwargs):
-            from vllm.model_executor.models.h2ovl import (IMG_CONTEXT, IMG_END,
-                                                          IMG_START,
-                                                          image_to_pixel_values
-                                                          )
+            from vllm.model_executor.models.h2ovl import (
+                IMG_CONTEXT, IMG_END, IMG_START, image_to_pixel_values)
             images = [images] if isinstance(images, Image) else images
             pixel_values = [
                 image_to_pixel_values(image,
