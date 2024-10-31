@@ -90,7 +90,7 @@ def _get_num_image_in_last_group(prompt_token_ids: List[int]) -> int:
 def input_processor_for_mllama(
     ctx: InputContext,
     inputs: EncoderDecoderInputs,
-)-> EncoderDecoderInputs:
+) -> EncoderDecoderInputs:
     # Example input to processor:
     # {
     #     'encoder': {
