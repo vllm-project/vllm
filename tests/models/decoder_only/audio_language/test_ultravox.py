@@ -92,7 +92,7 @@ def run_test(
             for vllm_prompt, _, audio in prompts_and_audios
         ]
 
-    def process(hf_inputs: BatchEncoding):
+    def process(hf_inputs: BatchEncoding, **kwargs):
         hf_inputs["audio_values"] = hf_inputs["audio_values"] \
             .to(torch_dtype)  # type: ignore
         return hf_inputs
@@ -158,6 +158,7 @@ def run_multi_audio_test(
     assert all(tokens for tokens, *_ in vllm_outputs)
 
 
+@pytest.mark.core_model
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [5])
@@ -178,6 +179,7 @@ def test_models(hf_runner, vllm_runner, audio, dtype: str, max_tokens: int,
     )
 
 
+@pytest.mark.core_model
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [5])

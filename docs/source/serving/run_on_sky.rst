@@ -109,7 +109,7 @@ SkyPilot can scale up the service to multiple service replicas with built-in aut
       messages:
         - role: user
           content: Hello! What is your name?
-    max_tokens: 1
+    max_completion_tokens: 1
     
 .. raw:: html
 
@@ -129,7 +129,7 @@ SkyPilot can scale up the service to multiple service replicas with built-in aut
         messages:
           - role: user
             content: Hello! What is your name?
-        max_tokens: 1
+        max_completion_tokens: 1
 
   resources:
     accelerators: {L4, A10g, A10, L40, A40, A100, A100-80GB} # We can use cheaper accelerators for 8B model.
@@ -255,7 +255,7 @@ This will scale the service up to when the QPS exceeds 2 for each replica.
         messages:
           - role: user
             content: Hello! What is your name?
-        max_tokens: 1
+        max_completion_tokens: 1
 
   resources:
     accelerators: {L4, A10g, A10, L40, A40, A100, A100-80GB} # We can use cheaper accelerators for 8B model.

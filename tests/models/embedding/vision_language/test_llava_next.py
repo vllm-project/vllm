@@ -2,6 +2,7 @@ from typing import List, Type
 
 import pytest
 import torch.nn.functional as F
+import transformers
 from transformers import AutoModelForVision2Seq
 
 from ....conftest import IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner
@@ -85,6 +86,8 @@ def _run_test(
     )
 
 
+@pytest.mark.skipif(transformers.__version__.startswith("4.46"),
+                    reason="Model broken with changes in transformers 4.46")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 def test_models_text(

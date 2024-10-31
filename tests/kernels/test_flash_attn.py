@@ -3,7 +3,7 @@ from typing import List, Optional, Tuple
 import pytest
 import torch
 
-from vllm.utils import seed_everything
+from vllm.platforms import current_platform
 from vllm.vllm_flash_attn import (flash_attn_varlen_func,
                                   flash_attn_with_kvcache)
 
@@ -91,7 +91,7 @@ def test_flash_attn_with_paged_kv(
     sliding_window: Optional[int],
 ) -> None:
     torch.set_default_device("cuda")
-    seed_everything(0)
+    current_platform.seed_everything(0)
     num_seqs = len(kv_lens)
     num_query_heads = num_heads[0]
     num_kv_heads = num_heads[1]
@@ -161,7 +161,7 @@ def test_varlen_with_paged_kv(
     num_blocks: int,
 ) -> None:
     torch.set_default_device("cuda")
-    seed_everything(0)
+    current_platform.seed_everything(0)
     num_seqs = len(seq_lens)
     query_lens = [x[0] for x in seq_lens]
     kv_lens = [x[1] for x in seq_lens]
