@@ -10,6 +10,7 @@ from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig, LoadConfig,
                          ParallelConfig, PromptAdapterConfig, SchedulerConfig,
                          SpeculativeConfig)
 from vllm.logger import init_logger
+from vllm.usage.usage_lib import UsageContext
 from vllm.v1.core.scheduler import Scheduler
 from vllm.v1.engine import (LLM_ENGINE_CORE_READY_STR, POLLING_TIMEOUT_MS,
                             EngineCoreOutput, EngineCoreOutputs,
@@ -37,7 +38,15 @@ class LLMEngineCore:
         decoding_config: Optional[DecodingConfig],
         observability_config: Optional[ObservabilityConfig],
         prompt_adapter_config: Optional[PromptAdapterConfig],
+        usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
     ):
+        if usage_context == UsageContext.LLM_CLASS:
+            scheduler_config.max_num_seqs = 1024
+            scheduler_config.max_num_batched_tokens = 8192
+        elif usage_context == UsageContext.OPENAI_API_SERVER:
+            scheduler_config.max_num_seqs = 1024
+            scheduler_config.max_num_batched_tokens = 2048
+
         assert model_config.task != "embedding"
 
         logger.info(
@@ -173,7 +182,6 @@ class LLMEngineCoreProcess(LLMEngineCore):
         ready_path: str,
         **kwargs,
     ):
-        print("HERE HERE HERE")
         super().__init__(*args, **kwargs)
 
         self.msgpack_encoder = msgspec.msgpack.Encoder()

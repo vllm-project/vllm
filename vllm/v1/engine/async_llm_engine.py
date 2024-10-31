@@ -69,7 +69,7 @@ class AsyncLLMEngine(LLMEngineProtocol):
 
         self.log_requests = log_requests
 
-        # Processor (convert Inputs --> EngineCoreRequests)
+        # Processor (converts Inputs --> EngineCoreRequests)
         self.processor = Processor(model_config, parallel_config,
                                    scheduler_config, lora_config,
                                    input_registry)
