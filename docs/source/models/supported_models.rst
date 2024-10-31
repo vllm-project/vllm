@@ -277,7 +277,7 @@ Text Generation
   * - :code:`QWenLMHeadModel`
     - Qwen
     - :code:`Qwen/Qwen-7B`, :code:`Qwen/Qwen-7B-Chat`, etc.
-    -
+    - ✅︎
     - ✅︎
   * - :code:`Qwen2ForCausalLM`
     - Qwen2
@@ -414,7 +414,7 @@ Text Generation
     - Models
     - Inputs
     - Example HF Models
-    - :ref:`LoRA <lora>`
+    - :ref:`LoRA (see note) <lora>`
     - :ref:`PP <distributed_serving>`
   * - :code:`Blip2ForConditionalGeneration`
     - BLIP-2
@@ -516,7 +516,7 @@ Text Generation
     - Qwen-VL
     - T + I\ :sup:`E+`
     - :code:`Qwen/Qwen-VL`, :code:`Qwen/Qwen-VL-Chat`, etc.
-    -
+    - ✅︎
     - ✅︎
   * - :code:`Qwen2AudioForConditionalGeneration`
     - Qwen2-Audio
@@ -541,8 +541,9 @@ Text Generation
 | :sup:`+` Multiple items can be inputted per text prompt for this modality.
 
 .. note::
-  For :code:`openbmb/MiniCPM-V-2`, the official repo doesn't work yet, so we need to use a fork (:code:`HwwwH/MiniCPM-V-2`) for now.
+  - For :code:`openbmb/MiniCPM-V-2`, the official repo doesn't work yet, so we need to use a fork (:code:`HwwwH/MiniCPM-V-2`) for now.
   For more details, please see: https://github.com/vllm-project/vllm/pull/4087#issuecomment-2250397630
+  - Regarding multimodal models, vLLM currently only supports adding LoRA to language model.               
 
 Multimodal Embedding
 --------------------
