@@ -30,14 +30,12 @@ from vllm.attention import Attention, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
-                              get_tensor_model_parallel_world_size,
-                              get_tp_group, tensor_model_parallel_all_gather)
+                              get_tensor_model_parallel_world_size)
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
-                                               RowParallelLinear, should_slice,
-                                               slice_residual)
+                                               RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
@@ -59,11 +57,6 @@ from .utils import (AutoWeightsLoader, PPMissingLayer, extract_layer_index,
                     maybe_prefix)
 
 
-def pprint(x):
-    #print(x)
-    pass
-
-
 class LlamaMLP(nn.Module):
 
     def __init__(
@@ -74,8 +67,6 @@ class LlamaMLP(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
         bias: bool = False,
         prefix: str = "",
-        last_layer: bool = False,
-        fuse_gemms=True,
     ) -> None:
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
@@ -84,15 +75,13 @@ class LlamaMLP(nn.Module):
             bias=bias,
             quant_config=quant_config,
             prefix=f"{prefix}.gate_up_proj",
-            fuse_ag_gemm=fuse_gemms)
-
+        )
         self.down_proj = RowParallelLinear(
             input_size=intermediate_size,
             output_size=hidden_size,
             bias=bias,
             quant_config=quant_config,
             prefix=f"{prefix}.down_proj",
-            fuse_gemm_rs=(not last_layer) and fuse_gemms,
         )
         if hidden_act != "silu":
             raise ValueError(f"Unsupported activation: {hidden_act}. "
@@ -114,7 +103,6 @@ class LlamaAttention(nn.Module):
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
-        first_layer: bool,
         rope_theta: float = 10000,
         rope_scaling: Optional[Dict[str, Any]] = None,
         max_position_embeddings: int = 8192,
@@ -122,7 +110,6 @@ class LlamaAttention(nn.Module):
         bias: bool = False,
         cache_config: Optional[CacheConfig] = None,
         prefix: str = "",
-        fuse_gemms=True,
     ) -> None:
         super().__init__()
         layer_idx = extract_layer_index(prefix)
@@ -158,14 +145,14 @@ class LlamaAttention(nn.Module):
             bias=bias,
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj",
-            fuse_ag_gemm=(not first_layer) and fuse_gemms)
+        )
+
         self.o_proj = RowParallelLinear(
             input_size=self.total_num_heads * self.head_dim,
             output_size=hidden_size,
             bias=bias,
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
-            fuse_gemm_rs=fuse_gemms,
         )
 
         is_neox_style = True
@@ -225,18 +212,11 @@ class LlamaDecoderLayer(nn.Module):
     def __init__(
         self,
         config: LlamaConfig,
-        # Hack: pass in whether this is the first/last layer
-        # so we know if we can rewrite AllReduce -> ReduceScatter + AllGather,
-        # and then propagate the AllGather to the next layer.
-        first_layer: bool,
-        last_layer: bool,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
-        fuse_gemms=True,
     ) -> None:
         super().__init__()
-        self.fuse_gemms = fuse_gemms
         self.hidden_size = config.hidden_size
         rope_theta = getattr(config, "rope_theta", 10000)
         rope_scaling = getattr(config, "rope_scaling", None)
@@ -256,7 +236,6 @@ class LlamaDecoderLayer(nn.Module):
             num_heads=config.num_attention_heads,
             num_kv_heads=getattr(config, "num_key_value_heads",
                                  config.num_attention_heads),
-            first_layer=first_layer,
             rope_theta=rope_theta,
             rope_scaling=rope_scaling,
             max_position_embeddings=max_position_embeddings,
@@ -264,7 +243,6 @@ class LlamaDecoderLayer(nn.Module):
             bias=attention_bias,
             cache_config=cache_config,
             prefix=f"{prefix}.self_attn",
-            fuse_gemms=self.fuse_gemms,
         )
         self.mlp = LlamaMLP(
             hidden_size=self.hidden_size,
@@ -273,16 +251,11 @@ class LlamaDecoderLayer(nn.Module):
             quant_config=quant_config,
             bias=getattr(config, "mlp_bias", False),
             prefix=f"{prefix}.mlp",
-            last_layer=last_layer,
-            fuse_gemms=self.fuse_gemms,
         )
         self.input_layernorm = RMSNorm(config.hidden_size,
                                        eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
                                                 eps=config.rms_norm_eps)
-
-        self.first_layer = first_layer
-        self.last_layer = last_layer
 
     def forward(
         self,
@@ -297,60 +270,17 @@ class LlamaDecoderLayer(nn.Module):
             residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
-            assert (hidden_states.shape == residual.shape)
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual)
-
-        pprint(f"RESIDUAL SHAPE = {residual.shape}")
-
-        def slices(residual: torch.Tensor) -> List[torch.Tensor]:
-            if not self.fuse_gemms or not should_slice(residual.shape):
-                return []
-            else:
-                return slice_residual(residual)
-
-        orig_residual_shape = residual.shape
-
-        # Partition residual
-        residual_slices = slices(residual) if self.first_layer else []
-        if len(residual_slices) > 0:
-            my_residual = residual_slices[get_tensor_model_parallel_rank()]
-        else:
-            my_residual = residual
-
         hidden_states = self.self_attn(positions=positions,
                                        hidden_states=hidden_states,
                                        kv_cache=kv_cache,
                                        attn_metadata=attn_metadata)
 
         # Fully Connected
-        assert (hidden_states.shape == my_residual.shape
-                ), f"{hidden_states.shape} != {my_residual.shape}"
-        hidden_states, my_residual = self.post_attention_layernorm(
-            hidden_states, my_residual)
+        hidden_states, residual = self.post_attention_layernorm(
+            hidden_states, residual)
         hidden_states = self.mlp(hidden_states)
-
-        pprint(
-            f"LAST_LAYER = {self.last_layer}, #slices = {len(residual_slices)}"
-        )
-        if self.fuse_gemms and self.last_layer and should_slice(
-                orig_residual_shape):
-            pprint(f"FINAL REDUCE {my_residual.shape}")
-            if False:
-                residual = tensor_model_parallel_all_gather(my_residual, 0)
-            else:
-                residual = torch.ops._c10d_functional.all_gather_into_tensor(
-                    my_residual.contiguous(),
-                    get_tp_group().world_size,
-                    torch.distributed.group.WORLD.group_name)
-                residual = torch.ops._c10d_functional.wait_tensor(residual)
-
-            pprint(f"GOT HERE2 {my_residual.shape}, {residual.shape}")
-        else:
-            residual = my_residual
-
-        assert (hidden_states.shape == residual.shape
-                ), f"{hidden_states.shape} != {residual.shape}"
         return hidden_states, residual
 
 
@@ -363,7 +293,6 @@ class LlamaModel(nn.Module):
                  prefix: str = "",
                  layer_type: Type[LlamaDecoderLayer] = LlamaDecoderLayer):
         super().__init__()
-        fuse_gemms = bool(os.environ.get("VLLM_FUSE_GEMMS", "0") == "1")
 
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
