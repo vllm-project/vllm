@@ -8,7 +8,6 @@ from typing import Optional, Tuple
 
 import torch
 from torch import nn
-from torch.library import Library
 
 from vllm.compilation.compile_context import set_compile_context
 from vllm.compilation.config import CompilationConfig
@@ -16,6 +15,7 @@ from vllm.compilation.counter import compilation_counter
 from vllm.compilation.decorators import support_torch_compile
 from vllm.compilation.levels import CompilationLevel
 from vllm.plugins import set_compilation_config
+from vllm.utils import direct_register_custom_op
 
 
 def silly_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
@@ -30,10 +30,13 @@ def silly_attention_fake(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
     return
 
 
-my_lib = Library("silly", "FRAGMENT")
-my_lib.define("attention(Tensor q, Tensor k, Tensor v, Tensor(a3!) out) -> ()")
-my_lib.impl("attention", silly_attention, "CUDA")
-my_lib._register_fake("attention", silly_attention_fake)
+direct_register_custom_op(
+    library_name="silly",
+    op_name="attention",
+    op_func=silly_attention,
+    mutates_args=["out"],
+    fake_impl=silly_attention_fake,
+)
 
 
 @dataclass
