@@ -123,7 +123,8 @@ def is_layer_skipped_bnb(prefix: str, llm_int8_skip_modules: List[str]):
     components = prefix.split('.')
 
     # Check if any of the skip modules exactly matches any component
-    return any(module_name in components for module_name in llm_int8_skip_modules)
+    return any(module_name in components
+               for module_name in llm_int8_skip_modules)
 
 
 class BitsAndBytesLinearMethod(LinearMethodBase):
