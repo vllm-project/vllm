@@ -3,11 +3,12 @@ import torch
 from compressed_tensors.quantization import FP8_DTYPE
 
 import vllm.envs as envs
-from vllm._custom_ops import cutlass_scaled_mm, scaled_fp8_quant
 from vllm.compilation.config import CompilationConfig
 from vllm.compilation.fusion import (FusionPass, find_auto_fn,
                                      find_auto_fn_maybe)
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
+    apply_fp8_linear)
 
 from .backend import TestBackend
 
@@ -26,20 +27,12 @@ class TestModel(torch.nn.Module):
     def forward(self, x):
         resid = torch.relu(x)
         y = self.norm[0](x)
-        yq, s0 = scaled_fp8_quant(y, self.scale[0])
-        x2 = cutlass_scaled_mm(yq,
-                               self.w[0],
-                               s0,
-                               self.scale[1],
-                               out_dtype=x.dtype)
+
+        x2 = apply_fp8_linear(y, self.w[0], self.scale[0], self.scale[1])
         # make sure resid is used for replacement to work
         y2, resid = self.norm[1](x2, resid)
-        yq2, s2 = scaled_fp8_quant(y2, self.scale[2])
-        x3 = cutlass_scaled_mm(yq2,
-                               self.w[1],
-                               s2,
-                               self.scale[3],
-                               out_dtype=x.dtype)
+
+        x3 = apply_fp8_linear(y2, self.w[1], self.scale[2], self.scale[3])
         y3, resid = self.norm[2](x3, resid)  # use resid here
         return y3
 
