@@ -158,6 +158,7 @@ def run_multi_audio_test(
     # just assert that some tokens were generated.
     assert all(tokens for tokens, *_ in vllm_outputs)
 
+
 # TODO: remove this after CPU float16 support ready
 target_dtype = "float" if current_platform.is_cpu() else "half"
 
