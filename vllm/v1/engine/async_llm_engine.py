@@ -59,6 +59,8 @@ class AsyncLLMEngine(LLMEngineProtocol):
         assert start_engine_loop
 
         self.log_requests = log_requests
+        self.log_stats = log_stats
+        self.stat_loggers = stat_loggers
 
         # Processor (converts Inputs --> EngineCoreRequests)
         self.processor = Processor(model_config, parallel_config,
@@ -168,7 +170,7 @@ class AsyncLLMEngine(LLMEngineProtocol):
         # AsyncStream generator
         stream = AsyncStream(request_id, _abort)
 
-        # 1) Process raw inputs into the request.
+        # 1) Convert input --> DetokenizerRequest / EngineCoreRequest.
         detokenizer_req, engine_core_req = self.processor.process_inputs(
             request_id, prompt, params, arrival_time, lora_request,
             trace_headers, prompt_adapter_request, priority)

@@ -25,9 +25,9 @@ from vllm.utils import (FlexibleArgumentParser, iterate_with_cancellation,
 from vllm.version import __version__ as VLLM_VERSION
 
 if VLLM_USE_V1:
-    from vllm.v1.engine.async_llm_engine import AsyncLLMEngine
+    from vllm.v1.engine.async_llm_engine import AsyncLLMEngine  # type: ignore
 else:
-    from vllm.engine.async_llm_engine import AsyncLLMEngine
+    from vllm.engine.async_llm_engine import AsyncLLMEngine  # type: ignore
 
 logger = init_logger("vllm.entrypoints.api_server")
 
