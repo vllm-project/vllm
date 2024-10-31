@@ -458,6 +458,7 @@ def _get_default_neuron_speculation_config(model_config: ModelConfig,
     )
     return neuron_config
 
+
 def _get_neuron_config_after_override(default_neuron_config,
                                       overridden_neuron_config):
     overridden_neuron_config = overridden_neuron_config or {}
