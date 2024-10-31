@@ -18,7 +18,7 @@ async def test_chat_completion_without_tools(client: openai.AsyncOpenAI,
     chat_completion = await client.chat.completions.create(
         messages=ensure_system_prompt(MESSAGES_WITHOUT_TOOLS, server_config),
         temperature=0,
-        max_tokens=150,
+        max_completion_tokens=150,
         model=model_name,
         logprobs=False)
     choice = chat_completion.choices[0]
@@ -38,7 +38,7 @@ async def test_chat_completion_without_tools(client: openai.AsyncOpenAI,
     stream = await client.chat.completions.create(
         messages=ensure_system_prompt(MESSAGES_WITHOUT_TOOLS, server_config),
         temperature=0,
-        max_tokens=150,
+        max_completion_tokens=150,
         model=model_name,
         logprobs=False,
         stream=True,
@@ -86,7 +86,7 @@ async def test_chat_completion_with_tools(client: openai.AsyncOpenAI,
     chat_completion = await client.chat.completions.create(
         messages=ensure_system_prompt(MESSAGES_WITHOUT_TOOLS, server_config),
         temperature=0,
-        max_tokens=150,
+        max_completion_tokens=150,
         model=model_name,
         tools=[WEATHER_TOOL],
         logprobs=False)
@@ -107,7 +107,7 @@ async def test_chat_completion_with_tools(client: openai.AsyncOpenAI,
     stream = await client.chat.completions.create(
         messages=ensure_system_prompt(MESSAGES_WITHOUT_TOOLS, server_config),
         temperature=0,
-        max_tokens=150,
+        max_completion_tokens=150,
         model=model_name,
         logprobs=False,
         tools=[WEATHER_TOOL],
