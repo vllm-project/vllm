@@ -87,8 +87,10 @@ def _get_num_image_in_last_group(prompt_token_ids: List[int]) -> int:
     return num_images
 
 
-def input_processor_for_mllama(ctx: InputContext,
-                               inputs: EncoderDecoderInputs):
+def input_processor_for_mllama(
+    ctx: InputContext,
+    inputs: EncoderDecoderInputs,
+)-> EncoderDecoderInputs:
     # Example input to processor:
     # {
     #     'encoder': {
@@ -104,9 +106,7 @@ def input_processor_for_mllama(ctx: InputContext,
     # }
 
     # move encoder prompt to decoder
-    inputs["decoder"] = TokenInputs(**inputs["encoder"])
-
-    dec_inputs = inputs["decoder"]
+    dec_inputs = TokenInputs(**inputs["encoder"])
 
     multi_modal_data = dec_inputs.get("multi_modal_data")
     if multi_modal_data is None or "image" not in multi_modal_data:
