@@ -3,12 +3,12 @@ import functools
 from typing import Optional
 
 import torch
-from torch.library import Library
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     fused_topk, moe_align_block_size, try_get_optimal_moe_config)
 from vllm.scalar_type import scalar_types
+from vllm.utils import direct_register_custom_op
 
 
 def get_scalar_type(num_bits: int, has_zp: bool):
@@ -135,12 +135,13 @@ def single_marlin_moe_fake(
     return torch.empty_like(hidden_states)
 
 
-my_lib = Library("vllm", "FRAGMENT")
-my_lib.define(
-    "single_marlin_moe(Tensor hidden_states, Tensor w, Tensor scales, Tensor gating_output, SymInt topk, bool renormalize, Tensor? g_idx=None, Tensor? sort_indices=None, Tensor? w_zeros=None, SymInt num_bits=8, bool is_k_full=True) -> Tensor"  # noqa
+direct_register_custom_op(
+    library_name="vllm",
+    op_name="single_marlin_moe",
+    op_func=single_marlin_moe,
+    mutates_args=[],
+    fake_impl=single_marlin_moe_fake,
 )
-my_lib.impl("single_marlin_moe", single_marlin_moe, "CUDA")
-my_lib._register_fake("single_marlin_moe", single_marlin_moe_fake)
 
 
 def fused_marlin_moe(
@@ -351,9 +352,10 @@ def fused_marlin_moe_fake(
     return torch.empty_like(hidden_states)
 
 
-my_lib = Library("vllm", "FRAGMENT")
-my_lib.define(
-    "fused_marlin_moe(Tensor hidden_states, Tensor w1, Tensor w2, Tensor w1_scale, Tensor w2_scale, Tensor gating_output, Tensor topk_weights, Tensor topk_ids, Tensor? g_idx1=None, Tensor? g_idx2=None, Tensor? sort_indices1=None, Tensor? sort_indices2=None, Tensor? w1_zeros=None, Tensor? w2_zeros=None, SymInt num_bits=8, bool is_k_full=True) -> Tensor"  # noqa
+direct_register_custom_op(
+    library_name="vllm",
+    op_name="fused_marlin_moe",
+    op_func=fused_marlin_moe,
+    mutates_args=[],
+    fake_impl=fused_marlin_moe_fake,
 )
-my_lib.impl("fused_marlin_moe", fused_marlin_moe, "CUDA")
-my_lib._register_fake("fused_marlin_moe", fused_marlin_moe_fake)
