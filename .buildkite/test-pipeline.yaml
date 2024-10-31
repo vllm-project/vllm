@@ -9,6 +9,7 @@
 # label(str): the name of the test. emoji allowed.
 # fast_check(bool): whether to run this on each commit on fastcheck pipeline.
 # fast_check_only(bool): run this test on fastcheck pipeline only
+# nightly(bool): run this test in nightly pipeline only
 # optional(bool): never run this test by default (i.e. need to unblock manually)
 # command(str): the single command to run for tests. incompatible with commands.
 # commands(list): the list of commands to run for test. incompatbile with command.
@@ -341,7 +342,7 @@ steps:
     - pytest -v -s --ignore models/decoder_only/vision_language/test_phi3v.py models/decoder_only/vision_language -m core_model
 
 - label: Decoder-only Multi-Modal Models Test (Extended)
-  #mirror_hardwares: [amd]
+  nightly: true
   source_file_dependencies:
   - vllm/
   - tests/models/decoder_only/audio_language
