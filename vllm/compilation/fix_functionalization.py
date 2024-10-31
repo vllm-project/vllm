@@ -53,12 +53,15 @@ class FixFunctionalizationPass(VllmInductorPass):
                 self.insert_defunctionalized(graph, node)
                 self._remove(node)
 
-            # These 2 replacements avoid the most copies for LLaMa.
+            # rms_norm replacements avoid the most copies for LLaMa.
             elif at_target == torch.ops._C.fused_add_rms_norm.default:
                 mutated_args = {1: 'input', 2: 'residual'}
                 self.defunctionalize(graph, node, mutated_args)
             elif at_target == torch.ops._C.fused_add_rms_norm_static_fp8_quant.default:  # noqa: E501
                 mutated_args = {1: 'result', 2: 'residual'}
+                self.defunctionalize(graph, node, mutated_args)
+            elif at_target == torch.ops._C.fused_add_rms_norm_dynamic_fp8_quant.default:  # noqa: E501
+                mutated_args = {1: 'result', 2: 'residual', 3: 'scale'}
                 self.defunctionalize(graph, node, mutated_args)
 
             elif at_target in [
@@ -66,6 +69,9 @@ class FixFunctionalizationPass(VllmInductorPass):
                     torch.ops._C.rms_norm_static_fp8_quant.default
             ]:
                 mutated_args = {1: 'result'}
+                self.defunctionalize(graph, node, mutated_args)
+            elif at_target == torch.ops._C.rms_norm_dynamic_fp8_quant.default:
+                mutated_args = {1: 'result', 2: 'scale'}
                 self.defunctionalize(graph, node, mutated_args)
 
             elif at_target == torch.ops._C.silu_and_mul.default:
