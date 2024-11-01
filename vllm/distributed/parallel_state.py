@@ -31,12 +31,6 @@ from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
                     Union)
 from unittest.mock import patch
 
-try:
-    import flux
-    has_flux = True
-except ImportError:
-    has_flux = False
-
 import torch
 import torch.distributed
 from torch.distributed import Backend, ProcessGroup, _symmetric_memory
@@ -49,6 +43,14 @@ from vllm.utils import direct_register_custom_op, supports_custom_op
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+
+has_flux = False
+if envs.VLLM_USE_FLUX:
+    try:
+        import flux
+        has_flux = True
+    except ImportError:
+        has_flux = False
 
 
 @dataclass
