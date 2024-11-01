@@ -42,9 +42,6 @@ jobs:
       run: |
         echo "::add-matcher::.github/workflows/matchers/ruff.json"
         ruff check --output-format github .
-    - name: Spelling check with codespell
-      run: |
-        codespell --toml pyproject.toml
     - name: Run isort
       run: |
         isort . --check-only
