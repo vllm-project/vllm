@@ -24,17 +24,6 @@ from vllm.utils import merge_async_iterators, random_uuid
 logger = init_logger(__name__)
 
 
-def check_embedding_mode(model_config: ModelConfig) -> bool:
-    embedding_mode = model_config.task == "embedding"
-
-    if not embedding_mode:
-        logger.warning("embedding_mode is False. Embedding API will not work.")
-    else:
-        logger.info("Activating the server engine with embedding enabled.")
-
-    return embedding_mode
-
-
 def _get_embedding(
     output: EmbeddingOutput,
     encoding_format: Literal["float", "base64"],
@@ -98,8 +87,6 @@ class OpenAIServingEmbedding(OpenAIServing):
 
         self.chat_template = load_chat_template(chat_template)
 
-        self._enabled = check_embedding_mode(model_config)
-
     async def create_embedding(
         self,
         request: EmbeddingRequest,
@@ -111,8 +98,6 @@ class OpenAIServingEmbedding(OpenAIServing):
         See https://platform.openai.com/docs/api-reference/embeddings/create
         for the API specification. This API mimics the OpenAI Embedding API.
         """
-        if not self._enabled:
-            return self.create_error_response("Embedding API disabled")
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
