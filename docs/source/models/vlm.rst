@@ -244,7 +244,8 @@ To consume the server, you can use the OpenAI client like in the example below:
 A full code example can be found in `examples/openai_api_client_for_multimodal.py <https://github.com/vllm-project/vllm/blob/main/examples/openai_api_client_for_multimodal.py>`_.
 
 .. tip::
-    There is no need to format the prompt in the API request since it will be handled by the server.
+    There is no need to place image placeholders in the text content of the API request - they are already represented by the image content.
+    In fact, you can place image placeholders in the middle of the text by interleaving text and image content.
 
 .. note::
 
