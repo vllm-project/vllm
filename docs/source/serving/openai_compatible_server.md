@@ -254,6 +254,20 @@ AI21's Jamba-1.5 models are supported.
 
 Flags: `--tool-call-parser jamba`
 
+#### MiniCPM Models (`minicpm`)
+Supported models:
+* `openbmb/MiniCPM3-4B`
+
+The tool calling uses Python's built-in function call format. The tool parsing module is adapted from the implementation in [ShishirPatil/gorilla](https://github.com/ShishirPatil/gorilla/blob/main/berkeley-function-call-leaderboard/bfcl/model_handler/utils.py).
+
+Known issues:
+1. Tool names must be valid Python function names, which can only contain letters (A-Z, a-z), numbers (0-9), and underscores (_). Tool names cannot start with a number.
+2. Tool parameter names cannot be Python reserved words, such as `return`, `format`, `class`, etc.
+3. Tool parameter descriptions must follow JSON Schema format. Complex formats like allOf, anyOf, etc. are not currently supported.
+
+The `tool_chat_template_minicpm3.jinja` file contains the MiniCPM chat template.
+
+Recommended flags: `--tool-call-parser minicpm --chat-template examples/tool_chat_template_minicpm3.jinja`
 
 ### How to write a tool parser plugin
 
