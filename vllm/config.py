@@ -278,28 +278,23 @@ class ModelConfig:
         pooling_returned_token_ids: Optional[List[int]] = None
     ) -> Optional["PoolerConfig"]:
         if self.task == "embedding":
+            pooling_type_ = pooling_type
+            normalize_ = pooling_norm
             pooling_config = get_pooling_config(self.model, self.revision)
             if pooling_config is not None:
-                pooling_type_from_file = pooling_config["pooling_type"]
-                normalize_from_file = pooling_config["normalize"]
-                pooling_config_from_file = PoolerConfig(
-                    pooling_type=pooling_type_from_file,
-                    pooling_norm=normalize_from_file,
-                    pooling_softmax=pooling_softmax,
-                    pooling_step_tag_id=pooling_step_tag_id,
-                    pooling_returned_token_ids=pooling_returned_token_ids)
+                pooling_type_ = pooling_config["pooling_type"]
+                normalize_ = pooling_config["normalize"]
+                # override if user specifies pooling_type and/or pooling_norm
                 if pooling_type is not None:
-                    pooling_config_from_file.pooling_type = pooling_type
+                    pooling_type_ = pooling_type
                 if pooling_norm is not None:
-                    pooling_config_from_file.pooling_norm = pooling_norm
-                return pooling_config_from_file
-            else:
-                return PoolerConfig(
-                    pooling_type=pooling_type,
-                    pooling_norm=pooling_norm,
-                    pooling_softmax=pooling_softmax,
-                    pooling_step_tag_id=pooling_step_tag_id,
-                    pooling_returned_token_ids=pooling_returned_token_ids)
+                    normalize_ = pooling_norm
+            return PoolerConfig(
+                pooling_type=pooling_type_,
+                pooling_norm=normalize_,
+                pooling_softmax=pooling_softmax,
+                pooling_step_tag_id=pooling_step_tag_id,
+                pooling_returned_token_ids=pooling_returned_token_ids)
         return None
 
     def _init_attention_free(self) -> bool:
