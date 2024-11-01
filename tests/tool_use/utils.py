@@ -117,7 +117,8 @@ CONFIGS: Dict[str, ServerConfig] = {
         "openbmb/MiniCPM3-4B",
         "arguments": [
             "--tool-call-parser", "minicpm", "--chat-template",
-            str(VLLM_PATH / "examples/tool_chat_template_minicpm3.jinja")
+            str(VLLM_PATH / "examples/tool_chat_template_minicpm3.jinja"),
+            "--trust_remote_code"
         ],
         "supports_parallel":
         False,
