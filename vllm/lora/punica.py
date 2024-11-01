@@ -16,7 +16,6 @@ if HAS_TRITON:
     from vllm.lora.ops.bgmv_expand import bgmv_expand
     from vllm.lora.ops.bgmv_expand_slice import bgmv_expand_slice
     from vllm.lora.ops.bgmv_sample import bgmv_sample
-    from vllm.lora.ops.bgmv_embed import bgmv_embed
     from vllm.lora.ops.bgmv_shrink import bgmv_shrink
     from vllm.lora.ops.sgmv_expand import sgmv_expand
     from vllm.lora.ops.sgmv_expand_slice import sgmv_expand_slice

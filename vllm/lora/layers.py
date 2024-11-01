@@ -1421,8 +1421,8 @@ class ModulesToSaveWrapper(BaseLayerWithLoRA, TensorPropertiesMixin):
     def apply(self, lm_head: 'ModulesToSaveWrapper',
               hidden_states: torch.Tensor,
               bias: Optional[torch.Tensor]) -> torch.Tensor:
-        
-        assert type(self.base_layer)==ParallelLMHead
+
+        assert self.base_layer is ParallelLMHead
 
         logits = self.punica_wrapper.bgmv_sample(hidden_states,
                                                  self._lora_tensors,
@@ -1432,21 +1432,10 @@ class ModulesToSaveWrapper(BaseLayerWithLoRA, TensorPropertiesMixin):
             logits += bias
 
         return logits
-    
-    def embedding(self, embed_tokens: 'ModulesToSaveWrapper', masked_input: torch.LongTensor):
-        assert type(self.base_layer)==VocabParallelEmbedding
-        assert masked_input.dtype==torch.int64, f"tokens dtype must be torch.int64 but got {masked_input.dtype}"
-        embeddings = self.punica_wrapper.bgmv_embedding(
-                                                masked_input,
-                                                self._lora_tensors,
-                                                self.base_layer.weight)
-        return embeddings
-
-
 
     def embedding(self, embed_tokens: 'ModulesToSaveWrapper',
                   masked_input: torch.LongTensor):
-        assert isinstance(self.base_layer, VocabParallelEmbedding)
+        assert self.base_layer is VocabParallelEmbedding
         embeddings = self.punica_wrapper.bgmv_embedding(
             masked_input, self._lora_tensors, self.base_layer.weight)
         return embeddings
@@ -1460,15 +1449,13 @@ class ModulesToSaveWrapper(BaseLayerWithLoRA, TensorPropertiesMixin):
 
         self.dtype = lora_config.lora_dtype
 
-        # lora_tensors - lm_head tensors in case of ParallelLMHead base 
+        # lora_tensors - lm_head tensors in case of ParallelLMHead base
         # or embed_tokens tensors in case of VocabParallelEmbedding
         self._lora_tensors = torch.zeros(
             (max_loras, self.padded_vocab_size, self.base_layer.embedding_dim),
             dtype=self.base_layer.weight.dtype,
             device=self.device,
         )
-        
-            
 
     def reset_lora(self, index: int):
         weights = self.base_layer.weight
