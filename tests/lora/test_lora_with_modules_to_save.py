@@ -12,7 +12,7 @@ MODELS = [
     "/workspace/t-lite-instruct/1/t-lite-instruct/"
 ]
 
-LORAS = ['/workspace/models/talkbot_questioner/'] #["SergeyKochetkovT/llama3-lora-with-modules-to-save"]
+LORAS = ["SergeyKochetkovT/llama3-lora-with-modules-to-save"]
 
 os.environ['CUDA_VISIBLE_DEVICES']="1"
 
