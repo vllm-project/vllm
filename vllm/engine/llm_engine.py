@@ -257,7 +257,8 @@ class LLMEngine:
             "num_scheduler_steps=%d, chunked_prefill_enabled=%s "
             "multi_step_stream_outputs=%s, enable_prefix_caching=%s, "
             "use_async_output_proc=%s, use_cached_outputs=%s, "
-            "chat_template_text_format=%s, mm_processor_kwargs=%s)",
+            "chat_template_text_format=%s, mm_processor_kwargs=%s, "
+            "pooler_config=%r)",
             VLLM_VERSION,
             model_config.model,
             speculative_config,
@@ -294,6 +295,7 @@ class LLMEngine:
             use_cached_outputs,
             model_config.chat_template_text_format,
             model_config.mm_processor_kwargs,
+            model_config.pooler_config,
         )
         # TODO(woosuk): Print more configs in debug mode.
         self.model_config = model_config
@@ -826,6 +828,13 @@ class LLMEngine:
         if priority != 0 and not self.scheduler_config.policy == "priority":
             raise ValueError(f"Got priority {priority} but "
                              "Priority scheduling is not enabled.")
+
+        if isinstance(params, SamplingParams) \
+            and (params.guided_decoding or params.logits_processors) \
+            and self.scheduler_config.num_scheduler_steps > 1:
+            raise ValueError(
+                "Guided decoding and logits processors are not supported "
+                "in multi-step decoding")
 
         if arrival_time is None:
             arrival_time = time.time()

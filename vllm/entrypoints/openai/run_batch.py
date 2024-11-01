@@ -217,13 +217,14 @@ async def main(args):
         prompt_adapters=None,
         request_logger=request_logger,
         chat_template=None,
-    )
+    ) if model_config.task == "generate" else None
     openai_serving_embedding = OpenAIServingEmbedding(
         engine,
         model_config,
         base_model_paths,
         request_logger=request_logger,
-    )
+        chat_template=None,
+    ) if model_config.task == "embedding" else None
 
     tracker = BatchProgressTracker()
     logger.info("Reading batch from %s...", args.input_file)
@@ -240,14 +241,31 @@ async def main(args):
 
         # Determine the type of request and run it.
         if request.url == "/v1/chat/completions":
-            response_futures.append(
-                run_request(openai_serving_chat.create_chat_completion,
-                            request, tracker))
+            handler_fn = (None if openai_serving_chat is None else
+                          openai_serving_chat.create_chat_completion)
+            if handler_fn is None:
+                response_futures.append(
+                    make_async_error_request_output(
+                        request,
+                        error_msg=
+                        "The model does not support Chat Completions API",
+                    ))
+                continue
+
+            response_futures.append(run_request(handler_fn, request, tracker))
             tracker.submitted()
         elif request.url == "/v1/embeddings":
-            response_futures.append(
-                run_request(openai_serving_embedding.create_embedding, request,
-                            tracker))
+            handler_fn = (None if openai_serving_embedding is None else
+                          openai_serving_embedding.create_embedding)
+            if handler_fn is None:
+                response_futures.append(
+                    make_async_error_request_output(
+                        request,
+                        error_msg="The model does not support Embeddings API",
+                    ))
+                continue
+
+            response_futures.append(run_request(handler_fn, request, tracker))
             tracker.submitted()
         else:
             response_futures.append(
