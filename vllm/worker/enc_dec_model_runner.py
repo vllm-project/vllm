@@ -28,7 +28,7 @@ from vllm.worker.model_runner import (GPUModelRunnerBase,
                                       ModelInputForGPUWithSamplingMetadata,
                                       _get_graph_batch_size)
 from vllm.worker.model_runner_base import (
-    ModelRunnerBase, _add_attn_metadata_broadcastable_dict,
+    _add_attn_metadata_broadcastable_dict,
     _add_sampling_metadata_broadcastable_dict)
 from vllm.worker.utils import assert_enc_dec_mr_supported_scenario
 
@@ -91,8 +91,6 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         models) but these arguments are present here for compatibility with 
         the base-class constructor.
         '''
-        ModelRunnerBase.__init__(self, vllm_config=vllm_config)
-
         self._maybe_force_supported_attention_backend()
 
         super().__init__(
