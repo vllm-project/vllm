@@ -120,8 +120,9 @@ class LoRAModel(AdapterModel):
         pin_memory = str(device) == "cpu" and is_pin_memory_available()
         loras: Dict[str, LoRALayerWeights] = {}
         for tensor_name, tensor in tensors.items():
-            module_name, is_lora_a = parse_fine_tuned_lora_name(tensor_name, enable_lora_modules_to_save)
-            
+            module_name, is_lora_a = parse_fine_tuned_lora_name(
+                tensor_name, enable_lora_modules_to_save)
+
             if module_name not in loras:
                 lora_embeddings_tensor = None
                 if embeddings:
@@ -144,7 +145,7 @@ class LoRAModel(AdapterModel):
                                                       dtype=dtype).t()
                 if pin_memory:
                     loras[module_name].lora_a_pin_memory()
-            elif is_lora_a is None: # this is modules_to_save tensor
+            elif is_lora_a is None:  # this is modules_to_save tensor
                 loras[module_name].lora_b = tensor.to(device=device,
                                                       dtype=dtype)
                 if pin_memory:
@@ -179,7 +180,7 @@ class LoRAModel(AdapterModel):
         max_position_embeddings: Optional[int] = None,
         lora_model_id: Optional[int] = None,
         device: str = "cuda",
-        enable_lora_modules_to_save: bool= False,
+        enable_lora_modules_to_save: bool = False,
         dtype: Optional[torch.dtype] = None,
         target_embedding_padding: Optional[int] = None,
         embedding_modules: Optional[Dict[str, str]] = None,
@@ -487,7 +488,8 @@ class LoRAModelManager(AdapterModelManager):
                     new_module.scaling_factor_to_offset
             # (yard1): TODO make this more robust
             # replace lm_head by A*B lora if needed
-            if (("lm_head" in module_name) and not self.lora_config.enable_lora_modules_to_save):
+            if (("lm_head" in module_name)
+                    and not self.lora_config.enable_lora_modules_to_save):
                 logits_processor_module = self.model.get_submodule(
                     "logits_processor")
                 new_module = replace_submodule(

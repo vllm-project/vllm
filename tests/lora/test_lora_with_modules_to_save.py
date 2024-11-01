@@ -41,6 +41,7 @@ def test_llama3_models(
         name_1="vllm",
     )
 
+
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("adapter_name", LORAS)
 @pytest.mark.parametrize("dtype", ["bfloat16"])
@@ -60,15 +61,14 @@ def test_lora_with_modules_to_save(
     with vllm_runner(model,
                      dtype=dtype,
                      enable_lora=True,
-                     max_loras = 4,
-                     max_lora_rank = 32,
+                     max_loras=4,
+                     max_lora_rank=32,
                      enable_lora_modules_to_save=True,
                      gpu_memory_utilization=0.5) as vllm_lora_model:
         vllm_outputs = []
-        lora_request = LoRARequest(
-                'lora', 1, lora_local_path=adapter_name)
-        
-        for i in range(len(example_prompts)):    
+        lora_request = LoRARequest('lora', 1, lora_local_path=adapter_name)
+
+        for i in range(len(example_prompts)):
             output = vllm_lora_model.generate_greedy_logprobs(
                 [example_prompts[i]],
                 max_tokens,
@@ -109,8 +109,8 @@ def test_llama3_loras_switches(
     with vllm_runner(model,
                      dtype=dtype,
                      enable_lora=True,
-                     max_loras = 4,
-                     max_lora_rank = 32,
+                     max_loras=4,
+                     max_lora_rank=32,
                      enable_lora_modules_to_save=True,
                      gpu_memory_utilization=0.5) as vllm_lora_model:
         vllm_outputs = []

@@ -903,14 +903,13 @@ class VllmRunner:
         '''
 
         return self.generate_encoder_decoder_w_logprobs(
-            encoder_decoder_prompts, greedy_logprobs_params, lora_requests=lora_requests)
+            encoder_decoder_prompts,
+            greedy_logprobs_params,
+            lora_requests=lora_requests)
 
     def generate_beam_search(
-        self,
-        prompts: Union[List[str], List[List[int]]],
-        beam_width: int,
-        max_tokens: int
-    ) -> List[Tuple[List[List[int]], List[str]]]:
+            self, prompts: Union[List[str], List[List[int]]], beam_width: int,
+            max_tokens: int) -> List[Tuple[List[List[int]], List[str]]]:
         outputs = self.model.beam_search(
             prompts,
             BeamSearchParams(beam_width=beam_width, max_tokens=max_tokens))

@@ -99,7 +99,8 @@ class WorkerLoRAManager(AbstractWorkerManager):
                 max_position_embeddings=self.max_position_embeddings,
                 lora_model_id=lora_request.lora_int_id,
                 device="cpu",
-                enable_lora_modules_to_save=self._adapter_manager.lora_config.enable_lora_modules_to_save,
+                enable_lora_modules_to_save=self._adapter_manager.lora_config.
+                enable_lora_modules_to_save,
                 dtype=self.lora_config.lora_dtype,
                 target_embedding_padding=self.vocab_size +
                 self.lora_config.lora_extra_vocab_size,

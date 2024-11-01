@@ -12,10 +12,8 @@ from tqdm import tqdm
 
 from vllm import LLM, SamplingParams
 from vllm.engine.arg_utils import EngineArgs
-from vllm.inputs import PromptInputs
-from vllm.lora.request import LoRARequest
-from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.inputs import PromptType
+from vllm.lora.request import LoRARequest
 from vllm.utils import FlexibleArgumentParser
 
 
