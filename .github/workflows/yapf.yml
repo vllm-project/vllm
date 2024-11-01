@@ -6,9 +6,16 @@ on:
   push:
     branches:
       - main
+    paths:
+      - "**/*.py"
+      - .github/workflows/yapf.yml
   pull_request:
     branches:
       - main
+    paths:
+      - "**/*.py"
+      - .github/workflows/yapf.yml
+
 jobs:
   yapf:
     runs-on: ubuntu-latest
