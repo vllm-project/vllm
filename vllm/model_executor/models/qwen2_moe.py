@@ -30,6 +30,7 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig
 from vllm.distributed import (get_pp_group,
                               get_tensor_model_parallel_world_size,
@@ -312,6 +313,7 @@ class Qwen2MoeDecoderLayer(nn.Module):
         return hidden_states, residual
 
 
+@support_torch_compile
 class Qwen2MoeModel(nn.Module):
 
     def __init__(

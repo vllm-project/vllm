@@ -166,7 +166,7 @@ TEXT_GENERATION_MODELS = {
     "microsoft/Phi-3.5-MoE-instruct": PPTestSettings.fast(trust_remote_code=True),  # noqa: E501
     "adept/persimmon-8b-chat": PPTestSettings.fast(),
     "Qwen/Qwen-7B-Chat": PPTestSettings.fast(trust_remote_code=True),
-    "Qwen/Qwen2-beta-7B-Chat": PPTestSettings.fast(),
+    "Qwen/Qwen2-7B-Instruct": PPTestSettings.fast(),
     "Qwen/Qwen1.5-MoE-A2.7B-Chat": PPTestSettings.fast(),
     "stabilityai/stablelm-3b-4e1t": PPTestSettings.fast(),
     "bigcode/starcoder2-3b": PPTestSettings.fast(),
