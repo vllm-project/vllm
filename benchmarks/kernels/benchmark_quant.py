@@ -3,8 +3,8 @@ import time
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, FlexibleArgumentParser,
-                        seed_everything)
+from vllm.platforms import current_platform
+from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, FlexibleArgumentParser
 
 
 @torch.inference_mode()
@@ -17,7 +17,7 @@ def main(num_tokens: int,
          do_profile: bool = False,
          num_warmup_iters: int = 5,
          num_iters: int = 100) -> None:
-    seed_everything(seed)
+    current_platform.seed_everything(seed)
     torch.set_default_device("cuda")
 
     x = torch.randn(num_tokens, hidden_size, dtype=dtype)

@@ -31,8 +31,8 @@ cleanup_docker() {
     echo "Disk usage is above $threshold%. Cleaning up Docker images and volumes..."
     # Remove dangling images (those that are not tagged and not used by any container)
     docker image prune -f
-    # Remove unused volumes
-    docker volume prune -f
+    # Remove unused volumes / force the system prune for old images as well.
+    docker volume prune -f && docker system prune --force --filter "until=72h" --all
     echo "Docker images and volumes cleanup completed."
   else
     echo "Disk usage is below $threshold%. No cleanup needed."
