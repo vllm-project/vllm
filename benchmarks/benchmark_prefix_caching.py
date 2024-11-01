@@ -162,7 +162,8 @@ def main(args):
     random.seed(args.seed)
     if args.dataset_path is not None:
         print(
-            f"Start to sample {args.num_prompts} prompts " f"from {args.dataset_path}"
+            f"Start to sample {args.num_prompts} prompts "
+            f"from {args.dataset_path}"
         )
         filtered_requests = sample_requests_from_dataset(
             dataset_path=args.dataset_path,
