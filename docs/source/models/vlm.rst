@@ -277,7 +277,7 @@ In this example, we will serve the ``TIGER-Lab/VLM2Vec-Full`` model.
 
 .. important::
 
-    VLM2Vec does not expect chat-based input. We use a `custom chat template <examples/template_vlm2vec.jinja>`_
+    VLM2Vec does not expect chat-based input. We use a `custom chat template <https://github.com/vllm-project/vllm/blob/main/examples/template_vlm2vec.jinja>`_
     to combine the text and images together.
 
 Since this schema is not defined by OpenAI client, we post a request to the server using the lower-level ``requests`` library:
