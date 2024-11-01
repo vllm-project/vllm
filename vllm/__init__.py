@@ -1,7 +1,5 @@
 """vLLM: a high-throughput and memory-efficient inference engine for LLMs"""
 
-from torch.library import Library
-
 from vllm.engine.arg_utils import AsyncEngineArgs, EngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.engine.llm_engine import LLMEngine
@@ -15,9 +13,6 @@ from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 
 from .version import __version__, __version_tuple__
-
-# create a library to hold the custom op
-vllm_lib = Library("vllm", "FRAGMENT")  # noqa
 
 __all__ = [
     "__version__",

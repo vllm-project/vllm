@@ -1515,12 +1515,17 @@ def weak_ref_tensors(
     raise ValueError("Invalid type for tensors")
 
 
+# create a library to hold the custom op
+vllm_lib = Library("vllm", "FRAGMENT")  # noqa
+
+
 def direct_register_custom_op(
     library_name: str,
     op_name: str,
     op_func: Callable,
     mutates_args: List[str],
     fake_impl: Optional[Callable] = None,
+    lib: Optional[Library] = None,
 ):
     """
     `torch.library.custom_op` can have significant overhead because it
@@ -1535,7 +1540,11 @@ def direct_register_custom_op(
     to keep the library object alive.
     """
     schema_str = torch.library.infer_schema(op_func, mutates_args=mutates_args)
-    my_lib = Library(library_name, "FRAGMENT")
+    if library_name == "vllm":
+        my_lib = vllm_lib
+    else:
+        assert lib is not None
+        my_lib = lib
     my_lib.define(op_name + schema_str)
     my_lib.impl(op_name, op_func, "CUDA")
     if fake_impl is not None:

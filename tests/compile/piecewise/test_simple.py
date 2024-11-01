@@ -42,6 +42,7 @@ direct_register_custom_op(
     op_func=silly_attention,
     mutates_args=["out"],
     fake_impl=silly_attention_fake,
+    lib=silly_lib,
 )
 
 
