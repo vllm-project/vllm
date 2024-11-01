@@ -126,9 +126,9 @@ async def test_conversation_embedding(server: RemoteOpenAIServer,
 
     chat_response = requests.post(server.url_for("v1/embeddings"),
                                   json={
-                                        "model": model_name,
-                                        "messages": messages,
-                                        "encoding_format": "float",
+                                      "model": model_name,
+                                      "messages": messages,
+                                      "encoding_format": "float",
                                   })
     chat_response.raise_for_status()
     chat_embeddings = chat_response.json()
@@ -152,7 +152,8 @@ async def test_conversation_embedding(server: RemoteOpenAIServer,
 
     assert chat_embeddings.pop("id") is not None
     assert completion_embeddings.pop("id") is not None
-    assert chat_embeddings.pop("created") <= completion_embeddings.pop("created")
+    assert chat_embeddings.pop("created") <= completion_embeddings.pop(
+        "created")
     assert chat_embeddings == completion_embeddings
 
 
