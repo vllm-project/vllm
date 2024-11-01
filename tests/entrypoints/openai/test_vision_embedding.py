@@ -6,10 +6,13 @@ import requests
 
 from vllm.multimodal.utils import encode_image_base64, fetch_image
 
-from ...utils import RemoteOpenAIServer
+from ...utils import VLLM_PATH, RemoteOpenAIServer
 
 MODEL_NAME = "TIGER-Lab/VLM2Vec-Full"
 MAXIMUM_IMAGES = 2
+
+vlm2vec_jinja_path = VLLM_PATH / "examples/template_vlm2vec.jinja"
+assert vlm2vec_jinja_path.exists()
 
 # Test different image extensions (JPG/PNG) and formats (gray/RGB/RGBA)
 TEST_IMAGE_URLS = [
@@ -35,6 +38,8 @@ def server():
         "--trust-remote-code",
         "--limit-mm-per-prompt",
         f"image={MAXIMUM_IMAGES}",
+        "--chat-template",
+        str(vlm2vec_jinja_path),
     ]
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
@@ -90,5 +95,5 @@ async def test_image_embedding(server: RemoteOpenAIServer, model_name: str,
     assert len(embeddings["data"]) == 1
     assert len(embeddings["data"][0]["embedding"]) == 3072
     assert embeddings["usage"]["completion_tokens"] == 0
-    assert embeddings["usage"]["prompt_tokens"] == 771
-    assert embeddings["usage"]["total_tokens"] == 771
+    assert embeddings["usage"]["prompt_tokens"] == 762
+    assert embeddings["usage"]["total_tokens"] == 762
