@@ -220,7 +220,7 @@ class StableLMEpochModel(nn.Module):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: StablelmDecoderLayer(
-                config, cache_config, quant_config, prefix=f"{prefix}.layers"),
+                config, cache_config, quant_config, prefix=prefix),
             prefix=f"{prefix}.layers",
         )
         norm_eps = getattr(config, "norm_eps",

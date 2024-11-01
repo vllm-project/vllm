@@ -52,7 +52,8 @@ class Starcoder2Attention(nn.Module):
     def __init__(self,
                  config: Starcoder2Config,
                  cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None):
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = ""):
         super().__init__()
         self.config = config
 
@@ -86,12 +87,14 @@ class Starcoder2Attention(nn.Module):
             self.total_num_kv_heads,
             bias=self.use_bias,
             quant_config=quant_config,
+            prefix=f"{prefix}.qkv_proj",
         )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             self.hidden_size,
             bias=self.use_bias,
             quant_config=quant_config,
+            prefix=f"{prefix}.o_proj",
         )
         self.rotary_emb = get_rope(
             self.head_dim,
@@ -126,19 +129,22 @@ class Starcoder2MLP(nn.Module):
 
     def __init__(self,
                  config: Starcoder2Config,
-                 quant_config: Optional[QuantizationConfig] = None):
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = ""):
         super().__init__()
         self.c_fc = ColumnParallelLinear(
             config.hidden_size,
             config.intermediate_size,
             bias=config.use_bias,
             quant_config=quant_config,
+            prefix=f"{prefix}.c_fc",
         )
         self.c_proj = RowParallelLinear(
             config.intermediate_size,
             config.hidden_size,
             bias=config.use_bias,
             quant_config=quant_config,
+            prefix=f"{prefix}.c_proj",
         )
         self.act = get_act_fn(config.hidden_act, quant_config,
                               config.intermediate_size)
@@ -155,13 +161,17 @@ class Starcoder2DecoderLayer(nn.Module):
     def __init__(self,
                  config: Starcoder2Config,
                  cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None):
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = ""):
         super().__init__()
         self.hidden_size = config.hidden_size
         self.self_attn = Starcoder2Attention(config,
                                              cache_config,
-                                             quant_config=quant_config)
-        self.mlp = Starcoder2MLP(config, quant_config=quant_config)
+                                             quant_config=quant_config,
+                                             prefix=f"{prefix}.self_attn")
+        self.mlp = Starcoder2MLP(config,
+                                 quant_config=quant_config,
+                                 prefix=f"{prefix}.mlp")
         self.input_layernorm = nn.LayerNorm(config.hidden_size,
                                             eps=config.norm_epsilon)
         self.post_attention_layernorm = nn.LayerNorm(config.hidden_size,
@@ -208,13 +218,16 @@ class Starcoder2Model(nn.Module):
         self.vocab_size = config.vocab_size
 
         # TODO: consider padding_idx (currently removed)
-        self.embed_tokens = VocabParallelEmbedding(config.vocab_size,
-                                                   config.hidden_size,
-                                                   quant_config=quant_config)
+        self.embed_tokens = VocabParallelEmbedding(
+            config.vocab_size,
+            config.hidden_size,
+            quant_config=quant_config,
+            prefix=f"{prefix}.embed_tokens")
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: Starcoder2DecoderLayer(
-                config, cache_config, quant_config=quant_config),
+                config, cache_config, quant_config=quant_config, prefix=prefix
+            ),
             prefix=f"{prefix}.layers",
         )
         self.norm = nn.LayerNorm(config.hidden_size, eps=config.norm_epsilon)
@@ -251,12 +264,14 @@ class Starcoder2ForCausalLM(nn.Module, SupportsPP):
     def __init__(self,
                  config: Starcoder2Config,
                  cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None):
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = ""):
         super().__init__()
         self.config = config
         self.model = Starcoder2Model(config,
                                      cache_config,
-                                     quant_config=quant_config)
+                                     quant_config=quant_config,
+                                     prefix=f"{prefix}.model")
         self.vocab_size = config.vocab_size
         self.unpadded_vocab_size = config.vocab_size
         if config.tie_word_embeddings:
@@ -269,6 +284,7 @@ class Starcoder2ForCausalLM(nn.Module, SupportsPP):
                 org_num_embeddings=config.vocab_size,
                 padding_size=DEFAULT_VOCAB_PADDING_SIZE,
                 quant_config=quant_config,
+                prefix=f"{prefix}.lm_head",
             )
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)
