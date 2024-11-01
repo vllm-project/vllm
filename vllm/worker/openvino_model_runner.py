@@ -6,9 +6,7 @@ from torch import nn
 
 from vllm.attention import get_attn_backend
 from vllm.attention.backends.openvino import OpenVINOAttentionMetadata
-from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, MultiModalConfig, ParallelConfig,
-                         SchedulerConfig)
+from vllm.config import EngineConfig
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.sampler import SamplerOutput
@@ -16,6 +14,7 @@ from vllm.model_executor.model_loader.openvino import get_model
 from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
                              MultiModalInputs)
 from vllm.sequence import SequenceGroupMetadata
+from vllm.worker.model_runner_base import ModelRunnerBase
 
 logger = init_logger(__name__)
 
@@ -38,33 +37,21 @@ class ModelInput(NamedTuple):
                           multi_modal_kwargs={})
 
 
-class OpenVINOModelRunner:
+class OpenVINOModelRunner(ModelRunnerBase):
 
     def __init__(
         self,
         ov_core: ov.Core,
-        model_config: ModelConfig,
-        parallel_config: ParallelConfig,
-        scheduler_config: SchedulerConfig,
-        device_config: DeviceConfig,
-        cache_config: CacheConfig,
-        load_config: LoadConfig,
-        lora_config: Optional[LoRAConfig],
-        multimodal_config: Optional[MultiModalConfig],
+        vllm_config: EngineConfig,
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
         *args,
         **kwargs,
     ):
         self.ov_core = ov_core
-        self.model_config = model_config
-        self.parallel_config = parallel_config
-        self.scheduler_config = scheduler_config
-        self.device_config = device_config
-        self.cache_config = cache_config
-        self.lora_config = lora_config
-        self.multimodal_config = multimodal_config
-        self.load_config = load_config
+        ModelRunnerBase.__init__(self, vllm_config=vllm_config)
+        cache_config = self.cache_config
+        model_config = self.model_config
         self.is_driver_worker = is_driver_worker
 
         self.device = self.device_config.device
@@ -350,3 +337,9 @@ class OpenVINOModelRunner:
             sampling_metadata=sampling_metadata,
         )
         return output
+
+    def prepare_model_input(self, *args, **kwargs):
+        raise NotImplementedError
+
+    def make_model_input_from_broadcasted_tensor_dict(self, *args, **kwargs):
+        raise NotImplementedError
