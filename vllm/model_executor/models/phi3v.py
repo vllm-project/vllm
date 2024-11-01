@@ -679,7 +679,6 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                 intermediate_tensors: Optional[IntermediateTensors] = None,
                 **kwargs: object):
         if intermediate_tensors is not None:
-            input_ids = None
             inputs_embeds = None
         else:
             image_input = self._parse_and_validate_image_input(**kwargs)
@@ -690,9 +689,14 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                 inputs_embeds = merge_multimodal_embeddings(
                     input_ids, inputs_embeds, vision_embeddings,
                     self.image_token_id)
-                input_ids = None
             else:
-                inputs_embeds = None
+                inputs_embeds = self.language_model.model.embed_tokens(
+                    input_ids)
+
+        # always pass the input via `inputs_embeds`
+        # to make sure the computation graph is consistent
+        # for `torch.compile` integration
+        input_ids = None
 
         hidden_states = self.language_model.model(input_ids,
                                                   positions,
