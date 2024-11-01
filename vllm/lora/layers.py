@@ -1457,4 +1457,6 @@ class ModulesToSaveWrapper(BaseLayerWithLoRA, TensorPropertiesMixin):
         packed_modules_list: List,
         model_config: Optional[PretrainedConfig],
     ) -> bool:
+        if not lora_config.enable_lora_modules_to_save:
+            return False
         return type(source_layer) in (ParallelLMHead, VocabParallelEmbedding)
