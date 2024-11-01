@@ -37,7 +37,7 @@ from torch.distributed import Backend, ProcessGroup
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import supports_custom_op
+from vllm.utils import direct_register_custom_op, supports_custom_op
 
 
 @dataclass
@@ -99,8 +99,6 @@ def _register_group(group: "GroupCoordinator") -> None:
 
 if supports_custom_op():
 
-    @torch.library.custom_op("vllm::inplace_all_reduce",
-                             mutates_args=["tensor"])
     def inplace_all_reduce(tensor: torch.Tensor, group_name: str) -> None:
         assert group_name in _groups, f"Group {group_name} is not found."
         group = _groups[group_name]()
@@ -108,11 +106,16 @@ if supports_custom_op():
             raise ValueError(f"Group {group_name} is destroyed.")
         group._all_reduce_in_place(tensor)
 
-    @inplace_all_reduce.register_fake
-    def _(tensor: torch.Tensor, group_name: str) -> None:
+    def inplace_all_reduce_fake(tensor: torch.Tensor, group_name: str) -> None:
         return
 
-    @torch.library.custom_op("vllm::outplace_all_reduce", mutates_args=[])
+    direct_register_custom_op(
+        op_name="inplace_all_reduce",
+        op_func=inplace_all_reduce,
+        mutates_args=["tensor"],
+        fake_impl=inplace_all_reduce_fake,
+    )
+
     def outplace_all_reduce(tensor: torch.Tensor,
                             group_name: str) -> torch.Tensor:
         assert group_name in _groups, f"Group {group_name} is not found."
@@ -121,9 +124,16 @@ if supports_custom_op():
             raise ValueError(f"Group {group_name} is destroyed.")
         return group._all_reduce_out_place(tensor)
 
-    @outplace_all_reduce.register_fake
-    def _(tensor: torch.Tensor, group_name: str) -> torch.Tensor:
+    def outplace_all_reduce_fake(tensor: torch.Tensor,
+                                 group_name: str) -> torch.Tensor:
         return torch.empty_like(tensor)
+
+    direct_register_custom_op(
+        op_name="outplace_all_reduce",
+        op_func=outplace_all_reduce,
+        mutates_args=[],
+        fake_impl=outplace_all_reduce_fake,
+    )
 
 
 class GroupCoordinator:
@@ -338,6 +348,11 @@ class GroupCoordinator:
         if self.world_size == 1:
             return input_
 
+        if input_.is_cpu:
+            import intel_extension_for_pytorch as ipex
+            ipex.distributed.all_reduce(input_, group=self.device_group)
+            return input_
+
         if not supports_custom_op():
             self._all_reduce_in_place(input_)
             return input_
@@ -369,9 +384,6 @@ class GroupCoordinator:
         pynccl_comm = self.pynccl_comm
         if (pynccl_comm is not None and not pynccl_comm.disabled):
             pynccl_comm.all_reduce(input_)
-        elif input_.is_cpu:
-            import intel_extension_for_pytorch as ipex
-            ipex.distributed.all_reduce(input_, group=self.device_group)
         else:
             torch.distributed.all_reduce(input_, group=self.device_group)
 
