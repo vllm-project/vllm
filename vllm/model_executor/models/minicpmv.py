@@ -840,7 +840,7 @@ class MiniCPMV2_5(MiniCPMVBaseModel, SupportsLoRA):
         # Currently, vllm does not support BNB quantization for the `out_proj`
         # of the resampler, so it's necessary to distinguish between the
         # vision encoder and the resampler's out_proj. The same applies to
-        # MiniCPMV2_5.
+        # MiniCPMV2_6.
         ".self_attn.out_proj.",  #  vision encoder out_proj
         # resampler
         ".kv_proj.",
