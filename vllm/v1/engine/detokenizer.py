@@ -1,8 +1,6 @@
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
-from sequence import SequenceStatus
-
 from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
@@ -143,7 +141,7 @@ class IncrementalDetokenizer:
                 stop_str, truncate_to = stop
                 if truncate_to != -1:
                     self.output_text = self.output_text[:truncate_to]
-                finish_reason = SequenceStatus.FINISHED_STOPPED
+                finish_reason = "stop"  # TODO: use constant
                 stop_reason = stop_str
 
         # TODO: handle stop_token_ids here too?
