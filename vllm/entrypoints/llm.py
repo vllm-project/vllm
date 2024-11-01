@@ -1,3 +1,4 @@
+import time
 import itertools
 import warnings
 from contextlib import contextmanager
@@ -33,7 +34,7 @@ from vllm.utils import Counter, deprecate_args, deprecate_kwargs, is_list_of
 
 if envs.VLLM_USE_V1:
     from vllm.v1.engine.llm_engine import LLMEngine  # type: ignore
-    from vllm.v1.engine.core import EngineCore  # type: ignore
+    from vllm.v1.engine.core import EngineCoreClient  # type: ignore
     from vllm.v1.engine.detokenizer import Detokenizer  # type: ignore
     from vllm.v1.engine.processor import Processor  # type: ignore
 else:
@@ -199,10 +200,12 @@ class LLM:
             **kwargs,
         )
 
+        # TODO: should this be wrapped in a class?
         if envs.VLLM_USE_V1:
-
             engine_config = engine_args.create_engine_config()
             executor_class = LLMEngine._get_executor_cls(engine_config)
+            self.task = engine_config.model_config.task
+            self.supported_tasks = engine_config.model_config.task
 
             # Processor (converts Inputs --> EngineCoreRequests)
             self.processor = Processor(engine_config.model_config,
@@ -215,11 +218,30 @@ class LLM:
             self.detokenizer = Detokenizer(
                 engine_config.model_config.tokenizer)
 
-            self.engine_core_cleint
+            # EngineCoreClient.
+            self.engine_core_client = EngineCoreClient(
+                executor_class,
+                engine_config.model_config,
+                engine_config.cache_config,
+                engine_config.parallel_config,
+                engine_config.scheduler_config,
+                engine_config.device_config,
+                engine_config.load_config,
+                engine_config.lora_config,
+                engine_config.speculative_config,
+                engine_config.decoding_config,
+                engine_config.observability_config,
+                engine_config.prompt_adapter_config,
+                UsageContext.LLM_CLASS,
+                use_async_sockets=False,
+            )
 
         else:
             self.llm_engine = LLMEngine.from_engine_args(
                 engine_args, usage_context=UsageContext.LLM_CLASS)
+
+            self.task = self.llm_engine.model_config.task
+            self.supported_tasks = self.llm_engine.model_config.task
 
         self.request_counter = Counter()
 
@@ -361,14 +383,14 @@ class LLM:
             considered legacy and may be deprecated in the future. You should
             instead pass them via the ``inputs`` parameter.
         """
-        task = self.llm_engine.model_config.task
+        task = self.task
         if task != "generate":
             messages = [
                 "LLM.generate() is only supported for (conditional) generation "
                 "models (XForCausalLM, XForConditionalGeneration).",
             ]
 
-            supported_tasks = self.llm_engine.model_config.supported_tasks
+            supported_tasks = self.supported_tasks
             if "generate" in supported_tasks:
                 messages.append(
                     "Your model supports the 'generate' task, but is "
@@ -748,11 +770,11 @@ class LLM:
             considered legacy and may be deprecated in the future. You should
             instead pass them via the ``inputs`` parameter.
         """
-        task = self.llm_engine.model_config.task
+        task = self.task
         if task != "embedding":
             messages = ["LLM.encode() is only supported for embedding models."]
 
-            supported_tasks = self.llm_engine.model_config.supported_tasks
+            supported_tasks = self.supported_tasks
             if "embedding" in supported_tasks:
                 messages.append(
                     "Your model supports the 'embedding' task, but is "
@@ -892,14 +914,28 @@ class LLM:
         priority: int = 0,
     ) -> None:
         request_id = str(next(self.request_counter))
-        self.llm_engine.add_request(
-            request_id,
-            prompt,
-            params,
-            lora_request=lora_request,
-            prompt_adapter_request=prompt_adapter_request,
-            priority=priority,
-        )
+
+        if envs.VLLM_USE_V1:
+            # 1) Convert input --> DetokenizerRequest / EngineCoreRequest.
+            detokenizer_req, engine_core_req = self.processor.process_inputs(
+                request_id, prompt, params, time.time(), lora_request,
+                None, prompt_adapter_request, priority)
+
+            # 2) Add the request to Detokenizer (this process).
+            self.detokenizer.add_request(detokenizer_req)
+
+            # 3) Add the EngineCoreRequest to EngineCore (separate process).
+            self.engine_core_client.add_request(engine_core_req)
+
+        else:
+            self.llm_engine.add_request(
+                request_id,
+                prompt,
+                params,
+                lora_request=lora_request,
+                prompt_adapter_request=prompt_adapter_request,
+                priority=priority,
+            )
 
     def _add_guided_params(
             self,
@@ -922,9 +958,43 @@ class LLM:
             whitespace_pattern=guided_options.guided_whitespace_pattern)
         return params
 
+    def _run_engine_v1(
+            self, use_tqdm: bool
+    ) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
+        # Initialize tqdm.
+        if use_tqdm:
+            num_requests = self.detokenizer.get_num_unfinished_requests()
+            pbar = tqdm(
+                total=num_requests,
+                desc="Processed prompts",
+                dynamic_ncols=True,
+            )
+        
+        # Run the engine.
+        request_outputs: List[Union[RequestOutput, EmbeddingRequestOutput]] = []
+        while self.detokenizer.has_unfinished_requests():
+            engine_core_outputs = self.engine_core_client.get_output()
+            outputs = self.detokenizer.step(engine_core_outputs)
+            for output in outputs:
+                if output.finished:
+                    request_outputs.append(output)
+                    if use_tqdm:
+                        pbar.update(1)
+
+        if use_tqdm:
+            pbar.close()
+        # Sort the outputs by request ID.
+        # This is necessary because some requests may be finished earlier than
+        # its previous requests.
+        return sorted(outputs, key=lambda x: int(x.request_id))
+
+
     def _run_engine(
             self, *, use_tqdm: bool
     ) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
+        if envs.VLLM_USE_V1:
+            return self._run_engine_v1(use_tqdm)
+
         # Initialize tqdm.
         if use_tqdm:
             num_requests = self.llm_engine.get_num_unfinished_requests()
@@ -965,7 +1035,7 @@ class LLM:
         # Sort the outputs by request ID.
         # This is necessary because some requests may be finished earlier than
         # its previous requests.
-        return sorted(outputs, key=lambda x: int(x.request_id))
+        outputs = sorted(outputs, key=lambda x: int(x.request_id))
 
     def _is_encoder_decoder_model(self):
         return self.llm_engine.is_encoder_decoder_model()

@@ -182,15 +182,13 @@ class AsyncLLMEngine(LLMEngineProtocol):
 
         try:
             while True:
-                logger.debug("About call get_output_async")
                 outputs = await self.engine_core_client.get_output_async()
-                logger.debug("Got EngineRequestOutput from EngineCore")
 
                 # Make RequestOutputs and push to the per-client output queues
                 # NOTE: we could simplify the Detokenizer code by returning full
                 # List[RequestOutput] rather than pushing to the Queue at the
                 # expense of doing another loop through List[RequestOutput].
                 self.detokenizer.step_streaming(outputs)
-                logger.debug("Stepped the Detokenizer.")
+
         except BaseException as e:
             logger.error(e)
