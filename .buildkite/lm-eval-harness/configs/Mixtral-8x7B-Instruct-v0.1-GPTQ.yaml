@@ -1,0 +1,12 @@
+# bash .buildkite/lm-eval-harness/run-lm-eval-gsm-vllm-baseline.sh -m TheBloke/Mixtral-8x7B-Instruct-v0.1-GPTQ -b "auto" -l 1000 -f 5 -t 1
+# Loading model weights took 22.1429 GB
+model_name: "TheBloke/Mixtral-8x7B-Instruct-v0.1-GPTQ"
+tasks:
+- name: "gsm8k"
+  metrics:
+  - name: "exact_match,strict-match"
+    value: 0.570
+  - name: "exact_match,flexible-extract"
+    value: 0.574
+limit: 1000
+num_fewshot: 5

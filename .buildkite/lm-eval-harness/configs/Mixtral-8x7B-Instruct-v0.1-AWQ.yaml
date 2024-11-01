@@ -1,0 +1,12 @@
+# bash .buildkite/lm-eval-harness/run-lm-eval-gsm-vllm-baseline.sh -m ybelkada/Mixtral-8x7B-Instruct-v0.1-AWQ -b "auto" -l 1000 -f 5 -t 1
+# Loading model weights took 23.0240 GB
+model_name: "ybelkada/Mixtral-8x7B-Instruct-v0.1-AWQ"
+tasks:
+- name: "gsm8k"
+  metrics:
+  - name: "exact_match,strict-match"
+    value: 0.474
+  - name: "exact_match,flexible-extract"
+    value: 0.498
+limit: 1000
+num_fewshot: 5

@@ -485,19 +485,17 @@ steps:
   - vllm/
   - tests/weight_loading
   commands:
-    - bash weight_loading/run_model_weight_loading_test.sh -c weight_loading/models.txt
+    - bash weight_loading/run_model_weight_loading_test.sh -c weight_loading/models.txt 
 
-- label: Weight Loading Multiple GPU Test - Large Models # optional
-  working_dir: "/vllm-workspace/tests"
+- label: LM Eval Large Models # optional
+  working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
   num_gpus: 2
-  gpu: a100
-  optional: true
   source_file_dependencies:
-  - vllm/
-  - tests/weight_loading
+  - csrc/
+  - vllm/model_executor/layers/quantization
   commands:
-    - bash weight_loading/run_model_weight_loading_test.sh -c weight_loading/models-large.txt 
-
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - bash ./run-tests.sh -c configs/models-large.txt -t 2
 
 ##### multi gpus test #####
 ##### A100 test #####
@@ -514,13 +512,13 @@ steps:
   - TARGET_TEST_SUITE=A100 pytest basic_correctness/ -v -s -m distributed_2_gpus
   - pytest -v -s -x lora/test_mixtral.py
 
-- label: LM Eval Large Models # optional
+- label: Weight Loading Multiple GPU Test - Large Models # optional
+  working_dir: "/vllm-workspace/tests"
+  num_gpus: 2
   gpu: a100
-  num_gpus: 4
-  working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
+  optional: true
   source_file_dependencies:
-  - csrc/
-  - vllm/model_executor/layers/quantization
+  - vllm/
+  - tests/weight_loading
   commands:
-  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - bash ./run-tests.sh -c configs/models-large.txt -t 4
+    - bash weight_loading/run_model_weight_loading_test.sh -c weight_loading/models-large.txt

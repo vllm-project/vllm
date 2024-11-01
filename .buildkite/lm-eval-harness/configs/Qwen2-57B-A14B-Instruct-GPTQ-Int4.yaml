@@ -1,0 +1,11 @@
+# bash .buildkite/lm-eval-harness/run-lm-eval-gsm-vllm-baseline.sh -m Qwen/Qwen1.5-MoE-A2.7B-Chat-GPTQ-Int4 -b "auto" -l 1000 -f 5 -t 2
+model_name: "Qwen/Qwen2-57B-A14B-Instruct-GPTQ-Int4"
+tasks:
+- name: "gsm8k"
+  metrics:
+  - name: "exact_match,strict-match"
+    value: 0.789
+  - name: "exact_match,flexible-extract"
+    value: 0.807
+limit: 1000
+num_fewshot: 5
