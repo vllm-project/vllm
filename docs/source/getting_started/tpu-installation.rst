@@ -26,7 +26,7 @@ information see:
 
 In order for you to use Cloud TPUs you need to have TPU quota granted to your 
 Google Cloud Platform project. TPU quotas specify how many TPUs you can use in a
-GPC project and are specified in terms of TPU version, the numnber of TPU you 
+GPC project and are specified in terms of TPU version, the number of TPU you 
 want to use, and quota type. For more information, see `TPU quota <https://cloud.google.com/tpu/docs/quota#tpu_quota>`_. 
 
 For TPU pricing information, see `Cloud TPU pricing <https://cloud.google.com/tpu/pricing>`_.
