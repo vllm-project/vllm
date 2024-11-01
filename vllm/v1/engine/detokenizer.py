@@ -37,8 +37,10 @@ class IncrementalDetokenizer:
     spaces_between_special_tokens: bool
     output_kind: RequestOutputKind
 
-    # Request output (Cached + updated incrementally)
-    request_output: RequestOutput
+    # TODO: Probably decouple these
+    request_id: str
+    prompt: Optional[str]
+    prompt_token_ids: List[int]
 
     # Tokenizer for this request
     tokenizer: AnyTokenizer
@@ -64,12 +66,6 @@ class IncrementalDetokenizer:
             skip_special_tokens=request.skip_special_tokens,
         )
 
-        request_output = RequestOutput.create_empty(
-            request.request_id,
-            request.prompt,
-            request.prompt_token_ids,
-        )
-
         stops = request.stop
         # Number of chars to hold back when stop strings are to be excluded
         # from streamed output.
@@ -90,7 +86,9 @@ class IncrementalDetokenizer:
             spaces_between_special_tokens=request.
             spaces_between_special_tokens,
             output_kind=request.output_kind,
-            request_output=request_output,
+            request_id=request.request_id,
+            prompt=request.prompt,
+            prompt_token_ids=request.prompt_token_ids,
             tokenizer=tokenizer,
             buffer_length=buffer_length,
             stream=stream,
@@ -157,19 +155,22 @@ class IncrementalDetokenizer:
             return None
 
         delta = self.output_kind == RequestOutputKind.DELTA
-        request_output = self.request_output
-        completion_output = request_output.outputs[0]
-
         output_text = self._get_next_output_text(finished, delta)
         token_ids = new_token_ids if delta else self.token_ids
 
-        completion_output.text = output_text
-        completion_output.token_ids = token_ids
+        request_output = RequestOutput.new(
+            self.request_id,
+            self.prompt,
+            self.prompt_token_ids,
+            output_text,
+            token_ids,
+            finished,
+        )
 
         if finished:
+            completion_output = request_output.outputs[0]
             completion_output.finish_reason = finish_reason
             completion_output.stop_reason = stop_reason
-            request_output.finished = finished
 
         return request_output
 
