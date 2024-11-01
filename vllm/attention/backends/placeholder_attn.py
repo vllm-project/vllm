@@ -294,7 +294,7 @@ class PlaceholderAttentionMetadataBuilder(
         seq_start_loc = torch.zeros(seq_lens_tensor.shape[0] + 1,
                                     dtype=torch.int32,
                                     device=device)
-        placeholder_maps = {
+        placeholder_index_maps = {
             modality: placeholder_map.index_map()
             for modality, placeholder_map in
             self.multimodal_placeholder_maps.items()
@@ -315,7 +315,7 @@ class PlaceholderAttentionMetadataBuilder(
         return PlaceholderAttentionMetadata(
             num_prefills=self.num_prefills,
             slot_mapping=slot_mapping,
-            multi_modal_placeholder_index_maps=placeholder_maps,
+            multi_modal_placeholder_index_maps=placeholder_index_maps,
             num_prefill_tokens=self.num_prefill_tokens,
             num_decode_tokens=num_decode_tokens,
             seq_lens=seq_lens,

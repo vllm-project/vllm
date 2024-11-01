@@ -463,7 +463,7 @@ class FlashAttentionMetadataBuilder(
         seq_start_loc = torch.zeros(seq_lens_tensor.shape[0] + 1,
                                     dtype=torch.int32,
                                     device=device)
-        placeholder_maps = {
+        placeholder_index_maps = {
             modality: placeholder_map.index_map()
             for modality, placeholder_map in
             self.multimodal_placeholder_maps.items()
@@ -483,7 +483,7 @@ class FlashAttentionMetadataBuilder(
             num_prefill_tokens=self.num_prefill_tokens,
             num_decode_tokens=num_decode_tokens,
             seq_lens=seq_lens,
-            multi_modal_placeholder_index_maps=placeholder_maps,
+            multi_modal_placeholder_index_maps=placeholder_index_maps,
             seq_lens_tensor=seq_lens_tensor,
             max_query_len=max_query_len,
             max_decode_query_len=max_decode_query_len,
