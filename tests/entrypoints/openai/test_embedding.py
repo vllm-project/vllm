@@ -111,6 +111,7 @@ async def test_batch_embedding(client: openai.AsyncOpenAI, model_name: str):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_conversation_embedding(server: RemoteOpenAIServer,
+                                      client: openai.AsyncOpenAI,
                                       model_name: str):
     messages = [{
         "role": "user",
@@ -123,13 +124,14 @@ async def test_conversation_embedding(server: RemoteOpenAIServer,
         "content": "Stars twinkle brightly in the night sky.",
     }]
 
-    response = requests.post(server.url_for("v1/embeddings"),
-                             json={
-                                 "model": model_name,
-                                 "messages": messages,
-                                 "encoding_format": "float"
-                             })
-    response.raise_for_status()
+    chat_response = requests.post(server.url_for("v1/embeddings"),
+                                  json={
+                                        "model": model_name,
+                                        "messages": messages,
+                                        "encoding_format": "float",
+                                  })
+    chat_response.raise_for_status()
+    chat_embeddings = chat_response.json()
 
     tokenizer = get_tokenizer(tokenizer_name=model_name, tokenizer_mode="fast")
     prompt = tokenizer.apply_chat_template(
@@ -139,15 +141,19 @@ async def test_conversation_embedding(server: RemoteOpenAIServer,
         continue_final_message=False,
         tokenize=False,
     )
-    tokens = tokenizer.encode(prompt, add_special_tokens=False)
+    completion_response = await client.embeddings.create(
+        model=model_name,
+        input=prompt,
+        encoding_format="float",
+        # To be consistent with chat
+        extra_body={"add_special_tokens": False},
+    )
+    completion_embeddings = completion_response.model_dump(mode="json")
 
-    embeddings = response.json()
-    assert embeddings["id"] is not None
-    assert len(embeddings["data"]) == 1
-    assert len(embeddings["data"][0]["embedding"]) == 4096
-    assert embeddings["usage"]["completion_tokens"] == 0
-    assert embeddings["usage"]["prompt_tokens"] == len(tokens)
-    assert embeddings["usage"]["total_tokens"] == len(tokens)
+    assert chat_embeddings.pop("id") is not None
+    assert completion_embeddings.pop("id") is not None
+    assert chat_embeddings.pop("created") <= completion_embeddings.pop("created")
+    assert chat_embeddings == completion_embeddings
 
 
 @pytest.mark.asyncio
