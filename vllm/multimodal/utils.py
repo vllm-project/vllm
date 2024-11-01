@@ -10,7 +10,7 @@ from PIL import Image
 from vllm.connections import global_http_connection
 from vllm.envs import VLLM_AUDIO_FETCH_TIMEOUT, VLLM_IMAGE_FETCH_TIMEOUT
 from vllm.logger import init_logger
-from vllm.multimodal.base import MultiModalDataDict
+from vllm.multimodal.base import MultiModalDataDict, PlaceholderRange
 from vllm.transformers_utils.tokenizer import AnyTokenizer, get_tokenizer
 
 logger = init_logger(__name__)
@@ -258,7 +258,7 @@ def repeat_and_pad_placeholder_tokens(
     repeat_count: Union[int, List[int]],
     pad_token_left: Optional[int] = None,
     pad_token_right: Optional[int] = None,
-) -> Tuple[Optional[str], List[int]]:
+) -> Tuple[Optional[str], List[int], List[PlaceholderRange]]:
     if isinstance(repeat_count, int):
         repeat_count = [repeat_count]
 
@@ -301,6 +301,7 @@ def repeat_and_pad_placeholder_tokens(
         new_prompt += prompt_parts[-1]
 
     new_token_ids: List[int] = []
+    placeholder_ranges: List[PlaceholderRange] = []
     placeholder_token_idx = 0
     for i, token in enumerate(prompt_token_ids):
         if token == placeholder_token_id:
@@ -310,6 +311,10 @@ def repeat_and_pad_placeholder_tokens(
                 pad_token_left=pad_token_left,
                 pad_token_right=pad_token_right,
             )
+            placeholder_ranges.append({
+                "offset": len(new_token_ids),
+                "length": len(replacement_ids)
+            })
             new_token_ids.extend(replacement_ids)
             placeholder_token_idx += 1
 
@@ -320,4 +325,14 @@ def repeat_and_pad_placeholder_tokens(
         else:
             new_token_ids.append(token)
 
-    return new_prompt, new_token_ids
+    return new_prompt, new_token_ids, placeholder_ranges
+
+
+def consecutive_placeholder_ranges(num_items: int,
+                                   item_size: int) -> List[PlaceholderRange]:
+    """Returns a list of consecutive PlaceholderRanges of a fixed size"""
+
+    return [
+        PlaceholderRange(offset=i * item_size, length=item_size)
+        for i in range(num_items)
+    ]

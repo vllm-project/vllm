@@ -1,5 +1,6 @@
 import dataclasses
 import weakref
+from collections import defaultdict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type, Union
 
@@ -16,7 +17,7 @@ from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
-                             MultiModalInputs)
+                             MultiModalInputs, MultiModalPlaceholderMap)
 from vllm.sequence import (IntermediateTensors, SequenceData,
                            SequenceGroupMetadata)
 from vllm.transformers_utils.config import uses_mrope
@@ -148,9 +149,18 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
             query_lens=seq_lens,
         )
 
-    def _compute_multi_modal_input(self, seq_data: SequenceData, mm_data,
-                                   computed_len: int,
+    def _compute_multi_modal_input(self, seq_group: SequenceGroupMetadata,
+                                   seq_data: SequenceData, computed_len: int,
                                    mm_processor_kwargs: Dict[str, Any]):
+
+        # NOTE: mm_data only includes the subset of multi-modal items that
+        # intersect with the current prefill positions.
+        mm_data, placeholder_maps = MultiModalPlaceholderMap.from_seq_group(
+            seq_group, range(computed_len, len(seq_data.get_token_ids())))
+
+        if not mm_data:
+            return
+
         mm_kwargs = self.multi_modal_input_mapper(mm_data, mm_processor_kwargs)
 
         # special processing for mrope position deltas.
@@ -179,7 +189,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
                     context_len=computed_len,
                 )
             seq_data.mrope_position_delta = mrope_position_delta
-        return mm_kwargs, mrope_positions
+        return mm_kwargs, placeholder_maps, mrope_positions
 
     def _prepare_prompt(
         self,
@@ -194,6 +204,9 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
         slot_mapping: List[int] = []
         seq_lens: List[int] = []
         multi_modal_inputs_list: List[MultiModalInputs] = []
+        multi_modal_placeholder_maps: Dict[
+            str,
+            MultiModalPlaceholderMap] = defaultdict(MultiModalPlaceholderMap)
 
         for seq_group_metadata in seq_group_metadata_list:
             assert seq_group_metadata.is_prompt
@@ -210,11 +223,15 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
             input_tokens.extend(prompt_tokens)  # Token ids
 
             mrope_positions = None
-            if (mm_data := seq_group_metadata.multi_modal_data):
-                mm_kwargs, mrope_positions = self._compute_multi_modal_input(
-                    seq_data, mm_data, computed_len,
+            if seq_group_metadata.multi_modal_data:
+                mm_kwargs, placeholder_maps, mrope_positions = self \
+                    ._compute_multi_modal_input(
+                        seq_group_metadata, seq_data, computed_len,
                     seq_group_metadata.mm_processor_kwargs)
                 multi_modal_inputs_list.append(mm_kwargs)
+                for modality, placeholder_map in placeholder_maps.items():
+                    multi_modal_placeholder_maps[modality].extend(
+                        placeholder_map)
 
             # Token position ids
             # NOTE(woosuk): Here we assume that the first token in the prompt
@@ -264,6 +281,11 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
         slot_mapping = torch.tensor(slot_mapping,
                                     dtype=torch.long,
                                     device=self.device)  # type: ignore
+        placeholder_index_maps = {
+            modality: placeholder_map.index_map()
+            for modality, placeholder_map in
+            multi_modal_placeholder_maps.items()
+        }
 
         attn_metadata = self.attn_backend.make_metadata(
             is_prompt=True,
@@ -275,6 +297,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
             num_decode_tokens=0,
             block_tables=torch.tensor([]),
             slot_mapping=slot_mapping,
+            multi_modal_placeholder_index_maps=placeholder_index_maps,
         )
 
         multi_modal_kwargs = MultiModalInputs.batch(multi_modal_inputs_list)
@@ -366,6 +389,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
         attn_metadata = self.attn_backend.make_metadata(
             is_prompt=False,
             slot_mapping=slot_mapping,
+            multi_modal_placeholder_index_maps=None,
             seq_lens=seq_lens,
             seq_lens_tensor=seq_lens_tensor,
             max_decode_seq_len=max_decode_seq_len,

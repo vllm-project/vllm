@@ -36,7 +36,7 @@ from vllm.attention import Attention, AttentionMetadata, AttentionType
 from vllm.attention.ops.paged_attn import PagedAttention
 from vllm.config import CacheConfig, MultiModalConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs,
+from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
                          EncoderDecoderInputs, InputContext)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -176,13 +176,14 @@ def dummy_image(num_images: int, ):
 def dummy_decoder_data_for_mllama(ctx: InputContext, seq_len: int,
                                   mm_counts: Mapping[str, int]):
     num_images = mm_counts["image"]
-    return dummy_decoder_seq_data(seq_len, num_images), None
+    return DummyData(dummy_decoder_seq_data(seq_len, num_images))
 
 
 def dummy_encoder_data_for_mllama(ctx: InputContext, seq_len: int,
                                   mm_counts: Mapping[str, int]):
     num_images = mm_counts["image"]
-    return dummy_encoder_seq_data(ctx, num_images), dummy_image(num_images)
+    return DummyData(dummy_encoder_seq_data(ctx, num_images),
+                     dummy_image(num_images))
 
 
 def _prepare_aspect_ratio_attention_mask(

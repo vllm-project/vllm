@@ -306,13 +306,12 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                        (group_id < max_num_batched_tokens % max_num_seqs))
             batch_size += seq_len
 
-            decoder_seq_data, decoder_dummy_multi_modal_data \
-                = self.input_registry.dummy_data_for_profiling(
-                    self.model_config,
+            decoder_dummy_data = self.input_registry \
+                .dummy_data_for_profiling(self.model_config,
                                           seq_len,
                                           self.mm_registry,
                                           is_encoder_data=False)
-            encoder_seq_data, encoder_dummy_multi_modal_data \
+            encoder_dummy_data \
                 = self.input_registry.dummy_data_for_profiling(
                     self.model_config,
                                          seq_len,
@@ -320,26 +319,31 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                                          is_encoder_data=True)
 
             # Having more tokens is over-conservative but otherwise fine
-            assert len(decoder_seq_data.prompt_token_ids) >= seq_len, (
+            assert len(
+                decoder_dummy_data.seq_data.prompt_token_ids
+            ) >= seq_len, (
                 f"Expected at least {seq_len} dummy tokens for profiling, "
-                f"but got: {len(decoder_seq_data.prompt_token_ids)}")
+                f"but got: {len(decoder_dummy_data.seq_data.prompt_token_ids)}"
+            )
 
-            assert decoder_dummy_multi_modal_data is None or \
-            encoder_dummy_multi_modal_data is None, (
+            assert decoder_dummy_data.multi_modal_data is None or \
+            encoder_dummy_data.multi_modal_data is None, (
                 "Multi-modal data can't be provided in both encoder and decoder"
             )
 
             seq = SequenceGroupMetadata(
                 request_id=str(group_id),
                 is_prompt=True,
-                seq_data={group_id: decoder_seq_data},
+                seq_data={group_id: decoder_dummy_data.seq_data},
                 sampling_params=sampling_params,
                 block_tables=None,
-                encoder_seq_data=encoder_seq_data,
+                encoder_seq_data=encoder_dummy_data.seq_data,
                 cross_block_table=None,
-                multi_modal_data=decoder_dummy_multi_modal_data
-                or encoder_dummy_multi_modal_data,
-            )
+                multi_modal_data=decoder_dummy_data.multi_modal_data
+                or encoder_dummy_data.multi_modal_data,
+                multi_modal_placeholders=decoder_dummy_data.
+                multi_modal_placeholders
+                or encoder_dummy_data.multi_modal_placeholders)
             seqs.append(seq)
 
         # Run the model with the dummy inputs.
