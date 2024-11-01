@@ -14,6 +14,15 @@ updates:
     reviewers: ["khluu", "simon-mo"]
     allow:
       - dependency-type: "all"
+    ignore:
+      - dependency-name: "torch"
+      - dependency-name: "torchvision"
+      - dependency-name: "xformers"
+      - dependency-name: "lm-format-enforcer"
+      - dependency-name: "gguf"
+      - dependency-name: "compressed-tensors"
+      - dependency-name: "ray[adag]"
+      - dependency-name: "lm-eval"
     groups:
       patch-update:
         applies-to: version-updates
