@@ -6,9 +6,21 @@ on:
   push:
     branches:
       - main
+    paths:
+      - "**/*.py"
+      - pyproject.toml
+      - requirements-lint.txt
+      - .github/workflows/matchers/ruff.json
+      - .github/workflows/ruff.yml
   pull_request:
     branches:
       - main
+    paths:
+      - "**/*.py"
+      - pyproject.toml
+      - requirements-lint.txt
+      - .github/workflows/matchers/ruff.json
+      - .github/workflows/ruff.yml
 
 jobs:
   ruff:
