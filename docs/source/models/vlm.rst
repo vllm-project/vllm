@@ -299,6 +299,5 @@ Since this schema is not defined by OpenAI client, we post a request to the serv
         },
     )
     response.raise_for_status()
-
-    embedding_json = response.json()
-    print("Embedding output:", embedding_json["data"][0]["embedding"])
+    response_json = response.json()
+    print("Embedding output:", response_json["data"][0]["embedding"])
