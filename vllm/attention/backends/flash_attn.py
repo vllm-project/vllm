@@ -15,7 +15,8 @@ from vllm.attention.backends.utils import (
     get_seq_len_block_table_args, is_all_cross_attn_metadata_set,
     is_all_encoder_attn_metadata_set, is_block_tables_empty)
 from vllm.forward_context import get_forward_context
-from vllm.utils import async_tensor_h2d, make_tensor_with_pad
+from vllm.utils import (async_tensor_h2d, direct_register_custom_op,
+                        make_tensor_with_pad)
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import (ModelInputForGPUBuilder,
@@ -946,8 +947,7 @@ def unified_flash_attention(
     return output.view(num_tokens, hidden_size)
 
 
-@unified_flash_attention.register_fake
-def _(
+def unified_flash_attention_fake(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
@@ -965,3 +965,11 @@ def _(
     logits_soft_cap: Optional[float] = None,
 ) -> torch.Tensor:
     return torch.empty_like(query)
+
+
+direct_register_custom_op(
+    op_name="unified_flash_attention",
+    op_func=unified_flash_attention,
+    mutates_args=["kv_cache"],
+    fake_impl=unified_flash_attention_fake,
+)

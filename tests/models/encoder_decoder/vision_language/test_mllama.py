@@ -192,7 +192,7 @@ def _run_test(
             for prompts, images in inputs
         ]
 
-    def process(hf_inputs: BatchEncoding):
+    def process(hf_inputs: BatchEncoding, **kwargs):
         return hf_inputs
 
     with hf_runner(model,
