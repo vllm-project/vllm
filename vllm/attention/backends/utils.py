@@ -519,7 +519,7 @@ def get_num_prefill_decode_query_kv_tokens(
     attn_type: AttentionType,
 ) -> Tuple[int, int, int]:
     """
-    Calculate the number of prefill and decode tokens for query, key or value
+    Calculate the number of prefill and decode tokens for query, key/value
     based on the attention metadata and the specified attention type.
 
     Args:
@@ -527,9 +527,9 @@ def get_num_prefill_decode_query_kv_tokens(
         attn_type (AttentionType): The type of attention being used.
     Returns:
         Tuple[int, int, int]: A tuple containing three integers:
-            - The number of prefill tokens.
-            - The number of encoder tokens.
-            - The number of decode tokens.
+            - The number of prefill query tokens.
+            - The number of prefill key/value tokens.
+            - The number of decode query tokens.
 
     Raises:
         AssertionError: If the number of encoder tokens in `attn_metadata` 
