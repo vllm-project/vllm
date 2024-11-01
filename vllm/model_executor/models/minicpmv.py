@@ -138,13 +138,15 @@ class Resampler2_5(BaseResampler):
                  kv_dim: Optional[int] = None,
                  norm_layer: Callable[[int], nn.LayerNorm] = DEFAULT_LN,
                  max_size: Tuple[int, int] = (70, 70),
-                 quant_config: Optional[QuantizationConfig] = None) -> None:
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = "") -> None:
         super().__init__(num_queries,
                          embed_dim,
                          num_heads,
                          kv_dim,
                          norm_layer,
-                         quant_config=quant_config)
+                         quant_config=quant_config,
+                         prefix=prefix)
 
         self.max_size = max_size
         self._set_2d_pos_cache(self.max_size)
@@ -410,7 +412,8 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
         self.embed_dim = self.config.hidden_size
         self.resampler = self.init_resampler(self.embed_dim,
                                              self.vision_dim,
-                                             quant_config=quant_config)
+                                             quant_config=quant_config,
+                                             prefix="resampler")
         self.resampler.to(device="cuda", dtype=param_dtype)
         # TODO: why is there _KEYS_TO_MODIFY_MAPPING? lm_head should be in llm
         self.lm_head = ParallelLMHead(config.vocab_size,
@@ -667,11 +670,11 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
     ) -> nn.Module:
         raise NotImplementedError
 
-    def init_resampler(
-            self,
-            embed_dim: int,
-            vision_dim: int,
-            quant_config: Optional[QuantizationConfig] = None) -> nn.Module:
+    def init_resampler(self,
+                       embed_dim: int,
+                       vision_dim: int,
+                       quant_config: Optional[QuantizationConfig] = None,
+                       prefix: str = "") -> nn.Module:
         raise NotImplementedError
 
     def get_vision_embedding(
@@ -748,11 +751,11 @@ class MiniCPMV2_0(MiniCPMVBaseModel):
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_tokens(input_ids)
 
-    def init_resampler(
-            self,
-            embed_dim: int,
-            vision_dim: int,
-            quant_config: Optional[QuantizationConfig] = None) -> nn.Module:
+    def init_resampler(self,
+                       embed_dim: int,
+                       vision_dim: int,
+                       quant_config: Optional[QuantizationConfig] = None,
+                       prefix: str = "") -> nn.Module:
         with set_default_torch_dtype(torch.float16):
             resampler = Resampler2(embed_dim=embed_dim,
                                    num_heads=embed_dim // 128,
@@ -761,7 +764,8 @@ class MiniCPMV2_0(MiniCPMVBaseModel):
                                    kv_dim=vision_dim,
                                    adaptive=False,
                                    do_post_projection=True,
-                                   quant_config=quant_config)
+                                   quant_config=quant_config,
+                                   prefix=prefix)
 
         return resampler
 
@@ -896,17 +900,18 @@ class MiniCPMV2_5(MiniCPMVBaseModel, SupportsLoRA):
             model.encoder.layers = model.encoder.layers[:-1]
         return model
 
-    def init_resampler(
-            self,
-            embed_dim: int,
-            vision_dim: int,
-            quant_config: Optional[QuantizationConfig] = None) -> nn.Module:
+    def init_resampler(self,
+                       embed_dim: int,
+                       vision_dim: int,
+                       quant_config: Optional[QuantizationConfig] = None,
+                       prefix: str = "") -> nn.Module:
         with set_default_torch_dtype(torch.float16):
             resampler = Resampler2_5(num_queries=self.config.query_num,
                                      embed_dim=embed_dim,
                                      num_heads=embed_dim // 128,
                                      kv_dim=vision_dim,
-                                     quant_config=quant_config)
+                                     quant_config=quant_config,
+                                     prefix=prefix)
         return resampler
 
     def get_vision_embedding(
@@ -1047,18 +1052,19 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
             model.encoder.layers = model.encoder.layers[:-1]
         return model
 
-    def init_resampler(
-            self,
-            embed_dim: int,
-            vision_dim: int,
-            quant_config: Optional[QuantizationConfig] = None) -> nn.Module:
+    def init_resampler(self,
+                       embed_dim: int,
+                       vision_dim: int,
+                       quant_config: Optional[QuantizationConfig] = None,
+                       prefix: str = "") -> nn.Module:
         with set_default_torch_dtype(torch.float16):
             # The resampler in 2.6 remains consistent with the one in 2.5.
             resampler = Resampler2_5(num_queries=self.config.query_num,
                                      embed_dim=embed_dim,
                                      num_heads=embed_dim // 128,
                                      kv_dim=vision_dim,
-                                     quant_config=quant_config)
+                                     quant_config=quant_config,
+                                     prefix=prefix)
         return resampler
 
     def get_vision_embedding(

@@ -162,7 +162,8 @@ class BaseResampler(nn.Module):
                  kv_dim: Optional[int] = None,
                  norm_layer: Callable[[int], nn.LayerNorm] = DEFAULT_LN,
                  do_post_projection: bool = True,
-                 quant_config: Optional[QuantizationConfig] = None) -> None:
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = "") -> None:
         super().__init__()
 
         self.num_queries = num_queries
@@ -175,7 +176,8 @@ class BaseResampler(nn.Module):
             self.kv_proj = ReplicatedLinear(kv_dim,
                                             embed_dim,
                                             bias=False,
-                                            quant_config=quant_config)
+                                            quant_config=quant_config,
+                                            prefix=prefix)
         else:
             # Maintain the same return value with ReplicatedLinear.forward
             self.kv_proj = lambda *args, **kwargs: (  # type: ignore # noqa 
@@ -220,14 +222,16 @@ class Resampler2(BaseResampler):
                  norm_layer: Callable[[int], nn.LayerNorm] = DEFAULT_LN,
                  adaptive: bool = False,
                  do_post_projection: bool = True,
-                 quant_config: Optional[QuantizationConfig] = None) -> None:
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = "") -> None:
         super().__init__(grid_size**2,
                          embed_dim,
                          num_heads,
                          kv_dim,
                          norm_layer,
                          do_post_projection=do_post_projection,
-                         quant_config=quant_config)
+                         quant_config=quant_config,
+                         prefix=prefix)
 
         self.adaptive = adaptive
         pos_embed_arr = get_2d_sincos_pos_embed(embed_dim,
