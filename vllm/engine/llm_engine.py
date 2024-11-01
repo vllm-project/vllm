@@ -829,6 +829,13 @@ class LLMEngine:
             raise ValueError(f"Got priority {priority} but "
                              "Priority scheduling is not enabled.")
 
+        if isinstance(params, SamplingParams) \
+            and (params.guided_decoding or params.logits_processors) \
+            and self.scheduler_config.num_scheduler_steps > 1:
+            raise ValueError(
+                "Guided decoding and logits processors are not supported "
+                "in multi-step decoding")
+
         if arrival_time is None:
             arrival_time = time.time()
 
