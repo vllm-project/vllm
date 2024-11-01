@@ -150,6 +150,8 @@ class ROCmFlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
             num_prefill_tokens=self.num_prefill_tokens,
             num_decode_tokens=0,
             slot_mapping=self.slot_mapping[:self.num_prefill_tokens],
+            multi_modal_placeholder_index_maps=self.
+            multi_modal_placeholder_index_maps,
             seq_lens=self.seq_lens[:self.num_prefills],
             seq_lens_tensor=self.seq_lens_tensor[:self.num_prefills],
             max_query_len=self.max_query_len,
@@ -178,6 +180,7 @@ class ROCmFlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
             num_prefill_tokens=0,
             num_decode_tokens=self.num_decode_tokens,
             slot_mapping=self.slot_mapping[self.num_prefill_tokens:],
+            multi_modal_placeholder_index_maps=None,
             seq_lens=None,
             seq_lens_tensor=self.seq_lens_tensor[self.num_prefills:],
             max_query_len=None,

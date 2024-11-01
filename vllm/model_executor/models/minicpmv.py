@@ -36,8 +36,8 @@ from typing_extensions import NotRequired
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig, MultiModalConfig
-from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, InputContext,
-                         token_inputs)
+from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
+                         InputContext, token_inputs)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.resampler import (BaseResampler, Resampler2,
@@ -277,7 +277,7 @@ def dummy_data_for_minicpmv(ctx: InputContext, seq_len: int,
     seq_data = dummy_seq_data_for_minicpmv(seq_len, num_images)
     mm_data = dummy_image_for_minicpmv(ctx, hf_config, num_images)
 
-    return seq_data, mm_data
+    return DummyData(seq_data, mm_data)
 
 
 def input_processor_for_minicpmv(ctx: InputContext, inputs: DecoderOnlyInputs):

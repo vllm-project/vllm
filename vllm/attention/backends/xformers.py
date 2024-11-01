@@ -212,6 +212,8 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
             num_prefill_tokens=self.num_prefill_tokens,
             num_decode_tokens=0,
             slot_mapping=slot_mapping,
+            multi_modal_placeholder_index_maps=self.
+            multi_modal_placeholder_index_maps,
             seq_lens=seq_lens,
             seq_lens_tensor=seq_lens_tensor,
             max_query_len=self.max_query_len,
@@ -255,6 +257,7 @@ class XFormersMetadata(AttentionMetadata, PagedAttentionMetadata):
             num_prefill_tokens=0,
             num_decode_tokens=self.num_decode_tokens,
             slot_mapping=slot_mapping,
+            multi_modal_placeholder_index_maps=None,
             seq_lens_tensor=seq_lens_tensor,
             max_prefill_seq_len=0,
             max_decode_seq_len=self.max_decode_seq_len,

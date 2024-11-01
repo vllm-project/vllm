@@ -1,6 +1,7 @@
 import dataclasses
 import time
 import weakref
+from collections import defaultdict
 from dataclasses import dataclass
 from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
                     Type, TypeVar)
@@ -19,7 +20,8 @@ from vllm.model_executor import SamplingMetadataCache
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
-                             MultiModalInputs, MultiModalRegistry)
+                             MultiModalInputs, MultiModalPlaceholderMap,
+                             MultiModalRegistry)
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
 from vllm.utils import DeviceMemoryProfiler, make_tensor_with_pad
@@ -161,6 +163,9 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
         slot_mapping: List[int] = []
         seq_lens: List[int] = []
         multi_modal_inputs_list: List[MultiModalInputs] = []
+        multi_modal_placeholder_maps: Dict[
+            str,
+            MultiModalPlaceholderMap] = defaultdict(MultiModalPlaceholderMap)
 
         for seq_group_metadata in seq_group_metadata_list:
             assert seq_group_metadata.is_prompt
@@ -179,7 +184,21 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
             # Token position ids
             # NOTE(woosuk): Here we assume that the first token in the prompt
             # is always the first token in the sequence.
-            input_positions.extend(list(range(computed_len, seq_len)))
+            positions_range = range(computed_len, seq_len)
+            input_positions.extend(list(positions_range))
+
+            if seq_group_metadata.multi_modal_data:
+                # NOTE: mm_data only includes the subset of multi-modal items
+                # that intersect with the current prefill positions.
+                mm_data, placeholder_maps = MultiModalPlaceholderMap \
+                    .from_seq_group(seq_group_metadata, positions_range)
+
+                mm_kwargs = self.runner.multi_modal_input_mapper(mm_data)
+                multi_modal_inputs_list.append(mm_kwargs)
+
+                for modality, placeholder_map in placeholder_maps.items():
+                    multi_modal_placeholder_maps[modality].extend(
+                        placeholder_map)
 
             if seq_group_metadata.block_tables is None:
                 # During memory profiling, the block tables are not initialized
@@ -220,6 +239,11 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
         slot_mapping = torch.tensor(slot_mapping,
                                     dtype=torch.long,
                                     device=self.device)  # type: ignore
+        placeholder_index_maps = {
+            modality: placeholder_map.index_map()
+            for modality, placeholder_map in
+            multi_modal_placeholder_maps.items()
+        }
 
         max_seqlen = max(seq_lens)
         tmp = [0]
@@ -230,6 +254,7 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
         attn_metadata = self.attn_backend.make_metadata(
             is_prompt=True,
             slot_mapping=slot_mapping,
+            multi_modal_placeholder_index_maps=placeholder_index_maps,
             seq_lens=seq_lens,
             seqlen_q=seqlen_q,
             max_seqlen=max_seqlen,
@@ -313,6 +338,7 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
         attn_metadata = self.attn_backend.make_metadata(
             is_prompt=False,
             slot_mapping=slot_mapping,
+            multi_modal_placeholder_index_maps=None,
             seq_lens=seq_lens,
             seqlen_q=torch.tensor([]),
             max_seqlen=0,
@@ -450,7 +476,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
                        (group_id < max_num_batched_tokens % max_num_seqs))
             batch_size += seq_len
 
-            seq_data, dummy_multi_modal_data = self.input_registry \
+            dummy_data = self.input_registry \
                 .dummy_data_for_profiling(self.model_config,
                                           seq_len,
                                           self.mm_registry)
@@ -458,12 +484,12 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
             seq = SequenceGroupMetadata(
                 request_id=str(group_id),
                 is_prompt=True,
-                seq_data={group_id: seq_data},
+                seq_data={group_id: dummy_data.seq_data},
                 sampling_params=sampling_params,
                 block_tables=None,
                 lora_request=None,
-                multi_modal_data=dummy_multi_modal_data,
-            )
+                multi_modal_data=dummy_data.multi_modal_data,
+                multi_modal_placeholders=dummy_data.multi_modal_placeholders)
             seqs.append(seq)
 
         # Run the model with the dummy inputs.
