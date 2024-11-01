@@ -75,38 +75,26 @@ __global__ void rms_norm_kernel(
     const scalar_t* __restrict__ weight,  // [hidden_size]
     const float epsilon, const int num_tokens, const int hidden_size) {
   __shared__ float s_variance;
+  float variance = 0.0f;
 
-  vec8_t<scalar_t> v8_variance = {0, 0, 0, 0, 0, 0, 0, 0};
-
-  vec8_t<scalar_t>* vectorized_out = reinterpret_cast<vec8_t<scalar_t>*>(out);
-  vec8_t<scalar_t> const* vectorized_in =
-      reinterpret_cast<vec8_t<scalar_t> const*>(input);
-  vec8_t<scalar_t> const* vectorized_weight =
-      reinterpret_cast<vec8_t<scalar_t> const*>(weight);
-  const int vec_hidden_size = hidden_size >> 3;
-
-  // Compute variance. Be careful, hidden_size should multiple of 4.
-  for (int idx = threadIdx.x; idx < vec_hidden_size; idx += blockDim.x) {
-    vec8_t<scalar_t> x = vectorized_in[blockIdx.x * vec_hidden_size + idx];
-    v8_variance += x * x;
+  for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
+    const float x = (float)input[blockIdx.x * hidden_size + idx];
+    variance += x * x;
   }
-  float v8_variance_sum = v8_variance.sum();
 
   using BlockReduce = cub::BlockReduce<float, 1024>;
   __shared__ typename BlockReduce::TempStorage reduceStore;
-  float variance =
-      BlockReduce(reduceStore).Reduce(v8_variance_sum, cub::Sum{}, blockDim.x);
+  variance = BlockReduce(reduceStore).Reduce(variance, cub::Sum{}, blockDim.x);
 
   if (threadIdx.x == 0) {
     s_variance = rsqrtf(variance / hidden_size + epsilon);
   }
   __syncthreads();
 
-  for (int idx = threadIdx.x; idx < vec_hidden_size; idx += blockDim.x) {
-    vec8_t<scalar_t> v8_in = vectorized_in[blockIdx.x * vec_hidden_size + idx];
-    vec8_t<scalar_t> v8_w = vectorized_weight[idx];
-    vectorized_out[blockIdx.x * vec_hidden_size + idx] =
-        v8_in * s_variance * v8_w;
+  for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
+    float x = (float)input[blockIdx.x * hidden_size + idx];
+    out[blockIdx.x * hidden_size + idx] =
+        ((scalar_t)(x * s_variance)) * weight[idx];
   }
 }
 
