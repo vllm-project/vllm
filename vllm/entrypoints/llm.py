@@ -1,5 +1,5 @@
-import time
 import itertools
+import time
 import warnings
 from contextlib import contextmanager
 from typing import (Any, ClassVar, Dict, List, Optional, Sequence, Tuple,
@@ -33,9 +33,9 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter, deprecate_args, deprecate_kwargs, is_list_of
 
 if envs.VLLM_USE_V1:
-    from vllm.v1.engine.llm_engine import LLMEngine  # type: ignore
     from vllm.v1.engine.core import EngineCoreClient  # type: ignore
     from vllm.v1.engine.detokenizer import Detokenizer  # type: ignore
+    from vllm.v1.engine.llm_engine import LLMEngine  # type: ignore
     from vllm.v1.engine.processor import Processor  # type: ignore
 else:
     from vllm.engine.llm_engine import LLMEngine  # type: ignore
@@ -918,8 +918,8 @@ class LLM:
         if envs.VLLM_USE_V1:
             # 1) Convert input --> DetokenizerRequest / EngineCoreRequest.
             detokenizer_req, engine_core_req = self.processor.process_inputs(
-                request_id, prompt, params, time.time(), lora_request,
-                None, prompt_adapter_request, priority)
+                request_id, prompt, params, time.time(), lora_request, None,
+                prompt_adapter_request, priority)
 
             # 2) Add the request to Detokenizer (this process).
             self.detokenizer.add_request(detokenizer_req)
@@ -969,9 +969,10 @@ class LLM:
                 desc="Processed prompts",
                 dynamic_ncols=True,
             )
-        
+
         # Run the engine.
-        request_outputs: List[Union[RequestOutput, EmbeddingRequestOutput]] = []
+        request_outputs: List[Union[RequestOutput,
+                                    EmbeddingRequestOutput]] = []
         while self.detokenizer.has_unfinished_requests():
             engine_core_outputs = self.engine_core_client.get_output()
             outputs = self.detokenizer.step(engine_core_outputs)
@@ -987,7 +988,6 @@ class LLM:
         # This is necessary because some requests may be finished earlier than
         # its previous requests.
         return sorted(outputs, key=lambda x: int(x.request_id))
-
 
     def _run_engine(
             self, *, use_tqdm: bool
