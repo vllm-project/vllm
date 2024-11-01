@@ -242,18 +242,6 @@ class FlashInferState(AttentionState):
                                     is_encoder_decoder_model: bool = False):
         return
 
-    # def begin_forward(self, model_input):
-    #     assert not self._is_graph_capturing
-    #     state = self
-    #     if model_input.attn_metadata.use_cuda_graph:
-    #         batch_size = model_input.input_tokens.shape[0]
-    #         state = (self.runner.graph_runners[model_input.virtual_engine]
-    #                  [batch_size].attn_state)
-    #     model_input.attn_metadata.prefill_wrapper = state._get_prefill_wrapper(
-    #     )
-    #     model_input.attn_metadata.decode_wrapper = state._get_decode_wrapper()
-    #     model_input.attn_metadata.begin_forward()
-
     def begin_forward(self, model_input, model):
         assert not self._is_graph_capturing
         state = self
@@ -374,10 +362,6 @@ class FlashInferMetadata(AttentionMetadata):
             # determine the number of blocks. Therefore,
             # we don't need to prepare the input for flashinfer for profile run.
             if not self.is_profile_run:
-                print(self.paged_kv_indices)
-                print(self.second_layer_kv_indices)
-                print(self.paged_kv_indptr)
-                print(self.second_layer_kv_indptr)
                 self.paged_kv_indptr = self.paged_kv_indptr.to(self.device)
                 self.paged_kv_last_page_len = self.paged_kv_last_page_len.to(
                     self.device)
