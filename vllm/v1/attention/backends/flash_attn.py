@@ -134,7 +134,7 @@ class FlashAttentionImpl(AttentionImpl):
         assert k_scale == 1.0 and v_scale == 1.0, (
             "key/v_scale is not supported in FlashAttention.")
 
-        output = torch.ops.vllm.unified_flash_attention(
+        output = torch.ops.vllm.unified_v1_flash_attention(
             query,
             key,
             value,
@@ -153,7 +153,7 @@ class FlashAttentionImpl(AttentionImpl):
         return output
 
 
-def unified_flash_attention(
+def unified_v1_flash_attention(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
@@ -216,7 +216,7 @@ def unified_flash_attention(
     return output.view(num_tokens, hidden_size)
 
 
-def unified_flash_attention_fake(
+def unified_v1_flash_attention_fake(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
@@ -236,8 +236,8 @@ def unified_flash_attention_fake(
 
 
 direct_register_custom_op(
-    op_name="unified_flash_attention",
-    op_func=unified_flash_attention,
+    op_name="unified_v1_flash_attention",
+    op_func=unified_v1_flash_attention,
     mutates_args=["kv_cache"],
-    fake_impl=unified_flash_attention_fake,
+    fake_impl=unified_v1_flash_attention_fake,
 )
