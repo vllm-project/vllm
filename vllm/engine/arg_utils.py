@@ -15,6 +15,7 @@ from vllm.config import (CacheConfig, ConfigFormat, DecodingConfig,
                          SpeculativeConfig, TaskOption, TokenizerPoolConfig)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
+from vllm.model_executor.layers.pooler import PoolingType
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
@@ -850,7 +851,7 @@ class EngineArgs:
 
         parser.add_argument(
             '--pooling-type',
-            choices=['LAST', 'ALL', 'CLS', 'STEP', 'MEAN'],
+            choices=[pt.name for pt in PoolingType],
             default=None,
             help='Used to configure the pooling method in the embedding model.'
         )

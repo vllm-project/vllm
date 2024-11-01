@@ -108,8 +108,6 @@ class ModelConfig:
             can not be gathered from the vllm arguments.
         config_format: The config format which shall be loaded.
             Defaults to 'auto' which defaults to 'hf'.
-        bert_config: tokenizationconfiguration dictionary for a given 
-            Sentence Transformer BERT model.
         mm_processor_kwargs: Arguments to be forwarded to the model's processor
             for multi-modal data, e.g., image processor.
         pooling_type: Used to configure the pooling method in the embedding 
