@@ -13,7 +13,6 @@ from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size)
 from vllm.logger import init_logger
-from vllm.model_executor.layers.linear import should_slice, slice_residual
 
 logger = init_logger(__name__)
 
@@ -24,6 +23,17 @@ TP_GROUP_NAME = "tp:0"
 # how to do this properly?
 def get_world_name() -> str:
     return torch.distributed.group.WORLD.group_name
+
+
+# This check is a hack
+def should_slice(shape) -> bool:
+    n_slices = get_tensor_model_parallel_world_size()
+    return (shape[0] % n_slices == 0 and shape[0] >= 128)
+
+
+def slice_residual(residual) -> List[torch.Tensor]:
+    n_slices = get_tensor_model_parallel_world_size()
+    return torch.chunk(residual, n_slices, dim=0)
 
 
 def match_gemm_rs_ag_gemm(
