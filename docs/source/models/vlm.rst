@@ -240,8 +240,7 @@ To consume the server, you can use the OpenAI client like in the example below:
     )
     print("Chat completion output:", chat_response.choices[0].message.content)
 
-
-A full code example can be found in `examples/openai_api_client_for_multimodal.py <https://github.com/vllm-project/vllm/blob/main/examples/openai_api_client_for_multimodal.py>`_.
+A full code example can be found in `examples/openai_chat_completion_client_for_multimodal.py <https://github.com/vllm-project/vllm/blob/main/examples/openai_chat_completion_client_for_multimodal.py>`_.
 
 .. tip::
     There is no need to place image placeholders in the text content of the API request - they are already represented by the image content.
@@ -269,14 +268,19 @@ In this example, we will serve the ``TIGER-Lab/VLM2Vec-Full`` model.
 .. code-block:: bash
 
     vllm serve TIGER-Lab/VLM2Vec-Full --task embedding \
-      --trust-remote-code --max-model-len 4096
+      --trust-remote-code --max-model-len 4096 --chat-template examples/template_vlm2vec.jinja
 
 .. important::
 
     Since VLM2Vec has the same model architecture as Phi-3.5-Vision, we have to explicitly pass ``--task embedding``
     to run this model in embedding mode instead of text generation mode.
 
-Since this schema is not defined by OpenAI client, we post a request to the server using the lower-level ``requests`` library:
+.. important::
+
+    VLM2Vec does not expect chat-based input. We use a `custom chat template <https://github.com/vllm-project/vllm/blob/main/examples/template_vlm2vec.jinja>`_
+    to combine the text and images together.
+
+Since the request schema is not defined by OpenAI client, we post a request to the server using the lower-level ``requests`` library:
 
 .. code-block:: python
 
@@ -301,3 +305,5 @@ Since this schema is not defined by OpenAI client, we post a request to the serv
     response.raise_for_status()
     response_json = response.json()
     print("Embedding output:", response_json["data"][0]["embedding"])
+
+A full code example can be found in `examples/openai_chat_embedding_client_for_multimodal.py <https://github.com/vllm-project/vllm/blob/main/examples/openai_chat_embedding_client_for_multimodal.py>`_.
