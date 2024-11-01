@@ -12,10 +12,10 @@ import torch
 from vllm.triton_utils import HAS_TRITON
 
 if HAS_TRITON:
+    from vllm.lora.ops.bgmv_embed import bgmv_embed
     from vllm.lora.ops.bgmv_expand import bgmv_expand
     from vllm.lora.ops.bgmv_expand_slice import bgmv_expand_slice
     from vllm.lora.ops.bgmv_sample import bgmv_sample
-    from vllm.lora.ops.bgmv_embed import bgmv_embed
     from vllm.lora.ops.bgmv_shrink import bgmv_shrink
     from vllm.lora.ops.sgmv_expand import sgmv_expand
     from vllm.lora.ops.sgmv_expand_slice import sgmv_expand_slice
@@ -638,10 +638,14 @@ class PunicaWrapper:
                              indices)
         return logits
 
-    def bgmv_embedding(self, tokens: torch.LongTensor, embed_tokens_all: torch.Tensor, embed_tokens_base: torch.Tensor)->torch.Tensor:
+    def bgmv_embedding(self, tokens: torch.LongTensor,
+                       embed_tokens_all: torch.Tensor,
+                       embed_tokens_base: torch.Tensor) -> torch.Tensor:
         '''
-        embed_tokens_all - [num_loras, vocab_size, hidden_dim] - modules_to_save embeddings
-        embed_tokens_base - [vocab_size, hidden_dim] - base layer embeddings will be applied to tokens with index=-1
+        embed_tokens_all - [num_loras, vocab_size, hidden_dim]
+            modules_to_save embeddings
+        embed_tokens_base - [vocab_size, hidden_dim] - base layer
+            embeddings will be applied to tokens with index=-1
         tokens - [num_tokens]
 
         returns:
@@ -649,6 +653,9 @@ class PunicaWrapper:
         
         '''
 
-        embeddings = bgmv_embed(tokens, embed_tokens_all,embed_tokens_base, token_indices=self.token_lora_indices.long())
-        
+        embeddings = bgmv_embed(tokens,
+                                embed_tokens_all,
+                                embed_tokens_base,
+                                token_indices=self.token_lora_indices.long())
+
         return embeddings
