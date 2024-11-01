@@ -1050,7 +1050,7 @@ class QWenVL(QWenBaseModel):
 @MULTIMODAL_REGISTRY.register_max_image_tokens(MAX_QWEN_IMG_TOKENS)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_qwen)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_qwen)
-class QWenLMHeadModel(QWenBaseModel):
+class QWenLMHeadModel(QWenBaseModel, SupportsLoRA):
     """
     QWenLMHeadModel is not only applicable to LLM  but also to VL, which is not 
     conducive to the current integration logic of LoRA in vLLM. Therefore, it 
