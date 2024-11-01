@@ -26,10 +26,6 @@ class ModelPair:
 
 
 model_pairs = [
-    ModelPair(model_marlin="nm-testing/zephyr-beta-7b-marlin-g128",
-              model_gptq="nm-testing/zephyr-beta-7b-gptq-g128"),
-    ModelPair(model_marlin="robertgshaw2/zephyr-7b-beta-channelwise-marlin",
-              model_gptq="robertgshaw2/zephyr-7b-beta-channelwise-gptq"),
     ModelPair(model_marlin="robertgshaw2/TinyLlama-1.1B-Chat-v1.0-g128-marlin",
               model_gptq="robertgshaw2/TinyLlama-1.1B-Chat-v1.0-g128-gptq")
 ]

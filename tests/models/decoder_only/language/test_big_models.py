@@ -56,6 +56,10 @@ def test_models(
         with vllm_runner(model, dtype=dtype, enforce_eager=True) as vllm_model:
             vllm_outputs = vllm_model.generate_greedy_logprobs(
                 example_prompts, max_tokens, NUM_LOG_PROBS)
+            # This test is for verifying whether the model's extra_repr
+            # can be printed correctly.
+            print(vllm_model.model.llm_engine.model_executor.driver_worker.
+                model_runner.model)
 
         check_logprobs_close(
             outputs_0_lst=hf_outputs,
@@ -70,6 +74,10 @@ def test_models(
         with vllm_runner(model, dtype=dtype, enforce_eager=True) as vllm_model:
             vllm_outputs = vllm_model.generate_greedy(example_prompts,
                                                       max_tokens)
+            # This test is for verifying whether the model's extra_repr
+            # can be printed correctly.
+            print(vllm_model.model.llm_engine.model_executor.driver_worker.
+                model_runner.model)
 
         check_outputs_equal(
             outputs_0_lst=hf_outputs,
@@ -77,17 +85,3 @@ def test_models(
             name_0="hf",
             name_1="vllm",
         )
-
-
-@pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype", [target_dtype])
-def test_model_print(
-    vllm_runner,
-    model: str,
-    dtype: str,
-) -> None:
-    with vllm_runner(model, dtype=dtype, enforce_eager=True) as vllm_model:
-        # This test is for verifying whether the model's extra_repr
-        # can be printed correctly.
-        print(vllm_model.model.llm_engine.model_executor.driver_worker.
-              model_runner.model)
