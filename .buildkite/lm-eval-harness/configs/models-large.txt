@@ -1,4 +1,5 @@
 Meta-Llama-3-8B-Instruct-FBGEMM-nonuniform.yaml
+Meta-Llama-3-8B-QQQ.yaml
 Mixtral-8x7B-Instruct-v0.1-GPTQ.yaml
 Qwen2-57B-A14B-Instruct-GPTQ-Int4.yaml
 DeepSeek-V2-Lite-Chat.yaml
