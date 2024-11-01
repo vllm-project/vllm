@@ -71,8 +71,8 @@ class IncrementalDetokenizer:
         )
 
         stops = request.stop
-        # How many chars to hold back stop strings are to be excluded
-        # from the output when streaming
+        # Number of chars to hold back when stop strings are to be excluded
+        # from streamed output.
         buffer_length = 0 if not stops or request.include_stop_str_in_output \
             else max(len(s) for s in stops) - 1
 
@@ -150,7 +150,7 @@ class IncrementalDetokenizer:
 
         # TODO: handle stop_token_ids here too?
 
-        # 2) Update the RequestOutput object with the new text.
+        # 3) Update the RequestOutput object with the new text.
         finished = bool(finish_reason)
         if self.output_kind == RequestOutputKind.FINAL_ONLY \
             and not finished:
@@ -234,7 +234,10 @@ class Detokenizer:
         requests_to_abort: List[str] = []
         for engine_core_output in encore_core_outputs:
             request_id = engine_core_output.request_id
-            detokenizer = self.request_states[request_id]
+            detokenizer = self.request_states.get(request_id)
+            if detokenizer is None:
+                # Ignore output for already-aborted request.
+                continue
 
             # Detokenize and update state.
             request_output = detokenizer.add_tokens(
@@ -265,7 +268,10 @@ class Detokenizer:
         requests_to_abort: List[str] = []
         for engine_core_output in encore_core_outputs:
             request_id = engine_core_output.request_id
-            detokenizer = self.request_states[request_id]
+            detokenizer = self.request_states.get(request_id)
+            if detokenizer is None:
+                # Ignore output for already-aborted request.
+                continue
 
             # Detokenize and update state.
             request_output = detokenizer.add_tokens(
