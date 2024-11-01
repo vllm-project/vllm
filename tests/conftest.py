@@ -920,26 +920,23 @@ class VllmRunner:
         Greedy logprobs generation for vLLM encoder/decoder models
         '''
 
-        outputs = self.generate_encoder_decoder_w_logprobs(
+        return self.generate_encoder_decoder_w_logprobs(
             encoder_decoder_prompts,
             greedy_logprobs_params,
             lora_requests=lora_requests)
 
     def generate_beam_search(
-        self,
-        prompts: Union[List[str], List[List[int]]],
-        beam_width: int,
-        max_tokens: int,
-        lora_requests: Optional[List[LoRARequest]] = None,
-    ) -> List[Tuple[List[List[int]], List[str]]]:
-        beam_search_params = SamplingParams(n=beam_width,
-                                            use_beam_search=True,
-                                            temperature=0.0,
-                                            max_tokens=max_tokens)
-        outputs = self.generate(prompts,
-                                beam_search_params,
-                                lora_requests=lora_requests)
-        return outputs
+            self, prompts: Union[List[str], List[List[int]]], beam_width: int,
+            max_tokens: int) -> List[Tuple[List[List[int]], List[str]]]:
+        outputs = self.model.beam_search(
+            prompts,
+            BeamSearchParams(beam_width=beam_width, max_tokens=max_tokens))
+        returned_outputs = []
+        for output in outputs:
+            token_ids = [x.tokens for x in output.sequences]
+            texts = [x.text for x in output.sequences]
+            returned_outputs.append((token_ids, texts))
+        return returned_outputs
 
     def encode(
         self,
