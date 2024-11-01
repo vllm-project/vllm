@@ -1520,12 +1520,11 @@ vllm_lib = Library("vllm", "FRAGMENT")  # noqa
 
 
 def direct_register_custom_op(
-    library_name: str,
     op_name: str,
     op_func: Callable,
     mutates_args: List[str],
     fake_impl: Optional[Callable] = None,
-    lib: Optional[Library] = None,
+    target_lib: Optional[Library] = None,
 ):
     """
     `torch.library.custom_op` can have significant overhead because it
@@ -1534,17 +1533,16 @@ def direct_register_custom_op(
     See https://gist.github.com/youkaichao/ecbea9ec9fc79a45d2adce1784d7a9a5
     for more details.
 
+    By default, the custom op is registered to the vLLM library. If you
+    want to register it to a different library, you can pass the library
+    object to the `target_lib` argument.
+
     IMPORTANT: the lifetime of the operator is tied to the lifetime of the
-    library object. It is important to have one line of code
-    `my_lib = Library(library_name, "FRAGMENT")` outside of the function
-    to keep the library object alive.
+    library object. If you want to bind the operator to a different library,
+    make sure the library object is alive when the operator is used.
     """
     schema_str = torch.library.infer_schema(op_func, mutates_args=mutates_args)
-    if library_name == "vllm":
-        my_lib = vllm_lib
-    else:
-        assert lib is not None
-        my_lib = lib
+    my_lib = target_lib or vllm_lib
     my_lib.define(op_name + schema_str)
     my_lib.impl(op_name, op_func, "CUDA")
     if fake_impl is not None:

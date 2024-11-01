@@ -499,7 +499,6 @@ def inplace_fused_experts_fake(
 
 
 direct_register_custom_op(
-    library_name="vllm",
     op_name="inplace_fused_experts",
     op_func=inplace_fused_experts,
     mutates_args=["hidden_states"],
@@ -540,7 +539,6 @@ def outplace_fused_experts_fake(
 
 
 direct_register_custom_op(
-    library_name="vllm",
     op_name="outplace_fused_experts",
     op_func=outplace_fused_experts,
     mutates_args=[],

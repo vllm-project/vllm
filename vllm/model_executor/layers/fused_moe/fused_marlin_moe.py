@@ -136,7 +136,6 @@ def single_marlin_moe_fake(
 
 
 direct_register_custom_op(
-    library_name="vllm",
     op_name="single_marlin_moe",
     op_func=single_marlin_moe,
     mutates_args=[],
@@ -353,7 +352,6 @@ def fused_marlin_moe_fake(
 
 
 direct_register_custom_op(
-    library_name="vllm",
     op_name="fused_marlin_moe",
     op_func=fused_marlin_moe,
     mutates_args=[],

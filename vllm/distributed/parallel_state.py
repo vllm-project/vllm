@@ -110,7 +110,6 @@ if supports_custom_op():
         return
 
     direct_register_custom_op(
-        library_name="vllm",
         op_name="inplace_all_reduce",
         op_func=inplace_all_reduce,
         mutates_args=["tensor"],
@@ -130,7 +129,6 @@ if supports_custom_op():
         return torch.empty_like(tensor)
 
     direct_register_custom_op(
-        library_name="vllm",
         op_name="outplace_all_reduce",
         op_func=outplace_all_reduce,
         mutates_args=[],

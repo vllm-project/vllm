@@ -774,7 +774,6 @@ def unified_flash_attention_fake(
 
 
 direct_register_custom_op(
-    library_name="vllm",
     op_name="unified_flash_attention",
     op_func=unified_flash_attention,
     mutates_args=["kv_cache"],

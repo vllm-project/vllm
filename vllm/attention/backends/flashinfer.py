@@ -924,7 +924,6 @@ def unified_flash_infer_fake(
 
 
 direct_register_custom_op(
-    library_name="vllm",
     op_name="unified_flash_infer",
     op_func=unified_flash_infer,
     mutates_args=["kv_cache"],

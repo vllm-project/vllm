@@ -37,12 +37,11 @@ def silly_attention_fake(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
 
 
 direct_register_custom_op(
-    library_name="silly",
     op_name="attention",
     op_func=silly_attention,
     mutates_args=["out"],
     fake_impl=silly_attention_fake,
-    lib=silly_lib,
+    target_lib=silly_lib,
 )
 
 
