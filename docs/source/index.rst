@@ -125,9 +125,9 @@ Documentation
 
 .. toctree::
    :maxdepth: 1
-   :caption: Performance benchmarks
+   :caption: Performance
 
-   performance_benchmark/benchmarks
+   performance/benchmarks
 
 .. toctree::
    :maxdepth: 2
