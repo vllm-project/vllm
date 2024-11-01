@@ -12,7 +12,7 @@ namespace machete {
 struct MMArgs {
   torch::Tensor const& A;
   torch::Tensor const& B;
-  vllm::ScalarType const& btype;
+  vllm::ScalarType const& b_type;
   c10::optional<at::ScalarType> const& maybe_out_type;
   c10::optional<torch::Tensor> const& maybe_group_scales;
   c10::optional<torch::Tensor> const& maybe_group_zeros;

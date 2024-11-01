@@ -3,9 +3,9 @@
 /*
    This file defines custom epilogues for fusing channel scales, token scales,
    bias, and activation zero-points onto a GEMM operation using the
-   CUTLASS 3.x API, for pre sm90 (Hopper) NVIDIA GPUs.
+   CUTLASS 2.x API, for sm80 (Ampere) NVIDIA GPUs.
 
-   Epilogues must contain a public type named EVTCompute of type Sm90EVT,
+   Epilogues must contain a public type named EVTCompute of type Sm80EVT,
    as well as a static prepare_args function that constructs an
    EVTCompute::Arguments struct.
 */

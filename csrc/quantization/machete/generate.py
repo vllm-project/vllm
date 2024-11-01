@@ -82,7 +82,7 @@ torch::Tensor mm_dispatch(MMArgs args) {
   {% for impl_config in impl_configs %}
   {% set t = impl_config.types -%}
   {% set type_sig = gen_type_sig(t) -%}
-  if (args.btype == {{VLLMScalarTypeTag[t.b]}}
+  if (args.b_type == {{VLLMScalarTypeTag[t.b]}}
       && a_type == {{TorchTypeTag[t.a]}}
       && out_type == {{TorchTypeTag[t.out]}}
       && {%if t.b_group_scale != void -%}
@@ -105,7 +105,7 @@ torch::Tensor mm_dispatch(MMArgs args) {
   TORCH_CHECK_NOT_IMPLEMENTED(
     false, "machete_mm(..) is not implemented for "
     "a_type=", args.A.scalar_type(),
-    ", b_type=", args.btype.str(),
+    ", b_type=", args.b_type.str(),
     ", out_type=", out_type,
     ", with_group_scale_type=", maybe_g_scales_type
         ? toString(*maybe_g_scales_type) : "None",
@@ -231,7 +231,7 @@ torch::Tensor prepack_B_dispatch(PrepackBArgs args) {
   TORCH_CHECK_NOT_IMPLEMENTED(false, 
     "prepack_B_dispatch(..) is not implemented for "
     "atype = ", args.a_type,
-    ", btype = ", args.b_type.str(),
+    ", b_type = ", args.b_type.str(),
     ", with_group_scales_type= ", args.maybe_group_scales_type ? 
         toString(*args.maybe_group_scales_type) : "None");
 }

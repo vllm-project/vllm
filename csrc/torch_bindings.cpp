@@ -217,7 +217,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "machete_mm("
       "   Tensor A,"
       "   Tensor B,"
-      "   int btype,"
+      "   int b_type,"
       "   ScalarType? out_type,"
       "   Tensor? group_scales,"
       "   Tensor? group_zeros,"
