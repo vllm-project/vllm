@@ -31,8 +31,8 @@ def silly_attention_fake(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
 
 
 direct_register_custom_op(
-    library_name="silly",
-    op_name="attention",
+    library_name="vllm",
+    op_name="toy_attention",
     op_func=silly_attention,
     mutates_args=["out"],
     fake_impl=silly_attention_fake,
@@ -103,7 +103,7 @@ class LlamaAttention(nn.Module):
         k = k + positions.unsqueeze(1)
 
         attn_output = torch.empty_like(q)
-        torch.ops.silly.attention(q, k, v, attn_output)
+        torch.ops.vllm.toy_attention(q, k, v, attn_output)
 
         output = self.output_projection(attn_output)
         return output
@@ -179,7 +179,7 @@ def run_model(llama_config,
             set_compilation_config(
                 CompilationConfig(
                     use_cudagraph=True,
-                    non_cudagraph_ops=["silly.attention"],
+                    non_cudagraph_ops=["vllm.toy_attention"],
                 ))
         else:
             set_compilation_config(CompilationConfig(use_cudagraph=True, ))

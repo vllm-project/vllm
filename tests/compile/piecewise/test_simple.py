@@ -33,8 +33,8 @@ def silly_attention_fake(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
 
 
 direct_register_custom_op(
-    library_name="silly",
-    op_name="attention",
+    library_name="vllm",
+    op_name="toy_attention",
     op_func=silly_attention,
     mutates_args=["out"],
     fake_impl=silly_attention_fake,
@@ -57,12 +57,12 @@ class SillyModel(nn.Module):
         x = x + 1
         x = x + 2
         out = torch.empty_like(x)
-        torch.ops.silly.attention(x, x, x, out)
+        torch.ops.vllm.toy_attention(x, x, x, out)
         x = out
         x = x - 2
         x = x - 1
         out = torch.empty_like(x)
-        torch.ops.silly.attention(x, x, x, out)
+        torch.ops.vllm.toy_attention(x, x, x, out)
         x = out
         x = x + 1
         return x

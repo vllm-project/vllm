@@ -1515,6 +1515,9 @@ def weak_ref_tensors(
     raise ValueError("Invalid type for tensors")
 
 
+vllm_lib = Library("vllm", "FRAGMENT")
+
+
 def direct_register_custom_op(
     library_name: str,
     op_name: str,
@@ -1530,7 +1533,9 @@ def direct_register_custom_op(
     for more details.
     """
     schema_str = torch.library.infer_schema(op_func, mutates_args=mutates_args)
-    my_lib = Library(library_name, "FRAGMENT")
+    # FIXME after https://github.com/pytorch/pytorch/issues/139444 is resolved
+    assert library_name == "vllm"
+    my_lib = vllm_lib
     my_lib.define(op_name + schema_str)
     my_lib.impl(op_name, op_func, "CUDA")
     if fake_impl is not None:
