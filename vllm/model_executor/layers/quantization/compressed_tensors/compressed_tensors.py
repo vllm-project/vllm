@@ -359,6 +359,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         """
         scheme = CompressedTensors24(
             model_compressor=self.model_compressor,
+            layer_name=layer_name
         )
 
         return scheme
