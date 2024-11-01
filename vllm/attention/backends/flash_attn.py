@@ -756,8 +756,6 @@ def _get_causal_option(attn_type: AttentionType) -> bool:
                 or attn_type == AttentionType.ENCODER_DECODER)
 
 
-@torch.library.custom_op("vllm::unified_flash_attention",
-                         mutates_args=["kv_cache"])
 def unified_flash_attention(
     query: torch.Tensor,
     key: torch.Tensor,
