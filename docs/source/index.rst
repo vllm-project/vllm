@@ -151,6 +151,12 @@ Documentation
    community/meetups
    community/sponsors
 
+.. toctree::
+   :maxdepth: 2
+   :caption: Contributing
+
+   contributing/overview.md
+
 Indices and tables
 ==================
 
