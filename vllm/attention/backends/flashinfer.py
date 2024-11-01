@@ -871,7 +871,7 @@ def unified_flash_infer(
         else:
             assert prefill_meta is not None
             assert prefill_meta.prefill_wrapper is not None
-            output = prefill_meta.prefill_wrapper.forward(
+            prefill_output = prefill_meta.prefill_wrapper.forward(
                 query,
                 kv_cache,
                 logits_soft_cap=logits_soft_cap,
