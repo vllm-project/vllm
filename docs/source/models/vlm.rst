@@ -268,7 +268,8 @@ In this example, we will serve the ``TIGER-Lab/VLM2Vec-Full`` model.
 .. code-block:: bash
 
     vllm serve TIGER-Lab/VLM2Vec-Full --task embedding \
-      --trust-remote-code --max-model-len 4096 --chat-template examples/template_vlm2vec.jinja
+      --trust-remote-code --max-model-len 4096 \
+      --chat-template examples/template_vlm2vec.jinja --chat-template-content-format openai
 
 .. important::
 

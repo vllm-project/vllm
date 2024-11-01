@@ -26,7 +26,7 @@ def phi3v_model_config():
                        trust_remote_code=True,
                        dtype="bfloat16",
                        seed=0,
-                       chat_template_text_format="string",
+                       chat_template_content_format="string",
                        limit_mm_per_prompt={
                            "image": 2,
                        })
@@ -335,7 +335,7 @@ def test_parse_chat_messages_context_text_format(
     phi3v_model_config,
     phi3v_tokenizer,
 ):
-    phi3v_model_config.chat_template_text_format = "openai"
+    phi3v_model_config.chat_template_content_format = "openai"
     conversation, mm_data = parse_chat_messages(
         [{
             "role": "user",

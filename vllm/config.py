@@ -153,7 +153,7 @@ class ModelConfig:
             use_async_output_proc: bool = True,
             override_neuron_config: Optional[Dict[str, Any]] = None,
             config_format: ConfigFormat = ConfigFormat.AUTO,
-            chat_template_text_format: str = "string",
+            chat_template_content_format: str = "string",
             mm_processor_kwargs: Optional[Dict[str, Any]] = None,
             pooling_type: Optional[str] = None,
             pooling_norm: Optional[bool] = None,
@@ -190,7 +190,7 @@ class ModelConfig:
             self.model, revision)
         self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
         self.use_async_output_proc = use_async_output_proc
-        self.chat_template_text_format = chat_template_text_format
+        self.chat_template_content_format = chat_template_content_format
         self.mm_processor_kwargs = mm_processor_kwargs
 
         # Set enforce_eager to False if the value is unset.

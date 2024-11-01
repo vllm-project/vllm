@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import (Any, Awaitable, Callable, Dict, Generic, Iterable, List,
                     Literal, Mapping, Optional, Tuple, TypeVar, Union, cast)
 
+import jinja2
 # yapf conflicts with isort for this block
 # yapf: disable
 from openai.types.chat import (ChatCompletionAssistantMessageParam,
@@ -24,6 +25,7 @@ from openai.types.chat import (ChatCompletionMessageToolCallParam,
 # pydantic needs the TypedDict from typing_extensions
 from pydantic import ConfigDict
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
+from transformers.utils.chat_template_utils import _compile_jinja_template
 from typing_extensions import Required, TypeAlias, TypedDict
 
 from vllm.config import ModelConfig
@@ -417,7 +419,6 @@ _TextParser = partial(cast, ChatCompletionContentPartTextParam)
 _ImageParser = partial(cast, ChatCompletionContentPartImageParam)
 _AudioParser = partial(cast, ChatCompletionContentPartAudioParam)
 _RefusalParser = partial(cast, ChatCompletionContentPartRefusalParam)
-MODEL_KEEP_MULTI_MODAL_CONTENT = {'mllama'}
 
 # Define a mapping from part types to their corresponding parsing functions.
 MM_PARSER_MAP: Dict[str, Callable[[ChatCompletionContentPartParam], str]] = {
@@ -490,18 +491,13 @@ def _parse_chat_message_content_parts(
     role: str,
     parts: Iterable[ChatCompletionContentPartParam],
     mm_tracker: BaseMultiModalItemTracker,
-    chat_template_text_format: str,
 ) -> List[ConversationMessage]:
     content: List[Union[str, Dict[str, str]]] = []
 
     mm_parser = mm_tracker.create_parser()
-    model_config = mm_tracker.model_config
+    model_config = mm_tracer.model_config
 
-    wrap_dicts = (chat_template_text_format == "openai"
-                  or (model_config.task == "embedding"
-                      and model_config.is_multimodal_model)
-                  or (model_config.hf_config.model_type
-                      in MODEL_KEEP_MULTI_MODAL_CONTENT))
+    wrap_dicts = model_config.chat_template_content_format == "openai"
 
     for part in parts:
         parse_res = _parse_chat_message_content_part(
@@ -573,7 +569,6 @@ _ToolParser = partial(cast, ChatCompletionToolMessageParam)
 def _parse_chat_message_content(
     message: ChatCompletionMessageParam,
     mm_tracker: BaseMultiModalItemTracker,
-    chat_template_text_format: str,
 ) -> List[ConversationMessage]:
     role = message["role"]
     content = message.get("content")
@@ -589,7 +584,6 @@ def _parse_chat_message_content(
         role,
         content,  # type: ignore
         mm_tracker,
-        chat_template_text_format,
     )
 
     for result_msg in result:
@@ -636,7 +630,6 @@ def parse_chat_messages(
         sub_messages = _parse_chat_message_content(
             msg,
             mm_tracker,
-            model_config.chat_template_text_format,
         )
 
         conversation.extend(sub_messages)
@@ -658,7 +651,6 @@ def parse_chat_messages_futures(
         sub_messages = _parse_chat_message_content(
             msg,
             mm_tracker,
-            model_config.chat_template_text_format,
         )
 
         conversation.extend(sub_messages)
@@ -666,6 +658,23 @@ def parse_chat_messages_futures(
     _postprocess_messages(conversation)
 
     return conversation, mm_tracker.all_mm_data()
+
+
+def validate_hf_chat_template_content_format(
+    model_config: ModelConfig,
+    chat_template: str,
+) -> None:
+    content_format = model_config.chat_template_content_format
+
+    compiled = _compile_jinja_template(chat_template)
+    # Somehow parse out the AST and find how messages[int]['content'] is used?
+
+    if content_format == "string":
+        pass
+    elif content_format == "openai":
+        pass
+    else:
+        raise ValueError(f"Invalid format: {content_format}")
 
 
 def apply_hf_chat_template(
