@@ -23,7 +23,7 @@ from typing import Iterable, List, Optional, Tuple, Union
 
 import torch
 from torch import nn
-from transformers import PretrainedConfig
+from transformers import StableLmConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig
@@ -50,8 +50,9 @@ from .utils import (is_pp_missing_parameter,
 class StablelmMLP(nn.Module):
 
     def __init__(self,
-                 config: PretrainedConfig,
-                 quant_config: Optional[QuantizationConfig] = None) -> None:
+                 config: StableLmConfig,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = "") -> None:
         super().__init__()
         self.config = config
         self.hidden_size = config.hidden_size
@@ -59,11 +60,13 @@ class StablelmMLP(nn.Module):
         self.gate_up_proj = MergedColumnParallelLinear(
             config.hidden_size, [config.intermediate_size] * 2,
             bias=False,
-            quant_config=quant_config)
+            quant_config=quant_config,
+            prefix=f"{prefix}.gate_up_proj")
         self.down_proj = RowParallelLinear(config.intermediate_size,
                                            config.hidden_size,
                                            bias=False,
-                                           quant_config=quant_config)
+                                           quant_config=quant_config,
+                                           prefix=f"{prefix}.down_proj")
         self.act_fn = SiluAndMul()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -76,9 +79,10 @@ class StablelmMLP(nn.Module):
 class StablelmAttention(nn.Module):
 
     def __init__(self,
-                 config: PretrainedConfig,
+                 config: StableLmConfig,
                  cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None) -> None:
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = "") -> None:
         super().__init__()
         self.config = config
         self.hidden_size = config.hidden_size
@@ -116,11 +120,13 @@ class StablelmAttention(nn.Module):
                                           self.total_num_heads,
                                           self.total_num_key_value_heads,
                                           self.qkv_bias,
-                                          quant_config=quant_config)
+                                          quant_config=quant_config,
+                                          prefix=f"{prefix}.qkv_proj")
         self.o_proj = RowParallelLinear(self.total_num_heads * self.head_dim,
                                         self.hidden_size,
                                         bias=False,
-                                        quant_config=quant_config)
+                                        quant_config=quant_config,
+                                        prefix=f"{prefix}.o_proj")
         self.rotary_emb = get_rope(
             self.head_dim,
             rotary_dim=self.rotary_ndims,
@@ -153,13 +159,17 @@ class StablelmDecoderLayer(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: StableLmConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
-        self.self_attn = StablelmAttention(config, cache_config, quant_config)
-        self.mlp = StablelmMLP(config, quant_config)
+        self.self_attn = StablelmAttention(config,
+                                           cache_config,
+                                           quant_config,
+                                           prefix=f"{prefix}.self_attn")
+        self.mlp = StablelmMLP(config, quant_config, prefix=f"{prefix}.mlp")
         norm_eps = getattr(config, "norm_eps",
                            getattr(config, "layer_norm_eps", 1e-05))
         self.input_layernorm = nn.LayerNorm(config.hidden_size, eps=norm_eps)
@@ -196,20 +206,21 @@ class StablelmDecoderLayer(nn.Module):
 class StableLMEpochModel(nn.Module):
 
     def __init__(self,
-                 config: PretrainedConfig,
+                 config: StableLmConfig,
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None,
-                 prefix: str = '') -> None:
+                 prefix: str = "") -> None:
         super().__init__()
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
             config.hidden_size,
             quant_config=quant_config,
+            prefix=f"{prefix}.embed_tokens",
         )
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: StablelmDecoderLayer(config, cache_config,
-                                                quant_config),
+            lambda prefix: StablelmDecoderLayer(
+                config, cache_config, quant_config, prefix=f"{prefix}.layers"),
             prefix=f"{prefix}.layers",
         )
         norm_eps = getattr(config, "norm_eps",
@@ -250,17 +261,22 @@ class StablelmForCausalLM(nn.Module, SupportsPP):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: StableLmConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.config = config
         self.quant_config = quant_config
-        self.model = StableLMEpochModel(config, cache_config, quant_config)
+        self.model = StableLMEpochModel(config,
+                                        cache_config,
+                                        quant_config,
+                                        prefix=f"{prefix}.model")
         self.lm_head = ParallelLMHead(config.vocab_size,
                                       config.hidden_size,
-                                      quant_config=quant_config)
+                                      quant_config=quant_config,
+                                      prefix=f"{prefix}.lm_head")
         if self.config.tie_word_embeddings:
             self.lm_head.weight = self.model.embed_tokens.weight
         self.logits_processor = LogitsProcessor(config.vocab_size)
