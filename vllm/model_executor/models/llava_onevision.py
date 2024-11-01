@@ -15,8 +15,8 @@ from typing_extensions import NotRequired
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
-from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, InputContext,
-                         token_inputs)
+from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
+                         InputContext, token_inputs)
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
@@ -218,31 +218,31 @@ def dummy_data_for_llava_onevision(ctx: InputContext, seq_len: int,
     video_feature_size = get_llava_onevision_video_tokens(ctx, num_frames)
 
     if isinstance(vision_config, CLIPVisionConfig):
-        seq_data = dummy_seq_data_for_clip(
+        seq_data, ranges = dummy_seq_data_for_clip(
             vision_config,
             seq_len,
             num_videos,
             image_token_id=hf_config.video_token_index,
             image_feature_size_override=video_feature_size,
-        )
+            mm_key="video")
 
         mm_data = dummy_video_for_clip(vision_config,
                                        num_frames=num_frames,
                                        num_videos=num_videos)
-        return seq_data, mm_data
+        return DummyData(seq_data, mm_data, ranges)
     elif isinstance(vision_config, SiglipVisionConfig):
-        seq_data = dummy_seq_data_for_siglip(
+        seq_data, ranges = dummy_seq_data_for_siglip(
             vision_config,
             seq_len,
             num_videos,
             image_token_id=hf_config.video_token_index,
             image_feature_size_override=video_feature_size,
-        )
+            mm_key="video")
 
         mm_data = dummy_video_for_siglip(vision_config,
                                          num_frames=num_frames,
                                          num_videos=num_videos)
-        return seq_data, mm_data
+        return DummyData(seq_data, mm_data, ranges)
 
     msg = f"Unsupported vision config: {type(vision_config)}"
     raise NotImplementedError(msg)
@@ -320,7 +320,7 @@ def input_processor_when_multimodal_input_video(ctx: InputContext,
         video_feature_size = get_llava_onevision_video_tokens(ctx, num_frames)
         tokenizer = cached_get_tokenizer(model_config.tokenizer)
 
-        new_prompt, new_token_ids = repeat_and_pad_placeholder_tokens(
+        new_prompt, new_token_ids, ranges = repeat_and_pad_placeholder_tokens(
             tokenizer,
             inputs.get("prompt"),
             inputs["prompt_token_ids"],
@@ -330,7 +330,8 @@ def input_processor_when_multimodal_input_video(ctx: InputContext,
 
         return token_inputs(prompt_token_ids=new_token_ids,
                             prompt=new_prompt,
-                            multi_modal_data=multi_modal_data)
+                            multi_modal_data=multi_modal_data,
+                            multi_modal_placeholders={"video": ranges})
 
     elif is_list_of(video_data, np.ndarray):
         video_feature_size = []

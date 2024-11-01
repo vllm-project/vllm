@@ -17,8 +17,8 @@ from transformers.models.pixtral.modeling_pixtral import (
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, ModelConfig, MultiModalConfig
-from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, InputContext,
-                         token_inputs)
+from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
+                         InputContext, token_inputs)
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -28,7 +28,8 @@ from vllm.model_executor.models.utils import merge_multimodal_embeddings
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.base import MultiModalInputs
-from vllm.multimodal.utils import cached_get_tokenizer
+from vllm.multimodal.utils import (cached_get_tokenizer,
+                                   consecutive_placeholder_ranges)
 from vllm.sequence import IntermediateTensors, SequenceData
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.utils import is_list_of
@@ -81,7 +82,12 @@ def dummy_data_for_pixtral(ctx: InputContext, seq_len: int,
     )
 
     mm_data = {"image": num_images * [image]}
-    return seq_data, mm_data
+    mm_placeholders = {
+        "image":
+        consecutive_placeholder_ranges(num_items=num_images,
+                                       item_size=image_feature_size)
+    }
+    return DummyData(seq_data, mm_data, mm_placeholders)
 
 
 def input_mapper_for_pixtral(ctx: InputContext,
@@ -630,13 +636,13 @@ def get_max_pixtral_hf_image_tokens(hf_config: PixtralVisionConfig) -> int:
 
 
 def dummy_seq_data_for_pixtral_hf(
-    hf_config: PixtralVisionConfig,
-    seq_len: int,
-    num_images: int,
-    *,
-    image_token_id: int,
-    image_feature_size_override: Optional[int] = None,
-):
+        hf_config: PixtralVisionConfig,
+        seq_len: int,
+        num_images: int,
+        *,
+        image_token_id: int,
+        image_feature_size_override: Optional[int] = None,
+        mm_key: str = "image"):
     if image_feature_size_override is None:
         image_feature_size = get_max_pixtral_hf_image_feature_size(hf_config)
     else:
@@ -645,7 +651,11 @@ def dummy_seq_data_for_pixtral_hf(
     return SequenceData.from_prompt_token_counts(
         (image_token_id, image_feature_size * num_images),
         (0, seq_len - image_feature_size * num_images),
-    )
+    ), {
+        mm_key:
+        consecutive_placeholder_ranges(num_items=num_images,
+                                       item_size=image_feature_size)
+    }
 
 
 def dummy_image_for_pixtral_hf(

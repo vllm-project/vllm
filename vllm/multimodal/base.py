@@ -1,8 +1,9 @@
 import sys
 from abc import ABC, abstractmethod
 from collections import UserDict, defaultdict
-from typing import (Any, Callable, Dict, List, Mapping, Optional, Tuple, Type,
-                    TypedDict, TypeVar, Union, cast, final)
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Mapping,
+                    NamedTuple, Optional, Tuple, Type, TypedDict, TypeVar,
+                    Union, cast, final)
 
 import numpy as np
 import torch
@@ -11,11 +12,14 @@ from PIL import Image
 from torch import nn
 from typing_extensions import TypeAlias
 
-from vllm.config import ModelConfig
 from vllm.inputs import InputContext
 from vllm.logger import init_logger
 from vllm.utils import (JSONTree, get_allowed_kwarg_only_overrides, is_list_of,
                         json_map_leaves, resolve_mm_processor_kwargs)
+
+if TYPE_CHECKING:
+    from vllm.config import ModelConfig
+    from vllm.sequence import SequenceGroupMetadata
 
 logger = init_logger(__name__)
 
@@ -151,6 +155,30 @@ Note:
     Read more on that :ref:`here <adding_multimodal_plugin>`.
 """
 
+
+class PlaceholderRange(TypedDict):
+    """
+    Placeholder location information for multi-modal data.
+
+    For example:
+        Prompt: AAAA BBBB What is in these images?
+        Images A and B will have:
+            A: { "offset": 0, "length": 4 }
+            B: { "offset": 5, "length": 4 }
+    """
+
+    offset: int
+    """The start index of the placeholder in the prompt."""
+
+    length: int
+    """The length of the placeholder."""
+
+
+MultiModalPlaceholderDict = Mapping[str, List[PlaceholderRange]]
+"""
+A dictionary containing placeholder ranges.
+"""
+
 MultiModalInputMapper = Callable[[InputContext, MultiModalData[object]],
                                  MultiModalInputs]
 """
@@ -243,7 +271,7 @@ class MultiModalPlugin(ABC):
 
         return wrapper
 
-    def map_input(self, model_config: ModelConfig,
+    def map_input(self, model_config: "ModelConfig",
                   data: MultiModalData[object],
                   mm_processor_kwargs: Dict[str, Any]) -> MultiModalInputs:
         """
@@ -332,7 +360,7 @@ class MultiModalPlugin(ABC):
 
         return wrapper
 
-    def get_max_multimodal_tokens(self, model_config: ModelConfig) -> int:
+    def get_max_multimodal_tokens(self, model_config: "ModelConfig") -> int:
         """
         Get the maximum number of multi-modal tokens
         for profiling the memory usage of a model.
@@ -366,3 +394,179 @@ class MultiModalPlugin(ABC):
         self._validate_max_multimodal_tokens(max_mm_tokens)
 
         return max_mm_tokens
+
+
+class MultiModalPlaceholderMap:
+    """
+    Relates multi-modal embeddings to their corresponding placeholders.
+    """
+
+    class IndexMap(NamedTuple):
+        src: List[int]
+        dest: List[int]
+
+    src_ranges: List[range]
+    """
+    The indices of the multi-modal embeddings that will replace the
+    corresponding placeholder embeddings pointed to by ``dest_ranges``.
+    """
+
+    src_len: int
+    """
+    The total number of flattened multi-modal embeddings.
+    """
+
+    dest_ranges: List[range]
+    """
+    The indices of the placeholder embeddings that will be replaced by the
+    multimodal embeddings.
+    """
+
+    dest_len: int
+    """
+    The total number of embeddings in the destination tensor.
+    """
+
+    def __init__(self):
+        self.src_ranges = []
+        self.src_len = 0
+        self.dest_ranges = []
+        self.dest_len = 0
+
+    @classmethod
+    def from_seq_group(
+        cls, seq_group: "SequenceGroupMetadata", positions: range
+    ) -> Tuple[Optional[MultiModalDataDict], Dict[str,
+                                                  "MultiModalPlaceholderMap"]]:
+        """
+        Returns the multi-modal items that intersect with the portion of a
+        prompt (``seq_group``) represented by ``positions``, as well as a
+        ``MultiModalPlaceholderMap`` that relates the multi-modal embedding
+        vectors to their corresponding placeholders.
+
+        Consider the following scenarios:
+
+           Prompt: |AAAA BBBB What's in these images?|
+        Positions: |.................................|
+
+            images      = [A, B]
+            src_ranges  = [(0, 4), (4, 8)]
+            dest_ranges = [(0, 4), (5, 9)]
+
+           Prompt: |AAAA BBBB What's in these images?|
+        Positions: |  .....                          |
+
+            images      = [A, B]
+            src_ranges  = [(2, 4), (4, 6)]
+            dest_ranges = [(0, 2), (3, 5)]
+
+           Prompt: |AAAA BBBB What's in these images?|
+        Positions: |     .........                   |
+
+            images      = [B]
+            src_ranges  = [(0, 4)]
+            dest_ranges = [(0, 4)]
+
+           Prompt: |AAAA BBBB What's in these images?|
+        Positions: |          .......................|
+
+            images      = []
+            src_ranges  = []
+            dest_ranges = []
+        """
+        if (not seq_group.multi_modal_data
+                or not seq_group.multi_modal_placeholders):
+            return seq_group.multi_modal_data, {}
+
+        mm_data = {**seq_group.multi_modal_data}
+        placeholder_maps: Dict[str, MultiModalPlaceholderMap] = defaultdict(
+            MultiModalPlaceholderMap)
+
+        for modality, placeholders in seq_group.multi_modal_placeholders.items(
+        ):
+            mm_items = mm_data.pop(modality)
+            if not isinstance(mm_items, list):
+                mm_items = [mm_items]
+
+            if positions:
+                intersecting_items = placeholder_maps[
+                    modality].append_items_from_seq_group(
+                        positions, mm_items, placeholders)
+
+                if intersecting_items:
+                    mm_data[modality] = intersecting_items
+
+        return mm_data, placeholder_maps
+
+    def append_items_from_seq_group(
+            self, positions: range, multi_modal_items: List[_T],
+            multi_modal_placeholders: List[PlaceholderRange]) -> List[_T]:
+        """
+        Adds the multi-modal items that intersect ```positions`` to this
+        placeholder map and returns the intersecting items.
+        """
+        intersecting_items = []
+
+        if len(multi_modal_items) != len(multi_modal_placeholders):
+            raise ValueError(
+                "Multi-modal placeholders and items must have the same length."
+            )
+        for placeholder_dict, mm_item in zip(multi_modal_placeholders,
+                                             multi_modal_items):
+            placeholder = range(
+                placeholder_dict["offset"],
+                placeholder_dict["offset"] + placeholder_dict["length"])
+            intersection = range(max(positions.start, placeholder.start),
+                                 min(positions.stop, placeholder.stop))
+
+            if not intersection:
+                # Skip this multi-modal item.
+                continue
+
+            token_embedding_range = range(intersection.start - positions.start,
+                                          intersection.stop - positions.start)
+
+            multimodal_embedding_range = range(
+                intersection.start - placeholder.start + self.src_len,
+                intersection.stop - placeholder.start + self.src_len)
+
+            intersecting_items.append(mm_item)
+            self.dest_ranges.append(token_embedding_range)
+            self.src_ranges.append(multimodal_embedding_range)
+            self.src_len += len(placeholder)
+
+        self.dest_len += len(positions)
+        return intersecting_items
+
+    def extend(self, other: "MultiModalPlaceholderMap"):
+        """
+        Adds the placeholders from another ``MultiModalPlaceholderMap`` to this
+        instance based on the source and destination tensors being
+        concatenated.
+        """
+
+        self.src_ranges.extend(
+            range(self.src_len + r.start, self.src_len + r.stop)
+            for r in other.src_ranges)
+        self.src_len += other.src_len
+        self.dest_ranges.extend(
+            range(self.dest_len + r.start, self.dest_len + r.stop)
+            for r in other.dest_ranges)
+        self.dest_len += other.dest_len
+
+    def index_map(self) -> "IndexMap":
+        """
+        Finalizes the placeholder map into lists of indices that can be used to
+        index the source and destination tensors.
+        """
+
+        src_indices = [i for r in self.src_ranges for i in r]
+        dest_indices = [i for r in self.dest_ranges for i in r]
+
+        if len(src_indices) != len(dest_indices):
+            raise ValueError(
+                f"The number of source ({len(src_indices)}) and destination "
+                f"indices ({len(dest_indices)}) must be the same.")
+
+        return MultiModalPlaceholderMap.IndexMap(src=src_indices,
+                                                 dest=dest_indices)
