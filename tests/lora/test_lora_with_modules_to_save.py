@@ -9,7 +9,7 @@ from vllm.lora.request import LoRARequest
 
 MODELS = ["AnatoliiPotapov/T-lite-instruct-0.1"]
 
-LORAS = ['/workspace/models/talkbot_questioner/'] #["SergeyKochetkovT/llama3-lora-with-modules-to-save"]
+LORAS = ["SergeyKochetkovT/llama3-lora-with-modules-to-save"]
 
 
 @pytest.mark.parametrize("model", MODELS)
