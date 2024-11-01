@@ -5,11 +5,10 @@ from typing import Iterator, List, Optional, Union
 
 import cloudpickle
 import zmq
+from ray.exceptions import RayTaskError
 
 import vllm.envs
 from vllm import AsyncEngineArgs, SamplingParams
-from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig)
 from vllm.engine.llm_engine import LLMEngine
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -25,9 +24,6 @@ from vllm.executor.gpu_executor import GPUExecutor
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.usage.usage_lib import UsageContext
-
-CONFIG_TYPE = Union[ModelConfig, DecodingConfig, ParallelConfig,
-                    SchedulerConfig, LoRAConfig]
 
 logger = init_logger(__name__)
 
@@ -132,7 +128,7 @@ class MQLLMEngine:
 
         return cls(ipc_path=ipc_path,
                    use_async_sockets=use_async_sockets,
-                   **engine_config.to_dict(),
+                   vllm_config=engine_config,
                    executor_class=executor_class,
                    log_requests=not engine_args.disable_log_requests,
                    log_stats=not engine_args.disable_log_stats,
@@ -312,6 +308,11 @@ class MQLLMEngine:
     def _send_outputs(self, outputs: REQUEST_OUTPUTS_T):
         """Send List of RequestOutput to RPCClient."""
         if outputs:
+            # RayTaskError might not pickelable here. We need to unpack the
+            # underlying exception as the real exception in the output.
+            if (isinstance(outputs, RPCError)
+                    and isinstance(outputs.exception, RayTaskError)):
+                outputs.exception = outputs.exception.cause
             output_bytes = pickle.dumps(outputs)
             self.output_socket.send_multipart((output_bytes, ), copy=False)
 
