@@ -8,6 +8,7 @@ from typing import Optional, Tuple
 
 import torch
 from torch import nn
+from torch.library import Library
 
 from vllm.compilation.compile_context import set_compile_context
 from vllm.compilation.config import CompilationConfig
@@ -16,6 +17,9 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.compilation.levels import CompilationLevel
 from vllm.plugins import set_compilation_config
 from vllm.utils import direct_register_custom_op
+
+# create a library to hold the custom op
+silly_lib = Library("silly", "FRAGMENT")  # noqa
 
 
 def silly_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
@@ -31,8 +35,8 @@ def silly_attention_fake(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
 
 
 direct_register_custom_op(
-    library_name="vllm",
-    op_name="toy_attention",
+    library_name="silly",
+    op_name="attention",
     op_func=silly_attention,
     mutates_args=["out"],
     fake_impl=silly_attention_fake,
@@ -103,7 +107,7 @@ class LlamaAttention(nn.Module):
         k = k + positions.unsqueeze(1)
 
         attn_output = torch.empty_like(q)
-        torch.ops.vllm.toy_attention(q, k, v, attn_output)
+        torch.ops.silly.attention(q, k, v, attn_output)
 
         output = self.output_projection(attn_output)
         return output
@@ -179,7 +183,7 @@ def run_model(llama_config,
             set_compilation_config(
                 CompilationConfig(
                     use_cudagraph=True,
-                    non_cudagraph_ops=["vllm.toy_attention"],
+                    non_cudagraph_ops=["silly.attention"],
                 ))
         else:
             set_compilation_config(CompilationConfig(use_cudagraph=True, ))

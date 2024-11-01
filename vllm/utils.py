@@ -1515,17 +1515,6 @@ def weak_ref_tensors(
     raise ValueError("Invalid type for tensors")
 
 
-def is_in_doc_build() -> bool:
-    try:
-        from sphinx.ext.autodoc.mock import _MockModule
-        return isinstance(torch, _MockModule)
-    except ModuleNotFoundError:
-        return False
-
-
-vllm_lib = Library("vllm", "FRAGMENT")
-
-
 def direct_register_custom_op(
     library_name: str,
     op_name: str,
@@ -1539,13 +1528,14 @@ def direct_register_custom_op(
     directly registers a custom op and dispatches it to the CUDA backend.
     See https://gist.github.com/youkaichao/ecbea9ec9fc79a45d2adce1784d7a9a5
     for more details.
+
+    IMPORTANT: the lifetime of the operator is tied to the lifetime of the
+    library object. It is important to have one line of code
+    `my_lib = Library(library_name, "FRAGMENT")` outside of the function
+    to keep the library object alive.
     """
-    if is_in_doc_build():
-        return
     schema_str = torch.library.infer_schema(op_func, mutates_args=mutates_args)
-    # FIXME after https://github.com/pytorch/pytorch/issues/139444 is resolved
-    assert library_name == "vllm"
-    my_lib = vllm_lib
+    my_lib = Library(library_name, "FRAGMENT")
     my_lib.define(op_name + schema_str)
     my_lib.impl(op_name, op_func, "CUDA")
     if fake_impl is not None:
