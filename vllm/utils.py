@@ -1515,6 +1515,14 @@ def weak_ref_tensors(
     raise ValueError("Invalid type for tensors")
 
 
+def is_in_doc_build() -> bool:
+    try:
+        from sphinx.ext.autodoc.mock import _MockModule
+        return isinstance(torch, _MockModule)
+    except ModuleNotFoundError:
+        return False
+
+
 vllm_lib = Library("vllm", "FRAGMENT")
 
 
@@ -1532,6 +1540,8 @@ def direct_register_custom_op(
     See https://gist.github.com/youkaichao/ecbea9ec9fc79a45d2adce1784d7a9a5
     for more details.
     """
+    if is_in_doc_build():
+        return
     schema_str = torch.library.infer_schema(op_func, mutates_args=mutates_args)
     # FIXME after https://github.com/pytorch/pytorch/issues/139444 is resolved
     assert library_name == "vllm"
