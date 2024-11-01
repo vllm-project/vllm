@@ -6,13 +6,12 @@ import torch
 
 from vllm import SamplingParams
 from vllm.model_executor.layers.sampler import SamplerOutput
-from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, ExecuteModelRequest,
-                           SequenceData, SequenceGroupMetadata,
-                           get_all_seq_ids)
+from vllm.sequence import (VLLM_INVALID_TOKEN_ID, VLLM_TOKEN_ID_ARRAY_TYPE,
+                           ExecuteModelRequest, SequenceData,
+                           SequenceGroupMetadata, get_all_seq_ids)
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeScorer, SpeculativeScores)
 from vllm.spec_decode.util import nvtx_range, split_batch_by_proposal_len
-from vllm.worker.worker_base import WorkerBase
 
 SeqId = int
 TargetSeqId = int
@@ -35,12 +34,6 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
     It only supports scoring the top1 proposal tokens of the proposer, instead
     of topk/tree.
     """
-
-    def __init__(self, scorer_worker: WorkerBase, device: str,
-                 vocab_size: int):
-        self._scorer_worker = scorer_worker
-        self._device = device
-        self._vocab_size = vocab_size
 
     @nvtx_range("BatchExpansionTop1Scorer.score_proposals")
     def score_proposals(
@@ -69,10 +62,10 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         proposal_lens_list = proposals.proposal_lens.tolist()
         proposal_token_ids_list = proposals.proposal_token_ids.tolist()
 
-        # Filter the list to ignore -1 proposals.
+        # Filter the list to ignore invalid proposals.
         proposal_token_ids_list_without_skips = [
             proposals for proposals in proposal_token_ids_list
-            if -1 not in proposals
+            if VLLM_INVALID_TOKEN_ID not in proposals
         ]
 
         (spec_indices, non_spec_indices, target_seq_group_metadata_list,

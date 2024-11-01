@@ -1,0 +1,23 @@
+version: 2
+updates:
+  # Maintain dependencies for GitHub Actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels: ["dependencies"]
+    open-pull-requests-limit: 5
+    reviewers: ["khluu", "simon-mo"]
+    allow:
+      - dependency-type: "all"
+    groups:
+      patch-update:
+        applies-to: version-updates
+        update-types: ["patch"]
+      minor-update:
+        applies-to: version-updates
+        update-types: ["minor"]

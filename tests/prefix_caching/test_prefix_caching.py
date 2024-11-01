@@ -2,14 +2,10 @@
 
 Run `pytest tests/prefix_caching/test_prefix_caching.py`.
 """
-from typing import List
-
 import pytest
 
 from tests.kernels.utils import override_backend_env_variable
-from vllm.block import PhysicalTokenBlock
-from vllm.core.block_manager_v1 import CachedBlockAllocator
-from vllm.utils import Device
+from vllm import SamplingParams, TokensPrompt
 
 from ..models.utils import check_outputs_equal
 
@@ -17,79 +13,13 @@ MODELS = [
     "facebook/opt-125m",
 ]
 
-
-@pytest.mark.parametrize("block_size", [16])
-@pytest.mark.parametrize("num_blocks", [16])
-def test_block_allocator(
-    block_size: int,
-    num_blocks: int,
-):
-    block_hash = 1
-    block_allocator = CachedBlockAllocator(Device.CPU, block_size, num_blocks)
-
-    # Allocate two PysicalTokenBlocks with the same hash and check
-    # that they are the same PhysicalTokenBlock
-    first_block = block_allocator.allocate(block_hash, 0)
-    second_block = block_allocator.allocate(block_hash, 0)
-    assert (first_block == second_block)
-    assert (second_block.ref_count == 2)
-
-    # Check metric: 1 hit of 2 queries
-    assert block_allocator.get_prefix_cache_hit_rate() == 0.5
-
-    # Free the first_block and confirm that the ref_count is correctly
-    # decremented on the second block
-    block_allocator.free(first_block)
-    assert (second_block.ref_count == 1)
-
-    # Free the second block
-    block_allocator.free(second_block)
-
-    # Reallocate the first block and confirm that, even after the block
-    # had its ref_count go to 0, we still get the same block back
-    first_block = block_allocator.allocate(block_hash, 0)
-    assert (first_block == second_block)
-    assert (first_block.block_hash == block_hash)
-
-    # Allocate one more time to get 3/4 hit rate for easy checking
-    block_allocator.allocate(block_hash, 0)
-    assert block_allocator.get_prefix_cache_hit_rate() == 0.75
-
-
-@pytest.mark.parametrize("num_blocks", [16])
-def test_eviction(num_blocks: int, ):
-    block_size = 16
-    block_allocator = CachedBlockAllocator(Device.CPU, block_size, num_blocks)
-    blocks: List[PhysicalTokenBlock] = []
-
-    for i in range(num_blocks):
-        # use i as the block_hash
-        blocks.append(block_allocator.allocate(i, 0))
-
-    #Free all blocks
-    for block in blocks:
-        block_allocator.free(block)
-
-    # Allocate a new block and confirm that it's the first block freed.
-    # I.E The Least Recently Used block
-    new_block_hash = block_size
-    new_block = block_allocator.allocate(new_block_hash, 0)
-    assert (new_block == blocks[0])
-    assert (new_block.block_hash == new_block_hash)
-
-    # Reallocate the second in blocks to remove it from the free list
-    realloc_block_hash = 1
-    realloc_block = block_allocator.allocate(realloc_block_hash, 0)
-    assert (realloc_block == blocks[realloc_block_hash])
-    assert (realloc_block.block_hash == realloc_block_hash)
-
-    # Allocate a new block and confirm that it's not the realloc_block,
-    # since the realloc_block shouldn't be in the free list
-    new_block_hash = block_size + 1
-    new_block = block_allocator.allocate(new_block_hash, 0)
-    assert (realloc_block != new_block)
-    assert (new_block.block_hash == new_block_hash)
-    assert (new_block.block_number == 2)
+UNSTABLE_PROMPT_SEQUENCE = [
+    ([0] * 588) + ([1] * 1332) + ([2] * 30) + ([3] * 1),
+    ([0] * 588) + ([1] * 1332) + ([4] * 3) + ([5] * 50),
+    ([0] * 588) + ([1] * 1332) + ([2] * 30) + ([6] * 95),
+    ([0] * 588) + ([1] * 1332) + ([4] * 3) + ([7] * 174),
+    ([0] * 588) + ([8] * 1539),
+]
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -97,7 +27,6 @@ def test_eviction(num_blocks: int, ):
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [5])
 @pytest.mark.parametrize("cached_position", [0, 1])
-@pytest.mark.parametrize("use_v2_block_manager", [False, True])
 def test_mixed_requests(
     hf_runner,
     vllm_runner,
@@ -107,7 +36,6 @@ def test_mixed_requests(
     dtype: str,
     max_tokens: int,
     cached_position: int,
-    use_v2_block_manager: bool,
     monkeypatch,
 ) -> None:
     """
@@ -125,7 +53,6 @@ def test_mixed_requests(
             model,
             dtype=dtype,
             enable_prefix_caching=True,
-            use_v2_block_manager=use_v2_block_manager,
     ) as vllm_model:
         # Run the first prompt so the cache is populated
         vllm_outputs = vllm_model.generate_greedy([cached_prompt], max_tokens)
@@ -139,3 +66,22 @@ def test_mixed_requests(
         name_0="hf",
         name_1="vllm",
     )
+
+
+@pytest.mark.parametrize("backend", ["FLASH_ATTN", "FLASHINFER", "XFORMERS"])
+def test_unstable_prompt_sequence(
+    vllm_runner,
+    backend: str,
+    monkeypatch,
+) -> None:
+    override_backend_env_variable(monkeypatch, backend)
+
+    with vllm_runner(
+            "Qwen/Qwen2.5-0.5B-Instruct",
+            enable_chunked_prefill=True,
+            enable_prefix_caching=True,
+            max_model_len=4096,
+    ) as vllm_model:
+        for prompt in UNSTABLE_PROMPT_SEQUENCE:
+            vllm_model.generate(TokensPrompt(prompt_token_ids=prompt),
+                                SamplingParams(max_tokens=1))

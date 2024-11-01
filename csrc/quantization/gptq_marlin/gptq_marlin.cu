@@ -23,6 +23,8 @@
 #include "marlin_dtypes.cuh"
 #include "core/scalar_type.hpp"
 
+#include "core/registration.h"
+
 #define STATIC_ASSERT_SCALAR_TYPE_VALID(scalar_t)               \
   static_assert(std::is_same<scalar_t, half>::value ||          \
                     std::is_same<scalar_t, nv_bfloat16>::value, \
@@ -78,7 +80,7 @@ torch::Tensor gptq_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
                                torch::Tensor& b_scales, torch::Tensor& b_zeros,
                                torch::Tensor& g_idx, torch::Tensor& perm,
                                torch::Tensor& workspace,
-                               vllm::ScalarTypeTorchPtr const& b_q_type,
+                               vllm::ScalarTypeId const b_q_type_id,
                                int64_t size_m, int64_t size_n, int64_t size_k,
                                bool is_k_full, bool has_zp) {
   TORCH_CHECK_NOT_IMPLEMENTED(false,
@@ -2130,22 +2132,23 @@ torch::Tensor gptq_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
                                torch::Tensor& b_scales, torch::Tensor& b_zeros,
                                torch::Tensor& g_idx, torch::Tensor& perm,
                                torch::Tensor& workspace,
-                               vllm::ScalarTypeTorchPtr const& b_q_type,
+                               vllm::ScalarTypeId const& b_q_type_id,
                                int64_t size_m, int64_t size_n, int64_t size_k,
                                bool is_k_full, bool has_zp,
                                bool use_fp32_reduce) {
+  vllm::ScalarType const b_q_type = vllm::ScalarType::from_id(b_q_type_id);
   if (has_zp) {
-    TORCH_CHECK(*b_q_type == vllm::kU4 || *b_q_type == vllm::kU8,
-                "b_q_type must be u4 or u8 when has_zp = True. Got = ",
-                b_q_type->str());
+    TORCH_CHECK(
+        b_q_type == vllm::kU4 || b_q_type == vllm::kU8,
+        "b_q_type must be u4 or u8 when has_zp = True. Got = ", b_q_type.str());
   } else {
     TORCH_CHECK(
-        *b_q_type == vllm::kU4B8 || *b_q_type == vllm::kU8B128,
+        b_q_type == vllm::kU4B8 || b_q_type == vllm::kU8B128,
         "b_q_type must be uint4b8 or uint8b128 when has_zp = False. Got = ",
-        b_q_type->str());
+        b_q_type.str());
   }
 
-  int pack_factor = 32 / b_q_type->size_bits();
+  int pack_factor = 32 / b_q_type.size_bits();
 
   // Verify A
   TORCH_CHECK(a.size(0) == size_m, "Shape mismatch: a.size(0) = ", a.size(0),
@@ -2258,7 +2261,7 @@ torch::Tensor gptq_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
                 "b_zeros dim 0 = ", b_zeros.size(0),
                 " is not num_groups = ", num_groups);
     TORCH_CHECK(b_zeros.size(1) == size_n / pack_factor,
-                "b_zeros dim 1 = ", b_scales.size(1),
+                "b_zeros dim 1 = ", b_zeros.size(1),
                 " is not size_n / pack_factor = ", size_n / pack_factor);
   }
 
@@ -2277,7 +2280,7 @@ torch::Tensor gptq_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
         c_tmp.data_ptr<float>(), b_scales.data_ptr<at::Half>(),
         b_zeros.data_ptr(), g_idx.data_ptr(), perm.data_ptr(),
         a_tmp.data_ptr<at::Half>(), size_m, size_n, size_k,
-        workspace.data_ptr(), *b_q_type, has_act_order, is_k_full, has_zp,
+        workspace.data_ptr(), b_q_type, has_act_order, is_k_full, has_zp,
         num_groups, group_size, dev, at::cuda::getCurrentCUDAStream(dev),
         thread_k, thread_n, sms, marlin::max_par, use_fp32_reduce);
   } else if (a.scalar_type() == at::ScalarType::BFloat16) {
@@ -2286,7 +2289,7 @@ torch::Tensor gptq_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
         c.data_ptr<at::BFloat16>(), c_tmp.data_ptr<float>(),
         b_scales.data_ptr<at::BFloat16>(), b_zeros.data_ptr(), g_idx.data_ptr(),
         perm.data_ptr(), a_tmp.data_ptr<at::BFloat16>(), size_m, size_n, size_k,
-        workspace.data_ptr(), *b_q_type, has_act_order, is_k_full, has_zp,
+        workspace.data_ptr(), b_q_type, has_act_order, is_k_full, has_zp,
         num_groups, group_size, dev, at::cuda::getCurrentCUDAStream(dev),
         thread_k, thread_n, sms, marlin::max_par, use_fp32_reduce);
   } else {
@@ -2297,3 +2300,7 @@ torch::Tensor gptq_marlin_gemm(torch::Tensor& a, torch::Tensor& b_q_weight,
 }
 
 #endif
+
+TORCH_LIBRARY_IMPL_EXPAND(TORCH_EXTENSION_NAME, CUDA, m) {
+  m.impl("gptq_marlin_gemm", &gptq_marlin_gemm);
+}

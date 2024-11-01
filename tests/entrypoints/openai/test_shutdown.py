@@ -6,7 +6,7 @@ import pytest
 
 from ...utils import RemoteOpenAIServer
 
-MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
+MODEL_NAME = "meta-llama/Llama-3.2-1B"
 
 
 @pytest.mark.asyncio
@@ -44,5 +44,5 @@ async def test_shutdown_on_engine_failure(tmp_path):
                                                 prompt="Hello, my name is")
 
             # Now the server should shut down
-            return_code = remote_server.proc.wait(timeout=3)
+            return_code = remote_server.proc.wait(timeout=8)
             assert return_code is not None

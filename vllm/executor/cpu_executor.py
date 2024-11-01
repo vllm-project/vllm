@@ -5,7 +5,8 @@ from typing import Any, Awaitable, List, Optional, Set, Tuple, Union
 import torch
 
 import vllm.envs as envs
-from vllm.config import CacheConfig, ModelConfig, SchedulerConfig
+from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
+                         SchedulerConfig)
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.executor.multiproc_worker_utils import (ProcessWorkerWrapper,
                                                   ResultHandler, WorkerMonitor)
@@ -27,6 +28,8 @@ class CPUExecutor(ExecutorBase):
 
     def _init_executor(self) -> None:
         assert self.device_config.device_type == "cpu"
+        # Reminder: Please update docs/source/serving/compatibility_matrix.rst
+        # If the feature combo become valid
         assert self.lora_config is None, "cpu backend doesn't support LoRA"
 
         #
@@ -60,6 +63,8 @@ class CPUExecutor(ExecutorBase):
         self.cache_config = _verify_and_get_cache_config(self.cache_config)
         self.scheduler_config = _verify_and_get_scheduler_config(
             self.scheduler_config)
+        self.parallel_config = _verify_and_get_parallel_config(
+            self.parallel_config)
 
         # Multiprocessing-based executor does not support multi-node setting.
         # Since it only works for single node, we can use the loopback address
@@ -103,6 +108,7 @@ class CPUExecutor(ExecutorBase):
                         )) for rank in range(1, world_size)
                 ]
 
+        self.worker_monitor = None
         if world_size != 1 or is_async:
             if is_async:
                 async_worker_list = self.workers + [self.driver_worker]
@@ -320,6 +326,8 @@ def _verify_and_get_model_config(config: ModelConfig) -> ModelConfig:
     if config.dtype == torch.float16:
         logger.warning("float16 is not supported on CPU, casting to bfloat16.")
         config.dtype = torch.bfloat16
+    # Reminder: Please update docs/source/serving/compatibility_matrix.rst
+    # If the feature combo become valid
     if not config.enforce_eager:
         logger.warning(
             "CUDA graph is not supported on CPU, fallback to the eager "
@@ -330,6 +338,8 @@ def _verify_and_get_model_config(config: ModelConfig) -> ModelConfig:
 
 def _verify_and_get_scheduler_config(
         config: SchedulerConfig) -> SchedulerConfig:
+    # Reminder: Please update docs/source/serving/compatibility_matrix.rst
+    # If the feature combo become valid
     if config.chunked_prefill_enabled:
         logger.warning("Chunked prefill is not supported on CPU, disable it.")
         config.chunked_prefill_enabled = False
@@ -338,6 +348,8 @@ def _verify_and_get_scheduler_config(
 
 
 def _verify_and_get_cache_config(config: CacheConfig) -> CacheConfig:
+    # Reminder: Please update docs/source/serving/compatibility_matrix.rst
+    # If the feature combo become valid
     if config.enable_prefix_caching:
         logger.warning("Prefix caching is not supported on CPU, disable it.")
         config.enable_prefix_caching = False
@@ -356,6 +368,16 @@ def _verify_and_get_cache_config(config: CacheConfig) -> CacheConfig:
             "Invalid environment variable VLLM_CPU_KVCACHE_SPACE"
             f" {kv_cache_space}, expect a positive integer value.")
 
+    return config
+
+
+def _verify_and_get_parallel_config(config: ParallelConfig) -> ParallelConfig:
+    if (config.distributed_executor_backend is not None
+            and config.distributed_executor_backend != "mp"):
+        logger.warning(
+            "%s is not supported on CPU, fallback to mp distributed executor "
+            "backend.", config.distributed_executor_backend)
+        config.distributed_executor_backend = "mp"
     return config
 
 

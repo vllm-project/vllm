@@ -31,8 +31,8 @@ cleanup_docker() {
     echo "Disk usage is above $threshold%. Cleaning up Docker images and volumes..."
     # Remove dangling images (those that are not tagged and not used by any container)
     docker image prune -f
-    # Remove unused volumes
-    docker volume prune -f
+    # Remove unused volumes / force the system prune for old images as well.
+    docker volume prune -f && docker system prune --force --filter "until=72h" --all
     echo "Docker images and volumes cleanup completed."
   else
     echo "Disk usage is below $threshold%. No cleanup needed."
@@ -83,13 +83,25 @@ if [[ $commands == *" kernels "* ]]; then
   --ignore=kernels/test_encoder_decoder_attn.py \
   --ignore=kernels/test_flash_attn.py \
   --ignore=kernels/test_flashinfer.py \
+  --ignore=kernels/test_gguf.py \
   --ignore=kernels/test_int8_quant.py \
   --ignore=kernels/test_machete_gemm.py \
   --ignore=kernels/test_mamba_ssm.py \
   --ignore=kernels/test_marlin_gemm.py \
+  --ignore=kernels/test_moe.py \
   --ignore=kernels/test_prefix_prefill.py \
   --ignore=kernels/test_rand.py \
   --ignore=kernels/test_sampler.py"
+fi
+
+#ignore certain Entrypoints tests
+if [[ $commands == *" entrypoints/openai "* ]]; then
+  commands=${commands//" entrypoints/openai "/" entrypoints/openai \
+  --ignore=entrypoints/openai/test_accuracy.py \
+  --ignore=entrypoints/openai/test_audio.py \
+  --ignore=entrypoints/openai/test_encoder_decoder.py \
+  --ignore=entrypoints/openai/test_embedding.py \
+  --ignore=entrypoints/openai/test_oot_registration.py "}
 fi
 
 PARALLEL_JOB_COUNT=8

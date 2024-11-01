@@ -33,25 +33,17 @@ def is_block_tables_empty(block_tables: Union[None, Dict]):
     """
     if block_tables is None:
         return True
-    if isinstance(block_tables, dict) and all(
-            value is None for value in block_tables.values()):
-        return True
-    return False
+    return (isinstance(block_tables, dict)
+            and all(value is None for value in block_tables.values()))
 
 
 def compute_slot_mapping_start_idx(is_prompt: bool, query_len: int,
-                                   context_len: int, sliding_window: int,
-                                   use_v2_block_manager: bool):
+                                   context_len: int, sliding_window: int):
     """
     Compute the start index of slot mapping.
     """
     start_idx = 0
     if is_prompt and sliding_window is not None:
-        assert use_v2_block_manager or context_len == 0, (
-            "Prefix caching is currently not supported with "
-            "sliding window attention in V1 block manager")
-        # When prefill, we use it to not write slots to kv cache
-        # to save memory.
         start_idx = max(0, query_len - sliding_window)
     return start_idx
 
@@ -140,15 +132,12 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
 
         self.sliding_window = input_builder.sliding_window
         self.block_size = input_builder.block_size
-        self.use_v2_block_manager = (
-            input_builder.scheduler_config.use_v2_block_manager)
 
     def _add_seq_group(
             self, inter_data: "ModelInputForGPUBuilder.InterDataForSeqGroup",
             chunked_prefill_enabled: bool):
         is_prompt = inter_data.is_prompt
         block_tables = inter_data.block_tables
-        computed_block_nums = inter_data.computed_block_nums
 
         for (seq_id, token_len, seq_len, curr_seq_len, query_len, context_len,
              curr_sliding_window_block) in zip(
@@ -174,17 +163,21 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
             # NOTE: This only works for oooooooxxx style attention.
             block_table = []
             if inter_data.prefix_cache_hit:
-                block_table = computed_block_nums
+                block_table = block_tables[seq_id]
             elif ((chunked_prefill_enabled or not is_prompt)
                   and block_tables is not None):
-                block_table = block_tables[seq_id][-curr_sliding_window_block:]
+                if curr_sliding_window_block == 0:
+                    block_table = block_tables[seq_id]
+                else:
+                    block_table = block_tables[seq_id][
+                        -curr_sliding_window_block:]
             self.block_tables.append(block_table)
 
             # Compute slot mapping.
             is_profile_run = is_block_tables_empty(block_tables)
-            start_idx = compute_slot_mapping_start_idx(
-                is_prompt, query_len, context_len, self.sliding_window,
-                self.use_v2_block_manager)
+            start_idx = compute_slot_mapping_start_idx(is_prompt, query_len,
+                                                       context_len,
+                                                       self.sliding_window)
             compute_slot_mapping(is_profile_run, self.slot_mapping, seq_id,
                                  seq_len, context_len, start_idx,
                                  self.block_size, inter_data.block_tables)
@@ -304,7 +297,8 @@ class CommonAttentionState(AttentionState):
         assert self._is_graph_capturing
         return self.__class__(self.runner)
 
-    def graph_capture_get_metadata_for_batch(self, batch_size: int):
+    def graph_capture_get_metadata_for_batch(
+            self, batch_size: int, is_encoder_decoder_model: bool = False):
         assert self._is_graph_capturing
         attn_metadata = self.runner.attn_backend.make_metadata(
             num_prefills=0,
@@ -313,7 +307,8 @@ class CommonAttentionState(AttentionState):
             slot_mapping=self._graph_slot_mapping[:batch_size],
             seq_lens=None,
             seq_lens_tensor=self._graph_seq_lens[:batch_size],
-            max_query_len=None,
+            max_query_len=1,
+            max_decode_query_len=1,
             max_prefill_seq_len=0,
             max_decode_seq_len=self.runner.max_seq_len_to_capture,
             query_start_loc=None,
@@ -322,21 +317,121 @@ class CommonAttentionState(AttentionState):
             block_tables=self._graph_block_tables[:batch_size],
             use_cuda_graph=True,
         )
+        if is_encoder_decoder_model:
+            # The encoder decoder model works only with XFormers backend.
+            # Assert the same.
+            assert self.runner.attn_backend.get_name() == "XFORMERS", \
+            f"Expected attn_backend name to be 'XFORMERS', but "\
+            f" got '{self.runner.attn_backend.get_name()}'"
+            self._update_captured_metadata_for_enc_dec_model(
+                batch_size=batch_size, attn_metadata=attn_metadata)
+
         return attn_metadata
 
-    def get_graph_input_buffers(self, attn_metadata) -> Dict[str, Any]:
-        return {
+    def get_graph_input_buffers(
+            self,
+            attn_metadata,
+            is_encoder_decoder_model: bool = False) -> Dict[str, Any]:
+        input_buffers = {
             "slot_mapping": attn_metadata.slot_mapping,
             "seq_lens_tensor": attn_metadata.decode_metadata.seq_lens_tensor,
             "block_tables": attn_metadata.decode_metadata.block_tables,
         }
+        if is_encoder_decoder_model:
+            # The encoder decoder model works only with XFormers backend.
+            # Assert the same.
+            assert self.runner.attn_backend.get_name() == "XFORMERS", \
+            f"Expected attn_backend name to be 'XFORMERS', but "\
+            f" got '{self.runner.attn_backend.get_name()}'"
+            self._add_additonal_input_buffers_for_enc_dec_model(
+                attn_metadata=attn_metadata, input_buffers=input_buffers)
+        return input_buffers
 
-    def prepare_graph_input_buffers(self, input_buffers,
-                                    attn_metadata) -> None:
+    def prepare_graph_input_buffers(
+            self,
+            input_buffers,
+            attn_metadata,
+            is_encoder_decoder_model: bool = False) -> None:
         input_buffers["seq_lens_tensor"].copy_(
             attn_metadata.decode_metadata.seq_lens_tensor, non_blocking=True)
         input_buffers["block_tables"].copy_(
             attn_metadata.decode_metadata.block_tables, non_blocking=True)
+        if is_encoder_decoder_model:
+            # The encoder decoder model works only with XFormers backend.
+            # Assert the same.
+            assert self.runner.attn_backend.get_name() == "XFORMERS", \
+            f"Expected attn_backend name to be 'XFORMERS', but "\
+            f" got '{self.runner.attn_backend.get_name()}'"
+            self._prepare_input_buffers_for_enc_dec_model(
+                attn_metadata, input_buffers)
 
     def begin_forward(self, model_input) -> None:
         return
+
+    def _update_captured_metadata_for_enc_dec_model(self, batch_size: int,
+                                                    attn_metadata):
+        """
+        Updates the attention metadata parameters for CUDA graph capture in an
+        encoder-decoder model.
+
+        This method modifies attention-related tensors and metadata required
+        for CUDA graph capture in encoder-decoder models. Specifically, it
+        updates the cross-attention and encoder sequence tensors in the 
+        AttentionMetadata object.
+        """
+        # During decode phase the cross_slot_mapping will be empty. Hence set
+        # an empty tensor for CUDA Graph capture.
+        attn_metadata.cross_slot_mapping = torch.tensor(
+            [], dtype=torch.int).cuda()
+        attn_metadata.cross_block_tables = torch.full(
+            (batch_size, self.runner.get_max_block_per_batch()),
+            1,
+            dtype=torch.int).cuda()
+        attn_metadata.encoder_seq_lens = torch.full((batch_size, ),
+                                                    1,
+                                                    dtype=torch.int).cuda()
+        attn_metadata.encoder_seq_lens_tensor = torch.full(
+            (batch_size, ), 1, dtype=torch.int).cuda()
+        attn_metadata.max_encoder_seq_len = self.runner.max_seq_len_to_capture
+
+    def _add_additonal_input_buffers_for_enc_dec_model(
+            self, attn_metadata, input_buffers: Dict[str, Any]):
+        """
+        Saves additional input buffers specific to the encoder-decoder model
+        from the attention metadata.
+
+        This method extracts and stores encoder-decoder related input buffers
+        from the `attn_metadata` into the `input_buffers` dictionary. The
+        buffers include encoder sequence lengths, cross-slot mappings, and
+        cross-block tables, which are essential for the encoder-decoder model
+        during CUDA graph replay.
+        """
+        input_buffers["encoder_seq_lens_tensor"] = (
+            attn_metadata.decode_metadata.encoder_seq_lens_tensor)
+        input_buffers["cross_slot_mapping"] = (
+            attn_metadata.decode_metadata.cross_slot_mapping)
+        input_buffers["cross_block_tables"] = (
+            attn_metadata.decode_metadata.cross_block_tables)
+
+    def _prepare_input_buffers_for_enc_dec_model(self, attn_metadata,
+                                                 input_buffers: Dict[str,
+                                                                     Any]):
+        """
+        Populates input buffers with data from the encoder-decoder model's
+        attention metadata.
+
+        This method fills the input buffers with encoder-decoder specific
+        tensors. It copies data from the `attn_metadata` and keyword arguments
+        (`kwargs`) into corresponding buffers in the `input_buffers` dictionary.
+        The copied data includes attention-related metadata as well as input 
+        IDs and positional information for the encoder.
+        """
+        input_buffers["encoder_seq_lens_tensor"].copy_(
+            attn_metadata.decode_metadata.encoder_seq_lens_tensor,
+            non_blocking=True)
+        input_buffers["cross_slot_mapping"].copy_(
+            attn_metadata.decode_metadata.cross_slot_mapping,
+            non_blocking=True)
+        input_buffers["cross_block_tables"].copy_(
+            attn_metadata.decode_metadata.cross_block_tables,
+            non_blocking=True)

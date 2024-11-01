@@ -111,6 +111,7 @@ def test_llama3_loras_switches(
                      enable_lora=True,
                      max_loras = 4,
                      max_lora_rank = 32,
+                     enable_lora_modules_to_save=True,
                      gpu_memory_utilization=0.5) as vllm_lora_model:
         vllm_outputs = []
         for i in range(len(example_prompts)):

@@ -27,14 +27,17 @@ if TYPE_CHECKING:
     VLLM_USAGE_SOURCE: str = ""
     VLLM_CONFIGURE_LOGGING: int = 1
     VLLM_LOGGING_LEVEL: str = "INFO"
+    VLLM_LOGGING_PREFIX: str = ""
     VLLM_LOGGING_CONFIG_PATH: Optional[str] = None
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_ATTENTION_BACKEND: Optional[str] = None
     VLLM_USE_FLASHINFER_SAMPLER: bool = False
     VLLM_USE_FLASHINFER_REJECTION_SAMPLER: bool = False
+    VLLM_FLASHINFER_FORCE_TENSOR_CORES: bool = False
     VLLM_PP_LAYER_PARTITION: Optional[str] = None
     VLLM_CPU_KVCACHE_SPACE: int = 0
     VLLM_CPU_OMP_THREADS_BIND: str = ""
+    VLLM_OPENVINO_DEVICE: str = "CPU"
     VLLM_OPENVINO_KVCACHE_SPACE: int = 0
     VLLM_OPENVINO_CPU_KV_CACHE_PRECISION: Optional[str] = None
     VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS: bool = False
@@ -57,11 +60,16 @@ if TYPE_CHECKING:
     VERBOSE: bool = False
     VLLM_ALLOW_LONG_MAX_MODEL_LEN: bool = False
     VLLM_TEST_FORCE_FP8_MARLIN: bool = False
-    VLLM_RPC_GET_DATA_TIMEOUT_MS: int = 5000
-    VLLM_ALLOW_ENGINE_USE_RAY: bool = False
+    VLLM_RPC_TIMEOUT: int = 10000  # ms
     VLLM_PLUGINS: Optional[List[str]] = None
     VLLM_TORCH_PROFILER_DIR: Optional[str] = None
+    VLLM_USE_TRITON_AWQ: bool = False
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
+    VLLM_SKIP_P2P_CHECK: bool = False
+    VLLM_TORCH_COMPILE_LEVEL: int = 0
+    VLLM_CUSTOM_OPS: List[str] = []
+    VLLM_DISABLED_KERNELS: List[str] = []
+    VLLM_USE_V1: bool = False
 
 
 def get_default_cache_root():
@@ -195,14 +203,28 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda: (os.environ.get("VLLM_USE_TRITON_FLASH_ATTN", "True").lower() in
              ("true", "1")),
 
-    # Internal flag to enable Dynamo graph capture
-    "VLLM_TEST_DYNAMO_GRAPH_CAPTURE":
-    lambda: int(os.environ.get("VLLM_TEST_DYNAMO_GRAPH_CAPTURE", "0")),
-    "VLLM_DYNAMO_USE_CUSTOM_DISPATCHER":
-    lambda:
-    (os.environ.get("VLLM_DYNAMO_USE_CUSTOM_DISPATCHER", "True").lower() in
-     ("true", "1")),
+    # Internal flag to enable Dynamo fullgraph capture
+    "VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE":
+    lambda: bool(
+        os.environ.get("VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE", "1") != "0"),
+    "VLLM_TORCH_COMPILE_LEVEL":
+    lambda: int(os.environ.get("VLLM_TORCH_COMPILE_LEVEL", "0")),
 
+    # Path to the config file for torch compile
+    "VLLM_TORCH_COMPILE_CONFIG":
+    lambda: os.environ.get("VLLM_TORCH_COMPILE_CONFIG", None),
+
+    # Fine-grained control over which custom ops to enable/disable.
+    # Use 'all' to enable all, 'none' to disable all.
+    # Also specify a list of custom op names to enable (prefixed with a '+'),
+    # or disable (prefixed with a '-').
+    # Examples:
+    # - 'all,-op1' to enable all except op1
+    # - 'none,+op1,+op2' to enable only op1 and op2
+    # By default, all custom ops are enabled when running without Inductor
+    # and disabled when running with Inductor (compile_level >= Inductor).
+    "VLLM_CUSTOM_OPS":
+    lambda: os.environ.get("VLLM_CUSTOM_OPS", "").replace(" ", "").split(","),
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id
     "LOCAL_RANK":
@@ -252,6 +274,10 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_LOGGING_LEVEL":
     lambda: os.getenv("VLLM_LOGGING_LEVEL", "INFO"),
 
+    # if set, VLLM_LOGGING_PREFIX will be prepended to all log messages
+    "VLLM_LOGGING_PREFIX":
+    lambda: os.getenv("VLLM_LOGGING_PREFIX", ""),
+
     # Trace function calls
     # If set to 1, vllm will trace function calls
     # Useful for debugging
@@ -272,6 +298,11 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_USE_FLASHINFER_SAMPLER":
     lambda: bool(int(os.getenv("VLLM_USE_FLASHINFER_SAMPLER", "0"))),
 
+    # If set, vllm will force flashinfer to use tensor cores;
+    # otherwise will use heuristic based on model architecture.
+    "VLLM_FLASHINFER_FORCE_TENSOR_CORES":
+    lambda: bool(int(os.getenv("VLLM_FLASHINFER_FORCE_TENSOR_CORES", "0"))),
+
     # Pipeline stage partition strategy
     "VLLM_PP_LAYER_PARTITION":
     lambda: os.getenv("VLLM_PP_LAYER_PARTITION", None),
@@ -285,6 +316,11 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # "0,1,2", "0-31,33". CPU cores of different ranks are separated by '|'.
     "VLLM_CPU_OMP_THREADS_BIND":
     lambda: os.getenv("VLLM_CPU_OMP_THREADS_BIND", "all"),
+
+    # OpenVINO device selection
+    # default is CPU
+    "VLLM_OPENVINO_DEVICE":
+    lambda: os.getenv("VLLM_OPENVINO_DEVICE", "CPU").upper(),
 
     # OpenVINO key-value cache space
     # default is 4GB
@@ -380,19 +416,13 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda:
     (os.environ.get("VLLM_TEST_FORCE_FP8_MARLIN", "0").strip().lower() in
      ("1", "true")),
+    "VLLM_TEST_FORCE_LOAD_FORMAT":
+    lambda: os.getenv("VLLM_TEST_FORCE_LOAD_FORMAT", "dummy"),
 
     # Time in ms for the zmq client to wait for a response from the backend
     # server for simple data operations
-    "VLLM_RPC_GET_DATA_TIMEOUT_MS":
-    lambda: int(os.getenv("VLLM_RPC_GET_DATA_TIMEOUT_MS", "5000")),
-
-    # If set, allow running the engine as a separate ray actor,
-    # which is a deprecated feature soon to be removed.
-    # See https://github.com/vllm-project/vllm/issues/7045
-    "VLLM_ALLOW_ENGINE_USE_RAY":
-    lambda:
-    (os.environ.get("VLLM_ALLOW_ENGINE_USE_RAY", "0").strip().lower() in
-     ("1", "true")),
+    "VLLM_RPC_TIMEOUT":
+    lambda: int(os.getenv("VLLM_RPC_TIMEOUT", "10000")),
 
     # a list of plugin names to load, separated by commas.
     # if this is not set, it means all plugins will be loaded
@@ -416,6 +446,25 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda:
     (os.environ.get("VLLM_ALLOW_RUNTIME_LORA_UPDATING", "0").strip().lower() in
      ("1", "true")),
+
+    # By default, vLLM will check the peer-to-peer capability itself,
+    # in case of broken drivers. See https://github.com/vllm-project/vllm/blob/a9b15c606fea67a072416ea0ea115261a2756058/vllm/distributed/device_communicators/custom_all_reduce_utils.py#L101-L108 for details. # noqa
+    # If this env var is set to 1, vLLM will skip the peer-to-peer check,
+    # and trust the driver's peer-to-peer capability report.
+    "VLLM_SKIP_P2P_CHECK":
+    lambda: os.getenv("VLLM_SKIP_P2P_CHECK", "0") == "1",
+
+    # List of quantization kernels that should be disabled, used for testing
+    # and performance comparisons. Currently only affects MPLinearKernel
+    # selection
+    # (kernels: MacheteLinearKernel, MarlinLinearKernel, ExllamaLinearKernel)
+    "VLLM_DISABLED_KERNELS":
+    lambda: [] if "VLLM_DISABLED_KERNELS" not in os.environ else os.environ[
+        "VLLM_DISABLED_KERNELS"].split(","),
+
+    # If set, use the V1 code path.
+    "VLLM_USE_V1":
+    lambda: bool(int(os.getenv("VLLM_USE_V1", "0"))),
 }
 
 # end-env-vars-definition

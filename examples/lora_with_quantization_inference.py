@@ -79,23 +79,17 @@ def initialize_engine(model: str, quantization: str,
         # It quantizes the model when loading, with some config info from the
         # LoRA adapter repo. So need to set the parameter of load_format and
         # qlora_adapter_name_or_path as below.
-        engine_args = EngineArgs(
-            model=model,
-            quantization=quantization,
-            qlora_adapter_name_or_path=lora_repo,
-            load_format="bitsandbytes",
-            enable_lora=True,
-            max_lora_rank=64,
-            # set it only in GPUs of limited memory
-            enforce_eager=True)
+        engine_args = EngineArgs(model=model,
+                                 quantization=quantization,
+                                 qlora_adapter_name_or_path=lora_repo,
+                                 load_format="bitsandbytes",
+                                 enable_lora=True,
+                                 max_lora_rank=64)
     else:
-        engine_args = EngineArgs(
-            model=model,
-            quantization=quantization,
-            enable_lora=True,
-            max_loras=4,
-            # set it only in GPUs of limited memory
-            enforce_eager=True)
+        engine_args = EngineArgs(model=model,
+                                 quantization=quantization,
+                                 enable_lora=True,
+                                 max_loras=4)
     return LLMEngine.from_engine_args(engine_args)
 
 

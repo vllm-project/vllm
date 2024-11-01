@@ -1,3 +1,7 @@
+include(FetchContent)
+
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 #
@@ -81,14 +85,39 @@ else()
     message(FATAL_ERROR "vLLM CPU backend requires AVX512 or AVX2 or Power9+ ISA support.")
 endif()
 
+#
+# Build oneDNN for W8A8 GEMM kernels (only for x86-AVX512 platforms)
+#
+if (AVX512_FOUND AND NOT AVX512_DISABLED)
+    FetchContent_Declare(
+        oneDNN
+        GIT_REPOSITORY https://github.com/oneapi-src/oneDNN.git
+        GIT_TAG  v3.5.3
+        GIT_PROGRESS TRUE
+        GIT_SHALLOW TRUE
+    )
+
+    set(ONEDNN_LIBRARY_TYPE "STATIC")
+    set(ONEDNN_BUILD_DOC "OFF")
+    set(ONEDNN_BUILD_EXAMPLES "OFF")
+    set(ONEDNN_BUILD_TESTS "OFF")
+    set(ONEDNN_ENABLE_WORKLOAD "INFERENCE")
+    set(ONEDNN_ENABLE_PRIMITIVE "MATMUL;REORDER")
+    set(ONEDNN_BUILD_GRAPH "OFF")
+    set(ONEDNN_ENABLE_JIT_PROFILING "OFF")
+    set(ONEDNN_ENABLE_ITT_TASKS "OFF")
+    set(ONEDNN_ENABLE_MAX_CPU_ISA "OFF")
+    set(ONEDNN_ENABLE_CPU_ISA_HINTS "OFF")
+    set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
+
+    FetchContent_MakeAvailable(oneDNN)
+    
+    list(APPEND LIBS dnnl)
+endif()
+
 message(STATUS "CPU extension compile flags: ${CXX_COMPILE_FLAGS}")
 
-list(APPEND LIBS "numa")
-
-
-#
-# Define extension targets
-#
+list(APPEND LIBS numa)
 
 #
 # _C extension
@@ -102,6 +131,16 @@ set(VLLM_EXT_SRC
     "csrc/cpu/pos_encoding.cpp"
     "csrc/cpu/torch_bindings.cpp")
 
+if (AVX512_FOUND AND NOT AVX512_DISABLED)
+    set(VLLM_EXT_SRC
+        "csrc/cpu/quant.cpp"
+        ${VLLM_EXT_SRC})
+endif()
+
+#
+# Define extension targets
+#
+
 define_gpu_extension_target(
     _C
     DESTINATION vllm
@@ -114,4 +153,3 @@ define_gpu_extension_target(
 )
 
 message(STATUS "Enabling C extension.")
-add_dependencies(default _C)

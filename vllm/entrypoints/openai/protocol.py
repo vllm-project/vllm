@@ -10,11 +10,10 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from typing_extensions import Annotated, Required, TypedDict
 
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
-from vllm.entrypoints.openai.logits_processors import get_logits_processors
 from vllm.pooling_params import PoolingParams
-from vllm.sampling_params import LogitsProcessor, SamplingParams
+from vllm.sampling_params import (BeamSearchParams, GuidedDecodingParams,
+                                  RequestOutputKind, SamplingParams)
 from vllm.sequence import Logprob
-from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import random_uuid
 
 # torch is mocked during docs generation,
@@ -106,6 +105,11 @@ class UsageInfo(OpenAIBaseModel):
     completion_tokens: Optional[int] = 0
 
 
+class RequestResponseMetadata(BaseModel):
+    request_id: str
+    final_usage_info: Optional[UsageInfo] = None
+
+
 class JsonSchemaResponseFormat(OpenAIBaseModel):
     name: str
     description: Optional[str] = None
@@ -123,7 +127,7 @@ class ResponseFormat(OpenAIBaseModel):
 
 class StreamOptions(OpenAIBaseModel):
     include_usage: Optional[bool] = True
-    continuous_usage_stats: Optional[bool] = True
+    continuous_usage_stats: Optional[bool] = False
 
 
 class FunctionDefinition(OpenAIBaseModel):
@@ -155,7 +159,12 @@ class ChatCompletionRequest(OpenAIBaseModel):
     logit_bias: Optional[Dict[str, float]] = None
     logprobs: Optional[bool] = False
     top_logprobs: Optional[int] = 0
-    max_tokens: Optional[int] = None
+    # TODO(#9845): remove max_tokens when field is removed from OpenAI API
+    max_tokens: Optional[int] = Field(
+        default=None,
+        deprecated=
+        'max_tokens is deprecated in favor of the max_completion_tokens field')
+    max_completion_tokens: Optional[int] = None
     n: Optional[int] = 1
     presence_penalty: Optional[float] = 0.0
     response_format: Optional[ResponseFormat] = None
@@ -180,7 +189,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
     min_p: float = 0.0
     repetition_penalty: float = 1.0
     length_penalty: float = 1.0
-    early_stopping: bool = False
     stop_token_ids: Optional[List[int]] = Field(default_factory=list)
     include_stop_str_in_output: bool = False
     ignore_eos: bool = False
@@ -204,6 +212,15 @@ class ChatCompletionRequest(OpenAIBaseModel):
         ("If true, the generation prompt will be added to the chat template. "
          "This is a parameter used by chat template in tokenizer config of the "
          "model."),
+    )
+    continue_final_message: bool = Field(
+        default=False,
+        description=
+        ("If this is set, the chat will be formatted so that the final "
+         "message in the chat is open-ended, without any EOS tokens. The "
+         "model will continue this message rather than starting a new one. "
+         "This allows you to \"prefill\" part of the model's response for it. "
+         "Cannot be used at the same time as `add_generation_prompt`."),
     )
     add_special_tokens: bool = Field(
         default=False,
@@ -266,14 +283,42 @@ class ChatCompletionRequest(OpenAIBaseModel):
         description=(
             "If specified, will override the default whitespace pattern "
             "for guided json decoding."))
+    priority: int = Field(
+        default=0,
+        description=(
+            "The priority of the request (lower means earlier handling; "
+            "default: 0). Any priority other than 0 will raise an error "
+            "if the served model does not use priority scheduling."))
+    request_id: str = Field(
+        default_factory=lambda: f"{random_uuid()}",
+        description=(
+            "The request_id related to this request. If the caller does "
+            "not set it, a random_uuid will be generated. This id is used "
+            "through out the inference process and return in response."))
 
     # doc: end-chat-completion-extra-params
 
-    def to_sampling_params(
-            self, tokenizer: AnyTokenizer,
-            guided_decode_logits_processor: Optional[LogitsProcessor],
-            default_max_tokens: int) -> SamplingParams:
-        max_tokens = self.max_tokens
+    def to_beam_search_params(self,
+                              default_max_tokens: int) -> BeamSearchParams:
+        # TODO(#9845): remove max_tokens when field is removed from OpenAI API
+        max_tokens = self.max_completion_tokens or self.max_tokens
+        if max_tokens is None:
+            max_tokens = default_max_tokens
+
+        n = self.n if self.n is not None else 1
+        temperature = self.temperature if self.temperature is not None else 0.0
+
+        return BeamSearchParams(
+            beam_width=n,
+            max_tokens=max_tokens,
+            ignore_eos=self.ignore_eos,
+            temperature=temperature,
+            length_penalty=self.length_penalty,
+            include_stop_str_in_output=self.include_stop_str_in_output)
+
+    def to_sampling_params(self, default_max_tokens: int) -> SamplingParams:
+        # TODO(#9845): remove max_tokens when field is removed from OpenAI API
+        max_tokens = self.max_completion_tokens or self.max_tokens
         if max_tokens is None:
             max_tokens = default_max_tokens
 
@@ -281,14 +326,25 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if prompt_logprobs is None and self.echo:
             prompt_logprobs = self.top_logprobs
 
-        # We now allow logprobs being true without top_logrobs.
-        logits_processors = get_logits_processors(
-            logit_bias=self.logit_bias,
-            allowed_token_ids=None,
-            tokenizer=tokenizer,
-        )
-        if guided_decode_logits_processor:
-            logits_processors.append(guided_decode_logits_processor)
+        guided_json_object = None
+        if self.response_format is not None:
+            if self.response_format.type == "json_object":
+                guided_json_object = True
+            elif self.response_format.type == "json_schema":
+                json_schema = self.response_format.json_schema
+                assert json_schema is not None
+                self.guided_json = json_schema.json_schema
+                if self.guided_decoding_backend is None:
+                    self.guided_decoding_backend = "lm-format-enforcer"
+
+        guided_decoding = GuidedDecodingParams.from_optional(
+            json=self._get_guided_json_from_tool() or self.guided_json,
+            regex=self.guided_regex,
+            choice=self.guided_choice,
+            grammar=self.guided_grammar,
+            json_object=guided_json_object,
+            backend=self.guided_decoding_backend,
+            whitespace_pattern=self.guided_whitespace_pattern)
 
         return SamplingParams.from_optional(
             n=self.n,
@@ -308,15 +364,32 @@ class ChatCompletionRequest(OpenAIBaseModel):
             ignore_eos=self.ignore_eos,
             max_tokens=max_tokens,
             min_tokens=self.min_tokens,
-            use_beam_search=self.use_beam_search,
-            early_stopping=self.early_stopping,
             skip_special_tokens=self.skip_special_tokens,
             spaces_between_special_tokens=self.spaces_between_special_tokens,
             include_stop_str_in_output=self.include_stop_str_in_output,
-            length_penalty=self.length_penalty,
-            logits_processors=logits_processors,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
-        )
+            output_kind=RequestOutputKind.DELTA if self.stream \
+                else RequestOutputKind.FINAL_ONLY,
+            guided_decoding=guided_decoding,
+            logit_bias=self.logit_bias)
+
+    def _get_guided_json_from_tool(
+            self) -> Optional[Union[str, dict, BaseModel]]:
+        # user has chosen to not use any tool
+        if self.tool_choice == "none" or self.tools is None:
+            return None
+
+        # user has chosen to use a named tool
+        if type(self.tool_choice) is ChatCompletionNamedToolChoiceParam:
+            tool_name = self.tool_choice.function.name
+            tools = {tool.function.name: tool.function for tool in self.tools}
+            if tool_name not in tools:
+                raise ValueError(
+                    f"Tool '{tool_name}' has not been passed in `tools`.")
+            tool = tools[tool_name]
+            return tool.parameters
+
+        return None
 
     @model_validator(mode="before")
     @classmethod
@@ -378,7 +451,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
         # if "tool_choice" is not specified but tools are provided,
         # default to "auto" tool_choice
-        if "tool_choice" not in data and "tools" in data:
+        if "tool_choice" not in data and data.get("tools"):
             data["tool_choice"] = "auto"
 
         # if "tool_choice" is specified -- validation
@@ -423,6 +496,15 @@ class ChatCompletionRequest(OpenAIBaseModel):
                         " of the specified `tools`")
         return data
 
+    @model_validator(mode="before")
+    @classmethod
+    def check_generation_prompt(cls, data):
+        if data.get("continue_final_message") and data.get(
+                "add_generation_prompt"):
+            raise ValueError("Cannot set both `continue_final_message` and "
+                             "`add_generation_prompt` to True.")
+        return data
+
 
 class CompletionRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
@@ -452,7 +534,6 @@ class CompletionRequest(OpenAIBaseModel):
     min_p: float = 0.0
     repetition_penalty: float = 1.0
     length_penalty: float = 1.0
-    early_stopping: bool = False
     stop_token_ids: Optional[List[int]] = Field(default_factory=list)
     include_stop_str_in_output: bool = False
     ignore_eos: bool = False
@@ -475,8 +556,8 @@ class CompletionRequest(OpenAIBaseModel):
         default=None,
         description=
         ("Similar to chat completion, this parameter specifies the format of "
-         "output. Only {'type': 'json_object'} or {'type': 'text' } is "
-         "supported."),
+         "output. Only {'type': 'json_object'}, {'type': 'json_schema'} or "
+         "{'type': 'text' } is supported."),
     )
     guided_json: Optional[Union[str, dict, BaseModel]] = Field(
         default=None,
@@ -508,13 +589,33 @@ class CompletionRequest(OpenAIBaseModel):
         description=(
             "If specified, will override the default whitespace pattern "
             "for guided json decoding."))
+    priority: int = Field(
+        default=0,
+        description=(
+            "The priority of the request (lower means earlier handling; "
+            "default: 0). Any priority other than 0 will raise an error "
+            "if the served model does not use priority scheduling."))
 
     # doc: end-completion-extra-params
 
-    def to_sampling_params(
-            self, tokenizer: AnyTokenizer,
-            guided_decode_logits_processor: Optional[LogitsProcessor],
-            default_max_tokens: int) -> SamplingParams:
+    def to_beam_search_params(self,
+                              default_max_tokens: int) -> BeamSearchParams:
+        max_tokens = self.max_tokens
+        if max_tokens is None:
+            max_tokens = default_max_tokens
+
+        n = self.n if self.n is not None else 1
+        temperature = self.temperature if self.temperature is not None else 0.0
+
+        return BeamSearchParams(
+            beam_width=n,
+            max_tokens=max_tokens,
+            ignore_eos=self.ignore_eos,
+            temperature=temperature,
+            length_penalty=self.length_penalty,
+            include_stop_str_in_output=self.include_stop_str_in_output)
+
+    def to_sampling_params(self, default_max_tokens: int) -> SamplingParams:
         max_tokens = self.max_tokens
         if max_tokens is None:
             max_tokens = default_max_tokens
@@ -525,13 +626,19 @@ class CompletionRequest(OpenAIBaseModel):
 
         echo_without_generation = self.echo and self.max_tokens == 0
 
-        logits_processors = get_logits_processors(
-            logit_bias=self.logit_bias,
-            allowed_token_ids=self.allowed_token_ids,
-            tokenizer=tokenizer,
-        )
-        if guided_decode_logits_processor:
-            logits_processors.append(guided_decode_logits_processor)
+        guided_json_object = None
+        if (self.response_format is not None
+                and self.response_format.type == "json_object"):
+            guided_json_object = True
+
+        guided_decoding = GuidedDecodingParams.from_optional(
+            json=self.guided_json,
+            regex=self.guided_regex,
+            choice=self.guided_choice,
+            grammar=self.guided_grammar,
+            json_object=guided_json_object,
+            backend=self.guided_decoding_backend,
+            whitespace_pattern=self.guided_whitespace_pattern)
 
         return SamplingParams.from_optional(
             n=self.n,
@@ -550,16 +657,16 @@ class CompletionRequest(OpenAIBaseModel):
             ignore_eos=self.ignore_eos,
             max_tokens=max_tokens if not echo_without_generation else 1,
             min_tokens=self.min_tokens,
-            use_beam_search=self.use_beam_search,
-            early_stopping=self.early_stopping,
             prompt_logprobs=prompt_logprobs,
             skip_special_tokens=self.skip_special_tokens,
             spaces_between_special_tokens=self.spaces_between_special_tokens,
             include_stop_str_in_output=self.include_stop_str_in_output,
-            length_penalty=self.length_penalty,
-            logits_processors=logits_processors,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
-        )
+            output_kind=RequestOutputKind.DELTA if self.stream \
+                else RequestOutputKind.FINAL_ONLY,
+            guided_decoding=guided_decoding,
+            logit_bias=self.logit_bias,
+            allowed_token_ids=self.allowed_token_ids)
 
     @model_validator(mode="before")
     @classmethod
@@ -601,7 +708,7 @@ class CompletionRequest(OpenAIBaseModel):
         return data
 
 
-class EmbeddingRequest(OpenAIBaseModel):
+class EmbeddingCompletionRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/embeddings
     model: str
@@ -609,14 +716,106 @@ class EmbeddingRequest(OpenAIBaseModel):
     encoding_format: Literal["float", "base64"] = "float"
     dimensions: Optional[int] = None
     user: Optional[str] = None
+    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
 
     # doc: begin-embedding-pooling-params
     additional_data: Optional[Any] = None
-
     # doc: end-embedding-pooling-params
+
+    # doc: begin-embedding-extra-params
+    add_special_tokens: bool = Field(
+        default=True,
+        description=(
+            "If true (the default), special tokens (e.g. BOS) will be added to "
+            "the prompt."),
+    )
+    priority: int = Field(
+        default=0,
+        description=(
+            "The priority of the request (lower means earlier handling; "
+            "default: 0). Any priority other than 0 will raise an error "
+            "if the served model does not use priority scheduling."))
+
+    # doc: end-embedding-extra-params
 
     def to_pooling_params(self):
         return PoolingParams(additional_data=self.additional_data)
+
+
+class EmbeddingChatRequest(OpenAIBaseModel):
+    model: str
+    messages: List[ChatCompletionMessageParam]
+
+    encoding_format: Literal["float", "base64"] = "float"
+    dimensions: Optional[int] = None
+    user: Optional[str] = None
+    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
+
+    # doc: begin-chat-embedding-pooling-params
+    additional_data: Optional[Any] = None
+    # doc: end-chat-embedding-pooling-params
+
+    # doc: begin-chat-embedding-extra-params
+    add_generation_prompt: bool = Field(
+        default=True,
+        description=
+        ("If true, the generation prompt will be added to the chat template. "
+         "This is a parameter used by chat template in tokenizer config of the "
+         "model."),
+    )
+    continue_final_message: bool = Field(
+        default=False,
+        description=
+        ("If this is set, the chat will be formatted so that the final "
+         "message in the chat is open-ended, without any EOS tokens. The "
+         "model will continue this message rather than starting a new one. "
+         "This allows you to \"prefill\" part of the model's response for it. "
+         "Cannot be used at the same time as `add_generation_prompt`."),
+    )
+    add_special_tokens: bool = Field(
+        default=False,
+        description=(
+            "If true, special tokens (e.g. BOS) will be added to the prompt "
+            "on top of what is added by the chat template. "
+            "For most models, the chat template takes care of adding the "
+            "special tokens so this should be set to false (as is the "
+            "default)."),
+    )
+    chat_template: Optional[str] = Field(
+        default=None,
+        description=(
+            "A Jinja template to use for this conversion. "
+            "As of transformers v4.44, default chat template is no longer "
+            "allowed, so you must provide a chat template if the tokenizer "
+            "does not define one."),
+    )
+    chat_template_kwargs: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description=("Additional kwargs to pass to the template renderer. "
+                     "Will be accessible by the chat template."),
+    )
+    priority: int = Field(
+        default=0,
+        description=(
+            "The priority of the request (lower means earlier handling; "
+            "default: 0). Any priority other than 0 will raise an error "
+            "if the served model does not use priority scheduling."))
+    # doc: end-chat-embedding-extra-params
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_generation_prompt(cls, data):
+        if data.get("continue_final_message") and data.get(
+                "add_generation_prompt"):
+            raise ValueError("Cannot set both `continue_final_message` and "
+                             "`add_generation_prompt` to True.")
+        return data
+
+    def to_pooling_params(self):
+        return PoolingParams(additional_data=self.additional_data)
+
+
+EmbeddingRequest = Union[EmbeddingCompletionRequest, EmbeddingChatRequest]
 
 
 class CompletionLogProbs(OpenAIBaseModel):
@@ -681,7 +880,7 @@ class EmbeddingResponseData(OpenAIBaseModel):
 
 
 class EmbeddingResponse(OpenAIBaseModel):
-    id: str = Field(default_factory=lambda: f"cmpl-{random_uuid()}")
+    id: str = Field(default_factory=lambda: f"embd-{random_uuid()}")
     object: str = "list"
     created: int = Field(default_factory=lambda: int(time.time()))
     model: str
@@ -852,7 +1051,17 @@ class TokenizeChatRequest(OpenAIBaseModel):
     messages: List[ChatCompletionMessageParam]
 
     add_generation_prompt: bool = Field(default=True)
+    continue_final_message: bool = Field(default=False)
     add_special_tokens: bool = Field(default=False)
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_generation_prompt(cls, data):
+        if data.get("continue_final_message") and data.get(
+                "add_generation_prompt"):
+            raise ValueError("Cannot set both `continue_final_message` and "
+                             "`add_generation_prompt` to True.")
+        return data
 
 
 TokenizeRequest = Union[TokenizeCompletionRequest, TokenizeChatRequest]

@@ -1,12 +1,12 @@
 from functools import lru_cache
-from typing import List, Union
+from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
 
 from vllm.config import ModelConfig
 from vllm.inputs.registry import InputContext
 from vllm.logger import init_logger
-from vllm.transformers_utils.image_processor import get_video_processor
+from vllm.transformers_utils.processor import get_video_processor
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.utils import is_list_of
 
@@ -36,34 +36,45 @@ class VideoPlugin(ImagePlugin):
     def get_data_key(self) -> str:
         return "video"
 
-    def _get_hf_video_processor(self, model_config: ModelConfig):
+    def _get_hf_video_processor(
+        self,
+        model_config: ModelConfig,
+        mm_processor_kwargs: Optional[Dict[str, Any]] = None,
+    ):
+        if mm_processor_kwargs is None:
+            mm_processor_kwargs = {}
         return cached_get_video_processor(
             model_config.model,
-            trust_remote_code=model_config.trust_remote_code)
+            trust_remote_code=model_config.trust_remote_code,
+            **mm_processor_kwargs)
 
     def _default_input_mapper(
         self,
         ctx: InputContext,
         data: MultiModalData[object],
+        **mm_processor_kwargs,
     ) -> MultiModalInputs:
         model_config = ctx.model_config
 
-        # single video input as np.ndarray
-        if isinstance(data, np.ndarray):
-            video_processor = self._get_hf_video_processor(model_config)
+        if isinstance(data, np.ndarray) or is_list_of(data, np.ndarray):
+            video_processor = self._get_hf_video_processor(
+                model_config,
+                mm_processor_kwargs,
+            )
             if video_processor is None:
                 raise RuntimeError("No HuggingFace processor is available "
-                                   "to process the image object")
+                                   "to process the video object")
             try:
+                # NOTE: Similar to image; it may be a good idea to filter and
+                # pass mm_processor_kwargs here too, but for now we don't to
+                # avoid extra complexity if the initializer and preprocess
+                # signatures of the processor don't align
                 batch_data = video_processor(data, return_tensors="pt").data
             except Exception:
-                logger.error("Failed to process image (%s)", data)
+                logger.error("Failed to process video (%s)", data)
                 raise
 
             return MultiModalInputs(batch_data)
-        elif is_list_of(data, np.ndarray):
-            raise NotImplementedError(
-                "Multi video for a prompt is not supported yet")
 
         raise TypeError(f"Invalid video type: {type(data)}")
 

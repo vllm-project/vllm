@@ -42,6 +42,7 @@ class OpenVINOModelRunner:
 
     def __init__(
         self,
+        ov_core: ov.Core,
         model_config: ModelConfig,
         parallel_config: ParallelConfig,
         scheduler_config: SchedulerConfig,
@@ -55,6 +56,7 @@ class OpenVINOModelRunner:
         *args,
         **kwargs,
     ):
+        self.ov_core = ov_core
         self.model_config = model_config
         self.parallel_config = parallel_config
         self.scheduler_config = scheduler_config
@@ -72,13 +74,11 @@ class OpenVINOModelRunner:
         self.block_size = cache_config.block_size
 
         self.attn_backend = get_attn_backend(
-            self.model_config.get_num_attention_heads(self.parallel_config),
             self.model_config.get_head_size(),
-            self.model_config.get_num_kv_heads(self.parallel_config),
-            self.model_config.get_sliding_window(),
             self.model_config.dtype,
             self.kv_cache_dtype,
             self.block_size,
+            self.model_config.is_attention_free,
         )
 
         # Multi-modal data support
@@ -89,11 +89,10 @@ class OpenVINOModelRunner:
         self.model: nn.Module  # Set after init_Model
 
     def load_model(self) -> None:
-        self.model = get_model(
-            model_config=self.model_config,
-            device_config=self.device_config,
-            kv_cache_dtype=self.kv_cache_dtype,
-        )
+        self.model = get_model(model_config=self.model_config,
+                               device_config=self.device_config,
+                               kv_cache_dtype=self.kv_cache_dtype,
+                               ov_core=self.ov_core)
 
     def _prepare_model_input(
         self,
@@ -171,7 +170,11 @@ class OpenVINOModelRunner:
 
                 mm_data = seq_group_metadata.multi_modal_data
                 if mm_data:
-                    mm_kwargs = self.multi_modal_input_mapper(mm_data)
+                    mm_kwargs = self.multi_modal_input_mapper(
+                        mm_data,
+                        mm_processor_kwargs=seq_group_metadata.
+                        mm_processor_kwargs,
+                    )
                     multi_modal_inputs_list.append(mm_kwargs)
 
                 block_table = seq_group_metadata.block_tables[seq_id]

@@ -12,7 +12,16 @@ from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.platforms import current_platform
 
+if current_platform.is_cuda_alike():
+    from .fused_moe import fused_experts
+else:
+    fused_experts = None  # type: ignore
+if current_platform.is_tpu():
+    from .moe_pallas import fused_moe as fused_moe_pallas
+else:
+    fused_moe_pallas = None  # type: ignore
 logger = init_logger(__name__)
 
 
@@ -37,13 +46,13 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         raise NotImplementedError
 
 
+@CustomOp.register("unquantized_fused_moe")
 class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     """MoE method without quantization."""
 
     def create_weights(self, layer: torch.nn.Module, num_experts: int,
                        hidden_size: int, intermediate_size: int,
                        params_dtype: torch.dtype, **extra_weight_attrs):
-
         # Fused gate_up_proj (column parallel)
         w13_weight = torch.nn.Parameter(torch.empty(num_experts,
                                                     2 * intermediate_size,
@@ -74,7 +83,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             num_expert_group: Optional[int] = None,
             custom_routing_function: Optional[Callable] = None
     ) -> torch.Tensor:
-
         return self.forward(x=x,
                             layer=layer,
                             router_logits=router_logits,
@@ -97,10 +105,6 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             num_expert_group: Optional[int] = None,
             custom_routing_function: Optional[Callable] = None
     ) -> torch.Tensor:
-
-        from vllm.model_executor.layers.fused_moe.fused_moe import (
-            fused_experts)
-
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
             router_logits=router_logits,
@@ -134,18 +138,18 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             num_expert_group: Optional[int] = None,
             custom_routing_function: Optional[Callable] = None
     ) -> torch.Tensor:
-
-        from vllm.model_executor.layers.fused_moe.moe_pallas import fused_moe
         assert not use_grouped_topk
         assert num_expert_group is None
         assert topk_group is None
         assert custom_routing_function is None
-        return fused_moe(hidden_states=x,
-                         w1=layer.w13_weight,
-                         w2=layer.w2_weight,
-                         topk=top_k,
-                         gating_output=router_logits,
-                         renormalize=renormalize)
+        return fused_moe_pallas(hidden_states=x,
+                                w1=layer.w13_weight,
+                                w2=layer.w2_weight,
+                                topk=top_k,
+                                gating_output=router_logits,
+                                renormalize=renormalize)
+
+    forward_native = forward_cuda
 
 
 class FusedMoE(torch.nn.Module):
@@ -323,10 +327,12 @@ class FusedMoE(torch.nn.Module):
                       loaded_weight: torch.Tensor, weight_name: str,
                       shard_id: str, expert_id: int) -> None:
 
-        # compressed-tensors represents weights on disk which are flipped
+        # compressed-tensors checkpoints with packed weights are stored flipped
+        # TODO (mgoin): check self.quant_method.quant_config.quant_format
+        # against known CompressionFormat enum values that have this quality
         loaded_weight = loaded_weight.t().contiguous() if (
             self.quant_method.__class__.__name__
-            == "CompressedTensorsMoEMethod") else loaded_weight
+            == "CompressedTensorsWNA16MoEMethod") else loaded_weight
 
         if shard_id not in ("w1", "w2", "w3"):
             raise ValueError(f"shard_id must be ['w1','w2','w3'] but "
@@ -353,6 +359,9 @@ class FusedMoE(torch.nn.Module):
 
         # Case input scale: input_scale loading is only supported for fp8
         if "input_scale" in weight_name:
+            # this is needed for compressed-tensors only
+            loaded_weight = loaded_weight.to(param.data.device)
+
             if param.data[expert_id] != 1 and (param.data[expert_id] -
                                                loaded_weight).abs() > 1e-5:
                 raise ValueError(

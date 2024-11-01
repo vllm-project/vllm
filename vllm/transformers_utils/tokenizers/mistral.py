@@ -2,11 +2,12 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union, cast
 
+import huggingface_hub
 from huggingface_hub import HfApi, hf_hub_download
+from mistral_common.protocol.instruct.request import ChatCompletionRequest
 # yapf: disable
-from mistral_common.tokens.tokenizers.mistral import ChatCompletionRequest
 from mistral_common.tokens.tokenizers.mistral import (
     MistralTokenizer as PublicMistralTokenizer)
 # yapf: enable
@@ -24,18 +25,38 @@ class Encoding:
     input_ids: List[int]
 
 
+def list_local_repo_files(repo_id: str, revision: Optional[str]) -> List[str]:
+    repo_cache = os.path.join(
+        huggingface_hub.constants.HF_HUB_CACHE,
+        huggingface_hub.constants.REPO_ID_SEPARATOR.join(
+            ["models", *repo_id.split("/")]))
+
+    if revision is None:
+        revision_file = os.path.join(repo_cache, "refs", "main")
+        if os.path.isfile(revision_file):
+            with open(revision_file) as file:
+                revision = file.read()
+
+    if revision:
+        revision_dir = os.path.join(repo_cache, "snapshots", revision)
+        if os.path.isdir(revision_dir):
+            return os.listdir(revision_dir)
+
+    return []
+
+
 def find_tokenizer_file(files: List[str]):
     file_pattern = re.compile(r"^tokenizer\.model\.v.*$|^tekken\.json$")
 
     matched_files = [file for file in files if file_pattern.match(file)]
     if len(matched_files) > 1:
         raise OSError(f"Found {len(matched_files)} files matching the "
-                      "pattern: {matched_files}. Make sure only one Mistral "
-                      "tokenizer is present in {tokenizer_name}.")
+                      f"pattern: {file_pattern}. Make sure only one Mistral "
+                      f"tokenizer is present in {files}.")
     elif len(matched_files) == 0:
         raise OSError(f"Found {len(matched_files)} files matching the "
-                      "pattern: {matched_files}. Make sure that a Mistral "
-                      "tokenizer is present in {tokenizer_name}.")
+                      f"pattern: {file_pattern}. Make sure that a Mistral "
+                      f"tokenizer is present in {files}.")
 
     return matched_files[0]
 
@@ -45,26 +66,26 @@ class MistralTokenizer:
     def __init__(self, tokenizer: PublicMistralTokenizer) -> None:
         self.mistral = tokenizer
         self.instruct = tokenizer.instruct_tokenizer
-        self.tokenizer = tokenizer.instruct_tokenizer.tokenizer
 
-        self.vocab_size = len(self.tokenizer.vocab())
-
-        assert isinstance(self.tokenizer,
-                          (Tekkenizer, SentencePieceTokenizer)), type(
-                              self.tokenizer)
-
-        if (is_tekken := isinstance(self.tokenizer, Tekkenizer)):
+        tokenizer_ = tokenizer.instruct_tokenizer.tokenizer
+        if isinstance(tokenizer_, Tekkenizer):
             # Make sure special tokens will not raise
-            self.tokenizer.special_token_policy = SpecialTokenPolicy.IGNORE
+            tokenizer_.special_token_policy = SpecialTokenPolicy.IGNORE
 
-        self._is_tekken = is_tekken
+            self._vocab = {
+                token: idx
+                for idx, token in enumerate(tokenizer_.vocab())
+            }
+        elif isinstance(tokenizer_, SentencePieceTokenizer):
+            self._vocab = {
+                token: idx
+                for idx, token in enumerate(tokenizer_.vocab())
+            }
+        else:
+            raise TypeError(f"Unsupported tokenizer: {type(tokenizer_)}")
 
-        # the following attributes are set to fit VLLM's design
-        self.is_fast = True
-        self.chat_template = True
-        self.all_special_ids: List[Any] = []
-        self.all_special_tokens: List[Any] = []
-        self.all_special_tokens_extended: List[Any] = []
+        self.tokenizer = tokenizer_
+        self._max_token_id = max(self._vocab.values())
 
     @classmethod
     def from_pretrained(cls,
@@ -91,9 +112,16 @@ class MistralTokenizer:
     @staticmethod
     def _download_mistral_tokenizer_from_hf(tokenizer_name: str,
                                             revision: Optional[str]) -> str:
-        api = HfApi()
-        repo_info = api.model_info(tokenizer_name)
-        files = [s.rfilename for s in repo_info.siblings]
+        try:
+            hf_api = HfApi()
+            files = hf_api.list_repo_files(repo_id=tokenizer_name,
+                                           revision=revision)
+        except ConnectionError as exc:
+            files = list_local_repo_files(repo_id=tokenizer_name,
+                                          revision=revision)
+
+            if len(files) == 0:
+                raise exc
 
         filename = find_tokenizer_file(files)
 
@@ -101,6 +129,42 @@ class MistralTokenizer:
                                          filename=filename,
                                          revision=revision)
         return tokenizer_file
+
+    # the following attributes are set to fit VLLM's design
+    @property
+    def all_special_tokens_extended(self) -> List[str]:
+        return []
+
+    @property
+    def all_special_tokens(self) -> List[str]:
+        return []
+
+    @property
+    def all_special_ids(self) -> List[int]:
+        return []
+
+    @property
+    def bos_token_id(self) -> int:
+        return self.tokenizer.bos_id
+
+    @property
+    def eos_token_id(self) -> int:
+        return self.tokenizer.eos_id
+
+    @property
+    def is_fast(self) -> bool:
+        return True
+
+    @property
+    def vocab_size(self) -> int:
+        return len(self._vocab)
+
+    @property
+    def max_token_id(self) -> int:
+        return self._max_token_id
+
+    def __len__(self) -> int:
+        return self.vocab_size
 
     def __call__(
         self,
@@ -117,9 +181,12 @@ class MistralTokenizer:
 
         return Encoding(input_ids=input_ids)
 
-    def get_added_vocab(self) -> List[str]:
+    def get_vocab(self) -> Dict[str, int]:
+        return self._vocab
+
+    def get_added_vocab(self) -> Dict[str, int]:
         # Mistral tokenizers have no added vocabulary
-        return []
+        return {}
 
     def encode(self, prompt: str) -> List[int]:
         # `encode` should only be used for prompt completion
@@ -131,34 +198,54 @@ class MistralTokenizer:
                             messages: List["ChatCompletionMessageParam"],
                             tools: Optional[Dict[str, Any]] = None,
                             **kwargs) -> List[int]:
-        assert tools is None, "`tools` are not yet supported."
 
-        request = ChatCompletionRequest(
-            messages=messages)  # type: ignore[type-var]
+        last_message = cast(Dict[str, Any], messages[-1])
+        if last_message["role"] == "assistant":
+            last_message["prefix"] = True
+
+        request = ChatCompletionRequest(messages=messages,
+                                        tools=tools)  # type: ignore[type-var]
         encoded = self.mistral.encode_chat_completion(request)
 
         # encode-decode to get clean prompt
         return encoded.tokens
 
     def convert_tokens_to_string(self, tokens: List[str]) -> str:
-        if self._is_tekken:
-            return "".join(tokens)
+        if isinstance(self.tokenizer, Tekkenizer):
+            tokens = [
+                t for t in tokens
+                if t not in self.tokenizer._all_special_tokens
+            ]
+
+            if any(isinstance(t, bytes) for t in tokens):
+                # we need to encode and decode all tokens again
+                shift = self.tokenizer.num_special_tokens
+                byte_tokens = [
+                    t.encode("utf-8") if not isinstance(t, bytes) else t
+                    for t in tokens
+                ]
+                ids = [
+                    self.tokenizer._tekken_token2id_nospecial[t] + shift
+                    for t in byte_tokens
+                ]
+                decoded = self.tokenizer.decode(ids)
+            else:
+                decoded = "".join(tokens)
         else:
-            return self.tokenizer.decode(tokens)  # type: ignore[arg-type]
+            decoded = self.tokenizer.decode(tokens)  # type: ignore[arg-type]
+
+        return decoded
 
     def decode(self, ids: Union[List[int], int]) -> str:
         if isinstance(ids, int):
             ids = [ids]
         return self.tokenizer.decode(ids)
 
-    @property
-    def eos_token_id(self):
-        return self.tokenizer.eos_id
-
     def convert_ids_to_tokens(
-            self,
-            ids: List[int],
-            skip_special_tokens: Optional[bool] = True) -> List[str]:
+        self,
+        ids: List[int],
+        skip_special_tokens: bool = True,
+    ) -> List[str]:
         # TODO(Patrick) - potentially allow special tokens to not be skipped
         assert (
             skip_special_tokens
@@ -169,7 +256,11 @@ class MistralTokenizer:
                               self.tokenizer)
 
         tokens = [self.tokenizer.id_to_piece(id) for id in ids]
-        return tokens
 
-    def __len__(self):
-        return self.vocab_size
+        if any(t.strip() == "�" for t in tokens):
+            # if any stripped decoded token is undefined
+            # because it's invalid unicode then pass bytes
+            # See: https://github.com/vllm-project/vllm/pull/8640
+            tokens = [self.tokenizer.id_to_byte_piece(id) for id in ids]
+
+        return tokens

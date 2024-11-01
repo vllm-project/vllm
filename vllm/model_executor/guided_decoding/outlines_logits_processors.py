@@ -15,11 +15,11 @@
 # limitations under the License.
 import copy
 import json
-import math
 from collections import defaultdict
 from functools import lru_cache
 from typing import Callable, DefaultDict, Dict, List, Union
 
+import numpy as np
 import torch
 from lark import Lark
 from outlines import grammars
@@ -67,9 +67,9 @@ class BaseLogitsProcessor:
         instruction = self._guide.get_next_instruction(
             state=self._fsm_state[seq_id])
 
-        if type(instruction) == Generate:
+        if type(instruction) == Generate:  # noqa: E721
             allowed_tokens = instruction.tokens
-        elif type(instruction) == Write:
+        elif type(instruction) == Write:  # noqa: E721
             # TODO: support fast forward tokens
             allowed_tokens = [instruction.tokens[0]]
         else:
@@ -77,9 +77,17 @@ class BaseLogitsProcessor:
                 f"Unsupported instruction type {type(instruction)}")
 
         mask = torch.full((scores.shape[-1], ),
-                          -math.inf,
+                          -torch.inf,
                           device=scores.device)
-        mask[allowed_tokens] = 0
+        # The tokenizer may support more token ids than the model can generate,
+        # eg. Llama 3.2 Vision models have an `<|image|>` token with id 128256
+        # but scores.shape == torch.Size([128256])
+        # Using NumPy is faster for filtering token ids
+        allowed_tokens = np.array(allowed_tokens, dtype=np.int64)
+        allowed_tokens = torch.tensor(allowed_tokens, device=scores.device)
+        allowed_tokens = allowed_tokens.masked_select(
+            allowed_tokens < scores.shape[-1])
+        mask.index_fill_(0, allowed_tokens, 0)
         scores.add_(mask)
         return scores
 
