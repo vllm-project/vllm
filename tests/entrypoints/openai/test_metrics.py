@@ -79,9 +79,8 @@ EXPECTED_VALUES = {
 
 
 @pytest.mark.asyncio
-async def test_metrics_counts(client: openai.AsyncOpenAI):
-    base_url = str(client.base_url)[:-3].strip("/")
-
+async def test_metrics_counts(server: RemoteOpenAIServer,
+                              client: openai.AsyncClient):
     for _ in range(_NUM_REQUESTS):
         # sending a request triggers the metrics to be logged.
         await client.completions.create(
@@ -89,7 +88,7 @@ async def test_metrics_counts(client: openai.AsyncOpenAI):
             prompt=_TOKENIZED_PROMPT,
             max_tokens=_NUM_GENERATION_TOKENS_PER_REQUEST)
 
-    response = requests.get(base_url + "/metrics")
+    response = requests.get(server.url_for("metrics"))
     print(response.text)
     assert response.status_code == HTTPStatus.OK
 
@@ -170,16 +169,15 @@ EXPECTED_METRICS = [
 
 
 @pytest.mark.asyncio
-async def test_metrics_exist(client: openai.AsyncOpenAI):
-    base_url = str(client.base_url)[:-3].strip("/")
-
+async def test_metrics_exist(server: RemoteOpenAIServer,
+                             client: openai.AsyncClient):
     # sending a request triggers the metrics to be logged.
     await client.completions.create(model=MODEL_NAME,
                                     prompt="Hello, my name is",
                                     max_tokens=5,
                                     temperature=0.0)
 
-    response = requests.get(base_url + "/metrics")
+    response = requests.get(server.url_for("metrics"))
     assert response.status_code == HTTPStatus.OK
 
     for metric in EXPECTED_METRICS:

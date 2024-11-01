@@ -9,8 +9,10 @@ from typing_extensions import assert_never
 
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
+from vllm.entrypoints.chat_utils import load_chat_template
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.protocol import (EmbeddingRequest,
+from vllm.entrypoints.openai.protocol import (EmbeddingChatRequest,
+                                              EmbeddingRequest,
                                               EmbeddingResponse,
                                               EmbeddingResponseData,
                                               ErrorResponse, UsageInfo)
@@ -20,8 +22,6 @@ from vllm.outputs import EmbeddingOutput, EmbeddingRequestOutput
 from vllm.utils import merge_async_iterators, random_uuid
 
 logger = init_logger(__name__)
-
-TypeTokenIDs = List[int]
 
 
 def _get_embedding(
@@ -76,6 +76,7 @@ class OpenAIServingEmbedding(OpenAIServing):
         base_model_paths: List[BaseModelPath],
         *,
         request_logger: Optional[RequestLogger],
+        chat_template: Optional[str],
     ):
         super().__init__(engine_client=engine_client,
                          model_config=model_config,
@@ -83,21 +84,20 @@ class OpenAIServingEmbedding(OpenAIServing):
                          lora_modules=None,
                          prompt_adapters=None,
                          request_logger=request_logger)
-        self._enabled = self._check_embedding_mode(
-            model_config.task == "embedding")
+
+        self.chat_template = load_chat_template(chat_template)
 
     async def create_embedding(
         self,
         request: EmbeddingRequest,
         raw_request: Optional[Request] = None,
     ) -> Union[EmbeddingResponse, ErrorResponse]:
-        """Completion API similar to OpenAI's API.
+        """
+        Embedding API similar to OpenAI's API.
 
         See https://platform.openai.com/docs/api-reference/embeddings/create
         for the API specification. This API mimics the OpenAI Embedding API.
         """
-        if not self._enabled:
-            return self.create_error_response("Embedding API disabled")
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
@@ -122,8 +122,6 @@ class OpenAIServingEmbedding(OpenAIServing):
                     "greater than max_model_len."
                     " Please, select a smaller truncation size.")
 
-        # Schedule the request and get the result generator.
-        generators: List[AsyncGenerator[EmbeddingRequestOutput, None]] = []
         try:
             (
                 lora_request,
@@ -132,32 +130,60 @@ class OpenAIServingEmbedding(OpenAIServing):
 
             tokenizer = await self.engine_client.get_tokenizer(lora_request)
 
+            if prompt_adapter_request is not None:
+                raise NotImplementedError("Prompt adapter is not supported "
+                                          "for embedding models")
+
+            if isinstance(request, EmbeddingChatRequest):
+                (
+                    _,
+                    request_prompts,
+                    engine_prompts,
+                ) = await self._preprocess_chat(
+                    request,
+                    tokenizer,
+                    request.messages,
+                    chat_template=request.chat_template or self.chat_template,
+                    add_generation_prompt=request.add_generation_prompt,
+                    continue_final_message=request.continue_final_message,
+                    truncate_prompt_tokens=truncate_prompt_tokens,
+                    add_special_tokens=request.add_special_tokens,
+                )
+            else:
+                request_prompts, engine_prompts = self._preprocess_completion(
+                    request,
+                    tokenizer,
+                    request.input,
+                    truncate_prompt_tokens=truncate_prompt_tokens,
+                    add_special_tokens=request.add_special_tokens,
+                )
+        except ValueError as e:
+            logger.exception("Error in preprocessing prompt inputs")
+            return self.create_error_response(str(e))
+
+        # Schedule the request and get the result generator.
+        generators: List[AsyncGenerator[EmbeddingRequestOutput, None]] = []
+        try:
             pooling_params = request.to_pooling_params()
 
-            prompts = list(
-                self._tokenize_prompt_input_or_inputs(request, tokenizer,
-                                                      request.input,
-                                                      truncate_prompt_tokens))
-
-            for i, prompt_inputs in enumerate(prompts):
+            for i, engine_prompt in enumerate(engine_prompts):
                 request_id_item = f"{request_id}-{i}"
 
                 self._log_inputs(request_id_item,
-                                 prompt_inputs,
+                                 request_prompts[i],
                                  params=pooling_params,
                                  lora_request=lora_request,
                                  prompt_adapter_request=prompt_adapter_request)
 
-                if prompt_adapter_request is not None:
-                    raise NotImplementedError(
-                        "Prompt adapter is not supported "
-                        "for embedding models")
+                trace_headers = (None if raw_request is None else await
+                                 self._get_trace_headers(raw_request.headers))
 
                 generator = self.engine_client.encode(
-                    {"prompt_token_ids": prompt_inputs["prompt_token_ids"]},
+                    engine_prompt,
                     pooling_params,
                     request_id_item,
                     lora_request=lora_request,
+                    trace_headers=trace_headers,
                     priority=request.priority,
                 )
 
@@ -171,13 +197,18 @@ class OpenAIServingEmbedding(OpenAIServing):
             is_cancelled=raw_request.is_disconnected if raw_request else None,
         )
 
+        num_prompts = len(engine_prompts)
+
         # Non-streaming response
         final_res_batch: List[Optional[EmbeddingRequestOutput]]
-        final_res_batch = [None] * len(prompts)
+        final_res_batch = [None] * num_prompts
         try:
             async for i, res in result_generator:
                 final_res_batch[i] = res
+        except asyncio.CancelledError:
+            return self.create_error_response("Client disconnected")
 
+        try:
             for final_res in final_res_batch:
                 assert final_res is not None
 
@@ -187,18 +218,8 @@ class OpenAIServingEmbedding(OpenAIServing):
             response = request_output_to_embedding_response(
                 final_res_batch_checked, request_id, created_time, model_name,
                 encoding_format)
-        except asyncio.CancelledError:
-            return self.create_error_response("Client disconnected")
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
 
         return response
-
-    def _check_embedding_mode(self, embedding_mode: bool) -> bool:
-        if not embedding_mode:
-            logger.warning(
-                "embedding_mode is False. Embedding API will not work.")
-        else:
-            logger.info("Activating the server engine with embedding enabled.")
-        return embedding_mode
