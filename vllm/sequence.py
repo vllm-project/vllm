@@ -257,7 +257,8 @@ class SequenceData(msgspec.Struct,
         return tuple(self._output_token_ids)
 
     @output_token_ids.setter
-    def output_token_ids(self, new_output_token_ids: Tuple[int, ...]) -> None:
+    def output_token_ids(self,
+                         new_output_token_ids: GenericSequence[int]) -> None:
         self._output_token_ids = array(VLLM_TOKEN_ID_ARRAY_TYPE,
                                        new_output_token_ids)
         self._update_cached_all_tokens()
