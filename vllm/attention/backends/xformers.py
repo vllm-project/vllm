@@ -13,7 +13,7 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
 from vllm.attention.backends.utils import (
     CommonAttentionState, CommonMetadataBuilder,
-    get_num_prefill_encode_decode_tokens, get_seq_len_block_table_args,
+    get_num_prefill_decode_query_kv_tokens, get_seq_len_block_table_args,
     is_all_cross_attn_metadata_set, is_all_encoder_attn_metadata_set)
 from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
@@ -516,25 +516,21 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                                                     updated_slot_mapping,
                                                     self.kv_cache_dtype,
                                                     k_scale, v_scale)
-        num_prefill_tokens, num_encoder_tokens,  num_decode_tokens = \
-            get_num_prefill_encode_decode_tokens(attn_metadata, attn_type)
+        (num_prefill_query_tokens, num_prefill_kv_tokens,
+        num_decode_query_tokens) = \
+            get_num_prefill_decode_query_kv_tokens(attn_metadata, attn_type)
 
         output = torch.empty_like(query)
         # Query for decode. KV is not needed because it is already cached.
-        decode_query = query[num_prefill_tokens:]
+        decode_query = query[num_prefill_query_tokens:]
         # QKV for prefill.
-        query = query[:num_prefill_tokens]
+        query = query[:num_prefill_query_tokens]
         if key is not None and value is not None:
-            if (attn_type == AttentionType.ENCODER or \
-                attn_type == AttentionType.ENCODER_DECODER):
-                key = key[:num_encoder_tokens]
-                value = value[:num_encoder_tokens]
-            else:
-                key = key[:num_prefill_tokens]
-                value = value[:num_prefill_tokens]
+            key = key[:num_prefill_kv_tokens]
+            value = value[:num_prefill_kv_tokens]
 
-        assert query.shape[0] == num_prefill_tokens
-        assert decode_query.shape[0] == num_decode_tokens
+        assert query.shape[0] == num_prefill_query_tokens
+        assert decode_query.shape[0] == num_decode_query_tokens
 
         if prefill_meta := attn_metadata.prefill_metadata:
             # Prompt run.
@@ -544,8 +540,8 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 # prefix.
                 out = self._run_memory_efficient_xformers_forward(
                     query, key, value, prefill_meta, attn_type=attn_type)
-                assert out.shape == output[:num_prefill_tokens].shape
-                output[:num_prefill_tokens] = out
+                assert out.shape == output[:num_prefill_query_tokens].shape
+                output[:num_prefill_query_tokens] = out
             else:
                 assert attn_type != AttentionType.ENCODER_ONLY, (
                     "Encoder-only models should not have prefix attention.")
@@ -574,8 +570,8 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                     k_scale,
                     v_scale,
                 )
-                assert output[:num_prefill_tokens].shape == out.shape
-                output[:num_prefill_tokens] = out
+                assert output[:num_prefill_query_tokens].shape == out.shape
+                output[:num_prefill_query_tokens] = out
 
         if decode_meta := attn_metadata.decode_metadata:
             assert attn_type != AttentionType.ENCODER_ONLY, (
@@ -587,7 +583,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 block_tables_arg,
             ) = get_seq_len_block_table_args(decode_meta, False, attn_type)
 
-            output[num_prefill_tokens:] = PagedAttention.forward_decode(
+            output[num_prefill_query_tokens:] = PagedAttention.forward_decode(
                 decode_query,
                 key_cache,
                 value_cache,

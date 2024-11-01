@@ -11,7 +11,7 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionType)
 from vllm.attention.backends.utils import (
     PAD_SLOT_ID, CommonAttentionState, compute_slot_mapping,
-    compute_slot_mapping_start_idx, get_num_prefill_encode_decode_tokens,
+    compute_slot_mapping_start_idx, get_num_prefill_decode_query_kv_tokens,
     get_seq_len_block_table_args, is_all_cross_attn_metadata_set,
     is_all_encoder_attn_metadata_set, is_block_tables_empty)
 from vllm.forward_context import get_forward_context
@@ -828,13 +828,14 @@ def unified_flash_attention(
                 v_scale,
             )
 
-    num_prefill_tokens, num_encoder_tokens,  num_decode_tokens = \
-        get_num_prefill_encode_decode_tokens(attn_metadata, attn_type)
-    decode_query = query[num_prefill_tokens:]
+    (num_prefill_query_tokens, num_prefill_kv_tokens,
+    num_decode_query_tokens) = \
+        get_num_prefill_decode_query_kv_tokens(attn_metadata, attn_type)
+    decode_query = query[num_prefill_query_tokens:]
     # QKV for prefill.
-    query = query[:num_prefill_tokens]
-    assert query.shape[0] == num_prefill_tokens
-    assert decode_query.shape[0] == num_decode_tokens
+    query = query[:num_prefill_query_tokens]
+    assert query.shape[0] == num_prefill_query_tokens
+    assert decode_query.shape[0] == num_decode_query_tokens
 
     prefill_output: Optional[torch.Tensor] = None
     decode_output: Optional[torch.Tensor] = None
@@ -848,13 +849,8 @@ def unified_flash_attention(
             q_seq_start_loc, q_seq_len, k_seq_start_loc, k_seq_len = \
                 _get_query_key_seq_metadata(prefill_meta, True, attn_type)
 
-            if (attn_type == AttentionType.ENCODER or \
-                attn_type == AttentionType.ENCODER_DECODER):
-                key = key[:num_encoder_tokens]
-                value = value[:num_encoder_tokens]
-            else:
-                key = key[:num_prefill_tokens]
-                value = value[:num_prefill_tokens]
+            key = key[:num_prefill_kv_tokens]
+            value = value[:num_prefill_kv_tokens]
 
             prefill_output = flash_attn_varlen_func(
                 q=query,
@@ -937,10 +933,10 @@ def unified_flash_attention(
 
     if prefill_output is None:
         assert decode_output is not None
-        return decode_output.view(num_decode_tokens, hidden_size)
+        return decode_output.view(num_decode_query_tokens, hidden_size)
     if decode_output is None:
         assert prefill_output is not None
-        return prefill_output.view(num_prefill_tokens, hidden_size)
+        return prefill_output.view(num_prefill_query_tokens, hidden_size)
 
     # Chunked prefill does not work with speculative decoding.
     # Therefore, the query length for decode should be 1 in chunked prefill.

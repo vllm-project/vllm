@@ -514,13 +514,13 @@ def get_seq_len_block_table_args(
         raise AttributeError(f"Invalid attention type {str(attn_type)}")
 
 
-def get_num_prefill_encode_decode_tokens(
+def get_num_prefill_decode_query_kv_tokens(
     attn_metadata,
     attn_type: AttentionType,
 ) -> Tuple[int, int, int]:
     """
-    Calculate the number of prefill, encoder, and decode tokens based on the 
-    attention metadata and the specified attention type.
+    Calculate the number of prefill and decode tokens for query, key or value
+    based on the attention metadata and the specified attention type.
 
     Args:
         attn_metadata (FlashAttentionMetadata): Attention Metadata object.
@@ -535,23 +535,27 @@ def get_num_prefill_encode_decode_tokens(
         AssertionError: If the number of encoder tokens in `attn_metadata` 
         is `None` when required for the calculations.
     """
+    num_prefill_query_tokens = 0
+    num_decode_query_tokens = 0
+    num_prefill_kv_tokens = 0
     if attn_type == AttentionType.ENCODER:
         # Encoder attention is only invoked during prefill phase.
+        # The same input servers a both query and key.
         assert attn_metadata.num_encoder_tokens is not None
-        num_prefill_tokens = attn_metadata.num_encoder_tokens
-        num_encoder_tokens = attn_metadata.num_encoder_tokens
-        num_decode_tokens = 0
+        num_prefill_query_tokens = attn_metadata.num_encoder_tokens
+        num_prefill_kv_tokens = attn_metadata.num_encoder_tokens
+        num_decode_query_tokens = 0
     elif attn_type == AttentionType.ENCODER_DECODER:
         assert attn_metadata.num_encoder_tokens is not None
-        num_prefill_tokens = attn_metadata.num_prefill_tokens
-        num_encoder_tokens = attn_metadata.num_encoder_tokens
-        num_decode_tokens = attn_metadata.num_decode_tokens
+        num_prefill_query_tokens = attn_metadata.num_prefill_tokens
+        # The key is the encoder/cross-attention.
+        num_prefill_kv_tokens = attn_metadata.num_encoder_tokens
+        num_decode_query_tokens = attn_metadata.num_decode_tokens
     else:  # attn_type == AttentionType.DECODER or
         # attn_type == AttentionType.ENCODER_ONLY
-        # There are no encoder tokens for DECODER and ENCODER_ONLY
-        # attention type.
-        num_prefill_tokens = attn_metadata.num_prefill_tokens
-        num_encoder_tokens = 0
-        num_decode_tokens = attn_metadata.num_decode_tokens
+        num_prefill_query_tokens = attn_metadata.num_prefill_tokens
+        num_prefill_kv_tokens = attn_metadata.num_prefill_tokens
+        num_decode_query_tokens = attn_metadata.num_decode_tokens
 
-    return (num_prefill_tokens, num_encoder_tokens, num_decode_tokens)
+    return (num_prefill_query_tokens, num_prefill_kv_tokens,
+            num_decode_query_tokens)
