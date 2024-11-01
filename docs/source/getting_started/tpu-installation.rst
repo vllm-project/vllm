@@ -65,7 +65,7 @@ Create a TPU v5e with 4 TPU chips:
     --project PROJECT_ID \
     --zone ZONE \
     --accelerator-type ACCELERATOR_TYPE \
-    --runtime-version v2-alpha-tpuv6e \
+    --runtime-version RUNTIME_VERSION \
     --service-account SERVICE_ACCOUNT
 
 .. list-table:: Parameter descriptions
