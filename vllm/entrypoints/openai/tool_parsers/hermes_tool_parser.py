@@ -213,12 +213,18 @@ class Hermes2ProToolParser(ToolParser):
 
             try:
 
+                # try to load the tool call if it's present
                 current_tool_call = partial_json_parser.loads(
                     tool_call_portion or "{}",
                     flags) if tool_call_portion else None
                 logger.debug("Parsed tool call %s", current_tool_call)
             except partial_json_parser.core.exceptions.MalformedJSON:
                 logger.debug('not enough tokens to parse into JSON yet')
+                return None
+
+            if not current_tool_call:
+                logger.debug(
+                    'current_tool_call is none. waiting for more tokens')
                 return None
 
             # case - we haven't sent the tool name yet. If it's available, send
@@ -260,8 +266,14 @@ class Hermes2ProToolParser(ToolParser):
 
             # main logic for tool parsing here - compare prev. partially-parsed
             #   JSON to the current partially-parsed JSON
-            prev_arguments = (
-                self.prev_tool_call_arr[self.current_tool_id].get("arguments"))
+            prev_call_state = self.prev_tool_call_arr[self.current_tool_id]
+
+            # get the previous and current versions of the arguments for the
+            # call if they exist.
+            if prev_call_state:
+                prev_arguments = prev_call_state.get('arguments')
+            else:
+                prev_arguments = None
             cur_arguments = current_tool_call.get("arguments")
 
             logger.debug("diffing old arguments: %s", prev_arguments)
