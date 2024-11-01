@@ -26,13 +26,26 @@ print(completion.choices[0].message)
 ```
 
 ## API Reference
-Please see the [OpenAI API Reference](https://platform.openai.com/docs/api-reference) for more information on the API. We support all parameters except:
-- Chat: `tools`, and `tool_choice`.
-- Completions: `suffix`.
 
-vLLM also provides experimental support for OpenAI Vision API compatible inference. See more details in [Using VLMs](../models/vlm.rst).
+We currently support the following OpenAI APIs:
+
+- [Completions API](https://platform.openai.com/docs/api-reference/completions)
+  - *Note: `suffix` parameter is not supported.*
+- [Chat Completions API](https://platform.openai.com/docs/api-reference/chat)
+  - [Vision](https://platform.openai.com/docs/guides/vision)-related parameters are supported; see [Using VLMs](../models/vlm.rst).
+    - *Note: `image_url.detail` parameter is not supported.*
+  - We also support `audio_url` content type for audio files.
+    - Refer to [vllm.entrypoints.chat_utils](https://github.com/vllm-project/vllm/tree/main/vllm/entrypoints/chat_utils.py) for the exact schema.
+    - *TODO: Support `input_audio` content type as defined [here](https://github.com/openai/openai-python/blob/v1.52.2/src/openai/types/chat/chat_completion_content_part_input_audio_param.py).*
+  - *Note: `parallel_tool_calls` and `user` parameters are ignored.*
+- [Embeddings API](https://platform.openai.com/docs/api-reference/embeddings)
+  - Instead of `inputs`, you can pass in a list of `messages` (same schema as Chat Completions API),
+    which will be treated as a single prompt to the model according to its chat template.
+    - This enables multi-modal inputs to be passed to embedding models, see [Using VLMs](../models/vlm.rst).
+  - *Note: You should run `vllm serve` with `--task embedding` to ensure that the model is being run in embedding mode.*
 
 ## Extra Parameters
+
 vLLM supports a set of parameters that are not part of the OpenAI API.
 In order to use them, you can pass them as extra parameters in the OpenAI client.
 Or directly merge them into the JSON payload if you are using HTTP call directly.
@@ -49,7 +62,26 @@ completion = client.chat.completions.create(
 )
 ```
 
-### Extra Parameters for Chat API
+### Extra Parameters for Completions API
+
+The following [sampling parameters (click through to see documentation)](../dev/sampling_params.rst) are supported.
+
+```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
+:language: python
+:start-after: begin-completion-sampling-params
+:end-before: end-completion-sampling-params
+```
+
+The following extra parameters are supported:
+
+```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
+:language: python
+:start-after: begin-completion-extra-params
+:end-before: end-completion-extra-params
+```
+
+### Extra Parameters for Chat Completions API
+
 The following [sampling parameters (click through to see documentation)](../dev/sampling_params.rst) are supported.
 
 ```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
@@ -66,21 +98,22 @@ The following extra parameters are supported:
 :end-before: end-chat-completion-extra-params
 ```
 
-### Extra Parameters for Completions API
-The following [sampling parameters (click through to see documentation)](../dev/sampling_params.rst) are supported.
+### Extra Parameters for Embeddings API
+
+The following [pooling parameters (click through to see documentation)](../dev/pooling_params.rst) are supported.
 
 ```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
 :language: python
-:start-after: begin-completion-sampling-params
-:end-before: end-completion-sampling-params
+:start-after: begin-embedding-pooling-params
+:end-before: end-embedding-pooling-params
 ```
 
 The following extra parameters are supported:
 
 ```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
 :language: python
-:start-after: begin-completion-extra-params
-:end-before: end-completion-extra-params
+:start-after: begin-embedding-extra-params
+:end-before: end-embedding-extra-params
 ```
 
 ## Chat Template
