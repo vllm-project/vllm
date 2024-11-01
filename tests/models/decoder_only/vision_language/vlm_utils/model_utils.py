@@ -283,6 +283,7 @@ def h2ovl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
             # yapf: disable
             from vllm.model_executor.models.h2ovl import (
                 IMG_CONTEXT, IMG_END, IMG_START, image_to_pixel_values)
+
             # yapf: enable
             images = [images] if isinstance(images, Image) else images
             pixel_values = [
