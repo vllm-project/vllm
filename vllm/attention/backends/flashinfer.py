@@ -28,8 +28,8 @@ from vllm.attention.backends.utils import (PAD_SLOT_ID, compute_slot_mapping,
                                            is_block_tables_empty)
 from vllm.attention.ops.paged_attn import PagedAttention
 from vllm.forward_context import get_forward_context
-from vllm.utils import (async_tensor_h2d, get_kv_cache_torch_dtype,
-                        make_tensor_with_pad)
+from vllm.utils import (async_tensor_h2d, direct_register_custom_op,
+                        get_kv_cache_torch_dtype, make_tensor_with_pad)
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import (ModelInputForGPUBuilder,
@@ -759,8 +759,6 @@ class FlashInferImpl(AttentionImpl):
         v_scale: float = 1.0,
         attn_type: AttentionType = AttentionType.DECODER,
     ) -> torch.Tensor:
-        assert k_scale == 1.0 and v_scale == 1.0, (
-            "key/v_scale is not supported in FlashInfer.")
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError("Encoder self-attention and "
                                       "encoder/decoder cross-attention "
@@ -785,8 +783,6 @@ class FlashInferImpl(AttentionImpl):
         )
 
 
-@torch.library.custom_op("vllm::unified_flash_infer",
-                         mutates_args=["kv_cache"])
 def unified_flash_infer(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -876,7 +872,12 @@ def unified_flash_infer(
             assert prefill_meta is not None
             assert prefill_meta.prefill_wrapper is not None
             prefill_output = prefill_meta.prefill_wrapper.forward(
-                query, kv_cache, logits_soft_cap=logits_soft_cap, causal=True)
+                query,
+                kv_cache,
+                logits_soft_cap=logits_soft_cap,
+                causal=True,
+                k_scale=k_scale,
+                v_scale=v_scale)
     if decode_meta := attn_metadata.decode_metadata:
         assert attn_metadata.decode_metadata is not None
         assert attn_metadata.decode_metadata.decode_wrapper is not None
@@ -906,8 +907,7 @@ def unified_flash_infer(
     return output.view(num_tokens, hidden_size)
 
 
-@unified_flash_infer.register_fake
-def _(
+def unified_flash_infer_fake(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
@@ -924,3 +924,11 @@ def _(
     logits_soft_cap: Optional[float] = None,
 ) -> torch.Tensor:
     return torch.empty_like(query).contiguous()
+
+
+direct_register_custom_op(
+    op_name="unified_flash_infer",
+    op_func=unified_flash_infer,
+    mutates_args=["kv_cache"],
+    fake_impl=unified_flash_infer_fake,
+)
