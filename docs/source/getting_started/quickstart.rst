@@ -138,10 +138,10 @@ Since this server is compatible with OpenAI API, you can use it as a drop-in rep
 
 A more detailed client example can be found `here <https://github.com/vllm-project/vllm/blob/main/examples/openai_completion_client.py>`__.
 
-OpenAI Chat API with vLLM
-~~~~~~~~~~~~~~~~~~~~~~~~~~
+OpenAI Chat Completions API with vLLM
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-vLLM is designed to also support the OpenAI Chat API. The chat interface is a more dynamic, interactive way to communicate with the model, allowing back-and-forth exchanges that can be stored in the chat history. This is useful for tasks that require context or more detailed explanations.
+vLLM is designed to also support the OpenAI Chat Completions API. The chat interface is a more dynamic, interactive way to communicate with the model, allowing back-and-forth exchanges that can be stored in the chat history. This is useful for tasks that require context or more detailed explanations.
 
 You can use the `create chat completion <https://platform.openai.com/docs/api-reference/chat/completions/create>`_ endpoint to interact with the model:
 
@@ -157,7 +157,7 @@ You can use the `create chat completion <https://platform.openai.com/docs/api-re
     $         ]
     $     }'
 
-Alternatively, you can use the `openai` python package:
+Alternatively, you can use the ``openai`` python package:
 
 .. code-block:: python
 
