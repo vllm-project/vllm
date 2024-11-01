@@ -228,6 +228,7 @@ class LLMEngine:
         use_cached_outputs: bool = False,
     ) -> None:
 
+        # TODO: remove the local variables and use self.* throughout the class.
         model_config = self.model_config = vllm_config.model_config
         cache_config = self.cache_config = vllm_config.cache_config
         lora_config = self.lora_config = vllm_config.lora_config
