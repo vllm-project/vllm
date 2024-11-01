@@ -131,20 +131,6 @@ Documentation
    performance/benchmarks
 
 .. toctree::
-   :maxdepth: 2
-   :caption: Developer Documentation
-
-   dev/sampling_params
-   dev/pooling_params
-   dev/offline_inference/offline_index
-   dev/engine/engine_index
-   dev/kernel/paged_attention
-   dev/input_processing/model_inputs_index
-   dev/multimodal/multimodal_index
-   dev/dockerfile/dockerfile
-   dev/profiling/profiling_index
-
-.. toctree::
    :maxdepth: 1
    :caption: Community
 
@@ -153,9 +139,23 @@ Documentation
 
 .. toctree::
    :maxdepth: 2
+   :caption: API Documentation
+
+   dev/sampling_params
+   dev/pooling_params
+   dev/offline_inference/offline_index
+   dev/engine/engine_index
+   dev/kernel/paged_attention
+   dev/input_processing/model_inputs_index
+   dev/multimodal/multimodal_index
+
+.. toctree::
+   :maxdepth: 2
    :caption: Contributing
 
    contributing/overview.md
+   contributing/profiling/profiling_index
+   contributing/dockerfile/dockerfile
 
 Indices and tables
 ==================
