@@ -5,6 +5,7 @@ from typing import Iterator, List, Optional, Union
 
 import cloudpickle
 import zmq
+from ray.exceptions import RayTaskError
 
 from vllm import AsyncEngineArgs, SamplingParams
 # yapf conflicts with isort for this block
@@ -305,6 +306,11 @@ class MQLLMEngine:
     def _send_outputs(self, outputs: REQUEST_OUTPUTS_T):
         """Send List of RequestOutput to RPCClient."""
         if outputs:
+            # RayTaskError might not pickelable here. We need to unpack the
+            # underlying exception as the real exception in the output.
+            if (isinstance(outputs, RPCError)
+                    and isinstance(outputs.exception, RayTaskError)):
+                outputs.exception = outputs.exception.cause
             output_bytes = pickle.dumps(outputs)
             self.output_socket.send_multipart((output_bytes, ), copy=False)
 
