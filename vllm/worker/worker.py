@@ -24,7 +24,8 @@ from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.embedding_model_runner import EmbeddingModelRunner
 from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
 from vllm.worker.model_runner import GPUModelRunnerBase, ModelRunner
-from vllm.worker.worker_base import LocalOrDistributedWorkerBase, WorkerInput
+from vllm.worker.worker_base import (LocalOrDistributedWorkerBase, WorkerBase,
+                                     WorkerInput)
 
 logger = init_logger(__name__)
 
@@ -46,7 +47,7 @@ class Worker(LocalOrDistributedWorkerBase):
         is_driver_worker: bool = False,
         model_runner_cls: Optional[Type[GPUModelRunnerBase]] = None,
     ) -> None:
-        LocalOrDistributedWorkerBase.__init__(self, vllm_config)
+        WorkerBase.__init__(self, vllm_config)
         self.parallel_config.rank = rank
         self.local_rank = local_rank
         self.rank = rank

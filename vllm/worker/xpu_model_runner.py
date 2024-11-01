@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 
 from vllm.attention import get_attn_backend
-from vllm.config import (EngineConfig)
+from vllm.config import EngineConfig
 from vllm.distributed import get_pp_group
 from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.logger import init_logger
