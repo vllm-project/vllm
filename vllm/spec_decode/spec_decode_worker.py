@@ -184,7 +184,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
         if not disable_mqa_scorer:
             if scorer_worker.model_runner.attn_backend.get_name(
-            ) != "flash-attn":
+            ) != "FLASH_ATTN":
                 disable_mqa_scorer = True
                 logger.info(
                     "[Speculative Decoding] Disabling MQA scorer as the "
@@ -1037,6 +1037,14 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         See https://arxiv.org/abs/2308.04623.
         """
         raise NotImplementedError
+
+    def start_profile(self):
+        if isinstance(self.scorer_worker, Worker):
+            self.scorer_worker.start_profile()
+
+    def stop_profile(self):
+        if isinstance(self.scorer_worker, Worker):
+            self.scorer_worker.stop_profile()
 
 
 def split_num_cache_blocks_evenly(scorer_cache_block_size_bytes: int,

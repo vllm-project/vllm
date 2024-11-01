@@ -127,7 +127,7 @@ class ResponseFormat(OpenAIBaseModel):
 
 class StreamOptions(OpenAIBaseModel):
     include_usage: Optional[bool] = True
-    continuous_usage_stats: Optional[bool] = True
+    continuous_usage_stats: Optional[bool] = False
 
 
 class FunctionDefinition(OpenAIBaseModel):
@@ -159,7 +159,12 @@ class ChatCompletionRequest(OpenAIBaseModel):
     logit_bias: Optional[Dict[str, float]] = None
     logprobs: Optional[bool] = False
     top_logprobs: Optional[int] = 0
-    max_tokens: Optional[int] = None
+    # TODO(#9845): remove max_tokens when field is removed from OpenAI API
+    max_tokens: Optional[int] = Field(
+        default=None,
+        deprecated=
+        'max_tokens is deprecated in favor of the max_completion_tokens field')
+    max_completion_tokens: Optional[int] = None
     n: Optional[int] = 1
     presence_penalty: Optional[float] = 0.0
     response_format: Optional[ResponseFormat] = None
@@ -284,12 +289,19 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "The priority of the request (lower means earlier handling; "
             "default: 0). Any priority other than 0 will raise an error "
             "if the served model does not use priority scheduling."))
+    request_id: str = Field(
+        default_factory=lambda: f"{random_uuid()}",
+        description=(
+            "The request_id related to this request. If the caller does "
+            "not set it, a random_uuid will be generated. This id is used "
+            "through out the inference process and return in response."))
 
     # doc: end-chat-completion-extra-params
 
     def to_beam_search_params(self,
                               default_max_tokens: int) -> BeamSearchParams:
-        max_tokens = self.max_tokens
+        # TODO(#9845): remove max_tokens when field is removed from OpenAI API
+        max_tokens = self.max_completion_tokens or self.max_tokens
         if max_tokens is None:
             max_tokens = default_max_tokens
 
@@ -302,10 +314,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
             ignore_eos=self.ignore_eos,
             temperature=temperature,
             length_penalty=self.length_penalty,
-        )
+            include_stop_str_in_output=self.include_stop_str_in_output)
 
     def to_sampling_params(self, default_max_tokens: int) -> SamplingParams:
-        max_tokens = self.max_tokens
+        # TODO(#9845): remove max_tokens when field is removed from OpenAI API
+        max_tokens = self.max_completion_tokens or self.max_tokens
         if max_tokens is None:
             max_tokens = default_max_tokens
 
@@ -600,7 +613,7 @@ class CompletionRequest(OpenAIBaseModel):
             ignore_eos=self.ignore_eos,
             temperature=temperature,
             length_penalty=self.length_penalty,
-        )
+            include_stop_str_in_output=self.include_stop_str_in_output)
 
     def to_sampling_params(self, default_max_tokens: int) -> SamplingParams:
         max_tokens = self.max_tokens

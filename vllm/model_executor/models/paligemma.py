@@ -142,14 +142,18 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.config = config
         self.multimodal_config = multimodal_config
 
-        self.vision_tower = SiglipVisionModel(config.vision_config)
+        self.vision_tower = SiglipVisionModel(config.vision_config,
+                                              quant_config,
+                                              prefix="vision_tower")
         self.multi_modal_projector = PaliGemmaMultiModalProjector(
             vision_hidden_size=config.vision_config.hidden_size,
             projection_dim=config.vision_config.projection_dim)
 
         self.quant_config = quant_config
         self.language_model = GemmaForCausalLM(config.text_config,
-                                               cache_config, quant_config)
+                                               cache_config,
+                                               quant_config,
+                                               prefix="language_model")
         logit_scale = getattr(config, "logit_scale", 1.0)
         self.language_model.logits_processor.scale *= logit_scale
 

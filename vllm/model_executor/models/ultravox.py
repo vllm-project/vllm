@@ -117,6 +117,9 @@ def input_mapper_for_ultravox(ctx: InputContext, data: object):
     if not isinstance(data, list):
         data = [data]
 
+    if len(data) == 0:
+        return MultiModalInputs()
+
     # If the audio inputs are embeddings, no need for preprocessing
     if is_list_of(data, torch.Tensor, check="all"):
         return MultiModalInputs({"audio_embeds": data})
@@ -354,7 +357,10 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP):
                 ))
         self.multi_modal_projector = UltravoxProjector(config)
         self.language_model = init_vllm_registered_model(
-            config.text_config, cache_config, quant_config)
+            config.text_config,
+            cache_config,
+            quant_config,
+            prefix="language_model")
         if config.text_model_id is not None:
             self.secondary_weights.append(
                 DefaultModelLoader.Source(model_or_path=config.text_model_id,

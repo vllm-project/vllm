@@ -103,6 +103,23 @@ vllm serve <model> --chat-template ./path-to-chat-template.jinja
 vLLM community provides a set of chat templates for popular models. You can find them in the examples
 directory [here](https://github.com/vllm-project/vllm/tree/main/examples/)
 
+With the inclusion of multi-modal chat APIs, the OpenAI spec now accepts chat messages in a new format which specifies 
+both a `type` and a `text` field. An example is provided below:
+```python
+completion = client.chat.completions.create(
+  model="NousResearch/Meta-Llama-3-8B-Instruct",
+  messages=[
+    {"role": "user", "content": [{"type": "text", "text": "Classify this sentiment: vLLM is wonderful!"}]}
+  ]
+)
+```
+Most chat templates for LLMs expect the `content` to be a `string` but there are some newer models like 
+`meta-llama/Llama-Guard-3-1B` that expect the content to be parsed with the new OpenAI spec. In order to choose which
+format the content needs to be parsed in by vLLM, please use the `--chat-template-text-format` argument to specify
+between `string` or `openai`. The default value is `string` and vLLM internally converts both spec formats to match 
+this, unless explicitly specified.
+
+
 ## Command line arguments for the server
 
 ```{argparse}
@@ -168,7 +185,9 @@ from HuggingFace; and you can find an example of this in a `tokenizer_config.jso
 
 If your favorite tool-calling model is not supported, please feel free to contribute a parser & tool use chat template! 
 
+
 #### Hermes Models (`hermes`)
+
 All Nous Research Hermes-series models newer than Hermes 2 Pro should be supported.
 * `NousResearch/Hermes-2-Pro-*`
 * `NousResearch/Hermes-2-Theta-*`
@@ -180,7 +199,9 @@ step in their creation_.
 
 Flags: `--tool-call-parser hermes`
 
+
 #### Mistral Models (`mistral`)
+
 Supported models:
 * `mistralai/Mistral-7B-Instruct-v0.3` (confirmed)
 * Additional mistral function-calling models are compatible as well.
@@ -199,7 +220,9 @@ when tools are provided, that results in much better reliability when working wi
 
 Recommended flags: `--tool-call-parser mistral --chat-template examples/tool_chat_template_mistral_parallel.jinja`
 
+
 #### Llama Models (`llama3_json`)
+
 Supported models:
 * `meta-llama/Meta-Llama-3.1-8B-Instruct`
 * `meta-llama/Meta-Llama-3.1-70B-Instruct`
@@ -219,7 +242,9 @@ it works better with vLLM.
 
 Recommended flags: `--tool-call-parser llama3_json --chat-template examples/tool_chat_template_llama3_json.jinja`
 
+
 #### InternLM Models (`internlm`)
+
 Supported models:
 * `internlm/internlm2_5-7b-chat` (confirmed)
 * Additional internlm2.5 function-calling models are compatible as well
@@ -229,6 +254,7 @@ Known issues:
 
 Recommended flags: `--tool-call-parser internlm --chat-template examples/tool_chat_template_internlm2_tool.jinja`
 
+
 #### Jamba Models (`jamba`)
 AI21's Jamba-1.5 models are supported.
 * `ai21labs/AI21-Jamba-1.5-Mini`
@@ -236,6 +262,16 @@ AI21's Jamba-1.5 models are supported.
 
 
 Flags: `--tool-call-parser jamba`
+
+
+#### IBM Granite (`granite-20b-fc`)
+
+Supported models:
+* `ibm-granite/granite-20b-functioncalling`
+
+Flags: `--tool-call-parser granite-20b-fc --chat-template examples/tool_chat_template_granite_20b_fc.jinja`
+
+The example chat template deviates slightly from the original on Huggingface, which is not vLLM compatible. It blends function description elements from the Hermes template and follows the same system prompt as "Response Generation" mode from [the paper](https://arxiv.org/abs/2407.00121). Parallel function calls are supported.
 
 
 ### How to write a tool parser plugin
@@ -295,5 +331,5 @@ Then you can use this plugin in the command line like this.
     --tool-parser-plugin <absolute path of the plugin file>
     --tool-call-parser example \
     --chat-template <your chat template> \
-``` 
+```
 

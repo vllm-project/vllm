@@ -1,12 +1,12 @@
 from functools import cached_property
-from typing import (Iterable, List, Literal, Mapping, Optional, Tuple,
-                    TypedDict, Union)
+from typing import (Iterable, List, Literal, Mapping, Optional, Protocol,
+                    Tuple, TypedDict, Union)
 
 import torch
 import torch.nn as nn
 from PIL import Image
 from transformers import (CLIPVisionConfig, LlavaConfig, PixtralVisionConfig,
-                          SiglipVisionConfig)
+                          PretrainedConfig, SiglipVisionConfig)
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
@@ -200,7 +200,18 @@ def input_processor_for_llava(ctx: InputContext, inputs: DecoderOnlyInputs):
     raise NotImplementedError(msg)
 
 
-def _init_vision_tower(hf_config: LlavaConfig):
+class LlavaLikeConfig(Protocol):
+    vision_config: PretrainedConfig
+    vision_feature_layer: int
+
+
+def init_vision_tower_for_llava(
+    hf_config: LlavaLikeConfig,
+    quant_config: Optional[QuantizationConfig],
+    *,
+    require_post_norm: Optional[bool] = None,
+    prefix: str = "",
+):
     vision_config = hf_config.vision_config
 
     # Initialize the vision tower only up to the required feature layer
@@ -214,16 +225,27 @@ def _init_vision_tower(hf_config: LlavaConfig):
     if isinstance(vision_config, CLIPVisionConfig):
         return CLIPVisionModel(
             vision_config,
+            quant_config=quant_config,
             num_hidden_layers_override=num_hidden_layers,
+            require_post_norm=require_post_norm,
+            prefix=prefix,
         )
     elif isinstance(vision_config, SiglipVisionConfig):
         return SiglipVisionModel(
             vision_config,
+            quant_config=quant_config,
             num_hidden_layers_override=num_hidden_layers,
+            require_post_norm=require_post_norm,
+            prefix=prefix,
         )
     elif isinstance(vision_config, PixtralVisionConfig):
-        # TODO: allow layer override?
-        return PixtralHFVisionModel(vision_config)
+        return PixtralHFVisionModel(
+            vision_config,
+            quant_config=quant_config,
+            num_hidden_layers_override=num_hidden_layers,
+            require_post_norm=require_post_norm,
+            prefix=prefix,
+        )
 
     msg = f"Unsupported vision config: {type(vision_config)}"
     raise NotImplementedError(msg)
@@ -255,14 +277,21 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
             config.projector_hidden_act = "gelu"
 
         # TODO: Optionally initializes this for supporting embeddings.
-        self.vision_tower = _init_vision_tower(config)
+        self.vision_tower = init_vision_tower_for_llava(
+            config,
+            quant_config,
+            require_post_norm=False,
+            prefix="vision_tower")
         self.multi_modal_projector = LlavaMultiModalProjector(
             vision_hidden_size=config.vision_config.hidden_size,
             text_hidden_size=config.text_config.hidden_size,
             projector_hidden_act=config.projector_hidden_act)
 
         self.language_model = init_vllm_registered_model(
-            config.text_config, cache_config, quant_config)
+            config.text_config,
+            cache_config,
+            quant_config,
+            prefix="language_model")
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
@@ -287,6 +316,34 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
 
         return data
 
+    def _validate_image_sizes(self, images: List[torch.Tensor],
+                              sizes: List[torch.Tensor]) -> List[torch.Tensor]:
+        if not isinstance(sizes, list):
+            sizes = [sizes]
+
+        total_images = sum(size.numel() // 2 for size in sizes)
+        if total_images != len(images):
+            raise ValueError("Mismatch in number of images. "
+                             f"Expected {total_images}, got {len(images)}")
+        img_idx = 0
+        for size in sizes:
+            # Flatten the size tensor to a list of (height, width) pairs
+            size = size.view(-1, 2).tolist()
+            for expected_h, expected_w in size:
+                if img_idx >= len(images):
+                    raise ValueError("Ran out of images before sizes. "
+                                     f"{img_idx} >= {len(images)}")
+                img = images[img_idx]
+                if img.shape[-2:] != (expected_h, expected_w):
+                    raise ValueError(
+                        "Image size mismatch. Expected "
+                        f"{(expected_h, expected_w)}, got {img.shape[-2:]}")
+                if img.shape[-3] != 3:
+                    raise ValueError("Image channel mismatch. Expected 3, "
+                                     f"got {img.shape[-3]}")
+                img_idx += 1
+        return images
+
     def _parse_and_validate_image_input(
             self, **kwargs: object) -> Optional[LlavaImageInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
@@ -305,20 +362,28 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
             # so we need to produce a list of tensors
             if image_sizes is not None:
                 images = pixel_values
-                if isinstance(images, torch.Tensor):
-                    # if passed as batch take all images
-                    NN, N, B, C, W, H = images.shape
-                    images = images.reshape(NN * N * B, C, W, H)
-                    images = [images[i] for i in range(images.size(0))]
-                elif isinstance(images, list):
-                    # if passed as list flatten lists of tensors
-                    while isinstance(images, list) and len(images) == 1:
-                        images = images[0]
 
-                # TODO: Add validation based on image_sizes
+                def flatten_to_3d_tensors(item):
+                    if isinstance(item, torch.Tensor):
+                        if item.dim() >= 3:
+                            return [t for t in item.view(-1, *item.shape[-3:])]
+                        else:
+                            raise ValueError(
+                                f"Unexpected tensor dimension: {item.dim()}")
+                    elif isinstance(item, list):
+                        return [
+                            t for subitem in item
+                            for t in flatten_to_3d_tensors(subitem)
+                        ]
+                    else:
+                        raise ValueError(f"Unexpected type: {type(item)}")
+
+                # Restructure the batched images into a list of lists of images
+                images = flatten_to_3d_tensors(pixel_values)
+
                 return LlavaImagePixelInputs(
                     type="pixel_values",
-                    data=images,
+                    data=self._validate_image_sizes(images, image_sizes),
                 )
 
             return LlavaImagePixelInputs(

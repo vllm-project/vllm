@@ -29,7 +29,7 @@ from transformers import LlamaConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, LoRAConfig
+from vllm.config import CacheConfig, LoRAConfig, PoolerConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -50,12 +50,13 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, kv_cache_scales_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors, PoolerOutput
-from vllm.utils import is_hip
 
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (AutoWeightsLoader, PPMissingLayer, is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, make_layers)
+                    make_empty_intermediate_tensors_factory, make_layers,
+                    maybe_prefix)
 
 
 class LlamaMLP(nn.Module):
@@ -268,13 +269,7 @@ class LlamaDecoderLayer(nn.Module):
         return hidden_states, residual
 
 
-@support_torch_compile(
-    dynamic_arg_dims={
-        "input_ids": 0,
-        "positions": 0,
-        "inputs_embeds": 0,
-        "intermediate_tensors": 0,
-    })
+@support_torch_compile
 class LlamaModel(nn.Module):
 
     def __init__(
@@ -429,7 +424,7 @@ class LlamaModel(nn.Module):
             if not isinstance(self.layers[layer_idx], nn.Identity):
                 layer_self_attn = self.layers[layer_idx].self_attn
 
-            if is_hip():
+            if current_platform.is_rocm():
                 # The scaling factor convention we are assuming is
                 # quantized_value * scaling_factor ~= true_value
                 # which is consistent with the practice of setting
@@ -506,6 +501,8 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
+        prefix: str = "",
+        pooler_config: Optional[PoolerConfig] = None,
     ) -> None:
         super().__init__()
 
@@ -516,7 +513,7 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                                 cache_config,
                                 quant_config,
                                 lora_config=lora_config,
-                                prefix="model")
+                                prefix=maybe_prefix(prefix, "model"))
         if get_pp_group().is_last_rank:
             self.unpadded_vocab_size = config.vocab_size
             if lora_config:
@@ -532,6 +529,7 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                     if not lora_config else
                     lora_config.lora_vocab_padding_size),
                 quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
             )
             if config.tie_word_embeddings:
                 self.lm_head = self.lm_head.tie_weights(
@@ -546,6 +544,11 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             self.lm_head = PPMissingLayer()
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
+        self._pooler = Pooler.from_config_with_defaults(
+            pooler_config,
+            pooling_type=PoolingType.STEP,
+            normalize=False,
+            softmax=False)
 
     def forward(
         self,
@@ -567,6 +570,14 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         logits = self.logits_processor(self.lm_head, hidden_states,
                                        sampling_metadata)
         return logits
+
+    def pooler(
+        self,
+        hidden_states: torch.Tensor,
+        pooling_metadata: PoolingMetadata,
+    ) -> Optional[PoolerOutput]:
+        logits = self.compute_logits(hidden_states, None)
+        return self._pooler(logits, pooling_metadata)
 
     def sample(self, logits: torch.Tensor,
                sampling_metadata: SamplingMetadata) -> Optional[SamplerOutput]:
@@ -633,12 +644,17 @@ class LlamaEmbeddingModel(nn.Module, SupportsPP):
 
     def __init__(
         self,
+        pooler_config: Optional[PoolerConfig] = None,
         **kwargs,
     ) -> None:
         super().__init__()
 
         self.model = LlamaModel(**kwargs)
-        self._pooler = Pooler(pooling_type=PoolingType.LAST, normalize=True)
+        self._pooler = Pooler.from_config_with_defaults(
+            pooler_config,
+            pooling_type=PoolingType.LAST,
+            normalize=True,
+            softmax=False)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 

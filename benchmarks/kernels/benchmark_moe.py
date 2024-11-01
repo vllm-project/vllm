@@ -10,7 +10,8 @@ from ray.experimental.tqdm_ray import tqdm
 from transformers import AutoConfig
 
 from vllm.model_executor.layers.fused_moe.fused_moe import *
-from vllm.utils import FlexibleArgumentParser, seed_everything
+from vllm.platforms import current_platform
+from vllm.utils import FlexibleArgumentParser
 
 
 class BenchmarkConfig(TypedDict):
@@ -88,22 +89,23 @@ def benchmark_config(
         input_gating.copy_(gating_output[i])
 
     def run():
-        fused_moe(
-            x,
-            w1,
-            w2,
-            input_gating,
-            topk,
-            renormalize=True,
-            inplace=True,
-            override_config=config,
-            use_fp8_w8a8=use_fp8_w8a8,
-            use_int8_w8a16=use_int8_w8a16,
-            w1_scale=w1_scale,
-            w2_scale=w2_scale,
-            a1_scale=a1_scale,
-            a2_scale=a2_scale,
-        )
+        from vllm.model_executor.layers.fused_moe import override_config
+        with override_config(config):
+            fused_moe(
+                x,
+                w1,
+                w2,
+                input_gating,
+                topk,
+                renormalize=True,
+                inplace=True,
+                use_fp8_w8a8=use_fp8_w8a8,
+                use_int8_w8a16=use_int8_w8a16,
+                w1_scale=w1_scale,
+                w2_scale=w2_scale,
+                a1_scale=a1_scale,
+                a2_scale=a2_scale,
+            )
 
     # JIT compilation & warmup
     run()
@@ -166,7 +168,7 @@ class BenchmarkWorker:
 
     def __init__(self, seed: int) -> None:
         torch.set_default_device("cuda")
-        seed_everything(seed)
+        current_platform.seed_everything(seed)
         self.seed = seed
 
     def benchmark(
@@ -180,7 +182,7 @@ class BenchmarkWorker:
         use_fp8_w8a8: bool,
         use_int8_w8a16: bool,
     ) -> Tuple[Dict[str, int], float]:
-        seed_everything(self.seed)
+        current_platform.seed_everything(self.seed)
         dtype_str = get_config_dtype_str(dtype,
                                          use_int8_w8a16=use_int8_w8a16,
                                          use_fp8_w8a8=use_fp8_w8a8)

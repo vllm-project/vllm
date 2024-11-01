@@ -6,6 +6,7 @@ from typing import (Any, AsyncGenerator, Dict, Iterator, List, Mapping,
                     Optional, Union, cast, overload)
 
 import cloudpickle
+import psutil
 import zmq
 import zmq.asyncio
 from zmq import Frame  # type: ignore[attr-defined]
@@ -77,7 +78,8 @@ class MQLLMEngineClient(EngineClient):
             every N seconds, confirming the engine is healthy
     """
 
-    def __init__(self, ipc_path: str, engine_config: EngineConfig):
+    def __init__(self, ipc_path: str, engine_config: EngineConfig,
+                 engine_pid: int):
         self.context = zmq.asyncio.Context()
         self._errored_with: Optional[BaseException] = None
 
@@ -115,6 +117,7 @@ class MQLLMEngineClient(EngineClient):
         # Loop to check health of the LLMEngine periodically.
         # Started after the MQLLMEngine is ready.
         self.health_loop: Optional[asyncio.Task] = None
+        self._engine_process = psutil.Process(engine_pid)
 
     @staticmethod
     def is_unsupported_config(engine_args: AsyncEngineArgs):
@@ -131,21 +134,22 @@ class MQLLMEngineClient(EngineClient):
             socket.close(linger=0)
 
     async def run_heartbeat_loop(self, timeout: int):
-        """Background loop that continually listens to the RPCServer for
-        heartbeats.
+        """Background loop that continually checks to ensure the engine process
+        is still alive.
         """
         try:
             while True:
-                if await self.heartbeat_socket.poll(timeout=timeout) == 0:
-                    # No heartbeat was received. Set error and exit the loop
+                # Check if the engine process is running:
+                if not self._engine_process.is_running() or (
+                        self._engine_process.status() == psutil.STATUS_ZOMBIE):
+                    # NB: is_running() returns True for zombies
                     self._set_errored(
-                        TimeoutError("No heartbeat received "
-                                     "from MQLLMEngine"))
-                    logger.debug("Shutting down MQLLMEngineClient check "
-                                 "health loop due to timeout")
+                        RuntimeError(
+                            f"Engine process (pid {self._engine_process.pid}) "
+                            "died."))
                     break
 
-                else:
+                if await self.heartbeat_socket.poll(timeout=timeout):
                     # Heartbeat received- check the message
                     await self._check_success(
                         error_message="Heartbeat failed.",
@@ -155,6 +159,11 @@ class MQLLMEngineClient(EngineClient):
 
         except asyncio.CancelledError:
             logger.debug("Shutting down MQLLMEngineClient check health loop.")
+
+        except psutil.NoSuchProcess:
+            self._set_errored(
+                RuntimeError(
+                    f"Engine process (pid {self._engine_process.pid}) died."))
 
         except Exception as e:
             self._set_errored(e)
@@ -204,8 +213,20 @@ class MQLLMEngineClient(EngineClient):
                     # (and record only the first one)
                     if is_engine_errored and not self._errored_with:
                         self._errored_with = exception
+                        # If engine is errored, no matter the type of exception
+                        # it will no longer be able to receive new requests,
+                        # therefore we have to inform that the current
+                        # processed requests failed as well. Send back a dead
+                        # engine error give this feedback and also give a
+                        # 'hint' to the server to shutdown next.
+                        exception = self.dead_error
 
                     if request_id is None:
+                        # If request_id is None, then the engine raised an
+                        # exception for a batch, and we may not know the
+                        # request that caused it, neither if it was actually
+                        # caused by any of them (e.g. CUDA OOM). Therefore we
+                        # broadcast the same exception for all requests.
                         for queue_i in tuple(self.output_queues.values()):
                             queue_i.put_nowait(exception)
                     else:

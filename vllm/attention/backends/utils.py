@@ -138,7 +138,6 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
             chunked_prefill_enabled: bool):
         is_prompt = inter_data.is_prompt
         block_tables = inter_data.block_tables
-        computed_block_nums = inter_data.computed_block_nums
 
         for (seq_id, token_len, seq_len, curr_seq_len, query_len, context_len,
              curr_sliding_window_block) in zip(
@@ -164,10 +163,14 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
             # NOTE: This only works for oooooooxxx style attention.
             block_table = []
             if inter_data.prefix_cache_hit:
-                block_table = computed_block_nums
+                block_table = block_tables[seq_id]
             elif ((chunked_prefill_enabled or not is_prompt)
                   and block_tables is not None):
-                block_table = block_tables[seq_id][-curr_sliding_window_block:]
+                if curr_sliding_window_block == 0:
+                    block_table = block_tables[seq_id]
+                else:
+                    block_table = block_tables[seq_id][
+                        -curr_sliding_window_block:]
             self.block_tables.append(block_table)
 
             # Compute slot mapping.
@@ -317,8 +320,8 @@ class CommonAttentionState(AttentionState):
         if is_encoder_decoder_model:
             # The encoder decoder model works only with XFormers backend.
             # Assert the same.
-            assert self.runner.attn_backend.get_name() == "xformers", \
-            f"Expected attn_backend name to be 'xformers', but "\
+            assert self.runner.attn_backend.get_name() == "XFORMERS", \
+            f"Expected attn_backend name to be 'XFORMERS', but "\
             f" got '{self.runner.attn_backend.get_name()}'"
             self._update_captured_metadata_for_enc_dec_model(
                 batch_size=batch_size, attn_metadata=attn_metadata)
@@ -337,8 +340,8 @@ class CommonAttentionState(AttentionState):
         if is_encoder_decoder_model:
             # The encoder decoder model works only with XFormers backend.
             # Assert the same.
-            assert self.runner.attn_backend.get_name() == "xformers", \
-            f"Expected attn_backend name to be 'xformers', but "\
+            assert self.runner.attn_backend.get_name() == "XFORMERS", \
+            f"Expected attn_backend name to be 'XFORMERS', but "\
             f" got '{self.runner.attn_backend.get_name()}'"
             self._add_additonal_input_buffers_for_enc_dec_model(
                 attn_metadata=attn_metadata, input_buffers=input_buffers)
@@ -356,8 +359,8 @@ class CommonAttentionState(AttentionState):
         if is_encoder_decoder_model:
             # The encoder decoder model works only with XFormers backend.
             # Assert the same.
-            assert self.runner.attn_backend.get_name() == "xformers", \
-            f"Expected attn_backend name to be 'xformers', but "\
+            assert self.runner.attn_backend.get_name() == "XFORMERS", \
+            f"Expected attn_backend name to be 'XFORMERS', but "\
             f" got '{self.runner.attn_backend.get_name()}'"
             self._prepare_input_buffers_for_enc_dec_model(
                 attn_metadata, input_buffers)

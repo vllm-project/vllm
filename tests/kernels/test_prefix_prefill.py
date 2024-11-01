@@ -9,7 +9,8 @@ from xformers.ops.fmha.attn_bias import BlockDiagonalCausalFromBottomRightMask
 
 from vllm.attention.backends.xformers import _make_alibi_bias
 from vllm.attention.ops.prefix_prefill import context_attention_fwd
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, seed_everything
+from vllm.platforms import current_platform
+from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 
 NUM_HEADS = [64]
 NUM_QUERIES_PER_KV = [1, 8, 64]
@@ -39,7 +40,7 @@ def test_contexted_kv_attention(
     kv_cache_dtype: str,
     device: str,
 ) -> None:
-    seed_everything(0)
+    current_platform.seed_everything(0)
     torch.set_default_device(device)
 
     # Need this, otherwise when we capture the graph the process
@@ -234,7 +235,7 @@ def test_contexted_kv_attention_alibi(
     kv_cache_dtype: str,
     device: str,
 ) -> None:
-    seed_everything(0)
+    current_platform.seed_everything(0)
     torch.set_default_device(device)
 
     # Need this, otherwise when we capture the graph the process

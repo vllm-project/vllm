@@ -1,6 +1,6 @@
 """
-This example shows how to use vLLM for running offline inference 
-with the correct prompt format on vision language models.
+This example shows how to use vLLM for running offline inference with
+the correct prompt format on vision language models for text generation.
 
 For most models, the prompt format should follow corresponding examples
 on HuggingFace model repository.
@@ -262,11 +262,15 @@ def run_qwen2_vl(question: str, modality: str):
 
     model_name = "Qwen/Qwen2-VL-7B-Instruct"
 
-    # Tested on L40
     llm = LLM(
         model=model_name,
-        max_model_len=8192,
+        max_model_len=4096,
         max_num_seqs=5,
+        # Note - mm_processor_kwargs can also be passed to generate/chat calls
+        mm_processor_kwargs={
+            "min_pixels": 28 * 28,
+            "max_pixels": 1280 * 28 * 28,
+        },
     )
 
     prompt = ("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
@@ -450,7 +454,7 @@ def main(args):
 if __name__ == "__main__":
     parser = FlexibleArgumentParser(
         description='Demo on using vLLM for offline inference with '
-        'vision language models')
+        'vision language models for text generation')
     parser.add_argument('--model-type',
                         '-m',
                         type=str,
