@@ -1515,6 +1515,14 @@ def weak_ref_tensors(
     raise ValueError("Invalid type for tensors")
 
 
+def is_in_doc_build() -> bool:
+    try:
+        from sphinx.ext.autodoc.mock import _MockModule
+        return isinstance(torch, _MockModule)
+    except ModuleNotFoundError:
+        return False
+
+
 # create a library to hold the custom op
 vllm_lib = Library("vllm", "FRAGMENT")  # noqa
 
@@ -1541,6 +1549,8 @@ def direct_register_custom_op(
     library object. If you want to bind the operator to a different library,
     make sure the library object is alive when the operator is used.
     """
+    if is_in_doc_build():
+        return
     schema_str = torch.library.infer_schema(op_func, mutates_args=mutates_args)
     my_lib = target_lib or vllm_lib
     my_lib.define(op_name + schema_str)
