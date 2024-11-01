@@ -8,6 +8,7 @@ from vllm import _custom_ops as ops
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     fused_topk, moe_align_block_size, try_get_optimal_moe_config)
 from vllm.scalar_type import scalar_types
+from vllm.utils import direct_register_custom_op
 
 
 def get_scalar_type(num_bits: int, has_zp: bool):
@@ -18,7 +19,6 @@ def get_scalar_type(num_bits: int, has_zp: bool):
         return scalar_types.uint4b8 if num_bits == 4 else scalar_types.uint8b128
 
 
-@torch.library.custom_op("vllm::single_marlin_moe", mutates_args=[])
 def single_marlin_moe(
     hidden_states: torch.Tensor,
     w: torch.Tensor,
@@ -119,8 +119,7 @@ def single_marlin_moe(
     return torch.sum(intermediate_cache.view(*intermediate_cache.shape), dim=1)
 
 
-@single_marlin_moe.register_fake
-def _(
+def single_marlin_moe_fake(
     hidden_states: torch.Tensor,
     w: torch.Tensor,
     scales: torch.Tensor,
@@ -136,7 +135,14 @@ def _(
     return torch.empty_like(hidden_states)
 
 
-@torch.library.custom_op("vllm::fused_marlin_moe", mutates_args=[])
+direct_register_custom_op(
+    op_name="single_marlin_moe",
+    op_func=single_marlin_moe,
+    mutates_args=[],
+    fake_impl=single_marlin_moe_fake,
+)
+
+
 def fused_marlin_moe(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
@@ -324,8 +330,7 @@ def fused_marlin_moe(
                      dim=1)
 
 
-@fused_marlin_moe.register_fake
-def _(
+def fused_marlin_moe_fake(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
     w2: torch.Tensor,
@@ -344,3 +349,11 @@ def _(
     is_k_full: bool = True,
 ) -> torch.Tensor:
     return torch.empty_like(hidden_states)
+
+
+direct_register_custom_op(
+    op_name="fused_marlin_moe",
+    op_func=fused_marlin_moe,
+    mutates_args=[],
+    fake_impl=fused_marlin_moe_fake,
+)
