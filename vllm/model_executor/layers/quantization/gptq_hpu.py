@@ -226,23 +226,24 @@ class GPTQHPULinearMethod(LinearMethodBase):
 
         self.wf = torch.tensor(list(range(0, 32, self.quant_config.weight_bits)), dtype=torch.int32).unsqueeze(0)
         weight = self.unpack_weight_from_cuda_old_format(layer)
-        new_qweight = self.pack_tensor(weight)
-        layer.qweight = Parameter(new_qweight.to('hpu'), requires_grad=False)
-
-        # TODO: Support group indexing and remove the check
-        # columns = layer.qweight.shape[0]
-        # g_idx_trivial = [i // self.quant_config.group_size for i in range(columns)]
-        # g_idx_trivial = torch.tensor(g_idx_trivial, dtype=torch.int32)
-        # assert torch.equal(layer.g_idx, g_idx_trivial), "Non-trivial tensor g_idx is not supported"
+        layer.qweight.data = self.pack_tensor(weight).to('hpu')
 
         zeros = self.unpack_zeros_from_cuda_old_format(layer).cpu()
-        new_qzeros = self.pack_tensor(zeros)
-        layer.qzeros = Parameter(new_qzeros.to('hpu'), requires_grad=False)
+        layer.qzeros.data = self.pack_tensor(zeros).to('hpu')
+
+
+        # TODO: Support group indexing and remove the check
+        columns = layer.qweight.shape[0]
+        if self.quant_config.group_size > 0:
+            g_idx_trivial = [i // self.quant_config.group_size for i in range(columns)]
+        else:
+            g_idx_trivial = [0] * columns
+        g_idx_trivial = torch.tensor(g_idx_trivial, dtype=torch.int32)
+        assert torch.equal(layer.g_idx, g_idx_trivial), "Non-trivial tensor g_idx is not supported"
 
         # for torch.compile
         layer.qweight = Parameter(layer.qweight.data, requires_grad=False)
         layer.qzeros = Parameter(layer.qzeros.data, requires_grad=False)
-        layer.qweight = Parameter(layer.qweight.data, requires_grad=False)
         layer.g_idx = Parameter(layer.g_idx.data, requires_grad=False)
         layer.scales = Parameter(layer.scales.data, requires_grad=False)
 

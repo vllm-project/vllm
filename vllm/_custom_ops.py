@@ -243,7 +243,7 @@ def gptq_hpu_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
               b_gptq_qzeros: torch.Tensor, b_gptq_scales: torch.Tensor,
               b_g_idx: torch.Tensor, use_exllama: bool,
               bit: int) -> torch.Tensor:
-
+    
     weight = convert_from_uint4(b_q_weight, b_gptq_scales, b_gptq_qzeros, a.dtype)
     return torch.matmul(a, weight)
 
