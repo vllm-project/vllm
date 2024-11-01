@@ -1115,7 +1115,13 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             for shard_name, (
                     weight_name, index
             ) in model.bitsandbytes_stacked_params_mapping.items():
-                if shard_name in quant_param_name:
+
+                shard_pos = quant_param_name.find(shard_name)
+                # Some models, such as MiniCPM V2.5/2.6, contain both
+                # module names 'kv_proj' and 'qkv_proj'. To prevent 'kv_proj'
+                # from being incorrectly identified as being present in
+                # 'vpm.encoder.layers.0.self_attn.qkv_proj.qweight
+                if shard_pos > 0 and quant_param_name[shard_pos - 1] == ".":
                     shard_index = index
                     quant_param_name = quant_param_name.replace(
                         shard_name, weight_name)
