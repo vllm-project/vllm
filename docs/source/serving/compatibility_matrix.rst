@@ -283,7 +283,7 @@ Feature x Feature
      - ✅
      - ✅
      - ✅
-     - `✗ <https://github.com/vllm-project/vllm/issues/8985>`__ 
+     - `✗ <https://github.com/vllm-project/vllm/issues/9893>`__ 
      - ?
      - ✅
      - ✅
