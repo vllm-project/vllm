@@ -107,6 +107,7 @@ class LoRAModel(AdapterModel):
         rank: int,
         lora_alpha: int,
         tensors: Dict[str, torch.Tensor],
+        enable_lora_modules_to_save: bool = False,
         device: str = "cuda",
         dtype: Optional[torch.dtype] = None,
         embeddings: Optional[Dict[str, torch.Tensor]] = None,
@@ -119,7 +120,8 @@ class LoRAModel(AdapterModel):
         pin_memory = str(device) == "cpu" and is_pin_memory_available()
         loras: Dict[str, LoRALayerWeights] = {}
         for tensor_name, tensor in tensors.items():
-            module_name, is_lora_a = parse_fine_tuned_lora_name(tensor_name)
+            module_name, is_lora_a = parse_fine_tuned_lora_name(tensor_name, enable_lora_modules_to_save)
+            
             if module_name not in loras:
                 lora_embeddings_tensor = None
                 if embeddings:
@@ -142,7 +144,7 @@ class LoRAModel(AdapterModel):
                                                       dtype=dtype).t()
                 if pin_memory:
                     loras[module_name].lora_a_pin_memory()
-            elif is_lora_a is None:
+            elif is_lora_a is None: # this is modules_to_save tensor
                 loras[module_name].lora_b = tensor.to(device=device,
                                                       dtype=dtype)
                 if pin_memory:
@@ -177,6 +179,7 @@ class LoRAModel(AdapterModel):
         max_position_embeddings: Optional[int] = None,
         lora_model_id: Optional[int] = None,
         device: str = "cuda",
+        enable_lora_modules_to_save: bool= False,
         dtype: Optional[torch.dtype] = None,
         target_embedding_padding: Optional[int] = None,
         embedding_modules: Optional[Dict[str, str]] = None,
@@ -221,7 +224,7 @@ class LoRAModel(AdapterModel):
                                        framework="pt") as f:  # type: ignore
                 for lora_module in f.keys():  # noqa
                     module_name, is_lora_a = parse_fine_tuned_lora_name(
-                        lora_module)
+                        lora_module, enable_lora_modules_to_save)
                     part_name = module_name.split(".")[-1]
 
                     is_expected_module_to_save = (is_lora_a is None) and (
@@ -292,6 +295,7 @@ class LoRAModel(AdapterModel):
             rank=rank,
             lora_alpha=lora_alpha,
             tensors=tensors,
+            enable_lora_modules_to_save=enable_lora_modules_to_save,
             device=device,
             dtype=dtype,
             embeddings=embeddings,
