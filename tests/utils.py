@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import functools
 import os
 import signal
@@ -8,13 +9,14 @@ import time
 import warnings
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Literal, Optional, Type, Union
+from typing import Any, Callable, Dict, List, Optional, Type, Union
 
 import openai
 import pytest
 import requests
+import torch
 from openai.types.completion import Completion
-from typing_extensions import ParamSpec, assert_never
+from typing_extensions import ParamSpec
 
 import vllm.envs as envs
 from tests.models.utils import TextTextLogprobs
@@ -272,6 +274,31 @@ def _test_completion(
     return results
 
 
+def _test_completion_close(
+    client: openai.OpenAI,
+    model: str,
+    prompt: str,
+):
+    results = []
+
+    # test with text prompt
+    completion = client.completions.create(model=model,
+                                           prompt=prompt,
+                                           max_tokens=1,
+                                           logprobs=5,
+                                           temperature=0.0)
+
+    logporbs = completion.choices[0].logprobs.top_logprobs[0]
+    logporbs = {k: round(v, 2) for k, v in logporbs.items()}
+
+    results.append({
+        "test": "completion_close",
+        "logprobs": logporbs,
+    })
+
+    return results
+
+
 def _test_embeddings(
     client: openai.OpenAI,
     model: str,
@@ -295,13 +322,81 @@ def _test_embeddings(
     return results
 
 
+def _test_image_text(
+    client: openai.OpenAI,
+    model_name: str,
+    image_url: str,
+):
+    results = []
+
+    # test pure text input
+    messages = [{
+        "role":
+        "user",
+        "content": [
+            {
+                "type": "text",
+                "text": "How do you feel today?"
+            },
+        ],
+    }]
+
+    chat_completion = client.chat.completions.create(model=model_name,
+                                                     messages=messages,
+                                                     temperature=0.0,
+                                                     max_tokens=1,
+                                                     logprobs=True,
+                                                     top_logprobs=5)
+    top_logprobs = chat_completion.choices[0].logprobs.content[0].top_logprobs
+
+    for x in top_logprobs:
+        x.logprob = round(x.logprob, 2)
+
+    results.append({
+        "test": "pure_text",
+        "logprobs": top_logprobs,
+    })
+
+    messages = [{
+        "role":
+        "user",
+        "content": [
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": image_url
+                }
+            },
+            {
+                "type": "text",
+                "text": "What's in this image?"
+            },
+        ],
+    }]
+
+    chat_completion = client.chat.completions.create(model=model_name,
+                                                     messages=messages,
+                                                     temperature=0.0,
+                                                     max_tokens=1,
+                                                     logprobs=True,
+                                                     top_logprobs=5)
+    top_logprobs = chat_completion.choices[0].logprobs.content[0].top_logprobs
+
+    results.append({
+        "test": "text_image",
+        "logprobs": top_logprobs,
+    })
+
+    return results
+
+
 def compare_two_settings(model: str,
                          arg1: List[str],
                          arg2: List[str],
                          env1: Optional[Dict[str, str]] = None,
                          env2: Optional[Dict[str, str]] = None,
                          *,
-                         method: Literal["generate", "encode"] = "generate",
+                         method: str = "generate",
                          max_wait_seconds: Optional[float] = None) -> None:
     """
     Launch API server with two different sets of arguments/environments
@@ -328,7 +423,7 @@ def compare_all_settings(model: str,
                          all_args: List[List[str]],
                          all_envs: List[Optional[Dict[str, str]]],
                          *,
-                         method: Literal["generate", "encode"] = "generate",
+                         method: str = "generate",
                          max_wait_seconds: Optional[float] = None) -> None:
     """
     Launch API server with several different sets of arguments/environments
@@ -397,10 +492,17 @@ def compare_all_settings(model: str,
 
             if method == "generate":
                 results += _test_completion(client, model, prompt, token_ids)
+            elif method == "generate_close":
+                results += _test_completion_close(client, model, prompt)
+            elif method == "generate_with_image":
+                results += _test_image_text(
+                    client, model,
+                    "https://upload.wikimedia.org/wikipedia/commons/0/0b/RGBA_comp.png"
+                )
             elif method == "encode":
                 results += _test_embeddings(client, model, prompt)
             else:
-                assert_never(method)
+                raise ValueError(f"Unknown method: {method}")
 
             if i > 0:
                 # if any setting fails, raise an error early
@@ -410,6 +512,18 @@ def compare_all_settings(model: str,
                 compare_envs = all_envs[i]
                 for ref_result, compare_result in zip(ref_results,
                                                       compare_results):
+                    ref_result = copy.deepcopy(ref_result)
+                    compare_result = copy.deepcopy(compare_result)
+                    if "embedding" in ref_result and method == "encode":
+                        ref_embedding = torch.tensor(ref_result["embedding"])
+                        compare_embedding = torch.tensor(
+                            compare_result["embedding"])
+                        mse = ((ref_embedding - compare_embedding)**2).mean()
+                        assert mse < 1e-6, (
+                            f"Embedding for {model=} are not the same.\n"
+                            f"mse={mse}\n")
+                        del ref_result["embedding"]
+                        del compare_result["embedding"]
                     assert ref_result == compare_result, (
                         f"Results for {model=} are not the same.\n"
                         f"{ref_args=} {ref_envs=}\n"
