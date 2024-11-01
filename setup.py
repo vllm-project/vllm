@@ -157,12 +157,16 @@ class cmake_build_ext(build_ext):
         # that use the same CMakeLists.txt.
         outdir = os.path.abspath(
             os.path.dirname(self.get_ext_fullpath(ext.name)))
-       
-        if not self.build_temp:
+      
+        build_dir = os.path.abspath('build')
+        if not os.path.exists(build_dir):
+            os.makedirs(build_dir) 
+        self.build_temp = build_dir
+        #if not self.build_temp:
             # Define the path you want to use as the temporary build directory
-            self.build_temp = os.path.join(os.path.abspath("build"), "temp")
+            #self.build_temp = os.path.join(os.path.abspath("build"), "temp")
 
-        logger.info("NOOOOOOOOO: self.build_temp %s", self.build_temp)
+        logger.info("NOOOOOOOOO: self.build_temp %s, outdir %s", self.build_temp, outdir)
 
         cmake_args = [
             '-DCMAKE_BUILD_TYPE={}'.format(cfg),

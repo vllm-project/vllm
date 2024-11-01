@@ -550,6 +550,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                                  "requires setting cross-attention "
                                  "metadata attributes.")
 
+
         query = query.view(-1, self.num_heads, self.head_size)
         if key is not None:
             assert value is not None
@@ -606,13 +607,19 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 # If kv_cache is not provided, the new key and value tensors are
                 # not cached. This happens during the initial memory profiling run.
                 layer_idx = kv_cache.item()
+
                 #torch.set_printoptions(precision=2, sci_mode=False)
-                #print(f"key.shape:{key.shape}, type:{key.dtype} \n{key[:2,:1,]}") 
+                #print(f"key.shape:{key.shape}, type:{key.dtype}, key.elements:{key.numel()}, key.size:{key.storage().nbytes() } stride:{key.stride(0)}") 
                 #print(f"value.shape:{value.shape}, type:{key.dtype} \n{value[:3,:1,]}") 
-                #if layer_idx == 0:
-                #    print(f"attn_metadata:{attn_metadata}")
-                #    print(f"attn_metadata.cache_row_mapping:{attn_metadata.cache_row_mapping}")
-                #    print(f"attn_metadata.cache_col_mapping:{attn_metadata.cache_col_mapping}")
+                #if layer_idx > 50:
+                #    print(f"key.shape:{key.shape}, type:{key.dtype} \n", file=sys.stderr) 
+                #    print(f"value.shape:{value.shape}, type:{key.dtype} \n", file=sys.stderr) 
+                #    print(f"layers:{attn_metadata.num_layers}, block_size:{attn_metadata.block_size}\n", file=sys.stderr)
+                #    print(f"NNNNNN attn_metadata.cache_row_mapping:{attn_metadata.cache_row_mapping}\n", file=sys.stderr)
+                #    if attn_metadata.cache_row_mapping.shape == torch.Size([1]):
+                #        print(f"attn_metadata.cache_row_mapping:{hex(attn_metadata.cache_row_mapping)}, col_mapping:{hex(attn_metadata.cache_col_mapping)}", file=sys.stderr)
+                #        print(f"attn_metadata.cache_row_mapping at 0x{attn_metadata.cache_row_mapping.data_ptr():X}, col_mapping at 0x{attn_metadata.cache_col_mapping.data_ptr():X}", file=sys.stderr)
+                #    print(f"attn_metadata.cache_col_mapping:{attn_metadata.cache_col_mapping}", file=sys.stderr)
                 PagedAttention.write_to_paged_cache_dattn(key, value, layer_idx,
                                                           attn_metadata.num_layers,
                                                           attn_metadata.block_size,  
@@ -699,14 +706,14 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         if decode_meta := attn_metadata.decode_metadata:
             if self.profile == True:
                 start_time = time.time()
-            
-            (
+                        
+            if not attn_metadata.use_dattn: 
+                (
                 seq_lens_arg,
                 max_seq_len_arg,
                 block_tables_arg,
-            ) = _get_seq_len_block_table_args(decode_meta, False, attn_type)
+                ) = _get_seq_len_block_table_args(decode_meta, False, attn_type)
 
-            if not attn_metadata.use_dattn: 
                 output[num_prefill_tokens:] = PagedAttention.forward_decode(
                     decode_query,
                     key_cache,
@@ -725,10 +732,11 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 assert attn_metadata.use_dattn == True
                 layer_idx = kv_cache.item()
 
+                #print(f"decoding: layer_idx:{layer_idx} after printing\n", file=sys.stderr)
                 #print(f"decoding: layer_idx:{layer_idx}, decode_meta.num_layers:{decode_meta.num_layers}, decode_meta.block_size:{decode_meta.block_size}, decode_meta.cache_row_mapping:{decode_meta.cache_row_mapping.shape}, decode_meta.cache_col_mapping:{decode_meta.cache_col_mapping}")
-                #print(f"decoding: layer_idx:{layer_idx}, decode_meta.num_layers:{decode_meta.num_layers}")
-                #print(f"decoding: layer_idx:{layer_idx}, cache_row_mapping:{decode_meta.cache_row_mapping.shape}, cache_col_mapping:{decode_meta.cache_col_mapping}")
-                #print(f"decode_meta.seq_lens_tensor:{decode_meta.seq_lens_tensor}, decode_meta.max_decode_seq_len:{decode_meta.max_decode_seq_len}") 
+                #print(f"decoding: layer_idx:{layer_idx}, decode_meta.num_layers:{decode_meta.num_layers}", file=sys.stderr)
+                #print(f"decoding: layer_idx:{layer_idx}, cache_row_mapping:{decode_meta.cache_row_mapping.shape}, cache_col_mapping:{decode_meta.cache_col_mapping}", file=sys.stderr)
+                #print(f"decode_meta.seq_lens_tensor:{decode_meta.seq_lens_tensor}, decode_meta.max_decode_seq_len:{decode_meta.max_decode_seq_len}", file=sys.stderr) 
                 output[num_prefill_tokens:] = PagedAttention.forward_decode_dattn(
                     decode_query,
                     layer_idx,
@@ -760,7 +768,9 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
             self.stop_time = time.time()
 
         # Reshape the output tensor.
-        return output.view(-1, self.num_heads * self.head_size)
+        result = output.view(-1, self.num_heads * self.head_size)
+     
+        return result
 
     def _run_memory_efficient_xformers_forward(
         self,

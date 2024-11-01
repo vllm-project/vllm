@@ -63,7 +63,6 @@ static void freePhysicalMemory(void* ptr, size_t size) {
   if(res != CUDA_SUCCESS) {
     fprintf(stderr, "cuMemUnmap failed when deallocating ptr %p and size %lx\n", ptr, size);
   } 
-  CHECK_DRV(cuMemUnmap(dptr, size));
 }
 
 /*
@@ -79,7 +78,6 @@ kvCacheRegion::kvCacheRegion(uint64_t region_size, uint64_t block_size, uint64_t
   this->offset = 0; 
   this->total_pages = 0;
   this->used_pages = 0; 
-  //fprintf(stderr, "NNNNNNNNNN block_size %lx\n", this->block_size);
 }
 
 // Decontructor: release all physical pages of this region
@@ -89,17 +87,6 @@ kvCacheRegion::~kvCacheRegion() {
   // no need to clear other counters. 
 }
 
-/*
-// get CUdeviceptr dptr
-CUdeviceptr kvCacheRegion::getDeviceDptr(void) { 
-  return reinterpret_cast<CUdeviceptr>(this->dptr); 
-}
-
-// get void * type pointer
-void* kvCacheRegion::getVoidDptr(void) { 
-  return reinterpret_cast<void *>(this->dptr); 
-}
-*/
 
 uint64_t kvCacheRegion::getAllocPhyPages(void) {
   return this->total_pages;
@@ -121,19 +108,18 @@ int64_t kvCacheRegion::allocCacheBlocks(uint64_t blocks, uint64_t * used_pages) 
   // Align the new offset to page_size
   uint64_t alignedSize = roundup(this->offset + size, this->page_size); 
 
-  this->total_pages = alignedSize/this->page_size; 
-  this->alignedSize = alignedSize; 
+  this->total_pages = alignedSize/this->page_size;
 
-  if((uint64_t)this->dptr == 0xa02000000) {
-    //fprintf(stderr, "region 0 at %p with size %lx\n", this->dptr, this->alignedSize); 
-  }
+  // Updating the offset as we are using more blocks here. 
+  this->offset += size; 
+  this->alignedSize = alignedSize; 
+  
   // Check how many pages should we allocated this time
   char * alignedAddr = this->dptr + alignedSize; 
   if( alignedAddr > this->nextUnmapedAddr) {
 
     // Check whether alignedAddr is actually aligned well
     assert((alignedAddr - this->nextUnmapedAddr)%this->page_size == 0);
-
     toallocPages = (alignedAddr - this->nextUnmapedAddr)/this->page_size; 
 
     assert(toallocPages >= 0);
@@ -142,14 +128,18 @@ int64_t kvCacheRegion::allocCacheBlocks(uint64_t blocks, uint64_t * used_pages) 
 
     // Allocate physical pages, which will exit if can't allocate successfully
     if (toallocPages > 0 && allocatePhyPages(this->nextUnmapedAddr, allocSize) == 0) {
+      //fprintf(stderr, "allocSize %lx toallocPages %ld this->nextUnmapedAddr %p\n", allocSize, toallocPages, this->nextUnmapedAddr);
+      
+      // Touch this page in order to initiate page allocation
+      // This is important to avoid the memory allocation overhead on the critical path. 
+      if(toallocPages == 1) {
+        //int64_t h_data = 0;
+        //cuMemcpyHtoD(reinterpret_cast<CUdeviceptr>(this->nextUnmapedAddr), &h_data, sizeof(int64_t));
+      }
+
       this->nextUnmapedAddr = alignedAddr;
-        
       // Update the used pages correspondingly. The statement works even when this->offset is not aligned to page_size
       *used_pages += toallocPages; 
-
-      // Update the offset after allocating these blocks. 
-      this->offset += size; 
-      assert(this->offset <= alignedSize);
     }
   }
  
@@ -158,6 +148,8 @@ int64_t kvCacheRegion::allocCacheBlocks(uint64_t blocks, uint64_t * used_pages) 
 
 void kvCacheRegion::freeAllPhyMemory(void) {
   freePhysicalMemory(this->dptr, this->alignedSize);
+  this->offset = 0;
+  this->nextUnmapedAddr = this->dptr; 
 }
 
 // freeUnusedPages from a region, and return freed pages
@@ -271,7 +263,6 @@ int64_t kvCacheAllocator::reserveRegion(int64_t region_id) {
     region = _getLastCachedRegion();  
   }
   else {
-    //printf("region_size == %lx pages == %lx\n", this->region_size, this->region_size%2097152); 
     // The expensive way to get a new region. Only invoked when no cached regions
     // Allocate the virtual address for this region
     CHECK_DRV(cuMemAddressReserve(&ptr, this->region_size, 0ULL, 0ULL, 0ULL));
@@ -293,16 +284,14 @@ int64_t kvCacheAllocator::reserveRegion(int64_t region_id) {
 void kvCacheAllocator::_releaseRegion(int64_t region_id) {
   // Find the region corresponding to the given region_id
   if(this->active_regions_map.count(region_id) == 0) {
-    fprintf(stderr, "ERROR: region_id-%ld at does not exist at all.!\n", region_id);
+    fprintf(stderr, "ERROR in release: region_id-%ld does not exist at all.!\n", region_id);
     exit(-1); 
   }
 
   std::lock_guard<std::mutex> lock(this->mutex);
 
   kvCacheRegion * region = this->active_regions_map[region_id];
-  // Delete this region from active_regions_map that only keep 
-  this->active_regions_map.erase(region_id);
-  this->active_regions--; 
+
   // Note that as we don't actually release physical cache blocks. 
   // Therefore, we don't need to change the active_blocks here. 
   //fprintf(stderr, "NPPPPPP release region %d\n", region_id);
@@ -397,7 +386,7 @@ int64_t kvCacheAllocator::_allocCacheBlocksForRequest(int64_t region_id, int64_t
   // Find the region corresponding to the given region_id, which should reserveRegion before
   // If the region_id doesn't exist at all, it is the bug that should be fixed.  
   if(this->active_regions_map.count(region_id) == 0) {
-    fprintf(stderr, "ERROR: region_id %ld does not exist at all.!\n", region_id);
+    fprintf(stderr, "ERROR in allocation: region_id %ld does not exist at all!\n", region_id);
     exit(-1); 
   }
 
@@ -431,7 +420,8 @@ int64_t kvCacheAllocator::allocCacheBlocks(std::vector<std::vector<int64_t>> req
     uint64_t region_id = row[0]; 
     uint64_t blocks = row[1]; 
 
-    pages += _allocCacheBlocksForRequest(region_id, blocks); 
+    pages += _allocCacheBlocksForRequest(region_id, blocks);
+    //fprintf(stderr, "allocate cache blocks for region-%d blocks %ld DONE\n", region_id, blocks);
   }
 
   return pages; 
@@ -444,21 +434,19 @@ void * kvCacheAllocator::memoryManagerThread(void * arg) {
   while(true) {
     pthread_mutex_lock(&instance->mutex_manager); 
 
-    //pthread_cond_signal(&instance->cond_manager); 
     // We will wait if manager_running is true (didn't finish last memory management operations)
     // or there is no need to perform memory management
     while(!instance->manager_running) {
       pthread_cond_wait(&instance->cond_manager, &instance->mutex_manager); 
     }
-    pthread_mutex_unlock(&instance->mutex_manager);
-
+  
     // Perform memory management asynchronously
     instance->releaseRegions(instance->free_caches);
     instance->allocCacheBlocks(instance->req_cache_blocks);
 
-    pthread_mutex_lock(&instance->mutex_manager); 
+    //pthread_mutex_lock(&instance->mutex_manager); 
     instance->manager_running = false; 
-    pthread_cond_signal(&instance->cond_manager); 
+    pthread_cond_signal(&instance->cond_manager);
     pthread_mutex_unlock(&instance->mutex_manager); 
   }
 
@@ -473,6 +461,7 @@ void kvCacheAllocator::doAsyncKVCacheManage(std::vector<int64_t> free_caches, st
     
     // If the manager has not finished, waiting on the condition 
     while(this->manager_running) {
+      fprintf(stderr, "waiting for the virtual memory management in asyn mode\n"); 
       pthread_cond_wait(&this->cond_manager, &this->mutex_manager); 
     }
 
@@ -481,6 +470,7 @@ void kvCacheAllocator::doAsyncKVCacheManage(std::vector<int64_t> free_caches, st
 
     // Copying the work
     for(auto cache_id: free_caches) {
+      //fprintf(stderr, "releasing cache_id %d\n", cache_id); 
       this->free_caches.push_back(cache_id); 
     }
 
@@ -498,8 +488,16 @@ void kvCacheAllocator::updateCacheBlocks(bool is_prefill_phase, std::vector<int6
   //fprintf(stderr, "NNNNNNN is_prefill_phase is %d\n", is_prefill_phase); 
 
   if(is_prefill_phase) {
+    pthread_mutex_lock(&this->mutex_manager);
+    
+    // If the manager has not finished, waiting on the condition 
+    while(this->manager_running) {
+      pthread_cond_wait(&this->cond_manager, &this->mutex_manager); 
+    }
     this->releaseRegions(free_caches);
     this->allocCacheBlocks(req_cache_blocks);
+
+    pthread_mutex_unlock(&this->mutex_manager); 
   }
   else {
     doAsyncKVCacheManage(free_caches, req_cache_blocks);
@@ -525,7 +523,7 @@ int64_t kvCacheAllocator::getAllocPhyPages(int64_t region_id) {
     // Find the region corresponding to the given region_id, which should reserveRegion before
     // If the region_id doesn't exist at all, it is the bug that should be fixed.  
     if(this->active_regions_map.count(region_id) == 0) {
-      fprintf(stderr, "ERROR: region_id does not exist at all.!");
+      fprintf(stderr, "ERROR: region_id does not exist at getAllocPhyPages.!");
       exit(-1); 
     }
 
@@ -548,34 +546,4 @@ void kvCacheAllocator::collectPhyPages(int64_t pages) {
   return; 
 }
 
-#if 0
-// TODO: we need to delete this function!!!
-// free function, unmap the virtual address space，release physical memory
-// handles and free virtual address space
-int64_t kvCacheAllocator::freeCacheBlock(const c10::intrusive_ptr<kvCacheRegion>& ptr) {
-  CUresult status = CUDA_SUCCESS;
-  if (ptr->dptr != 0) {
-    status = cuMemUnmap(ptr->dptr, ptr->reservedPageNum * pageSize);
-    // status = cuMemUnmap(ptr.dptr, ptr.allocatedPageNum * pageSize);
-    if (status != CUDA_SUCCESS) {
-      printf("cuMemUnmap failed! error-code: %d\n", status);
-    } else {
-      for (int i = 0; i < ptr->handles.size(); i++) {
-        status = cuMemRelease(ptr->handles[i]);
-        if (status != CUDA_SUCCESS) {
-          printf("cuMemRelease failed! error-code: %d\n", status);
-          return status;
-        }
-      }
-      ptr->handles.clear();
 
-      status = cuMemAddressFree(ptr->dptr, ptr->reservedPageNum * pageSize);
-      if (status != CUDA_SUCCESS) {
-        printf("cuMemAddressFree failed! error-code: %d\n", status);
-      }
-    }
-  }
-  return status;
-}
-
-#endif

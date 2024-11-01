@@ -354,7 +354,11 @@ class Worker(LocalOrDistributedWorkerBase):
     @torch.inference_mode()
     def update_cache_blocks(self, virtual_engine: int, is_prefill_phase: bool, free_kv_caches: List[int], to_allocate_blocks: Dict[int, int]) -> None:
        self.cache_engine[virtual_engine].update_cache_blocks(is_prefill_phase, free_kv_caches, to_allocate_blocks) 
-    
+
+    @torch.inference_mode()
+    def append_cache_blocks(self, virtual_engine: int, free_kv_caches: List[int], to_allocate_blocks: Dict[int, int]) -> None:
+       self.cache_engine[virtual_engine].append_cache_blocks(free_kv_caches, to_allocate_blocks) 
+
     @torch.inference_mode()
     def execute_worker(self, worker_input: WorkerInput) -> None:
         virtual_engine = worker_input.virtual_engine
@@ -371,9 +375,6 @@ class Worker(LocalOrDistributedWorkerBase):
                 and worker_input.blocks_to_copy.numel() > 0):
             self.cache_engine[virtual_engine].copy(worker_input.blocks_to_copy)
 
-        #if self.use_dattn:
-        #    self.cache_engine[virtual_engine].update_cache_blocks(worker_input.free_kv_caches, worker_input.allocated_blocks)
-    
     def _get_cached_seq_group_metadata(
             self,
             seq_group_metadata_list: List[Union[SequenceGroupMetadata,

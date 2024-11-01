@@ -1,0 +1,126 @@
+diff --git a/evaluation/inference_long.py b/evaluation/inference_long.py
+index 38c86b3..b2068eb 100644
+--- a/evaluation/inference_long.py
++++ b/evaluation/inference_long.py
+@@ -17,13 +17,18 @@ prompts = [
+ 
+ set_seed(32)
+ 
++import os
++#os.environ['VLLM_ATTENTION_BACKEND'] = 'FLASH_ATTN'
++
+ # Create a sampling params object.
+ #sampling_params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=8192, ignore_eos=True)
+ #sampling_params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=8192, ignore_eos=True)
+ sampling_params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=2048)
+ 
+ # Create an LLM.
+-llm = LLM(model="facebook/opt-2.7b", enforce_eager=True)
++llm = LLM(model="facebook/opt-6.7b", use_dattn=True, enforce_eager=True)
++#llm = LLM(model="facebook/opt-6.7b", enforce_eager=True)
++#llm = LLM(model="facebook/opt-6.7b", enforce_eager=True)
+ #llm = LLM(model="facebook/opt-1.3b", enforce_eager=True)
+ #llm = LLM(model="facebook/opt-125m", enforce_eager=True)
+ # Generate texts from the prompts. The output is a list of RequestOutput objects
+diff --git a/evaluation/simple.py b/evaluation/simple.py
+index b7cb560..894466d 100644
+--- a/evaluation/simple.py
++++ b/evaluation/simple.py
+@@ -18,7 +18,7 @@ os.environ['VLLM_ATTENTION_BACKEND'] = 'FLASH_ATTN'
+ # Create an LLM.
+ llm = LLM(model="facebook/opt-125m", enforce_eager=True)
+ #llm = LLM(model="facebook/opt-125m",use_dattn=True, enforce_eager=True)
+-#llm = LLM(model="facebook/opt-2.7b", enforce_eager=True)
++#llm = LLM(model="facebook/opt-6.7b", enforce_eager=True)
+ #llm = LLM(model="facebook/opt-2.7b", use_dattn=True, enforce_eager=True)
+ # Generate texts from the prompts. The output is a list of RequestOutput objects
+ # that contain the prompt, generated text, and other information.
+diff --git a/src/compile_vllm.sh b/src/compile_vllm.sh
+index 8798a1b..efe913a 100755
+--- a/src/compile_vllm.sh
++++ b/src/compile_vllm.sh
+@@ -1,7 +1,9 @@
+ export VERBOSE=1
+ export CUDA_HOME=/usr/local/cuda-12
+ export TORCH_CUDA_ARCH_LIST="8.0"
++#export CUTLASS_NVCC_ARCHS="80"
+ export CUDACXX=/usr/local/cuda/bin/nvcc 
+ export PATH=/usr/local/cuda/bin:$PATH
+ 
+-PIP_NO_BUILD_ISOLATION=1 pip install -e . -vvv
++#PIP_NO_BUILD_ISOLATION=1 
++pip install -e . -vvv
+diff --git a/src/csrc/cache_kernels.cu b/src/csrc/cache_kernels.cu
+index e23bb4b..b884544 100644
+--- a/src/csrc/cache_kernels.cu
++++ b/src/csrc/cache_kernels.cu
+@@ -312,10 +312,11 @@ __global__ void reshape_and_cache_dattn_kernel(
+  
+   // Each head will be handled will be handled by each warp 
+   int64_t warp_idx = threadIdx.x / WARP_SIZE; //[0,3]
+-  assert (warp_idx <= 3);
++  //assert (warp_idx <= 3);
+  
++  int64_t heads = heads_per_thread_block/4; 
+   // head_idx for the token, should be less than num_heads. 
+-  int64_t head_idx = head_block_idx * heads_per_thread_block + warp_idx;
++  int64_t head_idx = head_block_idx * heads_per_thread_block + warp_idx*heads;
+ 
+   // kv_block_size == head_size * block_size
+   // Compute the start address of the head of the block for KV cache
+@@ -335,8 +336,9 @@ __global__ void reshape_and_cache_dattn_kernel(
+   scalar_t* src_key = const_cast<scalar_t*>(key + src_offset);
+   scalar_t* src_value = const_cast<scalar_t*>(value + src_offset);
+ 
++
+   // Each warp will handle only one token's one head 
+-  for (int i = thread_idx_in_warp; i < head_size; i += WARP_SIZE) {
++  for (int i = thread_idx_in_warp; i < head_size*heads; i += WARP_SIZE) {
+     // i == head_offset 
+     // We are going to transfer [0,head_size) to [head_size/x, block_size, x]
+     int x_idx = i / x;
+diff --git a/src/new.sh b/src/new.sh
+index d396e93..da716f5 100755
+--- a/src/new.sh
++++ b/src/new.sh
+@@ -1,5 +1,5 @@
+-cd /workspace/user/dAttention/src/build/temp.linux-x86_64-3.10
+-#/usr/local/cuda/bin/nvcc -forward-unknown-to-host-compiler -DPy_LIMITED_API=3 -DTORCH_EXTENSION_NAME=_C -DUSE_C10D_GLOO -DUSE_C10D_NCCL -DUSE_DISTRIBUTED -DUSE_RPC -DUSE_TENSORPIPE -D_C_EXPORTS --options-file CMakeFiles/_C.dir/includes_CUDA.rsp -DONNX_NAMESPACE=onnx_c2 -G -O0 -g -std=c++17 "--generate-code=arch=compute_60,code=[sm_60]" -Xcompiler=-fPIC --expt-relaxed-constexpr -DENABLE_FP8 --threads=4 -D_GLIBCXX_USE_CXX11_ABI=0 -MD -MT CMakeFiles/_C.dir/csrc/cache_kernels.cu.o -MF CMakeFiles/_C.dir/csrc/cache_kernels.cu.o.d -x cu -c /workspace/user/dAttention/src/csrc/cache_kernels.cu -o CMakeFiles/_C.dir/csrc/cache_kernels.cu.o
+-/usr/local/cuda/bin/nvcc -forward-unknown-to-host-compiler -DPy_LIMITED_API=3 -DTORCH_EXTENSION_NAME=_C -DUSE_C10D_GLOO -DUSE_C10D_NCCL -DUSE_DISTRIBUTED -DUSE_RPC -DUSE_TENSORPIPE -D_C_EXPORTS --options-file CMakeFiles/_C.dir/includes_CUDA.rsp -DONNX_NAMESPACE=onnx_c2 -G -O0 -g --generate-code=arch=compute_60,code=[sm_60] -Xcompiler=-fPIC -fno-inline --threads=8 -D_GLIBCXX_USE_CXX11_ABI=0 -MD -MT CMakeFiles/_C.dir/csrc/attention/attention_kernels.cu.o -MF CMakeFiles/_C.dir/csrc/attention/attention_kernels.cu.o.d -x cu -c /workspace/user/dAttention/src/csrc/attention/attention_kernels.cu -o CMakeFiles/_C.dir/csrc/attention/attention_kernels.cu.o
+-cd /workspace/user/dAttention/src/
++cd /root/dAttention/src/build/temp.linux-x86_64-cpython-39
++/usr/local/cuda/bin/nvcc -forward-unknown-to-host-compiler -DPy_LIMITED_API=3 -DTORCH_EXTENSION_NAME=_C -DUSE_C10D_GLOO -DUSE_C10D_NCCL -DUSE_DISTRIBUTED -DUSE_RPC -DUSE_TENSORPIPE -D_C_EXPORTS --options-file CMakeFiles/_C.dir/includes_CUDA.rsp -DONNX_NAMESPACE=onnx_c2 -G -O0 -g -std=c++17 "--generate-code=arch=compute_80,code=[sm_80]" -Xcompiler=-fPIC --expt-relaxed-constexpr -DENABLE_FP8 --threads=4 -D_GLIBCXX_USE_CXX11_ABI=0 -MD -MT CMakeFiles/_C.dir/csrc/cache_kernels.cu.o -MF CMakeFiles/_C.dir/csrc/cache_kernels.cu.o.d -x cu -c /root/dAttention/src/csrc/cache_kernels.cu -o CMakeFiles/_C.dir/csrc/cache_kernels.cu.o
++#/usr/local/cuda/bin/nvcc -forward-unknown-to-host-compiler -DPy_LIMITED_API=3 -DTORCH_EXTENSION_NAME=_C -DUSE_C10D_GLOO -DUSE_C10D_NCCL -DUSE_DISTRIBUTED -DUSE_RPC -DUSE_TENSORPIPE -D_C_EXPORTS --options-file CMakeFiles/_C.dir/includes_CUDA.rsp -DONNX_NAMESPACE=onnx_c2 -G -O0 -g --generate-code=arch=compute_80,code=[sm_80] -Xcompiler=-fPIC -fno-inline --threads=8 -D_GLIBCXX_USE_CXX11_ABI=0 -MD -MT CMakeFiles/_C.dir/csrc/attention/attention_kernels.cu.o -MF CMakeFiles/_C.dir/csrc/attention/attention_kernels.cu.o.d -x cu -c /root/dAttention/src/csrc/attention/attention_kernels.cu -o CMakeFiles/_C.dir/csrc/attention/attention_kernels.cu.o
++cd /root/dAttention/src/
+ pip install -e . -vvv
+diff --git a/src/requirements-cuda.txt b/src/requirements-cuda.txt
+index 10596ed..ce0afe5 100644
+--- a/src/requirements-cuda.txt
++++ b/src/requirements-cuda.txt
+@@ -4,8 +4,7 @@
+ # Dependencies for NVIDIA GPUs
+ ray >= 2.9
+ nvidia-ml-py # for pynvml package
+-torch == 2.3.0
++torch == 2.3.1
+ # These must be updated alongside torch
+-torchvision == 0.18.0   # Required for phi3v processor, also see https://github.com/pytorch/vision?tab=readme-ov-file#installation for corresponding version
+-xformers == 0.0.26.post1  # Requires PyTorch 2.3.0
+-vllm-flash-attn == 2.5.9  # Requires PyTorch 2.3.0
++#torchvision == 0.18.0   # Required for phi3v processor, also see https://github.com/pytorch/vision?tab=readme-ov-file#installation for corresponding version
++xformers == 0.0.27  # Requires PyTorch 2.3.0
+diff --git a/src/vllm/_custom_ops.py b/src/vllm/_custom_ops.py
+index b06ee53..2bb3ea7 100644
+--- a/src/vllm/_custom_ops.py
++++ b/src/vllm/_custom_ops.py
+@@ -233,8 +233,8 @@ def flash_attn_kvcache(
+     rotary_interleaved,
+     num_splits
+ ) -> None:
+-    import sys
+-    print(f"!!!before calling torch.ops._C.mha_fwd_kvcache\n", file=sys.stderr)
++    #import sys
++    #print(f"!!!before calling torch.ops._C.mha_fwd_kvcache\n", file=sys.stderr)
+     return torch.ops._C.mha_fwd_kvcache(
+         q,
+         k_cache,

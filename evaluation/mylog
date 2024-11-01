@@ -1,0 +1,152 @@
+INFO 10-31 07:41:13 arg_utils.py:876] DATTN: use 2097152 as a page, block size: 16
+WARNING 10-31 07:41:13 arg_utils.py:879] Preemption only support recompute for dattn now.
+WARNING 10-31 07:41:13 config.py:362] To see benefits of async output processing, enable CUDA graph. Since, enforce-eager is enabled, async output processor cannot be used
+INFO 10-31 07:41:13 llm_engine.py:228] Initializing an LLM engine (v0.6.1.post2) with config: model='facebook/opt-125m', speculative_config=None, tokenizer='facebook/opt-125m', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, override_neuron_config=None, rope_scaling=None, rope_theta=None, tokenizer_revision=None, trust_remote_code=False, dtype=torch.float16, max_seq_len=2048, download_dir=None, load_format=LoadFormat.AUTO, tensor_parallel_size=1, pipeline_parallel_size=1, disable_custom_all_reduce=False, quantization=None, enforce_eager=True, kv_cache_dtype=auto, quantization_param_path=None, device_config=cuda, decoding_config=DecodingConfig(guided_decoding_backend='outlines'), observability_config=ObservabilityConfig(otlp_traces_endpoint=None, collect_model_forward_time=False, collect_model_execute_time=False), seed=0, served_model_name=facebook/opt-125m, use_v2_block_manager=False, num_scheduler_steps=1, enable_prefix_caching=False, use_async_output_proc=False)
+/usr/local/lib/python3.9/dist-packages/transformers/tokenization_utils_base.py:1601: FutureWarning: `clean_up_tokenization_spaces` was not set. It will be set to `True` by default. This behavior will be depracted in transformers v4.45, and will be then set to `False` by default. For more details check this issue: https://github.com/huggingface/transformers/issues/31884
+  warnings.warn(
+INFO 10-31 07:41:14 selector.py:116] Using XFormers backend.
+/usr/local/lib/python3.9/dist-packages/xformers/ops/fmha/flash.py:211: FutureWarning: `torch.library.impl_abstract` was renamed to `torch.library.register_fake`. Please use that instead; we will remove `torch.library.impl_abstract` in a future version of PyTorch.
+  @torch.library.impl_abstract("xformers_flash::flash_fwd")
+/usr/local/lib/python3.9/dist-packages/xformers/ops/fmha/flash.py:344: FutureWarning: `torch.library.impl_abstract` was renamed to `torch.library.register_fake`. Please use that instead; we will remove `torch.library.impl_abstract` in a future version of PyTorch.
+  @torch.library.impl_abstract("xformers_flash::flash_bwd")
+INFO 10-31 07:41:15 model_runner.py:1081] Starting to load model facebook/opt-125m...
+INFO 10-31 07:41:15 selector.py:116] Using XFormers backend.
+INFO 10-31 07:41:16 weight_utils.py:242] Using model weights format ['*.bin']
+Loading pt checkpoint shards:   0% Completed | 0/1 [00:00<?, ?it/s]
+/root/vllm/vllm/model_executor/model_loader/weight_utils.py:424: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  state = torch.load(bin_file, map_location="cpu")
+Loading pt checkpoint shards: 100% Completed | 1/1 [00:00<00:00,  5.05it/s]
+Loading pt checkpoint shards: 100% Completed | 1/1 [00:00<00:00,  5.04it/s]
+
+INFO 10-31 07:41:16 model_runner.py:1092] Loading model weights took 0.2389 GB
+Before profiling run
+in the end of profiling run
+num_gpu_blocks: 128102, num_cpu_blocks:7281
+INFO 10-31 07:41:17 gpu_executor.py:121] # GPU blocks: 128102, # CPU blocks: 7281
+self.block_bytes_size-2097152
+INFO 10-31 07:41:17 cache_engine_dattn.py:83] CacheEngineDAttn basic info: { block_size: 16, dtype_size: 2, head_size: 64, num_kv_heads: 12, max_seq_len: 2048, max_batch_size: 256, num_layers: 12,token_size: 768, sequence_buffer_size: 1572864, cache_space_size: 402653184, cache_space_bytes_size: 805306368, cache_space_page_num: 384 }
+Processed prompts:   0%|          | 0/40 [00:00<?, ?it/s, est. speed input: 0.00 toks/s, output: 0.00 toks/s]seq_id: 0, seq_length:125 cache_id:-1, self_num_required_blocks:8
+seq_id: 1, seq_length:89 cache_id:-1, self_num_required_blocks:6
+seq_id: 2, seq_length:88 cache_id:-1, self_num_required_blocks:6
+seq_id: 3, seq_length:260 cache_id:-1, self_num_required_blocks:17
+seq_id: 4, seq_length:125 cache_id:-1, self_num_required_blocks:8
+seq_id: 5, seq_length:89 cache_id:-1, self_num_required_blocks:6
+seq_id: 6, seq_length:88 cache_id:-1, self_num_required_blocks:6
+seq_id: 7, seq_length:260 cache_id:-1, self_num_required_blocks:17
+seq_id: 8, seq_length:125 cache_id:-1, self_num_required_blocks:8
+seq_id: 9, seq_length:89 cache_id:-1, self_num_required_blocks:6
+seq_id: 10, seq_length:88 cache_id:-1, self_num_required_blocks:6
+seq_id: 11, seq_length:260 cache_id:-1, self_num_required_blocks:17
+seq_id: 12, seq_length:125 cache_id:-1, self_num_required_blocks:8
+seq_id: 13, seq_length:89 cache_id:-1, self_num_required_blocks:6
+seq_id: 14, seq_length:88 cache_id:-1, self_num_required_blocks:6
+seq_id: 15, seq_length:260 cache_id:-1, self_num_required_blocks:17
+seq_id: 15, seq_length:260 cache_id:-1, self_num_required_blocks:17
+seq_id: 16, seq_length:125 cache_id:-1, self_num_required_blocks:8
+seq_id: 17, seq_length:89 cache_id:-1, self_num_required_blocks:6
+seq_id: 18, seq_length:88 cache_id:-1, self_num_required_blocks:6
+seq_id: 19, seq_length:260 cache_id:-1, self_num_required_blocks:17
+seq_id: 20, seq_length:125 cache_id:-1, self_num_required_blocks:8
+seq_id: 21, seq_length:89 cache_id:-1, self_num_required_blocks:6
+seq_id: 22, seq_length:88 cache_id:-1, self_num_required_blocks:6
+seq_id: 23, seq_length:260 cache_id:-1, self_num_required_blocks:17
+seq_id: 24, seq_length:125 cache_id:-1, self_num_required_blocks:8
+seq_id: 25, seq_length:89 cache_id:-1, self_num_required_blocks:6
+seq_id: 26, seq_length:88 cache_id:-1, self_num_required_blocks:6
+seq_id: 27, seq_length:260 cache_id:-1, self_num_required_blocks:17
+seq_id: 28, seq_length:125 cache_id:-1, self_num_required_blocks:8
+seq_id: 28, seq_length:125 cache_id:-1, self_num_required_blocks:8
+seq_id: 29, seq_length:89 cache_id:-1, self_num_required_blocks:6
+seq_id: 30, seq_length:88 cache_id:-1, self_num_required_blocks:6
+seq_id: 31, seq_length:260 cache_id:-1, self_num_required_blocks:17
+seq_id: 32, seq_length:125 cache_id:-1, self_num_required_blocks:8
+seq_id: 33, seq_length:89 cache_id:-1, self_num_required_blocks:6
+seq_id: 34, seq_length:88 cache_id:-1, self_num_required_blocks:6
+seq_id: 35, seq_length:260 cache_id:-1, self_num_required_blocks:17
+seq_id: 36, seq_length:125 cache_id:-1, self_num_required_blocks:8
+seq_id: 37, seq_length:89 cache_id:-1, self_num_required_blocks:6
+seq_id: 38, seq_length:88 cache_id:-1, self_num_required_blocks:6
+seq_id: 39, seq_length:260 cache_id:-1, self_num_required_blocks:17
+Processed prompts:   2%|▎         | 1/40 [00:00<00:25,  1.53it/s, est. speed input: 191.58 toks/s, output: 58.24 toks/s]Processed prompts:   5%|▌         | 2/40 [00:01<00:21,  1.75it/s, est. speed input: 214.08 toks/s, output: 120.74 toks/s]Processed prompts:   8%|▊         | 3/40 [00:01<00:17,  2.15it/s, est. speed input: 225.30 toks/s, output: 190.74 toks/s]Processed prompts:  12%|█▎        | 5/40 [00:01<00:08,  4.04it/s, est. speed input: 434.54 toks/s, output: 364.31 toks/s]Processed prompts:  15%|█▌        | 6/40 [00:01<00:09,  3.75it/s, est. speed input: 428.69 toks/s, output: 409.50 toks/s]Processed prompts:  18%|█▊        | 7/40 [00:02<00:11,  2.85it/s, est. speed input: 369.41 toks/s, output: 428.94 toks/s]Processed prompts:  20%|██        | 8/40 [00:02<00:10,  3.12it/s, est. speed input: 368.51 toks/s, output: 501.76 toks/s]Processed prompts:  22%|██▎       | 9/40 [00:04<00:20,  1.50it/s, est. speed input: 260.54 toks/s, output: 443.19 toks/s]Processed prompts:  25%|██▌       | 10/40 [00:04<00:15,  1.93it/s, est. speed input: 271.01 toks/s, output: 543.81 toks/s]INFO 10-31 07:41:22 model_runner_base.py:120] Writing input of failed execution to /tmp/err_execute_model_input_20241031-074122.pkl...
+[rank0]: Traceback (most recent call last):
+[rank0]:   File "/root/vllm/vllm/worker/model_runner_base.py", line 116, in _wrapper
+[rank0]:     return func(*args, **kwargs)
+[rank0]:   File "/root/vllm/vllm/worker/model_runner.py", line 1661, in execute_model
+[rank0]:     hidden_or_intermediate_states = model_executable(
+[rank0]:   File "/usr/local/lib/python3.9/dist-packages/torch/nn/modules/module.py", line 1553, in _wrapped_call_impl
+[rank0]:     return self._call_impl(*args, **kwargs)
+[rank0]:   File "/usr/local/lib/python3.9/dist-packages/torch/nn/modules/module.py", line 1562, in _call_impl
+[rank0]:     return forward_call(*args, **kwargs)
+[rank0]:   File "/root/vllm/vllm/model_executor/models/opt.py", line 380, in forward
+[rank0]:     hidden_states = self.model(input_ids, positions, kv_caches,
+[rank0]:   File "/usr/local/lib/python3.9/dist-packages/torch/nn/modules/module.py", line 1553, in _wrapped_call_impl
+[rank0]:     return self._call_impl(*args, **kwargs)
+[rank0]:   File "/usr/local/lib/python3.9/dist-packages/torch/nn/modules/module.py", line 1562, in _call_impl
+[rank0]:     return forward_call(*args, **kwargs)
+[rank0]:   File "/root/vllm/vllm/model_executor/models/opt.py", line 345, in forward
+[rank0]:     return self.decoder(input_ids,
+[rank0]:   File "/usr/local/lib/python3.9/dist-packages/torch/nn/modules/module.py", line 1553, in _wrapped_call_impl
+[rank0]:     return self._call_impl(*args, **kwargs)
+[rank0]:   File "/usr/local/lib/python3.9/dist-packages/torch/nn/modules/module.py", line 1562, in _call_impl
+[rank0]:     return forward_call(*args, **kwargs)
+[rank0]:   File "/root/vllm/vllm/model_executor/models/opt.py", line 314, in forward
+[rank0]:     hidden_states = layer(hidden_states, kv_caches[i], attn_metadata)
+[rank0]:   File "/usr/local/lib/python3.9/dist-packages/torch/nn/modules/module.py", line 1553, in _wrapped_call_impl
+[rank0]:     return self._call_impl(*args, **kwargs)
+[rank0]:   File "/usr/local/lib/python3.9/dist-packages/torch/nn/modules/module.py", line 1562, in _call_impl
+[rank0]:     return forward_call(*args, **kwargs)
+[rank0]:   File "/root/vllm/vllm/model_executor/models/opt.py", line 205, in forward
+[rank0]:     hidden_states = self.self_attn(hidden_states=hidden_states,
+[rank0]:   File "/usr/local/lib/python3.9/dist-packages/torch/nn/modules/module.py", line 1553, in _wrapped_call_impl
+[rank0]:     return self._call_impl(*args, **kwargs)
+[rank0]:   File "/usr/local/lib/python3.9/dist-packages/torch/nn/modules/module.py", line 1562, in _call_impl
+[rank0]:     return forward_call(*args, **kwargs)
+[rank0]:   File "/root/vllm/vllm/model_executor/models/opt.py", line 124, in forward
+[rank0]:     attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
+[rank0]:   File "/usr/local/lib/python3.9/dist-packages/torch/nn/modules/module.py", line 1553, in _wrapped_call_impl
+[rank0]:     return self._call_impl(*args, **kwargs)
+[rank0]:   File "/usr/local/lib/python3.9/dist-packages/torch/nn/modules/module.py", line 1562, in _call_impl
+[rank0]:     return forward_call(*args, **kwargs)
+[rank0]:   File "/root/vllm/vllm/attention/layer.py", line 98, in forward
+[rank0]:     return self.impl.forward(query,
+[rank0]:   File "/root/vllm/vllm/attention/backends/xformers.py", line 748, in forward
+[rank0]:     output[num_prefill_tokens:] = PagedAttention.forward_decode_dattn(
+[rank0]: RuntimeError: CUDA error: an illegal memory access was encountered
+[rank0]: CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
+[rank0]: For debugging consider passing CUDA_LAUNCH_BLOCKING=1
+[rank0]: Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
+
+
+[rank0]: During handling of the above exception, another exception occurred:
+
+[rank0]: Traceback (most recent call last):
+[rank0]:   File "/root/vllm/evaluation/./inference_long.py", line 39, in <module>
+[rank0]:     outputs = llm.generate(prompts, sampling_params)
+[rank0]:   File "/root/vllm/vllm/utils.py", line 1037, in inner
+[rank0]:     return fn(*args, **kwargs)
+[rank0]:   File "/root/vllm/vllm/entrypoints/llm.py", line 349, in generate
+[rank0]:     outputs = self._run_engine(use_tqdm=use_tqdm)
+[rank0]:   File "/root/vllm/vllm/entrypoints/llm.py", line 719, in _run_engine
+[rank0]:     step_outputs = self.llm_engine.step()
+[rank0]:   File "/root/vllm/vllm/engine/llm_engine.py", line 1265, in step
+[rank0]:     outputs = self.model_executor.execute_model(
+[rank0]:   File "/root/vllm/vllm/executor/gpu_executor.py", line 128, in execute_model
+[rank0]:     output = self.driver_worker.execute_model(execute_model_req)
+[rank0]:   File "/root/vllm/vllm/worker/worker_base.py", line 349, in execute_model
+[rank0]:     output = self.model_runner.execute_model(
+[rank0]:   File "/usr/local/lib/python3.9/dist-packages/torch/utils/_contextlib.py", line 116, in decorate_context
+[rank0]:     return func(*args, **kwargs)
+[rank0]:   File "/root/vllm/vllm/worker/model_runner_base.py", line 140, in _wrapper
+[rank0]:     pickle.dump(dumped_inputs, filep)
+[rank0]:   File "/usr/local/lib/python3.9/dist-packages/torch/storage.py", line 1006, in __reduce__
+[rank0]:     torch.save(self, b, _use_new_zipfile_serialization=False)
+[rank0]:   File "/usr/local/lib/python3.9/dist-packages/torch/serialization.py", line 656, in save
+[rank0]:     _legacy_save(obj, opened_file, pickle_module, pickle_protocol)
+[rank0]:   File "/usr/local/lib/python3.9/dist-packages/torch/serialization.py", line 800, in _legacy_save
+[rank0]:     storage._write_file(f, _should_read_directly(f), True, torch._utils._element_size(dtype))
+[rank0]: RuntimeError: CUDA error: an illegal memory access was encountered
+[rank0]: CUDA kernel errors might be asynchronously reported at some other API call, so the stacktrace below might be incorrect.
+[rank0]: For debugging consider passing CUDA_LAUNCH_BLOCKING=1
+[rank0]: Compile with `TORCH_USE_CUDA_DSA` to enable device-side assertions.
+
+Processed prompts:  25%|██▌       | 10/40 [00:05<00:15,  1.97it/s, est. speed input: 271.01 toks/s, output: 543.81 toks/s]

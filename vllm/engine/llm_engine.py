@@ -224,6 +224,8 @@ class LLMEngine:
 
         # support for dattn
         use_dattn: bool = False,
+        # The frequency to invoke virtual memory management
+        dattn_vmm_frequency: int = 10,  
     ) -> None:
         logger.info(
             "Initializing an LLM engine (v%s) with config: "
@@ -279,6 +281,7 @@ class LLMEngine:
         load_general_plugins()
 
         self.use_dattn = use_dattn
+        self.dattn_vmm_frequency = dattn_vmm_frequency
         self.model_config = model_config
         self.cache_config = cache_config
         self.lora_config = lora_config
@@ -415,14 +418,18 @@ class LLMEngine:
             for v_id in range(parallel_config.pipeline_parallel_size)
         ]
 
-        self.profile = os.getenv("PROFILE", "False") == "True"
+        # Add for supporting dAttention
+        self.step_index = 0
+
+        #self.profile = os.getenv("PROFILE", "False") == "True"
+        self.profile = False
         if self.profile == True:
             self.sched_time = 0
             self.infer_time = 0
             self.proc_time = 0
             self.other_time = 0
             self.total_time = 0
-            self.steps = 0
+            self.step_index = 0
 
         # Metric Logging.
         if self.log_stats:
@@ -1172,10 +1179,12 @@ class LLMEngine:
             raise NotImplementedError(
                 "Pipeline parallelism is only supported through AsyncLLMEngine "
                 "as performance will be severely degraded otherwise.")
-        
+
+        # Update the step index
+        self.step_index += 1
+
         if self.profile == True:
             T1 = time.time()
-            self.steps += 1
 
         # For llm_engine, there is no pipeline parallel support, so the engine
         # used is always 0.
@@ -1193,7 +1202,7 @@ class LLMEngine:
         # Clear outputs for each new scheduler iteration
         ctx.request_outputs.clear()
 
-        # Skip the scheduler if there are any remaining steps in the seq groups.
+        # Skip the scheduler if there are any remaining step_index in the seq groups.
         # This ensures that the scheduler is only called again when the current
         # batch has completed.
         if not self._has_remaining_steps(seq_group_metadata_list):
@@ -1251,20 +1260,22 @@ class LLMEngine:
                     virtual_engine]
 
             if self.use_dattn:
-                # let's update cache blocks here to avoid unnecessary passing
-                if scheduler_outputs.free_kv_caches or scheduler_outputs.allocated_blocks: 
-                    self.model_executor.update_cache_blocks(virtual_engine, scheduler_outputs.num_prefill_groups > 0,  scheduler_outputs.free_kv_caches, scheduler_outputs.allocated_blocks) 
-                #execute_model_req.allocated_blocks = scheduler_outputs.allocated_blocks
-                #execute_model_req.free_kv_caches = scheduler_outputs.free_kv_caches
+                #print(f"step_index:{self.step_index}, scheduler_outputs.num_prefill_groups:{scheduler_outputs.num_prefill_groups}, size:{len(scheduler_outputs.allocated_blocks)}")
+                # Perform the memory allocations based on the prefined frequency or scheduler_outputs.num_prefill_groups > 0 (is_prefill_phase  == True) 
+                if (self.step_index % self.dattn_vmm_frequency == 0) or scheduler_outputs.num_prefill_groups > 0:
+                    #print(f"step_index:{self.step_index} before updating") 
+                    self.model_executor.update_cache_blocks(virtual_engine, scheduler_outputs.num_prefill_groups > 0,  scheduler_outputs.free_kv_caches, scheduler_outputs.allocated_blocks)
+                elif self.step_index % self.dattn_vmm_frequency != 0 and (scheduler_outputs.free_kv_caches or scheduler_outputs.allocated_blocks):
+                    self.model_executor.append_cache_blocks(virtual_engine, scheduler_outputs.free_kv_caches, scheduler_outputs.allocated_blocks) 
                 
             if self.profile == True:
-                T2 = time.time()
+                T3 = time.time()
         
             outputs = self.model_executor.execute_model(
                 execute_model_req=execute_model_req)
 
             if self.profile == True:
-                T2 = time.time()
+                T4 = time.time()
 
             # We need to do this here so that last step's sampled_token_ids can
             # be passed to the next iteration for PP.
@@ -1279,7 +1290,7 @@ class LLMEngine:
             outputs = []
 
         if self.profile == True:
-            T3 = time.time()
+            T5 = time.time()
 
         # Finish the current step for all the sequence groups.
         if self.scheduler_config.is_multi_step:
@@ -1287,7 +1298,7 @@ class LLMEngine:
                 seq_group.finish_step()
 
         if not self._has_remaining_steps(seq_group_metadata_list):
-            # clear the cache if we have finished all the steps.
+            # clear the cache if we have finished all the step_index.
             if self.scheduler_config.is_multi_step:
                 self.cached_scheduler_outputs[0] = SchedulerOutputState()
 
@@ -1321,7 +1332,7 @@ class LLMEngine:
             return ctx.request_outputs
             
         if self.profile == True:
-            T4 = time.time()
+            T6 = time.time()
 
         if not self.has_unfinished_requests():
             # Drain async postprocessor (if exists)
@@ -1338,15 +1349,15 @@ class LLMEngine:
             self.model_executor.stop_remote_worker_execution_loop()
         
         if self.profile == True:
-            T5 = time.time()
-            self.sched_time += T2 - T1
-            self.infer_time += T3 - T2
-            self.proc_time += T4 - T3
-            self.other_time += T5 - T4
-            self.total_time += T5 - T1
+            T7 = time.time()
+            self.sched_time += T3 - T1
+            self.infer_time += T4 - T3
+            self.proc_time += T7 - T4
+            self.other_time += (T7 - T4)+(T3-T1)
+            self.total_time += T7 - T1
 
-            if self.steps % 512 == 0:
-                print(f"STEP-{self.steps}: sched-{self.sched_time}, inference-{self.infer_time}, proc-{self.proc_time}, other-{self.other_time}, total-{self.total_time}", file=sys.stderr)
+            if self.step_index % 512 == 0:
+                print(f"STEP-{self.step_index}: sched-{self.sched_time}, inference-{self.infer_time}, proc-{self.proc_time}, other-{self.other_time}, total-{self.total_time}", file=sys.stderr)
                 self.sched_time = 0
                 self.infer_time = 0
                 self.proc_time = 0
@@ -1363,7 +1374,7 @@ class LLMEngine:
             return False
 
         # TODO(will) this is a sanity check for nowto make sure that all the
-        # seqs are on the same steps. Eventually we will want to do some sort of
+        # seqs are on the same step_index. Eventually we will want to do some sort of
         # dynamic scheduling when doing multi-step decoding.
         ref_remaining_steps = seq_group_metadata_list[0].state.remaining_steps
         if any([
@@ -1371,7 +1382,7 @@ class LLMEngine:
                 for seq_group in seq_group_metadata_list[1:]
         ]):
             raise AssertionError(("All running sequence groups should "
-                                  "have the same remaining steps."))
+                                  "have the same remaining step_index."))
 
         return ref_remaining_steps > 0
 

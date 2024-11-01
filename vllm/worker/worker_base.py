@@ -242,7 +242,14 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         Process an execution request.
         """
         raise NotImplementedError
-    
+
+    @abstractmethod
+    def append_cache_blocks(self, virtual_engine: int, free_kv_caches: List[int], to_allocate_blocks: Dict[int, int]) -> None:
+        """
+        Process an execution request.
+        """
+        raise NotImplementedError
+
     def _get_worker_input_from_broadcast(
         self
     ) -> Optional[Tuple[BroadcastableModelInput, WorkerInput, Dict[

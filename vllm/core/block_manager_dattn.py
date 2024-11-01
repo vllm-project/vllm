@@ -95,10 +95,11 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         self_num_required_blocks = self._get_seq_num_required_blocks(seq)
         cross_num_required_blocks = self._get_seq_num_required_blocks(
             seq_group.get_encoder_seq())
-        
+
         num_required_blocks = self_num_required_blocks + \
                               cross_num_required_blocks + 1
-        
+
+        #print(f"seq_id: {seq.seq_id}, seq_length:{seq.get_len()} cache_id:{seq.cache_id}, self_num_required_blocks:{self_num_required_blocks}", file=sys.stderr)
         #if seq.cache_id == -1:
         #    print(f"seq_id: {seq.seq_id} while cache_id:{seq.cache_id}", file=sys.stderr)
         # If the sequence is not allocated yet, its cache_id must be -1.
@@ -133,8 +134,8 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         seq = seq_group.get_seqs(status=SequenceStatus.WAITING)[0]
         
         need_blocks = self._get_seq_num_required_blocks(seq)
-        
         cache_id, to_allocate_num, allocated_num = self._allocate_cache(need_blocks)
+        #print(f"cache_id: {cache_id}, need_blocks:{need_blocks}, to_allocate_num:{to_allocate_num}, allocated_num:{allocated_num}") 
         seq.cache_id = cache_id
         seq.data.cache_id = cache_id
         self.allocated_blocks[cache_id] = allocated_num
@@ -174,11 +175,9 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
                 to_allocate_num = 0 
 
             if cache_id == -1: 
-                print(f"self.free_kv_caches:{len(self.free_kv_caches)}")
                 for id, num_blocks in self.free_kv_caches.items():
                     diff = abs(num_blocks - need_blocks)
 
-                    print(f"id-{id}, diff-{diff}, num_blocks:{num_blocks}, need_blocks:{need_blocks}") 
             # Remove this item from the free_kv_caches
             del self.free_kv_caches[cache_id]
         else:
@@ -215,12 +214,13 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         
         logical_blocks_num = seq.predict_n_blocks
         allocated_num = self.allocated_blocks[cache_id]
-        
+
         # If we need to allocate a new physical block
         if allocated_num < logical_blocks_num:
             # Currently this code only supports adding one physical block
             assert allocated_num == logical_blocks_num - 1
 
+            #print(f"NOW cache_id:{cache_id}, logical_blocks_num:{logical_blocks_num}, real tokens:{seq.get_len()}", file=sys.stderr) 
             self.num_free_gpu_blocks -= logical_blocks_num - allocated_num 
             self.allocated_blocks[cache_id] = logical_blocks_num
             self.to_allocate_blocks[cache_id] = logical_blocks_num 
@@ -263,7 +263,6 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         free_blocks = self.allocated_blocks[cache_id]
         self.free_kv_caches[cache_id] = free_blocks
         self.cached_free_blocks += free_blocks
-        #print(f"Adding to free_kv_caches: cache_id-{seq.cache_id}, free_blocks:{free_blocks}, cached_free_blocks:{self.cached_free_blocks}", file=sys.stderr)
 
     def reset(self) -> None:
         # Free decoder block tables
@@ -311,41 +310,17 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         to_allocate_blocks = self.to_allocate_blocks
 
         #print(f"self.free_kv_caches has length:{len(self.free_kv_caches)}, cached_free_blocks:{self.cached_free_blocks}, total_available:{self.num_free_gpu_blocks}", file=sys.stderr)
-        
         to_free_kv_caches = []
 
         # Check whether there is a need to free kv caches
-        if self.free_kv_caches != None:
-            """
-            if self.cached_free_blocks > self.start_free_blocks or self.cached_free_blocks > self.num_free_gpu_blocks or self.num_free_gpu_blocks < self.watermark_blocks: 
-                to_free_blocks = max(self.start_free_blocks, self.cached_free_blocks-self.num_free_gpu_blocks) 
-                if self.num_free_gpu_blocks < self.watermark_blocks:
-                    to_free_blocks = self.cached_free_blocks
-
-                for cache_id, num_blocks in self.free_kv_caches.items():
-                    to_free_kv_caches.append(cache_id)
-                    to_free_blocks -= num_blocks 
-                    if to_free_blocks < 0:
-                        break
-            """
-            for cache_id, num_blocks in self.free_kv_caches.items():
-                to_free_kv_caches.append(cache_id)
-
-
-        to_free_blocks = 0
-        # Removing all to_free_kv_caches from self.free_kv_caches
-        for cache_id in to_free_kv_caches:
-            num_blocks = self.free_kv_caches[cache_id]
+        for cache_id, num_blocks in self.free_kv_caches.items():
+            to_free_kv_caches.append(cache_id)
             self.gpu_allocator.free(cache_id)
             self.cached_free_blocks -= num_blocks
             self.num_free_gpu_blocks += num_blocks
-            to_free_blocks += num_blocks
-            #print(f"free cache_id:{cache_id}")
-            self.free_kv_caches.pop(cache_id)
-
+            
         # step() is invoked once after _schedule() inside Scheduler::schedule(). It is invoked once for every decode or prefill
-        # We actually uses self.free_kv_caches and self.to_allocate_blocks to track all requests 
-        # checked by the whole _schedule(). This is a hacky solution but may work correctly.    
+        self.free_kv_caches.clear()
         self.to_allocate_blocks = {}
 
         # we can invoke the reset here

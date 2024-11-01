@@ -94,7 +94,11 @@ class CacheEngineDAttn:
 
         # record the number of allocated blocks in a cache space for each request 
         self.allocated_blocks = [0 for _ in range(self.max_batch_size)] 
-        
+
+        # record the number of blocks to be allocated and to be released, especially within the updating frequency (4 steps)
+        self.to_alloc_blocks = {}
+        self.to_free_caches = set()
+
         # Get attention backend.
         self.attn_backend = get_attn_backend(
             model_config.get_num_attention_heads(parallel_config),
@@ -172,7 +176,7 @@ class CacheEngineDAttn:
         However, it is not a wise approach, as that can increase the overhead by 100X based on our experiments. 
         Instead, we should invoke c++ library function just once by passing an array with [req_id, new_blocks]
 
-        Note that self.allocated_blocks[buffer_id] will track the number of allocated blocks
+        Note that self.allocated_blocks[cache_id] will track the number of allocated blocks
         in this function. Let's utilize the same mechanism at the first step. 
         TODO: we may change this later. To my understanding, it is better to track the number of blocks at sequence 
     """
@@ -180,13 +184,13 @@ class CacheEngineDAttn:
         to_alloc_blocks = []
 
         """Allocate cache handles for the given number of blocks."""
-        for buffer_id, num_blocks in to_allocate.items():
-            allocated_blocks = self.allocated_blocks[buffer_id]
-            #print(f"CacheEngineDAttn: buffer_id-{buffer_id}, num_blocks:{num_blocks}, allocated_blocks:{allocated_blocks}", file=sys.stderr)
+        for cache_id, num_blocks in to_allocate.items():
+            allocated_blocks = self.allocated_blocks[cache_id]
+            #print(f"CacheEngineDAttn: cache_id-{cache_id}, num_blocks:{num_blocks}, allocated_blocks:{allocated_blocks}", file=sys.stderr)
             num_blocks -= allocated_blocks
             if num_blocks > 0:
-                to_alloc_blocks.append([buffer_id, num_blocks])
-                self.allocated_blocks[buffer_id] += num_blocks
+                to_alloc_blocks.append([cache_id, num_blocks])
+                self.allocated_blocks[cache_id] += num_blocks
 
         # Allocate physical blocks for all requests. 
         self.device_cache_allocator.alloc_cache_blocks(to_alloc_blocks) 
@@ -197,22 +201,44 @@ class CacheEngineDAttn:
         #for cache_id in free_kv_caches:
         #    print(f"free_seqs with cache_id:{cache_id}")
         self.device_cache_allocator.release_cache_regions(free_kv_caches)
-    
+
+    def append_cache_blocks(self, free_kv_caches: List[int], to_allocate: Dict[int, int]):
+        self.to_alloc_blocks.update(to_allocate)
+
+        for cache_id in free_kv_caches:
+            self.to_free_caches.add(cache_id)
+        
+
     def update_cache_blocks(self, is_prefill_phase: bool, free_kv_caches: List[int], to_allocate: Dict[int, int]):
         to_alloc_blocks = []
+        to_free_caches = []
 
-        """Allocate cache handles for the given number of blocks."""
-        for buffer_id, num_blocks in to_allocate.items():
-            allocated_blocks = self.allocated_blocks[buffer_id]
-            #print(f"CacheEngineDAttn: buffer_id-{buffer_id}, num_blocks:{num_blocks}, allocated_blocks:{allocated_blocks}", file=sys.stderr)
+        # append cache blocks 
+        self.append_cache_blocks(free_kv_caches, to_allocate)
+
+        # Handle to_free_caches now. 
+        for cache_id in self.to_free_caches:
+            #print(f"tofree cache_id:{cache_id}")
+            to_free_caches.append(cache_id)
+        
+        """Find all blocks that needs to be allocated. """
+        for cache_id, num_blocks in self.to_alloc_blocks.items():
+            allocated_blocks = self.allocated_blocks[cache_id]
             num_blocks -= allocated_blocks
-            if num_blocks > 0:
-                to_alloc_blocks.append([buffer_id, num_blocks])
-                self.allocated_blocks[buffer_id] += num_blocks
+            # Note that it is possible that an item appears in self.to_alloc_blocks, 
+            # but later it is determined to be free. For this case, there is no need for 
+            # further allocation.  
+            if num_blocks > 0 and cache_id not in self.to_free_caches:
+                #print(f"Allocate cache_id:{cache_id} with blocks :{num_blocks}")
+                to_alloc_blocks.append([cache_id, num_blocks])
+                self.allocated_blocks[cache_id] += num_blocks
 
-        #print(f"update_cache_blocks NOW: with free_kv_caches:{len(free_kv_caches)}, to_allocate:{len(to_alloc_blocks)}", file=sys.stderr)
-        self.device_cache_allocator.update_cache_blocks(is_prefill_phase, free_kv_caches, to_alloc_blocks)
- 
+        self.to_alloc_blocks.clear()
+        self.to_free_caches.clear()
+
+        #print(f"CACHE_ENGINE: update_cache_blocks!!!", file=sys.stderr)
+        self.device_cache_allocator.update_cache_blocks(is_prefill_phase, to_free_caches, to_alloc_blocks)
+        
 
 def _get_dtype_size(dtype: torch.dtype) -> int:
     return torch.tensor([], dtype=dtype).element_size()

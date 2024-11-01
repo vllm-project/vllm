@@ -149,7 +149,6 @@ private:
   void doAsyncKVCacheManage(std::vector<int64_t> free_caches, std::vector<std::vector<int64_t>> req_cache_blocks); 
   pthread_mutex_t mutex_manager;
   pthread_cond_t  cond_manager; 
-  bool require_memory_management;
   std::vector<int64_t> free_caches;
   std::vector<std::vector<int64_t>> req_cache_blocks; 
 

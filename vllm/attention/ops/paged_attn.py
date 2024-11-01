@@ -254,7 +254,6 @@ class PagedAttention:
             tmp_output = None
             exp_sums = None
             max_logits = None
-        #print(f"forward_decode_dattn: Query shape: {output.shape}")
         ops.dattention(
             output,
             exp_sums,

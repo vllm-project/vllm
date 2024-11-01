@@ -433,7 +433,7 @@ class Sequence:
     @property
     def predict_n_blocks(self) -> int:
         # Adding one more token for the predicted mode (used in dattn)
-        return (self.get_len() + self.block_size) // self.block_size
+        return (self.get_len() + self.block_size + 12) // self.block_size
 
 
     @property

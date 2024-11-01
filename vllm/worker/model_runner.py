@@ -1691,6 +1691,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                     torch.tensor(model_forward_time + orig_model_forward_time))
             return hidden_or_intermediate_states
 
+
         logits = self.model.compute_logits(hidden_or_intermediate_states,
                                            model_input.sampling_metadata)
         if not self.is_driver_worker:
@@ -1699,6 +1700,9 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         if model_input.async_callback is not None:
             model_input.async_callback()
 
+        
+        #check_data=model_input.sampling_metadata.seq_groups[0].seq_data[0] 
+        #print(f"Sampling logits:{logits.shape}, sampling_metadata prompts-{len(check_data.prompt_token_ids)}, output-{len(check_data.output_token_ids)}\n")
         # Sample the next token.
         output: SamplerOutput = self.model.sample(
             logits=logits,

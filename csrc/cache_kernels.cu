@@ -267,6 +267,9 @@ __global__ void reshape_and_cache_dattn_kernel(
   const int64_t num_heads = gridDim.y * heads_per_thread_block; 
   constexpr int x = 16 / sizeof(cache_t);
  
+ //   printf("[blockIdx.x %d, blockIdx.y %d, thread %d], cache_row_mapping %p\n", blockIdx.x, blockIdx.y, threadIdx.x, cache_row_mapping); 
+ //   printf("[blockIdx.x %d, blockIdx.y %d, thread %d], cache_col_mapping %p\n", blockIdx.x, blockIdx.y, threadIdx.x, cache_col_mapping); 
+
   // NOTE: cache_row_idx or cache_col_idx can be -1 if the token is padded
   const int64_t cache_address = cache_row_mapping[index];
   // token index in the sequence, which determins the position of kv cache 
@@ -274,29 +277,28 @@ __global__ void reshape_and_cache_dattn_kernel(
   if (cache_address <= 0 || token_idx < 0) {
     return;
   }
-  
-  // Note: each thread block is in charge of 4 heads of the same token
+
+  // Note: each thread block is in charge of heads_per_thread_block of the same token
   // Therefore, each warp is in charge of 1 head of the same token 
   int64_t block_idx = token_idx / block_size;
 
   // token index inside the current block: [0, 16)
   int64_t block_offset = token_idx % block_size;    
   
-  // compute the block index for the current thread block
-  const int64_t head_block_idx = blockIdx.y;
- 
-  // Each head will be handled will be handled by each warp 
-  int64_t warp_idx = threadIdx.x / WARP_SIZE; //[0,3]
-  //assert (warp_idx <= 3);
- 
-  int64_t heads = heads_per_thread_block/4; 
-  //constexpr int64_t heads = 1; 
-  // head_idx for the token, should be less than num_heads. 
-  int64_t head_idx = head_block_idx * heads_per_thread_block + warp_idx*heads;
+  // Get the block index for the current thread block
+  const int64_t thread_block_idx = blockIdx.y;
+  const int64_t warp_idx = threadIdx.x / WARP_SIZE; //[0,3]
 
-  // kv_block_size == head_size * block_size
+  // The workload for each warp (assuming there are 4 warps in one thread block)
+  const int warps_per_thread_block = blockDim.x/WARP_SIZE;
+  const int64_t heads_per_warp = heads_per_thread_block/warps_per_thread_block; 
+  
+  // starting head_idx for this warp 
+  int64_t head_idx = thread_block_idx * heads_per_thread_block + warp_idx * heads_per_warp;
+
+  // kv_block_size == head_size * block_size (without considering the type)
   // Compute the start address of the head of the block for KV cache
-  int64_t head_start = block_idx * whole_block_size + layer_offset + head_idx * kv_block_size ; 
+  int64_t head_start = block_idx * whole_block_size + layer_offset + head_idx * kv_block_size; 
   
   int64_t thread_idx_in_warp = threadIdx.x % WARP_SIZE;
 
@@ -312,9 +314,8 @@ __global__ void reshape_and_cache_dattn_kernel(
   scalar_t* src_key = const_cast<scalar_t*>(key + src_offset);
   scalar_t* src_value = const_cast<scalar_t*>(value + src_offset);
 
-
   // Each warp will handle only one token's one head 
-  for (int i = thread_idx_in_warp; i < head_size*heads; i += WARP_SIZE) {
+  for (int i = thread_idx_in_warp; i < head_size*heads_per_warp; i += WARP_SIZE) {
     // i == head_offset 
     // We are going to transfer [0,head_size) to [head_size/x, block_size, x]
     int x_idx = i / x;
@@ -322,12 +323,10 @@ __global__ void reshape_and_cache_dattn_kernel(
 
     // [num_blocks, num_heads, head_size/x, block_size, x]
     int64_t tgt_key_idx = x_idx * block_size * x + block_offset * x + x_offset;     
+    int64_t tgt_value_idx = i * block_size + block_offset; 
     dest_key[tgt_key_idx] = src_key[i];
 
     // [num_blocks, num_heads, head_size, block_size]
-    int64_t tgt_value_idx = i * block_size + block_offset; 
-    //if(head_idx == 0 && i < 8)
-    //  printf("[%d, %d, %d]: index %ld offset [%d, %ld, %d] at %p\n", blockIdx.x, blockIdx.y, threadIdx.x, tgt_value_idx, x_idx, block_offset, x_offset, &dest_value[i]); 
     dest_value[tgt_value_idx] = src_value[i]; 
   }
 }
@@ -442,25 +441,25 @@ void reshape_and_cache_dattn(
   if (kv_cache_dtype != "auto") {
     TORCH_CHECK(false, "Unsupported data type of kv cache: ", kv_cache_dtype);
   }
-  int num_tokens = key.size(0);
-  int num_heads = key.size(1);
+  const int num_tokens = key.size(0);
+  const int num_heads = key.size(1);
   const int head_size = key.size(2);
 
   const int key_stride = key.stride(0);
   const int value_stride = value.stride(0);
 
-  //printf("hihihi, num_tokens %d, head_size %d, key_stride %d,  value_stride %d\n", num_tokens, head_size, key_stride, value_stride);
+  //fprintf(stderr, "hihihi, layer_idx %d, num_tokens %d, num_heads %d, head_size %d, key_stride %d,  value_stride %d\n", layer_idx, num_tokens, num_heads, head_size, key_stride, value_stride);
   // We will dynamically decide heads_per_thread_block
-  int heads_per_thread_block = 8;
+  constexpr int heads_per_thread_block = 4;
   assert(num_heads % heads_per_thread_block == 0);
 
-  int sm_for_heads = num_heads/heads_per_thread_block; 
+  const int sm_for_heads = num_heads/heads_per_thread_block; 
 
-  int64_t kv_block_size = head_size * block_size;
-  int64_t whole_block_size = kv_block_size * num_heads * num_layers * 2;  
-  int64_t layer_offset = layer_idx * kv_block_size * num_heads; 
+  const int64_t kv_block_size = head_size * block_size;
+  const int64_t whole_block_size = kv_block_size * num_heads * num_layers * 2;  
+  const int64_t layer_offset = layer_idx * kv_block_size * num_heads; 
 
-  //printf("key_block_size-%d, whole_block_size-%ld, num_layers-%d\n", key_block_size, whole_block_size, num_layers); 
+  //fprintf(stderr, "newwww block_size %d, key_block_size-%d, whole_block_size-%ld, num_layers-%d, sm_for_heads %d\n", block_size, kv_block_size, whole_block_size, num_layers, sm_for_heads); 
   dim3 grid(num_tokens, sm_for_heads);
 
   // each thread block will be 128 threads
@@ -471,6 +470,8 @@ void reshape_and_cache_dattn(
 
   DISPATCH_BY_KV_CACHE_DTYPE(key.dtype(), kv_cache_dtype,
                              CALL_RESHAPE_AND_CACHE_DATTN)
+  
+  cudaDeviceSynchronize();  
 }
 
 namespace vllm {

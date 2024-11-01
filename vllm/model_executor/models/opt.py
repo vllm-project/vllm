@@ -113,18 +113,19 @@ class OPTAttention(nn.Module):
         if self.profile == True:
             self.step += 1
             T1 = time.time()
+        
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.chunk(chunks=3, dim=-1)
 
         if self.profile == True:
             T2 = time.time()
+
         #print(f"OPT step-{self.step}, before attn", file=sys.stderr)
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
-        
+
         if self.profile == True:
             T3 = time.time()
         
-        #print(f"OPT step-{self.step}, after attn: time - {T3-T2}!", file=sys.stderr)
         output, _ = self.out_proj(attn_output)
 
         if self.profile == True:
@@ -200,9 +201,11 @@ class OPTDecoderLayer(nn.Module):
         # 125m, 1.7B, ..., 175B applies layer norm BEFORE attention
         if self.do_layer_norm_before:
             hidden_states = self.self_attn_layer_norm(hidden_states)
+        
         hidden_states = self.self_attn(hidden_states=hidden_states,
                                        kv_cache=kv_cache,
                                        attn_metadata=attn_metadata)
+
         hidden_states = residual + hidden_states
         # 350m applies layer norm AFTER attention
         if not self.do_layer_norm_before:
@@ -220,6 +223,7 @@ class OPTDecoderLayer(nn.Module):
         # 350m applies layer norm AFTER attention
         if not self.do_layer_norm_before:
             hidden_states = self.final_layer_norm(hidden_states)
+
         return hidden_states
 
 
@@ -306,6 +310,7 @@ class OPTDecoder(nn.Module):
 
         for i in range(len(self.layers)):
             layer = self.layers[i]
+            
             hidden_states = layer(hidden_states, kv_caches[i], attn_metadata)
 
         if self.final_layer_norm is not None:
