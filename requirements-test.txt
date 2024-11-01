@@ -36,20 +36,20 @@ attrs==24.2.0
     #   referencing
 audioread==3.0.1
     # via librosa
-awscli==1.35.16
+awscli==1.35.19
     # via -r requirements-test.in
 bitsandbytes==0.44.1
     # via -r requirements-test.in
 black==24.10.0
     # via datamodel-code-generator
-boto3==1.35.50
+boto3==1.35.53
     # via tensorizer
-botocore==1.35.50
+botocore==1.35.53
     # via
     #   awscli
     #   boto3
     #   s3transfer
-buildkite-test-collector==0.1.8
+buildkite-test-collector==0.1.9
     # via -r requirements-test.in
 certifi==2024.8.30
     # via
@@ -426,7 +426,7 @@ requests==2.32.3
     #   transformers
 rouge-score==0.1.2
     # via lm-eval
-rpds-py==0.20.0
+rpds-py==0.20.1
     # via
     #   jsonschema
     #   referencing
@@ -552,7 +552,7 @@ xxhash==3.5.0
     # via
     #   datasets
     #   evaluate
-yarl==1.17.0
+yarl==1.17.1
     # via aiohttp
 zstandard==0.23.0
     # via lm-eval
