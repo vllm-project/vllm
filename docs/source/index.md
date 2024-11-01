@@ -162,6 +162,7 @@ contributing/overview
 contributing/profiling/profiling_index
 contributing/dockerfile/dockerfile
 contributing/model/index
+contributing/vulnerability_management
 ```
 
 # Indices and tables
