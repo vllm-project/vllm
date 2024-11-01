@@ -474,7 +474,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_DISABLE_COMPILE_CACHE":
     lambda: bool(int(os.getenv("VLLM_DISABLE_COMPILE_CACHE", "0"))),
 
-    # If set, try to use the flux fused collective comminucation gemm kernels
+    # If set, try to use the flux fused collective communication gemm kernels.
     "VLLM_USE_FLUX":
     lambda: bool(int(os.getenv("VLLM_USE_FLUX", "0"))),
 }
