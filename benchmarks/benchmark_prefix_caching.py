@@ -145,7 +145,7 @@ def sample_requests_from_random(
     return requests
 
 
-def repeat_and_sort_requests(requests: List[Tuple[str, int, int]],
+def repeat_and_sort_requests(requests: List[Request],
                              repeat_count: int,
                              sort: bool = False) -> List[str]:
     repeated_requests = requests * repeat_count
@@ -153,7 +153,7 @@ def repeat_and_sort_requests(requests: List[Tuple[str, int, int]],
         repeated_requests.sort(key=lambda x: x[1])
     else:
         random.shuffle(repeated_requests)
-    return [req[0] for req in repeated_requests]
+    return [req.prompt for req in repeated_requests]
 
 
 def main(args):
@@ -220,18 +220,18 @@ if __name__ == "__main__":
     parser.add_argument('--output-len', type=int, default=10)
     parser.add_argument('--num-prompts',
                         type=int,
-                        default=1,
+                        required=True,
                         help="Number of the prompts sampled from dataset")
     parser.add_argument('--repeat-count',
                         type=int,
-                        default=100,
+                        default=1,
                         help='Number of times to repeat each prompt')
     parser.add_argument('--sort',
                         action='store_true',
                         help='Sort prompts by input length')
     parser.add_argument('--input-length-range',
                         type=str,
-                        default='128:256',
+                        required=True,
                         help='Range of input lengths for sampling prompts,'
                         'specified as "min:max" (e.g., "128:256").')
     parser.add_argument(
