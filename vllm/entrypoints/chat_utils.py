@@ -497,11 +497,11 @@ def _parse_chat_message_content_parts(
     mm_parser = mm_tracker.create_parser()
     model_config = mm_tracker.model_config
 
-    wrap_dicts = (
-        chat_template_text_format == "openai"
-        or model_config.task == "embedding" and model_config.is_multimodal_model
-        or model_config.hf_config.model_type in MODEL_KEEP_MULTI_MODAL_CONTENT
-    )
+    wrap_dicts = (chat_template_text_format == "openai"
+                  or (model_config.task == "embedding"
+                      and model_config.is_multimodal_model)
+                  or (model_config.hf_config.model_type
+                      in MODEL_KEEP_MULTI_MODAL_CONTENT))
 
     for part in parts:
         parse_res = _parse_chat_message_content_part(

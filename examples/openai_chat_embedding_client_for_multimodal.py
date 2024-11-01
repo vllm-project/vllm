@@ -5,17 +5,29 @@ image_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisco
 response = requests.post(
     "http://localhost:8000/v1/embeddings",
     json={
-        "model": "TIGER-Lab/VLM2Vec-Full",
+        "model":
+        "TIGER-Lab/VLM2Vec-Full",
         "messages": [{
-            "role": "user",
+            "role":
+            "user",
             "content": [
-                {"type": "image_url", "image_url": {"url": image_url}},
-                {"type": "text", "text": "Represent the given image."},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": image_url
+                    }
+                },
+                {
+                    "type": "text",
+                    "text": "Represent the given image."
+                },
             ],
         }],
-        "encoding_format": "float",
+        "encoding_format":
+        "float",
     },
 )
 response.raise_for_status()
 response_json = response.json()
+
 print("Embedding output:", response_json["data"][0]["embedding"])
