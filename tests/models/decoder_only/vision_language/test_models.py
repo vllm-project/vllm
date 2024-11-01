@@ -291,6 +291,15 @@ VLM_TEST_SETTINGS = {
     #     vllm_output_post_proc=model_utils.phi3v_vllm_to_hf_output,
     #     num_logprobs=10,
     # ),
+    "pixtral_hf": VLMTestInfo(
+        models=["nm-testing/pixtral-12b-FP8-dynamic"],
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        prompt_formatter=lambda img_prompt: f"<s>[INST]{img_prompt}[/INST]",
+        img_idx_to_prompt=lambda idx: "[IMG]",
+        max_model_len=8192,
+        max_num_seqs=2,
+        auto_cls=AutoModelForVision2Seq,
+    ),
     "qwen": VLMTestInfo(
         models=["Qwen/Qwen-VL"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
