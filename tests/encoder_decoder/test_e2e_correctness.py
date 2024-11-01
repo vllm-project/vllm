@@ -66,6 +66,7 @@ def test_encoder_decoder_e2e(
     '''
     with global_force_attn_backend_context_manager(attn_backend):
         if attn_backend == _Backend.FLASH_ATTN:
+            # Flash Attention works only with bfloat16 data-type
             dtype = 'bfloat16'
         test_case_prompts = example_encoder_decoder_prompts[
             decoder_prompt_type]
