@@ -8,7 +8,6 @@ import torch
 
 class PlatformEnum(enum.Enum):
     CUDA = enum.auto()
-    CUDA_JETSON = enum.auto()
     ROCM = enum.auto()
     TPU = enum.auto()
     XPU = enum.auto()
@@ -39,13 +38,7 @@ class Platform:
     _enum: PlatformEnum
 
     def is_cuda(self) -> bool:
-        return self._enum in (PlatformEnum.CUDA, PlatformEnum.CUDA_JETSON)
-
-    def is_cuda_nvml(self) -> bool:
         return self._enum == PlatformEnum.CUDA
-
-    def is_cuda_jetson(self) -> bool:
-        return self._enum == PlatformEnum.CUDA_JETSON
 
     def is_rocm(self) -> bool:
         return self._enum == PlatformEnum.ROCM
@@ -67,11 +60,7 @@ class Platform:
 
     def is_cuda_alike(self) -> bool:
         """Stateless version of :func:`torch.cuda.is_available`."""
-        return self._enum in (
-            PlatformEnum.CUDA,
-            PlatformEnum.CUDA_JETSON,
-            PlatformEnum.ROCM,
-        )
+        return self._enum in (PlatformEnum.CUDA, PlatformEnum.ROCM)
 
     @classmethod
     def get_device_capability(

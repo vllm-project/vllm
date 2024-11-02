@@ -124,7 +124,7 @@ class CustomAllreduce:
         # test nvlink first, this will filter out most of the cases
         # where custom allreduce is not supported
         # this checks hardware and driver support for NVLink
-        assert current_platform.is_cuda_nvml()
+        assert current_platform.is_cuda()
         from vllm.platforms.cuda import CudaPlatform
         cuda_platform: CudaPlatform = current_platform
         full_nvlink = cuda_platform.is_full_nvlink(physical_device_ids)

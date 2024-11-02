@@ -17,7 +17,6 @@ except Exception:
     pass
 
 is_cuda = False
-is_cuda_jetson = False
 
 try:
     import pynvml
@@ -28,7 +27,7 @@ try:
     finally:
         pynvml.nvmlShutdown()
 except Exception:
-    # CUDA is supported on Jetson, but NVML is not.
+    # CUDA is supported on Jetson, but NVML may not be.
     import os
 
     def cuda_is_jetson() -> bool:
@@ -37,7 +36,6 @@ except Exception:
 
     if cuda_is_jetson():
         is_cuda = True
-        is_cuda_jetson = True
 
 is_rocm = False
 
@@ -91,12 +89,8 @@ if is_tpu:
     from .tpu import TpuPlatform
     current_platform = TpuPlatform()
 elif is_cuda:
-    if is_cuda_jetson:
-        from .cuda_jetson import CudaJetsonPlatform
-        current_platform = CudaJetsonPlatform()
-    else:
-        from .cuda import CudaPlatform
-        current_platform = CudaPlatform()
+    from .cuda import CudaPlatform
+    current_platform = CudaPlatform()
 elif is_rocm:
     from .rocm import RocmPlatform
     current_platform = RocmPlatform()
