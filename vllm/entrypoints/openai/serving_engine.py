@@ -11,6 +11,8 @@ from typing_extensions import Annotated
 
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
+# yapf conflicts with isort for this block
+# yapf: disable
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          ChatTemplateContentFormatOption,
                                          ConversationMessage,
@@ -19,8 +21,6 @@ from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          parse_chat_messages_futures,
                                          resolve_chat_template_content_format)
 from vllm.entrypoints.logger import RequestLogger
-# yapf conflicts with isort for this block
-# yapf: disable
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               CompletionRequest,
                                               DetokenizeRequest,

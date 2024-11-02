@@ -168,11 +168,19 @@ def _resolve_chat_template_content_format(
         return "string" if given_format == "auto" else given_format
 
     detected_format = _detect_chat_template_content_format(jinja_text)
+    logger.info(
+        "Detected the chat template content format to be '%s'. "
+        "Set `--chat-template-content-format` to explicitly specifiy this.",
+        detected_format,
+    )
 
     if given_format != "auto" and given_format != detected_format:
         logger.warning(
-            "You specified `--chat-template-content-format %s`, "
-            "but we detected that it should be '%s'.",
+            "You specified `--chat-template-content-format %s` "
+            "which is different from the detected format '%s'. "
+            "To help us improve automatic detection, please consider "
+            "opening a GitHub issue at: "
+            "https://github.com/vllm-project/vllm/issues/new/choose",
             given_format,
             detected_format,
         )
