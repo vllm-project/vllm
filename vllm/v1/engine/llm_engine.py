@@ -18,13 +18,13 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.core import EngineCore
 from vllm.v1.engine.detokenizer import Detokenizer
 from vllm.v1.engine.processor import Processor
-from vllm.v1.engine.protocol import LLMEngineProtocol
 from vllm.v1.executor.gpu_executor import GPUExecutor
 
 logger = init_logger(__name__)
 
 
-class LLMEngine(LLMEngineProtocol):
+class LLMEngine:
+    """Legacy LLMEngine for backwards compatibility."""
 
     def __init__(
         self,
@@ -47,7 +47,7 @@ class LLMEngine(LLMEngineProtocol):
         use_cached_outputs: bool = False,
     ) -> None:
 
-        # TODO: Avoid?
+        # TODO: Can we avoid this?
         self.model_config = model_config
 
         # Processor (convert Inputs --> EngineCoreRequests)
@@ -99,6 +99,19 @@ class LLMEngine(LLMEngineProtocol):
     @classmethod
     def _get_executor_cls(cls, engine_config: EngineConfig):
         return GPUExecutor
+
+    def stop_remote_worker_execution_loop(self) -> None:
+        raise NotImplementedError("TP not implemented yet.")
+
+    def get_num_unfinished_requests(self) -> int:
+        return self.detokenizer.get_num_unfinished_requests()
+
+    def has_unfinished_requests(self) -> bool:
+        return self.detokenizer.has_unfinished_requests()
+
+    @classmethod
+    def validate_outputs(cls, outputs, output_type):
+        return outputs
 
     def add_request(
         self,

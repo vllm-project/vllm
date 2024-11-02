@@ -27,7 +27,7 @@ from vllm.v1.executor.gpu_executor import GPUExecutor
 logger = init_logger(__name__)
 
 
-class AsyncLLMEngine(LLMEngineProtocol):
+class AsyncLLMEngine:
 
     def __init__(
         self,
