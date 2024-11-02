@@ -1551,7 +1551,14 @@ def direct_register_custom_op(
     """
     if is_in_doc_build():
         return
-    schema_str = torch.library.infer_schema(op_func, mutates_args=mutates_args)
+    import torch.library
+    if hasattr(torch.library, "infer_schema"):
+        schema_str = torch.library.infer_schema(op_func,
+                                                mutates_args=mutates_args)
+    else:
+        # for pytorch 2.4
+        import torch._custom_op.impl
+        schema_str = torch._custom_op.impl.infer_schema(op_func, mutates_args)
     my_lib = target_lib or vllm_lib
     my_lib.define(op_name + schema_str)
     my_lib.impl(op_name, op_func, "CUDA")
