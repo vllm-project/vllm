@@ -3,7 +3,7 @@ from typing import Dict, Iterable, List, Mapping, Optional, Type, Union
 from vllm.config import EngineConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics_types import StatLoggerBase
-from vllm.envs import VLLM_V1_MULTIPROCESSING
+from vllm.envs import VLLM_DISABLE_V1_MULTIPROCESSING
 from vllm.inputs import INPUT_REGISTRY, InputRegistry, PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -70,6 +70,7 @@ class LLMEngine:
         engine_args: EngineArgs,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
+        enable_multiprocessing: bool = False,
     ) -> "LLMEngine":
         """Creates an LLM engine from the engine arguments."""
 
@@ -77,13 +78,17 @@ class LLMEngine:
         engine_config = engine_args.create_engine_config()
         executor_class = cls._get_executor_cls(engine_config)
 
+        if VLLM_DISABLE_V1_MULTIPROCESSING:
+            logger.debug("Disabling multiprocessing for LLMEngine.")
+            enable_multiprocessing = False
+
         # Create the LLMEngine.
         return cls(vllm_config=engine_config,
                    executor_class=executor_class,
                    log_stats=not engine_args.disable_log_stats,
                    usage_context=usage_context,
                    stat_loggers=stat_loggers,
-                   multiprocess_mode=VLLM_V1_MULTIPROCESSING)
+                   multiprocess_mode=enable_multiprocessing)
 
     @classmethod
     def _get_executor_cls(cls, engine_config: EngineConfig):

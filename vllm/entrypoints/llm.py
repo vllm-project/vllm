@@ -201,8 +201,13 @@ class LLM:
             **kwargs,
         )
 
-        self.llm_engine = LLMEngine.from_engine_args(
-            engine_args, usage_context=UsageContext.LLM_CLASS)
+        if envs.VLLM_USE_V1:
+            self.llm_engine = LLMEngine.from_engine_args(
+                engine_args, usage_context=UsageContext.LLM_CLASS,
+                enable_multiprocessing=True)
+        else:
+            self.llm_engine = LLMEngine.from_engine_args(
+                engine_args, usage_context=UsageContext.LLM_CLASS)
 
         self.task = self.llm_engine.model_config.task
         self.supported_tasks = self.llm_engine.model_config.task
