@@ -1,4 +1,5 @@
-from typing import List, NamedTuple, Optional, Tuple
+from collections import defaultdict
+from typing import Dict, List, NamedTuple, Optional, Tuple
 
 import openvino as ov
 import torch
@@ -12,7 +13,7 @@ from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader.openvino import get_model
 from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
-                             MultiModalInputs)
+                             MultiModalInputs, MultiModalPlaceholderMap)
 from vllm.sequence import SequenceGroupMetadata
 from vllm.worker.model_runner_base import ModelRunnerBase
 
@@ -102,6 +103,9 @@ class OpenVINOModelRunner(ModelRunnerBase):
         past_lens: List[int] = []
         query_lens: List[int] = []
         multi_modal_inputs_list: List[MultiModalInputs] = []
+        multi_modal_placeholder_maps: Dict[
+            str,
+            MultiModalPlaceholderMap] = defaultdict(MultiModalPlaceholderMap)
 
         subsequence_begins: List[int] = []
         block_indices: List[int] = []
@@ -155,15 +159,6 @@ class OpenVINOModelRunner(ModelRunnerBase):
                                     and self.sliding_window is None
                                     and is_prompt)
 
-                mm_data = seq_group_metadata.multi_modal_data
-                if mm_data:
-                    mm_kwargs = self.multi_modal_input_mapper(
-                        mm_data,
-                        mm_processor_kwargs=seq_group_metadata.
-                        mm_processor_kwargs,
-                    )
-                    multi_modal_inputs_list.append(mm_kwargs)
-
                 block_table = seq_group_metadata.block_tables[seq_id]
                 # TODO(sang): Combine chunked prefill and prefix caching by
                 # only allowing multiple of block_size chunk size.
@@ -207,7 +202,8 @@ class OpenVINOModelRunner(ModelRunnerBase):
                 query_lens.append(query_len)
 
                 input_tokens.extend(tokens)
-                input_positions.extend(list(range(computed_len, seq_len)))
+                positions_range = range(computed_len, seq_len)
+                input_positions.extend(list(positions_range))
 
                 past_lens.append(computed_len)
                 subsequence_begins.append(subsequence_begins[-1] + query_len)
@@ -219,6 +215,22 @@ class OpenVINOModelRunner(ModelRunnerBase):
                         query_len == 1
                     ), "seq_len: {}, computed_len: {}, query_len: {}".format(
                         seq_len, computed_len, query_len)
+
+                if seq_group_metadata.multi_modal_data:
+                    # NOTE: mm_data only includes the subset of multi-modal
+                    # items that intersect with the current prefill positions.
+                    mm_data, placeholder_maps = MultiModalPlaceholderMap \
+                        .from_seq_group(seq_group_metadata, positions_range)
+
+                    mm_kwargs = self.multi_modal_input_mapper(
+                        mm_data,
+                        mm_processor_kwargs=seq_group_metadata.
+                        mm_processor_kwargs)
+                    multi_modal_inputs_list.append(mm_kwargs)
+
+                    for modality, placeholder_map in placeholder_maps.items():
+                        multi_modal_placeholder_maps[modality].extend(
+                            placeholder_map, )
 
         max_query_len = max(query_lens)
         assert max_query_len > 0, "query_lens: {}".format(query_lens)
@@ -248,12 +260,19 @@ class OpenVINOModelRunner(ModelRunnerBase):
             max_context_len, dtype=torch.int32,
             device=self.device)  # type: ignore
 
+        placeholder_index_maps = {
+            modality: placeholder_map.index_map()
+            for modality, placeholder_map in
+            multi_modal_placeholder_maps.items()
+        }
+
         attn_metadata = self.attn_backend.make_openvino_metadata(
             past_lens=past_lens_tensor,
             subsequence_begins=subsequence_begins_tensor,
             block_indices=block_indices_tensor,
             block_indices_begins=block_indices_begins_tensor,
             max_context_len=max_context_len_tensor,
+            multi_modal_placeholder_index_maps=placeholder_index_maps,
         )
 
         multi_modal_kwargs = MultiModalInputs.batch(multi_modal_inputs_list)
