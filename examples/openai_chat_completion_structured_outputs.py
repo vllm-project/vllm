@@ -10,7 +10,7 @@ client = OpenAI(
 
 # Guided decoding by Choice (list of possible options)
 completion = client.chat.completions.create(
-    model="Qwen/Qwen2.5-3B",
+    model="Qwen/Qwen2.5-3B-Instruct",
     messages=[{
         "role": "user",
         "content": "Classify this sentiment: vLLM is wonderful!"
@@ -25,7 +25,7 @@ prompt = ("Generate an email address for Alan Turing, who works in Enigma."
           "alan.turing@enigma.com\n")
 
 completion = client.chat.completions.create(
-    model="Qwen/Qwen2.5-3B",
+    model="Qwen/Qwen2.5-3B-Instruct",
     messages=[{
         "role": "user",
         "content": prompt,
@@ -57,7 +57,7 @@ json_schema = CarDescription.model_json_schema()
 prompt = ("Generate a JSON with the brand, model and car_type of"
           "the most iconic car from the 90's")
 completion = client.chat.completions.create(
-    model="Qwen/Qwen2.5-3B",
+    model="Qwen/Qwen2.5-3B-Instruct",
     messages=[{
         "role": "user",
         "content": prompt,
@@ -84,7 +84,7 @@ simplified_sql_grammar = """
 prompt = ("Generate an SQL query to show the 'username' and 'email'"
           "from the 'users' table.")
 completion = client.chat.completions.create(
-    model="Qwen/Qwen2.5-3B",
+    model="Qwen/Qwen2.5-3B-Instruct",
     messages=[{
         "role": "user",
         "content": prompt,

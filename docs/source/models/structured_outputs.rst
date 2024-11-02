@@ -21,6 +21,8 @@ The following parameters are supported, which must be added as extra parameters:
 - ``guided_whitespace_pattern``: used to override the default whitespace pattern for guided json decoding.
 - ``guided_decoding_backend``: used to select the guided decoding backend to use.
 
+You can see the complete list of supported parameters on the `OpenAI Compatible Server </../serving/openai_compatible_server.html>`_ page. 
+
 Now let´s see an example for each of the cases, starting with the ``guided_choice``, as it´s the easiest one: 
 
 .. code-block:: python
@@ -32,7 +34,7 @@ Now let´s see an example for each of the cases, starting with the ``guided_choi
     )
 
     completion = client.chat.completions.create(
-        model="Qwen/Qwen2.5-3B",
+        model="Qwen/Qwen2.5-3B-Instruct",
         messages=[
             {"role": "user", "content": "Classify this sentiment: vLLM is wonderful!"}
         ],
@@ -46,7 +48,7 @@ The next example shows how to use the ``guided_regex``. The idea is to generate 
 .. code-block:: python
 
     completion = client.chat.completions.create(
-        model="Qwen/Qwen2.5-3B",
+        model="Qwen/Qwen2.5-3B-Instruct",
         messages=[
             {
                 "role": "user",
@@ -86,7 +88,7 @@ The next example shows how to use the ``guided_json`` parameter with a Pydantic 
     json_schema = CarDescription.model_json_schema()
 
     completion = client.chat.completions.create(
-        model="Qwen/Qwen2.5-3B",
+        model="Qwen/Qwen2.5-3B-Instruct",
         messages=[
             {
                 "role": "user",
@@ -122,7 +124,7 @@ It works by using a context free EBNF grammar, which for example we can use to d
     """
 
     completion = client.chat.completions.create(
-        model="Qwen/Qwen2.5-3B",
+        model="Qwen/Qwen2.5-3B-Instruct",
         messages=[
             {
                 "role": "user",

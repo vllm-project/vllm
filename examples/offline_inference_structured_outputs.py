@@ -5,7 +5,7 @@ from pydantic import BaseModel
 from vllm import LLM, SamplingParams
 from vllm.sampling_params import GuidedDecodingParams
 
-llm = LLM(model="Qwen/Qwen2.5-3B", max_model_len=100)
+llm = LLM(model="Qwen/Qwen2.5-3B-Instruct", max_model_len=100)
 
 # Guided decoding by Choice (list of possible options)
 guided_decoding_params = GuidedDecodingParams(choice=["Positive", "Negative"])
