@@ -19,6 +19,7 @@ from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.model_executor.model_loader.utils import get_architecture_class_name
 from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalInputs,
                              MultiModalRegistry)
 from vllm.sampling_params import SamplingParams
@@ -35,6 +36,11 @@ from vllm.worker.model_runner_base import (
 from vllm.worker.utils import assert_enc_dec_mr_supported_scenario
 
 logger = init_logger(__name__)
+
+# The Mllama model has PagedAttention specific logic because of which it
+# can only be run with the XFORMERS backend
+# TODO Make Mllama model work with Flash Attention backend.
+_XFORMERS_ONLY_ENCODER_DECODER_ARCHS = ["MllamaForConditionalGeneration"]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -101,9 +107,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         models) but these arguments are present here for compatibility with 
         the base-class constructor.
         '''
-
-        self._maybe_force_supported_attention_backend()
-
+        self._maybe_force_supported_attention_backend(model_config)
         super().__init__(
             model_config,
             parallel_config,
@@ -119,7 +123,12 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         # Crash for unsupported encoder/scenarios
         assert_enc_dec_mr_supported_scenario(self)
 
-    def _maybe_force_supported_attention_backend(self):
+    def _is_xformers_only_encoder_decoder_model(self,
+                                                model: ModelConfig) -> bool:
+        return get_architecture_class_name(
+            model) in _XFORMERS_ONLY_ENCODER_DECODER_ARCHS
+
+    def _maybe_force_supported_attention_backend(self, model: ModelConfig):
         '''
         Force vLLM to use the XFormers attention backend,
         which is currently the only supported option.
@@ -135,22 +144,26 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         is_forced_by_global = maybe_global_forced_backend is not None
         is_forced_by_env_var = maybe_env_var_forced_backend is not None
 
-        if not (is_forced_by_global or is_forced_by_env_var):
+        if not (is_forced_by_global or is_forced_by_env_var) \
+            and self._is_xformers_only_encoder_decoder_model(model):
             # The user has not already specified an attention backend
             # override
-            logger.info("EncoderDecoderModelRunner requires "
-                        "XFormers backend; overriding backend "
-                        "auto-selection and forcing XFormers.")
+            logger.info(
+                "Encoder-Decoder Model Architecture %s requires XFormers "
+                "backend; overriding backend auto-selection and "
+                "forcing XFormers.", get_architecture_class_name(model))
             global_force_attn_backend(_Backend.XFORMERS)
         elif is_forced_by_global:
             # Backend override enforced by global variable takes
             # precedence over vLLM backend environment variable.
-            if maybe_global_forced_backend != _Backend.XFORMERS:
+            if maybe_global_forced_backend not in\
+                 [_Backend.XFORMERS, _Backend.FLASH_ATTN]:
                 raise_backend_err()
         elif is_forced_by_env_var:
             # Backend override enforced by vLLM backend
             # environment variable
-            if maybe_env_var_forced_backend != _Backend.XFORMERS:
+            if maybe_env_var_forced_backend not in\
+                 [_Backend.XFORMERS, _Backend.FLASH_ATTN]:
                 raise_backend_err()
 
     def _list_to_int32_tensor(
@@ -532,6 +545,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
             attn_metadata.encoder_seq_lens,
             attn_metadata.encoder_seq_lens_tensor,
             attn_metadata.max_encoder_seq_len,
+            attn_metadata.encoder_seq_start_loc,
             attn_metadata.cross_slot_mapping,
             attn_metadata.cross_block_tables,
         ) = (
@@ -539,6 +553,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
             encoder_seq_lens,
             encoder_seq_lens_tensor,
             max_encoder_seq_len,
+            encoder_seq_start_loc,
             cross_slot_mapping_tensor,
             cross_block_tables,
         )
