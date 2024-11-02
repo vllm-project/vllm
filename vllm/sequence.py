@@ -15,13 +15,13 @@ import torch
 from typing_extensions import assert_never
 
 from vllm.lora.request import LoRARequest
+from vllm.multimodal import MultiModalDataDict, MultiModalPlaceholderDict
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 
 if TYPE_CHECKING:
     from vllm.inputs import SingletonInputs
-    from vllm.multimodal.base import MultiModalDataDict
 
 VLLM_TOKEN_ID_ARRAY_TYPE = "l"
 
@@ -475,6 +475,15 @@ class Sequence:
         assert_never(inputs)
 
     @property
+    def multi_modal_placeholders(self) -> MultiModalPlaceholderDict:
+        inputs = self.inputs
+
+        if inputs["type"] == "token":
+            return inputs.get("multi_modal_placeholders", {})
+
+        assert_never(inputs)
+
+    @property
     def lora_int_id(self) -> int:
         return self.lora_request.lora_int_id if self.lora_request else 0
 
@@ -698,8 +707,12 @@ class SequenceGroup:
                 if self.encoder_seq is not None else None)
 
     @property
-    def multi_modal_data(self) -> "MultiModalDataDict":
+    def multi_modal_data(self) -> MultiModalDataDict:
         return self.first_seq.multi_modal_data
+
+    @property
+    def multi_modal_placeholders(self) -> MultiModalPlaceholderDict:
+        return self.first_seq.multi_modal_placeholders
 
     @property
     def mm_processor_kwargs(self) -> Dict[str, Any]:
@@ -916,6 +929,7 @@ class SequenceGroupMetadata(
     # "MultiModalDataDict" types. We have to use Any due to msgspec
     # doesn't allow to have union of 2 different dicts.
     multi_modal_data: Optional[Any] = None
+    multi_modal_placeholders: Optional[MultiModalPlaceholderDict] = None
     mm_processor_kwargs: Optional[Dict[str, Any]] = None
     encoder_seq_data: Optional[SequenceData] = None
     cross_block_table: Optional[List[int]] = None

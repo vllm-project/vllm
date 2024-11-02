@@ -29,6 +29,7 @@ __all__ = [
     "to_enc_dec_tuple_list",
     "zip_enc_dec_prompts",
     "INPUT_REGISTRY",
+    "DummyData",
     "InputContext",
     "InputRegistry",
 ]

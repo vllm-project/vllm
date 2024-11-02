@@ -4,7 +4,7 @@ from typing import (TYPE_CHECKING, Any, Dict, Generic, Iterable, List, Literal,
 from typing_extensions import NotRequired, TypedDict, TypeVar
 
 if TYPE_CHECKING:
-    from vllm.multimodal import MultiModalDataDict
+    from vllm.multimodal import MultiModalDataDict, MultiModalPlaceholderDict
 
 
 class TextPrompt(TypedDict):
@@ -140,6 +140,11 @@ class TokenInputs(TypedDict):
     if the model supports it.
     """
 
+    multi_modal_placeholders: NotRequired["MultiModalPlaceholderDict"]
+    """
+    Placeholder ranges for the multi-modal data.
+    """
+
     mm_processor_kwargs: NotRequired[Dict[str, Any]]
     """
     Optional multi-modal processor kwargs to be forwarded to the
@@ -153,6 +158,7 @@ def token_inputs(
     prompt_token_ids: List[int],
     prompt: Optional[str] = None,
     multi_modal_data: Optional["MultiModalDataDict"] = None,
+    multi_modal_placeholders: Optional["MultiModalPlaceholderDict"] = None,
     mm_processor_kwargs: Optional[Dict[str, Any]] = None,
 ) -> TokenInputs:
     """Construct :class:`TokenInputs` from optional values."""
@@ -162,6 +168,8 @@ def token_inputs(
         inputs["prompt"] = prompt
     if multi_modal_data is not None:
         inputs["multi_modal_data"] = multi_modal_data
+    if multi_modal_placeholders is not None:
+        inputs["multi_modal_placeholders"] = multi_modal_placeholders
     if mm_processor_kwargs is not None:
         inputs["mm_processor_kwargs"] = mm_processor_kwargs
 
