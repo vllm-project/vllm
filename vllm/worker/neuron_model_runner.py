@@ -7,7 +7,7 @@ import torch
 from torch import nn
 from transformers_neuronx.config import GenerationConfig
 
-from vllm.config import ModelConfig
+from vllm.config import EngineConfig
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.sampler import SamplerOutput
@@ -56,7 +56,7 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
 
     def __init__(
         self,
-        vllm_config: ModelConfig,
+        vllm_config: EngineConfig,
     ):
         ModelRunnerBase.__init__(self, vllm_config)
         model_config = self.model_config
