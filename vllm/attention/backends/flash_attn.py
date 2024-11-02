@@ -964,7 +964,6 @@ def unified_flash_attention(
     output = torch.cat([prefill_output, decode_output], dim=0)
     return output.view(num_tokens, hidden_size)
 
-
 def unified_flash_attention_fake(
     query: torch.Tensor,
     key: torch.Tensor,
