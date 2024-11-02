@@ -605,7 +605,6 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
             :class:`LlavaNextImageInputs`
         """
         if intermediate_tensors is not None:
-            input_ids = None
             inputs_embeds = None
         else:
             image_input = self._parse_and_validate_image_input(**kwargs)
@@ -617,9 +616,13 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
                     self.language_model.model.get_input_embeddings,
                     lambda _: self._process_image_input(image_input),
                 )
-                input_ids = None
             else:
-                inputs_embeds = None
+                inputs_embeds = self.language_model.model.get_input_embeddings(input_ids)
+
+        # always pass the input via `inputs_embeds`
+        # to make sure the computation graph is consistent
+        # for `torch.compile` integration
+        input_ids = None
 
         hidden_states = self.language_model.model(input_ids,
                                                   positions,
