@@ -25,7 +25,7 @@ ENV VLLM_TARGET_DEVICE="tpu"
 RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=bind,source=.git,target=.git \
     python3 -m pip install \
-        cmake>=3.26 ninja packaging setuptools-scm>=8 wheel jinja2 \
+        'cmake>=3.26' ninja packaging 'setuptools-scm>=8' wheel jinja2 \
         -r requirements-tpu.txt
 RUN python3 setup.py develop
 
