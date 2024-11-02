@@ -497,7 +497,7 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
             inputs_embeds = None
         else:
             inputs_embeds = self.language_model.model.get_input_embeddings(
-                    input_ids)
+                input_ids)
 
             image_input = self._parse_and_validate_image_input(**kwargs)
             if image_input is not None:

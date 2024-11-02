@@ -44,7 +44,8 @@ from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
 from vllm.utils import is_list_of
 
 from .interfaces import SupportsMultiModal, SupportsPP
-from .utils import AutoWeightsLoader, flatten_bn, merge_multimodal_embeddings_from_map
+from .utils import (AutoWeightsLoader, flatten_bn,
+                    merge_multimodal_embeddings_from_map)
 
 # Cannot find the following 2 numbers from hf config.
 _IMAGE_TOKEN_ID = 71011
@@ -319,7 +320,7 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             inputs_embeds = None
         else:
             inputs_embeds = self.language_model.model.get_input_embeddings(
-                    input_ids)
+                input_ids)
 
             image_input = self._parse_and_validate_image_input(**kwargs)
             if image_input is not None:
