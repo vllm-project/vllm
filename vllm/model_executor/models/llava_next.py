@@ -617,7 +617,8 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
                     lambda _: self._process_image_input(image_input),
                 )
             else:
-                inputs_embeds = self.language_model.model.get_input_embeddings(input_ids)
+                inputs_embeds = self.language_model.model.get_input_embeddings(
+                    input_ids)
 
         # always pass the input via `inputs_embeds`
         # to make sure the computation graph is consistent
