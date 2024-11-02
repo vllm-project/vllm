@@ -8,10 +8,7 @@ import oneccl_bindings_for_pytorch  # noqa: F401
 import torch
 import torch.distributed
 
-from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, ObservabilityConfig, ParallelConfig,
-                         PromptAdapterConfig, SchedulerConfig,
-                         SpeculativeConfig)
+from vllm.config import VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.logger import init_logger
@@ -19,7 +16,7 @@ from vllm.model_executor import set_random_seed
 from vllm.platforms import current_platform
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.worker import Worker
-from vllm.worker.worker_base import LoraNotSupportedWorkerBase
+from vllm.worker.worker_base import LoraNotSupportedWorkerBase, WorkerBase
 from vllm.worker.xpu_model_runner import XPUModelRunner
 
 logger = init_logger(__name__)
@@ -36,53 +33,32 @@ class XPUWorker(LoraNotSupportedWorkerBase, Worker):
 
     def __init__(
         self,
-        model_config: ModelConfig,
-        parallel_config: ParallelConfig,
-        scheduler_config: SchedulerConfig,
-        device_config: DeviceConfig,
-        cache_config: CacheConfig,
-        load_config: LoadConfig,
+        vllm_config: VllmConfig,
         local_rank: int,
         rank: int,
         distributed_init_method: str,
-        lora_config: Optional[LoRAConfig] = None,
-        speculative_config: Optional[SpeculativeConfig] = None,
-        prompt_adapter_config: Optional[PromptAdapterConfig] = None,
         is_driver_worker: bool = False,
-        observability_config: Optional[ObservabilityConfig] = None,
     ) -> None:
+        WorkerBase.__init__(self, vllm_config=vllm_config)
+        device_config = self.device_config
+        parallel_config = self.parallel_config
         assert device_config.device_type == "xpu"
         assert current_platform.is_xpu()
 
-        self.model_config = model_config
-        self.parallel_config = parallel_config
         self.parallel_config.rank = rank
-        self.scheduler_config = scheduler_config
-        self.device_config = device_config
-        self.cache_config = cache_config
-        self.load_config = load_config
+
         self.local_rank = local_rank
         self.rank = rank
         self.distributed_init_method = distributed_init_method
-        self.lora_config = lora_config
-        self.prompt_adapter_config = prompt_adapter_config
         self.is_driver_worker = is_driver_worker
-        self.observability_config = observability_config
         if parallel_config and is_driver_worker:
             assert rank % parallel_config.tensor_parallel_size == 0, \
                    "Driver worker should be rank 0 of tensor parallel group."
 
         self.model_runner = XPUModelRunner(  # type: ignore
-            model_config,
-            parallel_config,
-            scheduler_config,
-            device_config,
-            cache_config,
-            load_config=self.load_config,
-            lora_config=self.lora_config,
+            vllm_config=vllm_config,
             kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=is_driver_worker,
-            observability_config=self.observability_config,
         )
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.

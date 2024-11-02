@@ -21,7 +21,7 @@ class NGramWorker(NonLLMProposerWorkerBase):
     def __init__(self, *args, **kwargs):
         # Get local_rank/vocab_size from kwargs attribute
         self.local_rank = kwargs["local_rank"]
-        self.vocab_size = kwargs["model_config"].get_vocab_size()
+        self.vocab_size = kwargs["vllm_config"].model_config.get_vocab_size()
 
         # Lazy initialization list.
         self._proposer: Top1Proposer
