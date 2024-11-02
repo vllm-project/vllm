@@ -1,6 +1,7 @@
+from typing import List, Tuple, Type
+
 import multiprocessing
 from multiprocessing.process import BaseProcess
-from typing import List, Tuple, Type
 
 import msgspec
 import zmq
@@ -9,7 +10,6 @@ import zmq.asyncio
 from vllm.config import CacheConfig, EngineConfig
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import get_open_zmq_ipc_path
 from vllm.v1.core.scheduler import Scheduler
 from vllm.v1.engine import (POLLING_TIMEOUT_MS, EngineCoreOutput,
                             EngineCoreOutputs, EngineCoreRequest)
@@ -20,7 +20,6 @@ from vllm.version import __version__ as VLLM_VERSION
 logger = init_logger(__name__)
 
 LLM_ENGINE_CORE_READY_STR = "READY"
-
 
 class EngineCore:
 
@@ -117,12 +116,12 @@ class EngineCore:
         self.model_executor.initialize_cache(num_gpu_blocks)
         return num_gpu_blocks, num_cpu_blocks
 
-    def add_request(self, engine_core_request: EngineCoreRequest):
+    def add_request(self, request: EngineCoreRequest):
         """Add request to the scheduler."""
 
-        request = Request.from_engine_core_request(engine_core_request)
-        self.scheduler.add_request(request)
-
+        req = Request.from_engine_core_request(request)
+        self.scheduler.add_request(req)
+    
     def step(self) -> List[EngineCoreOutput]:
         """Schedule, execute, and make output."""
 
@@ -135,12 +134,8 @@ class EngineCore:
             scheduler_output, output)
         return engine_core_outputs
 
-    def check_health(self):
-        self.model_executor.check_health()
-
-
 class EngineCoreProc(EngineCore):
-    """ZMQ-based busy loop wrapper for EngineCore"""
+    """ZMQ-wrapper for running EngineCore in background process."""
 
     def __init__(
         self,
@@ -175,6 +170,35 @@ class EngineCoreProc(EngineCore):
         finally:
             if ready_socket:
                 ready_socket.close(linger=0)
+    
+    @staticmethod
+    def wait_for_startup(
+        proc: BaseProcess,
+        ready_path: str,
+    ) -> None:
+        """Wait until the EngineCore is ready."""
+
+        try:
+            sync_ctx = zmq.Context()  # type: ignore[attr-defined]
+            socket = sync_ctx.socket(zmq.constants.PULL)
+            socket.connect(ready_path)
+
+            # Poll ready socket socket until
+            while socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
+                logger.debug("Waiting for EngineCoreProc to startup.")
+
+                if not proc.is_alive():
+                    raise RuntimeError("EngineCoreProc failed to start.")
+
+            message = socket.recv_string()
+            assert message == LLM_ENGINE_CORE_READY_STR
+
+        except BaseException as e:
+            logger.exception(e)
+            raise e
+
+        finally:
+            sync_ctx.destroy(linger=0)
 
     @staticmethod
     def make_engine_core_process(
@@ -227,7 +251,7 @@ class EngineCoreProc(EngineCore):
             # Forward pass.
             outputs = self.step()
 
-            # Send outputs to the AsyncLLMEngine.
+            # Send outputs to the EngineCoreClient.
             self._send_outputs(outputs)
 
     def _handle_new_input(self):
@@ -260,125 +284,3 @@ class EngineCoreProc(EngineCore):
         self.output_socket.send_multipart((outputs_serialized, ),
                                           copy=False,
                                           flags=zmq.NOBLOCK)
-
-
-class EngineCoreClient:
-    """Client for the EngineCore."""
-
-    def __init__(
-        self,
-        vllm_config: EngineConfig,
-        executor_class: Type[GPUExecutor],
-        usage_context: UsageContext,
-        asyncio_mode: bool = True,
-    ):
-        # Serialization setup.
-        self.encoder = msgspec.msgpack.Encoder()
-        self.decoder = msgspec.msgpack.Decoder(EngineCoreOutputs)
-
-        # IPC Setup
-        self.asyncio_mode = asyncio_mode
-        self.ctx = (
-            zmq.asyncio.Context() if self.asyncio_mode else zmq.Context()
-        )  # type: ignore[attr-defined]
-
-        # Path for IPC.
-        ready_path = get_open_zmq_ipc_path()
-        output_path = get_open_zmq_ipc_path()
-        input_path = get_open_zmq_ipc_path()
-
-        # Get output (EngineCoreOutput) from EngineCore.
-        self.output_socket = self.ctx.socket(zmq.constants.PULL)
-        self.output_socket.connect(output_path)
-
-        # Send input (EngineCoreRequest) to EngineCore.
-        self.input_socket = self.ctx.socket(zmq.constants.PUSH)
-        self.input_socket.bind(input_path)
-
-        # Start EngineCore in background process.
-        self.proc = EngineCoreProc.make_engine_core_process(
-            vllm_config,
-            executor_class,
-            usage_context,
-            input_path,
-            output_path,
-            ready_path,
-        )
-        self.proc.start()
-        self.wait_for_startup(self.proc, ready_path)
-
-    def __del__(self):
-        # Hack.
-        self.proc.kill()
-
-    @staticmethod
-    def wait_for_startup(
-        proc: BaseProcess,
-        ready_path: str,
-    ) -> None:
-        """Wait until the EngineCore is ready."""
-
-        try:
-            sync_ctx = zmq.Context()  # type: ignore[attr-defined]
-            socket = sync_ctx.socket(zmq.constants.PULL)
-            socket.connect(ready_path)
-
-            # Poll ready socket socket until
-            while socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
-                logger.debug("Waiting for EngineCore to startup.")
-
-                if not proc.is_alive():
-                    raise RuntimeError("EngineCore process failed to start.")
-
-            message = socket.recv_string()
-            assert message == LLM_ENGINE_CORE_READY_STR
-
-        except BaseException as e:
-            logger.exception(e)
-            raise e
-
-        finally:
-            sync_ctx.destroy(linger=0)
-
-    def get_output(self) -> List[EngineCoreOutput]:
-        """Get EngineCoreOutput from the EngineCore (non-blocking)."""
-
-        assert not self.asyncio_mode
-
-        while self.output_socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
-            logger.debug("Waiting for output from EngineCore.")
-
-        frames = self.output_socket.recv_multipart(copy=False)
-        engine_core_outputs = self.decoder.decode(frames[0].buffer).outputs
-
-        return engine_core_outputs
-
-    async def get_output_async(self) -> List[EngineCoreOutput]:
-        """Get EngineCoreOutput from EngineCore (non-blocking) in asyncio."""
-
-        assert self.asyncio_mode
-
-        while await self.output_socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
-            logger.debug("Waiting for output from EngineCore.")
-
-        frames = await self.output_socket.recv_multipart(copy=False)
-        engine_core_outputs = self.decoder.decode(frames[0].buffer).outputs
-
-        return engine_core_outputs
-
-    def add_request(self, request: EngineCoreRequest) -> None:
-        """Add EngineCoreRequest to EngineCore (non-blocking)."""
-
-        assert not self.asyncio_mode
-
-        self.input_socket.send_multipart((self.encoder.encode(request), ),
-                                         copy=False,
-                                         flags=zmq.NOBLOCK)
-
-    async def add_request_async(self, request: EngineCoreRequest) -> None:
-        """Add EngineCoreRequest to EngineCore (non-blocking) in asyncio."""
-
-        assert self.asyncio_mode
-
-        await self.input_socket.send_multipart(
-            (self.encoder.encode(request), ), copy=False, flags=zmq.NOBLOCK)

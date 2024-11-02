@@ -7,6 +7,7 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind
 from vllm.transformers_utils.detokenizer_utils import (
     AnyTokenizer, convert_prompt_ids_to_tokens, detokenize_incrementally)
+from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.v1.engine import DetokenizerRequest, EngineCoreOutput
 from vllm.v1.engine.async_stream import AsyncStream
 
@@ -190,8 +191,10 @@ class IncrementalDetokenizer:
 
 class Detokenizer:
 
-    def __init__(self, tokenizer: AnyTokenizer, stream_mode: bool = False):
-        self.tokenizer = tokenizer
+    def __init__(self, tokenizer_name: str, stream_mode: bool = False):
+        # TODO: once we support LoRA, we should should pass the tokenizer
+        # here. We currently have two copies (this + in the LLMEngine).
+        self.tokenizer = get_tokenizer(tokenizer_name)
         self.stream_mode = stream_mode
 
         # Request id -> IncrementalDetokenizer

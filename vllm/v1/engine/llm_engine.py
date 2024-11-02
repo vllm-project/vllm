@@ -12,7 +12,7 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
-from vllm.v1.engine.core import EngineCore, EngineCoreClient
+from vllm.v1.engine.core import EngineCoreProtocol
 from vllm.v1.engine.detokenizer import Detokenizer
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.gpu_executor import GPUExecutor
@@ -32,13 +32,13 @@ class LLMEngine:
         stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
         input_registry: InputRegistry = INPUT_REGISTRY,
         use_cached_outputs: bool = False,
-        use_multiprocessing: bool = False,
-    ) -> None:
+        enable_multiprocessing: bool = True,
+    ) -> None: 
 
         # TODO: Can we avoid this?
         self.model_config = vllm_config.model_config
 
-        # Tokenizer
+        # Tokenizer.
         self.tokenizer = init_tokenizer_from_configs(
             model_config=vllm_config.model_config,
             scheduler_config=vllm_config.scheduler_config,
@@ -53,24 +53,16 @@ class LLMEngine:
                                    input_registry)
 
         # Detokenizer (converts EngineCoreOutputs --> RequestOutput)
-        self.detokenizer = Detokenizer(self.tokenizer)
+        self.detokenizer = Detokenizer(vllm_config.model_config.tokenizer)
 
-        if use_multiprocessing:
-            # EngineCore (starts the engine in the background process).
-            self.engine_core = EngineCoreClient(
-                vllm_config=vllm_config,
-                executor_class=executor_class,
-                usage_context=usage_context,
-                asyncio_mode=False,
-            )
-
-        else:
-            # EngineCore (starts the engine in the main process).
-            self.engine_core = EngineCore(
-                executor_class=executor_class,
-                vllm_config=vllm_config,
-                usage_context=usage_context,
-            )
+        # EngineCore (gets EngineCoreRequests and gives EngineCoreOutputs)
+        self.engine_core = EngineCoreProtocol.make_engine_core(
+            vllm_config,
+            executor_class,
+            usage_context,
+            asyncio_mode=False,
+            enable_multiprocessing=enable_multiprocessing,
+        )
 
     @classmethod
     def from_engine_args(
@@ -137,17 +129,17 @@ class LLMEngine:
     def abort_request(self, request_id: Union[str, Iterable[str]]) -> None:
         # TODO: send to EngineCore
         # TODO: send to Detokenizer
-        raise NotImplementedError
+        pass
 
     def step(self) -> List[RequestOutput]:
 
-        # 1) Step the EngineCore.
-        engine_core_outputs = self.engine_core.step()
+        # 1) Get EngineCoreOutput from the EngineCore.
+        engine_core_outputs = self.engine_core.get_output()
 
-        # 2) Step the Detokenizer.
+        # 2) Detokenizer the EngineCoreOutput.
         request_outputs, to_abort = self.detokenizer.step(engine_core_outputs)
 
-        # 3) Abort requests that finished due to stop criteria
+        # 3) Abort requests that finished due to stopping criteria.
         self.abort_request(to_abort)
 
         return request_outputs
