@@ -463,6 +463,9 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         ".k_proj.",
         ".v_proj.",
         ".o_proj.",
+        # phi-3 specific
+        ".gate_up_proj.",
+        ".qkv_proj.",
     ]
     # in TP, these weights are partitioned along the column dimension (dim=-1)
     column_parallel_weights_modules = [".down_proj.", ".o_proj."]
