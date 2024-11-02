@@ -1,8 +1,14 @@
 import logging
-from typing import Callable, Optional, Union
+from typing import TYPE_CHECKING, Callable, Optional, Union
 
 import vllm.envs as envs
-from vllm.compilation.config import CompilationConfig
+
+if TYPE_CHECKING:
+    from vllm.compilation.config import CompilationConfig
+    from vllm.config import VllmConfig
+else:
+    CompilationConfig = None
+    VllmConfig = None
 
 logger = logging.getLogger(__name__)
 
@@ -55,3 +61,15 @@ def set_compilation_config(config: Optional[CompilationConfig]):
 
 def get_compilation_config() -> Optional[CompilationConfig]:
     return _compilation_config
+
+
+_vllm_config: Optional[VllmConfig] = None
+
+
+def set_vllm_config(config: Optional[VllmConfig]):
+    global _vllm_config
+    _vllm_config = config
+
+
+def get_vllm_config() -> Optional[VllmConfig]:
+    return _vllm_config
