@@ -1425,10 +1425,13 @@ class ModulesToSaveWrapper(BaseLayerWithLoRA, TensorPropertiesMixin):
             dtype=self.base_layer.weight.dtype,
             device=self.device,
         )
+        for index in range(max_loras):
+            self.reset_lora(index)
 
     def reset_lora(self, index: int):
-        self._lora_tensors[index] = 0
-
+        weights=self.base_layer.weight
+        self._lora_tensors[index, :weights.shape[0], :weights.shape[1]].copy_(weights, non_blocking=True)
+        
     def set_lora(
         self,
         index: int,
