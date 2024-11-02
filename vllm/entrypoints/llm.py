@@ -981,7 +981,7 @@ class LLM:
         while self.detokenizer.has_unfinished_requests():
             engine_core_outputs = self.engine_core_client.get_output()
             outputs, to_abort = self.detokenizer.step(engine_core_outputs)
-            # TODO handle stop sting (to abort)
+            # TODO handle stop string (to abort)
             for output in outputs:
                 if output.finished:
                     request_outputs.append(output)

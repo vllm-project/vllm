@@ -1,15 +1,12 @@
 import multiprocessing
 from multiprocessing.process import BaseProcess
-from typing import List, Optional, Tuple, Type
+from typing import List, Tuple, Type
 
 import msgspec
 import zmq
 import zmq.asyncio
 
-from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig, LoadConfig,
-                         LoRAConfig, ModelConfig, ObservabilityConfig,
-                         ParallelConfig, PromptAdapterConfig, SchedulerConfig,
-                         SpeculativeConfig)
+from vllm.config import CacheConfig, EngineConfig
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import get_open_zmq_ipc_path
@@ -29,30 +26,20 @@ class EngineCore:
 
     def __init__(
         self,
+        vllm_config: EngineConfig,
         executor_class: Type[GPUExecutor],
-        model_config: ModelConfig,
-        cache_config: CacheConfig,
-        parallel_config: ParallelConfig,
-        scheduler_config: SchedulerConfig,
-        device_config: DeviceConfig,
-        load_config: LoadConfig,
-        lora_config: Optional[LoRAConfig],
-        speculative_config: Optional[SpeculativeConfig],
-        decoding_config: Optional[DecodingConfig],
-        observability_config: Optional[ObservabilityConfig],
-        prompt_adapter_config: Optional[PromptAdapterConfig],
-        usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
+        usage_context: UsageContext,
     ):
         # Override the configs for V1.
         # FIXME
         if usage_context == UsageContext.LLM_CLASS:
-            scheduler_config.max_num_seqs = 1024
-            scheduler_config.max_num_batched_tokens = 8192
+            vllm_config.scheduler_config.max_num_seqs = 1024
+            vllm_config.scheduler_config.max_num_batched_tokens = 8192
         elif usage_context == UsageContext.OPENAI_API_SERVER:
-            scheduler_config.max_num_seqs = 1024
-            scheduler_config.max_num_batched_tokens = 2048
+            vllm_config.scheduler_config.max_num_seqs = 1024
+            vllm_config.scheduler_config.max_num_batched_tokens = 2048
 
-        assert model_config.task != "embedding"
+        assert vllm_config.model_config.task != "embedding"
 
         logger.info(
             "Initializing an LLM engine (v%s) with config: "
@@ -70,47 +57,48 @@ class EngineCore:
             "seed=%d, served_model_name=%s, "
             "num_scheduler_steps=%d, enable_prefix_caching=%s, "
             "use_async_output_proc=%s, mm_processor_kwargs=%s)", VLLM_VERSION,
-            model_config.model, speculative_config, model_config.tokenizer,
-            model_config.skip_tokenizer_init, model_config.tokenizer_mode,
-            model_config.revision, model_config.override_neuron_config,
-            model_config.rope_scaling, model_config.rope_theta,
-            model_config.tokenizer_revision, model_config.trust_remote_code,
-            model_config.dtype, model_config.max_model_len,
-            load_config.download_dir, load_config.load_format,
-            parallel_config.tensor_parallel_size,
-            parallel_config.pipeline_parallel_size,
-            parallel_config.disable_custom_all_reduce,
-            model_config.quantization, model_config.enforce_eager,
-            cache_config.cache_dtype, model_config.quantization_param_path,
-            device_config.device, decoding_config, observability_config,
-            model_config.seed, model_config.served_model_name,
-            scheduler_config.num_scheduler_steps,
-            cache_config.enable_prefix_caching,
-            model_config.use_async_output_proc,
-            model_config.mm_processor_kwargs)
+            vllm_config.model_config.model, vllm_config.speculative_config,
+            vllm_config.model_config.tokenizer,
+            vllm_config.model_config.skip_tokenizer_init,
+            vllm_config.model_config.tokenizer_mode,
+            vllm_config.model_config.revision,
+            vllm_config.model_config.override_neuron_config,
+            vllm_config.model_config.rope_scaling,
+            vllm_config.model_config.rope_theta,
+            vllm_config.model_config.tokenizer_revision,
+            vllm_config.model_config.trust_remote_code,
+            vllm_config.model_config.dtype,
+            vllm_config.model_config.max_model_len,
+            vllm_config.load_config.download_dir,
+            vllm_config.load_config.load_format,
+            vllm_config.parallel_config.tensor_parallel_size,
+            vllm_config.parallel_config.pipeline_parallel_size,
+            vllm_config.parallel_config.disable_custom_all_reduce,
+            vllm_config.model_config.quantization,
+            vllm_config.model_config.enforce_eager,
+            vllm_config.cache_config.cache_dtype,
+            vllm_config.model_config.quantization_param_path,
+            vllm_config.device_config.device, vllm_config.decoding_config,
+            vllm_config.observability_config, vllm_config.model_config.seed,
+            vllm_config.model_config.served_model_name,
+            vllm_config.scheduler_config.num_scheduler_steps,
+            vllm_config.cache_config.enable_prefix_caching,
+            vllm_config.model_config.use_async_output_proc,
+            vllm_config.model_config.mm_processor_kwargs)
 
         # Setup Model.
-        self.model_executor = executor_class(
-            model_config=model_config,
-            cache_config=cache_config,
-            parallel_config=parallel_config,
-            scheduler_config=scheduler_config,
-            device_config=device_config,
-            lora_config=lora_config,
-            speculative_config=speculative_config,
-            load_config=load_config,
-            prompt_adapter_config=prompt_adapter_config,
-            observability_config=observability_config,
-        )
+        self.model_executor = executor_class(vllm_config)
 
         # Setup KV Caches and update CacheConfig after profiling.
         num_gpu_blocks, num_cpu_blocks = self._initialize_kv_caches(
-            cache_config)
-        cache_config.num_gpu_blocks = num_gpu_blocks
-        cache_config.num_cpu_blocks = num_cpu_blocks
+            vllm_config.cache_config)
+        vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
+        vllm_config.cache_config.num_cpu_blocks = num_cpu_blocks
 
         # Setup scheduler.
-        self.scheduler = Scheduler(scheduler_config, cache_config, lora_config)
+        self.scheduler = Scheduler(vllm_config.scheduler_config,
+                                   vllm_config.cache_config,
+                                   vllm_config.lora_config)
 
     def _initialize_kv_caches(self,
                               cache_config: CacheConfig) -> Tuple[int, int]:
@@ -156,13 +144,14 @@ class EngineCoreProc(EngineCore):
 
     def __init__(
         self,
-        *args,
+        vllm_config: EngineConfig,
+        executor_class: Type[GPUExecutor],
+        usage_context: UsageContext,
         input_path: str,
         output_path: str,
         ready_path: str,
-        **kwargs,
     ):
-        super().__init__(*args, **kwargs)
+        super().__init__(vllm_config, executor_class, usage_context)
 
         self.msgpack_encoder = msgspec.msgpack.Encoder()
         self.msgpack_decoder = msgspec.msgpack.Decoder(EngineCoreRequest)
@@ -188,21 +177,30 @@ class EngineCoreProc(EngineCore):
                 ready_socket.close(linger=0)
 
     @staticmethod
-    def from_config(*config_args, input_path: str, output_path: str,
-                    ready_path: str) -> BaseProcess:
+    def make_engine_core_process(
+        vllm_config: EngineConfig,
+        executor_class: Type[GPUExecutor],
+        usage_context: UsageContext,
+        input_path: str,
+        output_path: str,
+        ready_path: str,
+    ) -> BaseProcess:
         # The current process might have CUDA context,
         # so we need to spawn a new process
         # context = multiprocessing.get_context("spawn")
         context = multiprocessing.get_context("fork")
 
+        process_kwargs = {
+            "input_path": input_path,
+            "output_path": output_path,
+            "ready_path": ready_path,
+            "vllm_config": vllm_config,
+            "executor_class": executor_class,
+            "usage_context": usage_context,
+        }
         # Run EngineCore busy loop in background process.
         return context.Process(target=EngineCoreProc.run_engine_core,
-                               args=config_args,
-                               kwargs={
-                                   "input_path": input_path,
-                                   "output_path": output_path,
-                                   "ready_path": ready_path,
-                               })
+                               kwargs=process_kwargs)
 
     @staticmethod
     def run_engine_core(*args, **kwargs):
@@ -263,14 +261,16 @@ class EngineCoreProc(EngineCore):
                                           copy=False,
                                           flags=zmq.NOBLOCK)
 
+
 class EngineCoreClient:
     """Client for the EngineCore."""
 
     def __init__(
         self,
-        *args,
+        vllm_config: EngineConfig,
+        executor_class: Type[GPUExecutor],
+        usage_context: UsageContext,
         asyncio_mode: bool = True,
-        **kwargs,
     ):
         # Serialization setup.
         self.encoder = msgspec.msgpack.Encoder()
@@ -296,11 +296,13 @@ class EngineCoreClient:
         self.input_socket.bind(input_path)
 
         # Start EngineCore in background process.
-        self.proc = EngineCoreProc.from_config(
-            *args,
-            input_path=input_path,
-            output_path=output_path,
-            ready_path=ready_path,
+        self.proc = EngineCoreProc.make_engine_core_process(
+            vllm_config,
+            executor_class,
+            usage_context,
+            input_path,
+            output_path,
+            ready_path,
         )
         self.proc.start()
         self.wait_for_startup(self.proc, ready_path)
@@ -326,8 +328,7 @@ class EngineCoreClient:
                 logger.debug("Waiting for EngineCore to startup.")
 
                 if not proc.is_alive():
-                    raise RuntimeError(
-                        "EngineCore process failed to start.")
+                    raise RuntimeError("EngineCore process failed to start.")
 
             message = socket.recv_string()
             assert message == LLM_ENGINE_CORE_READY_STR
@@ -339,19 +340,6 @@ class EngineCoreClient:
         finally:
             sync_ctx.destroy(linger=0)
 
-    async def get_output_async(self) -> List[EngineCoreOutput]:
-        """Get EngineCoreOutput from the EngineCore (non-blocking) in asyncio."""
-
-        assert self.asyncio_mode
-
-        while await self.output_socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
-            logger.debug("Waiting for output from EngineCore.")
-
-        frames = await self.output_socket.recv_multipart(copy=False)
-        engine_core_outputs = self.decoder.decode(frames[0].buffer).outputs
-        
-        return engine_core_outputs
-
     def get_output(self) -> List[EngineCoreOutput]:
         """Get EngineCoreOutput from the EngineCore (non-blocking)."""
 
@@ -362,25 +350,35 @@ class EngineCoreClient:
 
         frames = self.output_socket.recv_multipart(copy=False)
         engine_core_outputs = self.decoder.decode(frames[0].buffer).outputs
-        
+
         return engine_core_outputs
-    
-    async def add_request_async(self, request: EngineCoreRequest) -> None:
-        """Add EngineCoreRequest to the EngineCore (non-blocking) in asyncio."""
-        
+
+    async def get_output_async(self) -> List[EngineCoreOutput]:
+        """Get EngineCoreOutput from EngineCore (non-blocking) in asyncio."""
+
         assert self.asyncio_mode
 
-        await self.input_socket.send_multipart(
-            (self.encoder.encode(request), ),
-            copy=False,
-            flags=zmq.NOBLOCK)
-    
+        while await self.output_socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
+            logger.debug("Waiting for output from EngineCore.")
+
+        frames = await self.output_socket.recv_multipart(copy=False)
+        engine_core_outputs = self.decoder.decode(frames[0].buffer).outputs
+
+        return engine_core_outputs
+
     def add_request(self, request: EngineCoreRequest) -> None:
-        """Add EngineCoreRequest to the EngineCore (non-blocking)."""
+        """Add EngineCoreRequest to EngineCore (non-blocking)."""
 
         assert not self.asyncio_mode
 
-        self.input_socket.send_multipart(
-            (self.encoder.encode(request), ),
-            copy=False,
-            flags=zmq.NOBLOCK)
+        self.input_socket.send_multipart((self.encoder.encode(request), ),
+                                         copy=False,
+                                         flags=zmq.NOBLOCK)
+
+    async def add_request_async(self, request: EngineCoreRequest) -> None:
+        """Add EngineCoreRequest to EngineCore (non-blocking) in asyncio."""
+
+        assert self.asyncio_mode
+
+        await self.input_socket.send_multipart(
+            (self.encoder.encode(request), ), copy=False, flags=zmq.NOBLOCK)

@@ -1,8 +1,7 @@
 import time
 from typing import Any, Dict, Mapping, Optional, Tuple, Union
 
-from vllm.config import (LoRAConfig, ModelConfig, ParallelConfig,
-                         SchedulerConfig)
+from vllm.config import LoRAConfig, ModelConfig
 from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs,
                          EncoderDecoderLLMInputs, InputRegistry, PromptType)
 from vllm.inputs.preprocess import InputPreprocessor

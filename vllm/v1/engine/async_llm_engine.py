@@ -1,11 +1,7 @@
 import asyncio
 from typing import AsyncGenerator, Dict, Mapping, Optional, Type, Union
 
-from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
-                         EngineConfig, LoadConfig, LoRAConfig, ModelConfig,
-                         ObservabilityConfig, ParallelConfig,
-                         PromptAdapterConfig, SchedulerConfig,
-                         SpeculativeConfig)
+from vllm.config import EngineConfig, ModelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.metrics_types import StatLoggerBase
 from vllm.inputs import INPUT_REGISTRY, InputRegistry, PromptType
@@ -30,17 +26,7 @@ class AsyncLLMEngine:
 
     def __init__(
         self,
-        model_config: ModelConfig,
-        cache_config: CacheConfig,
-        parallel_config: ParallelConfig,
-        scheduler_config: SchedulerConfig,
-        device_config: DeviceConfig,
-        load_config: LoadConfig,
-        lora_config: Optional[LoRAConfig],
-        speculative_config: Optional[SpeculativeConfig],
-        decoding_config: Optional[DecodingConfig],
-        observability_config: Optional[ObservabilityConfig],
-        prompt_adapter_config: Optional[PromptAdapterConfig],
+        vllm_config: EngineConfig,
         executor_class: Type[GPUExecutor],
         log_stats: bool,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
@@ -55,34 +41,24 @@ class AsyncLLMEngine:
         self.log_requests = log_requests
         self.log_stats = log_stats
         self.stat_loggers = stat_loggers
-        self.model_config = model_config
+        self.model_config = vllm_config.model_config
         self.errored = False
 
         # Processor (converts Inputs --> EngineCoreRequests)
-        self.processor = Processor(model_config, parallel_config,
-                                   scheduler_config, lora_config,
+        self.processor = Processor(vllm_config.model_config,
+                                   vllm_config.lora_config, self.tokenizer,
                                    input_registry)
 
         # Detokenizer (converts EngineCoreOutputs --> RequestOutput)
-        self.detokenizer = Detokenizer(model_config.tokenizer,
+        self.detokenizer = Detokenizer(vllm_config.model_config.tokenizer,
                                        stream_mode=True)
 
         # EngineCore (starts the engine in background process).
         self.engine_core_client = EngineCoreClient(
-            executor_class,
-            model_config,
-            cache_config,
-            parallel_config,
-            scheduler_config,
-            device_config,
-            load_config,
-            lora_config,
-            speculative_config,
-            decoding_config,
-            observability_config,
-            prompt_adapter_config,
-            usage_context,
-        )
+            vllm_config=vllm_config,
+            executor_class=executor_class,
+            usage_context=usage_context,
+            asyncio_mode=True)
 
         # TODO: add background loop shielding
         # TODO: add AsyncEngineDeadError
@@ -205,7 +181,7 @@ class AsyncLLMEngine:
         except BaseException as e:
             logger.error(e)
 
-    # TODO: can we elminate these (used by OpenAI server)
+    # TODO: can we eliminate these (used by OpenAI server)
 
     async def get_model_config(self) -> ModelConfig:
         """Gets the model configuration."""

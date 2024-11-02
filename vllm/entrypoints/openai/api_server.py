@@ -63,7 +63,6 @@ if envs.VLLM_USE_V1:
 else:
     from vllm.engine.async_llm_engine import AsyncLLMEngine
 
-
 TIMEOUT_KEEP_ALIVE = 5  # seconds
 
 prometheus_multiproc_dir: tempfile.TemporaryDirectory
@@ -130,16 +129,11 @@ async def build_async_engine_client_from_engine_args(
     # TODO: fill out feature matrix.
     if (MQLLMEngineClient.is_unsupported_config(engine_args)
             or disable_frontend_multiprocessing):
-        engine_config = engine_args.create_engine_config()
-        uses_ray = getattr(AsyncLLMEngine._get_executor_cls(engine_config),
-                           "uses_ray", False)
 
-        engine_client = AsyncLLMEngine.from_engine_args(
+        yield AsyncLLMEngine.from_engine_args(
             engine_args=engine_args,
-            engine_config=engine_config,
             usage_context=UsageContext.OPENAI_API_SERVER)
 
-        yield engine_client
         return
 
     # Otherwise, use the multiprocessing AsyncLLMEngine.

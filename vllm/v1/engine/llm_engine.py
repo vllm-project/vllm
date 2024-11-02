@@ -1,7 +1,6 @@
 from typing import Dict, Iterable, List, Mapping, Optional, Type, Union
 
-from vllm.config import (DecodingConfig, EngineConfig, LoRAConfig, ModelConfig,
-                         ObservabilityConfig, ParallelConfig, SchedulerConfig)
+from vllm.config import EngineConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics_types import StatLoggerBase
 from vllm.inputs import INPUT_REGISTRY, InputRegistry, PromptType
@@ -35,7 +34,7 @@ class LLMEngine:
         use_cached_outputs: bool = False,
         use_multiprocessing: bool = False,
     ) -> None:
-        
+
         # TODO: Can we avoid this?
         self.model_config = vllm_config.model_config
 
@@ -50,14 +49,14 @@ class LLMEngine:
 
         # Processor (convert Inputs --> EngineCoreRequests)
         self.processor = Processor(vllm_config.model_config,
-                                   vllm_config.lora_config,
-                                   self.tokenizer,
+                                   vllm_config.lora_config, self.tokenizer,
                                    input_registry)
 
         # Detokenizer (converts EngineCoreOutputs --> RequestOutput)
         self.detokenizer = Detokenizer(self.tokenizer)
 
         if use_multiprocessing:
+            # EngineCore (starts the engine in the background process).
             self.engine_core = EngineCoreClient(
                 vllm_config=vllm_config,
                 executor_class=executor_class,
@@ -66,7 +65,7 @@ class LLMEngine:
             )
 
         else:
-            # EngineCore
+            # EngineCore (starts the engine in the main process).
             self.engine_core = EngineCore(
                 executor_class=executor_class,
                 vllm_config=vllm_config,
@@ -81,6 +80,7 @@ class LLMEngine:
         stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
     ) -> "LLMEngine":
         """Creates an LLM engine from the engine arguments."""
+
         # Create the engine configs.
         engine_config = engine_args.create_engine_config()
         executor_class = cls._get_executor_cls(engine_config)

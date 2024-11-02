@@ -7,7 +7,6 @@ from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind
 from vllm.transformers_utils.detokenizer_utils import (
     AnyTokenizer, convert_prompt_ids_to_tokens, detokenize_incrementally)
-from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.v1.engine import DetokenizerRequest, EngineCoreOutput
 from vllm.v1.engine.async_stream import AsyncStream
 
