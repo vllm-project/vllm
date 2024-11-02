@@ -31,7 +31,7 @@ RUN --mount=type=bind,source=.git,target=.git \
     if [ "$GIT_REPO_CHECK" != 0 ]; then bash tools/check_repo.sh ; fi
 
 RUN python3 -m pip install -U \
-        cmake>=3.26 ninja packaging setuptools-scm>=8 wheel jinja2 \
+        'cmake>=3.26' ninja packaging 'setuptools-scm>=8' wheel jinja2 \
         -r requirements-neuron.txt
 
 ENV VLLM_TARGET_DEVICE neuron
