@@ -75,15 +75,15 @@ class LLMEngine:
         """Creates an LLM engine from the engine arguments."""
 
         # Create the engine configs.
-        engine_config = engine_args.create_engine_config()
-        executor_class = cls._get_executor_cls(engine_config)
+        vllm_config = engine_args.create_engine_config()
+        executor_class = cls._get_executor_cls(vllm_config)
 
         if VLLM_DISABLE_V1_MULTIPROCESSING:
             logger.debug("Disabling multiprocessing for LLMEngine.")
             enable_multiprocessing = False
 
         # Create the LLMEngine.
-        return cls(vllm_config=engine_config,
+        return cls(vllm_config=vllm_config,
                    executor_class=executor_class,
                    log_stats=not engine_args.disable_log_stats,
                    usage_context=usage_context,

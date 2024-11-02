@@ -245,7 +245,7 @@ class EngineCoreProc(EngineCore):
             # Poll the input socket until there is work to do.
             if not self.scheduler.has_unfinished_requests():
                 while self.input_socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
-                    logger.debug("Waiting for new requests from LLMEngine.")
+                    logger.debug("Waiting for new requests.")
 
             # Handle new input from the socket.
             self._handle_new_input()

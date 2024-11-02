@@ -14,6 +14,7 @@ logger = init_logger(__name__)
 
 
 class EngineCoreClient:
+    """Interface between AsyncLLMEngine/LLMEngine and EngineCore."""
 
     def __init__(
         self,
@@ -37,7 +38,7 @@ class EngineCoreClient:
     async def get_output_async(self) -> List[EngineCoreOutput]:
         """Get EngineCoreOutput from EngineCore in asyncio."""
 
-        await self.client.get_output_async()
+        return await self.client.get_output_async()
 
     def add_request(self, request: EngineCoreRequest) -> None:
         """Add EngineCoreRequest to EngineCore."""
