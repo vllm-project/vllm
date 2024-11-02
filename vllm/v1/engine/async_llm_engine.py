@@ -1,6 +1,5 @@
 import asyncio
-from typing import (Any, AsyncGenerator, Callable, Dict, Mapping, Optional,
-                    Type, Union)
+from typing import AsyncGenerator, Dict, Mapping, Optional, Type, Union
 
 from vllm.config import EngineConfig, ModelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -14,6 +13,7 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.usage.usage_lib import UsageContext
+from vllm.v1.engine.async_stream import AsyncStream
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.detokenizer import Detokenizer
 from vllm.v1.engine.processor import Processor
@@ -214,55 +214,3 @@ class AsyncLLM:
 
 # Retain V0 name for backwards compatibility.
 AsyncLLMEngine = AsyncLLM
-
-
-class AsyncStream:
-    """A stream of RequestOutputs or EmbeddingRequestOutputs for a request
-    that can be iterated over asynchronously via an async generator."""
-
-    STOP_ITERATION = Exception()  # Sentinel
-
-    def __init__(self, request_id: str, cancel: Callable[[str], None]) -> None:
-        self.request_id = request_id
-        self._cancel = cancel
-        self._queue: asyncio.Queue = asyncio.Queue()
-        self._finished = False
-
-    def put(self, item: Union[RequestOutput, EmbeddingRequestOutput,
-                              Exception]) -> None:
-        if not self._finished:
-            self._queue.put_nowait(item)
-
-    def finish(
-        self,
-        exception: Optional[Union[BaseException, Type[BaseException]]] = None,
-    ) -> None:
-        if not self._finished:
-            self._finished = True
-            self._queue.put_nowait(exception if self._is_raisable(exception)
-                                   else AsyncStream.STOP_ITERATION)
-
-    @property
-    def finished(self) -> bool:
-        return self._finished
-
-    async def generator(
-        self
-    ) -> AsyncGenerator[Union[RequestOutput, EmbeddingRequestOutput], None]:
-        try:
-            while True:
-                result = await self._queue.get()
-                if self._is_raisable(result):
-                    if result == AsyncStream.STOP_ITERATION:
-                        return
-                    raise result
-                yield result
-        except GeneratorExit:
-            self._cancel(self.request_id)
-            raise asyncio.CancelledError from None
-
-    @staticmethod
-    def _is_raisable(value: Any):
-        return isinstance(value, BaseException) or \
-                (isinstance(value, type) and \
-                 issubclass(value, BaseException))

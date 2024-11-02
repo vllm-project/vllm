@@ -33,7 +33,7 @@ class LLMEngine:
         stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
         input_registry: InputRegistry = INPUT_REGISTRY,
         use_cached_outputs: bool = False,
-        enable_multiprocessing: bool = False,
+        multiprocess_mode: bool = False,
     ) -> None:
 
         # TODO: Can we avoid this?
@@ -60,7 +60,7 @@ class LLMEngine:
             vllm_config,
             executor_class,
             usage_context,
-            multiprocess_mode=enable_multiprocessing,
+            multiprocess_mode=multiprocess_mode,
             asyncio_mode=False,
         )
 
@@ -83,7 +83,7 @@ class LLMEngine:
                    log_stats=not engine_args.disable_log_stats,
                    usage_context=usage_context,
                    stat_loggers=stat_loggers,
-                   enable_multiprocessing=VLLM_V1_MULTIPROCESSING)
+                   multiprocess_mode=VLLM_V1_MULTIPROCESSING)
 
     @classmethod
     def _get_executor_cls(cls, engine_config: EngineConfig):
