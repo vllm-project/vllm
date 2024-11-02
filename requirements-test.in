@@ -27,6 +27,6 @@ lm-eval[api]==0.4.4 # required for model evaluation test
 
 # quantization
 bitsandbytes>=0.44.0
-buildkite-test-collector==0.1.8
+buildkite-test-collector==0.1.9
 
 numpy < 2.0.0

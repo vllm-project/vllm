@@ -1,4 +1,3 @@
-import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
 import requests
@@ -55,9 +54,11 @@ async def client(server):
     [(MODEL_NAME, MODEL_NAME), ("zephyr-lora2", "zephyr-lora2")],
     indirect=["tokenizer_name"],
 )
-async def test_tokenize_completions(client: openai.AsyncOpenAI,
-                                    model_name: str, tokenizer_name: str):
-    base_url = str(client.base_url)[:-3].strip("/")
+async def test_tokenize_completions(
+    server: RemoteOpenAIServer,
+    model_name: str,
+    tokenizer_name: str,
+):
     tokenizer = get_tokenizer(tokenizer_name=tokenizer_name,
                               tokenizer_mode="fast")
 
@@ -65,7 +66,7 @@ async def test_tokenize_completions(client: openai.AsyncOpenAI,
         prompt = "vllm1 This is a test prompt."
         tokens = tokenizer.encode(prompt, add_special_tokens=add_special)
 
-        response = requests.post(base_url + "/tokenize",
+        response = requests.post(server.url_for("tokenize"),
                                  json={
                                      "add_special_tokens": add_special,
                                      "model": model_name,
@@ -86,9 +87,11 @@ async def test_tokenize_completions(client: openai.AsyncOpenAI,
     [(MODEL_NAME, MODEL_NAME), ("zephyr-lora2", "zephyr-lora2")],
     indirect=["tokenizer_name"],
 )
-async def test_tokenize_chat(client: openai.AsyncOpenAI, model_name: str,
-                             tokenizer_name: str):
-    base_url = str(client.base_url)[:-3].strip("/")
+async def test_tokenize_chat(
+    server: RemoteOpenAIServer,
+    model_name: str,
+    tokenizer_name: str,
+):
     tokenizer = get_tokenizer(tokenizer_name=tokenizer_name,
                               tokenizer_mode="fast")
 
@@ -121,7 +124,7 @@ async def test_tokenize_chat(client: openai.AsyncOpenAI, model_name: str,
                 tokens = tokenizer.encode(prompt,
                                           add_special_tokens=add_special)
 
-                response = requests.post(base_url + "/tokenize",
+                response = requests.post(server.url_for("tokenize"),
                                          json={
                                              "add_generation_prompt":
                                              add_generation,
@@ -146,17 +149,18 @@ async def test_tokenize_chat(client: openai.AsyncOpenAI, model_name: str,
     [(MODEL_NAME, MODEL_NAME), ("zephyr-lora2", "zephyr-lora2")],
     indirect=["tokenizer_name"],
 )
-async def test_detokenize(client: openai.AsyncOpenAI, model_name: str,
-                          tokenizer_name: str):
-    base_url = str(client.base_url)[:-3].strip("/")
+async def test_detokenize(
+    server: RemoteOpenAIServer,
+    model_name: str,
+    tokenizer_name: str,
+):
     tokenizer = get_tokenizer(tokenizer_name=tokenizer_name,
                               tokenizer_mode="fast")
 
     prompt = "This is a test prompt. vllm1"
     tokens = tokenizer.encode(prompt, add_special_tokens=False)
 
-    print(f"CALLING {base_url} FOR {model_name}")
-    response = requests.post(base_url + "/detokenize",
+    response = requests.post(server.url_for("detokenize"),
                              json={
                                  "model": model_name,
                                  "tokens": tokens
