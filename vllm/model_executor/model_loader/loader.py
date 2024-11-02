@@ -150,6 +150,7 @@ def _get_model_initialization_kwargs(
 
 
 def build_model(model_class: Type[nn.Module],
+                vllm_config: VllmConfig,
                 hf_config: PretrainedConfig,
                 cache_config: Optional[CacheConfig],
                 quant_config: Optional[QuantizationConfig],
@@ -165,6 +166,8 @@ def build_model(model_class: Type[nn.Module],
                                                     pooler_config)
     if prefix:
         extra_kwargs["prefix"] = prefix
+
+    extra_kwargs["vllm_config"] = vllm_config
 
     return model_class(config=hf_config,
                        cache_config=cache_config,
@@ -183,6 +186,7 @@ def _initialize_model(vllm_config: VllmConfig) -> nn.Module:
 
     return build_model(
         model_class,
+        vllm_config,
         model_config.hf_config,
         cache_config=cache_config,
         quant_config=_get_quantization_config(model_config, load_config),
