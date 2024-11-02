@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple, Type
 
 import torch
 
-from vllm.config import ParallelConfig, SpeculativeConfig
+from vllm.config import ParallelConfig, SpeculativeConfig, VllmConfig
 from vllm.distributed.communication_op import broadcast_tensor_dict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.rejection_sampler import RejectionSampler
@@ -45,8 +45,8 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
     """Helper method that is the entrypoint for Executors which use
     WorkerWrapper. It constructs a SpecDecodeWorker from the speculative config.
     """
-    assert "speculative_config" in kwargs
-    speculative_config: SpeculativeConfig = kwargs.get("speculative_config")
+    vllm_config: VllmConfig = kwargs.get("vllm_config")
+    speculative_config: SpeculativeConfig = vllm_config.speculative_config
     assert speculative_config is not None
 
     draft_worker_kwargs = kwargs.copy()
@@ -58,10 +58,14 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
     target_worker.model_runner.disable_logprobs =\
          speculative_config.disable_logprobs
 
-    # Override draft-model specific worker args.
-    draft_worker_kwargs.update(
+    draft_worker_config = VllmConfig(
         model_config=speculative_config.draft_model_config,
         parallel_config=speculative_config.draft_parallel_config,
+    )
+
+    # Override draft-model specific worker args.
+    draft_worker_kwargs.update(
+        vllm_config=draft_worker_config,
         ngram_prompt_lookup_max=speculative_config.ngram_prompt_lookup_max,
         ngram_prompt_lookup_min=speculative_config.ngram_prompt_lookup_min,
         # TODO allow draft-model specific load config.
