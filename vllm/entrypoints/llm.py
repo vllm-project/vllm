@@ -210,9 +210,6 @@ class LLM:
             self.llm_engine = LLMEngine.from_engine_args(
                 engine_args, usage_context=UsageContext.LLM_CLASS)
 
-        self.task = self.llm_engine.model_config.task
-        self.supported_tasks = self.llm_engine.model_config.task
-
         self.request_counter = Counter()
 
     def get_tokenizer(self) -> AnyTokenizer:
@@ -353,14 +350,14 @@ class LLM:
             considered legacy and may be deprecated in the future. You should
             instead pass them via the ``inputs`` parameter.
         """
-        task = self.task
+        task = self.llm_engine.model_config.task
         if task != "generate":
             messages = [
                 "LLM.generate() is only supported for (conditional) generation "
                 "models (XForCausalLM, XForConditionalGeneration).",
             ]
 
-            supported_tasks = self.supported_tasks
+            supported_tasks = self.llm_engine.model_config.supported_tasks
             if "generate" in supported_tasks:
                 messages.append(
                     "Your model supports the 'generate' task, but is "
@@ -740,11 +737,11 @@ class LLM:
             considered legacy and may be deprecated in the future. You should
             instead pass them via the ``inputs`` parameter.
         """
-        task = self.task
+        task = self.llm_engine.model_config.task
         if task != "embedding":
             messages = ["LLM.encode() is only supported for embedding models."]
 
-            supported_tasks = self.supported_tasks
+            supported_tasks = self.llm_engine.model_config.supported_tasks
             if "embedding" in supported_tasks:
                 messages.append(
                     "Your model supports the 'embedding' task, but is "
@@ -884,7 +881,6 @@ class LLM:
         priority: int = 0,
     ) -> None:
         request_id = str(next(self.request_counter))
-
         self.llm_engine.add_request(
             request_id,
             prompt,
@@ -918,7 +914,6 @@ class LLM:
     def _run_engine(
             self, *, use_tqdm: bool
     ) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
-
         # Initialize tqdm.
         if use_tqdm:
             num_requests = self.llm_engine.get_num_unfinished_requests()
