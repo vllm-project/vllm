@@ -26,9 +26,6 @@ class Processor:
 
         self.model_config = model_config
         self.lora_config = lora_config
-
-        assert not model_config.skip_tokenizer_init
-
         self.tokenizer = tokenizer
 
         self.generation_config_fields = _load_generation_config_dict(

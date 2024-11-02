@@ -14,7 +14,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_stream import AsyncStream
-from vllm.v1.engine.core import EngineCoreClient
+from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.detokenizer import Detokenizer
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.gpu_executor import GPUExecutor
@@ -58,11 +58,14 @@ class AsyncLLMEngine:
             vllm_config=vllm_config,
             executor_class=executor_class,
             usage_context=usage_context,
-            asyncio_mode=True)
+            multiprocess_mode=True,
+            asyncio_mode=True,
+        )
 
         # TODO: add background loop shielding
         # TODO: add AsyncEngineDeadError
-        self.output_handler = asyncio.create_task(self.run_output_handler())
+
+        self.is_output_handler_running = False
 
     @classmethod
     def from_engine_args(
@@ -92,6 +95,10 @@ class AsyncLLMEngine:
             stat_loggers=stat_loggers,
         )
         return engine
+
+    @classmethod
+    def _get_executor_cls(cls, engine_config: EngineConfig):
+        return GPUExecutor
 
     async def add_request(
         self,
@@ -149,6 +156,14 @@ class AsyncLLMEngine:
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
         priority: int = 0,
     ) -> AsyncGenerator[RequestOutput, None]:
+
+        # We start the output_handler on the first call to generate() so that
+        # we can call __init__ before the event loop starts, which enables us
+        # to handle startup failure gracefully in the OpenAI server.
+        if not self.is_output_handler_running:
+            self.output_handler = asyncio.create_task(
+                self.run_output_handler())
+            self.is_output_handler_running = True
 
         async for output in await self.add_request(
                 request_id,

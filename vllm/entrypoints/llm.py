@@ -1,5 +1,4 @@
 import itertools
-import time
 import warnings
 from contextlib import contextmanager
 from typing import (Any, ClassVar, Dict, List, Optional, Sequence, Tuple,
@@ -15,7 +14,7 @@ from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          apply_hf_chat_template,
                                          apply_mistral_chat_template,
                                          parse_chat_messages)
-from vllm.inputs import INPUT_REGISTRY, PromptType, TextPrompt, TokensPrompt
+from vllm.inputs import PromptType, TextPrompt, TokensPrompt
 from vllm.inputs.parse import parse_and_batch_prompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest

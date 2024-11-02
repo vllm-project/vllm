@@ -1,7 +1,6 @@
-from typing import List, Tuple, Type
-
 import multiprocessing
 from multiprocessing.process import BaseProcess
+from typing import List, Tuple, Type
 
 import msgspec
 import zmq
@@ -19,9 +18,9 @@ from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
 
-LLM_ENGINE_CORE_READY_STR = "READY"
 
 class EngineCore:
+    """Inner loop of vLLM's Engine."""
 
     def __init__(
         self,
@@ -121,7 +120,7 @@ class EngineCore:
 
         req = Request.from_engine_core_request(request)
         self.scheduler.add_request(req)
-    
+
     def step(self) -> List[EngineCoreOutput]:
         """Schedule, execute, and make output."""
 
@@ -134,8 +133,11 @@ class EngineCore:
             scheduler_output, output)
         return engine_core_outputs
 
+
 class EngineCoreProc(EngineCore):
     """ZMQ-wrapper for running EngineCore in background process."""
+
+    READY_STR = "READY"
 
     def __init__(
         self,
@@ -166,11 +168,11 @@ class EngineCoreProc(EngineCore):
         try:
             ready_socket = self.ctx.socket(zmq.constants.PUSH)
             ready_socket.bind(ready_path)
-            ready_socket.send_string(LLM_ENGINE_CORE_READY_STR)
+            ready_socket.send_string(EngineCoreProc.READY_STR)
         finally:
             if ready_socket:
                 ready_socket.close(linger=0)
-    
+
     @staticmethod
     def wait_for_startup(
         proc: BaseProcess,
@@ -191,7 +193,7 @@ class EngineCoreProc(EngineCore):
                     raise RuntimeError("EngineCoreProc failed to start.")
 
             message = socket.recv_string()
-            assert message == LLM_ENGINE_CORE_READY_STR
+            assert message == EngineCoreProc.READY_STR
 
         except BaseException as e:
             logger.exception(e)

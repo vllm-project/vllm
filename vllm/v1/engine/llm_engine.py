@@ -33,7 +33,7 @@ class LLMEngine:
         input_registry: InputRegistry = INPUT_REGISTRY,
         use_cached_outputs: bool = False,
         enable_multiprocessing: bool = True,
-    ) -> None: 
+    ) -> None:
 
         # TODO: Can we avoid this?
         self.model_config = vllm_config.model_config
