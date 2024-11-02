@@ -160,13 +160,13 @@ Text Generation
     -
     - ✅︎
   * - :code:`GraniteForCausalLM`
-    - PowerLM
-    - :code:`ibm/PowerLM-3b` etc.
+    - Granite 3.0, PowerLM
+    - :code:`ibm-granite/granite-3.0-2b-base`, :code:`ibm-granite/granite-3.0-8b-instruct`, :code:`ibm/PowerLM-3b`, etc.
     - ✅︎
     - ✅︎
   * - :code:`GraniteMoeForCausalLM`
-    - PowerMoE
-    - :code:`ibm/PowerMoE-3b` etc.
+    - Granite 3.0 MoE, PowerMoE
+    - :code:`ibm-granite/granite-3.0-1b-a400m-base`, :code:`ibm-granite/granite-3.0-3b-a800m-instruct`, :code:`ibm/PowerMoE-3b`, etc.
     - ✅︎
     - ✅︎
   * - :code:`InternLMForCausalLM`
