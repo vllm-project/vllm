@@ -1,6 +1,6 @@
 import enum
 import json
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field
 from typing import (TYPE_CHECKING, Any, ClassVar, Dict, Final, List, Literal,
                     Mapping, Optional, Set, Tuple, Type, Union)
 
@@ -1943,7 +1943,7 @@ class ObservabilityConfig:
 
 @dataclass(frozen=True)
 class VllmConfig:
-    """Dataclass which contains all engine-related configuration. This
+    """Dataclass which contains all vllm-related configuration. This
     simplifies passing around the distinct configurations in the codebase.
     """
 
@@ -1975,9 +1975,3 @@ class VllmConfig:
         if self.prompt_adapter_config:
             self.prompt_adapter_config.verify_with_model_config(
                 self.model_config)
-
-    def to_dict(self):
-        """Return the configs as a dictionary, for use in **kwargs.
-        """
-        return dict(
-            (field.name, getattr(self, field.name)) for field in fields(self))
