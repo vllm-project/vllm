@@ -1,3 +1,4 @@
+import copy
 from collections import defaultdict
 from functools import cached_property
 from typing import Any, Dict, List, Optional, Set, Tuple, Type
@@ -58,18 +59,18 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
     target_worker.model_runner.disable_logprobs =\
          speculative_config.disable_logprobs
 
-    draft_worker_config = VllmConfig(
-        model_config=speculative_config.draft_model_config,
-        parallel_config=speculative_config.draft_parallel_config,
-    )
+    draft_worker_config = copy.deepcopy(vllm_config)
+    draft_worker_config.model_config = speculative_config.draft_model_config
+    draft_worker_config.parallel_config = speculative_config.draft_parallel_config  # noqa
+    # TODO allow draft-model specific load config.
+    #load_config=load_config,
+    draft_worker_config.load_config = None
 
     # Override draft-model specific worker args.
     draft_worker_kwargs.update(
         vllm_config=draft_worker_config,
         ngram_prompt_lookup_max=speculative_config.ngram_prompt_lookup_max,
         ngram_prompt_lookup_min=speculative_config.ngram_prompt_lookup_min,
-        # TODO allow draft-model specific load config.
-        #load_config=load_config,
     )
 
     spec_decode_worker = SpecDecodeWorker.create_worker(
