@@ -6,15 +6,24 @@ from PIL import Image
 
 from vllm.assets.image import ImageAsset
 from vllm.config import ModelConfig
-from vllm.entrypoints.chat_utils import (parse_chat_messages,
-                                         parse_chat_messages_futures)
+from vllm.entrypoints.chat_utils import (load_chat_template,
+                                         parse_chat_messages,
+                                         parse_chat_messages_futures,
+                                         resolve_chat_template_content_format)
 from vllm.entrypoints.llm import apply_hf_chat_template
 from vllm.multimodal import MultiModalDataDict
 from vllm.multimodal.utils import encode_image_base64
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 
+from ..utils import VLLM_PATH
+
+EXAMPLES_DIR = VLLM_PATH / "examples"
+
 PHI3V_MODEL_ID = "microsoft/Phi-3.5-vision-instruct"
+ULTRAVOX_MODEL_ID = "fixie-ai/ultravox-v0_3"
+QWEN2VL_MODEL_ID = "Qwen/Qwen2-VL-2B-Instruct"
 MLLAMA_MODEL_ID = "meta-llama/Llama-3.2-11B-Vision-Instruct"
+LLAMA_GUARD_MODEL_ID = "meta-llama/Llama-Guard-3-1B"
 
 
 @pytest.fixture(scope="function")
@@ -702,3 +711,73 @@ def test_multimodal_image_parsing_matches_hf(model, image_url):
     )
 
     assert hf_result == vllm_result
+
+
+# yapf: disable
+@pytest.mark.parametrize(
+    ("model", "expected_format"),
+    [(PHI3V_MODEL_ID, "string"),
+     (QWEN2VL_MODEL_ID, "openai"),
+     (ULTRAVOX_MODEL_ID, "string"),
+     (MLLAMA_MODEL_ID, "openai"),
+     (LLAMA_GUARD_MODEL_ID, "openai")],
+)
+# yapf: enable
+def test_resolve_content_format_hf_defined(model, expected_format):
+    tokenizer_group = TokenizerGroup(
+        model,
+        enable_lora=False,
+        max_num_seqs=5,
+        max_input_length=None,
+    )
+    tokenizer = tokenizer_group.tokenizer
+
+    resolved_format = resolve_chat_template_content_format(
+        tokenizer.chat_template,
+        "auto",
+        tokenizer,
+    )
+
+    assert resolved_format == expected_format
+
+
+# yapf: disable
+@pytest.mark.parametrize(
+    ("template_path", "expected_format"),
+    [("template_alpaca.jinja", "string"),
+     ("template_baichuan.jinja", "string"),
+     ("template_blip2.jinja", "string"),
+     ("template_chatglm.jinja", "string"),
+     ("template_chatglm2.jinja", "string"),
+     ("template_chatml.jinja", "string"),
+     ("template_falcon_180b.jinja", "string"),
+     ("template_falcon.jinja", "string"),
+     ("template_inkbot.jinja", "string"),
+     ("template_llava.jinja", "string"),
+     ("template_vlm2vec.jinja", "openai"),
+     ("tool_chat_template_granite_20b_fc.jinja", "string"),
+     ("tool_chat_template_hermes.jinja", "string"),
+     ("tool_chat_template_internlm2_tool.jinja", "string"),
+     ("tool_chat_template_llama3.1_json.jinja", "string"),
+     ("tool_chat_template_llama3.2_json.jinja", "string"),
+     ("tool_chat_template_mistral_parallel.jinja", "string"),
+     ("tool_chat_template_mistral.jinja", "string")],
+)
+# yapf: enable
+def test_resolve_content_format_examples(template_path, expected_format):
+    tokenizer_group = TokenizerGroup(
+        PHI3V_MODEL_ID,
+        enable_lora=False,
+        max_num_seqs=5,
+        max_input_length=None,
+    )
+    dummy_tokenizer = tokenizer_group.tokenizer
+    dummy_tokenizer.chat_template = None
+
+    resolved_format = resolve_chat_template_content_format(
+        load_chat_template(EXAMPLES_DIR / template_path),
+        "auto",
+        dummy_tokenizer,
+    )
+
+    assert resolved_format == expected_format

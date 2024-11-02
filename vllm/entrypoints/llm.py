@@ -526,9 +526,11 @@ class LLM:
         to the OpenAI API.
 
         Args:
-            messages: A list of conversations or a single conversation. 
-                - Each conversation is represented as a list of messages.
-                - Each message is a dictionary with 'role' and 'content' keys.
+            messages: A list of conversations or a single conversation.
+
+              - Each conversation is represented as a list of messages.
+              - Each message is a dictionary with 'role' and 'content' keys.
+
             sampling_params: The sampling parameters for text generation.
                 If None, we use the default sampling parameters. When it
                 is a single value, it is applied to every prompt. When it
@@ -539,16 +541,18 @@ class LLM:
             chat_template: The template to use for structuring the chat.
               If not provided, the model's default chat template will be used.
             chat_template_content_format: The format to render message content.
-                - "string" will render the content as a string.
-                  Example: "Hello World"
-                - "openai" will render the content as a list of dictionaries,
-                  similar to OpenAI schema.
-                  Example: [{"type": "text", "text": "Hello world!"}]
+
+              - "string" will render the content as a string.
+                Example: ``"Who are you?"``
+              - "openai" will render the content as a list of dictionaries,
+                similar to OpenAI schema.
+                Example: ``[{"type": "text", "text": "Who are you?"}]``
+
             add_generation_prompt: If True, adds a generation template
                 to each message.
             continue_final_message: If True, continues the final message in
-                the conversation instead of starting a new one. Cannot be `True`
-                if `add_generation_prompt` is also `True`.
+                the conversation instead of starting a new one. Cannot be
+                ``True`` if ``add_generation_prompt`` is also ``True``.
             mm_processor_kwargs: Multimodal processor kwarg overrides for this
                 chat request. Only used for offline requests.
 
@@ -739,7 +743,7 @@ class LLM:
                 generation, if any.
 
         Returns:
-            A list of `EmbeddingRequestOutput` objects containing the
+            A list of ``EmbeddingRequestOutput`` objects containing the
             generated embeddings in the same order as the input prompts.
 
         Note:

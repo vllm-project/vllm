@@ -70,6 +70,7 @@ def test_serving_chat_should_set_correct_max_tokens():
                                      BASE_MODEL_PATHS,
                                      response_role="assistant",
                                      chat_template=CHAT_TEMPLATE,
+                                     chat_template_content_format="auto",
                                      lora_modules=None,
                                      prompt_adapters=None,
                                      request_logger=None)
