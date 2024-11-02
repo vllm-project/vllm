@@ -144,33 +144,46 @@ ChatTemplateContentFormatOption = Literal["auto", "string", "openai"]
 _ChatTemplateContentFormat = Literal["string", "openai"]
 
 
-@lru_cache
 def _resolve_chat_template_content_format(
     chat_template: Optional[str],
     given_format: ChatTemplateContentFormatOption,
     tokenizer: AnyTokenizer,
 ) -> _ChatTemplateContentFormat:
-    if chat_template is None:
-        return "string" if given_format == "auto" else given_format
-
     if isinstance(tokenizer, (PreTrainedTokenizer, PreTrainedTokenizerFast)):
         tokenizer_chat_template = tokenizer.chat_template
     else:
         tokenizer_chat_template = None
 
+    jinja_text: Optional[str]
+    if isinstance(tokenizer_chat_template, str) and chat_template is None:
+        jinja_text = tokenizer_chat_template
     if (isinstance(tokenizer_chat_template, dict)
             and chat_template in tokenizer_chat_template):
         jinja_text = tokenizer_chat_template[chat_template]
     else:
         jinja_text = load_chat_template(chat_template, is_literal=True)
 
-    if jinja_text is None:
-        return "string" if given_format == "auto" else given_format
+    detected_format = ("string" if jinja_text is None else
+                       _detect_chat_template_content_format(jinja_text))
 
-    detected_format = _detect_chat_template_content_format(jinja_text)
+    return detected_format if given_format == "auto" else given_format
+
+
+@lru_cache
+def resolve_chat_template_content_format(
+    chat_template: Optional[str],
+    given_format: ChatTemplateContentFormatOption,
+    tokenizer: AnyTokenizer,
+) -> _ChatTemplateContentFormat:
+    detected_format = _resolve_chat_template_content_format(
+        chat_template,
+        given_format,
+        tokenizer,
+    )
+
     logger.info(
         "Detected the chat template content format to be '%s'. "
-        "Set `--chat-template-content-format` to explicitly specifiy this.",
+        "Set `--chat-template-content-format` to explicitly specify this.",
         detected_format,
     )
 
@@ -178,23 +191,14 @@ def _resolve_chat_template_content_format(
         logger.warning(
             "You specified `--chat-template-content-format %s` "
             "which is different from the detected format '%s'. "
-            "To help us improve automatic detection, please consider "
-            "opening a GitHub issue at: "
+            "If our automatic detection is incorrect, please consider "
+            "opening a GitHub issue so that we can improve it: "
             "https://github.com/vllm-project/vllm/issues/new/choose",
             given_format,
             detected_format,
         )
 
-    return detected_format if given_format == "auto" else given_format
-
-
-def resolve_chat_template_content_format(
-    chat_template: Optional[str],
-    given_format: ChatTemplateContentFormatOption,
-    tokenizer: AnyTokenizer,
-) -> _ChatTemplateContentFormat:
-    return _resolve_chat_template_content_format(chat_template, given_format,
-                                                 tokenizer)
+    return detected_format
 
 
 ModalityStr = Literal["image", "audio", "video"]
