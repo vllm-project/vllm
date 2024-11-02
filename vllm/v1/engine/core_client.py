@@ -14,44 +14,15 @@ logger = init_logger(__name__)
 
 
 class EngineCoreClient:
-    """Interface between AsyncLLMEngine/LLMEngine and EngineCore."""
+    """
+    EngineCoreClient: subclasses handle different methods for pushing 
+        and pulling from the EngineCore for asyncio / multiprocessing.
 
-    def __init__(
-        self,
-        *args,
-        multiprocess_mode: bool,
-        asyncio_mode: bool,
-        **kwargs,
-    ):
-        self.client = ClientProtocol.make_client(
-            *args,
-            multiprocess_mode=multiprocess_mode,
-            asyncio_mode=asyncio_mode,
-            **kwargs,
-        )
-
-    def get_output(self) -> List[EngineCoreOutput]:
-        """Get EngineCoreOutput from the EngineCore."""
-
-        return self.client.get_output()
-
-    async def get_output_async(self) -> List[EngineCoreOutput]:
-        """Get EngineCoreOutput from EngineCore in asyncio."""
-
-        return await self.client.get_output_async()
-
-    def add_request(self, request: EngineCoreRequest) -> None:
-        """Add EngineCoreRequest to EngineCore."""
-
-        return self.client.add_request(request)
-
-    async def add_request_async(self, request: EngineCoreRequest) -> None:
-        """Add EngineCoreRequest to EngineCore in asyncio."""
-
-        return await self.client.add_request_async(request)
-
-
-class ClientProtocol:
+    Subclasses:
+    * InprocClient: In process EngineCore (for V0-style LLMEngine use)
+    * SyncMPClient: ZMQ + background proc EngineCore (for LLM)
+    * AsyncMPClient: ZMQ + background proc EngineCore w/ asyncio (for AsyncLLM)
+    """
 
     @staticmethod
     def make_client(
@@ -59,7 +30,7 @@ class ClientProtocol:
         multiprocess_mode: bool,
         asyncio_mode: bool,
         **kwargs,
-    ) -> "ClientProtocol":
+    ) -> "EngineCoreClient":
 
         # TODO: support this for debugging purposes.
         if asyncio_mode and not multiprocess_mode:
@@ -71,7 +42,7 @@ class ClientProtocol:
             return AsyncMPClient(*args, **kwargs)
 
         if multiprocess_mode and not asyncio_mode:
-            return MPClient(*args, **kwargs)
+            return SyncMPClient(*args, **kwargs)
 
         return InprocClient(*args, **kwargs)
 
@@ -88,8 +59,17 @@ class ClientProtocol:
         raise NotImplementedError
 
 
-class InprocClient(ClientProtocol):
-    """In process client for the EngineCore."""
+class InprocClient(EngineCoreClient):
+    """
+    InprocClient: client for in-process EngineCore. Intended 
+    for use in LLMEngine for V0-style add_request() and step()
+        EngineCore setup in this process (no busy loop).
+
+        * pushes EngineCoreRequest directly into the EngineCore
+        * pulls EngineCoreOutputs by stepping the EngineCore
+
+        TODO: support asyncio-mode for debugging.
+    """
 
     def __init__(self, *args, **kwargs):
         self.engine_core = EngineCore(*args, **kwargs)
@@ -101,21 +81,31 @@ class InprocClient(ClientProtocol):
         self.engine_core.add_request(request)
 
 
-class MPClient(ClientProtocol):
-    """Multiprocess client for the EngineCore."""
+class MPClient(EngineCoreClient):
+    """
+    MPClient: base client for multi-proc EngineCore.
+        EngineCore runs in a background process busy loop, getting
+        new EngineCoreRequests and returning EngineCoreOutputs
+
+        * pushes EngineCoreRequests via input_socket
+        * pulls EngineCoreOutputs via output_socket
+    
+        * AsyncMPClient subclass for AsyncLLM usage
+        * SyncMPClient subclass for LLM usage
+    """
 
     def __init__(
         self,
         *args,
-        use_zmq_asyncio: bool = False,
+        asyncio_mode: bool,
         **kwargs,
     ):
         # Serialization setup.
         self.encoder = msgspec.msgpack.Encoder()
         self.decoder = msgspec.msgpack.Decoder(EngineCoreOutputs)
 
-        # IPC Setup
-        self.ctx = zmq.asyncio.Context() if use_zmq_asyncio else zmq.Context()
+        # ZMQ setup.
+        self.ctx = (zmq.asyncio.Context() if asyncio_mode else zmq.Context())
 
         # Path for IPC.
         ready_path = get_open_zmq_ipc_path()
@@ -146,6 +136,13 @@ class MPClient(ClientProtocol):
         if hasattr(self, "proc"):
             self.proc.kill()
 
+
+class SyncMPClient(MPClient):
+    """Synchronous client for multi-proc EngineCore."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, asyncio_mode=False, **kwargs)
+
     def get_output(self) -> List[EngineCoreOutput]:
 
         while self.output_socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
@@ -164,11 +161,10 @@ class MPClient(ClientProtocol):
 
 
 class AsyncMPClient(MPClient):
-    """Asyncio-compatible multiprocess client for the EngineCore."""
+    """Asyncio-compatible client for multi-proc EngineCore."""
 
     def __init__(self, *args, **kwargs):
-
-        super().__init__(*args, use_zmq_asyncio=True, **kwargs)
+        super().__init__(*args, asyncio_mode=True, **kwargs)
 
     async def get_output_async(self) -> List[EngineCoreOutput]:
 
