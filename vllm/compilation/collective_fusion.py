@@ -106,7 +106,10 @@ def gemm_rs_ag_gemm_fake(
     return (mm_res, my_residual, residual)
 
 
-def get_gemm_rs_ag_gemm(use_flux: bool, gemm_1_weights: torch.Size,
+def get_gemm_rs_ag_gemm(use_flux: bool,
+                        gemm_1_type,
+                        gemm_1_weights: torch.Size,
+                        gemm_2_type,
                         gemm_2_weights: torch.Size):
 
     if use_flux:
@@ -119,7 +122,7 @@ def get_gemm_rs_ag_gemm(use_flux: bool, gemm_1_weights: torch.Size,
             # TODO: It would be nicer to modify flux to dispatch based on dtype
             # at run time, but I don't know what the downside would be.
             # Similar comment for max m.
-            torch.float16,
+            gemm_1_type,
             # Note: transpose_weight=False means that B is transposed
             transpose_weight=False,
             # Note: bfloat16 requires fuse_reduction=False.
@@ -136,8 +139,8 @@ def get_gemm_rs_ag_gemm(use_flux: bool, gemm_1_weights: torch.Size,
             # TODO: It would be nicer to modify flux to dispatch based on dtype
             # at run time, but I don't know what the downside would be.
             # Similar comment for max m.
-            torch.float16,
-            torch.float16,
+            gemm_2_type,
+            gemm_2_type,
             # Note: transpose_weight=False means that B is transposed
             transpose_weight=False,
             # Note: if local_copy=True, I hit the following runtime error:
@@ -150,8 +153,10 @@ def get_gemm_rs_ag_gemm(use_flux: bool, gemm_1_weights: torch.Size,
         gemm_rs = lambda act, wt: gemm_rs_op.forward(act, wt).squeeze(0)
         ag_gemm = lambda act, wt: ag_gemm_op.forward(act, wt)
 
-        name = (f"gemm_rs_ag_gemm_{gemm_1_weights[0]}_"
-                f"{gemm_2_weights[0]}_{gemm_2_weights[1]}")
+        gemm_1_str = str(gemm_1_type).removeprefix("torch.")
+        gemm_2_str = str(gemm_2_type).removeprefix("torch.")
+        name = (f"gemm_rs_ag_gemm_{gemm_1_str}_{gemm_1_weights[0]}_"
+                f"{gemm_2_str}_{gemm_2_weights[0]}_{gemm_2_weights[1]}")
     else:
         group_name = get_world_name()
 
@@ -362,11 +367,11 @@ class CollectiveFusionPass(InductorPass):
                     my_res_replacements) > 0 else match.kwargs["residual"]
 
                 # TODO: use get
-                gemm_1_w = kwargs["gemm_1_weights"].meta["val"].shape
-                gemm_2_w = kwargs["gemm_2_weights"].meta["val"].shape
+                gemm_1 = kwargs["gemm_1_weights"].meta["val"]
+                gemm_2 = kwargs["gemm_2_weights"].meta["val"]
 
                 fused_node = graph.call_function(get_gemm_rs_ag_gemm(
-                    use_flux, gemm_1_w, gemm_2_w),
+                    use_flux, gemm_1.dtype, gemm_1.shape, gemm_2.dtype, gemm_2.shape),
                                                  kwargs=kwargs)
 
                 graph.inserting_after(fused_node)
