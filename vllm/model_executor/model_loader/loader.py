@@ -23,7 +23,8 @@ from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
 from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoadFormat,
                          LoRAConfig, ModelConfig, MultiModalConfig,
-                         ParallelConfig, PoolerConfig, SchedulerConfig)
+                         ParallelConfig, PoolerConfig, SchedulerConfig,
+                         VllmConfig)
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.envs import VLLM_USE_MODELSCOPE
@@ -205,12 +206,7 @@ class BaseModelLoader(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def load_model(self, *, model_config: ModelConfig,
-                   device_config: DeviceConfig,
-                   lora_config: Optional[LoRAConfig],
-                   parallel_config: ParallelConfig,
-                   scheduler_config: SchedulerConfig,
-                   cache_config: CacheConfig) -> nn.Module:
+    def load_model(self, *, vllm_config: VllmConfig) -> nn.Module:
         """Load a model with the given configurations."""
         raise NotImplementedError
 
@@ -396,12 +392,13 @@ class DefaultModelLoader(BaseModelLoader):
                               model_config.revision,
                               fall_back_to_pt=True)
 
-    def load_model(self, *, model_config: ModelConfig,
-                   device_config: DeviceConfig,
-                   lora_config: Optional[LoRAConfig],
-                   parallel_config: ParallelConfig,
-                   scheduler_config: SchedulerConfig,
-                   cache_config: CacheConfig) -> nn.Module:
+    def load_model(self, vllm_config: VllmConfig) -> nn.Module:
+        device_config = vllm_config.device_config
+        model_config = vllm_config.model_config
+        lora_config = vllm_config.lora_config
+        scheduler_config = vllm_config.scheduler_config
+        cache_config = vllm_config.cache_config
+
         target_device = torch.device(device_config.device)
         with set_default_torch_dtype(model_config.dtype):
             with target_device:
@@ -436,12 +433,12 @@ class DummyModelLoader(BaseModelLoader):
     def download_model(self, model_config: ModelConfig) -> None:
         pass  # Nothing to download
 
-    def load_model(self, *, model_config: ModelConfig,
-                   device_config: DeviceConfig,
-                   lora_config: Optional[LoRAConfig],
-                   parallel_config: ParallelConfig,
-                   scheduler_config: SchedulerConfig,
-                   cache_config: CacheConfig) -> nn.Module:
+    def load_model(self, vllm_config: VllmConfig) -> nn.Module:
+        device_config = vllm_config.device_config
+        model_config = vllm_config.model_config
+        lora_config = vllm_config.lora_config
+        scheduler_config = vllm_config.scheduler_config
+        cache_config = vllm_config.cache_config
         with set_default_torch_dtype(model_config.dtype):
             with torch.device(device_config.device):
                 model = _initialize_model(model_config, self.load_config,
@@ -544,12 +541,12 @@ class TensorizerLoader(BaseModelLoader):
         with self.tensorizer_config.open_stream():
             pass
 
-    def load_model(self, *, model_config: ModelConfig,
-                   device_config: DeviceConfig,
-                   lora_config: Optional[LoRAConfig],
-                   parallel_config: ParallelConfig,
-                   scheduler_config: SchedulerConfig,
-                   cache_config: CacheConfig) -> nn.Module:
+    def load_model(self, vllm_config: VllmConfig) -> nn.Module:
+        device_config = vllm_config.device_config
+        model_config = vllm_config.model_config
+        lora_config = vllm_config.lora_config
+        parallel_config = vllm_config.parallel_config
+        cache_config = vllm_config.cache_config
         self._verify_config(model_config, parallel_config)
 
         if parallel_config.tensor_parallel_size > 1:
@@ -648,12 +645,11 @@ class ShardedStateLoader(BaseModelLoader):
     def download_model(self, model_config: ModelConfig) -> None:
         self._prepare_weights(model_config.model, model_config.revision)
 
-    def load_model(self, *, model_config: ModelConfig,
-                   device_config: DeviceConfig,
-                   lora_config: Optional[LoRAConfig],
-                   parallel_config: ParallelConfig,
-                   scheduler_config: SchedulerConfig,
-                   cache_config: CacheConfig) -> nn.Module:
+    def load_model(self, vllm_config: VllmConfig) -> nn.Module:
+        device_config = vllm_config.device_config
+        model_config = vllm_config.model_config
+        lora_config = vllm_config.lora_config
+        cache_config = vllm_config.cache_config
         from safetensors.torch import safe_open
 
         from vllm.distributed import get_tensor_model_parallel_rank
@@ -1157,12 +1153,11 @@ class BitsAndBytesModelLoader(BaseModelLoader):
     def download_model(self, model_config: ModelConfig) -> None:
         self._prepare_weights(model_config.model, model_config.revision)
 
-    def load_model(self, *, model_config: ModelConfig,
-                   device_config: DeviceConfig,
-                   lora_config: Optional[LoRAConfig],
-                   parallel_config: ParallelConfig,
-                   scheduler_config: SchedulerConfig,
-                   cache_config: CacheConfig) -> nn.Module:
+    def load_model(self, vllm_config: VllmConfig) -> nn.Module:
+        device_config = vllm_config.device_config
+        model_config = vllm_config.model_config
+        lora_config = vllm_config.lora_config
+        cache_config = vllm_config.cache_config
         with set_default_torch_dtype(model_config.dtype):
             with torch.device(device_config.device):
                 model = _initialize_model(model_config, self.load_config,
@@ -1235,13 +1230,11 @@ class GGUFModelLoader(BaseModelLoader):
     def download_model(self, model_config: ModelConfig) -> None:
         self._prepare_weights(model_config.model)
 
-    def load_model(self, *, model_config: ModelConfig,
-                   device_config: DeviceConfig,
-                   lora_config: Optional[LoRAConfig],
-                   parallel_config: ParallelConfig,
-                   scheduler_config: SchedulerConfig,
-                   cache_config: CacheConfig) -> nn.Module:
-
+    def load_model(self, vllm_config: VllmConfig) -> nn.Module:
+        device_config = vllm_config.device_config
+        model_config = vllm_config.model_config
+        lora_config = vllm_config.lora_config
+        cache_config = vllm_config.cache_config
         local_model_path = self._prepare_weights(model_config.model)
         gguf_weights_map = self._get_gguf_weights_map(model_config)
         # we can only know if tie word embeddings after mapping weights
