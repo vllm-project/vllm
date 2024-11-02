@@ -1391,7 +1391,7 @@ class ModulesToSaveWrapper(BaseLayerWithLoRA, TensorPropertiesMixin):
               hidden_states: torch.Tensor,
               bias: Optional[torch.Tensor]) -> torch.Tensor:
 
-        assert self.base_layer is ParallelLMHead
+        assert isinstance(self.base_layer, ParallelLMHead)
 
         logits = self.punica_wrapper.bgmv_sample(hidden_states,
                                                  self._lora_tensors,
@@ -1404,7 +1404,7 @@ class ModulesToSaveWrapper(BaseLayerWithLoRA, TensorPropertiesMixin):
 
     def embedding(self, embed_tokens: 'ModulesToSaveWrapper',
                   masked_input: torch.LongTensor):
-        assert self.base_layer is VocabParallelEmbedding
+        assert isinstance(self.base_layer, VocabParallelEmbedding)
         embeddings = self.punica_wrapper.bgmv_embedding(
             masked_input, self._lora_tensors, self.base_layer.weight)
         return embeddings
