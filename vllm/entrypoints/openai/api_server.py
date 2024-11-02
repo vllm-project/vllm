@@ -25,7 +25,6 @@ from typing_extensions import assert_never
 import vllm.envs as envs
 from vllm.config import ModelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.engine.multiprocessing.client import MQLLMEngineClient
 from vllm.engine.multiprocessing.engine import run_mp_engine
 from vllm.engine.protocol import EngineClient
@@ -59,6 +58,12 @@ from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import FlexibleArgumentParser, get_open_zmq_ipc_path
 from vllm.version import __version__ as VLLM_VERSION
+
+if envs.VLLM_USE_V1:
+    from vllm.v1.engine.async_llm_engine import AsyncLLMEngine
+else:
+    from vllm.engine.async_llm_engine import AsyncLLMEngine
+
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds
 
@@ -130,16 +135,10 @@ async def build_async_engine_client_from_engine_args(
         uses_ray = getattr(AsyncLLMEngine._get_executor_cls(engine_config),
                            "uses_ray", False)
 
-        build_engine = partial(AsyncLLMEngine.from_engine_args,
-                               engine_args=engine_args,
-                               engine_config=engine_config,
-                               usage_context=UsageContext.OPENAI_API_SERVER)
-        if uses_ray:
-            # Must run in main thread with ray for its signal handlers to work
-            engine_client = build_engine()
-        else:
-            engine_client = await asyncio.get_running_loop().run_in_executor(
-                None, build_engine)
+        engine_client = AsyncLLMEngine.from_engine_args(
+            engine_args=engine_args,
+            engine_config=engine_config,
+            usage_context=UsageContext.OPENAI_API_SERVER)
 
         yield engine_client
         return

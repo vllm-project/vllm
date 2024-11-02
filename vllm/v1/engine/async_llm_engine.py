@@ -15,6 +15,7 @@ from vllm.outputs import EmbeddingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_stream import AsyncStream
 from vllm.v1.engine.core import EngineCoreClient
@@ -55,6 +56,8 @@ class AsyncLLMEngine(LLMEngineProtocol):
         self.log_requests = log_requests
         self.log_stats = log_stats
         self.stat_loggers = stat_loggers
+        self.model_config = model_config
+        self.errored = False
 
         # Processor (converts Inputs --> EngineCoreRequests)
         self.processor = Processor(model_config, parallel_config,
@@ -202,3 +205,19 @@ class AsyncLLMEngine(LLMEngineProtocol):
                 # TODO: send aborts (in one message)
         except BaseException as e:
             logger.error(e)
+
+    # TODO: can we elminate these (used by OpenAI server)
+
+    async def get_model_config(self) -> ModelConfig:
+        """Gets the model configuration."""
+        return self.model_config
+
+    async def is_tracing_enabled(self) -> bool:
+        return False
+
+    async def get_tokenizer(
+        self,
+        lora_request: Optional[LoRARequest] = None,
+    ) -> AnyTokenizer:
+        assert lora_request is None
+        return self.detokenizer.tokenizer
