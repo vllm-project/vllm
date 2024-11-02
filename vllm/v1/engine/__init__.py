@@ -1,11 +1,9 @@
-import asyncio
 from dataclasses import dataclass
 from typing import List, Optional, Union
 
 import msgspec
 
 from vllm.lora.request import LoRARequest
-from vllm.outputs import RequestOutput
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 
 POLLING_TIMEOUT_MS = 5000
@@ -21,8 +19,8 @@ class DetokenizerRequest:
     spaces_between_special_tokens: bool
     output_kind: RequestOutputKind
 
-    # Queue for streaming outputs to clients.
-    output_queue: Optional[asyncio.Queue[RequestOutput]] = None
+    stop: List[str]
+    include_stop_str_in_output: bool
 
 
 class EngineCoreRequest(msgspec.Struct):

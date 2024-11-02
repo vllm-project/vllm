@@ -134,6 +134,9 @@ class LLMEngine(LLMEngineProtocol):
         engine_core_outputs = self.engine_core.step()
 
         # 2) Step the Detokenizer.
-        request_outputs = self.detokenizer.step(engine_core_outputs)
+        request_outputs, to_abort = self.detokenizer.step(engine_core_outputs)
+
+        # 3) Abort requests that finished due to stop criteria
+        self.abort_request(to_abort)
 
         return request_outputs
