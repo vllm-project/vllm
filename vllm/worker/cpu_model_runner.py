@@ -453,13 +453,7 @@ class CPUModelRunner(ModelRunnerBase[ModelInputForCPU]):
         return uses_mrope(self.model_config.hf_config)
 
     def load_model(self) -> None:
-        self.model = get_model(model_config=self.model_config,
-                               load_config=self.load_config,
-                               device_config=self.device_config,
-                               lora_config=self.lora_config,
-                               parallel_config=self.parallel_config,
-                               scheduler_config=self.scheduler_config,
-                               cache_config=self.cache_config)
+        self.model = get_model(vllm_config=self.vllm_config)
 
     def make_model_input_from_broadcasted_tensor_dict(
         self,
