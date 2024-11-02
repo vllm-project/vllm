@@ -9,7 +9,6 @@ import socket
 import tempfile
 from argparse import Namespace
 from contextlib import asynccontextmanager
-from functools import partial
 from http import HTTPStatus
 from typing import AsyncIterator, Set
 
