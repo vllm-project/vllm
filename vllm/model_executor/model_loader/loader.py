@@ -167,6 +167,11 @@ def build_model(model_class: Type[nn.Module],
     if prefix:
         extra_kwargs["prefix"] = prefix
 
+    # TODO: unify all the module initialization code
+    # to only take the `VllmConfig` object as input
+    from vllm.plugins import set_vllm_config
+    set_vllm_config(vllm_config)
+
     return model_class(config=hf_config,
                        cache_config=cache_config,
                        quant_config=quant_config,
