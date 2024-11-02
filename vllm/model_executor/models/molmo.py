@@ -15,6 +15,7 @@ from transformers import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.attention.selector import _Backend
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, MultiModalConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
@@ -713,6 +714,7 @@ class MolmoVisionBackbone(nn.Module):
         return image_features
 
 
+@support_torch_compile
 class MolmoModel(nn.Module):
 
     def __init__(
@@ -1141,7 +1143,6 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         **kwargs: object,
     ) -> SamplerOutput:
         if intermediate_tensors is not None:
-            input_ids = None
             inputs_embeds = None
         else:
             image_input = self._parse_and_validate_image_input(**kwargs)
@@ -1156,10 +1157,13 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                     image_input["image_input_idx"],
                     image_input["seq_len"],
                 )
-
-                input_ids = None
             else:
-                inputs_embeds = None
+                inputs_embeds = self.model.embed_tokens(input_ids)
+
+        # always pass the input via `inputs_embeds`
+        # to make sure the computation graph is consistent
+        # for `torch.compile` integration
+        input_ids = None
 
         hidden_states = self.model(
             input_ids=input_ids,

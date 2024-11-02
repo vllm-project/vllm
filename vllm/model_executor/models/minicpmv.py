@@ -564,8 +564,13 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
 
             vlm_embeddings, _ = self.get_embedding(input_ids, image_inputs)
 
+        # always pass the input via `inputs_embeds`
+        # to make sure the computation graph is consistent
+        # for `torch.compile` integration
+        input_ids = None
+
         output = self.llm(
-            input_ids=None,
+            input_ids=input_ids,
             positions=positions,
             kv_caches=kv_caches,
             attn_metadata=attn_metadata,
