@@ -1953,11 +1953,11 @@ class VllmConfig:
     scheduler_config: SchedulerConfig
     device_config: DeviceConfig
     load_config: LoadConfig
-    lora_config: Optional[LoRAConfig]
-    speculative_config: Optional[SpeculativeConfig]
-    decoding_config: Optional[DecodingConfig]
-    observability_config: Optional[ObservabilityConfig]
-    prompt_adapter_config: Optional[PromptAdapterConfig]
+    lora_config: Optional[LoRAConfig] = None
+    speculative_config: Optional[SpeculativeConfig] = None
+    decoding_config: Optional[DecodingConfig] = None
+    observability_config: Optional[ObservabilityConfig] = None
+    prompt_adapter_config: Optional[PromptAdapterConfig] = None
 
     def __post_init__(self):
         """Verify configs are valid & consistent with each other.
