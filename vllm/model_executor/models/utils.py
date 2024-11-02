@@ -252,6 +252,7 @@ def init_vllm_registered_model(
 
     return build_model(
         model_class,
+        None,
         hf_config,
         cache_config,
         quant_config,
