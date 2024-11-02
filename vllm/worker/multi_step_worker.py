@@ -27,17 +27,9 @@ class MultiStepWorker(Worker):
         # for multi-step model, wrap the model runner with MultiStepModelRunner
         self.model_runner = MultiStepModelRunner(
             base_model_runner,
-            base_model_runner.model_config,
-            base_model_runner.parallel_config,
-            base_model_runner.scheduler_config,
-            base_model_runner.device_config,
-            base_model_runner.cache_config,
-            load_config=base_model_runner.load_config,
-            lora_config=self.lora_config,
+            vllm_config=base_model_runner.vllm_config,
             kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=base_model_runner.is_driver_worker,
-            prompt_adapter_config=base_model_runner.prompt_adapter_config,
-            observability_config=base_model_runner.observability_config,
         )
 
         pipeline_parallel_size = self.parallel_config.pipeline_parallel_size

@@ -9,10 +9,11 @@ import torch
 
 import vllm.envs as envs
 from vllm.config import (CacheConfig, ConfigFormat, DecodingConfig,
-                         DeviceConfig, EngineConfig, LoadConfig, LoadFormat,
-                         LoRAConfig, ModelConfig, ObservabilityConfig,
-                         ParallelConfig, PromptAdapterConfig, SchedulerConfig,
-                         SpeculativeConfig, TaskOption, TokenizerPoolConfig)
+                         DeviceConfig, LoadConfig, LoadFormat, LoRAConfig,
+                         ModelConfig, ObservabilityConfig, ParallelConfig,
+                         PromptAdapterConfig, SchedulerConfig,
+                         SpeculativeConfig, TaskOption, TokenizerPoolConfig,
+                         VllmConfig)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
@@ -955,7 +956,7 @@ class EngineArgs:
             ignore_patterns=self.ignore_patterns,
         )
 
-    def create_engine_config(self) -> EngineConfig:
+    def create_engine_config(self) -> VllmConfig:
         # gguf file needs a specific model loader and doesn't use hf_repo
         if check_gguf_file(self.model):
             self.quantization = self.load_format = "gguf"
@@ -1167,7 +1168,7 @@ class EngineArgs:
             or "all" in detailed_trace_modules,
         )
 
-        return EngineConfig(
+        return VllmConfig(
             model_config=model_config,
             cache_config=cache_config,
             parallel_config=parallel_config,

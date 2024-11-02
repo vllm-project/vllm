@@ -48,16 +48,10 @@ class OpenVINOExecutor(ExecutorBase):
             get_ip(), get_open_port())
         self.driver_worker = OpenVINOWorker(
             ov_core=self.ov_core,
-            model_config=self.model_config,
-            parallel_config=self.parallel_config,
-            scheduler_config=self.scheduler_config,
-            device_config=self.device_config,
-            cache_config=self.cache_config,
-            load_config=self.load_config,
+            vllm_config=self.vllm_config,
             local_rank=0,
             rank=0,
             distributed_init_method=distributed_init_method,
-            lora_config=self.lora_config,
             kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=True,
         )

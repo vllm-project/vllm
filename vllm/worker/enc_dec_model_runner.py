@@ -11,9 +11,7 @@ from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.attention.selector import (_Backend, get_env_variable_attn_backend,
                                      get_global_forced_attn_backend,
                                      global_force_attn_backend)
-from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, ObservabilityConfig, ParallelConfig,
-                         PromptAdapterConfig, SchedulerConfig)
+from vllm.config import ModelConfig, VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.logger import init_logger
@@ -85,17 +83,9 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
 
     def __init__(
         self,
-        model_config: ModelConfig,
-        parallel_config: ParallelConfig,
-        scheduler_config: SchedulerConfig,
-        device_config: DeviceConfig,
-        cache_config: CacheConfig,
-        load_config: LoadConfig,
-        lora_config: Optional[LoRAConfig],
+        vllm_config: VllmConfig,
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
-        prompt_adapter_config: Optional[PromptAdapterConfig] = None,
-        observability_config: Optional[ObservabilityConfig] = None,
         input_registry: InputRegistry = INPUT_REGISTRY,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
     ):
@@ -107,15 +97,10 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         models) but these arguments are present here for compatibility with 
         the base-class constructor.
         '''
-        self._maybe_force_supported_attention_backend(model_config)
+        self._maybe_force_supported_attention_backend(vllm_config.model_config)
+
         super().__init__(
-            model_config,
-            parallel_config,
-            scheduler_config,
-            device_config,
-            cache_config,
-            load_config,
-            lora_config=None,
+            vllm_config=vllm_config,
             kv_cache_dtype=kv_cache_dtype,
             is_driver_worker=is_driver_worker,
         )

@@ -9,6 +9,7 @@ from typing import (TYPE_CHECKING, Any, Dict, Generic, Iterable, List,
 import torch
 from torch import is_tensor
 
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.platforms import current_platform
@@ -219,6 +220,22 @@ class ModelRunnerBase(ABC, Generic[T]):
     Each ModelRunnerBase subclass should define a corresponding
     ModelRunnerInputBase subclass.
     """
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+    ) -> None:
+        self.vllm_config = vllm_config
+        self.model_config = vllm_config.model_config
+        self.cache_config = vllm_config.cache_config
+        self.lora_config = vllm_config.lora_config
+        self.load_config = vllm_config.load_config
+        self.parallel_config = vllm_config.parallel_config
+        self.scheduler_config = vllm_config.scheduler_config
+        self.device_config = vllm_config.device_config
+        self.speculative_config = vllm_config.speculative_config
+        self.prompt_adapter_config = vllm_config.prompt_adapter_config
+        self.observability_config = vllm_config.observability_config
 
     # Map of request_id -> generator used for seeded random sampling
     generators: Dict[str, torch.Generator] = {}

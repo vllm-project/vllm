@@ -3,9 +3,7 @@ from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
 import torch
 
-from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, ObservabilityConfig, ParallelConfig,
-                         PromptAdapterConfig, SchedulerConfig)
+from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
@@ -36,29 +34,13 @@ class EmbeddingModelRunner(
 
     def __init__(
         self,
-        model_config: ModelConfig,
-        parallel_config: ParallelConfig,
-        scheduler_config: SchedulerConfig,
-        device_config: DeviceConfig,
-        cache_config: CacheConfig,
-        load_config: LoadConfig,
-        lora_config: Optional[LoRAConfig],
+        vllm_config: VllmConfig,
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
-        prompt_adapter_config: Optional[PromptAdapterConfig] = None,
-        observability_config: Optional[ObservabilityConfig] = None,
     ):
-        super().__init__(model_config,
-                         parallel_config,
-                         scheduler_config,
-                         device_config,
-                         cache_config,
-                         load_config,
-                         lora_config=lora_config,
+        super().__init__(vllm_config=vllm_config,
                          kv_cache_dtype=kv_cache_dtype,
-                         is_driver_worker=is_driver_worker,
-                         prompt_adapter_config=prompt_adapter_config,
-                         observability_config=observability_config)
+                         is_driver_worker=is_driver_worker)
 
     @torch.inference_mode()
     def execute_model(

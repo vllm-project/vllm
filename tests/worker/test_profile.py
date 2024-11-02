@@ -24,12 +24,7 @@ def test_gpu_memory_profiling():
     distributed_init_method = get_distributed_init_method(
         get_ip(), get_open_port())
     worker = Worker(
-        model_config=engine_config.model_config,
-        parallel_config=engine_config.parallel_config,
-        scheduler_config=engine_config.scheduler_config,
-        device_config=engine_config.device_config,
-        cache_config=engine_config.cache_config,
-        load_config=engine_config.load_config,
+        vllm_config=engine_config,
         local_rank=0,
         rank=0,
         distributed_init_method=distributed_init_method,

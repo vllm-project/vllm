@@ -13,7 +13,7 @@ from zmq import Frame  # type: ignore[attr-defined]
 from zmq.asyncio import Socket
 
 from vllm import PoolingParams
-from vllm.config import DecodingConfig, EngineConfig, ModelConfig
+from vllm.config import DecodingConfig, ModelConfig, VllmConfig
 from vllm.core.scheduler import SchedulerOutputs
 from vllm.engine.arg_utils import AsyncEngineArgs
 # yapf conflicts with isort for this block
@@ -78,7 +78,7 @@ class MQLLMEngineClient(EngineClient):
             every N seconds, confirming the engine is healthy
     """
 
-    def __init__(self, ipc_path: str, engine_config: EngineConfig,
+    def __init__(self, ipc_path: str, engine_config: VllmConfig,
                  engine_pid: int):
         self.context = zmq.asyncio.Context()
         self._errored_with: Optional[BaseException] = None
