@@ -63,8 +63,6 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
     draft_worker_config.model_config = speculative_config.draft_model_config
     draft_worker_config.parallel_config = speculative_config.draft_parallel_config  # noqa
     # TODO allow draft-model specific load config.
-    #load_config=load_config,
-    draft_worker_config.load_config = None
 
     # Override draft-model specific worker args.
     draft_worker_kwargs.update(
