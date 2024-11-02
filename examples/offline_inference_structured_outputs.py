@@ -5,7 +5,6 @@ from enum import Enum
 
 llm = LLM(model="Qwen/Qwen2.5-3B", max_model_len=100)
 
-
 # Guided decoding by Choice (list of possible options)
 guided_decoding_params = GuidedDecodingParams(choice=["Positive", "Negative"])
 sampling_params = SamplingParams(guided_decoding=guided_decoding_params)
@@ -15,10 +14,10 @@ outputs = llm.generate(
 )
 print(outputs[0].outputs[0].text)
 
-
 # Guided decoding by Regex
 guided_decoding_params = GuidedDecodingParams(regex="\w+@\w+\.com\n")
-sampling_params = SamplingParams(guided_decoding=guided_decoding_params, stop=["\n"])
+sampling_params = SamplingParams(guided_decoding=guided_decoding_params,
+                                 stop=["\n"])
 prompt = "Generate an example email address for Alan Turing, who works in Enigma. End in .com and new line. Example result: alan.turing@enigma.com\n"
 outputs = llm.generate(prompts=prompt, sampling_params=sampling_params)
 print(outputs[0].outputs[0].text)
@@ -43,11 +42,11 @@ json_schema = CarDescription.model_json_schema()
 guided_decoding_params = GuidedDecodingParams(json=json_schema)
 sampling_params = SamplingParams(guided_decoding=guided_decoding_params)
 outputs = llm.generate(
-    prompts="Generate a JSON with the brand, model and car_type of the most iconic car from the 90's",
+    prompts=
+    "Generate a JSON with the brand, model and car_type of the most iconic car from the 90's",
     sampling_params=sampling_params,
 )
 print(outputs[0].outputs[0].text)
-
 
 # Guided decoding by Grammar
 simplified_sql_grammar = """
@@ -66,7 +65,8 @@ simplified_sql_grammar = """
 guided_decoding_params = GuidedDecodingParams(grammar=simplified_sql_grammar)
 sampling_params = SamplingParams(guided_decoding=guided_decoding_params)
 outputs = llm.generate(
-    prompts="Generate an SQL query to show the 'username' and 'email' from the 'users' table.",
+    prompts=
+    "Generate an SQL query to show the 'username' and 'email' from the 'users' table.",
     sampling_params=sampling_params,
 )
 print(outputs[0].outputs[0].text)

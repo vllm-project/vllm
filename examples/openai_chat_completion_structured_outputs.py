@@ -7,28 +7,30 @@ client = OpenAI(
     api_key="-",
 )
 
-
 # Guided decoding by Choice (list of possible options)
 completion = client.chat.completions.create(
     model="Qwen/Qwen2.5-3B",
-    messages=[
-        {"role": "user", "content": "Classify this sentiment: vLLM is wonderful!"}
-    ],
+    messages=[{
+        "role": "user",
+        "content": "Classify this sentiment: vLLM is wonderful!"
+    }],
     extra_body={"guided_choice": ["positive", "negative"]},
 )
 print(completion.choices[0].message.content)
 
-
 # Guided decoding by Regex
 completion = client.chat.completions.create(
     model="Qwen/Qwen2.5-3B",
-    messages=[
-        {
-            "role": "user",
-            "content": "Generate an example email address for Alan Turing, who works in Enigma. End in .com and new line. Example result: alan.turing@enigma.com\n",
-        }
-    ],
-    extra_body={"guided_regex": "\w+@\w+\.com\n", "stop": ["\n"]},
+    messages=[{
+        "role":
+        "user",
+        "content":
+        "Generate an example email address for Alan Turing, who works in Enigma. End in .com and new line. Example result: alan.turing@enigma.com\n",
+    }],
+    extra_body={
+        "guided_regex": "\w+@\w+\.com\n",
+        "stop": ["\n"]
+    },
 )
 print(completion.choices[0].message.content)
 
@@ -51,16 +53,15 @@ json_schema = CarDescription.model_json_schema()
 
 completion = client.chat.completions.create(
     model="Qwen/Qwen2.5-3B",
-    messages=[
-        {
-            "role": "user",
-            "content": "Generate a JSON with the brand, model and car_type of the most iconic car from the 90's",
-        }
-    ],
+    messages=[{
+        "role":
+        "user",
+        "content":
+        "Generate a JSON with the brand, model and car_type of the most iconic car from the 90's",
+    }],
     extra_body={"guided_json": json_schema},
 )
 print(completion.choices[0].message.content)
-
 
 # Guided decoding by Grammar
 simplified_sql_grammar = """
@@ -79,12 +80,12 @@ simplified_sql_grammar = """
 
 completion = client.chat.completions.create(
     model="Qwen/Qwen2.5-3B",
-    messages=[
-        {
-            "role": "user",
-            "content": "Generate an SQL query to show the 'username' and 'email' from the 'users' table.",
-        }
-    ],
+    messages=[{
+        "role":
+        "user",
+        "content":
+        "Generate an SQL query to show the 'username' and 'email' from the 'users' table.",
+    }],
     extra_body={"guided_grammar": simplified_sql_grammar},
 )
 print(completion.choices[0].message.content)
