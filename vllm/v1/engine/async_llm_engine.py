@@ -22,7 +22,7 @@ from vllm.v1.executor.gpu_executor import GPUExecutor
 logger = init_logger(__name__)
 
 
-class AsyncLLMEngine:
+class AsyncLLM:
 
     def __init__(
         self,
@@ -210,6 +210,10 @@ class AsyncLLMEngine:
 
     async def is_tracing_enabled(self) -> bool:
         return False
+
+
+# Retain V0 name for backwards compatibility.
+AsyncLLMEngine = AsyncLLM
 
 
 class AsyncStream:
