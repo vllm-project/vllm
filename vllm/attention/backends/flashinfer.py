@@ -1,6 +1,9 @@
+from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Type
+
+from vllm.multimodal import MultiModalPlaceholderMap
 
 try:
     from flashinfer import BatchDecodeWithPagedKVCacheWrapper
@@ -215,6 +218,7 @@ class FlashInferState(AttentionState):
         attn_metadata = self.runner.attn_backend.make_metadata(
             num_prefills=0,
             slot_mapping=self._graph_slot_mapping[:batch_size],
+            multi_modal_placeholder_index_maps=None,
             num_prefill_tokens=0,
             num_decode_tokens=batch_size,
             max_prefill_seq_len=0,
@@ -470,6 +474,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.context_lens: List[int] = []
         self.block_tables: List[List[int]] = []
         self.curr_seq_lens: List[int] = []
+        self.multimodal_placeholder_maps: Dict[
+            str,
+            MultiModalPlaceholderMap] = defaultdict(MultiModalPlaceholderMap)
         self.num_prefills = 0
         self.num_prefill_tokens = 0
         self.num_decode_tokens = 0
@@ -519,6 +526,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                  inter_data.curr_sliding_window_blocks):
             self.context_lens.append(context_len)
             if is_prompt:
+                mm_maps = inter_data.multi_modal_placeholder_maps
+                if mm_maps:
+                    for modality, placeholders in mm_maps.items():
+                        self.multimodal_placeholder_maps[modality].extend(
+                            placeholders)
                 self.num_prefills += 1
                 self.num_prefill_tokens += token_len
                 self.prefill_seq_lens.append(seq_len)
@@ -651,6 +663,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         seq_start_loc = torch.zeros(seq_lens_tensor.shape[0] + 1,
                                     dtype=torch.int32,
                                     device=device)
+        placeholder_index_maps = {
+            modality: placeholder_map.index_map()
+            for modality, placeholder_map in
+            self.multimodal_placeholder_maps.items()
+        }
         torch.cumsum(seq_lens_tensor,
                      dim=0,
                      dtype=seq_start_loc.dtype,
@@ -694,6 +711,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             decode_query_len=decode_query_len,
             num_prefills=self.num_prefills,
             slot_mapping=slot_mapping_tensor,
+            multi_modal_placeholder_index_maps=placeholder_index_maps,
             num_prefill_tokens=self.num_prefill_tokens,
             num_decode_tokens=num_decode_tokens,
             max_prefill_seq_len=max_prefill_seq_len,
@@ -759,8 +777,6 @@ class FlashInferImpl(AttentionImpl):
         v_scale: float = 1.0,
         attn_type: AttentionType = AttentionType.DECODER,
     ) -> torch.Tensor:
-        assert k_scale == 1.0 and v_scale == 1.0, (
-            "key/v_scale is not supported in FlashInfer.")
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError("Encoder self-attention and "
                                       "encoder/decoder cross-attention "
@@ -874,7 +890,12 @@ def unified_flash_infer(
             assert prefill_meta is not None
             assert prefill_meta.prefill_wrapper is not None
             prefill_output = prefill_meta.prefill_wrapper.forward(
-                query, kv_cache, logits_soft_cap=logits_soft_cap, causal=True)
+                query,
+                kv_cache,
+                logits_soft_cap=logits_soft_cap,
+                causal=True,
+                k_scale=k_scale,
+                v_scale=v_scale)
     if decode_meta := attn_metadata.decode_metadata:
         assert attn_metadata.decode_metadata is not None
         assert attn_metadata.decode_metadata.decode_wrapper is not None

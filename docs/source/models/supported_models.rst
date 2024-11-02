@@ -281,7 +281,7 @@ Text Generation
     - ✅︎
   * - :code:`Qwen2ForCausalLM`
     - Qwen2
-    - :code:`Qwen/Qwen2-beta-7B`, :code:`Qwen/Qwen2-beta-7B-Chat`, etc.
+    - :code:`Qwen/Qwen2-7B-Instruct`, :code:`Qwen/Qwen2-7B`, etc.
     - ✅︎
     - ✅︎
   * - :code:`Qwen2MoeForCausalLM`
@@ -466,7 +466,7 @@ Text Generation
     - ✅︎
   * - :code:`LlavaOnevisionForConditionalGeneration`
     - LLaVA-Onevision
-    - T + I\ :sup:`+` + V
+    - T + I\ :sup:`+` + V\ :sup:`+`
     - :code:`llava-hf/llava-onevision-qwen2-7b-ov-hf`, :code:`llava-hf/llava-onevision-qwen2-0.5b-ov-hf`, etc.
     -
     - ✅︎
@@ -478,7 +478,7 @@ Text Generation
     - ✅︎
   * - :code:`MllamaForConditionalGeneration`
     - Llama 3.2
-    - T + I
+    - T + I\ :sup:`+`
     - :code:`meta-llama/Llama-3.2-90B-Vision-Instruct`, :code:`meta-llama/Llama-3.2-11B-Vision`, etc.
     -
     -
