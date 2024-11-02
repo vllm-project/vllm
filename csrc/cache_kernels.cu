@@ -471,7 +471,7 @@ void reshape_and_cache_dattn(
   DISPATCH_BY_KV_CACHE_DTYPE(key.dtype(), kv_cache_dtype,
                              CALL_RESHAPE_AND_CACHE_DATTN)
   
-  cudaDeviceSynchronize();  
+  //cudaDeviceSynchronize();  
 }
 
 namespace vllm {

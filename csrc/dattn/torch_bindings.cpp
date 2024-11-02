@@ -15,7 +15,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
     .def(torch::init<int64_t, int64_t, int64_t, int64_t, int64_t, int64_t>())
     .def("reserveRegion", &kvCacheAllocator::reserveRegion)
     .def("releaseRegions", &kvCacheAllocator::releaseRegions)
-    .def("allocCacheBlocks", &kvCacheAllocator::allocCacheBlocks)
+    //.def("allocCacheBlocks", &kvCacheAllocator::allocCacheBlocks)
     .def("updateCacheBlocks", &kvCacheAllocator::updateCacheBlocks)
     .def("getAllocPhyPages", &kvCacheAllocator::getAllocPhyPages)
     .def("collectPhyPages", &kvCacheAllocator::collectPhyPages);

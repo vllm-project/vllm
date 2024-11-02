@@ -466,6 +466,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
         self.profile = os.getenv("PROFILE", "False") == "True"
+        
         if self.profile == True:
             self.step = 0
             self.cache_time = 0.0
@@ -559,7 +560,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         else:
             assert value is None
 
-        if self.profile == True: 
+        if self.profile == True:
             self.step += 1
             start_time = time.time()
             if self.stop_time != 0:
@@ -758,10 +759,12 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 self.attent_time += time.time() - start_time
             
         if self.profile == True:
+            #print(f"STEP:{self.step}, lay_index:{layer_idx}, cache time:{self.cache_time}, attent time: {self.attent_time}, loop time: {self.schedule_time}", file=sys.stderr) 
             if self.step % 512 == 0:
                 if layer_idx % 16 == 1: 
+                    #print(f"STEP:{self.step}, lay_index:{layer_idx}, cache time:{self.cache_time}, attent time: {self.attent_time}, loop time: {self.schedule_time}. Portion: 1-{self.attent_time/self.cache_time}-{self.schedule_time/(self.cache_time*32)}", file=sys.stderr)
                     print(f"STEP:{self.step}, lay_index:{layer_idx}, cache time:{self.cache_time}, attent time: {self.attent_time}, loop time: {self.schedule_time}, portion: 1-{self.attent_time/self.cache_time}", file=sys.stderr)
-                #print(f"STEP:{self.step}, lay_index:{layer_idx}, cache time:{self.cache_time}, attent time: {self.attent_time}, loop time: {self.schedule_time}. Portion: 1-{self.attent_time/self.cache_time}-{self.schedule_time/(self.cache_time*32)}", file=sys.stderr)
+                print(f"STEP:{self.step}, lay_index:{layer_idx}, cache time:{self.cache_time}, attent time: {self.attent_time}, loop time: {self.schedule_time}. Portion: 1-{self.attent_time/self.cache_time}-{self.schedule_time/(self.cache_time*32)}", file=sys.stderr)
                 self.cache_time = 0
                 self.attent_time = 0
                 self.schedule_time = 0

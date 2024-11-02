@@ -29,8 +29,8 @@ sampling_params = SamplingParams(temperature=0.8, top_p=0.95, max_tokens=2048)
 #sampling_params = SamplingParams(temperature=0, top_p=1, top_k=1,max_tokens=2048)
 
 # Create an LLM.
-llm = LLM(model="facebook/opt-6.7b", use_dattn=True, enforce_eager=True)
-#llm = LLM(model="facebook/opt-6.7b", enforce_eager=True)
+#llm = LLM(model="facebook/opt-6.7b", use_dattn=True, enforce_eager=True)
+llm = LLM(model="facebook/opt-6.7b", enforce_eager=True)
 #llm = LLM(model="facebook/opt-6.7b", enforce_eager=True)
 #llm = LLM(model="facebook/opt-1.3b", enforce_eager=True)
 #llm = LLM(model="facebook/opt-125m", use_dattn=True, enforce_eager=True)
@@ -38,6 +38,7 @@ llm = LLM(model="facebook/opt-6.7b", use_dattn=True, enforce_eager=True)
 # Generate texts from the prompts. The output is a list of RequestOutput objects
 # that contain the prompt, generated text, and other information.
 outputs = llm.generate(prompts, sampling_params)
+
 # Print the outputs.
 total = 0
 for index, output in enumerate(outputs):

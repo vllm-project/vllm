@@ -100,7 +100,7 @@ uint64_t kvCacheRegion::getUsedPhysicalPages(void) {
   kvCacheRegion function: allocate cached blocks  
     if the return value > 0, then it is succesful. 
  */ 
-int64_t kvCacheRegion::allocCacheBlocks(uint64_t blocks, uint64_t * used_pages) {
+int64_t kvCacheRegion::allocCacheBlocks(uint64_t blocks, uint64_t * used_pages, cudaStream_t stream) {
   uint64_t size = blocks * this->block_size;
 
   int64_t toallocPages = -1; 
@@ -133,8 +133,9 @@ int64_t kvCacheRegion::allocCacheBlocks(uint64_t blocks, uint64_t * used_pages) 
       // Touch this page in order to initiate page allocation
       // This is important to avoid the memory allocation overhead on the critical path. 
       if(toallocPages == 1) {
-        //int64_t h_data = 0;
+        int64_t h_data = 0;
         //cuMemcpyHtoD(reinterpret_cast<CUdeviceptr>(this->nextUnmapedAddr), &h_data, sizeof(int64_t));
+        cudaMemcpyAsync(reinterpret_cast<void *>(this->nextUnmapedAddr), &h_data, sizeof(int64_t), cudaMemcpyHostToDevice, stream);
       }
 
       this->nextUnmapedAddr = alignedAddr;
@@ -229,6 +230,8 @@ kvCacheAllocator::kvCacheAllocator(int64_t max_seq_length, int64_t layers_num, i
 
   this->manager_running = false;
   cuCtxGetCurrent(&origContext);
+
+  cudaStreamCreate(&stream);
 
   // Initialize of mutex lock and condition
   pthread_mutex_init(&mutex_manager, NULL); 
@@ -374,7 +377,7 @@ void kvCacheAllocator::_gcPhyPages(int64_t toCollectPages) {
 // require to save KV cache of multiple tokens, which should not invoke this function multiple times. 
 // Similarly, the python code may get the physical blocks for multiple tokens during the decoding phase
 // Note that the allocator doesn't care about tokens (which should be handled by the python code), but only blocks here.
-int64_t kvCacheAllocator::_allocCacheBlocksForRequest(int64_t region_id, int64_t blocks) {
+int64_t kvCacheAllocator::_allocCacheBlocksForRequest(int64_t region_id, int64_t blocks, cudaStream_t stream) {
   int64_t pages = -1;
 
   CUresult result = cuCtxSetCurrent(origContext);
@@ -394,7 +397,7 @@ int64_t kvCacheAllocator::_allocCacheBlocksForRequest(int64_t region_id, int64_t
 
   kvCacheRegion * region = this->active_regions_map[region_id]; 
 
-  pages = region->allocCacheBlocks(blocks, &this->used_pages);
+  pages = region->allocCacheBlocks(blocks, &this->used_pages, stream);
 
   if(pages > 0) { 
     this->total_pages += pages;
@@ -413,16 +416,17 @@ int64_t kvCacheAllocator::_allocCacheBlocksForRequest(int64_t region_id, int64_t
 
 // Allocate cache blocks for a range of requests. Each request information will be an vector, with
 // the request id as the first, and then number of blocks as the second. 
-int64_t kvCacheAllocator::allocCacheBlocks(std::vector<std::vector<int64_t>> req_cache_blocks) {
+int64_t kvCacheAllocator::allocCacheBlocks(std::vector<std::vector<int64_t>> req_cache_blocks, cudaStream_t stream) {
   int64_t pages = 0; 
 
   for(auto row : req_cache_blocks) {
     uint64_t region_id = row[0]; 
     uint64_t blocks = row[1]; 
 
-    pages += _allocCacheBlocksForRequest(region_id, blocks);
+    pages += _allocCacheBlocksForRequest(region_id, blocks, stream);
     //fprintf(stderr, "allocate cache blocks for region-%d blocks %ld DONE\n", region_id, blocks);
   }
+  //cudaDeviceSynchronize(); 
 
   return pages; 
 }
@@ -442,7 +446,7 @@ void * kvCacheAllocator::memoryManagerThread(void * arg) {
   
     // Perform memory management asynchronously
     instance->releaseRegions(instance->free_caches);
-    instance->allocCacheBlocks(instance->req_cache_blocks);
+    instance->allocCacheBlocks(instance->req_cache_blocks, instance->stream);
 
     //pthread_mutex_lock(&instance->mutex_manager); 
     instance->manager_running = false; 
@@ -495,7 +499,7 @@ void kvCacheAllocator::updateCacheBlocks(bool is_prefill_phase, std::vector<int6
       pthread_cond_wait(&this->cond_manager, &this->mutex_manager); 
     }
     this->releaseRegions(free_caches);
-    this->allocCacheBlocks(req_cache_blocks);
+    this->allocCacheBlocks(req_cache_blocks, this->stream);
 
     pthread_mutex_unlock(&this->mutex_manager); 
   }

@@ -81,8 +81,8 @@ class kvCacheAllocator:
         self._allocator.releaseRegions(free_caches)
         return 
 
-    def alloc_cache_blocks(self, req_cache_blocks:List[List[int]]): 
-       return self._allocator.allocCacheBlocks(req_cache_blocks)  
+    #def alloc_cache_blocks(self, req_cache_blocks:List[List[int]]): 
+    #   return self._allocator.allocCacheBlocks(req_cache_blocks)  
 
     def update_cache_blocks(self, is_prefill_phase: bool, free_caches: List[int], req_cache_blocks:List[List[int]]):
        return self._allocator.updateCacheBlocks(is_prefill_phase, free_caches, req_cache_blocks)

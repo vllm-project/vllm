@@ -94,7 +94,7 @@ public:
   // get the number of physical pages
   uint64_t getAllocPhyPages(void); 
   uint64_t getUsedPhysicalPages(void);
-  int64_t allocCacheBlocks(uint64_t blocks, uint64_t * used_pages);
+  int64_t allocCacheBlocks(uint64_t blocks, uint64_t * used_pages, cudaStream_t stream);
   int freeUnusedPages(void);
   void freeAllPhyMemory(void);
 };
@@ -128,6 +128,7 @@ private:
   CUdevice device;
   std::mutex mutex;
 
+  cudaStream_t stream;
   // the hashtable to record the relationship between regions and ptrs
   unordered_map<uint64_t, kvCacheRegion*> active_regions_map;
   std::deque<kvCacheRegion *> cached_regions; 
@@ -141,7 +142,7 @@ private:
   // Release the virtual address space for a region that is related to one request
   void _releaseRegion(int64_t region_id);
   // Allocate physical memory, map to the reserved virtual address space of dptr, and set access permission
-  int64_t _allocCacheBlocksForRequest(int64_t region_id, int64_t blocks = 1);
+  int64_t _allocCacheBlocksForRequest(int64_t region_id, int64_t blocks, cudaStream_t stream);
 
   bool manager_running;
 
@@ -176,7 +177,7 @@ public:
 
   void releaseRegions(std::vector<int64_t> regions);
 
-  int64_t allocCacheBlocks(std::vector<std::vector<int64_t>> reqs_blocks);
+  int64_t allocCacheBlocks(std::vector<std::vector<int64_t>> reqs_blocks, cudaStream_t stream);
 
   void updateCacheBlocks(bool is_prefill_phase, std::vector<int64_t> free_caches, std::vector<std::vector<int64_t>> req_caches);
 
