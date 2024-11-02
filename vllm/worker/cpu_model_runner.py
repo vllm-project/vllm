@@ -8,9 +8,7 @@ import torch
 from torch import nn
 
 from vllm.attention import AttentionMetadata, get_attn_backend
-from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, ParallelConfig, PromptAdapterConfig,
-                         SchedulerConfig)
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
@@ -412,29 +410,18 @@ class CPUModelRunner(ModelRunnerBase[ModelInputForCPU]):
 
     def __init__(
         self,
-        model_config: ModelConfig,
-        parallel_config: ParallelConfig,
-        scheduler_config: SchedulerConfig,
-        device_config: DeviceConfig,
-        cache_config: CacheConfig,
-        load_config: LoadConfig,
-        lora_config: Optional[LoRAConfig],
+        vllm_config: VllmConfig,
         kv_cache_dtype: Optional[str] = "auto",
-        prompt_adapter_config: Optional[PromptAdapterConfig] = None,
         is_driver_worker: bool = False,
         *args,
         **kwargs,
     ):
-        self.model_config = model_config
-        self.parallel_config = parallel_config
-        self.scheduler_config = scheduler_config
+        ModelRunnerBase.__init__(self, vllm_config)
         # Currently, CPU worker doesn't support chunked prefill.
         assert self.scheduler_config.chunked_prefill_enabled is False
-        self.device_config = device_config
-        self.cache_config = cache_config
-        self.lora_config = lora_config
-        self.prompt_adapter_config = prompt_adapter_config
-        self.load_config = load_config
+        model_config = self.model_config
+        cache_config = self.cache_config
+
         self.is_driver_worker = is_driver_worker
 
         self.device = self.device_config.device
