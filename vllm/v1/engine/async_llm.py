@@ -63,7 +63,7 @@ class AsyncLLM:
                                        stream_mode=True)
 
         # EngineCore (starts the engine in background process).
-        self.engine_core = EngineCoreClient(
+        self.engine_core = EngineCoreClient.make_client(
             vllm_config=vllm_config,
             executor_class=executor_class,
             usage_context=usage_context,
