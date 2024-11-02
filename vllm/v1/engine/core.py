@@ -269,7 +269,7 @@ class EngineCoreClient:
     def __init__(
         self,
         *args,
-        use_async_sockets: bool = True,
+        asyncio_mode: bool = True,
         **kwargs,
     ):
         # Serialization setup.
@@ -277,9 +277,9 @@ class EngineCoreClient:
         self.decoder = msgspec.msgpack.Decoder(EngineCoreOutputs)
 
         # IPC Setup
-        self.async_sockets = use_async_sockets
+        self.asyncio_mode = asyncio_mode
         self.ctx = (
-            zmq.asyncio.Context() if self.async_sockets else zmq.Context()
+            zmq.asyncio.Context() if self.asyncio_mode else zmq.Context()
         )  # type: ignore[attr-defined]
 
         # Path for IPC.
@@ -341,7 +341,8 @@ class EngineCoreClient:
 
     async def get_output_async(self) -> List[EngineCoreOutput]:
         """Get EngineCoreOutput from the EngineCore (non-blocking) in asyncio."""
-        assert self.async_sockets
+
+        assert self.asyncio_mode
 
         while await self.output_socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
             logger.debug("Waiting for output from EngineCore.")
@@ -354,7 +355,7 @@ class EngineCoreClient:
     def get_output(self) -> List[EngineCoreOutput]:
         """Get EngineCoreOutput from the EngineCore (non-blocking)."""
 
-        assert not self.async_sockets
+        assert not self.asyncio_mode
 
         while self.output_socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
             logger.debug("Waiting for output from EngineCore.")
@@ -367,7 +368,7 @@ class EngineCoreClient:
     async def add_request_async(self, request: EngineCoreRequest) -> None:
         """Add EngineCoreRequest to the EngineCore (non-blocking) in asyncio."""
         
-        assert self.async_sockets
+        assert self.asyncio_mode
 
         await self.input_socket.send_multipart(
             (self.encoder.encode(request), ),
@@ -376,8 +377,8 @@ class EngineCoreClient:
     
     def add_request(self, request: EngineCoreRequest) -> None:
         """Add EngineCoreRequest to the EngineCore (non-blocking)."""
-        
-        assert not self.async_sockets
+
+        assert not self.asyncio_mode
 
         self.input_socket.send_multipart(
             (self.encoder.encode(request), ),

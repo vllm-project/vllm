@@ -14,8 +14,9 @@ from vllm.outputs import RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
+from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
-from vllm.v1.engine.core import EngineCore
+from vllm.v1.engine.core import EngineCore, EngineCoreClient
 from vllm.v1.engine.detokenizer import Detokenizer
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.gpu_executor import GPUExecutor
@@ -45,35 +46,64 @@ class LLMEngine:
         stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
         input_registry: InputRegistry = INPUT_REGISTRY,
         use_cached_outputs: bool = False,
+        use_multiprocessing: bool = False,
     ) -> None:
 
         # TODO: Can we avoid this?
         self.model_config = model_config
 
+        # Tokenizer
+        self.tokenizer = init_tokenizer_from_configs(
+            model_config=model_config,
+            scheduler_config=scheduler_config,
+            parallel_config=parallel_config,
+            enable_lora=bool(lora_config))
+        # Ensure liveness if running in another process.
+        self.tokenizer.ping()
+
         # Processor (convert Inputs --> EngineCoreRequests)
-        self.processor = Processor(model_config, parallel_config,
-                                   scheduler_config, lora_config,
-                                   input_registry)
+        self.processor = Processor(model_config, lora_config,
+                                   self.tokenizer, input_registry)
 
         # Detokenizer (converts EngineCoreOutputs --> RequestOutput)
-        self.detokenizer = Detokenizer(model_config.tokenizer)
+        self.detokenizer = Detokenizer(self.tokenizer)
 
-        # EngineCore
-        self.engine_core = EngineCore(
-            executor_class=executor_class,
-            model_config=model_config,
-            cache_config=cache_config,
-            parallel_config=parallel_config,
-            scheduler_config=scheduler_config,
-            device_config=device_config,
-            load_config=load_config,
-            lora_config=lora_config,
-            speculative_config=speculative_config,
-            decoding_config=(decoding_config or DecodingConfig()),
-            observability_config=(observability_config
-                                  or ObservabilityConfig()),
-            prompt_adapter_config=prompt_adapter_config,
-        )
+        if use_multiprocessing:
+            self.engine_core = EngineCoreClient(
+                executor_class,
+                model_config,
+                cache_config,
+                parallel_config,
+                scheduler_config,
+                device_config,
+                load_config,
+                lora_config,
+                speculative_config,
+                decoding_config or DecodingConfig(),
+                observability_config or ObservabilityConfig(),
+                prompt_adapter_config,
+                usage_context,
+                asyncio_mode=False,
+            )
+
+        else:
+            # EngineCore
+            self.engine_core = EngineCore(
+                executor_class=executor_class,
+                model_config=model_config,
+                cache_config=cache_config,
+                parallel_config=parallel_config,
+                scheduler_config=scheduler_config,
+                device_config=device_config,
+                load_config=load_config,
+                lora_config=lora_config,
+                speculative_config=speculative_config,
+                decoding_config=(decoding_config or DecodingConfig()),
+                observability_config=(observability_config
+                                    or ObservabilityConfig()),
+                prompt_adapter_config=prompt_adapter_config,
+                usage_context=usage_context,
+            )
 
     @classmethod
     def from_engine_args(
@@ -86,7 +116,7 @@ class LLMEngine:
         # Create the engine configs.
         engine_config = engine_args.create_engine_config()
         executor_class = cls._get_executor_cls(engine_config)
-        # Create the LLM engine.
+        # Create the LLMEngine.
         engine = cls(
             **engine_config.to_dict(),
             executor_class=executor_class,

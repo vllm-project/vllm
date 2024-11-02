@@ -11,7 +11,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.config import try_get_generation_config
-from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
+from vllm.transformers_utils.tokenizer_group import AnyTokenizer
 from vllm.v1.engine import DetokenizerRequest, EngineCoreRequest
 
 
@@ -20,9 +20,8 @@ class Processor:
     def __init__(
         self,
         model_config: ModelConfig,
-        parallel_config: ParallelConfig,
-        scheduler_config: SchedulerConfig,
         lora_config: Optional[LoRAConfig],
+        tokenizer: AnyTokenizer,
         input_registry: InputRegistry = INPUT_REGISTRY,
     ):
 
@@ -31,15 +30,7 @@ class Processor:
 
         assert not model_config.skip_tokenizer_init
 
-        self.tokenizer = init_tokenizer_from_configs(
-            model_config=model_config,
-            scheduler_config=scheduler_config,
-            parallel_config=parallel_config,
-            enable_lora=bool(lora_config))
-
-        # Ping the tokenizer to ensure liveness if it runs in a
-        # different process.
-        self.tokenizer.ping()
+        self.tokenizer = tokenizer
 
         self.generation_config_fields = _load_generation_config_dict(
             model_config)

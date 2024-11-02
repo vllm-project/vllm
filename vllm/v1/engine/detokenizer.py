@@ -191,8 +191,8 @@ class IncrementalDetokenizer:
 
 class Detokenizer:
 
-    def __init__(self, tokenizer_name: str, stream_mode: bool = False):
-        self.tokenizer = get_tokenizer(tokenizer_name)
+    def __init__(self, tokenizer: AnyTokenizer, stream_mode: bool = False):
+        self.tokenizer = tokenizer
         self.stream_mode = stream_mode
 
         # Request id -> IncrementalDetokenizer

@@ -233,7 +233,7 @@ class LLM:
                 engine_config.observability_config,
                 engine_config.prompt_adapter_config,
                 UsageContext.LLM_CLASS,
-                use_async_sockets=False,
+                asyncio_mode=False,
             )
 
         else:
