@@ -25,7 +25,7 @@ class MultiStepWorker(Worker):
         super().__init__(*args, **kwargs)
         base_model_runner = self.model_runner
         # for multi-step model, wrap the model runner with MultiStepModelRunner
-        self.model_runner = MultiStepModelRunner(base_model_runner, )
+        self.model_runner = MultiStepModelRunner(base_model_runner)
 
         pipeline_parallel_size = self.parallel_config.pipeline_parallel_size
         self.multi_step_states: List[
