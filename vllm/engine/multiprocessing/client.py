@@ -29,7 +29,7 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          RPCUProfileRequest)
 from vllm.engine.protocol import EngineClient
 # yapf: enable
-from vllm.envs import VLLM_RPC_TIMEOUT, VLLM_USE_V1
+from vllm.envs import VLLM_RPC_TIMEOUT
 from vllm.inputs import PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -122,8 +122,7 @@ class MQLLMEngineClient(EngineClient):
     @staticmethod
     def is_unsupported_config(engine_args: AsyncEngineArgs):
         # Pipeline parallel not yet supported
-        # Use AsyncLLMEngine with VLLM_V1
-        return (VLLM_USE_V1 or engine_args.pipeline_parallel_size > 1)
+        return engine_args.pipeline_parallel_size > 1
 
     @contextmanager
     def get_data_socket(self) -> Iterator[Socket]:

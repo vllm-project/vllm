@@ -203,7 +203,8 @@ class LLM:
 
         if envs.VLLM_USE_V1:
             self.llm_engine = LLMEngine.from_engine_args(
-                engine_args, usage_context=UsageContext.LLM_CLASS,
+                engine_args,
+                usage_context=UsageContext.LLM_CLASS,
                 enable_multiprocessing=True)
         else:
             self.llm_engine = LLMEngine.from_engine_args(

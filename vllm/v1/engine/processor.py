@@ -35,8 +35,8 @@ class Processor:
         self.input_processor = input_registry.create_input_processor(
             model_config)
 
-    # TODO: run in an ThreadpoolExecutor or BackgroundProcess. 
-    # This ideally should releases the GIL, so we should not block the 
+    # TODO: run in an ThreadpoolExecutor or BackgroundProcess.
+    # This ideally should releases the GIL, so we should not block the
     # asyncio loop while this is running.
     def process_inputs(
         self,

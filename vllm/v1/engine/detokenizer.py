@@ -224,8 +224,8 @@ class Detokenizer:
             self.tokenizer, request, stream)
         self.request_states[request.request_id] = request_state
 
-    # TODO: run in an ThreadpoolExecutor or BackgroundProcess. 
-    # This ideally should releases the GIL, so we should not block the 
+    # TODO: run in an ThreadpoolExecutor or BackgroundProcess.
+    # This ideally should releases the GIL, so we should not block the
     # asyncio loop while this is running.
     def step(
         self, encore_core_outputs: List[EngineCoreOutput]
@@ -263,8 +263,8 @@ class Detokenizer:
         # Return to EngineClient.
         return request_outputs, requests_to_abort
 
-    # TODO: run in an ThreadpoolExecutor or BackgroundProcess. 
-    # This ideally should releases the GIL, so we should not block the 
+    # TODO: run in an ThreadpoolExecutor or BackgroundProcess.
+    # This ideally should releases the GIL, so we should not block the
     # asyncio loop while this is running.
     def step_streaming(
             self, encore_core_outputs: List[EngineCoreOutput]) -> List[str]:

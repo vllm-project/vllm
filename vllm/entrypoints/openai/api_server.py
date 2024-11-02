@@ -9,6 +9,7 @@ import socket
 import tempfile
 from argparse import Namespace
 from contextlib import asynccontextmanager
+from functools import partial
 from http import HTTPStatus
 from typing import AsyncIterator, Optional, Set
 
@@ -128,12 +129,24 @@ async def build_async_engine_client_from_engine_args(
     # Fall back
     # TODO: fill out feature matrix.
     if (MQLLMEngineClient.is_unsupported_config(engine_args)
-            or disable_frontend_multiprocessing):
+            or envs.VLLM_USE_V1 or disable_frontend_multiprocessing):
 
-        yield AsyncLLMEngine.from_engine_args(
-            engine_args=engine_args,
-            usage_context=UsageContext.OPENAI_API_SERVER)
+        engine_config = engine_args.create_engine_config()
+        uses_ray = getattr(AsyncLLMEngine._get_executor_cls(engine_config),
+                           "uses_ray", False)
 
+        build_engine = partial(AsyncLLMEngine.from_engine_args,
+                               engine_args=engine_args,
+                               engine_config=engine_config,
+                               usage_context=UsageContext.OPENAI_API_SERVER)
+        if uses_ray:
+            # Must run in main thread with ray for its signal handlers to work
+            engine_client = build_engine()
+        else:
+            engine_client = await asyncio.get_running_loop().run_in_executor(
+                None, build_engine)
+
+        yield engine_client
         return
 
     # Otherwise, use the multiprocessing AsyncLLMEngine.
