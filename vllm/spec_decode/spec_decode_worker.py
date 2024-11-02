@@ -144,23 +144,22 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                                                   ngram_prompt_lookup_max)
         else:
             draft_parallel_config: ParallelConfig = draft_worker_kwargs[
-                'parallel_config']
+                'vllm_config'].parallel_config
             draft_tp = draft_parallel_config.tensor_parallel_size
             target_tp = scorer_worker.parallel_config.tensor_parallel_size
 
-            if draft_worker_kwargs[
-                    "model_config"].hf_config.model_type == "mlp_speculator":
+            draft_model_config = draft_worker_kwargs[
+                "vllm_config"].model_config
+            if draft_model_config.hf_config.model_type == "mlp_speculator":
                 proposer_worker = MLPSpeculatorWorker(**draft_worker_kwargs)
-            elif draft_worker_kwargs[
-                    "model_config"].hf_config.model_type == "medusa":
+            elif draft_model_config.hf_config.model_type == "medusa":
                 proposer_worker = MedusaWorker(**draft_worker_kwargs)
             else:
                 if draft_tp == 1:
                     draft_worker_kwargs[
                         "model_runner_cls"] = TP1DraftModelRunner
                 else:
-                    if draft_worker_kwargs[
-                            "model_config"].hf_config.model_type == "eagle":
+                    if draft_model_config.hf_config.model_type == "eagle":
                         raise NotImplementedError(
                             "EAGLE does not support TP > 1 yet")
 
@@ -194,8 +193,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                     "[Speculative Decoding] Disabling MQA scorer as the "
                     "MQA is only available with flash attn backend.")
 
-            if "model_config" in draft_worker_kwargs and \
-                draft_worker_kwargs["model_config"].max_model_len < \
+            if draft_model_config and \
+                draft_model_config.max_model_len < \
                     scorer_worker.model_config.max_model_len:
                 disable_mqa_scorer = True
                 logger.info(
