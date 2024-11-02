@@ -56,7 +56,7 @@ class LLMEngine:
         self.detokenizer = Detokenizer(vllm_config.model_config.tokenizer)
 
         # EngineCore (gets EngineCoreRequests and gives EngineCoreOutputs)
-        self.engine_core = EngineCoreClient(
+        self.engine_core = EngineCoreClient.make_client(
             vllm_config,
             executor_class,
             usage_context,
