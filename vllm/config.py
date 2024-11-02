@@ -1941,7 +1941,7 @@ class ObservabilityConfig:
                 f"installed. Original error:\n{otel_import_error_traceback}")
 
 
-@dataclass(frozen=True)
+@dataclass
 class VllmConfig:
     """Dataclass which contains all vllm-related configuration. This
     simplifies passing around the distinct configurations in the codebase.
