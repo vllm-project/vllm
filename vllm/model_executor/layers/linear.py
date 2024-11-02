@@ -496,6 +496,18 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                     shard_size, shard_offset = adjust_marlin_shard(
                         param, shard_size, shard_offset)
 
+                use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit",
+                                            False)
+                if use_bitsandbytes_4bit:
+                    orig_offsets = {
+                        0: (0, self.output_sizes[0]),
+                        1: (self.output_sizes[0], self.output_sizes[1]),
+                        "total": (self.output_size, 0),
+                    }
+
+                    shard_size, shard_offset = adjust_bitsandbytes_4bit_shard(
+                        param, orig_offsets, shard_id)
+
                 loaded_weight_shard = loaded_weight.narrow(
                     output_dim, shard_offset, shard_size)
                 self.weight_loader(param, loaded_weight_shard, shard_id)
