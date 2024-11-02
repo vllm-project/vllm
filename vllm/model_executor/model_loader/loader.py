@@ -167,8 +167,6 @@ def build_model(model_class: Type[nn.Module],
     if prefix:
         extra_kwargs["prefix"] = prefix
 
-    extra_kwargs["vllm_config"] = vllm_config
-
     return model_class(config=hf_config,
                        cache_config=cache_config,
                        quant_config=quant_config,
