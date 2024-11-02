@@ -21,7 +21,8 @@ print(completion.choices[0].message.content)
 
 # Guided decoding by Regex
 prompt = ("Generate an email address for Alan Turing, who works in Enigma."
-          "End in .com and new line. Example result: a.turing@enigma.com\n")
+          "End in .com and new line. Example result:"
+          "alan.turing@enigma.com\n")
 
 completion = client.chat.completions.create(
     model="Qwen/Qwen2.5-3B",
