@@ -18,8 +18,7 @@ from vllm.utils import PyObjectCache, async_tensor_h2d
 from vllm.worker.model_runner import (GPUModelRunnerBase,
                                       ModelInputForGPUWithSamplingMetadata)
 from vllm.worker.model_runner_base import (
-    BroadcastableModelInput, ModelRunnerBase,
-    _init_attn_metadata_from_tensor_dict,
+    BroadcastableModelInput, _init_attn_metadata_from_tensor_dict,
     _init_frozen_model_input_from_tensor_dict,
     _init_sampling_metadata_from_tensor_dict)
 
@@ -304,9 +303,9 @@ class StatefulModelInput(BroadcastableModelInput):
 class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
     # mypy: enable-error-code=type-var
 
-    def __init__(self, base_model_runner: GPUModelRunnerBase):
+    def __init__(self, base_model_runner: GPUModelRunnerBase, *args, **kwargs):
 
-        ModelRunnerBase.__init__(self, base_model_runner.vllm_config)
+        super().__init__(*args, **kwargs)
 
         # Check attention backend support.
         supported_attention_backends: List[str] = \
