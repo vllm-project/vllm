@@ -28,6 +28,7 @@ from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
+from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.model_loader.tensorizer import (
@@ -786,6 +787,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         with open(config_file_path, "r") as f:
             config = json.load(f)
             self.target_modules = config["target_modules"]
+        self.wo_sharded_weights_modules: List[str] = []
 
     def _get_config_file(self, qlora_adapter: str) -> str:
         is_local = os.path.isdir(qlora_adapter)
@@ -1005,16 +1007,21 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             if any(target_module in weight_name for target_module in
                    self.target_modules) and weight_name.endswith(".weight"):
                 weight_name = weight_name.replace(".weight", ".qweight")
-
-                if any(module in weight_name
-                       for module in self.column_parallel_weights_modules):
+                # Without sharding
+                if any(
+                        weight_name.startswith(module)
+                        for module in self.wo_sharded_weights_modules):
+                    weight_sub_tensor = weight_tensor
+                # Shard by column
+                elif any(module in weight_name
+                         for module in self.column_parallel_weights_modules):
 
                     total_size = weight_tensor.size(-1)
                     start_index = total_size // tp_size * tp_rank
                     end_index = total_size // tp_size * (tp_rank + 1)
                     weight_sub_tensor = weight_tensor[...,
                                                       start_index:end_index]
-
+                # Shard by row
                 else:
                     total_size = weight_tensor.size(0)
                     start_index = total_size // tp_size * tp_rank
@@ -1068,7 +1075,15 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 model.column_parallel_weights_modules
         else:
             self.column_parallel_weights_modules = []
-
+        # Some modules like `ReplicatedLinear` should not have their weights
+        # sharded. The reason for implementing it this way is to avoid new
+        # static variable in the model implementation.
+        # TODO: Can we reduce the static variables needed for BNB based on
+        #  model information?
+        self.wo_sharded_weights_modules = [
+            name for name, module in model.named_modules()
+            if isinstance(module, (ReplicatedLinear, ))
+        ]
         self.model_type = type(model).__name__
 
         logger.info("Loading weights with BitsAndBytes quantization. "
