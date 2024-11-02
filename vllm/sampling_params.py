@@ -485,8 +485,8 @@ class SamplingParams(
             f"skip_special_tokens={self.skip_special_tokens}, "
             "spaces_between_special_tokens="
             f"{self.spaces_between_special_tokens}, "
-            f"truncate_prompt_tokens={self.truncate_prompt_tokens}), "
-            f"guided_decoding={self.guided_decoding}")
+            f"truncate_prompt_tokens={self.truncate_prompt_tokens}, "
+            f"guided_decoding={self.guided_decoding})")
 
 
 class BeamSearchParams(
@@ -500,3 +500,4 @@ class BeamSearchParams(
     ignore_eos: bool = False
     temperature: float = 0.0
     length_penalty: float = 1.0
+    include_stop_str_in_output: bool = False

@@ -133,18 +133,19 @@ class TPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         # Synchronize before measuring the memory usage.
         xm.wait_device_ops()
 
-        dtype_btyes = get_dtype_size(self.cache_dtype)
-        block_size = self.cache_config.block_size
-        block_size_bytes = (dtype_btyes * block_size * num_layers * 2 *
-                            head_size * num_kv_heads)
-
-        # Calculate the TPU KV cache size based on profiling.
+        # Get the maximum amount of memory used by the model weights and
+        # intermediate activations.
         m = xm.get_memory_info(self.device)
         total_memory_size = m["bytes_limit"]
+        profiled = m["peak_bytes_used"]  # Weights + intermediate activations.
+
+        # Calculate the TPU KV cache size based on profiling.
         usable_memory_size = int(total_memory_size *
                                  self.cache_config.gpu_memory_utilization)
-        profiled = m["bytes_used"]  # Weights + intermediate activations.
         tpu_kv_cache_bytes = max(usable_memory_size - profiled, 0)
+        dtype_btyes = get_dtype_size(self.cache_dtype)
+        block_size_bytes = (dtype_btyes * self.cache_config.block_size *
+                            num_layers * 2 * head_size * num_kv_heads)
         num_tpu_blocks = tpu_kv_cache_bytes // block_size_bytes
         num_tpu_blocks = (num_tpu_blocks // 8) * 8  # Round down to 8.
 

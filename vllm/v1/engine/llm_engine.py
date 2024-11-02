@@ -1,10 +1,7 @@
 from typing import Dict, Iterable, List, Mapping, Optional, Type, Union
 
-from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
-                         EngineConfig, LoadConfig, LoRAConfig, ModelConfig,
-                         ObservabilityConfig, ParallelConfig,
-                         PromptAdapterConfig, SchedulerConfig,
-                         SpeculativeConfig)
+from vllm.config import (DecodingConfig, EngineConfig, LoRAConfig, ModelConfig,
+                         ObservabilityConfig, ParallelConfig, SchedulerConfig)
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics_types import StatLoggerBase
 from vllm.inputs import INPUT_REGISTRY, InputRegistry, PromptType
@@ -29,17 +26,7 @@ class LLMEngine:
 
     def __init__(
         self,
-        model_config: ModelConfig,
-        cache_config: CacheConfig,
-        parallel_config: ParallelConfig,
-        scheduler_config: SchedulerConfig,
-        device_config: DeviceConfig,
-        load_config: LoadConfig,
-        lora_config: Optional[LoRAConfig],
-        speculative_config: Optional[SpeculativeConfig],
-        decoding_config: Optional[DecodingConfig],
-        observability_config: Optional[ObservabilityConfig],
-        prompt_adapter_config: Optional[PromptAdapterConfig],
+        vllm_config: EngineConfig,
         executor_class: Type[GPUExecutor],
         log_stats: bool,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
@@ -48,41 +35,33 @@ class LLMEngine:
         use_cached_outputs: bool = False,
         use_multiprocessing: bool = False,
     ) -> None:
-
+        
         # TODO: Can we avoid this?
-        self.model_config = model_config
+        self.model_config = vllm_config.model_config
 
         # Tokenizer
         self.tokenizer = init_tokenizer_from_configs(
-            model_config=model_config,
-            scheduler_config=scheduler_config,
-            parallel_config=parallel_config,
-            enable_lora=bool(lora_config))
+            model_config=vllm_config.model_config,
+            scheduler_config=vllm_config.scheduler_config,
+            parallel_config=vllm_config.parallel_config,
+            enable_lora=bool(vllm_config.lora_config))
         # Ensure liveness if running in another process.
         self.tokenizer.ping()
 
         # Processor (convert Inputs --> EngineCoreRequests)
-        self.processor = Processor(model_config, lora_config,
-                                   self.tokenizer, input_registry)
+        self.processor = Processor(vllm_config.model_config,
+                                   vllm_config.lora_config,
+                                   self.tokenizer,
+                                   input_registry)
 
         # Detokenizer (converts EngineCoreOutputs --> RequestOutput)
         self.detokenizer = Detokenizer(self.tokenizer)
 
         if use_multiprocessing:
             self.engine_core = EngineCoreClient(
-                executor_class,
-                model_config,
-                cache_config,
-                parallel_config,
-                scheduler_config,
-                device_config,
-                load_config,
-                lora_config,
-                speculative_config,
-                decoding_config or DecodingConfig(),
-                observability_config or ObservabilityConfig(),
-                prompt_adapter_config,
-                usage_context,
+                vllm_config=vllm_config,
+                executor_class=executor_class,
+                usage_context=usage_context,
                 asyncio_mode=False,
             )
 
@@ -90,18 +69,7 @@ class LLMEngine:
             # EngineCore
             self.engine_core = EngineCore(
                 executor_class=executor_class,
-                model_config=model_config,
-                cache_config=cache_config,
-                parallel_config=parallel_config,
-                scheduler_config=scheduler_config,
-                device_config=device_config,
-                load_config=load_config,
-                lora_config=lora_config,
-                speculative_config=speculative_config,
-                decoding_config=(decoding_config or DecodingConfig()),
-                observability_config=(observability_config
-                                    or ObservabilityConfig()),
-                prompt_adapter_config=prompt_adapter_config,
+                vllm_config=vllm_config,
                 usage_context=usage_context,
             )
 
@@ -118,7 +86,7 @@ class LLMEngine:
         executor_class = cls._get_executor_cls(engine_config)
         # Create the LLMEngine.
         engine = cls(
-            **engine_config.to_dict(),
+            vllm_config=engine_config,
             executor_class=executor_class,
             log_stats=not engine_args.disable_log_stats,
             usage_context=usage_context,
