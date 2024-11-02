@@ -150,7 +150,7 @@ def _get_model_initialization_kwargs(
 
 
 def build_model(model_class: Type[nn.Module],
-                vllm_config: VllmConfig,
+                vllm_config: Optional[VllmConfig],
                 hf_config: PretrainedConfig,
                 cache_config: Optional[CacheConfig],
                 quant_config: Optional[QuantizationConfig],
