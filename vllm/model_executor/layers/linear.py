@@ -40,12 +40,12 @@ def adjust_marlin_shard(param, shard_size, shard_offset):
 
 
 def adjust_bitsandbytes_4bit_shard(param: Parameter,
-                                   qkv_offsets: Dict[str, Tuple[int, int]],
+                                   shard_offsets: Dict[str, Tuple[int, int]],
                                    loaded_shard_id: str) -> Tuple[int, int]:
     """Adjust the quantization offsets and sizes for BitsAndBytes sharding."""
 
-    total, _ = qkv_offsets["total"]
-    orig_offset, orig_size = qkv_offsets[loaded_shard_id]
+    total, _ = shard_offsets["total"]
+    orig_offset, orig_size = shard_offsets[loaded_shard_id]
 
     quantized_total = param.data.shape[0]
     quantized_offset = orig_offset * quantized_total // total
@@ -497,16 +497,15 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                         param, shard_size, shard_offset)
 
                 use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit",
-                                            False)
+                                                False)
                 if use_bitsandbytes_4bit:
                     orig_offsets = {
-                        0: (0, self.output_sizes[0]),
-                        1: (self.output_sizes[0], self.output_sizes[1]),
+                        "0": (0, self.output_sizes[0]),
+                        "1": (self.output_sizes[0], self.output_sizes[1]),
                         "total": (self.output_size, 0),
                     }
-
                     shard_size, shard_offset = adjust_bitsandbytes_4bit_shard(
-                        param, orig_offsets, shard_id)
+                        param, orig_offsets, str(shard_id))
 
                 loaded_weight_shard = loaded_weight.narrow(
                     output_dim, shard_offset, shard_size)
