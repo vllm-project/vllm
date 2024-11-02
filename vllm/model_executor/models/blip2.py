@@ -23,7 +23,7 @@ from .blip import (BlipVisionModel, dummy_image_for_blip,
                    get_max_blip_image_tokens)
 from .interfaces import SupportsMultiModal, SupportsPP
 from .utils import (AutoWeightsLoader, init_vllm_registered_model,
-                    merge_multimodal_embeddings)
+                    merge_multimodal_embeddings_from_map)
 
 # We use this internally as placeholders since there is no image token
 # defined on the HuggingFace repo
@@ -472,9 +472,13 @@ def input_processor_for_blip2(ctx: InputContext, inputs: DecoderOnlyInputs):
     if new_prompt is not None:
         new_prompt = BLIP2_IMAGE_TOKEN * image_feature_size + new_prompt
 
+    ranges = consecutive_placeholder_ranges(num_items=1,
+                                            item_size=image_feature_size)
+
     return token_inputs(prompt_token_ids=new_token_ids,
                         prompt=new_prompt,
-                        multi_modal_data=multi_modal_data)
+                        multi_modal_data=multi_modal_data,
+                        multi_modal_placeholders={"image": ranges})
 
 
 @MULTIMODAL_REGISTRY.register_image_input_mapper()
@@ -651,24 +655,25 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
             :class:`Blip2ImageInputs`
         """
         if intermediate_tensors is not None:
-            input_ids = None
             inputs_embeds = None
         else:
+            inputs_embeds = self.language_model.model.get_input_embeddings(
+                    input_ids)
+            
             image_input = self._parse_and_validate_image_input(**kwargs)
-
             if image_input is not None:
                 vision_embeddings = self._process_image_input(image_input)
                 inputs_embeds = self.language_model.model.get_input_embeddings(
                     input_ids)
 
-                inputs_embeds = merge_multimodal_embeddings(
-                    input_ids, inputs_embeds, vision_embeddings,
-                    BLIP2_IMAGE_TOKEN_ID)
+                merge_multimodal_embeddings_from_map(
+                    inputs_embeds, vision_embeddings,
+                    attn_metadata.multi_modal_placeholder_index_maps["image"])
 
-                input_ids = None
-            else:
-                inputs_embeds = None
-
+        # always pass the input via `inputs_embeds`
+        # to make sure the computation graph is consistent
+        # for `torch.compile` integration
+        input_ids = None
         hidden_states = self.language_model.model(
             input_ids,
             positions,

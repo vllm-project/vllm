@@ -467,9 +467,11 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP):
             audio_features: A batch of audio inputs [B, N, 80, M].
         """
         if intermediate_tensors is not None:
-            input_ids = None
             inputs_embeds = None
         else:
+            inputs_embeds = self.language_model.model.get_input_embeddings(
+                input_ids)
+
             audio_input = self._parse_and_validate_audio_input(**kwargs)
             if audio_input is not None:
                 audio_embeddings = self._process_audio_input(audio_input)
@@ -479,10 +481,11 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP):
                 merge_multimodal_embeddings_from_map(
                     inputs_embeds, audio_embeddings,
                     attn_metadata.multi_modal_placeholder_index_maps["audio"])
-                input_ids = None
-            else:
-                inputs_embeds = None
 
+        # always pass the input via `inputs_embeds`
+        # to make sure the computation graph is consistent
+        # for `torch.compile` integration
+        input_ids = None
         hidden_states = self.language_model.model(
             input_ids=input_ids,
             positions=positions,

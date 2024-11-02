@@ -329,10 +329,21 @@ def repeat_and_pad_placeholder_tokens(
 
 
 def consecutive_placeholder_ranges(num_items: int,
-                                   item_size: int) -> List[PlaceholderRange]:
-    """Returns a list of consecutive PlaceholderRanges of a fixed size"""
+                                   item_size: int,
+                                   initial_offset: int = 0,
+                                   ) -> List[PlaceholderRange]:
+    """Returns a list of consecutive PlaceholderRanges of a fixed size
+
+    Args:
+        num_items: The number of items
+        item_size: The size of each item
+        initial_offset: The initial offset/index of the first item
+
+    Returns:
+        A list of PlaceholderRange objects
+    """
 
     return [
-        PlaceholderRange(offset=i * item_size, length=item_size)
+        PlaceholderRange(offset=initial_offset + i * item_size, length=item_size)
         for i in range(num_items)
     ]

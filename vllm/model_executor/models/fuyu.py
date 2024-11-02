@@ -44,7 +44,7 @@ from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
 from vllm.utils import is_list_of
 
 from .interfaces import SupportsMultiModal, SupportsPP
-from .utils import AutoWeightsLoader, flatten_bn, merge_multimodal_embeddings
+from .utils import AutoWeightsLoader, flatten_bn, merge_multimodal_embeddings_from_map
 
 # Cannot find the following 2 numbers from hf config.
 _IMAGE_TOKEN_ID = 71011
@@ -199,9 +199,12 @@ def input_processor_for_fuyu(ctx: InputContext, inputs: DecoderOnlyInputs):
     new_prompt_token_ids = image_input_ids + bos_token + prompt_token_ids[
         1:] + boa_token
 
+    ranges = consecutive_placeholder_ranges(num_items=len(image_list),
+                                            item_size=image_patches.size(1))
     return token_inputs(prompt=new_prompt,
                         prompt_token_ids=new_prompt_token_ids,
-                        multi_modal_data=new_multi_modal_data)
+                        multi_modal_data=new_multi_modal_data,
+                        multi_modal_placeholders={"image": ranges})
 
 
 def input_mapper_for_fuyu(ctx: InputContext, data: object):
@@ -313,22 +316,25 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         **kwargs: object,
     ):
         if intermediate_tensors is not None:
-            input_ids = None
             inputs_embeds = None
         else:
-            image_input = self._parse_and_validate_image_input(**kwargs)
+            inputs_embeds = self.language_model.model.get_input_embeddings(
+                    input_ids)
 
+            image_input = self._parse_and_validate_image_input(**kwargs)
             if image_input is not None:
                 vision_embeddings = self._process_image_input(image_input)
                 inputs_embeds = self.language_model.model.embed_tokens(
                     input_ids)
-                inputs_embeds = merge_multimodal_embeddings(
-                    input_ids, inputs_embeds, vision_embeddings,
-                    self.image_token_id)
 
-            else:
-                inputs_embeds = None
+                merge_multimodal_embeddings_from_map(
+                    inputs_embeds, vision_embeddings,
+                    attn_metadata.multi_modal_placeholder_index_maps["image"])
 
+        # always pass the input via `inputs_embeds`
+        # to make sure the computation graph is consistent
+        # for `torch.compile` integration
+        input_ids = None
         hidden_states = self.language_model(
             input_ids=input_ids,
             positions=positions,
