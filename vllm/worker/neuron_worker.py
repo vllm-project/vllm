@@ -36,7 +36,7 @@ class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
             init_cached_hf_modules()
 
         self.model_runner: NeuronModelRunner = NeuronModelRunner(
-            vllm_config=vllm_config, )
+            vllm_config=vllm_config)
         self.is_driver_worker = True
 
     def init_device(self) -> None:
