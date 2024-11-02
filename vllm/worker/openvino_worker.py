@@ -7,8 +7,8 @@ import torch.distributed
 
 import vllm.envs as envs
 from vllm.attention import get_attn_backend
-from vllm.config import (CacheConfig, DeviceConfig, EngineConfig, ModelConfig,
-                         ParallelConfig)
+from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
+                         ParallelConfig, VllmConfig)
 from vllm.distributed import (broadcast_tensor_dict,
                               ensure_model_parallel_initialized,
                               init_distributed_environment)
@@ -211,7 +211,7 @@ class OpenVINOWorker(LoraNotSupportedWorkerBase):
     def __init__(
         self,
         ov_core: ov.Core,
-        vllm_config: EngineConfig,
+        vllm_config: VllmConfig,
         local_rank: int,
         rank: int,
         distributed_init_method: str,

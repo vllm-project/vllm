@@ -20,7 +20,7 @@ from vllm.attention.backends.abstract import AttentionState
 from vllm.attention.backends.utils import CommonAttentionState
 from vllm.compilation.compile_context import set_compile_context
 from vllm.compilation.levels import CompilationLevel
-from vllm.config import EngineConfig
+from vllm.config import VllmConfig
 from vllm.core.scheduler import SchedulerOutputs
 from vllm.distributed import get_pp_group
 from vllm.distributed.parallel_state import graph_capture
@@ -943,7 +943,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
     def __init__(
         self,
-        vllm_config: EngineConfig,
+        vllm_config: VllmConfig,
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
         return_hidden_states: bool = False,

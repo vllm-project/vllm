@@ -3,7 +3,7 @@ from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
 import torch
 
-from vllm.config import EngineConfig
+from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
@@ -34,7 +34,7 @@ class EmbeddingModelRunner(
 
     def __init__(
         self,
-        vllm_config: EngineConfig,
+        vllm_config: VllmConfig,
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
     ):

@@ -9,7 +9,7 @@ from typing import (TYPE_CHECKING, Any, Dict, Generic, Iterable, List,
 import torch
 from torch import is_tensor
 
-from vllm.config import EngineConfig
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.platforms import current_platform
@@ -224,7 +224,7 @@ class ModelRunnerBase(ABC, Generic[T]):
 
     def __init__(
         self,
-        vllm_config: EngineConfig,
+        vllm_config: VllmConfig,
     ) -> None:
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config

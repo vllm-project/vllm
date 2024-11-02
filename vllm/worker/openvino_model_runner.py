@@ -6,7 +6,7 @@ from torch import nn
 
 from vllm.attention import get_attn_backend
 from vllm.attention.backends.openvino import OpenVINOAttentionMetadata
-from vllm.config import EngineConfig
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.sampler import SamplerOutput
@@ -42,7 +42,7 @@ class OpenVINOModelRunner(ModelRunnerBase):
     def __init__(
         self,
         ov_core: ov.Core,
-        vllm_config: EngineConfig,
+        vllm_config: VllmConfig,
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
         *args,

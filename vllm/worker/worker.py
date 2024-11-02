@@ -7,7 +7,7 @@ import torch
 import torch.distributed
 
 import vllm.envs as envs
-from vllm.config import EngineConfig, ParallelConfig
+from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment,
                               set_custom_all_reduce)
@@ -40,7 +40,7 @@ class Worker(LocalOrDistributedWorkerBase):
 
     def __init__(
         self,
-        vllm_config: EngineConfig,
+        vllm_config: VllmConfig,
         local_rank: int,
         rank: int,
         distributed_init_method: str,

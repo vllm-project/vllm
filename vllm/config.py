@@ -1942,7 +1942,7 @@ class ObservabilityConfig:
 
 
 @dataclass(frozen=True)
-class EngineConfig:
+class VllmConfig:
     """Dataclass which contains all engine-related configuration. This
     simplifies passing around the distinct configurations in the codebase.
     """

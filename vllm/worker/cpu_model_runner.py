@@ -7,7 +7,7 @@ import torch
 from torch import nn
 
 from vllm.attention import AttentionMetadata, get_attn_backend
-from vllm.config import EngineConfig
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
@@ -386,7 +386,7 @@ class CPUModelRunner(ModelRunnerBase[ModelInputForCPU]):
 
     def __init__(
         self,
-        vllm_config: EngineConfig,
+        vllm_config: VllmConfig,
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
         *args,

@@ -7,7 +7,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Type, Union
 
 import torch
 
-from vllm.config import EngineConfig, ObservabilityConfig
+from vllm.config import ObservabilityConfig, VllmConfig
 from vllm.distributed import broadcast_tensor_dict, get_pp_group, get_tp_group
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -31,7 +31,7 @@ class WorkerBase(ABC):
 
     def __init__(
         self,
-        vllm_config: EngineConfig,
+        vllm_config: VllmConfig,
     ) -> None:
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config

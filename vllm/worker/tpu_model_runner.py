@@ -12,7 +12,7 @@ import torch_xla.runtime as xr
 
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
-from vllm.config import EngineConfig
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader import get_model
@@ -89,7 +89,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
 
     def __init__(
         self,
-        vllm_config: EngineConfig,
+        vllm_config: VllmConfig,
         is_driver_worker: bool = False,
     ):
         ModelRunnerBase.__init__(self, vllm_config=vllm_config)

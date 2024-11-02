@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 
 from vllm.attention import get_attn_backend
-from vllm.config import EngineConfig
+from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.logger import init_logger
@@ -335,7 +335,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
 
     def __init__(
         self,
-        vllm_config: EngineConfig,
+        vllm_config: VllmConfig,
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
         return_hidden_states: bool = False,

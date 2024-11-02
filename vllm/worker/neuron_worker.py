@@ -4,7 +4,7 @@ from typing import List, Optional, Tuple
 import torch
 import torch.distributed
 
-from vllm.config import EngineConfig
+from vllm.config import VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.model_executor import set_random_seed
@@ -21,7 +21,7 @@ class NeuronWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
 
     def __init__(
         self,
-        vllm_config: EngineConfig,
+        vllm_config: VllmConfig,
         local_rank: int,
         rank: int,
         distributed_init_method: str,

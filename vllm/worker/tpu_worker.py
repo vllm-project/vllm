@@ -6,7 +6,7 @@ import torch_xla.core.xla_model as xm
 import torch_xla.runtime as xr
 
 import vllm.envs as envs
-from vllm.config import EngineConfig
+from vllm.config import VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.logger import init_logger
@@ -25,7 +25,7 @@ class TPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
 
     def __init__(
         self,
-        vllm_config: EngineConfig,
+        vllm_config: VllmConfig,
         local_rank: int,
         rank: int,
         distributed_init_method: str,

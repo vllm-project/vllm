@@ -6,8 +6,8 @@ import torch.distributed
 
 import vllm.envs as envs
 from vllm.attention import get_attn_backend
-from vllm.config import (CacheConfig, DeviceConfig, EngineConfig, ModelConfig,
-                         ParallelConfig)
+from vllm.config import (CacheConfig, DeviceConfig, ModelConfig,
+                         ParallelConfig, VllmConfig)
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.logger import init_logger
@@ -121,7 +121,7 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
 
     def __init__(
         self,
-        vllm_config: EngineConfig,
+        vllm_config: VllmConfig,
         local_rank: int,
         rank: int,
         distributed_init_method: str,

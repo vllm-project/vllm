@@ -11,7 +11,7 @@ from vllm.attention.backends.utils import PAD_SLOT_ID
 from vllm.attention.selector import (_Backend, get_env_variable_attn_backend,
                                      get_global_forced_attn_backend,
                                      global_force_attn_backend)
-from vllm.config import EngineConfig
+from vllm.config import VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.logger import init_logger
@@ -77,7 +77,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
 
     def __init__(
         self,
-        vllm_config: EngineConfig,
+        vllm_config: VllmConfig,
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
         input_registry: InputRegistry = INPUT_REGISTRY,
