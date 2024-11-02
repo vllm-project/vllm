@@ -3,6 +3,7 @@ from typing import Dict, Iterable, List, Mapping, Optional, Type, Union
 from vllm.config import EngineConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics_types import StatLoggerBase
+from vllm.envs import VLLM_V1_MULTIPROCESSING
 from vllm.inputs import INPUT_REGISTRY, InputRegistry, PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -12,7 +13,7 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
-from vllm.v1.engine.core import EngineCoreProtocol
+from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.detokenizer import Detokenizer
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.gpu_executor import GPUExecutor
@@ -32,19 +33,18 @@ class LLMEngine:
         stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
         input_registry: InputRegistry = INPUT_REGISTRY,
         use_cached_outputs: bool = False,
-        enable_multiprocessing: bool = True,
+        enable_multiprocessing: bool = False,
     ) -> None:
 
         # TODO: Can we avoid this?
         self.model_config = vllm_config.model_config
 
-        # Tokenizer.
+        # Tokenizer (+ ensure liveness if running in another process).
         self.tokenizer = init_tokenizer_from_configs(
             model_config=vllm_config.model_config,
             scheduler_config=vllm_config.scheduler_config,
             parallel_config=vllm_config.parallel_config,
             enable_lora=bool(vllm_config.lora_config))
-        # Ensure liveness if running in another process.
         self.tokenizer.ping()
 
         # Processor (convert Inputs --> EngineCoreRequests)
@@ -56,12 +56,12 @@ class LLMEngine:
         self.detokenizer = Detokenizer(vllm_config.model_config.tokenizer)
 
         # EngineCore (gets EngineCoreRequests and gives EngineCoreOutputs)
-        self.engine_core = EngineCoreProtocol.make_engine_core(
+        self.engine_core = EngineCoreClient(
             vllm_config,
             executor_class,
             usage_context,
+            multiprocess_mode=enable_multiprocessing,
             asyncio_mode=False,
-            enable_multiprocessing=enable_multiprocessing,
         )
 
     @classmethod
@@ -76,15 +76,14 @@ class LLMEngine:
         # Create the engine configs.
         engine_config = engine_args.create_engine_config()
         executor_class = cls._get_executor_cls(engine_config)
+
         # Create the LLMEngine.
-        engine = cls(
-            vllm_config=engine_config,
-            executor_class=executor_class,
-            log_stats=not engine_args.disable_log_stats,
-            usage_context=usage_context,
-            stat_loggers=stat_loggers,
-        )
-        return engine
+        return cls(vllm_config=engine_config,
+                   executor_class=executor_class,
+                   log_stats=not engine_args.disable_log_stats,
+                   usage_context=usage_context,
+                   stat_loggers=stat_loggers,
+                   enable_multiprocessing=VLLM_V1_MULTIPROCESSING)
 
     @classmethod
     def _get_executor_cls(cls, engine_config: EngineConfig):
@@ -102,6 +101,11 @@ class LLMEngine:
     @classmethod
     def validate_outputs(cls, outputs, output_type):
         return outputs
+
+    def abort_request(self, request_id: Union[str, Iterable[str]]) -> None:
+        # TODO: send to EngineCore
+        # TODO: send to Detokenizer
+        pass
 
     def add_request(
         self,
@@ -125,11 +129,6 @@ class LLMEngine:
 
         # 3) Add the request to EngineCore.
         self.engine_core.add_request(engine_core_req)
-
-    def abort_request(self, request_id: Union[str, Iterable[str]]) -> None:
-        # TODO: send to EngineCore
-        # TODO: send to Detokenizer
-        pass
 
     def step(self) -> List[RequestOutput]:
 

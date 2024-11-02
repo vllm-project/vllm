@@ -1,5 +1,6 @@
 import asyncio
-from typing import AsyncGenerator, Dict, Mapping, Optional, Type, Union
+from typing import (Any, AsyncGenerator, Callable, Dict, Mapping, Optional,
+                    Type, Union)
 
 from vllm.config import EngineConfig, ModelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -13,7 +14,6 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.usage.usage_lib import UsageContext
-from vllm.v1.engine.async_stream import AsyncStream
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.detokenizer import Detokenizer
 from vllm.v1.engine.processor import Processor
@@ -54,7 +54,7 @@ class AsyncLLMEngine:
                                        stream_mode=True)
 
         # EngineCore (starts the engine in background process).
-        self.engine_core_client = EngineCoreClient(
+        self.engine_core = EngineCoreClient(
             vllm_config=vllm_config,
             executor_class=executor_class,
             usage_context=usage_context,
@@ -85,7 +85,7 @@ class AsyncLLMEngine:
         executor_class = cls._get_executor_cls(engine_config)
 
         # Create the AsyncLLMEngine.
-        engine = cls(
+        return cls(
             **engine_config.to_dict(),
             executor_class=executor_class,
             log_requests=not engine_args.disable_log_requests,
@@ -94,7 +94,6 @@ class AsyncLLMEngine:
             usage_context=usage_context,
             stat_loggers=stat_loggers,
         )
-        return engine
 
     @classmethod
     def _get_executor_cls(cls, engine_config: EngineConfig):
@@ -135,7 +134,7 @@ class AsyncLLMEngine:
         self.detokenizer.add_request(detokenizer_req, stream)
 
         # 3) Add the EngineCoreRequest to EngineCore (separate process).
-        await self.engine_core_client.add_request_async(engine_core_req)
+        await self.engine_core.add_request_async(engine_core_req)
 
         logger.debug("Added request %s.", request_id)
 
@@ -162,7 +161,7 @@ class AsyncLLMEngine:
         # to handle startup failure gracefully in the OpenAI server.
         if not self.is_output_handler_running:
             self.output_handler = asyncio.create_task(
-                self.run_output_handler())
+                self._run_output_handler())
             self.is_output_handler_running = True
 
         async for output in await self.add_request(
@@ -176,7 +175,7 @@ class AsyncLLMEngine:
         ):
             yield output
 
-    async def run_output_handler(self):
+    async def _run_output_handler(self):
         # TODO: add weakref from current AsyncLLMEngine
         # TODO: shutdown remote worker execution loop
 
@@ -184,7 +183,7 @@ class AsyncLLMEngine:
 
         try:
             while True:
-                outputs = await self.engine_core_client.get_output_async()
+                outputs = await self.engine_core.get_output_async()
 
                 # Make RequestOutputs and push to the per-client output queues
                 # NOTE: we could simplify the Detokenizer code by returning full
@@ -202,12 +201,64 @@ class AsyncLLMEngine:
         """Gets the model configuration."""
         return self.model_config
 
-    async def is_tracing_enabled(self) -> bool:
-        return False
-
     async def get_tokenizer(
         self,
         lora_request: Optional[LoRARequest] = None,
     ) -> AnyTokenizer:
         assert lora_request is None
         return self.detokenizer.tokenizer
+
+    async def is_tracing_enabled(self) -> bool:
+        return False
+
+
+class AsyncStream:
+    """A stream of RequestOutputs or EmbeddingRequestOutputs for a request
+    that can be iterated over asynchronously via an async generator."""
+
+    STOP_ITERATION = Exception()  # Sentinel
+
+    def __init__(self, request_id: str, cancel: Callable[[str], None]) -> None:
+        self.request_id = request_id
+        self._cancel = cancel
+        self._queue: asyncio.Queue = asyncio.Queue()
+        self._finished = False
+
+    def put(self, item: Union[RequestOutput, EmbeddingRequestOutput,
+                              Exception]) -> None:
+        if not self._finished:
+            self._queue.put_nowait(item)
+
+    def finish(
+        self,
+        exception: Optional[Union[BaseException, Type[BaseException]]] = None,
+    ) -> None:
+        if not self._finished:
+            self._finished = True
+            self._queue.put_nowait(exception if self._is_raisable(exception)
+                                   else AsyncStream.STOP_ITERATION)
+
+    @property
+    def finished(self) -> bool:
+        return self._finished
+
+    async def generator(
+        self
+    ) -> AsyncGenerator[Union[RequestOutput, EmbeddingRequestOutput], None]:
+        try:
+            while True:
+                result = await self._queue.get()
+                if self._is_raisable(result):
+                    if result == AsyncStream.STOP_ITERATION:
+                        return
+                    raise result
+                yield result
+        except GeneratorExit:
+            self._cancel(self.request_id)
+            raise asyncio.CancelledError from None
+
+    @staticmethod
+    def _is_raisable(value: Any):
+        return isinstance(value, BaseException) or \
+                (isinstance(value, type) and \
+                 issubclass(value, BaseException))
