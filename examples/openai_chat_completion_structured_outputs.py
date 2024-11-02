@@ -1,6 +1,7 @@
+from enum import Enum
+
 from openai import OpenAI
 from pydantic import BaseModel
-from enum import Enum
 
 client = OpenAI(
     base_url="http://localhost:8000/v1",
@@ -19,13 +20,14 @@ completion = client.chat.completions.create(
 print(completion.choices[0].message.content)
 
 # Guided decoding by Regex
+prompt = ("Generate an email address for Alan Turing, who works in Enigma."
+          "End in .com and new line. Example result: a.turing@enigma.com\n")
+
 completion = client.chat.completions.create(
     model="Qwen/Qwen2.5-3B",
     messages=[{
-        "role":
-        "user",
-        "content":
-        "Generate an example email address for Alan Turing, who works in Enigma. End in .com and new line. Example result: alan.turing@enigma.com\n",
+        "role": "user",
+        "content": prompt,
     }],
     extra_body={
         "guided_regex": "\w+@\w+\.com\n",
@@ -51,13 +53,13 @@ class CarDescription(BaseModel):
 
 json_schema = CarDescription.model_json_schema()
 
+prompt = ("Generate a JSON with the brand, model and car_type of"
+          "the most iconic car from the 90's")
 completion = client.chat.completions.create(
     model="Qwen/Qwen2.5-3B",
     messages=[{
-        "role":
-        "user",
-        "content":
-        "Generate a JSON with the brand, model and car_type of the most iconic car from the 90's",
+        "role": "user",
+        "content": prompt,
     }],
     extra_body={"guided_json": json_schema},
 )
@@ -78,13 +80,13 @@ simplified_sql_grammar = """
     ?identifier: /[a-zA-Z_][a-zA-Z0-9_]*/
 """
 
+prompt = ("Generate an SQL query to show the 'username' and 'email'"
+          "from the 'users' table.")
 completion = client.chat.completions.create(
     model="Qwen/Qwen2.5-3B",
     messages=[{
-        "role":
-        "user",
-        "content":
-        "Generate an SQL query to show the 'username' and 'email' from the 'users' table.",
+        "role": "user",
+        "content": prompt,
     }],
     extra_body={"guided_grammar": simplified_sql_grammar},
 )
