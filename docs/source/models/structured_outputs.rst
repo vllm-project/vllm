@@ -102,7 +102,7 @@ The next example shows how to use the ``guided_json`` parameter with a Pydantic 
     This can improve the results notably in most cases.
 
 
-Finally we have the ``guided_grammar``, which probably is the most difficult one to use but it´s really powerfull, as it allows us to define complete languages like SQL queries.
+Finally we have the ``guided_grammar``, which probably is the most difficult one to use but it´s really powerful, as it allows us to define complete languages like SQL queries.
 It works by using a context free EBNF grammar, which for example we can use to define a specific format of simplified SQL queries, like in the example below:
 
 .. code-block:: python
