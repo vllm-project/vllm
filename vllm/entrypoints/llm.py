@@ -11,9 +11,11 @@ from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
                               BeamSearchSequence, get_beam_search_score)
 from vllm.engine.arg_utils import EngineArgs, TaskOption
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
+                                         ChatTemplateContentFormatOption,
                                          apply_hf_chat_template,
                                          apply_mistral_chat_template,
-                                         parse_chat_messages)
+                                         parse_chat_messages,
+                                         resolve_chat_template_content_format)
 from vllm.inputs import PromptType, TextPrompt, TokensPrompt
 from vllm.inputs.parse import parse_and_batch_prompt
 from vllm.logger import init_logger
@@ -507,6 +509,7 @@ class LLM:
         use_tqdm: bool = True,
         lora_request: Optional[LoRARequest] = None,
         chat_template: Optional[str] = None,
+        chat_template_content_format: ChatTemplateContentFormatOption = "auto",
         add_generation_prompt: bool = True,
         continue_final_message: bool = False,
         tools: Optional[List[Dict[str, Any]]] = None,
@@ -535,6 +538,12 @@ class LLM:
             lora_request: LoRA request to use for generation, if any.
             chat_template: The template to use for structuring the chat.
               If not provided, the model's default chat template will be used.
+            chat_template_content_format: The format to render message content.
+                - "string" will render the content as a string.
+                  Example: "Hello World"
+                - "openai" will render the content as a list of dictionaries,
+                  similar to OpenAI schema.
+                  Example: [{"type": "text", "text": "Hello world!"}]
             add_generation_prompt: If True, adds a generation template
                 to each message.
             continue_final_message: If True, continues the final message in
@@ -560,17 +569,26 @@ class LLM:
                 cast(List[ChatCompletionMessageParam], messages)
             ]
 
+        tokenizer = self.get_tokenizer()
+        model_config = self.llm_engine.get_model_config()
+        resolved_content_format = resolve_chat_template_content_format(
+            chat_template,
+            chat_template_content_format,
+            tokenizer,
+        )
+
         prompts: List[Union[TokensPrompt, TextPrompt]] = []
 
         for msgs in list_of_messages:
-            tokenizer = self.get_tokenizer()
-            model_config = self.llm_engine.get_model_config()
-
             # NOTE: _parse_chat_message_content_parts() currently doesn't
             # handle mm_processor_kwargs, since there is no implementation in
             # the chat message parsing for it.
             conversation, mm_data = parse_chat_messages(
-                msgs, model_config, tokenizer)
+                msgs,
+                model_config,
+                tokenizer,
+                content_format=resolved_content_format,
+            )
 
             prompt_data: Union[str, List[int]]
             if isinstance(tokenizer, MistralTokenizer):
