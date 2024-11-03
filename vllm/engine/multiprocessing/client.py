@@ -112,7 +112,11 @@ class MQLLMEngineClient(EngineClient):
 
         # Stream for each individual request.
         self.output_queues: Dict[str, asyncio.Queue] = {}
-        self.output_loop = asyncio.create_task(self.run_output_handler_loop())
+
+        # Loop to handle output of the LLMEngine periodically.
+        # Started after the MQLLMEngine is ready so that we can
+        # build the Client in an executor to enable clean shutdown.
+        self.output_loop: Optional[asyncio.Task] = None
 
         # Loop to check health of the LLMEngine periodically.
         # Started after the MQLLMEngine is ready.
@@ -246,6 +250,9 @@ class MQLLMEngineClient(EngineClient):
 
     async def setup(self):
         """Setup the client before it starts sending server requests."""
+
+        # Start output_loop
+        self.output_loop = asyncio.create_task(self.run_output_handler_loop())
 
         with self.get_data_socket() as socket:
             # Wait until server is ready.
