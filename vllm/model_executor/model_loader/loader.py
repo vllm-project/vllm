@@ -1029,15 +1029,16 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                     # get the start/end index of each shard weight tensor
                     total_start_index = list(
                         itertools.accumulate([0] + total_shard_sizes))[:-1]
-                    shard_sizes = [x // tp_size for x in total_shard_sizes]
                     shard_weights_index = [
-                        (idx + size * tp_rank, idx + size * (tp_rank + 1))
-                        for idx, size in zip(total_start_index, shard_sizes)
+                        (idx + size // tp_size * tp_rank,
+                         idx + size // tp_size * (tp_rank + 1))
+                        for idx, size in zip(total_start_index,
+                                             total_shard_sizes)
                     ]
                     # slice and reorder the weight tensor
                     weight_tensor = [
-                        weight_tensor[start:end, ...]
-                        for start, end in shard_weights_index
+                        weight_tensor[start_index:end_index, ...]
+                        for start_index, end_index in shard_weights_index
                     ]
                     weight_sub_tensor = torch.cat(weight_tensor, dim=0)
                 else:
