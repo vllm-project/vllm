@@ -272,10 +272,9 @@ class H2OVLInputPipeline(InternVLInputPipeline):
         elif is_list_of(image_data, torch.Tensor):
 
             image_feature_sizes = []
-            for image in image_data:
-                _, image_feature_size, _ = image.shape
+            for image_embed in image_data:
+                _, image_feature_size, _ = image_embed.shape
                 image_feature_sizes.append(image_feature_size)
-            _, image_feature_size, _ = image_data.shape
             pixel_values = None
 
         else:
