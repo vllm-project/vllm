@@ -528,7 +528,6 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                                 quant_config,
                                 lora_config=lora_config,
                                 prefix=maybe_prefix(prefix, "model"))
-        self.post_init_bnb_attrs()
         if get_pp_group().is_last_rank:
             self.unpadded_vocab_size = config.vocab_size
             if lora_config:
@@ -564,6 +563,7 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             pooling_type=PoolingType.STEP,
             normalize=False,
             softmax=False)
+        self.post_init_bnb_attrs()
 
     def forward(
         self,

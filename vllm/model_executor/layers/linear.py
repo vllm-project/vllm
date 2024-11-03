@@ -1,3 +1,4 @@
+import itertools
 from abc import abstractmethod
 from typing import Dict, List, Optional, Tuple
 
@@ -499,11 +500,12 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit",
                                                 False)
                 if use_bitsandbytes_4bit:
+                    index = list(itertools.accumulate([0] + self.output_sizes))
                     orig_offsets = {
-                        "0": (0, self.output_sizes[0]),
-                        "1": (self.output_sizes[0], self.output_sizes[1]),
-                        "total": (self.output_size, 0),
+                        str(i): (index[i], size)
+                        for i, size in enumerate(self.output_sizes)
                     }
+                    orig_offsets["total"] = (self.output_size, 0)
                     shard_size, shard_offset = adjust_bitsandbytes_4bit_shard(
                         param, orig_offsets, str(shard_id))
 
