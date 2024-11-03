@@ -9,22 +9,22 @@ import pytest
 import torch
 
 from tests.quantization.utils import is_quant_method_supported
-
-from ..utils import fork_new_process_for_each_test
+from tests.utils import fork_new_process_for_each_test
 
 models_4bit_to_test = [
-    ('huggyllama/llama-7b', 'quantize model inflight'),
+    ("facebook/opt-125m", "quantize opt model inflight"),
 ]
 
 models_pre_qaunt_4bit_to_test = [
-    ('lllyasviel/omost-llama-3-8b-4bits',
-     'read pre-quantized 4-bit NF4 model'),
     ('PrunaAI/Einstein-v6.1-Llama3-8B-bnb-4bit-smashed',
      'read pre-quantized 4-bit FP4 model'),
+    ('poedator/opt-125m-bnb-4bit', 'read pre-quantized 4-bit NF4 opt model'),
 ]
 
 models_pre_quant_8bit_to_test = [
-    ('meta-llama/Llama-Guard-3-8B-INT8', 'read pre-quantized 8-bit model'),
+    ('meta-llama/Llama-Guard-3-8B-INT8',
+     'read pre-quantized llama 8-bit model'),
+    ("yec019/fbopt-350m-8bit", "read pre-quantized 8-bit opt model"),
 ]
 
 
@@ -107,8 +107,7 @@ def validate_generated_texts(hf_runner,
                      quantization='bitsandbytes',
                      load_format='bitsandbytes',
                      tensor_parallel_size=vllm_tp_size,
-                     enforce_eager=False,
-                     gpu_memory_utilization=0.8) as llm:
+                     enforce_eager=False) as llm:
         vllm_outputs = llm.generate_greedy(prompts, 8)
         vllm_logs = log_generated_texts(prompts, vllm_outputs, "VllmRunner")
 
@@ -133,6 +132,7 @@ def validate_generated_texts(hf_runner,
         hf_str = hf_log["generated_text"]
         vllm_str = vllm_log["generated_text"]
         prompt = hf_log["prompt"]
+
         assert hf_str == vllm_str, (f"Model: {model_name}"
                                     f"Mismatch between HF and vLLM outputs:\n"
                                     f"Prompt: {prompt}\n"

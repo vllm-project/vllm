@@ -81,12 +81,7 @@ def create_worker(cls: Callable[..., T],
         get_ip(), get_open_port())
 
     worker = cls(
-        model_config=engine_config.model_config,
-        parallel_config=engine_config.parallel_config,
-        scheduler_config=engine_config.scheduler_config,
-        device_config=engine_config.device_config,
-        cache_config=engine_config.cache_config,
-        load_config=engine_config.load_config,
+        vllm_config=engine_config,
         local_rank=0,
         rank=0,
         distributed_init_method=distributed_init_method,
@@ -131,19 +126,22 @@ def create_seq_group_metadata_from_prompts(
         for i, final_len in enumerate(final_prompt_lens)
     }
 
-    return [
-        SequenceGroupMetadata(
-            request_id=str(i),
-            is_prompt=len(cont_token_ids) == 0,
-            seq_data={
-                i: SequenceData.from_seqs(prompt_token_ids[:],
-                                          cont_token_ids[:]),
-            },
-            sampling_params=SamplingParams(temperature=0.0, ),
-            block_tables={i: block_allocations[i][:]},
-        ) for i, (prompt_token_ids,
-                  cont_token_ids) in enumerate(zip(prompts, continuations))
-    ]
+    seq_grou_metadata_list = []
+    for i, (prompt_token_ids,
+            cont_token_ids) in enumerate(zip(prompts, continuations)):
+        data = SequenceData.from_seqs(prompt_token_ids, cont_token_ids)
+        data.update_num_computed_tokens(
+            len(prompt_token_ids) + len(cont_token_ids) - 1)
+        seq_data = {i: data}
+        seq_grou_metadata_list.append(
+            SequenceGroupMetadata(
+                request_id=str(i),
+                is_prompt=len(cont_token_ids) == 0,
+                seq_data=seq_data,
+                sampling_params=SamplingParams(temperature=0.0),
+                block_tables={i: block_allocations[i][:]},
+            ))
+    return seq_grou_metadata_list
 
 
 def assert_logprobs_dict_allclose(

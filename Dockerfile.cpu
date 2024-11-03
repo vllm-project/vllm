@@ -22,28 +22,16 @@ ENV LD_PRELOAD="/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4:/usr/local/li
 
 RUN echo 'ulimit -c 0' >> ~/.bashrc
 
-RUN pip install https://intel-extension-for-pytorch.s3.amazonaws.com/ipex_dev/cpu/intel_extension_for_pytorch-2.4.0%2Bgitfbaa4bc-cp310-cp310-linux_x86_64.whl
+RUN pip install intel_extension_for_pytorch==2.4.0
 
 WORKDIR /workspace
 
-ENV PIP_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cpu
+ARG PIP_EXTRA_INDEX_URL="https://download.pytorch.org/whl/cpu"
+ENV PIP_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}
 RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=bind,src=requirements-build.txt,target=requirements-build.txt \
     pip install --upgrade pip && \
     pip install -r requirements-build.txt
-
-# install oneDNN
-RUN git clone -b rls-v3.5 https://github.com/oneapi-src/oneDNN.git
-
-RUN --mount=type=cache,target=/root/.cache/ccache \
-    cmake -B ./oneDNN/build -S ./oneDNN -G Ninja -DONEDNN_LIBRARY_TYPE=STATIC \ 
-    -DONEDNN_BUILD_DOC=OFF \ 
-    -DONEDNN_BUILD_EXAMPLES=OFF \ 
-    -DONEDNN_BUILD_TESTS=OFF \ 
-    -DONEDNN_BUILD_GRAPH=OFF \ 
-    -DONEDNN_ENABLE_WORKLOAD=INFERENCE \ 
-    -DONEDNN_ENABLE_PRIMITIVE=MATMUL && \
-    cmake --build ./oneDNN/build --target install --config Release
 
 FROM cpu-test-1 AS build
 
@@ -54,7 +42,10 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=bind,src=requirements-cpu.txt,target=requirements-cpu.txt \
     pip install -v -r requirements-cpu.txt
 
-COPY ./ ./
+COPY . .
+ARG GIT_REPO_CHECK=0
+RUN --mount=type=bind,source=.git,target=.git \
+    if [ "$GIT_REPO_CHECK" != 0 ]; then bash tools/check_repo.sh ; fi
 
 # Support for building with non-AVX512 vLLM: docker build --build-arg VLLM_CPU_DISABLE_AVX512="true" ...
 ARG VLLM_CPU_DISABLE_AVX512

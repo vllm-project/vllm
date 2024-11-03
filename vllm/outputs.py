@@ -1,13 +1,13 @@
 import time
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Dict, List, Optional
 from typing import Sequence as GenericSequence
 from typing import Union
 
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import RequestOutputKind
 from vllm.sequence import (PromptLogprobs, RequestMetrics, SampleLogprobs,
-                           SequenceGroup, SequenceStatus)
+                           SequenceGroup, SequenceGroupBase, SequenceStatus)
 
 
 @dataclass
@@ -114,14 +114,28 @@ class RequestOutput:
         self.encoder_prompt_token_ids = encoder_prompt_token_ids
 
     @classmethod
-    def from_seq_group(cls, seq_group: SequenceGroup,
-                       use_cache: bool) -> Optional["RequestOutput"]:
+    def from_seq_group(
+        cls, seq_group: SequenceGroup, use_cache: bool,
+        seq_id_to_seq_group: Dict[str, SequenceGroupBase]
+    ) -> Optional["RequestOutput"]:
+        finished = seq_group.is_finished()
+
+        if seq_group.request_id in seq_id_to_seq_group:
+            group: SequenceGroupBase = seq_id_to_seq_group[
+                seq_group.request_id]
+            if finished:
+                group.finish_seq(seq_group)
+            assembled_seq_group = group.maybe_assemble_group(seq_group)
+            if assembled_seq_group is None:
+                return None
+            return cls.from_seq_group(assembled_seq_group, use_cache,
+                                      seq_id_to_seq_group)
+
         sampling_params = seq_group.sampling_params
         if sampling_params is None:
             raise ValueError(
                 "Sampling parameters are missing for a CompletionRequest.")
 
-        finished = seq_group.is_finished()
         if sampling_params.output_kind == RequestOutputKind.FINAL_ONLY and (
                 not finished):
             return None
@@ -136,19 +150,7 @@ class RequestOutput:
                 outputs=[],
                 finished=False)
 
-        seqs = seq_group.get_seqs()
-        if len(seqs) == 1:
-            top_n_seqs = seqs
-        else:
-            # Get the top-n sequences.
-            n = sampling_params.n
-            if sampling_params.use_beam_search:
-                sorting_key = lambda seq: seq.get_beam_search_score(
-                    sampling_params.length_penalty)
-            else:
-                sorting_key = lambda seq: seq.get_cumulative_logprob()
-            sorted_seqs = sorted(seqs, key=sorting_key, reverse=True)
-            top_n_seqs = sorted_seqs[:n]
+        top_n_seqs = seq_group.get_seqs()
 
         # Create the outputs.
         # NOTE: We need omit logprobs here explicitly because the sequence
@@ -212,7 +214,7 @@ class RequestOutput:
 
             else:
                 output = CompletionOutput(
-                    seqs.index(seq), output_text, [output_token_ids]
+                    top_n_seqs.index(seq), output_text, [output_token_ids]
                     if isinstance(output_token_ids, int) else output_token_ids,
                     seq.get_cumulative_logprob() if include_logprobs else None,
                     output_logprobs,
@@ -313,10 +315,13 @@ class EmbeddingRequestOutput:
 class RequestOutputFactory:
 
     @staticmethod
-    def create(seq_group: SequenceGroup, use_cache: bool = False):
+    def create(seq_group: SequenceGroup,
+               seq_id_to_seq_group: Dict[str, SequenceGroupBase],
+               use_cache: bool = False):
         # Determine the type based on a condition, for example:
         if hasattr(seq_group,
                    'embeddings') and seq_group.embeddings is not None:
             return EmbeddingRequestOutput.from_seq_group(seq_group)
         else:
-            return RequestOutput.from_seq_group(seq_group, use_cache)
+            return RequestOutput.from_seq_group(seq_group, use_cache,
+                                                seq_id_to_seq_group)

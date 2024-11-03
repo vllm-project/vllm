@@ -2,6 +2,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Union
 
 import torch
 
+import vllm.model_executor.layers.fused_moe  # noqa
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.layer import (
@@ -536,9 +537,6 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         topk_group: Optional[int] = None,
         custom_routing_function: Optional[Callable] = None,
     ) -> torch.Tensor:
-        from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
-            fused_marlin_moe)
-
         # The input must currently be float16
         orig_dtype = x.dtype
         x = x.half()
@@ -553,18 +551,18 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             num_expert_group=num_expert_group,
             custom_routing_function=None)
 
-        return fused_marlin_moe(
+        return torch.ops.vllm.fused_marlin_moe(
             x,
             layer.w13_qweight,
             layer.w2_qweight,
+            layer.w13_scales,
+            layer.w2_scales,
             router_logits,
-            layer.w13_g_idx,
-            layer.w2_g_idx,
-            layer.w13_g_idx_sort_indices,
-            layer.w2_g_idx_sort_indices,
             topk_weights,
             topk_ids,
-            w1_scale=layer.w13_scales,
-            w2_scale=layer.w2_scales,
+            g_idx1=layer.w13_g_idx,
+            g_idx2=layer.w2_g_idx,
+            sort_indices1=layer.w13_g_idx_sort_indices,
+            sort_indices2=layer.w2_g_idx_sort_indices,
             num_bits=self.quant_config.quant_type.size_bits,
         ).to(orig_dtype)

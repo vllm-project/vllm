@@ -1,13 +1,15 @@
 import itertools
+import warnings
 from contextlib import contextmanager
-from dataclasses import dataclass
 from typing import (Any, ClassVar, Dict, List, Optional, Sequence, Tuple,
                     Union, cast, overload)
 
 from tqdm import tqdm
 
-from vllm.engine.arg_utils import EngineArgs
-from vllm.engine.llm_engine import LLMEngine
+from vllm import envs
+from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
+                              BeamSearchSequence, get_beam_search_score)
+from vllm.engine.arg_utils import EngineArgs, TaskOption
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          apply_hf_chat_template,
                                          apply_mistral_chat_template,
@@ -16,51 +18,25 @@ from vllm.inputs import PromptType, TextPrompt, TokensPrompt
 from vllm.inputs.parse import parse_and_batch_prompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.model_executor.guided_decoding import (
-    GuidedDecodingRequest, get_local_guided_decoding_logits_processor)
-from vllm.model_executor.guided_decoding.guided_fields import LLMGuidedOptions
+from vllm.model_executor.guided_decoding.guided_fields import (
+    GuidedDecodingRequest, LLMGuidedOptions)
 from vllm.outputs import EmbeddingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.sampling_params import RequestOutputKind, SamplingParams
+from vllm.sampling_params import (BeamSearchParams, GuidedDecodingParams,
+                                  RequestOutputKind, SamplingParams)
 from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
                                                get_cached_tokenizer)
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import Counter, deprecate_kwargs, is_list_of
+from vllm.utils import Counter, deprecate_args, deprecate_kwargs, is_list_of
+
+if envs.VLLM_USE_V1:
+    from vllm.v1.engine.llm_engine import LLMEngine  # type: ignore
+else:
+    from vllm.engine.llm_engine import LLMEngine  # type: ignore
 
 logger = init_logger(__name__)
-
-
-@dataclass
-class BeamSearchSequence:
-    """A sequence for beam search.
-    It keeps track of the tokens and the log probability of the sequence.
-    The text field is optional and will only be filled when the sequence is
-    about to be returned to the user.
-    """
-    # The tokens includes the prompt.
-    tokens: List[int]
-    cum_logprob: float = 0.0
-    text: Optional[str] = None
-
-
-@dataclass
-class BeamSearchOutput:
-    """The output of beam search.
-    It contains the list of the best beam search sequences.
-    The length of the list is equal to the beam width.
-    """
-    sequences: List[BeamSearchSequence]
-
-
-class BeamSearchInstance:
-
-    def __init__(self, prompt_tokens: List[int]):
-        self.beams: List[BeamSearchSequence] = [
-            BeamSearchSequence(tokens=prompt_tokens)
-        ]
-        self.completed: List[BeamSearchSequence] = []
 
 
 class LLM:
@@ -117,9 +93,6 @@ class LLM:
         enforce_eager: Whether to enforce eager execution. If True, we will
             disable CUDA graph and always execute the model in eager mode.
             If False, we will use CUDA graph and eager execution in hybrid.
-        max_context_len_to_capture: Maximum context len covered by CUDA graphs.
-            When a sequence has context length larger than this, we fall back
-            to eager mode (DEPRECATED. Use `max_seq_len_to_capture` instead).
         max_seq_len_to_capture: Maximum sequence len covered by CUDA graphs.
             When a sequence has context length larger than this, we fall back
             to eager mode. Additionally for encoder-decoder models, if the
@@ -137,6 +110,12 @@ class LLM:
     DEPRECATE_LEGACY: ClassVar[bool] = False
     """A flag to toggle whether to deprecate the legacy generate/encode API."""
 
+    DEPRECATE_INIT_POSARGS: ClassVar[bool] = True
+    """
+    A flag to toggle whether to deprecate positional arguments in
+    :meth:`LLM.__init__`.
+    """
+
     @classmethod
     @contextmanager
     def deprecate_legacy_api(cls):
@@ -146,6 +125,13 @@ class LLM:
 
         cls.DEPRECATE_LEGACY = False
 
+    @deprecate_args(
+        start_index=2,  # Ignore self and model
+        is_deprecated=lambda: LLM.DEPRECATE_INIT_POSARGS,
+        additional_message=(
+            "All positional arguments other than `model` will be "
+            "replaced with keyword arguments in an upcoming version."),
+    )
     def __init__(
         self,
         model: str,
@@ -163,11 +149,17 @@ class LLM:
         swap_space: float = 4,
         cpu_offload_gb: float = 0,
         enforce_eager: Optional[bool] = None,
-        max_context_len_to_capture: Optional[int] = None,
         max_seq_len_to_capture: int = 8192,
         disable_custom_all_reduce: bool = False,
         disable_async_output_proc: bool = False,
         mm_processor_kwargs: Optional[Dict[str, Any]] = None,
+        # After positional args are removed, move this right below `model`
+        task: TaskOption = "auto",
+        pooling_type: Optional[str] = None,
+        pooling_norm: Optional[bool] = None,
+        pooling_softmax: Optional[bool] = None,
+        pooling_step_tag_id: Optional[int] = None,
+        pooling_returned_token_ids: Optional[List[int]] = None,
         **kwargs,
     ) -> None:
         '''
@@ -179,17 +171,10 @@ class LLM:
 
         if "disable_log_stats" not in kwargs:
             kwargs["disable_log_stats"] = True
-        removed_vision_keys = (
-            "image_token_id",
-            "image_feature_size",
-            "image_input_shape",
-            "image_input_type",
-        )
-        if any(k in kwargs for k in removed_vision_keys):
-            raise TypeError(
-                "There is no need to pass vision-related arguments anymore.")
+
         engine_args = EngineArgs(
             model=model,
+            task=task,
             tokenizer=tokenizer,
             tokenizer_mode=tokenizer_mode,
             skip_tokenizer_init=skip_tokenizer_init,
@@ -204,11 +189,15 @@ class LLM:
             swap_space=swap_space,
             cpu_offload_gb=cpu_offload_gb,
             enforce_eager=enforce_eager,
-            max_context_len_to_capture=max_context_len_to_capture,
             max_seq_len_to_capture=max_seq_len_to_capture,
             disable_custom_all_reduce=disable_custom_all_reduce,
             disable_async_output_proc=disable_async_output_proc,
             mm_processor_kwargs=mm_processor_kwargs,
+            pooling_type=pooling_type,
+            pooling_norm=pooling_norm,
+            pooling_softmax=pooling_softmax,
+            pooling_step_tag_id=pooling_step_tag_id,
+            pooling_returned_token_ids=pooling_returned_token_ids,
             **kwargs,
         )
         self.llm_engine = LLMEngine.from_engine_args(
@@ -353,10 +342,21 @@ class LLM:
             considered legacy and may be deprecated in the future. You should
             instead pass them via the ``inputs`` parameter.
         """
-        if self.llm_engine.model_config.embedding_mode:
-            raise ValueError(
+        task = self.llm_engine.model_config.task
+        if task != "generate":
+            messages = [
                 "LLM.generate() is only supported for (conditional) generation "
-                "models (XForCausalLM, XForConditionalGeneration).")
+                "models (XForCausalLM, XForConditionalGeneration).",
+            ]
+
+            supported_tasks = self.llm_engine.model_config.supported_tasks
+            if "generate" in supported_tasks:
+                messages.append(
+                    "Your model supports the 'generate' task, but is "
+                    f"currently initialized for the '{task}' task. Please "
+                    "initialize the model using `--task generate`.")
+
+            raise ValueError(" ".join(messages))
 
         if prompt_token_ids is not None:
             parsed_prompts = self._convert_v1_inputs(
@@ -393,10 +393,7 @@ class LLM:
     def beam_search(
         self,
         prompts: List[Union[str, List[int]]],
-        beam_width: int,
-        max_tokens: int,
-        ignore_eos: bool = False,
-        temperature: float = 0.0,
+        params: BeamSearchParams,
     ) -> List[BeamSearchOutput]:
         """
         Generate sequences using beam search.
@@ -404,13 +401,22 @@ class LLM:
         Args:
             prompts: A list of prompts. Each prompt can be a string or a list
                 of token IDs.
-            beam_width: The number of beams to keep at each step.
-            max_tokens: The max number of tokens to generate for each prompt.
-            temperature: The temperature to use for generation.
-        
+            params: The beam search parameters.
+
         TODO: how does beam search work together with length penalty, frequency
         penalty, and stopping criteria, etc.?
         """
+
+        beam_width = params.beam_width
+        max_tokens = params.max_tokens
+        temperature = params.temperature
+        ignore_eos = params.ignore_eos
+        length_penalty = params.length_penalty
+
+        def sort_beams_key(x: BeamSearchSequence) -> float:
+            return get_beam_search_score(x.tokens, x.cum_logprob,
+                                         tokenizer.eos_token_id,
+                                         length_penalty)
 
         tokenizer = self.get_tokenizer()
         # generate 2 * beam_width candidates at each step
@@ -464,6 +470,7 @@ class LLM:
                         for token_id, logprob_obj in logprobs.items():
                             new_beam = BeamSearchSequence(
                                 tokens=current_beam.tokens + [token_id],
+                                logprobs=current_beam.logprobs + [logprobs],
                                 cum_logprob=current_beam.cum_logprob +
                                 logprob_obj.logprob)
 
@@ -473,7 +480,7 @@ class LLM:
                             else:
                                 instance_new_beams.append(new_beam)
                 sorted_beams = sorted(instance_new_beams,
-                                      key=lambda x: x.cum_logprob,
+                                      key=sort_beams_key,
                                       reverse=True)
                 instance.beams = sorted_beams[:beam_width]
 
@@ -481,7 +488,7 @@ class LLM:
         for instance in instances:
             instance.completed.extend(instance.beams)
             sorted_completed = sorted(instance.completed,
-                                      key=lambda x: x.cum_logprob,
+                                      key=sort_beams_key,
                                       reverse=True)
             best_beams = sorted_completed[:beam_width]
 
@@ -503,6 +510,7 @@ class LLM:
         add_generation_prompt: bool = True,
         continue_final_message: bool = False,
         tools: Optional[List[Dict[str, Any]]] = None,
+        mm_processor_kwargs: Optional[Dict[str, Any]] = None,
     ) -> List[RequestOutput]:
         """
         Generate responses for a chat conversation.
@@ -532,6 +540,8 @@ class LLM:
             continue_final_message: If True, continues the final message in
                 the conversation instead of starting a new one. Cannot be `True`
                 if `add_generation_prompt` is also `True`.
+            mm_processor_kwargs: Multimodal processor kwarg overrides for this
+                chat request. Only used for offline requests.
 
         Returns:
             A list of ``RequestOutput`` objects containing the generated
@@ -542,10 +552,13 @@ class LLM:
         # Handle multi and single conversations
         if is_list_of(messages, list):
             # messages is List[List[...]]
-            list_of_messages = messages
+            list_of_messages = cast(List[List[ChatCompletionMessageParam]],
+                                    messages)
         else:
             # messages is List[...]
-            list_of_messages = [messages]
+            list_of_messages = [
+                cast(List[ChatCompletionMessageParam], messages)
+            ]
 
         prompts: List[Union[TokensPrompt, TextPrompt]] = []
 
@@ -553,6 +566,9 @@ class LLM:
             tokenizer = self.get_tokenizer()
             model_config = self.llm_engine.get_model_config()
 
+            # NOTE: _parse_chat_message_content_parts() currently doesn't
+            # handle mm_processor_kwargs, since there is no implementation in
+            # the chat message parsing for it.
             conversation, mm_data = parse_chat_messages(
                 msgs, model_config, tokenizer)
 
@@ -584,6 +600,9 @@ class LLM:
 
             if mm_data is not None:
                 prompt["multi_modal_data"] = mm_data
+
+            if mm_processor_kwargs is not None:
+                prompt["mm_processor_kwargs"] = mm_processor_kwargs
 
             prompts.append(prompt)
 
@@ -710,10 +729,18 @@ class LLM:
             considered legacy and may be deprecated in the future. You should
             instead pass them via the ``inputs`` parameter.
         """
-        if not self.llm_engine.model_config.embedding_mode:
-            raise ValueError(
-                "LLM.encode() is only supported for embedding models (XModel)."
-            )
+        task = self.llm_engine.model_config.task
+        if task != "embedding":
+            messages = ["LLM.encode() is only supported for embedding models."]
+
+            supported_tasks = self.llm_engine.model_config.supported_tasks
+            if "embedding" in supported_tasks:
+                messages.append(
+                    "Your model supports the 'embedding' task, but is "
+                    f"currently initialized for the '{task}' task. Please "
+                    "initialize the model using `--task embedding`.")
+
+            raise ValueError(" ".join(messages))
 
         if prompt_token_ids is not None:
             parsed_prompts = self._convert_v1_inputs(
@@ -798,6 +825,14 @@ class LLM:
         guided_options: Optional[GuidedDecodingRequest] = None,
         priority: Optional[List[int]] = None,
     ) -> None:
+        if guided_options is not None:
+            warnings.warn(
+                "guided_options_request is deprecated, use "
+                "SamplingParams.guided_decoding instead",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
         if isinstance(prompts, (str, dict)):
             # Convert a single prompt to a list.
             prompts = [prompts]
@@ -813,7 +848,7 @@ class LLM:
 
         for sp in params if isinstance(params, list) else (params, ):
             if isinstance(sp, SamplingParams):
-                self._add_guided_processor(sp, guided_options)
+                self._add_guided_params(sp, guided_options)
 
                 # We only care about the final output
                 sp.output_kind = RequestOutputKind.FINAL_ONLY
@@ -847,22 +882,25 @@ class LLM:
             priority=priority,
         )
 
-    def _add_guided_processor(
+    def _add_guided_params(
             self,
             params: SamplingParams,
             guided_options: Optional[GuidedDecodingRequest] = None):
-        if guided_options:
-            if guided_options.guided_decoding_backend is None:
-                decoding_config = self.llm_engine.get_decoding_config()
-                guided_options.guided_decoding_backend = (
-                    decoding_config.guided_decoding_backend)
-            guided_logits_processor = get_local_guided_decoding_logits_processor(  #noqa
-                guided_options.guided_decoding_backend, guided_options,
-                self.get_tokenizer())
-            if guided_logits_processor:
-                if params.logits_processors is None:
-                    params.logits_processors = []
-                params.logits_processors.append(guided_logits_processor)
+        if guided_options is None:
+            return params
+
+        if params.guided_decoding is not None:
+            raise ValueError("Cannot set both guided_options_request and"
+                             "params.guided_decoding.")
+
+        params.guided_decoding = GuidedDecodingParams(
+            json=guided_options.guided_json,
+            regex=guided_options.guided_regex,
+            choice=guided_options.guided_choice,
+            grammar=guided_options.guided_grammar,
+            json_object=guided_options.guided_json_object,
+            backend=guided_options.guided_decoding_backend,
+            whitespace_pattern=guided_options.guided_whitespace_pattern)
         return params
 
     def _run_engine(
@@ -912,6 +950,3 @@ class LLM:
 
     def _is_encoder_decoder_model(self):
         return self.llm_engine.is_encoder_decoder_model()
-
-    def _is_embedding_model(self):
-        return self.llm_engine.is_embedding_model()

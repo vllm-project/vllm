@@ -24,13 +24,14 @@ MNK_SHAPES = [
     (1, 128, 128),
     (1, 512, 1024),
     (1, 4096, 4096),
+    (1, 8192, 28672),
     (13, 8192, 4096),
     (26, 4096, 8192),
-    (1, 4096, 4096),
+    (64, 4096, 4096),
+    (64, 8192, 28672),
     (257, 128, 4096),
     (257, 4224, 4160),
     (257, 4096, 4096),
-    (64, 4096, 4096),
     (1024, 4096, 8192),
     (1024, 8192, 4096),
 ]
@@ -79,7 +80,7 @@ def machete_quantize_and_pack(w: torch.Tensor,
     w_q = w_q.t().contiguous().t()  # convert to col major
     w_q_machete = ops.machete_prepack_B(w_q, wtype)
 
-    opcheck(torch.ops._C.machete_prepack_B, (w_q, wtype))
+    opcheck(torch.ops._C.machete_prepack_B, (w_q, wtype.id))
 
     return w_ref, w_q_machete, w_s, w_zp
 
@@ -152,9 +153,10 @@ def test_machete_all_schedules(shape, atype: torch.dtype,
             schedule=schedule,
         )
 
-        opcheck(torch.ops._C.machete_gemm,
-                (a, w_q_machete, wtype, w_s, maybe_convert_zeropoints(
-                    w_zp, w_s), group_size, None, None, None, schedule))
+        opcheck(
+            torch.ops._C.machete_gemm,
+            (a, w_q_machete, wtype.id, w_s, maybe_convert_zeropoints(
+                w_zp, w_s), group_size, None, None, None, schedule))
 
         # Relax atol as our reduction dim becomes larger (more rounding error)
         # Relax atol when we have zeropoints since the way machete applies

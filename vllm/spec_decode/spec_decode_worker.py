@@ -1,10 +1,11 @@
+import copy
 from collections import defaultdict
 from functools import cached_property
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple, Type
 
 import torch
 
-from vllm.config import ParallelConfig, SpeculativeConfig
+from vllm.config import ParallelConfig, SpeculativeConfig, VllmConfig
 from vllm.distributed.communication_op import broadcast_tensor_dict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.rejection_sampler import RejectionSampler
@@ -24,6 +25,7 @@ from vllm.spec_decode.interfaces import (SpeculativeProposals,
 from vllm.spec_decode.medusa_worker import MedusaWorker
 from vllm.spec_decode.metrics import AsyncMetricsCollector
 from vllm.spec_decode.mlp_speculator_worker import MLPSpeculatorWorker
+from vllm.spec_decode.mqa_scorer import MQAScorer
 from vllm.spec_decode.multi_step_worker import MultiStepWorker
 from vllm.spec_decode.ngram_worker import NGramWorker
 from vllm.spec_decode.proposer_worker_base import ProposerWorkerBase
@@ -44,8 +46,8 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
     """Helper method that is the entrypoint for Executors which use
     WorkerWrapper. It constructs a SpecDecodeWorker from the speculative config.
     """
-    assert "speculative_config" in kwargs
-    speculative_config: SpeculativeConfig = kwargs.get("speculative_config")
+    vllm_config: VllmConfig = kwargs.get("vllm_config")
+    speculative_config: SpeculativeConfig = vllm_config.speculative_config
     assert speculative_config is not None
 
     draft_worker_kwargs = kwargs.copy()
@@ -57,19 +59,22 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
     target_worker.model_runner.disable_logprobs =\
          speculative_config.disable_logprobs
 
+    draft_worker_config = copy.deepcopy(vllm_config)
+    draft_worker_config.model_config = speculative_config.draft_model_config
+    draft_worker_config.parallel_config = speculative_config.draft_parallel_config  # noqa
+    # TODO allow draft-model specific load config.
+
     # Override draft-model specific worker args.
     draft_worker_kwargs.update(
-        model_config=speculative_config.draft_model_config,
-        parallel_config=speculative_config.draft_parallel_config,
+        vllm_config=draft_worker_config,
         ngram_prompt_lookup_max=speculative_config.ngram_prompt_lookup_max,
         ngram_prompt_lookup_min=speculative_config.ngram_prompt_lookup_min,
-        # TODO allow draft-model specific load config.
-        #load_config=load_config,
     )
 
     spec_decode_worker = SpecDecodeWorker.create_worker(
         scorer_worker=target_worker,
         draft_worker_kwargs=draft_worker_kwargs,
+        disable_mqa_scorer=speculative_config.speculative_disable_mqa_scorer,
         disable_by_batch_size=speculative_config.
         speculative_disable_by_batch_size,
         draft_token_acceptance_method=speculative_config.
@@ -85,6 +90,8 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
     return spec_decode_worker
 
 
+# Reminder: Please update docs/source/serving/compatibility_matrix.rst
+# If the feature combo become valid
 class SpecDecodeWorker(LoraNotSupportedWorkerBase):
     """Worker which implements speculative decoding.
 
@@ -116,6 +123,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         cls,
         scorer_worker: Worker,
         draft_worker_kwargs: Dict[str, Any],
+        disable_mqa_scorer: bool,
         disable_by_batch_size: Optional[int],
         draft_token_acceptance_method: str,
         typical_acceptance_sampler_posterior_threshold: float,
@@ -129,29 +137,27 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             draft_worker_kwargs.pop("ngram_prompt_lookup_max"))
         ngram_prompt_lookup_min = (
             draft_worker_kwargs.pop("ngram_prompt_lookup_min"))
+        draft_model_config = draft_worker_kwargs["vllm_config"].model_config
+        draft_parallel_config: ParallelConfig = draft_worker_kwargs[
+            'vllm_config'].parallel_config
         if ngram_prompt_lookup_max > 0:
             proposer_worker = NGramWorker(**draft_worker_kwargs)
             proposer_worker.set_ngram_window_size(ngram_prompt_lookup_min,
                                                   ngram_prompt_lookup_max)
         else:
-            draft_parallel_config: ParallelConfig = draft_worker_kwargs[
-                'parallel_config']
             draft_tp = draft_parallel_config.tensor_parallel_size
             target_tp = scorer_worker.parallel_config.tensor_parallel_size
 
-            if draft_worker_kwargs[
-                    "model_config"].hf_config.model_type == "mlp_speculator":
+            if draft_model_config.hf_config.model_type == "mlp_speculator":
                 proposer_worker = MLPSpeculatorWorker(**draft_worker_kwargs)
-            elif draft_worker_kwargs[
-                    "model_config"].hf_config.model_type == "medusa":
+            elif draft_model_config.hf_config.model_type == "medusa":
                 proposer_worker = MedusaWorker(**draft_worker_kwargs)
             else:
                 if draft_tp == 1:
                     draft_worker_kwargs[
                         "model_runner_cls"] = TP1DraftModelRunner
                 else:
-                    if draft_worker_kwargs[
-                            "model_config"].hf_config.model_type == "eagle":
+                    if draft_model_config.hf_config.model_type == "eagle":
                         raise NotImplementedError(
                             "EAGLE does not support TP > 1 yet")
 
@@ -173,12 +179,37 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                     typical_acceptance_sampler_posterior_threshold,
                 posterior_alpha=typical_acceptance_sampler_posterior_alpha,
             )
-        logger.info("Configuring SpecDecodeWorker with sampler=%s",
-                    type(spec_decode_sampler))
+        logger.info(
+            "[Speculative Decoding] Configuring"
+            " SpecDecodeWorker with sampler=%s", type(spec_decode_sampler))
+
+        if not disable_mqa_scorer:
+            if scorer_worker.model_runner.attn_backend.get_name(
+            ) != "FLASH_ATTN":
+                disable_mqa_scorer = True
+                logger.info(
+                    "[Speculative Decoding] Disabling MQA scorer as the "
+                    "MQA is only available with flash attn backend.")
+
+            if draft_model_config and \
+                draft_model_config.max_model_len < \
+                    scorer_worker.model_config.max_model_len:
+                disable_mqa_scorer = True
+                logger.info(
+                    "[Speculative Decoding] Disabling MQA scorer as the "
+                    "draft model max_model_len is smaller than the target "
+                    "model max_model_len.")
+
+            if not scorer_worker.model_runner.model_config.enforce_eager:
+                disable_mqa_scorer = True
+                logger.info(
+                    "[Speculative Decoding] Disabling MQA scorer as the "
+                    "target model is not running in eager mode.")
 
         return SpecDecodeWorker(
             proposer_worker,
             scorer_worker,
+            disable_mqa_scorer=disable_mqa_scorer,
             disable_logprobs=disable_logprobs,
             disable_log_stats=disable_log_stats,
             disable_by_batch_size=disable_by_batch_size,
@@ -190,6 +221,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         proposer_worker: ProposerWorkerBase,
         scorer_worker: WorkerBase,
         spec_decode_sampler: SpecDecodeBaseSampler,
+        disable_mqa_scorer: bool = False,
         disable_logprobs: bool = False,
         disable_log_stats: bool = False,
         metrics_collector: Optional[AsyncMetricsCollector] = None,
@@ -211,6 +243,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                 types of sampler namely RejectionSampler and
                 TypicalAcceptanceSampler. 'spec_decode_sampler' is either an
                 instance of RejectionSampler or TypicalAcceptanceSampler.
+            disable_mqa_scorer: If set to True, disable the MQA scorer and use
+                the BatchExpansionTop1Scorer instead.
             disable_logprobs: If set to True, token log probabilities will
                 not be output in both the draft worker and the target worker.
                 If set to False, log probabilities will be output by both.
@@ -248,6 +282,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         self.token_id_dtype = self.spec_decode_sampler.token_id_dtype
         # Lazy initialization.
         self.scorer: SpeculativeScorer
+        self.disable_mqa_scorer = disable_mqa_scorer
 
         # Hidden states from target model to pass to proposer
         # in the subsequent step.
@@ -270,10 +305,19 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         self._metrics.init_gpu_tensors(self.rank)
         self.spec_decode_sampler.init_gpu_tensors(self.rank)
 
-        self.scorer = BatchExpansionTop1Scorer(
-            scorer_worker=self.scorer_worker,
-            device=self.device,
-            vocab_size=self._vocab_size)
+        scorer_cls: Type[SpeculativeScorer]
+        if self.disable_mqa_scorer:
+            scorer_cls = BatchExpansionTop1Scorer
+            logger.info("[Speculative Decoding] Use batch "
+                        "expansion for scoring proposals.")
+        else:
+            scorer_cls = MQAScorer
+            logger.info(
+                "[Speculative Decoding] Use MQA scorer for scoring proposals.")
+
+        self.scorer = scorer_cls(scorer_worker=self.scorer_worker,
+                                 device=self.device,
+                                 vocab_size=self._vocab_size)
 
         self._configure_model_sampler_for_spec_decode()
 
@@ -994,6 +1038,14 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         See https://arxiv.org/abs/2308.04623.
         """
         raise NotImplementedError
+
+    def start_profile(self):
+        if isinstance(self.scorer_worker, Worker):
+            self.scorer_worker.start_profile()
+
+    def stop_profile(self):
+        if isinstance(self.scorer_worker, Worker):
+            self.scorer_worker.stop_profile()
 
 
 def split_num_cache_blocks_evenly(scorer_cache_block_size_bytes: int,

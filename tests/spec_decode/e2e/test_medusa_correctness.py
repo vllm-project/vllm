@@ -45,9 +45,6 @@ PRECISION = "float32"
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
 
-        # Required for spec decode.
-        "use_v2_block_manager": True,
-
         # Print spec metrics.
         "disable_log_stats": False,
 
@@ -92,9 +89,6 @@ def test_medusa_e2e_greedy_correctness(vllm_runner, common_llm_kwargs,
     [{
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
-
-        # Required for spec decode.
-        "use_v2_block_manager": True,
 
         # Print spec metrics.
         "disable_log_stats": False,
@@ -151,9 +145,6 @@ def test_medusa_e2e_greedy_logprobs(vllm_runner, common_llm_kwargs,
     [{
         "enforce_eager": False,
 
-        # Required for spec decode.
-        "use_v2_block_manager": True,
-
         # Print spec metrics.
         "disable_log_stats": False,
 
@@ -204,9 +195,6 @@ def test_medusa_e2e_greedy_correctness_cuda_graph(
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
 
-        # Required for spec decode.
-        "use_v2_block_manager": True,
-
         # Precision
         "dtype": PRECISION,
 
@@ -252,9 +240,6 @@ def test_medusa_e2e_greedy_correctness_with_preemption(
     [{
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
-
-        # Required for spec decode.
-        "use_v2_block_manager": True,
 
         # Precision
         "dtype": PRECISION,
@@ -306,9 +291,6 @@ def test_medusa_different_k(vllm_runner, common_llm_kwargs,
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
 
-        # Required for spec decode.
-        "use_v2_block_manager": True,
-
         # Precision
         "dtype": PRECISION,
 
@@ -338,6 +320,52 @@ def test_medusa_disable_queue(vllm_runner, common_llm_kwargs,
     """Verify that medusa speculative decoding produces exact equality
     to without spec decode when speculation is disabled for large
     batch sizes.
+    """
+    run_equality_correctness_test(vllm_runner,
+                                  common_llm_kwargs,
+                                  per_test_common_llm_kwargs,
+                                  baseline_llm_kwargs,
+                                  test_llm_kwargs,
+                                  batch_size,
+                                  max_output_len=output_len,
+                                  seed=seed,
+                                  temperature=0.0)
+
+
+@pytest.mark.parametrize(
+    "common_llm_kwargs",
+    [{
+        # Skip cuda graph recording for fast test.
+        "enforce_eager": True,
+
+        # Precision
+        "dtype": PRECISION,
+
+        # Main model
+        "model_name": MAIN_MODEL,
+        "speculative_model": SPEC_MODEL,
+        "num_speculative_tokens": MAX_SPEC_TOKENS,
+        "speculative_disable_by_batch_size": 4
+    }])
+@pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
+@pytest.mark.parametrize("baseline_llm_kwargs", [{}])
+@pytest.mark.parametrize("test_llm_kwargs",
+                         [{
+                             "speculative_disable_mqa_scorer": True,
+                         }])
+@pytest.mark.parametrize("batch_size", [1, 5])
+@pytest.mark.parametrize(
+    "output_len",
+    [
+        # Use smaller output len for fast test.
+        32,
+    ])
+@pytest.mark.parametrize("seed", [1])
+def test_mqa_scorer(vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
+                    baseline_llm_kwargs, test_llm_kwargs, batch_size: int,
+                    output_len: int, seed: int):
+    """Verify that speculative decoding generates the same output 
+    with batch expansion scorer and mqa scorer.
     """
     run_equality_correctness_test(vllm_runner,
                                   common_llm_kwargs,

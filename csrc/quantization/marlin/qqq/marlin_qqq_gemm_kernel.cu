@@ -30,6 +30,7 @@
 #include <iostream>
 
 #include "../dense/common/base.h"
+#include "core/registration.h"
 
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
   #include "../dense/common/mem.h"
@@ -1240,4 +1241,8 @@ torch::Tensor marlin_qqq_gemm(torch::Tensor const& a,
       at::cuda::getCurrentCUDAStream(dev), thread_k, thread_n, sms, max_par);
 
   return d;
+}
+
+TORCH_LIBRARY_IMPL_EXPAND(TORCH_EXTENSION_NAME, CUDA, m) {
+  m.impl("marlin_qqq_gemm", &marlin_qqq_gemm);
 }

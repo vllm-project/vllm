@@ -55,8 +55,8 @@ torch::Tensor prepack_impl(torch::Tensor const B) {
   // Allocate output
   torch::Tensor D = torch::empty_like(B, {}, at::MemoryFormat::Contiguous);
 
-  prepack_B<PrepackedLayoutB>(stream, B_ptr, layout_Bt,
-                              static_cast<ElementB*>(D.mutable_data_ptr()));
+  prepack_B_template<PrepackedLayoutB>(
+      stream, B_ptr, layout_Bt, static_cast<ElementB*>(D.mutable_data_ptr()));
 
   return D;
 };

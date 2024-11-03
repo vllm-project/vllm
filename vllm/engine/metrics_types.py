@@ -46,12 +46,17 @@ class Stats:
     # Request stats (should have _requests suffix)
     #   Latency
     time_e2e_requests: List[float]
+    time_in_queue_requests: List[float]
+    model_forward_time_requests: List[float]
+    model_execute_time_requests: List[float]
     #   Metadata
     num_prompt_tokens_requests: List[int]
     num_generation_tokens_requests: List[int]
-    best_of_requests: List[int]
     n_requests: List[int]
     finished_reason_requests: List[str]
+    waiting_lora_adapters: List[str]
+    running_lora_adapters: List[str]
+    max_lora: str
 
     spec_decode_metrics: Optional["SpecDecodeWorkerMetrics"] = None
 
