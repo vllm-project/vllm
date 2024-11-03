@@ -404,15 +404,14 @@ class GPUModelRunner:
 
     def load_model(self) -> None:
         if self.use_cuda_graph:
-            # FIXME(woosuk): Currently, the custom ops are not supported
-            # in the piecewise compilation mode. We rely on TorchInductor
-            # to optimize the model.
-            os.environ["VLLM_CUSTOM_OPS"] = "none"
+            # FIXME(woosuk): Currently, we do not use inductor to reduce the
+            # compilation time and any potential issues with the inductor.
+            os.environ["VLLM_CUSTOM_OPS"] = "all"
             set_compilation_config(
                 CompilationConfig(
                     use_cudagraph=True,
                     non_cudagraph_ops=["vllm.unified_v1_flash_attention"],
-                    use_inductor=True,
+                    use_inductor=False,
                 ))
 
         logger.info("Starting to load model %s...", self.model_config.model)

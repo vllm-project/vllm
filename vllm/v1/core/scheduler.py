@@ -1,12 +1,13 @@
 from collections import deque
 from dataclasses import dataclass
-from typing import Deque, Dict, Iterable, List, Optional, Set, Tuple, Union
+from typing import Deque, Dict, Iterable, List, Optional, Set, Union
 
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.logger import init_logger
 from vllm.multimodal import MultiModalDataDict
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.kv_cache_manager import KVCacheManager
+from vllm.v1.engine import EngineCoreOutput
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 
@@ -244,13 +245,12 @@ class Scheduler:
         self,
         scheduler_output: "SchedulerOutput",
         model_runner_output: "ModelRunnerOutput",
-    ) -> List[Tuple[Request, int]]:
+    ) -> List[EngineCoreOutput]:
         # NOTE(woosuk): This method doesn't consider speculative decoding.
         sampled_token_ids = model_runner_output.sampled_token_ids_cpu.tolist()
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         new_running: List[Request] = []
-        # (request, num_sampled_tokens)
-        sampled: List[Tuple[Request, int]] = []
+        engine_core_outputs: List[EngineCoreOutput] = []
         for request in self.running:
             req_id = request.request_id
             request.num_computed_tokens += num_scheduled_tokens[req_id]
@@ -264,17 +264,29 @@ class Scheduler:
                 # generates at most one token at each step.
                 token_id = sampled_token_ids[req_index]
                 request.append_output_token_ids(token_id)
-                sampled.append((request, 1))
+                num_new_tokens = 1
                 # TODO: Update the KV cache manager for prefix caching.
 
-                # Check if the request is finished.
+                # Check for stop and update request state.
+                # This must be called before me make the EngineCoreOutput.
                 stopped = self._check_stop(request)
+
+                # Add EngineCoreOutput for this Request.
+                output = EngineCoreOutput(
+                    request_id=req_id,
+                    new_token_ids=request.output_token_ids[-num_new_tokens:],
+                    finished=request.is_finished(),
+                    finish_reason=request.get_finished_reason(),
+                    stop_reason=request.stop_reason)
+                engine_core_outputs.append(output)
+
+                # Breakout of the loop.
                 if stopped:
                     continue
 
             new_running.append(request)
         self.running = new_running
-        return sampled
+        return engine_core_outputs
 
     def _check_stop(self, request: Request) -> bool:
         if (request.num_tokens >= self.max_model_len
