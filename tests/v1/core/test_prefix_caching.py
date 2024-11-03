@@ -39,7 +39,7 @@ def test_prefill():
     # Check full block metadata
     prev_block_id = None
     for block_id in (0, 1, 2):
-        assert manager.block_pool[block_id].prev_block_id == prev_block_id
+        assert manager.block_pool[block_id].parent_block_id == prev_block_id
         assert manager.block_pool[block_id].block_hash is not None
         assert manager.block_pool[block_id].ref_cnt == 1
         assert manager.block_pool[block_id].num_hashed_tokens == 16 * (
@@ -49,7 +49,7 @@ def test_prefill():
 
     # Check partial/preallocated block metadata
     for block_id in (3, 4):
-        assert manager.block_pool[block_id].prev_block_id == block_id - 1
+        assert manager.block_pool[block_id].parent_block_id == block_id - 1
         assert manager.block_pool[block_id].block_hash is None
         assert manager.block_pool[block_id].ref_cnt == 1
         assert manager.block_pool[block_id].num_hashed_tokens == 0
