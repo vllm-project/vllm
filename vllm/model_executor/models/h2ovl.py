@@ -261,11 +261,6 @@ class H2OVLInputPipeline(InternVLInputPipeline):
             for pixel_value in pixel_values:
                 num_blocks = pixel_value.shape[0]
                 image_feature_sizes.append(num_blocks * num_patches)
-
-        elif isinstance(image_data, torch.Tensor):
-            num_images, image_feature_size, hidden_size = image_data.shape
-            image_feature_sizes = [image_feature_size]
-            pixel_values = image_data
         else:
             raise TypeError(f"Invalid image type: {type(image_data)}")
 
@@ -311,12 +306,17 @@ class H2OVLInputPipeline(InternVLInputPipeline):
         max_dynamic_patch: Optional[int] = None,
     ) -> MultiModalInputs:
 
-        # NOTE: when preprocessing for the image data is done in the
-        # 'input_processor' function
+        # NOTE: Preprocessing for the image data is done in the
+        # 'input_processor' function during actual inference.
         if isinstance(data, dict):
             return MultiModalInputs(data)
 
-        # these is only for dummy data
+        # Image embeddings as input
+        if isinstance(data, torch.Tensor):
+            return MultiModalInputs({"image_embeds": data})
+
+        # The section below is only used with dummy data during
+        # memory profiling.
         hf_config = ctx.get_hf_config()
 
         image_pixel_values_mapper = image_to_pixel_values_wrapper(
