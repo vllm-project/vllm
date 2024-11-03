@@ -1,5 +1,5 @@
 """A layer that samples the next tokens from the model's outputs."""
-from typing import List, Optional
+from typing import Dict
 
 import torch
 import torch.nn as nn
@@ -84,22 +84,21 @@ class Sampler(nn.Module):
     def random_sample(
         self,
         probs: torch.Tensor,
-        generators: List[Optional[torch.Generator]],
-        no_generator: bool,
+        generators: Dict[int, torch.Generator],
     ) -> torch.Tensor:
         q = torch.empty_like(probs)
         # NOTE(woosuk): To batch-process the requests without their own seeds,
         # which is the common case, we first assume that every request does
         # not have its own seed. Then, we overwrite the values for the requests
         # that have their own seeds.
-        q.exponential_()
-        if not no_generator:
-            assert len(generators) == probs.shape[0]
+        if len(generators) != probs.shape[0]:
+            # This might still be done here unnecessarily if there are greedies
+            q.exponential_()
+        if generators:
             # TODO(woosuk): This can be slow because we handle each request
             # one by one. Optimize this.
-            for i, generator in enumerate(generators):
-                if generator is not None:
-                    q[i].exponential_(generator=generator)
+            for i, generator in generators.items():
+                q[i].exponential_(generator=generator)
         return probs.div_(q).argmax(dim=-1).view(-1)
 
     def sample(
@@ -112,13 +111,11 @@ class Sampler(nn.Module):
         if sampling_metadata.all_greedy:
             return self.greedy_sample(probs)
         if sampling_metadata.all_random:
-            return self.random_sample(probs, sampling_metadata.generators,
-                                      sampling_metadata.no_generator)
+            return self.random_sample(probs, sampling_metadata.generators)
 
         greedy_sampled = self.greedy_sample(probs)
         random_sampled = self.random_sample(probs,
-                                            sampling_metadata.generators,
-                                            sampling_metadata.no_generator)
+                                            sampling_metadata.generators)
         sampled = torch.where(
             sampling_metadata.temperature < _SAMPLING_EPS,
             greedy_sampled,
