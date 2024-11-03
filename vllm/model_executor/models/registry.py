@@ -342,13 +342,16 @@ class _ModelRegistry:
     def _raise_for_unsupported(self, architectures: List[str]):
         all_supported_archs = self.get_supported_archs()
 
-        msg = (f"Model architectures {architectures} are not supported for "
-               f"now. Supported architectures: {all_supported_archs}")
         if any(arch in all_supported_archs for arch in architectures):
-            msg += ("\n(Please check the logs to see why the model "
-                    "failed to be inspected.)")
+            raise ValueError(
+                f"Model architectures {architectures} failed "
+                "to be inspected. Please check the logs for more details."
+            )
 
-        raise ValueError(msg)
+        raise ValueError(
+            f"Model architectures {architectures} are not supported for now. "
+            f"Supported architectures: {all_supported_archs}"
+        )
 
     def _try_load_model_cls(self,
                             model_arch: str) -> Optional[Type[nn.Module]]:
