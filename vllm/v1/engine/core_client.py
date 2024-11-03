@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Union
 
 import msgspec
 import zmq
@@ -7,7 +7,8 @@ import zmq.asyncio
 from vllm.logger import init_logger
 from vllm.utils import get_open_zmq_ipc_path
 from vllm.v1.engine import (POLLING_TIMEOUT_MS, EngineCoreOutput,
-                            EngineCoreOutputs, EngineCoreRequest)
+                            EngineCoreOutputs, EngineCoreRequest,
+                            EngineCoreRequestType)
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
 
 logger = init_logger(__name__)
@@ -52,10 +53,16 @@ class EngineCoreClient:
     def add_request(self, request: EngineCoreRequest) -> None:
         raise NotImplementedError
 
+    def abort_requests(self, request_ids: List[str]) -> None:
+        raise NotImplementedError
+
     async def get_output_async(self) -> List[EngineCoreOutput]:
         raise NotImplementedError
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
+        raise NotImplementedError
+
+    async def abort_requests_async(self, request_ids: List[str]) -> None:
         raise NotImplementedError
 
 
@@ -79,6 +86,9 @@ class InprocClient(EngineCoreClient):
 
     def add_request(self, request: EngineCoreRequest) -> None:
         self.engine_core.add_request(request)
+
+    def abort_requests(self, request_ids: List[str]) -> None:
+        self.engine_core.abort_requests(request_ids)
 
 
 class MPClient(EngineCoreClient):
@@ -153,11 +163,22 @@ class SyncMPClient(MPClient):
 
         return engine_core_outputs
 
-    def add_request(self, request: EngineCoreRequest) -> None:
-
-        self.input_socket.send_multipart((self.encoder.encode(request), ),
+    def _send_input(self,
+                   request_type: EngineCoreRequestType,
+                   request: Union[EngineCoreRequest, List[str]]) \
+                           -> None:
+        self.input_socket.send_multipart((
+            request_type.value,
+            self.encoder.encode(request),
+        ),
                                          copy=False,
                                          flags=zmq.NOBLOCK)
+
+    def add_request(self, request: EngineCoreRequest) -> None:
+        self._send_input(EngineCoreRequestType.AddRequest, request)
+
+    def abort_requests(self, request_ids: List[str]) -> None:
+        self._send_input(EngineCoreRequestType.AbortRequest, request_ids)
 
 
 class AsyncMPClient(MPClient):
@@ -176,7 +197,19 @@ class AsyncMPClient(MPClient):
 
         return engine_core_outputs
 
-    async def add_request_async(self, request: EngineCoreRequest) -> None:
+    async def _send_input(self,
+                   request_type: EngineCoreRequestType,
+                   request: Union[EngineCoreRequest, List[str]])\
+                           -> None:
+        await self.input_socket.send_multipart((
+            request_type.value,
+            self.encoder.encode(request),
+        ),
+                                               copy=False,
+                                               flags=zmq.NOBLOCK)
 
-        await self.input_socket.send_multipart(
-            (self.encoder.encode(request), ), copy=False, flags=zmq.NOBLOCK)
+    async def add_request_async(self, request: EngineCoreRequest) -> None:
+        await self._send_input(EngineCoreRequestType.AddRequest, request)
+
+    async def abort_requests_async(self, request_ids: List[str]) -> None:
+        await self._send_input(EngineCoreRequestType.AbortRequest, request_ids)

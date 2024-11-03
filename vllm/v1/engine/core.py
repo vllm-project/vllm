@@ -2,7 +2,8 @@ import multiprocessing
 import queue
 from multiprocessing.process import BaseProcess
 from threading import Thread
-from typing import List, Tuple, Type
+from typing import List, Tuple, Type, Any
+from collections import namedtuple
 
 import msgspec
 import zmq
@@ -13,9 +14,10 @@ from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.core.scheduler import Scheduler
 from vllm.v1.engine import (POLLING_TIMEOUT_MS, EngineCoreOutput,
-                            EngineCoreOutputs, EngineCoreRequest)
+                            EngineCoreOutputs, EngineCoreRequest,
+                            EngineCoreRequestType)
 from vllm.v1.executor.gpu_executor import GPUExecutor
-from vllm.v1.request import Request
+from vllm.v1.request import Request, RequestStatus
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -123,6 +125,10 @@ class EngineCore:
         req = Request.from_engine_core_request(request)
         self.scheduler.add_request(req)
 
+    def abort_requests(self, request_ids: List[str]):
+        self.scheduler.finish_requests(request_ids,
+                                       RequestStatus.FINISHED_ABORTED)
+
     def step(self) -> List[EngineCoreOutput]:
         """Schedule, execute, and make output."""
 
@@ -153,7 +159,10 @@ class EngineCoreProc(EngineCore):
         super().__init__(vllm_config, executor_class, usage_context)
 
         self.msgpack_encoder = msgspec.msgpack.Encoder()
-        self.msgpack_decoder = msgspec.msgpack.Decoder(EngineCoreRequest)
+        self.msgpack_add_request_decoder = \
+                msgspec.msgpack.Decoder(EngineCoreRequest)
+        self.msgpack_abort_requests_decoder = \
+                msgspec.msgpack.Decoder(list[str])
 
         self.ctx = zmq.Context()  # type: ignore[attr-defined]
 
@@ -182,10 +191,27 @@ class EngineCoreProc(EngineCore):
                 ready_socket.close(linger=0)
 
     def process_input_socket(self):
+
+        def get_decoder_from_request_type(req_type: bytes) \
+                    -> msgspec.msgpack.Decoder:
+            # Identify msgpack decoder based on request_type.
+            if req_type == EngineCoreRequestType.AddRequest.value:
+                return self.msgpack_add_request_decoder
+            elif req_type == EngineCoreRequestType.AbortRequest.value:
+                return self.msgpack_abort_requests_decoder
+            else:
+                raise ValueError(f"Unhandled request type {request_type}")
+
         while True:
-            frames = self.input_socket.recv_multipart(copy=False)
-            request = self.msgpack_decoder.decode(frames[0].buffer)
-            self.input_queue.put_nowait(request)
+            request_type, request_data = \
+                self.input_socket.recv_multipart(copy=False)
+
+            # Decode request_data
+            msgpack_decoder: msgspec.msgpack.Decoder = \
+                  get_decoder_from_request_type(request_type.buffer)
+            request_data: Any = msgpack_decoder.decode(request_data.buffer)
+
+            self.input_queue.put_nowait((request_type.buffer, request_data))
 
     def process_output_socket(self):
         while True:
@@ -267,8 +293,7 @@ class EngineCoreProc(EngineCore):
         while True:
             # Poll the input socket until there is work to do.
             if not self.scheduler.has_unfinished_requests():
-                request = self.input_queue.get()
-                self._handle_request(request)
+                self._handle_request(self.input_queue.get())
 
             # Handle new input from the socket.
             self._handle_new_input()
@@ -282,17 +307,27 @@ class EngineCoreProc(EngineCore):
     def _handle_new_input(self):
         """Handle new input from the AsyncLLMEngine for async mode."""
         while not self.input_queue.empty():
-            request = self.input_queue.get_nowait()
-            self._handle_request(request)
+            self._handle_request(self.input_queue.get_nowait())
 
-    def _handle_request(self, request: EngineCoreRequest):
+    def _handle_request(self, request: Tuple[bytes, Any]):
+
         try:
-            self.add_request(request)
+            request_type, request_data = request
+            # Process request_data based on request_type
+            if request_type == EngineCoreRequestType.AddRequest.value:
+                assert isinstance(request_data, EngineCoreRequest), \
+                    f'Unexpected datatype {type(request_data)}'
+                self.add_request(request_data)
+            elif request_type == EngineCoreRequestType.AbortRequest.value:
+                assert isinstance(request_data, list), \
+                    f'Unexpected datatype {type(request_data)}'
+                self.scheduler.finish_requests(request_data,
+                                               RequestStatus.FINISHED_ABORTED)
+            else:
+                raise ValueError(f"Unhandled request type {request_type}")
 
-            # TODO: handle abort via another socket
             # TODO: handle logits processors via cloudpickle
             # TODO: handle profiling
-
         except Exception as e:
             # TODO: handle gracefully
             raise e
