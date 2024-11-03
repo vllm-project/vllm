@@ -137,15 +137,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                 "vllm.model_executor.layers.vocab_parallel_embedding."
                 "get_tensor_model_parallel_rank",
                 return_value=xm_tp_rank):
-            model = get_model(
-                model_config=self.model_config,
-                load_config=self.load_config,
-                device_config=self.device_config,
-                parallel_config=self.parallel_config,
-                cache_config=self.cache_config,
-                scheduler_config=self.scheduler_config,
-                lora_config=None,
-            )
+            model = get_model(vllm_config=self.vllm_config)
         model = model.eval()
         xm.wait_device_ops()
         self.model = ModelWrapper(model)
