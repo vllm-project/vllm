@@ -261,6 +261,23 @@ class H2OVLInputPipeline(InternVLInputPipeline):
             for pixel_value in pixel_values:
                 num_blocks = pixel_value.shape[0]
                 image_feature_sizes.append(num_blocks * num_patches)
+
+        # image embeddings as input
+        elif isinstance(image_data, torch.Tensor):
+            _, image_feature_size, _ = image_data.shape
+            image_feature_sizes = [image_feature_size]
+            pixel_values = None
+
+        # multi-image image embeddings
+        elif is_list_of(image_data, torch.Tensor):
+
+            image_feature_sizes = []
+            for image in image_data:
+                _, image_feature_size, _ = image.shape
+                image_feature_sizes.append(image_feature_size)
+            _, image_feature_size, _ = image_data.shape
+            pixel_values = None
+
         else:
             raise TypeError(f"Invalid image type: {type(image_data)}")
 
@@ -284,13 +301,17 @@ class H2OVLInputPipeline(InternVLInputPipeline):
             add_special_tokens=False,
             return_tensors="pt",
         )[0]
-        # Prepare image_data dictionary
-        image_data = {
-            "pixel_values": pixel_values,
-            "image_token_id": image_token_id,
-        }
-        # Update multi_modal_data
-        multi_modal_data = {"image": image_data}
+
+        # Update multi_modal_data to return
+        if pixel_values is not None:
+            multi_modal_data = {
+                "image": {
+                    "pixel_values": pixel_values,
+                    "image_token_id": image_token_id,
+                }
+            }
+        else:
+            multi_modal_data = {"image": {"image_embeds": image_data}}
 
         return token_inputs(
             prompt=prompt,
@@ -310,10 +331,6 @@ class H2OVLInputPipeline(InternVLInputPipeline):
         # 'input_processor' function during actual inference.
         if isinstance(data, dict):
             return MultiModalInputs(data)
-
-        # Image embeddings as input
-        if isinstance(data, torch.Tensor):
-            return MultiModalInputs({"image_embeds": data})
 
         # The section below is only used with dummy data during
         # memory profiling.
