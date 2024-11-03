@@ -12,11 +12,11 @@ This document is just about installation, refer to the x86 platform write-up for
 
 Table of contents:
 
-#. :ref:`Requirements <cpu_backend_requirements>`
-#. :ref:`Quick start using Dockerfile <cpu_backend_quick_start_dockerfile>`
-#. :ref:`Build from source <build_cpu_backend_from_source>`
+#. :ref:`Requirements <arm_backend_requirements>`
+#. :ref:`Quick start using Dockerfile <arm_backend_quick_start_dockerfile>`
+#. :ref:`Build from source <build_arm_backend_from_source>`
 
-.. _cpu_backend_requirements:
+.. _arm_backend_requirements:
 
 Requirements
 ------------
@@ -26,7 +26,7 @@ Requirements
 * Compiler: gcc/g++>=12.3.0 (optional, recommended)
 * Instruction set architecture (ISA) requirement: Neon (basic requirement)
 
-.. _cpu_backend_quick_start_dockerfile:
+.. _arm_backend_quick_start_dockerfile:
 
 Quick start using Dockerfile
 ----------------------------
@@ -41,7 +41,7 @@ Quick start using Dockerfile
                  --cpuset-mems=<memory-node, optional> \
                  vllm-cpu-env
 
-.. _build_cpu_backend_from_source:
+.. _build_arm_backend_from_source:
 
 Build from source
 -----------------
