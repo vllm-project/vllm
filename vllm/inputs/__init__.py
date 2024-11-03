@@ -22,6 +22,7 @@ __all__ = [
     "ExplicitEncoderDecoderPrompt",
     "TokenInputs",
     "token_inputs",
+    "DecoderOnlyInputs",
     "EncoderDecoderInputs",
     "ProcessorInputs",
     "SingletonInputs",
