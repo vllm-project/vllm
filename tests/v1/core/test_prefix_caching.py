@@ -72,20 +72,21 @@ def test_prefill():
         assert manager.block_pool[block_id].ref_cnt == 2
 
     # At this point, we should have 3 free blocks left.
-    assert manager.num_free_blocks == 3
+    assert manager.free_block_queue.num_free_blocks == 3
 
     manager.free(req0)
     manager.free(req1)
 
     # All blocks should be available.
-    assert manager.num_free_blocks == 10
+    assert manager.free_block_queue.num_free_blocks == 10
     # The order should be
     # [unallocated (7, 8)]
     # [unique_req0 (4, 3)]
     # [unique_req1 (6, 5)]
     # [common (2, 1, 0)]
-    assert [b.block_id for b in manager.free_block_queue
-            ] == [7, 8, 9, 4, 3, 6, 5, 2, 1, 0]
+    assert [
+        b.block_id for b in manager.free_block_queue.get_all_free_blocks()
+    ] == [7, 8, 9, 4, 3, 6, 5, 2, 1, 0]
 
     # Cache hit in the common prefix when the original block is already free.
     # Incomplete 1 block (6 tokens)
@@ -100,9 +101,12 @@ def test_prefill():
 
     # Although we only have 5 free blocks, we have 8 blocks in
     # the free block queue due to lazy removal.
-    assert manager.num_free_blocks == 5
-    assert len(list(manager.free_block_queue)) == 8
-    assert len([b for b in manager.free_block_queue if b.ref_cnt > 0]) == 3
+    assert manager.free_block_queue.num_free_blocks == 5
+    assert all([
+        b.ref_cnt == 0 for b in manager.free_block_queue.get_all_free_blocks()
+    ])
+    assert len([b
+                for b in manager.free_block_queue.get_all_free_blocks()]) == 5
 
     manager.free(req2)
 
@@ -113,8 +117,9 @@ def test_prefill():
     block_ids = manager.allocate_slots(req2, 16 * 9, computed_block_ids)
     # This block ID order also checks the eviction order.
     assert block_ids == [9, 4, 3, 6, 5, 8, 7, 2, 1, 0]
-    assert manager.num_free_blocks == 0
-    assert not manager.free_block_queue
+    assert manager.free_block_queue.num_free_blocks == 0
+    assert manager.free_block_queue.free_list_head is None
+    assert manager.free_block_queue.free_list_tail is None
 
 
 def test_decode():
@@ -194,13 +199,14 @@ def test_evict():
     assert len(block_ids) == 3  # 3 full blocks
     last_token_id += 3 * 16
 
-    assert manager.num_free_blocks == 0
+    assert manager.free_block_queue.num_free_blocks == 0
 
     manager.free(req0)
     manager.free(req1)
-    assert manager.num_free_blocks == 10
-    assert [b.block_id for b in manager.free_block_queue
-            ] == [6, 5, 4, 3, 2, 1, 0, 9, 8, 7]
+    assert manager.free_block_queue.num_free_blocks == 10
+    assert [
+        b.block_id for b in manager.free_block_queue.get_all_free_blocks()
+    ] == [6, 5, 4, 3, 2, 1, 0, 9, 8, 7]
 
     # Touch the first 2 blocks.
     req2 = make_request("2", list(range(2 * 16 + 3)))
@@ -208,12 +214,4 @@ def test_evict():
     assert computed_block_ids == [0, 1]
     block_ids = manager.allocate_slots(req2, 3, computed_block_ids)
     assert block_ids == [6, 5]
-    # Number of free blocks should be updated immediately
-    assert manager.num_free_blocks == 6
-    # The touched blocks haven't been removed from the free block queue.
-    assert len(manager.free_block_queue) == 8
-
-    # The touched blocks should be removed from the free block queue.
-    manager.async_remove_touched_blocks()
-    manager.wait_for_removing_touched_blocks()
-    assert len(manager.free_block_queue) == 6
+    assert manager.free_block_queue.num_free_blocks == 6

@@ -130,6 +130,19 @@ class FreeKVCacheBlockQueue:
         block.next_free_block = None
         self.num_free_blocks += 1
 
+    def get_all_free_blocks(self) -> List[KVCacheBlock]:
+        """Get all free blocks in the free list. Mainly used for testing.
+        
+        Returns:
+            A list of free blocks.
+        """
+        ret = []
+        curr_block = self.free_list_head
+        while curr_block is not None:
+            ret.append(curr_block)
+            curr_block = curr_block.next_free_block
+        return ret
+
 
 class KVCacheManager:
 
