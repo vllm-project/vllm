@@ -68,10 +68,10 @@ class FreeKVCacheBlockQueue:
         # Initialize the doubly linked list of free blocks.
         self.free_list_head = blocks[0]
         self.free_list_tail = blocks[-1]
-        for i in range(self.size):
+        for i in range(self.num_free_blocks):
             if i > 0:
                 blocks[i].prev_free_block = blocks[i - 1]
-            if i < self.size - 1:
+            if i < self.num_free_blocks - 1:
                 blocks[i].next_free_block = blocks[i + 1]
 
     def popleft(self) -> KVCacheBlock:
