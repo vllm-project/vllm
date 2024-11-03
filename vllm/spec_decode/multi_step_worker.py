@@ -81,6 +81,8 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
             # Here we run the draft_model_runner with multi-step prepare
             # on the GPU directly
             expanded_request.num_steps = sample_len
+            self.model_runner.set_indices_of_seq_with_bonus_tokens(
+                indices_of_seq_with_bonus_tokens)
             model_outputs = self.execute_model(
                 execute_model_req=expanded_request)
         else:
