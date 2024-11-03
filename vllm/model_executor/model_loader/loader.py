@@ -1014,7 +1014,33 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                     end_index = total_size // tp_size * (tp_rank + 1)
                     weight_sub_tensor = weight_tensor[...,
                                                       start_index:end_index]
-
+                
+                elif any(module in weight_name for module in self.fused_weights_modules):
+                    # FIXME(Isotr0py): Rewrite this part
+                    if ".qkv_proj." in weight_name:
+                        # qkv_proj weight is split along the last dimension
+                        # and the last dimension is the column parallel dimension
+                        total_size = weight_tensor.size(0)
+                        qkv_size = total_size // 3
+                        qkv_sub_size = qkv_size // tp_size
+                        q_start_loc, k_start_loc, v_start_loc = [i*qkv_size for i in range(3)]
+                        q_start_loc = q_start_loc + qkv_sub_size * tp_rank
+                        k_start_loc = k_start_loc + qkv_sub_size * tp_rank
+                        v_start_loc = v_start_loc + qkv_sub_size * tp_rank
+                        q_tensor = weight_tensor[q_start_loc:q_start_loc+qkv_sub_size, ...]
+                        k_tensor = weight_tensor[k_start_loc:k_start_loc+qkv_sub_size, ...]
+                        v_tensor = weight_tensor[v_start_loc:v_start_loc+qkv_sub_size, ...]
+                        weight_sub_tensor = torch.cat([q_tensor, k_tensor, v_tensor], dim=0)
+                    elif ".gate_up_proj." in weight_name:
+                        total_size = weight_tensor.size(0)
+                        qkv_size = total_size // 2
+                        qkv_sub_size = qkv_size // tp_size
+                        start_loc_0, start_loc_1 = [i*qkv_size for i in range(2)]
+                        start_loc_0 = start_loc_0 + qkv_sub_size * tp_rank
+                        start_loc_1 = start_loc_1 + qkv_sub_size * tp_rank
+                        tensor_0 = weight_tensor[start_loc_0:start_loc_0+qkv_sub_size, ...]
+                        tensor_1 = weight_tensor[start_loc_1:start_loc_1+qkv_sub_size, ...]
+                        weight_sub_tensor = torch.cat([tensor_0, tensor_1], dim=0)
                 else:
                     total_size = weight_tensor.size(0)
                     start_index = total_size // tp_size * tp_rank
@@ -1068,6 +1094,11 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 model.column_parallel_weights_modules
         else:
             self.column_parallel_weights_modules = []
+        
+        if hasattr(model, 'fused_weights_modules'):
+            self.fused_weights_modules = model.fused_weights_modules
+        else:
+            self.fused_weights_modules = []
 
         self.model_type = type(model).__name__
 

@@ -469,6 +469,7 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     ]
     # in TP, these weights are partitioned along the column dimension (dim=-1)
     column_parallel_weights_modules = [".down_proj.", ".o_proj."]
+    fused_weights_modules = [".gate_up_proj.", ".qkv_proj."]
     bitsandbytes_stacked_params_mapping = {
         # shard_name, weight_name, index
         "q_proj": ("qkv_proj", 0),
