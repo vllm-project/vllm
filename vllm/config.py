@@ -1,6 +1,6 @@
 import enum
 import json
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field
 from typing import (TYPE_CHECKING, Any, ClassVar, Dict, Final, List, Literal,
                     Mapping, Optional, Set, Tuple, Type, Union)
 
@@ -1941,9 +1941,9 @@ class ObservabilityConfig:
                 f"installed. Original error:\n{otel_import_error_traceback}")
 
 
-@dataclass(frozen=True)
-class EngineConfig:
-    """Dataclass which contains all engine-related configuration. This
+@dataclass
+class VllmConfig:
+    """Dataclass which contains all vllm-related configuration. This
     simplifies passing around the distinct configurations in the codebase.
     """
 
@@ -1953,11 +1953,11 @@ class EngineConfig:
     scheduler_config: SchedulerConfig
     device_config: DeviceConfig
     load_config: LoadConfig
-    lora_config: Optional[LoRAConfig]
-    speculative_config: Optional[SpeculativeConfig]
-    decoding_config: Optional[DecodingConfig]
-    observability_config: Optional[ObservabilityConfig]
-    prompt_adapter_config: Optional[PromptAdapterConfig]
+    lora_config: Optional[LoRAConfig] = None
+    speculative_config: Optional[SpeculativeConfig] = None
+    decoding_config: Optional[DecodingConfig] = None
+    observability_config: Optional[ObservabilityConfig] = None
+    prompt_adapter_config: Optional[PromptAdapterConfig] = None
 
     def __post_init__(self):
         """Verify configs are valid & consistent with each other.
@@ -1975,9 +1975,3 @@ class EngineConfig:
         if self.prompt_adapter_config:
             self.prompt_adapter_config.verify_with_model_config(
                 self.model_config)
-
-    def to_dict(self):
-        """Return the configs as a dictionary, for use in **kwargs.
-        """
-        return dict(
-            (field.name, getattr(self, field.name)) for field in fields(self))

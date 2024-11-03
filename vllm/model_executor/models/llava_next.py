@@ -12,7 +12,8 @@ from typing_extensions import NotRequired
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig, PoolerConfig
-from vllm.inputs import INPUT_REGISTRY, DecoderOnlyInputs, InputContext
+from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
+                         InputContext)
 from vllm.model_executor.layers.pooler import Pooler, PoolingType
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
@@ -180,7 +181,7 @@ def dummy_data_for_llava_next(ctx: InputContext, seq_len: int,
     max_feat_height, max_feat_width = pinpoint
 
     if isinstance(vision_config, CLIPVisionConfig):
-        seq_data = dummy_seq_data_for_clip(
+        seq_data, ranges = dummy_seq_data_for_clip(
             vision_config,
             seq_len,
             num_images,
@@ -195,9 +196,9 @@ def dummy_data_for_llava_next(ctx: InputContext, seq_len: int,
             image_height_override=max_feat_height,
         )
 
-        return seq_data, mm_data
+        return DummyData(seq_data, mm_data, ranges)
     elif isinstance(vision_config, SiglipVisionConfig):
-        seq_data = dummy_seq_data_for_siglip(
+        seq_data, ranges = dummy_seq_data_for_siglip(
             vision_config,
             seq_len,
             num_images,
@@ -212,7 +213,7 @@ def dummy_data_for_llava_next(ctx: InputContext, seq_len: int,
             image_height_override=max_feat_height,
         )
 
-        return seq_data, mm_data
+        return DummyData(seq_data, mm_data, ranges)
 
     msg = f"Unsupported vision config: {type(vision_config)}"
     raise NotImplementedError(msg)
@@ -605,7 +606,6 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
             :class:`LlavaNextImageInputs`
         """
         if intermediate_tensors is not None:
-            input_ids = None
             inputs_embeds = None
         else:
             image_input = self._parse_and_validate_image_input(**kwargs)
@@ -617,9 +617,14 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
                     self.language_model.model.get_input_embeddings,
                     lambda _: self._process_image_input(image_input),
                 )
-                input_ids = None
             else:
-                inputs_embeds = None
+                inputs_embeds = self.language_model.model.get_input_embeddings(
+                    input_ids)
+
+        # always pass the input via `inputs_embeds`
+        # to make sure the computation graph is consistent
+        # for `torch.compile` integration
+        input_ids = None
 
         hidden_states = self.language_model.model(input_ids,
                                                   positions,

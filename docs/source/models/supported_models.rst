@@ -160,13 +160,13 @@ Text Generation
     -
     - ✅︎
   * - :code:`GraniteForCausalLM`
-    - PowerLM
-    - :code:`ibm/PowerLM-3b` etc.
+    - Granite 3.0, PowerLM
+    - :code:`ibm-granite/granite-3.0-2b-base`, :code:`ibm-granite/granite-3.0-8b-instruct`, :code:`ibm/PowerLM-3b`, etc.
     - ✅︎
     - ✅︎
   * - :code:`GraniteMoeForCausalLM`
-    - PowerMoE
-    - :code:`ibm/PowerMoE-3b` etc.
+    - Granite 3.0 MoE, PowerMoE
+    - :code:`ibm-granite/granite-3.0-1b-a400m-base`, :code:`ibm-granite/granite-3.0-3b-a800m-instruct`, :code:`ibm/PowerMoE-3b`, etc.
     - ✅︎
     - ✅︎
   * - :code:`InternLMForCausalLM`
@@ -281,7 +281,7 @@ Text Generation
     - ✅︎
   * - :code:`Qwen2ForCausalLM`
     - Qwen2
-    - :code:`Qwen/Qwen2-beta-7B`, :code:`Qwen/Qwen2-beta-7B-Chat`, etc.
+    - :code:`Qwen/Qwen2-7B-Instruct`, :code:`Qwen/Qwen2-7B`, etc.
     - ✅︎
     - ✅︎
   * - :code:`Qwen2MoeForCausalLM`
@@ -472,7 +472,7 @@ Text Generation
     - ✅︎
   * - :code:`LlavaOnevisionForConditionalGeneration`
     - LLaVA-Onevision
-    - T + I\ :sup:`+` + V
+    - T + I\ :sup:`+` + V\ :sup:`+`
     - :code:`llava-hf/llava-onevision-qwen2-7b-ov-hf`, :code:`llava-hf/llava-onevision-qwen2-0.5b-ov-hf`, etc.
     -
     - ✅︎
@@ -484,7 +484,7 @@ Text Generation
     - ✅︎
   * - :code:`MllamaForConditionalGeneration`
     - Llama 3.2
-    - T + I
+    - T + I\ :sup:`+`
     - :code:`meta-llama/Llama-3.2-90B-Vision-Instruct`, :code:`meta-llama/Llama-3.2-11B-Vision`, etc.
     -
     -

@@ -1,12 +1,15 @@
 """Attention backend utils"""
+from collections import defaultdict
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, Dict, List, Type, TypeVar, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Tuple, Type, TypeVar, Union
 
 import numpy as np
 import torch
 
 from vllm.attention import (AttentionMetadata, AttentionMetadataBuilder,
                             AttentionState)
+from vllm.attention.backends.abstract import AttentionType
+from vllm.multimodal import MultiModalPlaceholderMap
 from vllm.utils import async_tensor_h2d, make_tensor_with_pad
 
 if TYPE_CHECKING:
@@ -123,6 +126,9 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
         self.context_lens: List[int] = []
         self.block_tables: List[List[int]] = []
         self.curr_seq_lens: List[int] = []
+        self.multimodal_placeholder_maps: Dict[
+            str,
+            MultiModalPlaceholderMap] = defaultdict(MultiModalPlaceholderMap)
         self.num_prefills = 0
         self.num_prefill_tokens = 0
         self.num_decode_tokens = 0
@@ -147,6 +153,12 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
                  inter_data.curr_sliding_window_blocks):
             self.context_lens.append(context_len)
             if is_prompt:
+                mm_maps = inter_data.multi_modal_placeholder_maps
+                if mm_maps:
+                    for modality, placeholders in mm_maps.items():
+                        self.multimodal_placeholder_maps[modality].extend(
+                            placeholders)
+
                 self.num_prefills += 1
                 self.num_prefill_tokens += token_len
                 self.prefill_seq_lens.append(seq_len)
@@ -242,6 +254,11 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
         seq_start_loc = torch.zeros(seq_lens_tensor.shape[0] + 1,
                                     dtype=torch.int32,
                                     device=device)
+        placeholder_index_maps = {
+            modality: placeholder_map.index_map()
+            for modality, placeholder_map in
+            self.multimodal_placeholder_maps.items()
+        }
         torch.cumsum(seq_lens_tensor,
                      dim=0,
                      dtype=seq_start_loc.dtype,
@@ -254,6 +271,7 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
         return self._metadata_cls(  # type: ignore
             num_prefills=self.num_prefills,
             slot_mapping=slot_mapping_tensor,
+            multi_modal_placeholder_index_maps=placeholder_index_maps,
             num_prefill_tokens=self.num_prefill_tokens,
             num_decode_tokens=num_decode_tokens,
             seq_lens=seq_lens,
@@ -305,6 +323,7 @@ class CommonAttentionState(AttentionState):
             num_prefill_tokens=0,
             num_decode_tokens=batch_size,
             slot_mapping=self._graph_slot_mapping[:batch_size],
+            multi_modal_placeholder_index_maps=None,
             seq_lens=None,
             seq_lens_tensor=self._graph_seq_lens[:batch_size],
             max_query_len=1,
@@ -318,11 +337,13 @@ class CommonAttentionState(AttentionState):
             use_cuda_graph=True,
         )
         if is_encoder_decoder_model:
-            # The encoder decoder model works only with XFormers backend.
-            # Assert the same.
-            assert self.runner.attn_backend.get_name() == "XFORMERS", \
-            f"Expected attn_backend name to be 'XFORMERS', but "\
-            f" got '{self.runner.attn_backend.get_name()}'"
+            # The encoder decoder model works only with XFormers and
+            # Flash Attention backend. Assert the same.
+            assert self.runner.attn_backend.get_name() in\
+                ["XFORMERS", "FLASH_ATTN"], \
+                f"Expected attn_backend name to be either 'XFORMERS' or " \
+                f"'FLASH_ATTN', but "\
+                f"got '{self.runner.attn_backend.get_name()}'"
             self._update_captured_metadata_for_enc_dec_model(
                 batch_size=batch_size, attn_metadata=attn_metadata)
 
@@ -338,11 +359,13 @@ class CommonAttentionState(AttentionState):
             "block_tables": attn_metadata.decode_metadata.block_tables,
         }
         if is_encoder_decoder_model:
-            # The encoder decoder model works only with XFormers backend.
-            # Assert the same.
-            assert self.runner.attn_backend.get_name() == "XFORMERS", \
-            f"Expected attn_backend name to be 'XFORMERS', but "\
-            f" got '{self.runner.attn_backend.get_name()}'"
+            # The encoder decoder model works only with XFormers and
+            # Flash Attention backend. Assert the same.
+            assert self.runner.attn_backend.get_name() in\
+                ["XFORMERS", "FLASH_ATTN"], \
+                f"Expected attn_backend name to be either 'XFORMERS' or "\
+                f"'FLASH_ATTN', but "\
+                f"got '{self.runner.attn_backend.get_name()}'"
             self._add_additonal_input_buffers_for_enc_dec_model(
                 attn_metadata=attn_metadata, input_buffers=input_buffers)
         return input_buffers
@@ -357,11 +380,13 @@ class CommonAttentionState(AttentionState):
         input_buffers["block_tables"].copy_(
             attn_metadata.decode_metadata.block_tables, non_blocking=True)
         if is_encoder_decoder_model:
-            # The encoder decoder model works only with XFormers backend.
-            # Assert the same.
-            assert self.runner.attn_backend.get_name() == "XFORMERS", \
-            f"Expected attn_backend name to be 'XFORMERS', but "\
-            f" got '{self.runner.attn_backend.get_name()}'"
+            # The encoder decoder model works only with XFormers and
+            # Flash Attention backend. Assert the same.
+            assert self.runner.attn_backend.get_name() in\
+                ["XFORMERS", "FLASH_ATTN"], \
+                f"Expected attn_backend name to be either 'XFORMERS' or "\
+                f"'FLASH_ATTN', but "\
+                f"got '{self.runner.attn_backend.get_name()}'"
             self._prepare_input_buffers_for_enc_dec_model(
                 attn_metadata, input_buffers)
 
@@ -393,6 +418,7 @@ class CommonAttentionState(AttentionState):
         attn_metadata.encoder_seq_lens_tensor = torch.full(
             (batch_size, ), 1, dtype=torch.int).cuda()
         attn_metadata.max_encoder_seq_len = self.runner.max_seq_len_to_capture
+        attn_metadata.num_encoder_tokens = 0
 
     def _add_additonal_input_buffers_for_enc_dec_model(
             self, attn_metadata, input_buffers: Dict[str, Any]):
@@ -435,3 +461,122 @@ class CommonAttentionState(AttentionState):
         input_buffers["cross_block_tables"].copy_(
             attn_metadata.decode_metadata.cross_block_tables,
             non_blocking=True)
+
+
+def is_all_encoder_attn_metadata_set(attn_metadata):
+    '''
+    All attention metadata required for encoder attention is set.
+    '''
+    return ((attn_metadata.encoder_seq_lens is not None)
+            and (attn_metadata.encoder_seq_lens_tensor is not None)
+            and (attn_metadata.max_encoder_seq_len is not None))
+
+
+def is_all_cross_attn_metadata_set(attn_metadata):
+    '''
+    All attention metadata required for enc/dec cross-attention is set.
+
+    Superset of encoder attention required metadata.
+    '''
+    return (attn_metadata.is_all_encoder_attn_metadata_set
+            and (attn_metadata.cross_slot_mapping is not None)
+            and (attn_metadata.cross_block_tables is not None))
+
+
+def get_seq_len_block_table_args(
+    attn_metadata,
+    is_prompt: bool,
+    attn_type: AttentionType,
+) -> tuple:
+    '''
+    The particular choice of sequence-length- and block-table-related
+    attributes which should be extracted from attn_metadata is dependent
+    on the type of attention operation.
+
+    Decoder attn -> select entirely decoder self-attention-related fields
+    Encoder/decoder cross-attn -> select encoder sequence lengths & 
+                                  cross-attn block-tables fields
+    Encoder attn -> select encoder sequence lengths fields & no block tables
+    
+    Arguments:
+
+    * attn_metadata: Attention metadata structure associated with attention op
+    * is_prompt: True if prefill, False otherwise
+    * attn_type: encoder attention, decoder self-attention,
+                 encoder/decoder cross-attention
+
+    Returns:
+
+    * Appropriate sequence-lengths tensor
+    * Appropriate max sequence-length scalar
+    * Appropriate block tables (or None)
+    '''
+
+    if attn_type == AttentionType.DECODER:
+        # Decoder self-attention
+        # Choose max_seq_len based on whether we are in prompt_run
+        if is_prompt:
+            max_seq_len = attn_metadata.max_prefill_seq_len
+        else:
+            max_seq_len = attn_metadata.max_decode_seq_len
+        return (attn_metadata.seq_lens_tensor, max_seq_len,
+                attn_metadata.block_tables)
+    elif attn_type == AttentionType.ENCODER_DECODER:
+        # Enc/dec cross-attention KVs match encoder sequence length;
+        # cross-attention utilizes special "cross" block tables
+        return (attn_metadata.encoder_seq_lens_tensor,
+                attn_metadata.max_encoder_seq_len,
+                attn_metadata.cross_block_tables)
+    elif attn_type == AttentionType.ENCODER:
+        # No block tables associated with encoder attention
+        return (attn_metadata.encoder_seq_lens_tensor,
+                attn_metadata.max_encoder_seq_len, None)
+    else:
+        raise AttributeError(f"Invalid attention type {str(attn_type)}")
+
+
+def get_num_prefill_decode_query_kv_tokens(
+    attn_metadata,
+    attn_type: AttentionType,
+) -> Tuple[int, int, int]:
+    """
+    Calculate the number of prefill and decode tokens for query, key/value
+    based on the attention metadata and the specified attention type.
+
+    Args:
+        attn_metadata (FlashAttentionMetadata): Attention Metadata object.
+        attn_type (AttentionType): The type of attention being used.
+    Returns:
+        Tuple[int, int, int]: A tuple containing three integers:
+            - The number of prefill query tokens.
+            - The number of prefill key/value tokens.
+            - The number of decode query tokens.
+
+    Raises:
+        AssertionError: If the number of encoder tokens in `attn_metadata` 
+        is `None` when required for the calculations.
+    """
+    num_prefill_query_tokens = 0
+    num_decode_query_tokens = 0
+    num_prefill_kv_tokens = 0
+    if attn_type == AttentionType.ENCODER:
+        # Encoder attention is only invoked during prefill phase.
+        # The same input servers a both query and key.
+        assert attn_metadata.num_encoder_tokens is not None
+        num_prefill_query_tokens = attn_metadata.num_encoder_tokens
+        num_prefill_kv_tokens = attn_metadata.num_encoder_tokens
+        num_decode_query_tokens = 0
+    elif attn_type == AttentionType.ENCODER_DECODER:
+        assert attn_metadata.num_encoder_tokens is not None
+        num_prefill_query_tokens = attn_metadata.num_prefill_tokens
+        # The key is the encoder/cross-attention.
+        num_prefill_kv_tokens = attn_metadata.num_encoder_tokens
+        num_decode_query_tokens = attn_metadata.num_decode_tokens
+    else:  # attn_type == AttentionType.DECODER or
+        # attn_type == AttentionType.ENCODER_ONLY
+        num_prefill_query_tokens = attn_metadata.num_prefill_tokens
+        num_prefill_kv_tokens = attn_metadata.num_prefill_tokens
+        num_decode_query_tokens = attn_metadata.num_decode_tokens
+
+    return (num_prefill_query_tokens, num_prefill_kv_tokens,
+            num_decode_query_tokens)
