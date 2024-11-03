@@ -193,8 +193,6 @@ class TP1DraftModelRunner(ModelRunner):
 
     def set_indices_of_seq_with_bonus_tokens(self,
                                              indices_of_seq_with_bonus_tokens):
-        print("==========indices_of_seq_with_bonus_tokens",
-              indices_of_seq_with_bonus_tokens)
         self.indices_of_seq_with_bonus_tokens = indices_of_seq_with_bonus_tokens
 
     @torch.inference_mode()
