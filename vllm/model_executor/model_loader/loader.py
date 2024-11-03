@@ -1027,9 +1027,8 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                             break
                     assert total_size == sum(total_shard_sizes)
                     # get the start/end index of each shard weight tensor
-                    total_index_list = list(
-                        itertools.accumulate([0] + total_shard_sizes))
-                    total_start_index = total_index_list[:-1]
+                    total_start_index = list(
+                        itertools.accumulate([0] + total_shard_sizes))[:-1]
                     shard_sizes = [x // tp_size for x in total_shard_sizes]
                     shard_weights_index = [
                         (idx + size * tp_rank, idx + size * (tp_rank + 1))
