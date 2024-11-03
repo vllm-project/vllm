@@ -96,6 +96,11 @@ class LlamaMLP(nn.Module):
         x, _ = self.down_proj(x)
         return x
 
+    @property
+    def fused_weights_modules(self):
+        # BitandBytes specific attributes for fused weights
+        return {"gate_up_proj": self.gate_up_proj.output_sizes}
+
 
 class LlamaAttention(nn.Module):
 
@@ -190,6 +195,11 @@ class LlamaAttention(nn.Module):
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
         output, _ = self.o_proj(attn_output)
         return output
+
+    @property
+    def fused_weights_modules(self):
+        # BitandBytes specific attributes for fused weights
+        return {"qkv_proj": self.qkv_proj.output_sizes}
 
 
 class LlamaDecoderLayer(nn.Module):
@@ -469,7 +479,6 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     ]
     # in TP, these weights are partitioned along the column dimension (dim=-1)
     column_parallel_weights_modules = [".down_proj.", ".o_proj."]
-    fused_weights_modules = [".gate_up_proj.", ".qkv_proj."]
     bitsandbytes_stacked_params_mapping = {
         # shard_name, weight_name, index
         "q_proj": ("qkv_proj", 0),
@@ -478,6 +487,7 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         "gate_proj": ("gate_up_proj", 0),
         "up_proj": ("gate_up_proj", 1),
     }
+    fused_weights_modules = {}
 
     # Mistral/Llama models can also be loaded with --load-format mistral
     # from consolidated.safetensors checkpoints
@@ -518,6 +528,7 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                                 quant_config,
                                 lora_config=lora_config,
                                 prefix=maybe_prefix(prefix, "model"))
+        self.post_init_bnb_attrs()
         if get_pp_group().is_last_rank:
             self.unpadded_vocab_size = config.vocab_size
             if lora_config:
@@ -632,6 +643,14 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 name = name.replace(item, mapping[item])
 
         return name, loaded_weight
+
+    def post_init_bnb_attrs(self):
+        self.fused_weights_modules = {
+            k: v
+            for submodule in self.modules()
+            if hasattr(submodule, "fused_weights_modules")
+            for k, v in submodule.fused_weights_modules.items()
+        }
 
 
 class LlamaEmbeddingModel(nn.Module, SupportsPP):
