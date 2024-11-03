@@ -322,7 +322,7 @@ def dummy_data_for_idefics3(ctx: InputContext, seq_len: int,
 
     processor = cached_get_processor(ctx.model_config.model)
     image_seq_len = processor.image_seq_len
-    max_llm_image_tokens = 17 * image_seq_len
+    max_llm_image_tokens = 17 * image_seq_len * num_images
 
     seq_data = SequenceData.from_prompt_token_counts(
         (hf_config.image_token_id, max_llm_image_tokens), (0, seq_len))

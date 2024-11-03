@@ -475,12 +475,12 @@ if __name__ == "__main__":
     parser.add_argument('--model-type',
                         '-m',
                         type=str,
-                        default="idefics3",
+                        default="llava",
                         choices=model_example_map.keys(),
                         help='Huggingface "model_type".')
     parser.add_argument('--num-prompts',
                         type=int,
-                        default=1,
+                        default=4,
                         help='Number of prompts to run.')
     parser.add_argument('--modality',
                         type=str,
