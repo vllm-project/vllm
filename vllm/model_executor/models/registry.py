@@ -345,13 +345,11 @@ class _ModelRegistry:
         if any(arch in all_supported_archs for arch in architectures):
             raise ValueError(
                 f"Model architectures {architectures} failed "
-                "to be inspected. Please check the logs for more details."
-            )
+                "to be inspected. Please check the logs for more details.")
 
         raise ValueError(
             f"Model architectures {architectures} are not supported for now. "
-            f"Supported architectures: {all_supported_archs}"
-        )
+            f"Supported architectures: {all_supported_archs}")
 
     def _try_load_model_cls(self,
                             model_arch: str) -> Optional[Type[nn.Module]]:
