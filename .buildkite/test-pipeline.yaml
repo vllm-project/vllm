@@ -485,7 +485,7 @@ steps:
   - vllm/
   - tests/weight_loading
   commands:
-    - bash weight_loading/run_model_weight_loading_test.sh -c weight_loading/models.txt 
+    - bash weight_loading/run_model_weight_loading_test.sh -c weight_loading/models.txt
 
 - label: LM Eval Large Models # optional
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
