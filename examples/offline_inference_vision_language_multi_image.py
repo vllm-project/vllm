@@ -107,6 +107,40 @@ def load_phi3v(question: str, image_urls: List[str]) -> ModelRequestData:
     )
 
 
+def load_h2onvl(question: str, image_urls: List[str]) -> ModelRequestData:
+    model_name = "h2oai/h2ovl-mississippi-2b"
+
+    llm = LLM(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=8192,
+        limit_mm_per_prompt={"image": len(image_urls)},
+        mm_processor_kwargs={"max_dynamic_patch": 4},
+    )
+
+    placeholders = "\n".join(f"Image-{i}: <image>\n"
+                             for i, _ in enumerate(image_urls, start=1))
+    messages = [{'role': 'user', 'content': f"{placeholders}\n{question}"}]
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name,
+                                              trust_remote_code=True)
+    prompt = tokenizer.apply_chat_template(messages,
+                                           tokenize=False,
+                                           add_generation_prompt=True)
+
+    # Stop tokens for H2OVL-Mississippi
+    # https://huggingface.co/h2oai/h2ovl-mississippi-2b
+    stop_token_ids = [tokenizer.eos_token_id]
+
+    return ModelRequestData(
+        llm=llm,
+        prompt=prompt,
+        stop_token_ids=stop_token_ids,
+        image_data=[fetch_image(url) for url in image_urls],
+        chat_template=None,
+    )
+
+
 def load_internvl(question: str, image_urls: List[str]) -> ModelRequestData:
     model_name = "OpenGVLab/InternVL2-2B"
 
@@ -258,6 +292,7 @@ def load_mllama(question, image_urls: List[str]) -> ModelRequestData:
 
 model_example_map = {
     "phi3_v": load_phi3v,
+    "h2ovl_chat": load_h2onvl,
     "internvl_chat": load_internvl,
     "NVLM_D": load_nvlm_d,
     "qwen2_vl": load_qwen2_vl,

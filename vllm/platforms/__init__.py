@@ -45,6 +45,9 @@ except Exception:
 is_xpu = False
 
 try:
+    # installed IPEX if the machine has XPUs.
+    import intel_extension_for_pytorch  # noqa: F401
+    import oneccl_bindings_for_pytorch  # noqa: F401
     import torch
     if hasattr(torch, 'xpu') and torch.xpu.is_available():
         is_xpu = True
