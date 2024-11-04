@@ -98,7 +98,11 @@ class CompressedTensors24(CompressedTensorsScheme):
             split_meta = None
 
             def _process_split(input_weight, input_meta):
-                decompress = sparse_semi_structured_to_dense_cutlass(input_weight, input_meta)
+                weight_data = {
+                    "weight_packed": input_weight,
+                    "meta": input_meta
+                }
+                decompress = self.model_compressor.sparsity_compressor.decompress_weight(weight_data)
                 return decompress
 
             print(self.layer_name)
@@ -119,11 +123,8 @@ class CompressedTensors24(CompressedTensorsScheme):
                 compressed = torch.cat(all_compress)
                 compressed = compress_to_torch_sparse_semi_structured_mat(compressed)
             else:
-                decompress = sparse_semi_structured_to_dense_cutlass(weight_packed_data, meta)
+                decompress = _process_split(weight_packed_data, meta)
                 compressed = compress_to_torch_sparse_semi_structured_mat(decompress)
-            
-            #decompress = self.model_compressor.sparsity_compressor.decompress_weight(weight_data)
-            # Temporarily swap in to use Alex's method. Seems like the compression might be wrong?
             
             layer.weight = Parameter(compressed, requires_grad=False)
             
