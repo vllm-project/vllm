@@ -304,6 +304,7 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
     # mypy: enable-error-code=type-var
 
     def __init__(self, base_model_runner: GPUModelRunnerBase, *args, **kwargs):
+
         super().__init__(*args, **kwargs)
 
         # Check attention backend support.
