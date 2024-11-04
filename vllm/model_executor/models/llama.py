@@ -651,7 +651,9 @@ class LlamaEmbeddingModel(nn.Module, SupportsPP):
     ) -> None:
         super().__init__()
 
-        self.model = LlamaModel(vllm_config, **kwargs)
+        self.model = LlamaModel(vllm_config.model_config.hf_config,
+                                **kwargs,
+                                prefix=prefix)
         self._pooler = Pooler.from_config_with_defaults(
             vllm_config.model_config.pooler_config,
             pooling_type=PoolingType.LAST,
