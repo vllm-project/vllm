@@ -1,9 +1,11 @@
 import torch
 
 import vllm.envs as envs
-from vllm.utils import print_warning_once
+from vllm.logger import init_logger
 
 from .interface import Platform, PlatformEnum
+
+logger = init_logger(__name__)
 
 
 class OpenVinoPlatform(Platform):
@@ -27,5 +29,5 @@ class OpenVinoPlatform(Platform):
 
     @classmethod
     def is_pin_memory_available(self) -> bool:
-        print_warning_once("Pin memory is not supported on OpenViNO.")
+        logger.warning("Pin memory is not supported on OpenViNO.")
         return False
