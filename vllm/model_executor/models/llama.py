@@ -495,8 +495,6 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         "norm": "model.norm"
     }
 
-    modules_to_save = ["lm_head", "embed_tokens"]
-
     def __init__(
         self,
         config: LlamaConfig,
