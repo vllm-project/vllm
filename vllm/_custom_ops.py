@@ -236,15 +236,15 @@ def awq_gemm(input: torch.Tensor, qweight: torch.Tensor, qzeros: torch.Tensor,
     return torch.ops._C.awq_gemm(input, qweight, qzeros, scales, split_k_iters)
 
 
+def awq_hpu_gemm(
+    input: torch.Tensor,
+    qweight: torch.Tensor,
+    qzeros: torch.Tensor,
+    scales: torch.Tensor,
+) -> torch.Tensor:
 
-def awq_hpu_gemm(input: torch.Tensor, qweight: torch.Tensor,
-                  qzeros: torch.Tensor, scales: torch.Tensor,
-                  ) -> torch.Tensor:
-
-    weight = convert_from_uint4(qweight, scales, qzeros,
-                                input.dtype)
+    weight = convert_from_uint4(qweight, scales, qzeros, input.dtype)
     return torch.matmul(input, weight)
-
 
 
 # gptq
