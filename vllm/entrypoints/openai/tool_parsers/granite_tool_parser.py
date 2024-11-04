@@ -151,10 +151,7 @@ class GraniteToolParser(ToolParser):
                         ])
                         self.streamed_args_for_tool[
                             self.current_tool_id] += argument_diff
-                    else:
-                        delta = None
-                else:
-                    delta = None
+
                 # re-set stuff pertaining to progress in the current tool
                 self.current_tool_id = len(tool_call_arr) - 1
                 self.current_tool_name_sent = False
@@ -177,14 +174,11 @@ class GraniteToolParser(ToolParser):
                                               exclude_none=True))
                     ])
                     self.current_tool_name_sent = True
-                else:
-                    delta = None
 
             # now we know we're on the same tool call and we're streaming
             # arguments
             else:
                 cur_arguments = current_tool_call.get("arguments")
-                delta = None
 
                 if cur_arguments:
                     sent = len(
