@@ -44,39 +44,38 @@ class GraniteToolParser(ToolParser):
             return ExtractedToolCallInformation(tools_called=False,
                                                 tool_calls=[],
                                                 content=model_output)
-        else:
-            try:
-                raw_function_calls = json.loads(stripped)
-                if type(raw_function_calls) is not list:
-                    raise Exception(
-                        f"Expected dict or list, got {type(raw_function_calls)}"
-                    )
-
-                logger.debug("Extracted %d tool calls",
-                             len(raw_function_calls))
-                tool_calls = [
-                    ToolCall(
-                        type="function",
-                        function=FunctionCall(
-                            name=function_call["name"],
-                            # function call args are JSON but as a string
-                            arguments=json.dumps(function_call["arguments"]),
-                        ),
-                    ) for function_call in raw_function_calls
-                ]
-
-                return ExtractedToolCallInformation(
-                    tools_called=True,
-                    tool_calls=tool_calls,
-                    content=None,
+        try:
+            raw_function_calls = json.loads(stripped)
+            if not isinstance(raw_function_calls, list):
+                raise Exception(
+                    f"Expected dict or list, got {type(raw_function_calls)}"
                 )
 
-            except Exception as e:
-                logger.error("Error in extracting tool call from response %s",
-                             e)
-                return ExtractedToolCallInformation(tools_called=False,
-                                                    tool_calls=[],
-                                                    content=model_output)
+            logger.debug("Extracted %d tool calls",
+                            len(raw_function_calls))
+            tool_calls = [
+                ToolCall(
+                    type="function",
+                    function=FunctionCall(
+                        name=function_call["name"],
+                        # function call args are JSON but as a string
+                        arguments=json.dumps(function_call["arguments"]),
+                    ),
+                ) for function_call in raw_function_calls
+            ]
+
+            return ExtractedToolCallInformation(
+                tools_called=True,
+                tool_calls=tool_calls,
+                content=None,
+            )
+
+        except Exception as e:
+            logger.error("Error in extracting tool call from response %s",
+                            e)
+            return ExtractedToolCallInformation(tools_called=False,
+                                                tool_calls=[],
+                                                content=model_output)
 
     def extract_tool_calls_streaming(
         self,
@@ -118,19 +117,18 @@ class GraniteToolParser(ToolParser):
                 logger.debug('not enough tokens to parse into JSON yet')
                 return None
 
-            # select as the current tool call the one we're on the state at
-            current_tool_call: Dict = tool_call_arr[self.current_tool_id] \
-                if len(tool_call_arr) > 0 else {}
-
             # case -- if no tokens have been streamed for the tool, e.g.
             #   only the array brackets, stream nothing
-            if len(tool_call_arr) == 0:
+            if not tool_call_arr:
                 return None
 
+            # select as the current tool call the one we're on the state at
+            current_tool_call: Dict = tool_call_arr[self.current_tool_id]
+
+            delta = None
             # case: we are starting a new tool in the array
             #   -> array has > 0 length AND length has moved past cursor
-            elif (len(tool_call_arr) > 0
-                  and len(tool_call_arr) > self.current_tool_id + 1):
+            if len(tool_call_arr) > self.current_tool_id + 1:
 
                 # if we're moving on to a new call, first make sure we
                 # haven't missed anything in the previous one that was
