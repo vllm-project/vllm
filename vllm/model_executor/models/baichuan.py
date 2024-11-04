@@ -27,7 +27,7 @@ from transformers import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, LoRAConfig
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -333,14 +333,14 @@ class BaiChuanBaseForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
     def __init__(
         self,
-        config: PretrainedConfig,
+        vllm_config: VllmConfig,
         position_embedding: str,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        lora_config: Optional[LoRAConfig] = None,
     ):
         super().__init__()
-
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+        lora_config = vllm_config.lora_config
         self.config = config
         self.lora_config = lora_config
 
@@ -440,17 +440,13 @@ class BaichuanForCausalLM(BaiChuanBaseForCausalLM):
 
     def __init__(
         self,
-        config: PretrainedConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        lora_config: Optional[LoRAConfig] = None,
+        vllm_config: VllmConfig,
     ):
+        config = vllm_config.model_config.hf_config
         if config.hidden_size == 4096:  # baichuan2 7b
-            super().__init__(config, "ROPE", cache_config, quant_config,
-                             lora_config)
+            super().__init__(vllm_config, "ROPE")
         else:  # baichuan 13b, baichuan2 13b
-            super().__init__(config, "ALIBI", cache_config, quant_config,
-                             lora_config)
+            super().__init__(vllm_config, "ALIBI")
 
 
 class BaiChuanForCausalLM(BaiChuanBaseForCausalLM):
@@ -460,10 +456,6 @@ class BaiChuanForCausalLM(BaiChuanBaseForCausalLM):
 
     def __init__(
         self,
-        config: PretrainedConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        lora_config: Optional[LoRAConfig] = None,
+        vllm_config: VllmConfig,
     ):
-        super().__init__(config, "ROPE", cache_config, quant_config,
-                         lora_config)
+        super().__init__(vllm_config, "ROPE")

@@ -25,7 +25,7 @@ from transformers import BartConfig
 from transformers.utils import logging
 
 from vllm.attention import Attention, AttentionMetadata, AttentionType
-from vllm.config import CacheConfig, LoRAConfig
+from vllm.config import CacheConfig, LoRAConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -812,13 +812,13 @@ class BartModel(nn.Module):
 class BartForConditionalGeneration(nn.Module):
     base_model_prefix = "model"
 
-    def __init__(self,
-                 config: BartConfig,
-                 cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 lora_config: Optional[LoRAConfig] = None):
+    def __init__(self, vllm_config: VllmConfig):
 
         super().__init__()
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+        lora_config = vllm_config.lora_config
         # currently all existing BART models have `tie_word_embeddings` enabled
         assert config.tie_word_embeddings
         self.config = config

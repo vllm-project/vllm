@@ -26,8 +26,7 @@ from PIL import Image
 from transformers import CLIPVisionConfig, PretrainedConfig
 
 from vllm.attention import AttentionMetadata
-from vllm.config import (CacheConfig, ModelConfig, MultiModalConfig,
-                         PoolerConfig)
+from vllm.config import ModelConfig, VllmConfig
 from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
                          InputContext, token_inputs)
 from vllm.logger import init_logger
@@ -527,14 +526,16 @@ def input_processor_for_phi3v(ctx: InputContext,
 @INPUT_REGISTRY.register_input_processor(input_processor_for_phi3v)
 class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
-    def __init__(self,
-                 config: PretrainedConfig,
-                 multimodal_config: MultiModalConfig,
-                 cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 pooler_config: Optional[PoolerConfig] = None) -> None:
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+    ) -> None:
         super().__init__()
-
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+        pooler_config = vllm_config.model_config.pooler_config
+        multimodal_config = vllm_config.model_config.multimodal_config
         self.config = config
         self.multimodal_config = multimodal_config
         self.image_token_id = _IMAGE_TOKEN_ID

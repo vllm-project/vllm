@@ -6,11 +6,10 @@ from torch import nn
 from transformers import PaliGemmaConfig
 
 from vllm.attention import AttentionMetadata
-from vllm.config import CacheConfig, MultiModalConfig
+from vllm.config import VllmConfig
 from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
                          InputContext, token_inputs)
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.models.gemma import GemmaForCausalLM
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -132,13 +131,15 @@ class PaliGemmaMultiModalProjector(nn.Module):
 class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal,
                                         SupportsPP):
 
-    def __init__(self,
-                 config: PaliGemmaConfig,
-                 multimodal_config: MultiModalConfig,
-                 cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None) -> None:
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+    ) -> None:
         super().__init__()
-
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+        multimodal_config = vllm_config.model_config.multimodal_config
         self.config = config
         self.multimodal_config = multimodal_config
 

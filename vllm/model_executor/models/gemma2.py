@@ -22,7 +22,7 @@ from transformers import Gemma2Config
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, LoRAConfig, PoolerConfig
+from vllm.config import CacheConfig, PoolerConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import GeluAndMul
@@ -403,11 +403,12 @@ class Gemma2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
     def __init__(
         self,
-        config: Gemma2Config,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        lora_config: Optional[LoRAConfig] = None,
+        vllm_config: VllmConfig,
     ) -> None:
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+        lora_config = vllm_config.lora_config
         del lora_config  # Unused.
         super().__init__()
         self.config = config

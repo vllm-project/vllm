@@ -7,7 +7,7 @@ from torch import nn
 from transformers import MambaConfig
 
 from vllm.attention.backends.abstract import AttentionMetadata
-from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
+from vllm.config import CacheConfig, LoRAConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -309,12 +309,13 @@ class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree):
 
     def __init__(
         self,
-        config: MambaConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        lora_config: Optional[LoRAConfig] = None,
-        scheduler_config: Optional[SchedulerConfig] = None,
+        vllm_config: VllmConfig,
     ) -> None:
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+        lora_config = vllm_config.lora_config
+        scheduler_config = vllm_config.scheduler_config
         assert not cache_config.enable_prefix_caching, \
             "Mamba does not support prefix caching"
 

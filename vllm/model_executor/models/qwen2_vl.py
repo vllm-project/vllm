@@ -41,7 +41,7 @@ from transformers.models.qwen2_vl.image_processing_qwen2_vl import (
 
 from vllm.attention import AttentionMetadata
 from vllm.attention.selector import _Backend
-from vllm.config import CacheConfig, MultiModalConfig
+from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group, parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
@@ -931,13 +931,15 @@ def input_processor_for_qwen2_vl(
 class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
                                       SupportsPP):
 
-    def __init__(self,
-                 config: Qwen2VLConfig,
-                 multimodal_config: MultiModalConfig,
-                 cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None) -> None:
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+    ) -> None:
         super().__init__()
-
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+        multimodal_config = vllm_config.model_config.multimodal_config
         assert not cache_config.enable_prefix_caching, \
             "Qwen2-VL currently does not support prefix caching"
 

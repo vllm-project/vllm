@@ -12,7 +12,7 @@ from torch import nn
 from torch.nn import LayerNorm
 
 from vllm.attention import Attention, AttentionMetadata
-from vllm.config import CacheConfig, LoRAConfig, MultiModalConfig
+from vllm.config import CacheConfig, LoRAConfig, MultiModalConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
                          InputContext, token_inputs)
@@ -595,6 +595,7 @@ class ChatGLMForCausalLM(nn.Module, SupportsLoRA, SupportsPP,
 
     def __init__(
         self,
+        vllm_config: VllmConfig,
         config: ChatGLMConfig,
         multimodal_config: MultiModalConfig,
         cache_config: Optional[CacheConfig] = None,
@@ -602,7 +603,11 @@ class ChatGLMForCausalLM(nn.Module, SupportsLoRA, SupportsPP,
         lora_config: Optional[LoRAConfig] = None,
     ):
         super().__init__()
-
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+        lora_config = vllm_config.lora_config
+        multimodal_config = vllm_config.model_config.multimodal_config
         self.config = config
         self.lora_config = lora_config
         self.multimodal_config = multimodal_config
