@@ -193,7 +193,6 @@ class GraniteToolParser(ToolParser):
                     elif prev_arguments:
                         prev_args_json = json.dumps(prev_arguments)
                         if cur_args_json != prev_args_json:
-
                             prefix = find_common_prefix(
                                 prev_args_json, cur_args_json)
                             argument_diff = prefix[sent:]
