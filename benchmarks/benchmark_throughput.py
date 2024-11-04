@@ -9,7 +9,6 @@ from typing import List, Optional
 import torch
 import uvloop
 from PIL import Image
-from PIL import Image
 from tqdm import tqdm
 from transformers import (AutoModelForCausalLM, AutoTokenizer,
                           PreTrainedTokenizerBase)
@@ -67,33 +66,6 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
     num_requests: int = args.num_prompts
     fixed_output_len: Optional[int] = args.output_len
     model: str = args.model
-def _get_prompt_for_image_model(question: str, *, model: str) -> str:
-    """Prepend and append special tokens around the question to form a prompt.
-
-    Args:
-        question: The input question text to wrap with special tokens
-        model: The name of the model being used, to determine which special
-            tokens to add
-
-    Returns:
-        The formatted prompt string with appropriate special tokens for the
-            model
-
-    Raises:
-        ValueError: If an unsupported model name is provided
-    """
-    model = model.lower()
-    if "pixtral" in model:
-        return f"<s>[INST]{question}\n[IMG][/INST]"
-    raise ValueError(f"Unsupported model {model}")
-
-
-def sample_requests(tokenizer: PreTrainedTokenizerBase,
-                    args: argparse.Namespace) -> List[SampleRequest]:
-    dataset_path: str = args.dataset
-    num_requests: int = args.num_prompts
-    fixed_output_len: Optional[int] = args.output_len
-    model: str = args.model
     if fixed_output_len is not None and fixed_output_len < 4:
         raise ValueError("output_len too small")
 
@@ -108,28 +80,8 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
     # Filter out sequences that are too long or too short
     filtered_dataset: List[SampleRequest] = []
     for data in dataset:
-    for data in dataset:
         if len(filtered_dataset) == num_requests:
             break
-
-        # Only keep the first two turns of each conversation.
-        prompt = data["conversations"][0]["value"]
-        completion = data["conversations"][1]["value"]
-
-        multi_modal_data: Optional[MultiModalDataDict] = None
-        if "image" in data:
-            multi_modal_data = multi_modal_data or {}
-            image_path = data["image"]
-            # TODO(vllm-project/vllm/issues/9778): Support multiple images.
-            assert isinstance(image_path,
-                              str), "Only support single image input"
-            try:
-                multi_modal_data["image"] = Image.open(image_path).convert(
-                    "RGB")
-            except FileNotFoundError:
-                # Ignore datapoint where asset is missing
-                continue
-            prompt = _get_prompt_for_image_model(question=prompt, model=model)
 
         # Only keep the first two turns of each conversation.
         prompt = data["conversations"][0]["value"]
@@ -167,8 +119,6 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
                           prompt_len=prompt_len,
                           expected_output_len=output_len,
                           multi_modal_data=multi_modal_data))
-                          expected_output_len=output_len,
-                          multi_modal_data=multi_modal_data))
 
     return filtered_dataset
 
@@ -185,9 +135,6 @@ def run_vllm(
     prompts: List[TextPrompt] = []
     sampling_params: List[SamplingParams] = []
     for request in requests:
-        prompts.append(
-            TextPrompt(prompt=request.prompt,
-                       multi_modal_data=request.multi_modal_data))
         prompts.append(
             TextPrompt(prompt=request.prompt,
                        multi_modal_data=request.multi_modal_data))
@@ -239,9 +186,6 @@ async def run_vllm_async(
         prompts: List[TextPrompt] = []
         sampling_params: List[SamplingParams] = []
         for request in requests:
-            prompts.append(
-                TextPrompt(prompt=request.prompt,
-                           multi_modal_data=request.multi_modal_data))
             prompts.append(
                 TextPrompt(prompt=request.prompt,
                            multi_modal_data=request.multi_modal_data))
@@ -369,10 +313,7 @@ def main(args: argparse.Namespace):
         ]
     else:
         requests = sample_requests(tokenizer, args)
-        requests = sample_requests(tokenizer, args)
 
-    is_multi_modal = any(request.multi_modal_data is not None
-                         for request in requests)
     is_multi_modal = any(request.multi_modal_data is not None
                          for request in requests)
     if args.backend == "vllm":
