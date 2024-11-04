@@ -49,29 +49,34 @@ from .conftest import run_equality_correctness_test
         "speculative_model": "[ngram]",
         "num_speculative_tokens": 5,
         "ngram_prompt_lookup_max": 3,
-        "enable_chunked_prefill": False,
     },
     {
         "speculative_model": "[ngram]",
         "num_speculative_tokens": 5,
         "ngram_prompt_lookup_max": 3,
-        "enable_chunked_prefill": True,
-        "speculative_disable_mqa_scorer": True,
-        "max_num_batched_tokens": 4,
-        "max_num_seqs": 4
     },
 ])
 @pytest.mark.parametrize("output_len", [
     256,
 ])
 @pytest.mark.parametrize("batch_size", [1, 32])
+@pytest.mark.parametrize("prefill_chunk_size", [-1, 4])
 @pytest.mark.parametrize("seed", [1])
 def test_ngram_e2e_greedy_correctness(vllm_runner, common_llm_kwargs,
                                       per_test_common_llm_kwargs,
                                       baseline_llm_kwargs, test_llm_kwargs,
                                       batch_size: int, output_len: int,
-                                      seed: int):
+                                      prefill_chunk_size: int, seed: int):
     """Verify greedy equality on a tiny model with different batch size."""
+    if prefill_chunk_size > 0:
+        common_llm_kwargs.update(
+            **{
+                "enable_chunked_prefill": True,
+                "max_num_batched_tokens": prefill_chunk_size,
+                "max_num_seqs": prefill_chunk_size
+            })
+    else:
+        common_llm_kwargs["enable_chunked_prefill"] = True
     run_equality_correctness_test(vllm_runner,
                                   common_llm_kwargs,
                                   per_test_common_llm_kwargs,
