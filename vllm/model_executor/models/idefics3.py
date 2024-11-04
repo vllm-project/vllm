@@ -26,8 +26,8 @@ from transformers import Idefics3Config
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
-from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, InputContext,
-                         token_inputs)
+from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
+                         InputContext, token_inputs)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -331,7 +331,7 @@ def dummy_data_for_idefics3(ctx: InputContext, seq_len: int,
     image = Image.new("RGB", (width, height), color=0)
     mm_data = {"image": [image] if num_images == 1 else [image] * num_images}
 
-    return seq_data, mm_data
+    return DummyData(seq_data, mm_data)
 
 
 class Idefics3SimpleMLP(nn.Module):
