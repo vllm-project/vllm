@@ -503,7 +503,7 @@ torch==2.5.1
     #   tensorizer
     #   timm
     #   torchvision
-torchvision==0.20.0
+torchvision==0.20.1
     # via timm
 tqdm==4.66.6
     # via
