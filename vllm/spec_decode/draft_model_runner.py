@@ -1,7 +1,8 @@
+import weakref
 from typing import List, Optional
 
 import torch
-import weakref
+
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.sampler import SamplerOutput
 
@@ -246,7 +247,8 @@ class TP1DraftModelRunner(ModelRunner):
                     model_input.prompt_adapter_requests,
                     model_input.prompt_adapter_mapping)
 
-            self.attn_state.begin_forward(model_input, weakref.proxy(self.model))
+            self.attn_state.begin_forward(model_input,
+                                          weakref.proxy(self.model))
 
         # Detect exec mode
         assert model_input.attn_metadata is not None

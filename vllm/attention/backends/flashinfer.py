@@ -3,8 +3,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Set, Tuple, Type
 
 try:
-    from flashinfer.decode import CUDAGraphBatchDecodeWithPagedKVCacheWrapper
     from flashinfer.cascade import MultiLevelCascadeAttentionWrapper
+    from flashinfer.decode import CUDAGraphBatchDecodeWithPagedKVCacheWrapper
 
     from vllm.vllm_flash_attn import flash_attn_varlen_func
     FLASHINFER_WORKSPACE_BUFFER_SIZE = 256 * 1024 * 1024
@@ -117,7 +117,6 @@ class FlashInferState(AttentionState):
                 2, self._get_workspace_buffer(), "NHD")
         return self._wrapper
 
-
     def _get_cuda_wrapper(self):
         if self._cuda_wrapper is not None:
             return self._cuda_wrapper
@@ -224,7 +223,7 @@ class FlashInferState(AttentionState):
             use_cuda_graph=True,
             cuda_wrapper=self._graph_decode_wrapper,
             wrapper=self._wrapper)
-        # we don't need to pass logits and scale to begin_forward 
+        # we don't need to pass logits and scale to begin_forward
         # since in forward, it already gets it.
         attn_metadata.begin_forward(None, None)
         return attn_metadata
@@ -287,7 +286,7 @@ class FlashInferMetadata(AttentionMetadata):
 
     wrapper: Optional[MultiLevelCascadeAttentionWrapper] = None
     cuda_wrapper: Optional[CUDAGraphBatchDecodeWithPagedKVCacheWrapper] = None
-    
+
     # Metadata for wrapper
     seq_start_loc: Optional[torch.Tensor] = None
     query_start_loc: Optional[torch.Tensor] = None
@@ -339,8 +338,9 @@ class FlashInferMetadata(AttentionMetadata):
                 f"Only {supported_head_sizes} are supported for head_dim,",
                 f"received {self.head_dim}.")
 
-    #TODO: NEED TO ADD CHUNKED PREFILL 
-    def begin_forward(self, scale: Optional[float], logits_soft_cap: Optional[float]):
+    #TODO: NEED TO ADD CHUNKED PREFILL
+    def begin_forward(self, scale: Optional[float],
+                      logits_soft_cap: Optional[float]):
         if self.num_prefill_tokens > 0:
             if self.paged_kv_indices is None:
                 return
@@ -389,7 +389,7 @@ class FlashInferMetadata(AttentionMetadata):
                     causal=True,
                     sm_scale=scale,
                     logits_soft_cap=logits_soft_cap)
-                
+
         if self.num_decode_tokens > 0:
             if self.cuda_wrapper:
                 assert self.paged_kv_indices is not None
@@ -401,7 +401,8 @@ class FlashInferMetadata(AttentionMetadata):
                     self.device)
                 # handle model warmup path
                 if self.block_table_bound is not None:
-                    self.block_table_bound = self.block_table_bound.to(self.device)
+                    self.block_table_bound = self.block_table_bound.to(
+                        self.device)
                 if self.seq_lens_tensor is not None:
                     self.seq_lens_tensor = self.seq_lens_tensor.to(self.device)
 
@@ -421,7 +422,7 @@ class FlashInferMetadata(AttentionMetadata):
                     data_type=self.data_type,
                     # query data type.
                     q_data_type=self.q_data_type)
-                
+
                 return
 
             assert self.paged_kv_indices is not None
@@ -571,7 +572,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
     def _add_seq_group(
             self, inter_data: "ModelInputForGPUBuilder.InterDataForSeqGroup",
-            chunked_prefill_enabled: bool, common_prefix: List[int], use_cuda_graph: bool):
+            chunked_prefill_enabled: bool, common_prefix: List[int],
+            use_cuda_graph: bool):
         """Add a sequence group to the metadata. Specifically update/append
         1. context length.
         2. block table.
@@ -629,11 +631,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 return
 
             block_table = block_tables[seq_id]
-            self._update_unique_kv_tensors(block_table, seq_len, common_prefix, use_cuda_graph)
-
+            self._update_unique_kv_tensors(block_table, seq_len, common_prefix,
+                                           use_cuda_graph)
 
     def _update_unique_kv_tensors(self, block_table: List[int], seq_len: int,
-                                common_prefix: List[int], use_cuda_graph: bool) -> None:
+                                  common_prefix: List[int],
+                                  use_cuda_graph: bool) -> None:
         """
         Updates the unique level kv tensors
         """
@@ -651,7 +654,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 last_page_len = self.block_size
             self.paged_kv_last_page_len.append(last_page_len)
             return
-        
+
         shared_length = len(common_prefix)
         self.total_blocks += (len(block_table) - shared_length)
         block_table_bound = (seq_len) // self.block_size + 1 \
@@ -660,7 +663,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.second_layer_kv_indices.extend(
             block_table[shared_length:block_table_bound])
         self.second_layer_kv_indptr.append(self.second_layer_kv_indptr[-1] +
-                                        (block_table_bound - shared_length))
+                                           (block_table_bound - shared_length))
         last_page_len = (seq_len) % self.block_size
         if last_page_len == 0:
             last_page_len = self.block_size
@@ -685,7 +688,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self.paged_kv_indptr.append(self.paged_kv_indptr[-1] +
                                         len(common_prefix))
             self.paged_kv_last_page_len.append(self.block_size)
-    
+
     def get_shared_blocks_nums(
         self,
         inter_data_list: List["ModelInputForGPUBuilder.InterDataForSeqGroup"]
@@ -736,7 +739,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self._add_seq_group(inter_data,
                                 self.input_builder.chunked_prefill_enabled,
                                 common_prefix, use_captured_graph)
-            
+
         if not use_captured_graph:
             self._update_shared_kv_tensors(common_prefix, len(query_lens))
 
@@ -898,7 +901,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             is_profile_run=self.is_profile_run)
 
 
-
 class FlashInferImpl(AttentionImpl):
 
     def __init__(
@@ -1056,8 +1058,7 @@ def unified_flash_infer(
         else:
             assert prefill_meta is not None
             assert prefill_meta.wrapper is not None
-            prefill_output = prefill_meta.wrapper.run(
-                query, kv_cache)
+            prefill_output = prefill_meta.wrapper.run(query, kv_cache)
     if decode_meta := attn_metadata.decode_metadata:
         assert attn_metadata.decode_metadata is not None
         if attn_metadata.decode_metadata.cuda_wrapper is not None:
@@ -1071,8 +1072,7 @@ def unified_flash_infer(
         else:
             assert attn_metadata.decode_metadata.wrapper is not None
             decode_output = attn_metadata.decode_metadata.wrapper.run(
-                decode_query,
-                kv_cache)
+                decode_query, kv_cache)
 
     if prefill_output is None and decode_output is not None:
         # Decode only batch.
