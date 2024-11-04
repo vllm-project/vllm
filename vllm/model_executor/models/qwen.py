@@ -869,6 +869,7 @@ class QWenBaseModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
     def __init__(
         self,
         vllm_config: VllmConfig,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -1066,6 +1067,7 @@ class QWenLMHeadModel(QWenBaseModel, SupportsLoRA):
     def __new__(
         cls,
         vllm_config: VllmConfig,
+        prefix: str = "",
     ) -> None:
         config = vllm_config.model_config.hf_config
         # Initialize VL

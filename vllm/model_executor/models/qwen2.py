@@ -410,6 +410,7 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     def __init__(
         self,
         vllm_config: VllmConfig,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config

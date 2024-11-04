@@ -55,6 +55,7 @@ class DeciLMForCausalLM(LlamaForCausalLM):
     def __init__(
         self,
         vllm_config: VllmConfig,
+        prefix: str = "",
     ) -> None:
         config = vllm_config.model_config.hf_config
         config.num_key_value_heads = max(config.num_key_value_heads_per_layer)

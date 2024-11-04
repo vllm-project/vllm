@@ -8,7 +8,7 @@ from transformers import (Blip2Config, Blip2QFormerConfig, Blip2VisionConfig,
                           apply_chunking_to_forward)
 
 from vllm.attention import AttentionMetadata
-from vllm.config import CacheConfig, MultiModalConfig, VllmConfig
+from vllm.config import CacheConfig, VllmConfig
 from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
                          InputContext, token_inputs)
 from vllm.model_executor.layers.activation import get_act_fn
@@ -483,12 +483,11 @@ def input_processor_for_blip2(ctx: InputContext, inputs: DecoderOnlyInputs):
 @INPUT_REGISTRY.register_input_processor(input_processor_for_blip2)
 class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
 
-    def __init__(self,
-                 vllm_config: VllmConfig,
-                 config: Blip2Config,
-                 multimodal_config: MultiModalConfig,
-                 cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None) -> None:
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+    ) -> None:
 
         super().__init__()
         config = vllm_config.model_config.hf_config

@@ -387,6 +387,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
     def __init__(
         self,
         vllm_config: VllmConfig,
+        prefix: str = "",
     ):
         config = vllm_config.model_config.hf_config
         multimodal_config = vllm_config.model_config.multimodal_config
@@ -704,6 +705,7 @@ class MiniCPMV2_0(MiniCPMVBaseModel):
     def __init__(
         self,
         vllm_config: VllmConfig,
+        prefix: str = "",
     ):
         super().__init__(vllm_config)
         assert self.version == (2, 0)
@@ -871,6 +873,7 @@ class MiniCPMV2_5(MiniCPMVBaseModel, SupportsLoRA):
     def __init__(
         self,
         vllm_config: VllmConfig,
+        prefix: str = "",
     ):
         super().__init__(vllm_config)
         assert self.version == (2, 5)
@@ -1021,6 +1024,7 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
     def __init__(
         self,
         vllm_config: VllmConfig,
+        prefix: str = "",
     ):
         super().__init__(vllm_config)
         assert self.version == (2, 6)

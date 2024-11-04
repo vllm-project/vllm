@@ -523,6 +523,7 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA):
     def __init__(
         self,
         vllm_config: VllmConfig,
+        prefix: str = "",
     ) -> None:
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config

@@ -354,9 +354,7 @@ class DbrxForCausalLM(nn.Module, SupportsPP):
     def __init__(
         self,
         vllm_config: VllmConfig,
-        config: DbrxConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         config = vllm_config.model_config.hf_config

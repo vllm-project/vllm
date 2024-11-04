@@ -334,7 +334,8 @@ class BaiChuanBaseForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     def __init__(
         self,
         vllm_config: VllmConfig,
-        position_embedding: str,
+        prefix: str = "",
+        position_embedding: str = "ROPE",
     ):
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -441,12 +442,13 @@ class BaichuanForCausalLM(BaiChuanBaseForCausalLM):
     def __init__(
         self,
         vllm_config: VllmConfig,
+        prefix: str = "",
     ):
         config = vllm_config.model_config.hf_config
         if config.hidden_size == 4096:  # baichuan2 7b
-            super().__init__(vllm_config, "ROPE")
+            super().__init__(vllm_config, prefix, "ROPE")
         else:  # baichuan 13b, baichuan2 13b
-            super().__init__(vllm_config, "ALIBI")
+            super().__init__(vllm_config, prefix, "ALIBI")
 
 
 class BaiChuanForCausalLM(BaiChuanBaseForCausalLM):
@@ -457,5 +459,6 @@ class BaiChuanForCausalLM(BaiChuanBaseForCausalLM):
     def __init__(
         self,
         vllm_config: VllmConfig,
+        prefix: str = "",
     ):
-        super().__init__(vllm_config, "ROPE")
+        super().__init__(vllm_config, prefix, "ROPE")
