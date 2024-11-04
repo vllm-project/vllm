@@ -98,6 +98,11 @@ def input_processor_for_blip(
     if multi_modal_data is None or "image" not in multi_modal_data:
         return inputs
 
+    if "multi_modal_placeholders" in inputs and "image" in inputs[
+            "multi_modal_placeholders"]:
+        # The inputs already have placeholders.
+        return inputs
+
     tokenizer = cached_get_tokenizer(model_config.tokenizer)
 
     if image_feature_size_override is None:
@@ -105,7 +110,7 @@ def input_processor_for_blip(
     else:
         image_feature_size = image_feature_size_override
 
-    new_prompt, new_token_ids = repeat_and_pad_placeholder_tokens(
+    new_prompt, new_token_ids, ranges = repeat_and_pad_placeholder_tokens(
         tokenizer,
         inputs.get("prompt"),
         inputs["prompt_token_ids"],
@@ -116,13 +121,14 @@ def input_processor_for_blip(
     # NOTE: Create a defensive copy of the original inputs
     return token_inputs(prompt_token_ids=new_token_ids,
                         prompt=new_prompt,
-                        multi_modal_data=multi_modal_data)
+                        multi_modal_data=multi_modal_data,
+                        multi_modal_placeholders={"image": ranges})
 
 
 # Adapted from https://github.com/huggingface/transformers/blob/v4.39.0/src/transformers/models/blip/modeling_blip.py#L164 # noqa
 class BlipVisionEmbeddings(nn.Module):
 
-    def __init__(self, config: BlipVisionConfig):
+    def __init__(self, config: Union[BlipVisionConfig, Blip2VisionConfig]):
         super().__init__()
 
         self.config = config
@@ -167,9 +173,10 @@ class BlipParallelAttention(nn.Module):
 
     def __init__(
         self,
-        config: BlipVisionConfig,
+        config: Union[BlipVisionConfig, Blip2VisionConfig],
         quant_config: Optional[QuantizationConfig] = None,
-    ):
+        prefix: str = "",
+    ) -> None:
         super().__init__()
         self.config = config
         self.embed_dim = config.hidden_size
@@ -189,11 +196,13 @@ class BlipParallelAttention(nn.Module):
             self.num_heads,
             bias=config.qkv_bias,
             quant_config=quant_config,
+            prefix=f"{prefix}.qkv",
         )
         self.projection = RowParallelLinear(
             self.embed_dim,
             self.embed_dim,
             quant_config=quant_config,
+            prefix=f"{prefix}.projection",
         )
 
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -235,9 +244,12 @@ class BlipParallelAttention(nn.Module):
 
 class BlipMLP(nn.Module):
 
-    def __init__(self,
-                 config: BlipVisionConfig,
-                 quant_config: Optional[QuantizationConfig] = None):
+    def __init__(
+        self,
+        config: BlipVisionConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ) -> None:
         super().__init__()
 
         self.config = config
@@ -246,11 +258,13 @@ class BlipMLP(nn.Module):
         self.fc1 = ColumnParallelLinear(config.hidden_size,
                                         config.intermediate_size,
                                         bias=True,
-                                        quant_config=quant_config)
+                                        quant_config=quant_config,
+                                        prefix=f"{prefix}.fc1")
         self.fc2 = RowParallelLinear(config.intermediate_size,
                                      config.hidden_size,
                                      bias=True,
-                                     quant_config=quant_config)
+                                     quant_config=quant_config,
+                                     prefix=f"{prefix}.fc2")
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         hidden_states, _ = self.fc1(hidden_states)
@@ -262,24 +276,32 @@ class BlipMLP(nn.Module):
 
 class BlipEncoderLayer(nn.Module):
 
-    def __init__(self,
-                 config: BlipVisionConfig,
-                 quant_config: Optional[QuantizationConfig] = None):
+    def __init__(
+        self,
+        config: BlipVisionConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ) -> None:
         super().__init__()
 
         # fallback to sdpa attention if tp unavailable
         num_heads = config.num_attention_heads
         tp_size = get_tensor_model_parallel_world_size()
         if USE_XFORMERS_OPS and num_heads % tp_size == 0:
-            self.self_attn = BlipParallelAttention(config,
-                                                   quant_config=quant_config)
+            self.self_attn = BlipParallelAttention(
+                config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.self_attn",
+            )
         else:
             # Blip doesn't have SDPA attention implemented in transformers
             # use eager attention instead for cpu backend
             self.self_attn = BlipAttention(config)
         self.layer_norm1 = nn.LayerNorm(config.hidden_size,
                                         eps=config.layer_norm_eps)
-        self.mlp = BlipMLP(config, quant_config=quant_config)
+        self.mlp = BlipMLP(config,
+                           quant_config=quant_config,
+                           prefix=f"{prefix}.mlp")
         self.layer_norm2 = nn.LayerNorm(config.hidden_size,
                                         eps=config.layer_norm_eps)
 
@@ -307,10 +329,13 @@ class BlipEncoder(nn.Module):
         config: BlipConfig
     """
 
-    def __init__(self,
-                 config: BlipVisionConfig,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 num_hidden_layers_override: Optional[int] = None):
+    def __init__(
+        self,
+        config: BlipVisionConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+        num_hidden_layers_override: Optional[int] = None,
+        prefix: str = "",
+    ) -> None:
         super().__init__()
 
         self.config = config
@@ -321,8 +346,10 @@ class BlipEncoder(nn.Module):
             num_hidden_layers = num_hidden_layers_override
 
         self.layers = nn.ModuleList([
-            BlipEncoderLayer(config=config, quant_config=quant_config)
-            for _ in range(num_hidden_layers)
+            BlipEncoderLayer(config=config,
+                             quant_config=quant_config,
+                             prefix=f"{prefix}.layers.{layer_idx}")
+            for layer_idx in range(num_hidden_layers)
         ])
 
     def forward(self, inputs_embeds: torch.Tensor):
@@ -337,10 +364,15 @@ class BlipVisionModel(nn.Module):
     config_class = BlipVisionConfig
     main_input_name = "pixel_values"
 
-    def __init__(self,
-                 config: BlipVisionConfig,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 num_hidden_layers_override: Optional[int] = None):
+    def __init__(
+        self,
+        config: BlipVisionConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+        *,
+        num_hidden_layers_override: Optional[int] = None,
+        require_post_norm: Optional[bool] = None,
+        prefix: str = "",
+    ) -> None:
         super().__init__()
 
         tp_size = get_tensor_model_parallel_world_size()
@@ -354,19 +386,24 @@ class BlipVisionModel(nn.Module):
             config=config,
             quant_config=quant_config,
             num_hidden_layers_override=num_hidden_layers_override,
+            prefix=f"{prefix}.encoder",
         )
 
+        num_hidden_layers = config.num_hidden_layers
         if len(self.encoder.layers) > config.num_hidden_layers:
             raise ValueError(
-                f"The original encoder only has {config.num_hidden_layers} "
+                f"The original encoder only has {num_hidden_layers} "
                 f"layers, but you requested {len(self.encoder.layers)} layers."
             )
-        elif len(self.encoder.layers) == config.num_hidden_layers:
+
+        # If possible, skip post_layernorm to conserve memory
+        if require_post_norm is None:
+            require_post_norm = len(self.encoder.layers) == num_hidden_layers
+
+        if require_post_norm:
             self.post_layernorm = nn.LayerNorm(config.hidden_size,
                                                eps=config.layer_norm_eps)
         else:
-            # post_layernorm is unused when we extract intermediate features
-            # In this case, we can skip it to conserve memory
             self.post_layernorm = None
 
     def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:

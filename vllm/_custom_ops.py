@@ -26,7 +26,8 @@ with contextlib.suppress(ImportError):
     import vllm._moe_C  # noqa: F401
     supports_moe_ops = True
 
-if TYPE_CHECKING:
+# neuron has torch version that doesn't even have impl_abstract
+if TYPE_CHECKING or current_platform.is_neuron():
 
     def register_fake(fn):
         return lambda name: fn
@@ -76,6 +77,12 @@ def gelu_and_mul(out: torch.Tensor, x: torch.Tensor) -> None:
 
 def gelu_tanh_and_mul(out: torch.Tensor, x: torch.Tensor) -> None:
     torch.ops._C.gelu_tanh_and_mul(out, x)
+
+
+def fatrelu_and_mul(out: torch.Tensor,
+                    x: torch.Tensor,
+                    threshold: float = 0.0) -> None:
+    torch.ops._C.fatrelu_and_mul(out, x, threshold)
 
 
 def gelu_fast(out: torch.Tensor, x: torch.Tensor) -> None:
@@ -652,11 +659,11 @@ def scaled_fp8_quant(
     Args:
         input: The input tensor to be quantized to FP8
         scale: Optional scaling factor for the FP8 quantization
-        scale_ub: Optional upper bound for scaling factor in dynamic 
+        scale_ub: Optional upper bound for scaling factor in dynamic
             per token case
         num_token_padding: If specified, pad the first dimension
             of the output to at least this value.
-        use_per_token_if_dynamic: Whether to do per_tensor or per_token 
+        use_per_token_if_dynamic: Whether to do per_tensor or per_token
             in the dynamic quantization case.
 
     Returns:
@@ -667,8 +674,8 @@ def scaled_fp8_quant(
     assert (input.ndim == 2)
     shape: Union[Tuple[int, int], torch.Size] = input.shape
     # For rocm, the output fp8 dtype is torch.float_e3m3fnuz
-    out_dtype: torch.dtype = torch.float8_e4m3fnuz if vllm.utils.is_hip() \
-        else torch.float8_e4m3fn
+    out_dtype: torch.dtype = torch.float8_e4m3fnuz \
+            if current_platform.is_rocm() else torch.float8_e4m3fn
     if num_token_padding:
         shape = (max(num_token_padding, input.shape[0]), shape[1])
     output = torch.empty(shape, device=input.device, dtype=out_dtype)
@@ -806,13 +813,17 @@ def selective_scan_fwd(u: torch.Tensor, delta: torch.Tensor, A: torch.Tensor,
 
 
 # moe
+def moe_sum(input: torch.Tensor, output: torch.Tensor):
+    torch.ops._moe_C.moe_sum(input, output)
+
+
 def moe_align_block_size(topk_ids: torch.Tensor, num_experts: int,
                          block_size: int, sorted_token_ids: torch.Tensor,
                          experts_ids: torch.Tensor,
                          num_tokens_post_pad: torch.Tensor) -> None:
-    torch.ops._C.moe_align_block_size(topk_ids, num_experts, block_size,
-                                      sorted_token_ids, experts_ids,
-                                      num_tokens_post_pad)
+    torch.ops._moe_C.moe_align_block_size(topk_ids, num_experts, block_size,
+                                          sorted_token_ids, experts_ids,
+                                          num_tokens_post_pad)
 
 
 def topk_softmax(topk_weights: torch.Tensor, topk_ids: torch.Tensor,

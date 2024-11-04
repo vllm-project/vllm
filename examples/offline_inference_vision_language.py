@@ -1,6 +1,6 @@
 """
-This example shows how to use vLLM for running offline inference 
-with the correct prompt format on vision language models.
+This example shows how to use vLLM for running offline inference with
+the correct prompt format on vision language models for text generation.
 
 For most models, the prompt format should follow corresponding examples
 on HuggingFace model repository.
@@ -176,6 +176,31 @@ def run_minicpmv(question: str, modality: str):
     return llm, prompt, stop_token_ids
 
 
+# H2OVL-Mississippi
+def run_h2ovl(question: str, modality: str):
+    assert modality == "image"
+
+    model_name = "h2oai/h2ovl-mississippi-2b"
+
+    llm = LLM(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=8192,
+    )
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name,
+                                              trust_remote_code=True)
+    messages = [{'role': 'user', 'content': f"<image>\n{question}"}]
+    prompt = tokenizer.apply_chat_template(messages,
+                                           tokenize=False,
+                                           add_generation_prompt=True)
+
+    # Stop tokens for H2OVL-Mississippi
+    # https://huggingface.co/h2oai/h2ovl-mississippi-2b
+    stop_token_ids = [tokenizer.eos_token_id]
+    return llm, prompt, stop_token_ids
+
+
 # InternVL
 def run_internvl(question: str, modality: str):
     assert modality == "image"
@@ -262,11 +287,15 @@ def run_qwen2_vl(question: str, modality: str):
 
     model_name = "Qwen/Qwen2-VL-7B-Instruct"
 
-    # Tested on L40
     llm = LLM(
         model=model_name,
-        max_model_len=8192,
+        max_model_len=4096,
         max_num_seqs=5,
+        # Note - mm_processor_kwargs can also be passed to generate/chat calls
+        mm_processor_kwargs={
+            "min_pixels": 28 * 28,
+            "max_pixels": 1280 * 28 * 28,
+        },
     )
 
     prompt = ("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
@@ -359,6 +388,7 @@ model_example_map = {
     "chameleon": run_chameleon,
     "minicpmv": run_minicpmv,
     "blip-2": run_blip2,
+    "h2ovl_chat": run_h2ovl,
     "internvl_chat": run_internvl,
     "NVLM_D": run_nvlm_d,
     "qwen_vl": run_qwen_vl,
@@ -450,7 +480,7 @@ def main(args):
 if __name__ == "__main__":
     parser = FlexibleArgumentParser(
         description='Demo on using vLLM for offline inference with '
-        'vision language models')
+        'vision language models for text generation')
     parser.add_argument('--model-type',
                         '-m',
                         type=str,

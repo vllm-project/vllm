@@ -157,15 +157,15 @@ async def test_added_lora_tokens(client: openai.AsyncOpenAI):
 @pytest.mark.asyncio
 async def test_added_lora_tokens_base_model(client: openai.AsyncOpenAI):
     # test using token IDs
-    completion = await client.completions.create(
-        model=MODEL_NAME,
-        prompt=[0, 0, 32000, 32001, 32002],
-        echo=True,
-        max_tokens=5,
-        temperature=0.0,
-    )
-    # Added tokens should not appear in tokenized prompt
-    assert "vllm" not in completion.choices[0].text
+    with pytest.raises(openai.BadRequestError, match="out of vocabulary"):
+        # Added tokens should be rejected by the base model
+        await client.completions.create(
+            model=MODEL_NAME,
+            prompt=[0, 0, 32000, 32001, 32002],
+            echo=True,
+            max_tokens=5,
+            temperature=0.0,
+        )
 
 
 @pytest.mark.asyncio
@@ -338,6 +338,40 @@ async def test_completion_streaming(client: openai.AsyncOpenAI,
     assert chunk.choices[0].finish_reason == "length"
     assert chunk.choices[0].text
     assert "".join(chunks) == single_output
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_name",
+    [MODEL_NAME, "zephyr-lora", "zephyr-pa"],
+)
+async def test_parallel_streaming(client: openai.AsyncOpenAI, model_name: str):
+    """Streaming for parallel sampling.
+    The tokens from multiple samples, are flattened into a single stream,
+    with an index to indicate which sample the token belongs to.
+    """
+
+    prompt = "What is an LLM?"
+    n = 3
+    max_tokens = 5
+
+    stream = await client.completions.create(model=model_name,
+                                             prompt=prompt,
+                                             max_tokens=max_tokens,
+                                             n=n,
+                                             stream=True)
+    chunks: List[List[str]] = [[] for i in range(n)]
+    finish_reason_count = 0
+    async for chunk in stream:
+        index = chunk.choices[0].index
+        text = chunk.choices[0].text
+        chunks[index].append(text)
+        if chunk.choices[0].finish_reason is not None:
+            finish_reason_count += 1
+    assert finish_reason_count == n
+    for chunk in chunks:
+        assert len(chunk) == max_tokens
+        print("".join(chunk))
 
 
 @pytest.mark.asyncio
