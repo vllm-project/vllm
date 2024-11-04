@@ -25,7 +25,7 @@ PARTITION_SIZE = 512
 DTYPES = [torch.half, torch.bfloat16]
 NUM_GEN_SEQS = [3]  # Arbitrary values for testing
 NUM_PREFILL_SEQS = [3]  # Arbitrary values for testing
-NUM_HEADS = [(64, 8)]  # Arbitrary values for testing
+NUM_HEADS = [(40, 40)]  # Arbitrary values for testing
 
 HEAD_SIZES = [64, 112]
 BLOCK_SIZES = [16]

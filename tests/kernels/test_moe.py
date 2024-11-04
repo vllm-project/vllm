@@ -249,12 +249,12 @@ def test_fused_marlin_moe(
 
 @pytest.mark.skip("This test is here for the sake of debugging, "
                   "don't run it in automated tests.")
-@pytest.mark.parametrize("m", [1, 33, 64, 222])
-@pytest.mark.parametrize("n", [128, 2048])
-@pytest.mark.parametrize("k", [128, 1024])
-@pytest.mark.parametrize("e", NUM_EXPERTS)
-@pytest.mark.parametrize("topk", TOP_KS)
-@pytest.mark.parametrize("group_size", [-1, 32, 128])
+@pytest.mark.parametrize("m", [64, 512, 222, 33, 1])
+@pytest.mark.parametrize("n", [128, 2048, 256, 1024])
+@pytest.mark.parametrize("k", [128, 1024, 512])
+@pytest.mark.parametrize("e", [8, 64])
+@pytest.mark.parametrize("topk", [2, 6])
+@pytest.mark.parametrize("group_size", [-1, 32, 64, 128])
 @pytest.mark.parametrize("act_order", [True, False])
 @pytest.mark.parametrize("num_bits", [4, 8])
 @pytest.mark.parametrize("is_k_full", [True, False])
