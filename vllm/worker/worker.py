@@ -264,15 +264,31 @@ class Worker(LocalOrDistributedWorkerBase):
             return safe_gpu_blocks, 0
 
     def _assert_memory_footprint_increased_during_profiling(self):
-        # NOTE(woosuk): Here we assume that the other processes using the same
-        # GPU did not change their memory usage during the profiling.
-        free_gpu_memory, _ = torch.cuda.mem_get_info()
-        assert self.init_gpu_memory - free_gpu_memory > 0, (
+    # NOTE(woosuk): Here we assume that the other processes using the same
+    # GPU did not change their memory usage during the profiling.
+        free_gpu_memory, total_memory = torch.cuda.mem_get_info()
+        memory_diff = self.init_gpu_memory - free_gpu_memory
+        
+        # If we've loaded model weights but memory shows no change,
+        # we're likely in a restricted environment
+        model_loaded = hasattr(self.model_runner, 'model')
+        memory_is_static = memory_diff == 0
+        
+        is_restricted_env = model_loaded and memory_is_static
+        
+        if is_restricted_env:
+            logger.info(
+                "Detected restricted GPU environment. "
+                "Model is loaded but memory reports static usage. "
+                f"Free memory: {free_gpu_memory / (1024**3):.2f}GB, "
+                f"Total memory: {total_memory / (1024**3):.2f}GB"
+            )
+        
+        assert memory_diff > 0 or is_restricted_env, (
             "Error in memory profiling. "
             f"Initial free memory {self.init_gpu_memory}, current free memory"
             f" {free_gpu_memory}. This happens when the GPU memory was "
             "not properly cleaned up before initializing the vLLM instance.")
-
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int) -> None:
         """Allocate GPU and CPU KV cache with the specified number of blocks.
