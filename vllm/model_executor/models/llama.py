@@ -234,6 +234,8 @@ class LlamaAttention(nn.Module):
                                 if self.attn_fp8_out else None)
 
         if is_inference and decode_iteration_id == 36 and layer_id == 0:
+            print(f"{attn_metadata=}")
+            torch.save(kv_cache, f'/root/workspace/outputs/rocm/self_attn_kv_cache_{decode_iteration_id}_{layer_id}.pt')
             torch.save(attn_output, f'/root/workspace/outputs/rocm/self_attn_attn_output_{decode_iteration_id}_{layer_id}.pt')
 
         output, _ = self.o_proj(attn_output)

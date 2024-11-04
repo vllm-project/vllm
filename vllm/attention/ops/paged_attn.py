@@ -4,6 +4,7 @@ from typing import List, Optional, Tuple
 import torch
 
 from vllm import _custom_ops as ops
+import vllm
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
 
@@ -104,6 +105,7 @@ class PagedAttention:
         blocksparse_block_size: int = 64,
         blocksparse_head_sliding_step: int = 0,
     ) -> torch.Tensor:
+
         if blocksparse_vert_stride is not None and blocksparse_vert_stride > 1:
             # use blocksparse paged attention
             block_size = value_cache.size(-1)
@@ -129,6 +131,29 @@ class PagedAttention:
 
         if use_v1:
             # Run PagedAttention V1.
+            if vllm.model_executor.models.llama.is_inference and \
+                vllm.model_executor.models.llama.decode_iteration_id == 36 and \
+                vllm.model_executor.models.llama.layer_id == 0:
+                torch.save(query, f'/root/workspace/outputs/rocm/forward_decode_query.pt')
+                torch.save(key_cache, f'/root/workspace/outputs/rocm/forward_decode_key_cache.pt')
+                torch.save(value_cache, f'/root/workspace/outputs/rocm/forward_decode_value_cache.pt')
+                print(f'{num_kv_heads=}')
+                print(f'{scale=}')
+                print(f'{block_tables=}')
+                print(f'{seq_lens=}')
+                print(f'{block_size=}')
+                print(f'{max_seq_len=}')
+                print(f'{alibi_slopes=}')
+                print(f'{kv_cache_dtype=}')
+                print(f'{k_scale=}')
+                print(f'{v_scale=}')
+                print(f'{tp_rank=}')
+                print(f'{blocksparse_local_blocks=}')
+                print(f'{blocksparse_vert_stride=}')
+                print(f'{blocksparse_block_size=}')
+                print(f'{blocksparse_head_sliding_step=}')
+
+
             ops.paged_attention_v1(
                 output,
                 query,
@@ -150,6 +175,10 @@ class PagedAttention:
                 blocksparse_block_size,
                 blocksparse_head_sliding_step,
             )
+            if vllm.model_executor.models.llama.is_inference and \
+                vllm.model_executor.models.llama.decode_iteration_id == 36 and \
+                vllm.model_executor.models.llama.layer_id == 0:
+                torch.save(query, f'/root/workspace/outputs/rocm/forward_decode_output.pt')
         else:
             # Run PagedAttention V2.
             assert _PARTITION_SIZE % block_size == 0
