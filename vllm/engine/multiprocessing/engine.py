@@ -349,16 +349,22 @@ class MQLLMEngine:
             self.engine.model_executor._run_workers("stop_profile")
 
 
+def signal_handler(*_) -> None:
+    raise KeyboardInterrupt("MQLLMEngine terminated")
+
+
 def run_mp_engine(engine_args: AsyncEngineArgs, usage_context: UsageContext,
-                  ipc_path: str):
+                  ipc_path: str, engine_alive):
+    try:
+        engine = MQLLMEngine.from_engine_args(engine_args=engine_args,
+                                              usage_context=usage_context,
+                                              ipc_path=ipc_path)
 
-    def signal_handler(*_) -> None:
-        # Interrupt server on sigterm
-        raise KeyboardInterrupt("MQLLMEngine terminated")
+        signal.signal(signal.SIGTERM, signal_handler)
 
-    signal.signal(signal.SIGTERM, signal_handler)
+        engine.start()
 
-    engine = MQLLMEngine.from_engine_args(engine_args=engine_args,
-                                          usage_context=usage_context,
-                                          ipc_path=ipc_path)
-    engine.start()
+    except BaseException as e:
+        logger.exception(e)
+        engine_alive.value = False
+        raise e
