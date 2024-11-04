@@ -9,17 +9,18 @@ import torch
 
 import vllm.envs as envs
 from vllm.config import (CacheConfig, ConfigFormat, DecodingConfig,
-                         DeviceConfig, EngineConfig, LoadConfig, LoadFormat,
-                         LoRAConfig, ModelConfig, ObservabilityConfig,
-                         ParallelConfig, PromptAdapterConfig, SchedulerConfig,
-                         SpeculativeConfig, TaskOption, TokenizerPoolConfig)
+                         DeviceConfig, LoadConfig, LoadFormat, LoRAConfig,
+                         ModelConfig, ObservabilityConfig, ParallelConfig,
+                         PromptAdapterConfig, SchedulerConfig,
+                         SpeculativeConfig, TaskOption, TokenizerPoolConfig,
+                         VllmConfig)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.transformers_utils.utils import check_gguf_file
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils import FlexibleArgumentParser, StoreBoolean
 
 if TYPE_CHECKING:
     from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
@@ -91,6 +92,7 @@ class EngineArgs:
     tokenizer_mode: str = 'auto'
     chat_template_text_format: str = 'string'
     trust_remote_code: bool = False
+    allowed_local_media_path: str = ""
     download_dir: Optional[str] = None
     load_format: str = 'auto'
     config_format: ConfigFormat = ConfigFormat.AUTO
@@ -126,7 +128,6 @@ class EngineArgs:
     tokenizer_revision: Optional[str] = None
     quantization: Optional[str] = None
     enforce_eager: Optional[bool] = None
-    max_context_len_to_capture: Optional[int] = None
     max_seq_len_to_capture: int = 8192
     disable_custom_all_reduce: bool = False
     tokenizer_pool_size: int = 0
@@ -183,6 +184,13 @@ class EngineArgs:
     override_neuron_config: Optional[Dict[str, Any]] = None
     mm_processor_kwargs: Optional[Dict[str, Any]] = None
     scheduling_policy: Literal["fcfs", "priority"] = "fcfs"
+
+    # Pooling configuration.
+    pooling_type: Optional[str] = None
+    pooling_norm: Optional[bool] = None
+    pooling_softmax: Optional[bool] = None
+    pooling_step_tag_id: Optional[int] = None
+    pooling_returned_token_ids: Optional[List[int]] = None
 
     def __post_init__(self):
         if not self.tokenizer:
@@ -262,6 +270,13 @@ class EngineArgs:
         parser.add_argument('--trust-remote-code',
                             action='store_true',
                             help='Trust remote code from huggingface.')
+        parser.add_argument(
+            '--allowed-local-media-path',
+            type=str,
+            help="Allowing API requests to read local images or videos"
+            "from directories specified by the server file system."
+            "This is a security risk."
+            "Should only be enabled in trusted environments")
         parser.add_argument('--download-dir',
                             type=nullable_str,
                             default=EngineArgs.download_dir,
@@ -497,14 +512,6 @@ class EngineArgs:
                             help='Always use eager-mode PyTorch. If False, '
                             'will use eager mode and CUDA graph in hybrid '
                             'for maximal performance and flexibility.')
-        parser.add_argument('--max-context-len-to-capture',
-                            type=int,
-                            default=EngineArgs.max_context_len_to_capture,
-                            help='Maximum context length covered by CUDA '
-                            'graphs. When a sequence has context length '
-                            'larger than this, we fall back to eager mode. '
-                            '(DEPRECATED. Use --max-seq-len-to-capture instead'
-                            ')')
         parser.add_argument('--max-seq-len-to-capture',
                             type=int,
                             default=EngineArgs.max_seq_len_to_capture,
@@ -850,6 +857,58 @@ class EngineArgs:
             'priority (lower value means earlier handling) and time of '
             'arrival deciding any ties).')
 
+        parser.add_argument(
+            '--pooling-type',
+            choices=['LAST', 'ALL', 'CLS', 'STEP'],
+            default=None,
+            help='Used to configure the pooling method in the embedding model.'
+        )
+
+        parser.add_argument('--pooling-norm',
+                            default=None,
+                            action='store_true',
+                            help="Used to determine whether to normalize "
+                            "the pooled data in the embedding model.")
+
+        parser.add_argument('--no-pooling-norm',
+                            default=None,
+                            action='store_false',
+                            dest='pooling_norm',
+                            help="Used to determine whether to normalize "
+                            "the pooled data in the embedding model.")
+
+        parser.add_argument('--pooling-softmax',
+                            default=None,
+                            action='store_true',
+                            help="Used to determine whether to softmax "
+                            "the pooled data in the embedding model.")
+
+        parser.add_argument('--no-pooling-softmax',
+                            default=None,
+                            action='store_false',
+                            dest='pooling_softmax',
+                            help="Used to determine whether to softmax "
+                            "the pooled data in the embedding model.")
+
+        parser.add_argument(
+            '--pooling-step-tag-id',
+            type=int,
+            default=None,
+            help="When pooling-step-tag-id is not -1, it indicates "
+            "that the score corresponding to the step-tag-ids in the "
+            "generated sentence should be returned. Otherwise, it "
+            "returns the scores for all tokens.")
+
+        parser.add_argument(
+            '--pooling-returned-token-ids',
+            nargs='+',
+            type=int,
+            default=None,
+            help="pooling-returned-token-ids represents a list of "
+            "indices for the vocabulary dimensions to be extracted, "
+            "such as the token IDs of good_token and bad_token in "
+            "the math-shepherd-mistral-7b-prm model.")
+
         return parser
 
     @classmethod
@@ -869,6 +928,7 @@ class EngineArgs:
             tokenizer_mode=self.tokenizer_mode,
             chat_template_text_format=self.chat_template_text_format,
             trust_remote_code=self.trust_remote_code,
+            allowed_local_media_path=self.allowed_local_media_path,
             dtype=self.dtype,
             seed=self.seed,
             revision=self.revision,
@@ -880,7 +940,6 @@ class EngineArgs:
             quantization=self.quantization,
             quantization_param_path=self.quantization_param_path,
             enforce_eager=self.enforce_eager,
-            max_context_len_to_capture=self.max_context_len_to_capture,
             max_seq_len_to_capture=self.max_seq_len_to_capture,
             max_logprobs=self.max_logprobs,
             disable_sliding_window=self.disable_sliding_window,
@@ -891,6 +950,11 @@ class EngineArgs:
             override_neuron_config=self.override_neuron_config,
             config_format=self.config_format,
             mm_processor_kwargs=self.mm_processor_kwargs,
+            pooling_type=self.pooling_type,
+            pooling_norm=self.pooling_norm,
+            pooling_softmax=self.pooling_softmax,
+            pooling_step_tag_id=self.pooling_step_tag_id,
+            pooling_returned_token_ids=self.pooling_returned_token_ids,
         )
 
     def create_load_config(self) -> LoadConfig:
@@ -901,7 +965,7 @@ class EngineArgs:
             ignore_patterns=self.ignore_patterns,
         )
 
-    def create_engine_config(self) -> EngineConfig:
+    def create_engine_config(self) -> VllmConfig:
         # gguf file needs a specific model loader and doesn't use hf_repo
         if check_gguf_file(self.model):
             self.quantization = self.load_format = "gguf"
@@ -1113,7 +1177,7 @@ class EngineArgs:
             or "all" in detailed_trace_modules,
         )
 
-        return EngineConfig(
+        return VllmConfig(
             model_config=model_config,
             cache_config=cache_config,
             parallel_config=parallel_config,
@@ -1142,18 +1206,6 @@ class AsyncEngineArgs(EngineArgs):
                             action='store_true',
                             help='Disable logging requests.')
         return parser
-
-
-class StoreBoolean(argparse.Action):
-
-    def __call__(self, parser, namespace, values, option_string=None):
-        if values.lower() == "true":
-            setattr(namespace, self.dest, True)
-        elif values.lower() == "false":
-            setattr(namespace, self.dest, False)
-        else:
-            raise ValueError(f"Invalid boolean value: {values}. "
-                             "Expected 'true' or 'false'.")
 
 
 # These functions are used by sphinx to build the documentation

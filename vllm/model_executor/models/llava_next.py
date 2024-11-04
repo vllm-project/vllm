@@ -11,8 +11,9 @@ from transformers.models.llava_next.modeling_llava_next import (
 from typing_extensions import NotRequired
 
 from vllm.attention import AttentionMetadata
-from vllm.config import CacheConfig, MultiModalConfig
-from vllm.inputs import INPUT_REGISTRY, DecoderOnlyInputs, InputContext
+from vllm.config import CacheConfig, MultiModalConfig, PoolerConfig
+from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
+                         InputContext)
 from vllm.model_executor.layers.pooler import Pooler, PoolingType
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
@@ -180,7 +181,7 @@ def dummy_data_for_llava_next(ctx: InputContext, seq_len: int,
     max_feat_height, max_feat_width = pinpoint
 
     if isinstance(vision_config, CLIPVisionConfig):
-        seq_data = dummy_seq_data_for_clip(
+        seq_data, ranges = dummy_seq_data_for_clip(
             vision_config,
             seq_len,
             num_images,
@@ -195,9 +196,9 @@ def dummy_data_for_llava_next(ctx: InputContext, seq_len: int,
             image_height_override=max_feat_height,
         )
 
-        return seq_data, mm_data
+        return DummyData(seq_data, mm_data, ranges)
     elif isinstance(vision_config, SiglipVisionConfig):
-        seq_data = dummy_seq_data_for_siglip(
+        seq_data, ranges = dummy_seq_data_for_siglip(
             vision_config,
             seq_len,
             num_images,
@@ -212,7 +213,7 @@ def dummy_data_for_llava_next(ctx: InputContext, seq_len: int,
             image_height_override=max_feat_height,
         )
 
-        return seq_data, mm_data
+        return DummyData(seq_data, mm_data, ranges)
 
     msg = f"Unsupported vision config: {type(vision_config)}"
     raise NotImplementedError(msg)
@@ -285,7 +286,8 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
                  config: LlavaNextConfig,
                  multimodal_config: MultiModalConfig,
                  cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None) -> None:
+                 quant_config: Optional[QuantizationConfig] = None,
+                 pooler_config: Optional[PoolerConfig] = None) -> None:
         super().__init__()
 
         self.config = config
@@ -293,7 +295,10 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         # TODO: Optionally initializes this for supporting embeddings.
         self.vision_tower = init_vision_tower_for_llava(
-            config, quant_config, require_post_norm=False)
+            config,
+            quant_config,
+            require_post_norm=False,
+            prefix="vision_tower")
         self.image_newline = nn.Parameter(
             torch.empty(config.text_config.hidden_size))
         self.multi_modal_projector = LlavaMultiModalProjector(
@@ -302,12 +307,18 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
             projector_hidden_act=config.projector_hidden_act)
 
         self.language_model = init_vllm_registered_model(
-            config.text_config, cache_config, quant_config)
+            config.text_config,
+            cache_config,
+            quant_config,
+            prefix="language_model")
 
         # The same model class supports both language generation and embedding
         # because the architecture name is the same
-        self._pooler = Pooler(pooling_type=PoolingType.LAST, normalize=True)
-
+        self._pooler = Pooler.from_config_with_defaults(
+            pooler_config,
+            pooling_type=PoolingType.LAST,
+            normalize=True,
+            softmax=False)
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
 
@@ -595,7 +606,6 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
             :class:`LlavaNextImageInputs`
         """
         if intermediate_tensors is not None:
-            input_ids = None
             inputs_embeds = None
         else:
             image_input = self._parse_and_validate_image_input(**kwargs)
@@ -607,9 +617,14 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
                     self.language_model.model.get_input_embeddings,
                     lambda _: self._process_image_input(image_input),
                 )
-                input_ids = None
             else:
-                inputs_embeds = None
+                inputs_embeds = self.language_model.model.get_input_embeddings(
+                    input_ids)
+
+        # always pass the input via `inputs_embeds`
+        # to make sure the computation graph is consistent
+        # for `torch.compile` integration
+        input_ids = None
 
         hidden_states = self.language_model.model(input_ids,
                                                   positions,
