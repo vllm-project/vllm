@@ -43,11 +43,12 @@ class KVCacheBlock:
 
 class FreeKVCacheBlockQueue:
     """This class organizes a list of KVCacheBlock objects to a doubly linked
-    list of free blocks by manipulating the prev_free_block and next_free_block
-    attributes of the blocks. We implement this class instead of using Python
-    builtin deque for the following reasons:
-    1. Avoid the overhead of queue objects.
-    2. Remove a block in the middle of the queue in O(1) time.
+    list of free blocks. We implement this class instead of using Python
+    builtin deque to support removing a block in the middle of the queue
+    in O(1) time. To close the performance gap to the builtin deque which is
+    implemented in C++, this class does not allocate any Python objects when
+    manipulating the linked list. Instead, this class manipulates the 
+    prev_free_block and next_free_block attributes of the given blocks.
 
     The queue is ordered by block ID in the beginning. When a block is allocated
     and then freed, it will be appended back with the eviction order:
