@@ -33,6 +33,8 @@ from transformers.models.mllama.processing_mllama import (
 
 import vllm.distributed.parallel_state as ps
 from vllm.attention import Attention, AttentionMetadata, AttentionType
+from vllm.attention.backends.flash_attn import FlashAttentionMetadata
+from vllm.attention.backends.xformers import XFormersMetadata
 from vllm.attention.ops.paged_attn import PagedAttention
 from vllm.config import CacheConfig, MultiModalConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -754,28 +756,38 @@ class MllamaTextCrossAttention(nn.Module):
             _, k, v = qkv_enc.split(
                 [self.q_local_size, self.kv_local_size, self.kv_local_size],
                 dim=-1)
+            #print('k_shape ' + str(k.shape))
+            #print('v_shape ' + str(v.shape))
             k = k.view(-1, self.num_local_key_value_heads, self.head_dim)
             v = v.view(-1, self.num_local_key_value_heads, self.head_dim)
+            #print('k_shape1 ' + str(k.shape))
+            #print('v_shape1 ' + str(v.shape))
+
             k = self.k_norm(k)
+            #k = k.view(-1, self.num_local_key_value_heads * self.head_dim)
         q = q.view(-1, self.num_local_heads, self.head_dim)
         q = self.q_norm(q)
+        #q = q.view(-1, self.num_local_heads * self.head_dim)
+        #print("q.shape " + str(q.shape))
 
         if attention_mask is not None:
-            output = self.attention_with_mask(q, k, v, kv_cache,
-                                              attention_mask,
-                                              kv_range_for_decode,
-                                              attn_metadata)
+            output = self._attention_with_mask(q, k, v, kv_cache,
+                                               attention_mask,
+                                               kv_range_for_decode,
+                                               attn_metadata)
         else:
-            output = self.attn(q,
+            output = self.attn(q.view(-1,
+                                      self.num_local_heads * self.head_dim),
                                k,
                                v,
                                kv_cache,
                                attn_metadata,
                                attn_type=AttentionType.ENCODER_DECODER)
         out, _ = self.o_proj(output)
+        #print('output.shape ' + str(out.shape))
         return out
 
-    def attention_with_mask(
+    def _attention_with_mask(
         self,
         q: torch.Tensor,
         k: torch.Tensor,
@@ -786,14 +798,35 @@ class MllamaTextCrossAttention(nn.Module):
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
         # Skip writing kv-cache for the initial profiling run.
-        if len(kv_cache.shape) == 3:
-            key_cache, value_cache = PagedAttention.split_kv_cache(
-                kv_cache, self.num_local_key_value_heads, self.head_dim)
-            cached_k = torch.cat([k[s:e] for s, e in kv_range_for_decode])
-            cached_v = torch.cat([v[s:e] for s, e in kv_range_for_decode])
-            PagedAttention.write_to_paged_cache(
-                cached_k, cached_v, key_cache, value_cache,
-                attn_metadata.cross_slot_mapping, "auto", 1.0, 1.0)
+        if len(kv_cache.shape) > 1:
+            if isinstance(attn_metadata, FlashAttentionMetadata):
+                cached_k = torch.cat([k[s:e] for s, e in kv_range_for_decode])
+                cached_v = torch.cat([v[s:e] for s, e in kv_range_for_decode])
+                torch.ops._C_cache_ops.reshape_and_cache_flash(
+                    cached_k,
+                    cached_v,
+                    kv_cache[0],
+                    kv_cache[1],
+                    attn_metadata.
+                    cross_slot_mapping,  # type: ignore[union-attr]
+                    "auto",
+                    1.0,
+                    1.0,
+                )
+            elif isinstance(attn_metadata, XFormersMetadata):
+                key_cache, value_cache = PagedAttention.split_kv_cache(
+                    kv_cache, self.num_local_key_value_heads, self.head_dim)
+                cached_k = torch.cat([k[s:e] for s, e in kv_range_for_decode])
+                cached_v = torch.cat([v[s:e] for s, e in kv_range_for_decode])
+                PagedAttention.write_to_paged_cache(
+                    cached_k, cached_v, key_cache, value_cache,
+                    attn_metadata.cross_slot_mapping, "auto", 1.0, 1.0)
+            else:
+                raise ValueError(
+                    f"Unsupported AttentionMetadata {type(attn_metadata)} "
+                    f"class found. Expected the AttentionMetadata to "
+                    f"be either XFormersMetadata or FlashAttentionMetadata.")
+
         # We have to call torch.sdpa for prefill when using a
         # custom cross-attention mask. Because the mask is not a
         # standard causal mask, neither a block diagonal mask which
