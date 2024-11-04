@@ -28,6 +28,8 @@ if TYPE_CHECKING:
     from vllm.model_executor.model_loader.loader import BaseModelLoader
     from vllm.transformers_utils.tokenizer_group.base_tokenizer_group import (
         BaseTokenizerGroup)
+else:
+    QuantizationConfig = None
 
 logger = init_logger(__name__)
 
