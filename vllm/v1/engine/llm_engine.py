@@ -6,6 +6,7 @@ from vllm.config import VllmConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics_types import StatLoggerBase
 from vllm.envs import VLLM_ENABLE_V1_MULTIPROCESSING
+from vllm.executor.ray_utils import initialize_ray_cluster
 from vllm.inputs import INPUT_REGISTRY, InputRegistry, PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -20,6 +21,7 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.detokenizer import Detokenizer
 from vllm.v1.engine.processor import Processor
+from vllm.v1.executor.ray_executor import RayExecutor
 from vllm.v1.executor.abstract import Executor
 
 logger = init_logger(__name__)
@@ -106,7 +108,10 @@ class LLMEngine:
     def _get_executor_cls(cls, vllm_config: VllmConfig):
         distributed_executor_backend = (
             vllm_config.parallel_config.distributed_executor_backend)
-        if distributed_executor_backend == "mp":
+        if distributed_executor_backend == "ray":
+            initialize_ray_cluster(vllm_config.parallel_config)
+            return RayExecutor
+        elif distributed_executor_backend == "mp":
             from vllm.v1.executor.multiproc_executor import MultiprocExecutor
             executor_class = MultiprocExecutor
         else:
@@ -115,6 +120,9 @@ class LLMEngine:
             executor_class = UniprocExecutor
 
         return executor_class
+
+    def stop_remote_worker_execution_loop(self) -> None:
+        raise NotImplementedError("TP not implemented yet.")
 
     def get_num_unfinished_requests(self) -> int:
         return self.detokenizer.get_num_unfinished_requests()
