@@ -6,6 +6,7 @@ import torch.fx as fx
 from torch._inductor.pattern_matcher import (Match, PatternMatcherPass,
                                              fwd_only, register_replacement)
 
+import vllm._custom_ops as ops
 import vllm.envs as envs
 from vllm.compilation.inductor_pass import InductorPass
 from vllm.compilation.utils import (find_auto_fn, find_fn, find_getitem,
@@ -16,6 +17,7 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size,
     get_tp_group)
 from vllm.logger import init_logger
+from vllm.utils import direct_register_custom_op
 
 logger = init_logger(__name__)
 
@@ -106,6 +108,7 @@ def gemm_rs_ag_gemm_fake(
     return (mm_res, my_residual, residual)
 
 
+# TODO: factor out groupnames, etc.
 def get_gemm_rs_ag_gemm(use_flux: bool,
                         gemm_1_type,
                         gemm_1_weights: torch.Size,
@@ -177,13 +180,13 @@ def get_gemm_rs_ag_gemm(use_flux: bool,
             first_layer: bool
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
 
-        if should_slice(residual.shape) and first_layer:
+        if first_layer and should_slice(residual.shape):
             res_slices = slice_residual(residual)
             slice_size = res_slices[get_tensor_model_parallel_rank()].shape[0]
             residual_chunk = torch.ops.aten.split.Tensor(residual, slice_size)
             my_residual = residual_chunk[0]
         else:
-            my_residual = residual
+            my_residual = residual #.clone()
             slice_size = residual.shape[0]
 
         if not should_slice(residual.shape):
@@ -191,46 +194,41 @@ def get_gemm_rs_ag_gemm(use_flux: bool,
                                   gemm_1_weights.transpose(1, 0))
             reduced_output = tensor_model_parallel_all_reduce(output)
 
-            norm_res = torch.ops.higher_order.auto_functionalized(
-                torch.ops._C.fused_add_rms_norm.default,
-                input=reduced_output,
-                residual=my_residual,
-                weight=rms_norm_weight,
-                epsilon=1e-05)
-            normalized = norm_res[1]
-            new_residual = norm_res[2]
+            ops.fused_add_rms_norm(input=reduced_output,
+                                   residual=my_residual,
+                                   weight=rms_norm_weight,
+                                   epsilon=1e-05)
 
-            mm_2 = torch.matmul(normalized, gemm_2_weights.transpose(1, 0))
-            return mm_2, new_residual, new_residual.clone()
+            mm_2 = torch.matmul(reduced_output, gemm_2_weights.transpose(1, 0))
+            return mm_2, my_residual, my_residual.clone()
         else:
             output = gemm_rs(gemm_1_activations, gemm_1_weights)
 
-            norm_res = torch.ops.higher_order.auto_functionalized(
-                torch.ops._C.fused_add_rms_norm.default,
-                input=output,
-                residual=my_residual,
-                weight=rms_norm_weight,
-                epsilon=1e-05)
-            normalized = norm_res[1]
-            new_residual = norm_res[2]
+            ops.fused_add_rms_norm(input=output,
+                                   residual=my_residual,
+                                   weight=rms_norm_weight,
+                                   epsilon=1e-05)
 
             residual_1 = residual if first_layer else old_my_residual
             slice_scatter = torch.ops.aten.slice_scatter.default(
-                residual_1, new_residual, 0, 0, slice_size)
+                residual_1, my_residual, 0, 0, slice_size)
             split_2 = torch.ops.aten.split.Tensor(slice_scatter, slice_size)
-            new_residual = split_2[0]
-
-            mm_2 = ag_gemm(normalized, gemm_2_weights)
 
             # TODO: can we avoid clone here?
-            return mm_2[0], new_residual.clone(), slice_scatter
+            new_residual = split_2[0]  #.clone()
+
+            mm_2 = ag_gemm(output, gemm_2_weights)
+
+            return mm_2[0], new_residual, slice_scatter
 
     if not hasattr(torch.ops.vllm, name):
         logger.info("registering torch.ops.vllm.%s", name)
-        torch.library.custom_op(f"vllm::{name}",
-                                gemm_rs_ag_gemm,
-                                mutates_args=())
-        torch.library.register_fake(f"vllm::{name}", gemm_rs_ag_gemm_fake)
+        direct_register_custom_op(
+            name,
+            gemm_rs_ag_gemm,
+            mutates_args=[],
+            fake_impl=gemm_rs_ag_gemm_fake
+        )
         assert getattr(torch.ops.vllm, name)
 
     return getattr(torch.ops.vllm, name).default
@@ -260,19 +258,14 @@ def match_final(my_residual: torch.Tensor, gemm_1_weights: torch.Tensor,
 
 
 # Register this as a custom op since all reduce cannot be torch.compiled.
-@torch.library.custom_op("vllm::gemm_ag_final", mutates_args=())
 def replace_final(my_residual: torch.Tensor, gemm_1_weights: torch.Tensor,
                   gemm_1_activations: torch.Tensor,
                   rms_norm_weights: torch.Tensor) -> torch.Tensor:
     permute_254 = torch.ops.aten.permute.default(gemm_1_weights, [1, 0])
     mm_1 = torch.ops.aten.mm.default(gemm_1_activations, permute_254)
-    auto_functionalized_161 = torch.ops.higher_order.auto_functionalized(
-        torch.ops.vllm.inplace_all_reduce.default,
-        tensor=mm_1,
-        group_name=TP_GROUP_NAME)
-    reduced = auto_functionalized_161[1]
 
-    # is this the right thing to call it on?
+    reduced = tensor_model_parallel_all_reduce(mm_1)
+
     if should_slice(gemm_1_activations.shape):
         if True: #not use_flux:
             group_name = get_world_name()
@@ -287,23 +280,29 @@ def replace_final(my_residual: torch.Tensor, gemm_1_weights: torch.Tensor,
     else:
         wait_tensor = my_residual
 
-    norm_res = torch.ops.higher_order.auto_functionalized(
-        torch.ops._C.fused_add_rms_norm.default,
+    ops.fused_add_rms_norm(
         input=reduced,
         residual=wait_tensor,
         weight=rms_norm_weights,
         epsilon=1e-05)
 
-    return norm_res[1]
+    return reduced
 
 
-@torch.library.register_fake("vllm::gemm_ag_final")
 def replace_final_fake(my_residual: torch.Tensor, gemm_1_weights: torch.Tensor,
                        gemm_1_activations: torch.Tensor,
                        rms_norm_weights: torch.Tensor) -> torch.Tensor:
     return torch.empty([gemm_1_activations.shape[0], my_residual.shape[1]],
                        dtype=my_residual.dtype,
                        device=my_residual.device)
+
+
+direct_register_custom_op(
+    "gemm_ag_final",
+    replace_final,
+    mutates_args=[],
+    fake_impl=replace_final_fake
+)
 
 
 class CollectiveFusionPass(InductorPass):
@@ -343,7 +342,7 @@ class CollectiveFusionPass(InductorPass):
         # Return False to prevent automatic replacement.
         return False
 
-    def process_matches(self, graph: fx.Graph, num_to_process: int):
+    def process_matches(self, graph: fx.Graph):
         nodes = list(graph.nodes)
 
         def find_min_index(match: Match) -> int:
@@ -355,7 +354,7 @@ class CollectiveFusionPass(InductorPass):
         res_replacements: List[fx.Node] = []
         my_res_replacements: List[fx.Node] = []
 
-        for match in matches[:num_to_process]:
+        for match in matches:
             last_node = last_node_in_match(match)
 
             with graph.inserting_after(last_node):
@@ -401,22 +400,19 @@ class CollectiveFusionPass(InductorPass):
 
         # Finally, remove matched nodes
         graph.eliminate_dead_code()
-        assert all(node not in graph.nodes for match in matches[:num_to_process] for node in match.nodes)
+        assert all(node not in graph.nodes for match in matches for node in match.nodes)
 
     def __call__(self, graph: fx.Graph):
         self.dump_graph(graph, "before_collective_fusion")
         count = self.gemm_rs_ag_gemm_pattern.apply(graph)
         logger.info("fused gemm match count = %d", len(self.matches))
 
-        num_to_process = 1
-
         # Don't apply final pattern unless we've matched and replaced the
         # gemm+collective ops.
         if len(self.matches) > 0:
-            if True or num_to_process == len(self.matches):
-                count = self.final_pattern.apply(graph)
-                logger.info("final match count = %d", count)
-            self.process_matches(graph, num_to_process)
+            count = self.final_pattern.apply(graph)
+            logger.info("final match count = %d", count)
+            self.process_matches(graph)
 
         self.dump_graph(graph, "after_collective_fusion")
         self.matches.clear()
