@@ -265,8 +265,12 @@ def main(args: argparse.Namespace):
         else:
             raise ValueError(
                 f"Failed to synthesize a prompt with {args.input_len} tokens.")
-        requests = [(prompt, args.input_len, args.output_len)
-                    for _ in range(args.num_prompts)]
+        requests = [
+            SampleRequest(prompt=prompt,
+                          prompt_len=args.input_len,
+                          expected_output_len=args.output_len)
+            for _ in range(args.num_prompts)
+        ]
     else:
         requests = sample_requests(args.dataset, args.num_prompts, tokenizer,
                                    args.output_len)
