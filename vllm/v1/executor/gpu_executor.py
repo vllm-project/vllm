@@ -1,7 +1,7 @@
 import os
 from typing import Optional, Tuple
 
-from vllm.config import EngineConfig
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils import get_distributed_init_method, get_ip, get_open_port
 from vllm.v1.outputs import ModelRunnerOutput
@@ -12,7 +12,8 @@ logger = init_logger(__name__)
 
 class GPUExecutor:
 
-    def __init__(self, vllm_config: EngineConfig) -> None:
+    def __init__(self, vllm_config: VllmConfig) -> None:
+        self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
         self.lora_config = vllm_config.lora_config
