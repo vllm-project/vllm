@@ -92,6 +92,7 @@ class EngineArgs:
     tokenizer_mode: str = 'auto'
     chat_template_text_format: str = 'string'
     trust_remote_code: bool = False
+    allowed_local_media_path: str = ""
     download_dir: Optional[str] = None
     load_format: str = 'auto'
     config_format: ConfigFormat = ConfigFormat.AUTO
@@ -269,6 +270,13 @@ class EngineArgs:
         parser.add_argument('--trust-remote-code',
                             action='store_true',
                             help='Trust remote code from huggingface.')
+        parser.add_argument(
+            '--allowed-local-media-path',
+            type=str,
+            help="Allowing API requests to read local images or videos"
+            "from directories specified by the server file system."
+            "This is a security risk."
+            "Should only be enabled in trusted environments")
         parser.add_argument('--download-dir',
                             type=nullable_str,
                             default=EngineArgs.download_dir,
@@ -920,6 +928,7 @@ class EngineArgs:
             tokenizer_mode=self.tokenizer_mode,
             chat_template_text_format=self.chat_template_text_format,
             trust_remote_code=self.trust_remote_code,
+            allowed_local_media_path=self.allowed_local_media_path,
             dtype=self.dtype,
             seed=self.seed,
             revision=self.revision,
