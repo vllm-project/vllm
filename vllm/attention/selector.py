@@ -131,6 +131,7 @@ def _cached_get_attn_backend(
     backend = which_attn_to_use(head_size, dtype, kv_cache_dtype, block_size,
                                 is_attention_free, use_v1)
     if backend == _Backend.FLASH_ATTN:
+        logger.info("Using Flash Attention backend.")
         from vllm.attention.backends.flash_attn import (  # noqa: F401
             FlashAttentionBackend)
         return FlashAttentionBackend

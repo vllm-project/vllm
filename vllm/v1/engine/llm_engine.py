@@ -2,8 +2,9 @@ import time
 from typing import (Any, Dict, Iterable, List, Mapping, Optional, Tuple, Type,
                     Union)
 
-from vllm.config import (DecodingConfig, EngineConfig, LoRAConfig, ModelConfig,
-                         ObservabilityConfig, ParallelConfig, SchedulerConfig)
+from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
+                         ObservabilityConfig, ParallelConfig, SchedulerConfig,
+                         VllmConfig)
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics_types import StatLoggerBase
 from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs,
@@ -32,7 +33,7 @@ class LLMEngine:
 
     def __init__(
         self,
-        vllm_config: EngineConfig,
+        vllm_config: VllmConfig,
         executor_class: Type[GPUExecutor],
         log_stats: bool,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
@@ -483,7 +484,7 @@ class LLMEngine:
         return self.lora_config
 
     @classmethod
-    def _get_executor_cls(cls, engine_config: EngineConfig):
+    def _get_executor_cls(cls, engine_config: VllmConfig):
         return GPUExecutor
 
     def is_tracing_enabled(self) -> bool:
