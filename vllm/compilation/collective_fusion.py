@@ -260,7 +260,7 @@ def match_final(my_residual: torch.Tensor, gemm_1_weights: torch.Tensor,
 
 
 # Register this as a custom op since all reduce cannot be torch.compiled.
-#@torch.library.custom_op("vllm::gemm_ag_final", mutates_args=())
+@torch.library.custom_op("vllm::gemm_ag_final", mutates_args=())
 def replace_final(my_residual: torch.Tensor, gemm_1_weights: torch.Tensor,
                   gemm_1_activations: torch.Tensor,
                   rms_norm_weights: torch.Tensor) -> torch.Tensor:
@@ -274,7 +274,7 @@ def replace_final(my_residual: torch.Tensor, gemm_1_weights: torch.Tensor,
 
     # is this the right thing to call it on?
     if should_slice(gemm_1_activations.shape):
-        if True:
+        if True: #not use_flux:
             group_name = get_world_name()
             world_size = get_tensor_model_parallel_world_size()
             all_gather = (
@@ -297,7 +297,7 @@ def replace_final(my_residual: torch.Tensor, gemm_1_weights: torch.Tensor,
     return norm_res[1]
 
 
-#@torch.library.register_fake("vllm::gemm_ag_final")
+@torch.library.register_fake("vllm::gemm_ag_final")
 def replace_final_fake(my_residual: torch.Tensor, gemm_1_weights: torch.Tensor,
                        gemm_1_activations: torch.Tensor,
                        rms_norm_weights: torch.Tensor) -> torch.Tensor:
@@ -329,8 +329,8 @@ class CollectiveFusionPass(InductorPass):
         final_inputs = [x, w, resid, resid_w]
         register_replacement(
             match_final,
-            #torch.ops.vllm.gemm_ag_final,
-            replace_final,
+            torch.ops.vllm.gemm_ag_final,
+            #replace_final,
             final_inputs,
             fwd_only,
             [self.final_pattern])
@@ -343,7 +343,7 @@ class CollectiveFusionPass(InductorPass):
         # Return False to prevent automatic replacement.
         return False
 
-    def process_matches(self, graph: fx.Graph):
+    def process_matches(self, graph: fx.Graph, num_to_process: int):
         nodes = list(graph.nodes)
 
         def find_min_index(match: Match) -> int:
@@ -355,7 +355,7 @@ class CollectiveFusionPass(InductorPass):
         res_replacements: List[fx.Node] = []
         my_res_replacements: List[fx.Node] = []
 
-        for match in matches:
+        for match in matches[:num_to_process]:
             last_node = last_node_in_match(match)
 
             with graph.inserting_after(last_node):
@@ -401,20 +401,22 @@ class CollectiveFusionPass(InductorPass):
 
         # Finally, remove matched nodes
         graph.eliminate_dead_code()
-        assert all(node not in graph.nodes for match in matches
-                   for node in match.nodes)
+        assert all(node not in graph.nodes for match in matches[:num_to_process] for node in match.nodes)
 
     def __call__(self, graph: fx.Graph):
         self.dump_graph(graph, "before_collective_fusion")
         count = self.gemm_rs_ag_gemm_pattern.apply(graph)
         logger.info("fused gemm match count = %d", len(self.matches))
 
+        num_to_process = 1
+
         # Don't apply final pattern unless we've matched and replaced the
         # gemm+collective ops.
         if len(self.matches) > 0:
-            count = self.final_pattern.apply(graph)
-            logger.info("final match count = %d", count)
-            self.process_matches(graph)
+            if True or num_to_process == len(self.matches):
+                count = self.final_pattern.apply(graph)
+                logger.info("final match count = %d", count)
+            self.process_matches(graph, num_to_process)
 
         self.dump_graph(graph, "after_collective_fusion")
         self.matches.clear()
