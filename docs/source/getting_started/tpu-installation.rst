@@ -113,27 +113,8 @@ Clone the vLLM repository and go to the vLLM directory:
 
     git clone https://github.com/vllm-project/vllm.git && cd vllm
 
-Uninstall the existing `torch` and `torch_xla` packages:
 
-.. code-block:: bash
-
-    pip uninstall torch torch-xla -y
-
-Install `torch` and `torch_xla`
-
-.. code-block:: bash
-
-    pip install --pre torch==2.6.0.dev20241028+cpu torchvision==0.20.0.dev20241028+cpu --index-url https://download.pytorch.org/whl/nightly/cpu
-    pip install 'torch_xla[tpu] @ https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch_xla-2.6.0.dev-cp310-cp310-linux_x86_64.whl' -f https://storage.googleapis.com/libtpu-releases/index.html
-
-Install JAX and Pallas:
-
-.. code-block:: bash
-
-    pip install torch_xla[pallas] -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html -f https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html
-    pip install jaxlib==0.4.32.dev20240829 jax==0.4.32.dev20240829 -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html -f https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html
-
-Install other build dependencies:
+Install build dependencies:
 
 .. code-block:: bash
 
@@ -183,9 +164,6 @@ First, install the dependencies:
     $ # (Recommended) Create a new conda environment.
     $ conda create -n myenv python=3.10 -y
     $ conda activate myenv
-
-    $ # Clean up the existing torch and torch-xla packages.
-    $ pip uninstall torch torch-xla -y
 
     $ # Install other build dependencies.
     $ pip install -r requirements-tpu.txt
