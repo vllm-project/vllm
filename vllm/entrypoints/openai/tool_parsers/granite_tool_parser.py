@@ -48,11 +48,9 @@ class GraniteToolParser(ToolParser):
             raw_function_calls = json.loads(stripped)
             if not isinstance(raw_function_calls, list):
                 raise Exception(
-                    f"Expected dict or list, got {type(raw_function_calls)}"
-                )
+                    f"Expected dict or list, got {type(raw_function_calls)}")
 
-            logger.debug("Extracted %d tool calls",
-                            len(raw_function_calls))
+            logger.debug("Extracted %d tool calls", len(raw_function_calls))
             tool_calls = [
                 ToolCall(
                     type="function",
@@ -71,8 +69,7 @@ class GraniteToolParser(ToolParser):
             )
 
         except Exception as e:
-            logger.error("Error in extracting tool call from response %s",
-                            e)
+            logger.error("Error in extracting tool call from response %s", e)
             return ExtractedToolCallInformation(tools_called=False,
                                                 tool_calls=[],
                                                 content=model_output)
