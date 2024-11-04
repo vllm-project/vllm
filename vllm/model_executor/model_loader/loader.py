@@ -917,7 +917,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             if not weight_name.lower().endswith(".scb"):
                 continue
 
-            weight_key = weight_name.lower().replace(".scb", ".qweight")
+            weight_key = weight_name.lower().replace(".scb", ".weight")
             quant_state_dict[weight_key] = weight_tensor
 
         for weight_name, weight_tensor in self._hf_weight_iter(
@@ -926,11 +926,9 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             if self._is_8bit_weight_name(weight_name):
                 continue
 
-            qweight_name = weight_name.replace(".weight", ".qweight")
-
-            if qweight_name in quant_state_dict:
+            if weight_name in quant_state_dict:
                 set_weight_attrs(weight_tensor, {"load_in_8bit": True})
-                yield qweight_name, weight_tensor
+                yield weight_name, weight_tensor
             else:
                 yield weight_name, weight_tensor
 
@@ -975,9 +973,8 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             (f"{weight_name}.quant_state.bitsandbytes__fp4" \
                     in temp_state_dict):
                 quant_state = _parse_quant_state(weight_name, temp_state_dict)
-                weight_name = weight_name.replace(".weight", ".qweight")
                 quant_state_dict[weight_name] = quant_state
-                yield weight_name.replace(".weight", ".qweight"), weight_tensor
+                yield weight_name, weight_tensor
             else:
                 yield weight_name, weight_tensor
 
@@ -992,7 +989,6 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
             if any(target_module in weight_name for target_module in
                    self.target_modules) and weight_name.endswith(".weight"):
-                weight_name = weight_name.replace(".weight", ".qweight")
                 # Without sharding
                 if any(
                         weight_name.startswith(module)
@@ -1121,7 +1117,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 # Some models, such as MiniCPM V2.5/2.6, contain both
                 # module names 'kv_proj' and 'qkv_proj'. To prevent 'kv_proj'
                 # from being incorrectly identified as being present in
-                # 'vpm.encoder.layers.0.self_attn.qkv_proj.qweight
+                # 'vpm.encoder.layers.0.self_attn.qkv_proj.weight
                 if shard_pos > 0 and quant_param_name[shard_pos - 1] == ".":
                     shard_index = index
                     quant_param_name = quant_param_name.replace(
