@@ -16,15 +16,7 @@ def _create_model_runner(model: str, *args, **kwargs) -> ModelRunner:
     engine_args = EngineArgs(model, *args, **kwargs)
     engine_config = engine_args.create_engine_config()
     model_runner = ModelRunner(
-        model_config=engine_config.model_config,
-        parallel_config=engine_config.parallel_config,
-        scheduler_config=engine_config.scheduler_config,
-        device_config=engine_config.device_config,
-        cache_config=engine_config.cache_config,
-        load_config=engine_config.load_config,
-        lora_config=engine_config.lora_config,
-        prompt_adapter_config=engine_config.prompt_adapter_config,
-        observability_config=engine_config.observability_config,
+        vllm_config=engine_config,
         is_driver_worker=True,
     )
     return model_runner
