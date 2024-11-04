@@ -38,7 +38,7 @@ class VllmModel(Protocol[C_co, T_co]):
 
     def __init__(
         self,
-        vllm_config: VllmConfig,
+        vllm_config: "VllmConfig",
         prefix: str = "",
     ) -> None:
         ...
