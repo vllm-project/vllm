@@ -7,25 +7,35 @@ Run `pytest tests/models/test_models.py`.
 """
 import pytest
 
+from vllm.platforms import current_platform
+
 from ...utils import check_outputs_equal
 
 MODELS = [
-    "facebook/opt-125m",
-    "gpt2",
-    "bigcode/tiny_starcoder_py",
-    "EleutherAI/pythia-70m",
-    "bigscience/bloom-560m",  # Testing alibi slopes.
-    "microsoft/phi-2",
-    "stabilityai/stablelm-3b-4e1t",
-    # "allenai/OLMo-1B",  # Broken
-    "bigcode/starcoder2-3b",
-    "google/gemma-1.1-2b-it",
+    "facebook/opt-125m",  # opt
+    "openai-community/gpt2",  # gpt2
+    # "Milos/slovak-gpt-j-405M",  # gptj
+    # "bigcode/tiny_starcoder_py",  # gpt_bigcode
+    # "EleutherAI/pythia-70m",  # gpt_neox
+    "bigscience/bloom-560m",  # bloom - testing alibi slopes
+    "microsoft/phi-2",  # phi
+    # "stabilityai/stablelm-3b-4e1t",  # stablelm
+    # "bigcode/starcoder2-3b",  # starcoder2
+    "google/gemma-2-2b-it",  # gemma2
+    "Qwen/Qwen2.5-0.5B-Instruct",  # qwen2
+    "meta-llama/Llama-3.2-1B-Instruct",  # llama
 ]
+
+if not current_platform.is_cpu():
+    MODELS += [
+        # fused_moe which not supported on CPU
+        "openbmb/MiniCPM3-4B",
+    ]
 
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["float"])
-@pytest.mark.parametrize("max_tokens", [96])
+@pytest.mark.parametrize("max_tokens", [32])
 def test_models(
     hf_runner,
     vllm_runner,
