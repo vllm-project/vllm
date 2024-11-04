@@ -31,7 +31,7 @@ MAX_WAIT_SECONDS = None
 
 if current_platform.is_tpu():
     MORE_ARGS_LIST = [
-        [], # Default
+        [],  # Default
         # ["--num-scheduler-steps", "8"], # Multi-step << currently fails
     ]
     MAX_WAIT_SECONDS = 600
