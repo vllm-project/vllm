@@ -25,6 +25,7 @@ from torch import nn
 from transformers import GPTBigCodeConfig
 
 from vllm.attention import Attention, AttentionMetadata
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, LoRAConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
@@ -187,6 +188,7 @@ class GPTBigCodeBlock(nn.Module):
         return hidden_states
 
 
+@support_torch_compile
 class GPTBigCodeModel(nn.Module):
 
     def __init__(

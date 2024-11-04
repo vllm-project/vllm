@@ -29,6 +29,7 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, LoRAConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
@@ -48,8 +49,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, kv_cache_scales_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.utils import is_hip
 
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (PPMissingLayer, is_pp_missing_parameter,
@@ -263,6 +264,7 @@ class SolarDecoderLayer(nn.Module):
         return hidden_states, residual
 
 
+@support_torch_compile
 class SolarModel(nn.Module):
 
     def __init__(
@@ -556,7 +558,7 @@ class SolarForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             if not isinstance(self.model.layers[layer_idx], nn.Identity):
                 layer_self_attn = self.model.layers[layer_idx].self_attn
 
-            if is_hip():
+            if current_platform.is_rocm():
                 # The scaling factor convention we are assuming is
                 # quantized_value * scaling_factor ~= true_value
                 # which is consistent with the practice of setting
