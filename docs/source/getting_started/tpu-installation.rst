@@ -85,8 +85,8 @@ Create a TPU v5e with 4 TPU chips:
         want to create your Cloud TPU.
     * - ACCELERATOR_TYPE
       - The TPU version you want to use. Specify the TPU version, followed by a 
-        '-' and the number of TPU cores. For example `v5e-4` specifies a v5e TPU 
-        with 4 cores. For more information, see `TPU versions <https://cloud.devsite.corp.google.com/tpu/docs/system-architecture-tpu-vm#versions>`_.
+        '-' and the number of TPU cores. For example `v5-litepod-4` specifies a 
+        v5e TPU with 4 cores. For more information, see `TPU versions <https://cloud.devsite.corp.google.com/tpu/docs/system-architecture-tpu-vm#versions>`_.
     * - RUNTIME_VERSION
       - The TPU VM runtime version to use. For more information see `TPU VM images <https://cloud.google.com/tpu/docs/runtimes>`_.
     * - SERVICE_ACCOUNT
