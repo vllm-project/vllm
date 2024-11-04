@@ -267,10 +267,10 @@ class Worker(LocalOrDistributedWorkerBase):
 
         if is_restricted_env:
             logger.info("Detected restricted GPU environment. "
-                        "Model is loaded but memory reports static usage. "
-                        "Free memory: {:.2f}GB, Total memory: {:.2f}GB".format(
-                            free_gpu_memory / (1024**3),
-                            total_memory / (1024**3)))
+            "Model is loaded but memory reports static usage. "
+            "Free memory: %.2fGB, Total memory: %.2fGB",
+            free_gpu_memory / (1024**3),
+            total_memory / (1024**3))
 
         assert memory_diff > 0 or is_restricted_env, (
             "Error in memory profiling."
