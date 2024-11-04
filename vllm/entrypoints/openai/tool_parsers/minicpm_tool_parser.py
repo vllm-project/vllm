@@ -66,7 +66,7 @@ class MiniCPMToolParser(ToolParser):
             return ret
         else:
             return ExtractedToolCallInformation(
-                tools_called=True,
+                tools_called=False,
                 tool_calls=[],
                 content=msg.get("content", None),
             )
@@ -266,8 +266,8 @@ def resolve_ast_by_type(value):
         output = tuple(resolve_ast_by_type(v) for v in value.elts)
     elif isinstance(value, ast.Lambda):
         output = ast.literal_eval(
-            ast.unparse(  # type: ignore
-                value.body[0].value))  # type: ignore
+            ast.unparse(value.body[0].value)  # type: ignore
+        )  # type: ignore
     elif isinstance(value, ast.Ellipsis):
         output = "..."
     elif isinstance(value, ast.Subscript):
@@ -276,8 +276,8 @@ def resolve_ast_by_type(value):
         except Exception as e:
             logger.error("Error parsing tool call: %s", str(e))
             output = (
-                ast.unparse(value.value) + "[" +  # type: ignore
-                ast.unparse(value.slice) + "]")  # type: ignore
+                ast.unparse(value.value) + "["  # type: ignore
+                + ast.unparse(value.slice) + "]")  # type: ignore
     else:
         raise Exception(f"Unsupported AST type: {type(value)}")
     return output
