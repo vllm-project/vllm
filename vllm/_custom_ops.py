@@ -15,11 +15,8 @@ from vllm.scalar_type import ScalarType
 logger = init_logger(__name__)
 
 if current_platform.is_hpu():
-    try:
-        import habana_frameworks.torch.core as htcore
-        convert_from_uint4 = torch.ops.hpu.convert_from_uint4
-    except Exception as e:
-        hpu_import_exception = e
+    import habana_frameworks.torch.core as htcore
+    convert_from_uint4 = torch.ops.hpu.convert_from_uint4
 
 if not current_platform.is_tpu() and not current_platform.is_hpu():
     try:
