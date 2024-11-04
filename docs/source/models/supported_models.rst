@@ -160,13 +160,13 @@ Text Generation
     -
     - ✅︎
   * - :code:`GraniteForCausalLM`
-    - PowerLM
-    - :code:`ibm/PowerLM-3b` etc.
+    - Granite 3.0, PowerLM
+    - :code:`ibm-granite/granite-3.0-2b-base`, :code:`ibm-granite/granite-3.0-8b-instruct`, :code:`ibm/PowerLM-3b`, etc.
     - ✅︎
     - ✅︎
   * - :code:`GraniteMoeForCausalLM`
-    - PowerMoE
-    - :code:`ibm/PowerMoE-3b` etc.
+    - Granite 3.0 MoE, PowerMoE
+    - :code:`ibm-granite/granite-3.0-1b-a400m-base`, :code:`ibm-granite/granite-3.0-3b-a800m-instruct`, :code:`ibm/PowerMoE-3b`, etc.
     - ✅︎
     - ✅︎
   * - :code:`InternLMForCausalLM`
@@ -438,6 +438,12 @@ Text Generation
     - GLM-4V
     - T + I
     - :code:`THUDM/glm-4v-9b` etc.
+    - 
+    - ✅︎
+  * - :code:`H2OVLChatModel`
+    - H2OVL
+    - T + I\ :sup:`E+`
+    - :code:`h2oai/h2ovl-mississippi-800m`, :code:`h2oai/h2ovl-mississippi-2b`, etc.
     - 
     - ✅︎
   * - :code:`InternVLChatModel`
