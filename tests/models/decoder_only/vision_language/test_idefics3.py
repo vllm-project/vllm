@@ -6,18 +6,19 @@ from transformers import AutoTokenizer
 from vllm.multimodal.utils import rescale_image_size
 from vllm.sequence import SampleLogprobs
 
-from conftest import IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner
-from utils import check_logprobs_close
+from ....conftest import IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner
+from ...utils import check_logprobs_close
 
 HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
     "stop_sign":
     "<|begin_of_text|>User:<image>What's the content of the image?<end_of_utterance>\nAssistant:",  # noqa: E501
     "cherry_blossom":
-    "<|begin_of_text|>User:<image>What is the season?<end_of_utterance>\nAssistant:", # noqa: E501
+    "<|begin_of_text|>User:<image>What is the season?<end_of_utterance>\nAssistant:",  # noqa: E501
 })
 HF_MULTIIMAGE_IMAGE_PROMPT = "<|begin_of_text|>User:<image><image>Describe these images.<end_of_utterance>\nAssistant:"  # noqa: E501
 
 models = ["HuggingFaceM4/Idefics3-8B-Llama3"]
+target_dtype = "half"
 
 
 def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
@@ -38,7 +39,6 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
     return hf_output_ids, hf_output_str, out_logprobs
 
 
-target_dtype = "half"
 def run_test(
     hf_runner: Type[HfRunner],
     vllm_runner: Type[VllmRunner],
@@ -89,8 +89,9 @@ def run_test(
 
     # use eager mode for hf runner, since phi3_v didn't work with flash_attn
     hf_model_kwargs = {"_attn_implementation": "eager"}
-    with hf_runner(model, dtype=dtype,
-                   model_kwargs=hf_model_kwargs, 
+    with hf_runner(model,
+                   dtype=dtype,
+                   model_kwargs=hf_model_kwargs,
                    auto_cls=AutoModelForVision2Seq) as hf_model:
         eos_token_id = hf_model.processor.tokenizer.eos_token_id
         hf_outputs_per_case = [
