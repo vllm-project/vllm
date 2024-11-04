@@ -41,8 +41,10 @@ from vllm.sequence import IntermediateTensors, SequenceData
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.utils import is_list_of
 
+# yapf: disable
 from .idefics2_vision_model import (
     Idefics2VisionTransformer as Idefics3VisionTransformer)
+# yapf: enable
 from .interfaces import SupportsMultiModal
 from .llama import LlamaModel
 from .utils import AutoWeightsLoader, flatten_bn
