@@ -14,7 +14,8 @@ from torch.nn import LayerNorm
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig, MultiModalConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
-from vllm.inputs import INPUT_REGISTRY, DecoderOnlyInputs, InputContext
+from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
+                         InputContext, token_inputs)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -30,8 +31,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.glm4_vision_encoder import EVA2CLIPModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalDataDict,
-                             MultiModalInputs)
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalInputs
 from vllm.multimodal.base import MultiModalData
 from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
@@ -116,16 +116,15 @@ def get_max_glmv_image_tokens(ctx: InputContext):
     raise NotImplementedError(msg)
 
 
-def dummy_data_for_glmv(
-    ctx: InputContext, seq_len: int, mm_counts: Mapping[str, int]
-) -> Tuple[SequenceData, Optional[MultiModalDataDict]]:
+def dummy_data_for_glmv(ctx: InputContext, seq_len: int,
+                        mm_counts: Mapping[str, int]) -> DummyData:
     hf_config = ctx.get_hf_config(ChatGLMConfig)
     vision_config = getattr(hf_config, 'vision_config', None)
 
     if vision_config is None:
         token_ids = array(VLLM_TOKEN_ID_ARRAY_TYPE, [0] * seq_len)
         seq_data = SequenceData(token_ids)
-        return seq_data, None
+        return DummyData(seq_data, None)
     elif isinstance(vision_config, dict):
         image_size = vision_config["image_size"]
         image_placeholder_length = calculate_image_placeholder(vision_config)
@@ -140,7 +139,7 @@ def dummy_data_for_glmv(
             "image": Image.new("RGB", (image_size, image_size), color=0)
         }
 
-        return seq_data, mm_data
+        return DummyData(seq_data, mm_data)
 
     msg = f"Unsupported vision config: {type(vision_config)}"
     raise NotImplementedError(msg)
@@ -151,6 +150,10 @@ def find_all_positions(input_ids: List[int], target: int) -> List[int]:
 
 
 def input_processor_for_glmv(ctx: InputContext, inputs: DecoderOnlyInputs):
+    multi_modal_data = inputs.get("multi_modal_data")
+    if multi_modal_data is None or "image" not in multi_modal_data:
+        return inputs
+
     hf_config = ctx.get_hf_config(ChatGLMConfig)
     vision_config = getattr(hf_config, 'vision_config', None)
 
@@ -162,8 +165,8 @@ def input_processor_for_glmv(ctx: InputContext, inputs: DecoderOnlyInputs):
         msg = f"Unsupported vision config: {type(vision_config)}"
         raise NotImplementedError(msg)
 
-    input_ids = inputs.get("prompt_token_ids")
-    position_ids = inputs.get("position_ids")
+    input_ids = inputs["prompt_token_ids"]
+
     tokenizer = cached_get_tokenizer(
         ctx.model_config.model,
         trust_remote_code=ctx.model_config.trust_remote_code)
@@ -172,20 +175,19 @@ def input_processor_for_glmv(ctx: InputContext, inputs: DecoderOnlyInputs):
         raw_batch_data = tokenizer.apply_chat_template(
             conversation=[{
                 "role": "user",
-                "image": inputs['multi_modal_data']["image"],
-                "content": inputs['prompt']
+                "image": multi_modal_data["image"],
+                "content": inputs['prompt'],
             }],
             add_generation_prompt=True,
             tokenize=True,
             return_tensors="pt",
-            return_dict=True).data
+            return_dict=True,
+        ).data
     except Exception:
         logger.error("Failed to process content (%s)", inputs['prompt'])
         raise
     input_ids = raw_batch_data['input_ids'][0].tolist()
 
-    if position_ids is None:
-        position_ids = list(range(len(input_ids)))
     boi_token_id = hf_config.boi_token_id
     eoi_token_id = hf_config.eoi_token_id
     boi_positions = find_all_positions(input_ids, boi_token_id)
@@ -194,7 +196,6 @@ def input_processor_for_glmv(ctx: InputContext, inputs: DecoderOnlyInputs):
     assert len(boi_positions) == len(eoi_positions)
 
     new_input_ids = []
-    new_position_ids = []
     final_processed_position = 0
     final_processed_position = 0
 
@@ -202,22 +203,21 @@ def input_processor_for_glmv(ctx: InputContext, inputs: DecoderOnlyInputs):
         assert boi_position < eoi_position
         new_input_ids.extend(input_ids[final_processed_position:boi_position +
                                        1])
-        new_position_ids.extend(
-            list(range(final_processed_position, boi_position + 1)))
         new_input_ids.extend([input_ids[boi_position + 1]] *
                              image_placeholder_length)
-        new_position_ids.extend([boi_position + 1] * image_placeholder_length)
         final_processed_position = eoi_position
 
     new_input_ids.extend(input_ids[final_processed_position:])
-    new_position_ids.extend(
-        list(range(final_processed_position, len(input_ids))))
 
-    assert len(new_input_ids) == len(new_position_ids)
+    prompt = inputs.get("prompt")
+    if prompt is None:
+        prompt = tokenizer.decode(new_input_ids)
 
-    inputs["prompt_token_ids"] = new_input_ids
-    inputs["position_ids"] = new_position_ids
-    return inputs
+    return token_inputs(
+        prompt_token_ids=new_input_ids,
+        prompt=prompt,
+        multi_modal_data=multi_modal_data,
+    )
 
 
 class GLMAttention(nn.Module):

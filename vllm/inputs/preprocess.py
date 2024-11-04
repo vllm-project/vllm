@@ -124,7 +124,6 @@ class InputPreprocessor:
     def _prepare_decoder_input_ids_for_generation(
         self,
         decoder_input_ids: Optional[List[int]],
-        force_bos: bool = True,
     ) -> List[int]:
         """
         Prepares `decoder_input_ids` for generation with encoder-decoder models.
@@ -154,8 +153,8 @@ class InputPreprocessor:
             # use decoder_start_token_id as decoder_input_ids
             decoder_input_ids = self._get_default_enc_dec_decoder_prompt()
 
-        if force_bos and (len(decoder_input_ids) == 0
-                          or decoder_input_ids[0] != decoder_start_token_id):
+        if (len(decoder_input_ids) == 0
+                or decoder_input_ids[0] != decoder_start_token_id):
             decoder_input_ids = [decoder_start_token_id] + decoder_input_ids
 
         return decoder_input_ids
@@ -247,9 +246,11 @@ class InputPreprocessor:
             )
 
         if parsed["type"] == "tokens":
-            prompt_token_ids = parsed["content"]["prompt_token_ids"]
-            multi_modal_data = parsed["content"].get("multi_modal_data")
-            mm_processor_kwargs = parsed["content"].get("mm_processor_kwargs")
+            tokens_content = parsed["content"]
+
+            prompt_token_ids = tokens_content["prompt_token_ids"]
+            multi_modal_data = tokens_content.get("multi_modal_data")
+            mm_processor_kwargs = tokens_content.get("mm_processor_kwargs")
 
             return token_inputs(
                 prompt_token_ids=prompt_token_ids,
@@ -258,14 +259,16 @@ class InputPreprocessor:
             )
 
         if parsed["type"] == "text":
-            prompt_text = parsed["content"]["prompt"]
+            text_content = parsed["content"]
+
+            prompt_text = text_content["prompt"]
             prompt_token_ids = self._tokenize_prompt(
                 prompt_text,
                 request_id=request_id,
                 lora_request=lora_request,
             )
-            multi_modal_data = parsed["content"].get("multi_modal_data")
-            mm_processor_kwargs = parsed["content"].get("mm_processor_kwargs")
+            multi_modal_data = text_content.get("multi_modal_data")
+            mm_processor_kwargs = text_content.get("mm_processor_kwargs")
 
             return token_inputs(
                 prompt=prompt_text,
@@ -308,9 +311,11 @@ class InputPreprocessor:
             )
 
         if parsed["type"] == "tokens":
-            prompt_token_ids = parsed["content"]["prompt_token_ids"]
-            multi_modal_data = parsed["content"].get("multi_modal_data")
-            mm_processor_kwargs = parsed["content"].get("mm_processor_kwargs")
+            tokens_content = parsed["content"]
+
+            prompt_token_ids = tokens_content["prompt_token_ids"]
+            multi_modal_data = tokens_content.get("multi_modal_data")
+            mm_processor_kwargs = tokens_content.get("mm_processor_kwargs")
 
             return token_inputs(
                 prompt_token_ids=prompt_token_ids,
@@ -319,14 +324,16 @@ class InputPreprocessor:
             )
 
         if parsed["type"] == "text":
-            prompt_text = parsed["content"]["prompt"]
+            text_content = parsed["content"]
+
+            prompt_text = text_content["prompt"]
             prompt_token_ids = await self._tokenize_prompt_async(
                 prompt_text,
                 request_id=request_id,
                 lora_request=lora_request,
             )
-            multi_modal_data = parsed["content"].get("multi_modal_data")
-            mm_processor_kwargs = parsed["content"].get("mm_processor_kwargs")
+            multi_modal_data = text_content.get("multi_modal_data")
+            mm_processor_kwargs = text_content.get("mm_processor_kwargs")
 
             return token_inputs(
                 prompt=prompt_text,
@@ -363,16 +370,11 @@ class InputPreprocessor:
 
         if decoder_inputs is None:
             dec_token_ids = self._prepare_decoder_input_ids_for_generation(
-                None,
-                force_bos="multi_modal_data" not in encoder_inputs,
-            )
+                None)
             decoder_inputs = token_inputs(dec_token_ids)
         elif decoder_inputs["type"] == "token":
             dec_token_ids = self._prepare_decoder_input_ids_for_generation(
-                decoder_inputs["prompt_token_ids"],
-                force_bos=("multi_modal_data" not in encoder_inputs
-                           and "multi_modal_data" not in decoder_inputs),
-            )
+                decoder_inputs["prompt_token_ids"])
             decoder_inputs["prompt_token_ids"] = dec_token_ids
 
             if "multi_modal_data" in decoder_inputs:
