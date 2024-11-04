@@ -1062,7 +1062,6 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
         # so we can't add a dot in front of it.
         "multi_modal_projector."
     ]
-
     bitsandbytes_stacked_params_mapping = {
         # shard_name, weight_name, index
         "q_proj": ("qkv_proj", 0),

@@ -854,7 +854,6 @@ class MiniCPMV2_5(MiniCPMVBaseModel, SupportsLoRA):
         # resampler
         ".kv_proj.",
     ]
-
     bitsandbytes_stacked_params_mapping = {
         # shard_name, weight_name, index
         "q_proj": ("qkv_proj", 0),
@@ -1005,7 +1004,6 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
         # resampler
         ".kv_proj.",
     ]
-
     bitsandbytes_stacked_params_mapping = {
         # shard_name, weight_name, index
         "q_proj": ("qkv_proj", 0),
