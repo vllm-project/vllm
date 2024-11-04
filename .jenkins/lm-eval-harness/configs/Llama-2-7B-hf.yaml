@@ -1,0 +1,14 @@
+# These scores were chosen to place within 6% range of values achieved using  vLLM on HPU:
+# 0.148 - 0.164
+# where on https://www.llama.com/llama2/: 0.146 is given
+model_name: "/mnt/weka/data/pytorch/llama2/Llama-2-7b-hf"
+tasks:
+- name: "gsm8k"
+  metrics:
+  - name: "exact_match,strict-match"
+    value: 0.155
+  - name: "exact_match,flexible-extract"
+    value: 0.155
+limit: 250
+num_fewshot: 5
+dtype: "bfloat16"
