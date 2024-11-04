@@ -401,8 +401,6 @@ class FalconForCausalLM(nn.Module, SupportsPP):
         ".dense_h_to_4h.",
         ".dense_4h_to_h.",
     ]
-    # in TP, these weights are partitioned along the column dimension (dim=-1)
-    column_parallel_weights_modules = [".dense_4h_to_h.", ".dense."]
 
     def __init__(
         self,
