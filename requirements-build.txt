@@ -4,6 +4,6 @@ ninja
 packaging
 setuptools>=61
 setuptools-scm>=8
-torch==2.5.0
+torch==2.5.1
 wheel
 jinja2
