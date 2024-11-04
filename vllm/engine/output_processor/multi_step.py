@@ -165,19 +165,6 @@ class MultiStepOutputProcessor(SequenceGroupOutputProcessor):
         if remaining_tokens < 0:
             output_token_ids = output_token_ids[:remaining_tokens]
 
-        # Truncate any tokens after EOS. This is required as spec decode
-        # generates a fixed number of tokens without evaluating stopping
-        # conditions within the block. This can cause an eos token to be
-        # unintentionally ignored.
-        if not sampling_params.ignore_eos:
-            eos_token_id = self.get_tokenizer_for_seq(seq).eos_token_id
-            # Avoiding .index calls as exception throwing in the happy path
-            # is expensive.
-            for i in range(len(output_token_ids)):
-                if output_token_ids[i] == eos_token_id:
-                    output_token_ids = output_token_ids[:i + 1]
-                    break
-
         is_prefill_sampled_token = seq.data.get_num_uncomputed_tokens() == 0
         # Incrementally append tokens to the sequence, as if we had only one new
         # token.
