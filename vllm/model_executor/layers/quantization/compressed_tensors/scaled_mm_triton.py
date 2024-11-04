@@ -5,30 +5,12 @@ import triton
 import triton.language as tl
 
 
-# This function handles some cases that can cause certain failure, e.g.
-# a tensor that has shape = (72, 48) but stride = (5120, 1).  It can happen,
-# for example by saving a tensor using torch.save() and then adjusting its
-# size afterwards and then trying to use it.  Unfortunately,
-# torch.is_contiguous() doesn't help since a transposed tensor doesn't return
-# True, even though it can be stored contiguously in memory.
-#
-# There is a way to handle this case, which I learned about from here:
-#
-# https://github.com/pytorch/pytorch/blob/
-# a874ec85e83cfe75e7238296022d53d7e20860df/aten/src/ATen/native/
-# cuda/Blas.cpp#L58
-#
-# This doesn't happen very often fortunately, because the only solution is
-# inefficient.
-def prepare_matrix_for_triton(x: torch.Tensor):
+def has_good_tensor_strides(x: torch.Tensor):
     strides = x.stride()
     sizes = x.shape
     is_not_transpose = strides[0] == 1 and (strides[1] >= max(1, sizes[0]))
     is_transpose = strides[1] == 1 and (strides[0] >= max(1, sizes[1]))
-    if not is_not_transpose and not is_transpose:
-        return torch.clone(x, memory_format=torch.contiguous_format)
-    return x
-
+    return is_transpose or is_not_transpose
 
 @triton.jit
 def scaled_mm_kernel(a_ptr, b_ptr, scale_a_ptr, scale_b_ptr, c_ptr, bias_ptr,
@@ -77,16 +59,11 @@ def scaled_mm_kernel(a_ptr, b_ptr, scale_a_ptr, scale_b_ptr, c_ptr, bias_ptr,
                         (BLOCK_SIZE_SCALE_B > 1) * pid_n * BLOCK_SIZE_N)
     masks_scale_bn = offsets_scale_bn < N
 
-    offsets_scale_a = (offsets_scale_am[:, None].to(tl.int64) +
-                       tl.arange(0, 1)[None, :].to(tl.int64))
-    offsets_scale_b = (offsets_scale_bn[:, None].to(tl.int64) +
-                       tl.arange(0, 1)[None, :].to(tl.int64))
-
     a_ptrs = a_ptr + offsets_a
     b_ptrs = b_ptr + offsets_b
 
-    scale_a_ptrs = scale_a_ptr + offsets_scale_a
-    scale_b_ptrs = scale_b_ptr + offsets_scale_b
+    scale_a_ptrs = scale_a_ptr + offsets_scale_am
+    scale_b_ptrs = scale_b_ptr + offsets_scale_bn
 
     for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
         masks_k = offsets_k < K
@@ -105,7 +82,7 @@ def scaled_mm_kernel(a_ptr, b_ptr, scale_a_ptr, scale_b_ptr, c_ptr, bias_ptr,
 
     # Apply scale at end.
     masks_scale_a = masks_scale_am[:, None] & (tl.arange(0, 1) < 1)[:, None]
-    scale_a = tl.load(scale_a_ptrs, masks_scale_a)
+    scale_a = tl.load(scale_a_ptrs[:, None], masks_scale_a)
     # Need to broadcast to the appropriate size, if scale_a is already
     # (BLOCK_SIZE_M, 1) then it will broadcast to its own shape. Same goes
     # for scale_b below.
@@ -113,7 +90,7 @@ def scaled_mm_kernel(a_ptr, b_ptr, scale_a_ptr, scale_b_ptr, c_ptr, bias_ptr,
     accumulator = scale_a * accumulator.to(tl.float32)
 
     masks_scale_b = masks_scale_bn[:, None] & (tl.arange(0, 1) < 1)[None, :]
-    scale_b = tl.load(scale_b_ptrs, masks_scale_b)
+    scale_b = tl.load(scale_b_ptrs[:, None], masks_scale_b)
     scale_b = scale_b.broadcast_to((BLOCK_SIZE_N, 1))
     accumulator = scale_b.T * accumulator.to(tl.float32)
 
@@ -162,8 +139,10 @@ def scaled_mm_triton(input: torch.Tensor,
         [M, 1])
     assert scale_b.shape == torch.Size([1, 1]) or scale_b.shape == torch.Size(
         [N, 1])
-    assert torch.empty((1, 1), dtype=out_dtype).is_floating_point()
+    assert out_dtype.is_floating_point
     assert bias is None or bias.is_floating_point()
+    assert has_good_tensor_strides(input)
+    assert has_good_tensor_strides(weight)
 
     grid = lambda META: (triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(
         N, META['BLOCK_SIZE_N']), )
@@ -174,9 +153,6 @@ def scaled_mm_triton(input: torch.Tensor,
 
     block_size_sa = 1 if has_scalar(scale_a) else block_size_m
     block_size_sb = 1 if has_scalar(scale_b) else block_size_n
-
-    input = prepare_matrix_for_triton(input)
-    weight = prepare_matrix_for_triton(weight)
 
     accumulator_dtype = tl.float32 if input.is_floating_point() else tl.int32
 
