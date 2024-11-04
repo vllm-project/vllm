@@ -40,7 +40,8 @@ class EngineCoreRequest(msgspec.Struct):
     lora_request: Optional[LoRARequest]
 
 
-class EngineCoreOutput(msgspec.Struct, array_like=True):
+@dataclass
+class EngineCoreOutput:
 
     request_id: str
     new_token_ids: List[int]
