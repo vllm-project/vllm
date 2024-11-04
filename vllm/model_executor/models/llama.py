@@ -386,6 +386,7 @@ class LlamaModel(nn.Module):
             global decode_iteration_id
             if is_inference:
                 torch.save(hidden_states, f'/root/workspace/outputs/rocm/hidden_states_{decode_iteration_id}_{layer_id}.pt')
+                torch.save(residual, f'/root/workspace/outputs/rocm/residual_{decode_iteration_id}_{layer_id}.pt')
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
