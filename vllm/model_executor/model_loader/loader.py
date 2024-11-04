@@ -787,6 +787,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         with open(config_file_path, "r") as f:
             config = json.load(f)
             self.target_modules = config["target_modules"]
+        # Save the module names without sharding.
         self.unsharded_weights_modules: List[str] = []
 
     def _get_config_file(self, qlora_adapter: str) -> str:
