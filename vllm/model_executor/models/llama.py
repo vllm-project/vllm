@@ -61,6 +61,9 @@ from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (AutoWeightsLoader, PPMissingLayer, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers)
 
+is_inference = False
+decode_iteration_id = 0
+layer_id = 0
 
 class LlamaMLP(nn.Module):
 
@@ -371,10 +374,18 @@ class LlamaModel(nn.Module):
             residual = intermediate_tensors["residual"]
 
         for i in range(self.start_layer, self.end_layer):
+            global layer_id
+            layer_id = i
+
             layer = self.layers[i]
             hidden_states, residual = layer(positions, hidden_states,
                                             kv_caches[i - self.start_layer],
                                             attn_metadata, residual)
+
+            global is_inference
+            global decode_iteration_id
+            if is_inference:
+                torch.save(hidden_states, f'/root/workspace/outputs/rocm/hidden_states_{decode_iteration_id}_{layer_id}.pt')
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
@@ -586,6 +597,13 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     ) -> Union[torch.Tensor, IntermediateTensors]:
         model_output = self.model(input_ids, positions, kv_caches,
                                   attn_metadata, intermediate_tensors)
+        
+        global is_inference
+        global decode_iteration_id
+        if is_inference:
+            torch.save(model_output, f'/root/workspace/outputs/rocm/model_output_{decode_iteration_id}.pt')
+            decode_iteration_id = decode_iteration_id + 1
+
         return model_output
 
     def compute_logits(
