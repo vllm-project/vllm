@@ -127,7 +127,7 @@ class ipex_ops:
             context_lens,
             block_size,
             max_context_len,
-            alibi_slopes, 
+            alibi_slopes,
         )
 
     @staticmethod
