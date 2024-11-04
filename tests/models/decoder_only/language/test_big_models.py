@@ -59,7 +59,7 @@ def test_models(
             # This test is for verifying whether the model's extra_repr
             # can be printed correctly.
             print(vllm_model.model.llm_engine.model_executor.driver_worker.
-                model_runner.model)
+                  model_runner.model)
 
         check_logprobs_close(
             outputs_0_lst=hf_outputs,
@@ -77,7 +77,7 @@ def test_models(
             # This test is for verifying whether the model's extra_repr
             # can be printed correctly.
             print(vllm_model.model.llm_engine.model_executor.driver_worker.
-                model_runner.model)
+                  model_runner.model)
 
         check_outputs_equal(
             outputs_0_lst=hf_outputs,

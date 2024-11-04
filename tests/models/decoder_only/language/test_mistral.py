@@ -4,7 +4,7 @@ Run `pytest tests/models/test_mistral.py`.
 """
 import pytest
 
-from vllm import LLM, SamplingParams
+from vllm import SamplingParams
 
 from ...utils import check_logprobs_close
 
@@ -147,11 +147,11 @@ def test_mistral_symbolic_languages(
     dtype: str,
 ) -> None:
     with vllm_runner(model,
-                    dtype=dtype,
-                    max_model_len=8192,
-                    tokenizer_mode="mistral",
-                    config_format="mistral",
-                    load_format="mistral") as vllm_model:
+                     dtype=dtype,
+                     max_model_len=8192,
+                     tokenizer_mode="mistral",
+                     config_format="mistral",
+                     load_format="mistral") as vllm_model:
         for prompt in SYMBOLIC_LANG_PROMPTS:
             msg = {"role": "user", "content": prompt}
             outputs = vllm_model.model.chat([msg],
@@ -160,7 +160,8 @@ def test_mistral_symbolic_languages(
 
 
 @pytest.mark.parametrize("dtype", ["bfloat16"])
-@pytest.mark.parametrize("model", MISTRAL_FORMAT_MODELS)  # v1 can't do func calling
+@pytest.mark.parametrize("model",
+                         MISTRAL_FORMAT_MODELS)  # v1 can't do func calling
 def test_mistral_function_calling(
     vllm_runner,
     model: str,
