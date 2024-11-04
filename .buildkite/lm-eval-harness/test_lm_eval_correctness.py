@@ -20,6 +20,7 @@ TEST_DATA_FILE = os.environ.get(
     ".buildkite/lm-eval-harness/configs/Meta-Llama-3-8B-Instruct.yaml")
 
 TP_SIZE = os.environ.get("LM_EVAL_TP_SIZE", 1)
+MAX_MODEL_LEN = 4096
 
 
 def launch_lm_eval(eval_config):
@@ -28,7 +29,8 @@ def launch_lm_eval(eval_config):
     model_args = f"pretrained={eval_config['model_name']}," \
                  f"tensor_parallel_size={TP_SIZE}," \
                  f"add_bos_token=true," \
-                 f"trust_remote_code={trust_remote_code}"
+                 f"trust_remote_code={trust_remote_code}," \
+                 f"max_model_len={MAX_MODEL_LEN}"
 
     results = lm_eval.simple_evaluate(
         model="vllm",
