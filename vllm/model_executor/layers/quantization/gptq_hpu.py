@@ -95,13 +95,6 @@ class GPTQHPUConfig(QuantizationConfig):
         return []
 
 
-class ExllamaState(Enum):
-
-    UNUSED = enum.auto()
-    UNINITIALIZED = enum.auto()
-    READY = enum.auto()
-
-
 class GPTQHPULinearMethod(LinearMethodBase):
     """Linear method for GPTQ.
 
@@ -141,18 +134,8 @@ class GPTQHPULinearMethod(LinearMethodBase):
             group_size = self.quant_config.group_size
         else:
             group_size = input_size
-        exllama_state = ExllamaState.UNUSED # HPU does not use Exllama
         scale_and_zero_size = input_size // group_size
         scale_and_zero_input_dim = None
-        if (input_size != input_size_per_partition
-                and self.quant_config.group_size != -1):
-            # For act-order models, we cannot use Exllama for row parallel layer
-            if self.quant_config.desc_act:
-                exllama_state = ExllamaState.UNUSED
-            else:
-                # we need to partition qzeros and scales for exllama kernel
-                scale_and_zero_size = input_size_per_partition // group_size
-                scale_and_zero_input_dim = 0
 
         qweight = PackedvLLMParameter(
             data=torch.empty(
@@ -220,7 +203,6 @@ class GPTQHPULinearMethod(LinearMethodBase):
         layer.register_parameter("qzeros", qzeros)
         layer.register_parameter("scales", scales)
 
-        layer.exllama_state = exllama_state
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
 
@@ -247,19 +229,7 @@ class GPTQHPULinearMethod(LinearMethodBase):
         layer.g_idx = Parameter(layer.g_idx.data, requires_grad=False)
         layer.scales = Parameter(layer.scales.data, requires_grad=False)
 
-        # exllama needs to shuffle the weight after the weight is loaded
-        # here we do the shuffle on first forward passl
-        if layer.exllama_state == ExllamaState.UNINITIALIZED:
-            if self.quant_config.desc_act:
-                layer.g_idx.data = torch.argsort(layer.g_idx).to(torch.int)
-            else:
-                layer.g_idx.data = torch.empty((0, ),
-                                               dtype=torch.int,
-                                               device=layer.g_idx.device)
-            layer.exllama_state = ExllamaState.READY
-            ops.gptq_shuffle(layer.qweight, layer.g_idx,
-                             self.quant_config.weight_bits)
-            
+
     def apply(self,
               layer: torch.nn.Module,
               x: torch.Tensor,
@@ -275,7 +245,7 @@ class GPTQHPULinearMethod(LinearMethodBase):
 
         output = ops.gptq_hpu_gemm(reshaped_x, layer.qweight, layer.qzeros,
                                layer.scales, layer.g_idx,
-                               layer.exllama_state == ExllamaState.READY,
+                               None,
                                self.quant_config.weight_bits)
         if bias is not None:
             output.add_(bias)
