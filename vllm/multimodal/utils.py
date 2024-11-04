@@ -72,6 +72,81 @@ async def async_fetch_image(image_url: str,
     return image.convert(image_mode)
 
 
+def _load_video_frames_from_bytes(b: bytes):
+    frame = Image.open(BytesIO(b))
+    return np.array(frame)
+
+
+def load_video_frames_from_base64(frame: Union[bytes, str]):
+    """Load frame from base64 format."""
+    return _load_video_frames_from_bytes(base64.b64decode(frame))
+
+
+def _load_video_from_bytes(b: bytes, num_frames: int = 32):
+    _, decord = try_import_video_packages()
+
+    video_path = BytesIO(b)
+    vr = decord.VideoReader(video_path, num_threads=1)
+    total_frame_num = len(vr)
+
+    if total_frame_num > num_frames:
+        uniform_sampled_frames = np.linspace(0,
+                                             total_frame_num - 1,
+                                             num_frames,
+                                             dtype=int)
+        frame_idx = uniform_sampled_frames.tolist()
+    else:
+        frame_idx = [i for i in range(0, total_frame_num)]
+    frames = vr.get_batch(frame_idx).asnumpy()
+
+    return frames
+
+
+def _load_video_from_data_url(video_url: str):
+    # Only split once and assume the second part is the base64 encoded image
+    frames_base64 = video_url.split(",")[1:]
+    return np.stack([
+        load_video_frames_from_base64(frame_base64)
+        for frame_base64 in frames_base64
+    ])
+
+
+def fetch_video(video_url: str, *, num_frames: int = 32) -> npt.NDArray:
+    """
+    Load video from a HTTP or base64 data URL.
+    """
+    if video_url.startswith('http') or video_url.startswith('https'):
+        video_raw = global_http_connection.get_bytes(
+            video_url, timeout=VLLM_IMAGE_FETCH_TIMEOUT)
+        video = _load_video_from_bytes(video_raw, num_frames)
+    elif video_url.startswith('data:video'):
+        video = _load_video_from_data_url(video_url)
+    else:
+        raise ValueError("Invalid 'video_url': A valid 'video_url' must start "
+                         "with either 'data:video' or 'http'.")
+    return video
+
+
+async def async_fetch_video(video_url: str,
+                            *,
+                            num_frames: int = 32) -> npt.NDArray:
+    """
+    Asynchronously load video from a HTTP or base64 data URL.
+
+    By default, the image is converted into RGB format.
+    """
+    if video_url.startswith('http') or video_url.startswith('https'):
+        video_raw = await global_http_connection.async_get_bytes(
+            video_url, timeout=VLLM_IMAGE_FETCH_TIMEOUT)
+        video = _load_video_from_bytes(video_raw, num_frames)
+    elif video_url.startswith('data:video'):
+        video = _load_video_from_data_url(video_url)
+    else:
+        raise ValueError("Invalid 'video_url': A valid 'video_url' must start "
+                         "with either 'data:video' or 'http'.")
+    return video
+
+
 def try_import_audio_packages() -> Tuple[Any, Any]:
     try:
         import librosa
@@ -131,6 +206,11 @@ def get_and_parse_image(image_url: str) -> MultiModalDataDict:
     return {"image": image}
 
 
+def get_and_parse_video(video_url: str) -> MultiModalDataDict:
+    video = fetch_video(video_url)
+    return {"video": video}
+
+
 async def async_get_and_parse_audio(audio_url: str) -> MultiModalDataDict:
     audio, sr = await async_fetch_audio(audio_url)
     return {"audio": (audio, sr)}
@@ -139,6 +219,11 @@ async def async_get_and_parse_audio(audio_url: str) -> MultiModalDataDict:
 async def async_get_and_parse_image(image_url: str) -> MultiModalDataDict:
     image = await async_fetch_image(image_url)
     return {"image": image}
+
+
+async def async_get_and_parse_video(video_url: str) -> MultiModalDataDict:
+    video = await async_fetch_video(video_url)
+    return {"video": video}
 
 
 def encode_audio_base64(
@@ -191,14 +276,15 @@ def rescale_image_size(image: Image.Image,
 def try_import_video_packages() -> Any:
     try:
         import cv2
+        import decord
     except ImportError:
         raise ImportError(
             "Please install vllm[video] for video support.") from None
-    return cv2
+    return cv2, decord
 
 
 def resize_video(frames: npt.NDArray, size: Tuple[int, int]) -> npt.NDArray:
-    cv2 = try_import_video_packages()
+    cv2, _ = try_import_video_packages()
 
     num_frames, _, _, channels = frames.shape
     new_height, new_width = size
