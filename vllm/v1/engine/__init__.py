@@ -40,8 +40,7 @@ class EngineCoreRequest(msgspec.Struct):
     lora_request: Optional[LoRARequest]
 
 
-@dataclass
-class EngineCoreOutput:
+class EngineCoreOutput(msgspec.Struct, array_like=True):
 
     request_id: str
     new_token_ids: List[int]
@@ -50,7 +49,7 @@ class EngineCoreOutput:
     stop_reason: Union[int, str, None] = None
 
 
-class EngineCoreOutputs(msgspec.Struct):
+class EngineCoreOutputs(msgspec.Struct, array_like=True):
 
     #NOTE(Nick): We could consider ways to make this more compact,
     # e.g. columnwise layout and using an int enum for finish/stop reason
