@@ -1962,7 +1962,7 @@ class VllmConfig:
     decoding_config: Optional[DecodingConfig] = None
     observability_config: Optional[ObservabilityConfig] = None
     prompt_adapter_config: Optional[PromptAdapterConfig] = None
-    quant_config: Optional[QuantizationConfig] = field(init=False)
+    quant_config: Optional[QuantizationConfig] = None
 
     @staticmethod
     def _get_quantization_config(
@@ -2009,7 +2009,7 @@ class VllmConfig:
             self.prompt_adapter_config.verify_with_model_config(
                 self.model_config)
 
-        self.quant_config = None
-        if self.model_config is not None and self.load_config is not None:
+        if self.quant_config is None and \
+            self.model_config is not None and self.load_config is not None:
             self.quant_config = VllmConfig._get_quantization_config(
                 self.model_config, self.load_config)
