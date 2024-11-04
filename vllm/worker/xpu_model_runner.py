@@ -10,9 +10,7 @@ import torch
 import torch.nn as nn
 
 from vllm.attention import get_attn_backend
-from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, ObservabilityConfig, ParallelConfig,
-                         PromptAdapterConfig, SchedulerConfig)
+from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.logger import init_logger
@@ -363,33 +361,18 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
 
     def __init__(
         self,
-        model_config: ModelConfig,
-        parallel_config: ParallelConfig,
-        scheduler_config: SchedulerConfig,
-        device_config: DeviceConfig,
-        cache_config: CacheConfig,
-        load_config: LoadConfig,
-        lora_config: Optional[LoRAConfig],
+        vllm_config: VllmConfig,
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
-        prompt_adapter_config: Optional[PromptAdapterConfig] = None,
         return_hidden_states: bool = False,
-        observability_config: Optional[ObservabilityConfig] = None,
         input_registry: InputRegistry = INPUT_REGISTRY,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
     ):
-        self.model_config = model_config
-        self.parallel_config = parallel_config
-        self.scheduler_config = scheduler_config
-        self.device_config = device_config
-        self.cache_config = cache_config
-        self.lora_config = lora_config
-        self.load_config = load_config
+
+        ModelRunnerBase.__init__(self, vllm_config=vllm_config)
+        model_config = self.model_config
+        cache_config = self.cache_config
         self.is_driver_worker = is_driver_worker
-        self.prompt_adapter_config = prompt_adapter_config
-        self.observability_config = observability_config
-        if self.observability_config is not None:
-            print(f"observability_config is {self.observability_config}")
         self.return_hidden_states = return_hidden_states
 
         self.device = self.device_config.device
@@ -422,15 +405,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
 
     def load_model(self) -> None:
         with DeviceMemoryProfiler() as m:
-            self.model = get_model(
-                model_config=self.model_config,
-                device_config=self.device_config,
-                load_config=self.load_config,
-                lora_config=self.lora_config,
-                parallel_config=self.parallel_config,
-                scheduler_config=self.scheduler_config,
-                cache_config=self.cache_config,
-            )
+            self.model = get_model(vllm_config=self.vllm_config)
 
         self.model_memory_usage = m.consumed_memory
         logger.info("Loading model weights took %.4f GB",
