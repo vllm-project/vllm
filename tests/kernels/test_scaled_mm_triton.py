@@ -28,12 +28,19 @@ def scaled_mm_torch(a: torch.Tensor,
 
     return out
 
+def get_8bit_types():
+    types = [torch.int8]
+    if current_platform.is_rocm():
+        types.append(torch.float8_e4m3fnuz)
+    else:
+        types.append(torch.float8_e4m3fn)
+    return types
 
 @pytest.mark.parametrize("M", [1, 16, 32, 64, 128, 256, 512, 222, 33, 1])
 @pytest.mark.parametrize("N", [2048, 8192, 16384, 256, 1024])
 @pytest.mark.parametrize("K", [128, 496, 1024])
 @pytest.mark.parametrize("out_dtype", [torch.float16, torch.bfloat16])
-@pytest.mark.parametrize("in_dtype", [torch.int8])
+@pytest.mark.parametrize("in_dtype", get_8bit_types())
 @pytest.mark.parametrize("use_scalar_scale_a", [True, False])
 @pytest.mark.parametrize("use_scalar_scale_b", [True, False])
 @pytest.mark.parametrize("use_bias", [True, False])
