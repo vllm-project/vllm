@@ -176,6 +176,31 @@ def run_minicpmv(question: str, modality: str):
     return llm, prompt, stop_token_ids
 
 
+# H2OVL-Mississippi
+def run_h2ovl(question: str, modality: str):
+    assert modality == "image"
+
+    model_name = "h2oai/h2ovl-mississippi-2b"
+
+    llm = LLM(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=8192,
+    )
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name,
+                                              trust_remote_code=True)
+    messages = [{'role': 'user', 'content': f"<image>\n{question}"}]
+    prompt = tokenizer.apply_chat_template(messages,
+                                           tokenize=False,
+                                           add_generation_prompt=True)
+
+    # Stop tokens for H2OVL-Mississippi
+    # https://huggingface.co/h2oai/h2ovl-mississippi-2b
+    stop_token_ids = [tokenizer.eos_token_id]
+    return llm, prompt, stop_token_ids
+
+
 # InternVL
 def run_internvl(question: str, modality: str):
     assert modality == "image"
@@ -363,6 +388,7 @@ model_example_map = {
     "chameleon": run_chameleon,
     "minicpmv": run_minicpmv,
     "blip-2": run_blip2,
+    "h2ovl_chat": run_h2ovl,
     "internvl_chat": run_internvl,
     "NVLM_D": run_nvlm_d,
     "qwen_vl": run_qwen_vl,
