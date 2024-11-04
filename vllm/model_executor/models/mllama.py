@@ -756,19 +756,12 @@ class MllamaTextCrossAttention(nn.Module):
             _, k, v = qkv_enc.split(
                 [self.q_local_size, self.kv_local_size, self.kv_local_size],
                 dim=-1)
-            #print('k_shape ' + str(k.shape))
-            #print('v_shape ' + str(v.shape))
             k = k.view(-1, self.num_local_key_value_heads, self.head_dim)
             v = v.view(-1, self.num_local_key_value_heads, self.head_dim)
-            #print('k_shape1 ' + str(k.shape))
-            #print('v_shape1 ' + str(v.shape))
 
             k = self.k_norm(k)
-            #k = k.view(-1, self.num_local_key_value_heads * self.head_dim)
         q = q.view(-1, self.num_local_heads, self.head_dim)
         q = self.q_norm(q)
-        #q = q.view(-1, self.num_local_heads * self.head_dim)
-        #print("q.shape " + str(q.shape))
 
         if attention_mask is not None:
             output = self._attention_with_mask(q, k, v, kv_cache,
@@ -784,7 +777,6 @@ class MllamaTextCrossAttention(nn.Module):
                                attn_metadata,
                                attn_type=AttentionType.ENCODER_DECODER)
         out, _ = self.o_proj(output)
-        #print('output.shape ' + str(out.shape))
         return out
 
     def _attention_with_mask(
