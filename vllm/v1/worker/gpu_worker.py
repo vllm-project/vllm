@@ -93,6 +93,7 @@ class Worker:
             gc.collect()
             torch.cuda.empty_cache()
             self.init_gpu_memory = torch.cuda.mem_get_info()[0]
+            self.model_runner = GPUModelRunner(self.vllm_config, self.device)
         else:
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")
