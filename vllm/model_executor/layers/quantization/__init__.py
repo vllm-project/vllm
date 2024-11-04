@@ -110,6 +110,7 @@ def get_quantization_config(quantization: str) -> Type[QuantizationConfig]:
     method_to_config: Dict[str, Type[QuantizationConfig]] = {
         "aqlm": AQLMConfig,
         "awq": AWQConfig,
+        "awq_hpu": AWQHPUConfig,
         "deepspeedfp": DeepSpeedFPConfig,
         "tpu_int8": Int8TpuConfig,
         "fp8": Fp8Config,
