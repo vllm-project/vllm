@@ -36,15 +36,15 @@ attrs==24.2.0
     #   referencing
 audioread==3.0.1
     # via librosa
-awscli==1.35.19
+awscli==1.35.20
     # via -r requirements-test.in
 bitsandbytes==0.44.1
     # via -r requirements-test.in
 black==24.10.0
     # via datamodel-code-generator
-boto3==1.35.53
+boto3==1.35.54
     # via tensorizer
-botocore==1.35.53
+botocore==1.35.54
     # via
     #   awscli
     #   boto3
