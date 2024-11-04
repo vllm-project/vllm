@@ -197,7 +197,7 @@ class Worker(LocalOrDistributedWorkerBase):
             num_cpu_blocks = max(num_cpu_blocks, 0)
 
             logger.info(
-                "Using num_gpu_blocks_override=%d, calculated num_cpu_blocks=%d",
+                "Using num_gpu_blocks_override=%d,calculated num_cpu_blocks=%d",
                 num_gpu_blocks_override, num_cpu_blocks)
 
             return num_gpu_blocks_override, num_cpu_blocks
@@ -271,6 +271,7 @@ class Worker(LocalOrDistributedWorkerBase):
             f"Initial free memory {self.init_gpu_memory}, current free memory"
             f" {free_gpu_memory}. This happens when the GPU memory was "
             "not properly cleaned up before initializing the vLLM instance.")
+
     def initialize_cache(self, num_gpu_blocks: int,
                          num_cpu_blocks: int) -> None:
         """Allocate GPU and CPU KV cache with the specified number of blocks.
