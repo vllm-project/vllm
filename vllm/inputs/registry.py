@@ -1,8 +1,8 @@
 import functools
 from collections import UserDict
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Callable, Dict, Mapping, Optional,
-                    Protocol, Tuple, Type)
+from typing import (TYPE_CHECKING, Any, Callable, Dict, Mapping, NamedTuple,
+                    Optional, Protocol, Type)
 
 from torch import nn
 from transformers import PretrainedConfig
@@ -16,7 +16,8 @@ from .data import DecoderOnlyInputs
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
-    from vllm.multimodal import MultiModalDataDict, MultiModalRegistry
+    from vllm.multimodal import (MultiModalDataDict, MultiModalPlaceholderDict,
+                                 MultiModalRegistry)
     from vllm.sequence import SequenceData
 
 logger = init_logger(__name__)
@@ -63,6 +64,14 @@ class InputContext:
 N = TypeVar("N", bound=Type[nn.Module])
 
 
+class DummyData(NamedTuple):
+    """Dummy data used for profiling."""
+
+    seq_data: "SequenceData"
+    multi_modal_data: Optional["MultiModalDataDict"] = None
+    multi_modal_placeholders: Optional["MultiModalPlaceholderDict"] = None
+
+
 class DummyDataFactory(Protocol):
 
     def __call__(
@@ -71,7 +80,7 @@ class DummyDataFactory(Protocol):
         seq_len: int,
         mm_counts: Mapping[str, int],
         **mm_processor_kwargs: Any,
-    ) -> Tuple["SequenceData", Optional["MultiModalDataDict"]]:
+    ) -> DummyData:
         """
         Create dummy data to be inputted into the model.
 
@@ -123,7 +132,7 @@ class InputRegistry:
         ctx: InputContext,
         seq_len: int,
         mm_counts: Mapping[str, int],
-    ) -> Tuple["SequenceData", Optional["MultiModalDataDict"]]:
+    ) -> DummyData:
         """
         The default dummy data factory represents the longest possible text
         that can be inputted to the model.
@@ -134,10 +143,7 @@ class InputRegistry:
         # Avoid circular import
         from vllm.sequence import SequenceData
 
-        dummy_seq_data = SequenceData.from_prompt_token_counts((0, seq_len))
-        dummy_multi_modal_data = None
-
-        return dummy_seq_data, dummy_multi_modal_data
+        return DummyData(SequenceData.from_prompt_token_counts((0, seq_len)))
 
     def register_dummy_data(self, factory: DummyDataFactory):
         """
@@ -195,7 +201,7 @@ class InputRegistry:
         seq_len: int,
         mm_registry: "MultiModalRegistry",
         is_encoder_data: bool = False,
-    ) -> Tuple["SequenceData", Optional["MultiModalDataDict"]]:
+    ) -> DummyData:
         """
         Create dummy data for profiling the memory usage of a model.
 
@@ -220,12 +226,12 @@ class InputRegistry:
         mm_processor_kwargs = get_allowed_kwarg_only_overrides(
             dummy_factory, overrides=model_config.mm_processor_kwargs)
 
-        seq_data, mm_data = dummy_factory(InputContext(model_config), seq_len,
-                                          _MultiModalCounts(mm_counts),
-                                          **mm_processor_kwargs)
+        dummy_data = dummy_factory(InputContext(model_config), seq_len,
+                                   _MultiModalCounts(mm_counts),
+                                   **mm_processor_kwargs)
 
         # Having more tokens is over-conservative but otherwise fine
-        num_tokens = seq_data.prompt_token_ids
+        num_tokens = dummy_data.seq_data.prompt_token_ids
         if len(num_tokens) < seq_len:
             if is_encoder_data:
                 print_warning_once(
@@ -235,15 +241,15 @@ class InputRegistry:
                 raise AssertionError(
                     f"Expected at least {seq_len} dummy tokens for profiling, "
                     f"but found {len(num_tokens)} tokens instead.")
-        if mm_data is not None:
-            for k, v in mm_data.items():
+        if dummy_data.multi_modal_data is not None:
+            for k, v in dummy_data.multi_modal_data.items():
                 num_items = len(v) if isinstance(v, list) else 1
                 num_expected = mm_counts[k]
                 assert num_items >= num_expected, (
                     f"Expected at least {num_expected} dummy '{k}' instances "
                     f"for profiling, but found {num_items} instances instead.")
 
-        return seq_data, mm_data
+        return dummy_data
 
     def _default_input_processor(
         self,
