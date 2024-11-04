@@ -1,11 +1,12 @@
 import base64
 import mimetypes
-from tempfile import NamedTemporaryFile
+import os
+from tempfile import NamedTemporaryFile, TemporaryDirectory
 from typing import Dict, Tuple
 
 import numpy as np
 import pytest
-from PIL import Image
+from PIL import Image, ImageChops
 from transformers import AutoConfig, AutoTokenizer
 
 from vllm.multimodal.utils import (async_fetch_image, fetch_image,
@@ -82,6 +83,40 @@ async def test_fetch_image_base64(url_images: Dict[str, Image.Image],
 
         data_image_async = await async_fetch_image(data_url)
         assert _image_equals(data_image_sync, data_image_async)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
+async def test_fetch_image_local_files(image_url: str):
+    with TemporaryDirectory() as temp_dir:
+        origin_image = fetch_image(image_url)
+        origin_image.save(os.path.join(temp_dir, os.path.basename(image_url)),
+                          quality=100,
+                          icc_profile=origin_image.info.get('icc_profile'))
+
+        image_async = await async_fetch_image(
+            f"file://{temp_dir}/{os.path.basename(image_url)}",
+            allowed_local_media_path=temp_dir)
+
+        image_sync = fetch_image(
+            f"file://{temp_dir}/{os.path.basename(image_url)}",
+            allowed_local_media_path=temp_dir)
+        # Check that the images are equal
+        assert not ImageChops.difference(image_sync, image_async).getbbox()
+
+        with pytest.raises(ValueError):
+            await async_fetch_image(
+                f"file://{temp_dir}/../{os.path.basename(image_url)}",
+                allowed_local_media_path=temp_dir)
+        with pytest.raises(ValueError):
+            await async_fetch_image(
+                f"file://{temp_dir}/../{os.path.basename(image_url)}")
+
+        with pytest.raises(ValueError):
+            fetch_image(f"file://{temp_dir}/../{os.path.basename(image_url)}",
+                        allowed_local_media_path=temp_dir)
+        with pytest.raises(ValueError):
+            fetch_image(f"file://{temp_dir}/../{os.path.basename(image_url)}")
 
 
 @pytest.mark.parametrize("model", ["llava-hf/llava-v1.6-mistral-7b-hf"])
