@@ -440,6 +440,12 @@ Text Generation
     - :code:`THUDM/glm-4v-9b` etc.
     - 
     - ✅︎
+  * - :code:`H2OVLChatModel`
+    - H2OVL
+    - T + I\ :sup:`E+`
+    - :code:`h2oai/h2ovl-mississippi-800m`, :code:`h2oai/h2ovl-mississippi-2b`, etc.
+    - 
+    - ✅︎
   * - :code:`InternVLChatModel`
     - InternVL2
     - T + I\ :sup:`E+`
