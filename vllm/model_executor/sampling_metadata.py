@@ -518,26 +518,6 @@ class SamplingTensors:
     ) -> "SamplingTensors":
         # Note that the performance will be very bad without
         # pinned memory.
-        """
-        Create a SamplingTensors object from lists of values.
-
-        Args:
-            temperatures: List of temperatures to use for sampling.
-            top_ps: List of top-p values to use for sampling.
-            top_ks: List of top-k values to use for sampling.
-            min_ps: List of min-p values to use for sampling.
-            presence_penalties: List of presence penalties to use for sampling.
-            frequency_penalties: List of frequency penalties to use for sampling.
-            repetition_penalties: List of repetition penalties to use for sampling.
-            prompt_tokens: List of arrays of token ids for the prompts.
-            output_tokens: List of arrays of token ids for the outputs.
-            vocab_size: The size of the vocabulary.
-            device: The device to store the tensors on.
-            dtype: The type of the tensors.
-
-        Returns:
-            A SamplingTensors object.
-        """
         pin_memory = is_pin_memory_available()
 
         do_penalties = prompt_tokens or output_tokens
