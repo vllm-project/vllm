@@ -1,8 +1,11 @@
 from typing import List
 
+import pytest
+
 import vllm
 from vllm.assets.image import ImageAsset
 from vllm.lora.request import LoRARequest
+from vllm.platforms import current_platform
 
 MODEL_PATH = "openbmb/MiniCPM-Llama3-V-2_5"
 
@@ -53,6 +56,9 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> List[str]:
     return generated_texts
 
 
+@pytest.mark.xfail(
+    current_platform.is_rocm(),
+    reason="MiniCPM-V dependency xformers incompatible with ROCm")
 def test_minicpmv_lora(minicpmv_lora_files):
     llm = vllm.LLM(
         MODEL_PATH,
@@ -63,7 +69,6 @@ def test_minicpmv_lora(minicpmv_lora_files):
         trust_remote_code=True,
         gpu_memory_utilization=0.97  # This model is pretty big for CI gpus
     )
-
     output1 = do_sample(llm, minicpmv_lora_files, lora_id=1)
     for i in range(len(EXPECTED_OUTPUT)):
         assert EXPECTED_OUTPUT[i].startswith(output1[i])
