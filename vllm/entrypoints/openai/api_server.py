@@ -196,7 +196,8 @@ async def build_async_engine_client_from_engine_args(
                     await mq_engine_client.setup()
                     break
                 except TimeoutError:
-                    if (not engine_process.is_alive() or not engine_alive.value):
+                    if (not engine_process.is_alive()
+                            or not engine_alive.value):
                         raise RuntimeError(
                             "Engine process failed to start. See stack "
                             "trace for the root cause.") from None
