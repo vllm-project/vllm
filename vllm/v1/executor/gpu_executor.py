@@ -1,11 +1,12 @@
 import os
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Callable, Type, Dict, Any
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils import get_distributed_init_method, get_ip, get_open_port
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.gpu_worker import Worker
+from vllm.worker.worker_base import WorkerBase
 
 logger = init_logger(__name__)
 
@@ -75,3 +76,25 @@ class GPUExecutor:
         # GPUExecutor will always be healthy as long as
         # it's running.
         return
+
+    def _get_worker_module_and_class(
+            self) -> Tuple[str, str, Optional[Callable[[], Type[WorkerBase]]]]:
+        worker_module_name = "vllm.v1.worker.gpu_worker"
+        worker_class_name = "Worker"
+        return worker_module_name, worker_class_name
+
+    def _get_worker_kwargs(
+            self,
+            local_rank: int = 0,
+            rank: int = 0,
+            distributed_init_method: Optional[str] = None) -> Dict[str, Any]:
+        """Return worker init args for a given rank."""
+        if distributed_init_method is None:
+            distributed_init_method = get_distributed_init_method(
+                get_ip(), get_open_port())
+        return dict(
+            vllm_config=self.vllm_config,
+            local_rank=local_rank,
+            rank=rank,
+            distributed_init_method=distributed_init_method,
+        )

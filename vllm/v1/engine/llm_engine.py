@@ -479,7 +479,13 @@ class LLMEngine:
 
     @classmethod
     def _get_executor_cls(cls, engine_config: VllmConfig):
-        return GPUExecutor
+        if engine_config.parallel_config.distributed_executor_backend == "ray":
+            from vllm.v1.executor.ray_gpu_executor import RayGPUExecutor
+            from vllm.v1.executor.ray_utils import initialize_ray_cluster
+            initialize_ray_cluster(engine_config.parallel_config)
+            return RayGPUExecutor
+        else:
+            return GPUExecutor
 
     def is_tracing_enabled(self) -> bool:
         return False
