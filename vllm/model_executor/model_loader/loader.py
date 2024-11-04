@@ -787,7 +787,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         with open(config_file_path, "r") as f:
             config = json.load(f)
             self.target_modules = config["target_modules"]
-        self.wo_sharded_weights_modules: List[str] = []
+        self.unsharded_weights_modules: List[str] = []
 
     def _get_config_file(self, qlora_adapter: str) -> str:
         is_local = os.path.isdir(qlora_adapter)
@@ -1010,7 +1010,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 # Without sharding
                 if any(
                         weight_name.startswith(module)
-                        for module in self.wo_sharded_weights_modules):
+                        for module in self.unsharded_weights_modules):
                     weight_sub_tensor = weight_tensor
                 # Shard by column
                 elif any(module in weight_name
@@ -1080,7 +1080,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         # static variable in the model implementation.
         # TODO: Can we reduce the static variables needed for BNB based on
         #  model information?
-        self.wo_sharded_weights_modules = [
+        self.unsharded_weights_modules = [
             name for name, module in model.named_modules()
             if isinstance(module, (ReplicatedLinear, ))
         ]
