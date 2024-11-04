@@ -18,7 +18,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.loader import build_model
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models import ModelRegistry
-from vllm.multimodal.base import NestedTensors
+from vllm.multimodal.base import MultiModalPlaceholderMap, NestedTensors
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils import is_pin_memory_available
@@ -242,6 +242,7 @@ def init_vllm_registered_model(
     lora_config: Optional[LoRAConfig] = None,
     multimodal_config: Optional[MultiModalConfig] = None,
     scheduler_config: Optional[SchedulerConfig] = None,
+    prefix: str = "",
 ) -> nn.Module:
     """
     Helper function to initialize an inner model registered to vLLM,
@@ -251,12 +252,14 @@ def init_vllm_registered_model(
 
     return build_model(
         model_class,
+        None,
         hf_config,
         cache_config,
         quant_config,
         lora_config=lora_config,
         multimodal_config=multimodal_config,
         scheduler_config=scheduler_config,
+        prefix=prefix,
     )
 
 
@@ -322,6 +325,22 @@ def _embedding_count_expression(embeddings: NestedTensors) -> str:
 
     return " + ".join(
         _embedding_count_expression(inner) for inner in embeddings)
+
+
+def merge_multimodal_embeddings_from_map(
+        inputs_embeds: torch.Tensor, multimodal_embeddings: NestedTensors,
+        placeholder_map: MultiModalPlaceholderMap.IndexMap) -> torch.Tensor:
+    """
+    Merge ``multimodal_embeddings`` into ``inputs_embeds`` using the provided 
+    placeholder map .
+
+    Note:
+        This updates ``inputs_embeds`` in place.
+    """
+    flattened_embeddings = _flatten_embeddings(multimodal_embeddings)
+    inputs_embeds[placeholder_map.dest] = flattened_embeddings[
+        placeholder_map.src]
+    return inputs_embeds
 
 
 def _merge_multimodal_embeddings(
@@ -610,3 +629,16 @@ def get_vit_attn_backend() -> _Backend:
         else:
             selected_backend = _Backend.XFORMERS
     return selected_backend
+
+
+def maybe_prefix(prefix: str, name: str) -> str:
+    """Add a prefix to a name if the prefix is non-empty.
+
+    Args:
+        prefix: The prefix to add. If empty, no prefix will be added.
+        name: The name to potentially prefix.
+
+    Returns:
+        The string "prefix.name" if prefix was non-empty, otherwise just "name".
+    """
+    return name if not prefix else f"{prefix}.{name}"

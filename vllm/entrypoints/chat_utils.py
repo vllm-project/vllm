@@ -156,6 +156,10 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
 
         self._items: List[_T] = []
 
+    @property
+    def model_config(self) -> ModelConfig:
+        return self._model_config
+
     @staticmethod
     @lru_cache(maxsize=None)
     def _cached_token_str(tokenizer: AnyTokenizer, token_index: int) -> str:
@@ -183,7 +187,8 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
             if model_type.startswith("llava"):
                 return self._cached_token_str(self._tokenizer,
                                               hf_config.image_token_index)
-            if model_type in ("chameleon", "internvl_chat", "NVLM_D"):
+            if model_type in ("chameleon", "internvl_chat", "NVLM_D",
+                              "h2ovl_chat"):
                 return "<image>"
             if model_type == "mllama":
                 return "<|image|>"
@@ -491,10 +496,13 @@ def _parse_chat_message_content_parts(
     content: List[Union[str, Dict[str, str]]] = []
 
     mm_parser = mm_tracker.create_parser()
-    wrap_dicts = \
-        mm_tracker._model_config.hf_config.model_type in \
-            MODEL_KEEP_MULTI_MODAL_CONTENT or \
-        (chat_template_text_format == "openai")
+    model_config = mm_tracker.model_config
+
+    wrap_dicts = (chat_template_text_format == "openai"
+                  or (model_config.task == "embedding"
+                      and model_config.is_multimodal_model)
+                  or (model_config.hf_config.model_type
+                      in MODEL_KEEP_MULTI_MODAL_CONTENT))
 
     for part in parts:
         parse_res = _parse_chat_message_content_part(

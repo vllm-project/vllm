@@ -10,14 +10,12 @@ from typing import Sequence as GenericSequence
 from typing import Set, Type, Union, cast, overload
 
 import torch
-from typing_extensions import TypeVar
+from typing_extensions import TypeIs, TypeVar
 
 import vllm.envs as envs
-from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
-                         EngineConfig, LoadConfig, LoRAConfig, ModelConfig,
-                         ObservabilityConfig, ParallelConfig,
-                         PromptAdapterConfig, SchedulerConfig,
-                         SpeculativeConfig)
+from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
+                         ObservabilityConfig, ParallelConfig, SchedulerConfig,
+                         VllmConfig)
 from vllm.core.scheduler import (ScheduledSequenceGroup, Scheduler,
                                  SchedulerOutputs)
 from vllm.engine.arg_utils import EngineArgs
@@ -32,7 +30,8 @@ from vllm.executor.executor_base import ExecutorBase
 from vllm.executor.gpu_executor import GPUExecutor
 from vllm.executor.ray_utils import initialize_ray_cluster
 from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs,
-                         EncoderDecoderInputs, InputRegistry, PromptType)
+                         EncoderDecoderInputs, InputRegistry, PromptType,
+                         TokensPrompt)
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.logits_process import get_bad_words_logits_processors
@@ -221,17 +220,7 @@ class LLMEngine:
 
     def __init__(
         self,
-        model_config: ModelConfig,
-        cache_config: CacheConfig,
-        parallel_config: ParallelConfig,
-        scheduler_config: SchedulerConfig,
-        device_config: DeviceConfig,
-        load_config: LoadConfig,
-        lora_config: Optional[LoRAConfig],
-        speculative_config: Optional[SpeculativeConfig],
-        decoding_config: Optional[DecodingConfig],
-        observability_config: Optional[ObservabilityConfig],
-        prompt_adapter_config: Optional[PromptAdapterConfig],
+        vllm_config: VllmConfig,
         executor_class: Type[ExecutorBase],
         log_stats: bool,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
@@ -239,6 +228,22 @@ class LLMEngine:
         input_registry: InputRegistry = INPUT_REGISTRY,
         use_cached_outputs: bool = False,
     ) -> None:
+
+        # TODO: remove the local variables and use self.* throughout the class.
+        model_config = self.model_config = vllm_config.model_config
+        cache_config = self.cache_config = vllm_config.cache_config
+        lora_config = self.lora_config = vllm_config.lora_config
+        parallel_config = self.parallel_config = vllm_config.parallel_config
+        scheduler_config = self.scheduler_config = vllm_config.scheduler_config
+        device_config = self.device_config = vllm_config.device_config
+        speculative_config = self.speculative_config = vllm_config.speculative_config  # noqa
+        load_config = self.load_config = vllm_config.load_config
+        decoding_config = self.decoding_config = vllm_config.decoding_config or DecodingConfig(  # noqa
+        )
+        prompt_adapter_config = self.prompt_adapter_config = vllm_config.prompt_adapter_config  # noqa
+        observability_config = self.observability_config = vllm_config.observability_config or ObservabilityConfig(  # noqa
+        )
+
         logger.info(
             "Initializing an LLM engine (v%s) with config: "
             "model=%r, speculative_config=%r, tokenizer=%r, "
@@ -256,7 +261,8 @@ class LLMEngine:
             "num_scheduler_steps=%d, chunked_prefill_enabled=%s "
             "multi_step_stream_outputs=%s, enable_prefix_caching=%s, "
             "use_async_output_proc=%s, use_cached_outputs=%s, "
-            "chat_template_text_format=%s, mm_processor_kwargs=%s)",
+            "chat_template_text_format=%s, mm_processor_kwargs=%s, "
+            "pooler_config=%r)",
             VLLM_VERSION,
             model_config.model,
             speculative_config,
@@ -293,6 +299,7 @@ class LLMEngine:
             use_cached_outputs,
             model_config.chat_template_text_format,
             model_config.mm_processor_kwargs,
+            model_config.pooler_config,
         )
         # TODO(woosuk): Print more configs in debug mode.
         self.model_config = model_config
@@ -337,18 +344,7 @@ class LLMEngine:
         self.input_processor = input_registry.create_input_processor(
             model_config)
 
-        self.model_executor = executor_class(
-            model_config=model_config,
-            cache_config=cache_config,
-            parallel_config=parallel_config,
-            scheduler_config=scheduler_config,
-            device_config=device_config,
-            lora_config=lora_config,
-            speculative_config=speculative_config,
-            load_config=load_config,
-            prompt_adapter_config=prompt_adapter_config,
-            observability_config=self.observability_config,
-        )
+        self.model_executor = executor_class(vllm_config=vllm_config, )
 
         if self.model_config.task != "embedding":
             self._initialize_kv_caches()
@@ -505,7 +501,7 @@ class LLMEngine:
 
     @classmethod
     def _get_executor_cls(cls,
-                          engine_config: EngineConfig) -> Type[ExecutorBase]:
+                          engine_config: VllmConfig) -> Type[ExecutorBase]:
         distributed_executor_backend = (
             engine_config.parallel_config.distributed_executor_backend)
         # Initialize the cluster and specify the executor class.
@@ -579,7 +575,7 @@ class LLMEngine:
         executor_class = cls._get_executor_cls(engine_config)
         # Create the LLM engine.
         engine = cls(
-            **engine_config.to_dict(),
+            vllm_config=engine_config,
             executor_class=executor_class,
             log_stats=not engine_args.disable_log_stats,
             usage_context=usage_context,
@@ -667,7 +663,7 @@ class LLMEngine:
             )
             return None
 
-        self._validate_model_inputs(processed_inputs)
+        self._validate_model_inputs(processed_inputs, lora_request)
         # Create the sequences.
         block_size = self.cache_config.block_size
         seq_id = next(self.seq_counter)
@@ -826,8 +822,20 @@ class LLMEngine:
             raise ValueError(f"Got priority {priority} but "
                              "Priority scheduling is not enabled.")
 
+        if isinstance(params, SamplingParams) \
+            and (params.guided_decoding or params.logits_processors) \
+            and self.scheduler_config.num_scheduler_steps > 1:
+            raise ValueError(
+                "Guided decoding and logits processors are not supported "
+                "in multi-step decoding")
+
         if arrival_time is None:
             arrival_time = time.time()
+
+        if self.tokenizer is not None:
+            self._validate_token_prompt(
+                prompt,
+                tokenizer=self.get_tokenizer(lora_request=lora_request))
 
         preprocessed_inputs = self.input_preprocessor.preprocess(
             prompt,
@@ -854,6 +862,31 @@ class LLMEngine:
             trace_headers=trace_headers,
             priority=priority,
         )
+
+    def _validate_token_prompt(self, prompt: PromptType,
+                               tokenizer: AnyTokenizer):
+        # Guard against out-of-vocab tokens.
+        # For some tokenizers, tokenizer.decode will happily return empty text
+        # for token ids that are out of vocab, and we don't detect token ids
+        # that are greater than the max token id before running the model.
+        # However, these token ids will later crash a cuda kernel at runtime
+        # with an index out of bounds error. This will crash the entire engine.
+        # This needs to happen before multimodal input pre-processing, which
+        # may add dummy <image> tokens that aren't part of the tokenizer's
+        # vocabulary.
+        if self._is_token_prompt(prompt):
+            prompt_ids = prompt["prompt_token_ids"]
+            if len(prompt_ids) == 0:
+                # Empty prompt check is handled later
+                return
+            max_input_id = max(prompt_ids)
+            if max_input_id > tokenizer.max_token_id:
+                raise ValueError(
+                    "Token id {} is out of vocabulary".format(max_input_id))
+
+    @staticmethod
+    def _is_token_prompt(prompt: PromptType) -> TypeIs[TokensPrompt]:
+        return isinstance(prompt, dict) and "prompt_token_ids" in prompt
 
     def _create_sequence_group_with_sampling(
         self,
@@ -1645,6 +1678,9 @@ class LLMEngine:
         # Request stats
         #   Latency
         time_e2e_requests: List[float] = []
+        time_in_queue_requests: List[float] = []
+        model_forward_time_requests: List[float] = []
+        model_execute_time_requests: List[float] = []
         #   Metadata
         num_prompt_tokens_requests: List[int] = []
         num_generation_tokens_requests: List[int] = []
@@ -1738,6 +1774,15 @@ class LLMEngine:
                     # Latency timings
                     time_e2e_requests.append(now -
                                              seq_group.metrics.arrival_time)
+                    if seq_group.metrics.time_in_queue is not None:
+                        time_in_queue_requests.append(
+                            seq_group.metrics.time_in_queue)
+                    if seq_group.metrics.model_forward_time is not None:
+                        model_forward_time_requests.append(
+                            seq_group.metrics.model_forward_time)
+                    if seq_group.metrics.model_execute_time is not None:
+                        model_execute_time_requests.append(
+                            seq_group.metrics.model_execute_time * 1000)
                     # Metadata
                     num_prompt_tokens_requests.append(
                         len(seq_group.prompt_token_ids))
@@ -1795,6 +1840,9 @@ class LLMEngine:
             # Request stats
             #   Latency
             time_e2e_requests=time_e2e_requests,
+            time_in_queue_requests=time_in_queue_requests,
+            model_forward_time_requests=model_forward_time_requests,
+            model_execute_time_requests=model_execute_time_requests,
             #   Metadata
             num_prompt_tokens_requests=num_prompt_tokens_requests,
             num_generation_tokens_requests=num_generation_tokens_requests,
@@ -1927,7 +1975,8 @@ class LLMEngine:
         return self.input_preprocessor.is_encoder_decoder_model()
 
     def _validate_model_inputs(self, inputs: Union[DecoderOnlyInputs,
-                                                   EncoderDecoderInputs]):
+                                                   EncoderDecoderInputs],
+                               lora_request: Optional[LoRARequest]):
         if self.model_config.is_multimodal_model:
             # For encoder-decoder multimodal models, the max_prompt_len
             # restricts the decoder prompt length
