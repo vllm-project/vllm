@@ -31,20 +31,20 @@ Uses a list instead of a tensor if the dimensions of each element do not match.
 BatchedTensorInputs: TypeAlias = Dict[str, NestedTensors]
 """
 A dictionary containing nested tensors which have been batched via
-:meth:`MultiModalInputs.batch`.
+:meth:`MultiModalKwargs.batch`.
 """
 
 if sys.version_info < (3, 9):
     # UserDict cannot be subscripted
-    class _MultiModalInputsBase(UserDict):
+    class _MultiModalKwargsBase(UserDict):
         pass
 else:
 
-    class _MultiModalInputsBase(UserDict[str, NestedTensors]):
+    class _MultiModalKwargsBase(UserDict[str, NestedTensors]):
         pass
 
 
-class MultiModalInputs(_MultiModalInputsBase):
+class MultiModalKwargs(_MultiModalKwargsBase):
     """
     A dictionary that represents the keyword arguments to
     :meth:`~torch.nn.Module.forward`.
@@ -64,7 +64,7 @@ class MultiModalInputs(_MultiModalInputsBase):
         if isinstance(nested_tensors, (int, float)):
             return torch.tensor(nested_tensors)
 
-        stacked = [MultiModalInputs._try_stack(t) for t in nested_tensors]
+        stacked = [MultiModalKwargs._try_stack(t) for t in nested_tensors]
         if not is_list_of(stacked, torch.Tensor, check="all"):
             # Only tensors (not lists) can be stacked.
             return stacked
@@ -77,7 +77,7 @@ class MultiModalInputs(_MultiModalInputsBase):
         return torch.stack(tensors_)
 
     @staticmethod
-    def batch(inputs_list: List["MultiModalInputs"]) -> BatchedTensorInputs:
+    def batch(inputs_list: List["MultiModalKwargs"]) -> BatchedTensorInputs:
         """
         Batch multiple inputs together into a dictionary.
 
@@ -101,7 +101,7 @@ class MultiModalInputs(_MultiModalInputsBase):
                 item_lists[k].append(v)
 
         return {
-            k: MultiModalInputs._try_stack(item_list)
+            k: MultiModalKwargs._try_stack(item_list)
             for k, item_list in item_lists.items()
         }
 
@@ -180,7 +180,7 @@ A dictionary containing placeholder ranges.
 """
 
 MultiModalInputMapper = Callable[[InputContext, MultiModalData[object]],
-                                 MultiModalInputs]
+                                 MultiModalKwargs]
 """
 Return a dictionary to be passed as keyword arguments to
 :meth:`~torch.nn.Module.forward`. This is similar in concept to tokenizers
@@ -229,7 +229,7 @@ class MultiModalPlugin(ABC):
         ctx: InputContext,
         data: MultiModalData[object],
         **mm_processor_kwargs,
-    ) -> MultiModalInputs:
+    ) -> MultiModalKwargs:
         """
         Return a dictionary to be passed as keyword arguments to
         :meth:`~torch.nn.Module.forward`. This is similar in concept to
@@ -273,7 +273,7 @@ class MultiModalPlugin(ABC):
 
     def map_input(self, model_config: "ModelConfig",
                   data: MultiModalData[object],
-                  mm_processor_kwargs: Dict[str, Any]) -> MultiModalInputs:
+                  mm_processor_kwargs: Dict[str, Any]) -> MultiModalKwargs:
         """
         Transform the data into a dictionary of model inputs using the
         input mapper registered for that model.

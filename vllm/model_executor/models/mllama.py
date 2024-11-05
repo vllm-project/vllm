@@ -1163,7 +1163,7 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
 
     def _parse_and_validate_image_input(self, **kwargs: object):
         # tensor with the same shape will be batched together by
-        # MultiModalInputs.batch, so pixel_values here can be:
+        # MultiModalKwargs.batch, so pixel_values here can be:
         #   - List[List[torch.Tensor]]:
         #       with shape (num_tiles, 3, image_res, image_res)
         #   - List[torch.Tensor]:

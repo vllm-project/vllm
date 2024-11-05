@@ -24,7 +24,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.model_loader.loader import DefaultModelLoader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalInputs,
+from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalKwargs,
                              NestedTensors)
 from vllm.multimodal.utils import (cached_get_tokenizer,
                                    consecutive_placeholder_ranges,
@@ -116,11 +116,11 @@ def input_mapper_for_ultravox(ctx: InputContext, data: object):
         data = [data]
 
     if len(data) == 0:
-        return MultiModalInputs()
+        return MultiModalKwargs()
 
     # If the audio inputs are embeddings, no need for preprocessing
     if is_list_of(data, torch.Tensor, check="all"):
-        return MultiModalInputs({"audio_embeds": data})
+        return MultiModalKwargs({"audio_embeds": data})
 
     audio_features = []
     for audio_input in data:
@@ -154,7 +154,7 @@ def input_mapper_for_ultravox(ctx: InputContext, data: object):
         # Remove the batch dimension because we're wrapping it in a list.
         audio_features.append(single_audio_features.squeeze(0))
 
-    return MultiModalInputs({"audio_features": audio_features})
+    return MultiModalKwargs({"audio_features": audio_features})
 
 
 def input_processor_for_ultravox(ctx: InputContext, inputs: DecoderOnlyInputs):
