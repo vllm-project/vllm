@@ -182,7 +182,7 @@ class EngineCoreProc(EngineCore):
         Thread(target=self.process_input_socket, daemon=True).start()
         Thread(target=self.process_output_socket, daemon=True).start()
 
-        # Send Readiness signal to LLMEngine.
+        # Send Readiness signal to EngineClient.
         ready_socket = None
         try:
             ready_socket = self.ctx.socket(zmq.constants.PUSH)
@@ -204,7 +204,7 @@ class EngineCoreProc(EngineCore):
             socket = sync_ctx.socket(zmq.constants.PULL)
             socket.connect(ready_path)
 
-            # Poll ready socket socket until
+            # Wait for EngineCore to send EngineCoreProc.READY_STR.
             while socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
                 logger.debug("Waiting for EngineCoreProc to startup.")
 

@@ -170,7 +170,6 @@ def test_stop_string(include_stop_str_in_output: bool):
         for request_output in request_outputs:
             if request_output.finished:
                 assert request_output.outputs[0].finish_reason == "stop"
-                print(f"{request_output.outputs[0].stop_reason=}")
 
             request_id = request_output.request_id
             new_text = request_output.outputs[0].text

@@ -18,7 +18,8 @@ PROMPT = "Hello my name is Robert and I love quanitzation kernels"
 PROMPT_TOKENS = TOKENIZER(PROMPT).input_ids
 
 
-@pytest.fixture(scope="module")
+# NOTE: this is not working with scope="module."
+@pytest.fixture(scope="function")
 def engine_core():
 
     # Set V1 enviornment variable.
@@ -53,6 +54,8 @@ def make_request() -> EngineCoreRequest:
 
 
 def test_request_lifecycle(engine_core):
+    """Test request lifecycle."""
+
     engine_core.add_request(make_request())
     assert len(engine_core.scheduler.waiting) == 1
     assert len(engine_core.scheduler.running) == 0
@@ -72,5 +75,62 @@ def test_request_lifecycle(engine_core):
     while len(engine_core.step()) > 0:
         pass
 
+    assert len(engine_core.scheduler.waiting) == 0
+    assert len(engine_core.scheduler.running) == 0
+
+
+def test_abort_request(engine_core):
+    """Test abort cycle."""
+
+    # Basic abort.
+    req = make_request()
+    request_id = req.request_id
+
+    engine_core.add_request(req)
+    assert len(engine_core.scheduler.waiting) == 1
+    assert len(engine_core.scheduler.running) == 0
+
+    _ = engine_core.step()
+    assert len(engine_core.scheduler.waiting) == 0
+    assert len(engine_core.scheduler.running) == 1
+
+    engine_core.abort_requests([request_id])
+    assert len(engine_core.scheduler.waiting) == 0
+    assert len(engine_core.scheduler.running) == 0
+
+    # Add, step, abort 1 of the 3.
+    req0 = make_request()
+    req1 = make_request()
+    req2 = make_request()
+
+    engine_core.add_request(req0)
+    engine_core.add_request(req1)
+    assert len(engine_core.scheduler.waiting) == 2
+    assert len(engine_core.scheduler.running) == 0
+
+    _ = engine_core.step()
+    assert len(engine_core.scheduler.waiting) == 0
+    assert len(engine_core.scheduler.running) == 2
+
+    engine_core.add_request(req2)
+    assert len(engine_core.scheduler.waiting) == 1
+    assert len(engine_core.scheduler.running) == 2
+
+    _ = engine_core.step()
+    assert len(engine_core.scheduler.waiting) == 0
+    assert len(engine_core.scheduler.running) == 3
+
+    # Abort just one.
+    engine_core.abort_requests([req1.request_id])
+    assert len(engine_core.scheduler.waiting) == 0
+    assert len(engine_core.scheduler.running) == 2
+
+    _ = engine_core.step()
+    assert len(engine_core.scheduler.waiting) == 0
+    assert len(engine_core.scheduler.running) == 2
+
+    # Abort the other requests at the same time.
+    engine_core.abort_requests([req2.request_id,
+                                req0.request_id])
     assert len(engine_core.scheduler.waiting) == 0
     assert len(engine_core.scheduler.running) == 0
