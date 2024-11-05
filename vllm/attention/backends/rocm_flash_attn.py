@@ -1,10 +1,11 @@
 """Attention layer ROCm GPUs."""
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, Type
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type
 
 import torch
 
 import vllm.envs as envs
+from vllm import _custom_ops as ops
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
 from vllm.attention.backends.utils import (CommonAttentionState,
@@ -12,15 +13,25 @@ from vllm.attention.backends.utils import (CommonAttentionState,
 from vllm.attention.ops.paged_attn import (PagedAttention,
                                            PagedAttentionMetadata)
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
+
+if TYPE_CHECKING:
+    from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
 
 logger = init_logger(__name__)
+
+_PARTITION_SIZE_ROCM = 512
+_GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
+_ON_NAVI = "gfx1" in _GPU_ARCH
+_ON_MI250_MI300 = any(arch in _GPU_ARCH
+                      for arch in ["gfx90a", "gfx940", "gfx941", "gfx942"])
 
 
 class ROCmFlashAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "rocm-flash-attn"
+        return "ROCM_FLASH"
 
     @staticmethod
     def get_impl_cls() -> Type["ROCmFlashAttentionImpl"]:
@@ -108,9 +119,14 @@ class ROCmFlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
     # Cuda-graph is currently enabled for decoding only.
     # TODO(woosuk): Move `use_cuda_graph` out since it's unrelated to attention.
     use_cuda_graph: bool
+
     # (batch_size,) A tensor of context lengths (tokens that are computed
     # so far).
     context_lens_tensor: Optional[torch.Tensor]
+
+    # Max number of query tokens among request in the batch.
+    max_decode_query_len: Optional[int] = None
+
     _cached_prefill_metadata: Optional["ROCmFlashAttentionMetadata"] = None
     _cached_decode_metadata: Optional["ROCmFlashAttentionMetadata"] = None
 
@@ -134,6 +150,8 @@ class ROCmFlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
             num_prefill_tokens=self.num_prefill_tokens,
             num_decode_tokens=0,
             slot_mapping=self.slot_mapping[:self.num_prefill_tokens],
+            multi_modal_placeholder_index_maps=self.
+            multi_modal_placeholder_index_maps,
             seq_lens=self.seq_lens[:self.num_prefills],
             seq_lens_tensor=self.seq_lens_tensor[:self.num_prefills],
             max_query_len=self.max_query_len,
@@ -162,6 +180,7 @@ class ROCmFlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
             num_prefill_tokens=0,
             num_decode_tokens=self.num_decode_tokens,
             slot_mapping=self.slot_mapping[self.num_prefill_tokens:],
+            multi_modal_placeholder_index_maps=None,
             seq_lens=None,
             seq_lens_tensor=self.seq_lens_tensor[self.num_prefills:],
             max_query_len=None,
@@ -174,6 +193,69 @@ class ROCmFlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
             use_cuda_graph=self.use_cuda_graph,
         )
         return self._cached_decode_metadata
+
+    def advance_step(self,
+                     model_input: "ModelInputForGPUWithSamplingMetadata",
+                     sampled_token_ids: Optional[torch.Tensor],
+                     block_size: int,
+                     num_seqs: int,
+                     num_queries: int,
+                     turn_prefills_into_decodes: bool = False):
+        """
+        Update metadata in-place to advance one decode step.
+        """
+
+        assert not turn_prefills_into_decodes, \
+            ("Chunked prefill is not supported with rocm_flash_attn yet."
+             "turn_prefills_into_decodes is a Multi-Step + Chunked-Prefill "
+             "specific parameter.")
+
+        # When using cudagraph, the num_seqs is padded to the next captured
+        # batch sized, but num_queries tracks the actual number of requests in
+        # the batch. For --enforce-eager mode, num_seqs == num_queries
+        if num_seqs != num_queries:
+            assert num_seqs > num_queries
+            assert self.use_cuda_graph
+
+        assert self.num_prefills == 0
+        assert self.num_prefill_tokens == 0
+        assert self.num_decode_tokens == num_seqs
+        assert self.slot_mapping.shape == (num_seqs, )
+
+        assert self.seq_lens is not None
+        assert len(self.seq_lens) == num_seqs
+        assert self.seq_lens_tensor is not None
+        assert self.seq_lens_tensor.shape == (num_seqs, )
+        assert self.max_query_len == 1
+        assert self.max_prefill_seq_len == 0
+        assert self.max_decode_seq_len == max(self.seq_lens)
+
+        assert self.query_start_loc is not None
+        assert self.query_start_loc.shape == (num_queries + 1, )
+        assert self.seq_start_loc is not None
+        assert self.seq_start_loc.shape == (num_seqs + 1, )
+
+        assert self.context_lens_tensor is not None
+        assert self.context_lens_tensor.shape == (num_queries, )
+
+        assert self.block_tables is not None
+        assert self.block_tables.shape[0] == num_seqs
+
+        # Update query lengths. Note that we update only queries and not seqs,
+        # since tensors may be padded due to captured cuda graph batch size
+        for i in range(num_queries):
+            self.seq_lens[i] += 1
+        self.max_decode_seq_len = max(self.seq_lens)
+
+        ops.advance_step_flashattn(num_seqs=num_seqs,
+                                   num_queries=num_queries,
+                                   block_size=block_size,
+                                   input_tokens=model_input.input_tokens,
+                                   sampled_token_ids=sampled_token_ids,
+                                   input_positions=model_input.input_positions,
+                                   seq_lens=self.seq_lens_tensor,
+                                   slot_mapping=self.slot_mapping,
+                                   block_tables=self.block_tables)
 
 
 class ROCmFlashAttentionMetadataBuilder(
@@ -295,7 +377,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         else:
             # if not using triton, navi3x/navi21/navi10 do not use flash-attn
             # either
-            if torch.cuda.get_device_capability()[0] != 9:
+            if not current_platform.has_device_capability(90):
                 self.use_naive_attn = True
             else:
                 try:
@@ -335,10 +417,14 @@ class ROCmFlashAttentionImpl(AttentionImpl):
             key: shape = [num_tokens, num_kv_heads * head_size]
             value: shape = [num_tokens, num_kv_heads * head_size]
             kv_cache = [2, num_blocks, block_size * num_kv_heads * head_size]
+                NOTE: kv_cache will be an empty tensor with shape [0]
+                for profiling run.
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
+        # Reminder: Please update docs/source/serving/compatibility_matrix.rst
+        # If the feature combo become valid
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError("Encoder self-attention and "
                                       "encoder/decoder cross-attention "
@@ -351,7 +437,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         key = key.view(-1, self.num_kv_heads, self.head_size)
         value = value.view(-1, self.num_kv_heads, self.head_size)
 
-        if kv_cache is not None:
+        if kv_cache.numel() > 0:
             key_cache, value_cache = PagedAttention.split_kv_cache(
                 kv_cache, self.num_kv_heads, self.head_size)
 
@@ -388,7 +474,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         if prefill_meta := attn_metadata.prefill_metadata:
             # Prompt run.
             assert prefill_meta.seq_lens is not None
-            if kv_cache is None or prefill_meta.block_tables.numel() == 0:
+            if kv_cache.numel() == 0 or prefill_meta.block_tables.numel() == 0:
                 # triton attention
                 # When block_tables are not filled, it means q and k are the
                 # prompt, and they have the same length.
@@ -480,20 +566,64 @@ class ROCmFlashAttentionImpl(AttentionImpl):
 
         if decode_meta := attn_metadata.decode_metadata:
             # Decoding run.
-            output[num_prefill_tokens:] = PagedAttention.forward_decode(
-                decode_query,
-                key_cache,
-                value_cache,
-                decode_meta.block_tables,
-                decode_meta.seq_lens_tensor,
-                decode_meta.max_decode_seq_len,
-                self.kv_cache_dtype,
-                self.num_kv_heads,
-                self.scale,
-                self.alibi_slopes,
-                k_scale,
-                v_scale,
-            )
+            # Whether to use rocm custom paged attention or not
+            num_seqs, num_heads, head_size = decode_query.shape
+            block_size = value_cache.shape[3]
+            gqa_ratio = num_heads // self.num_kv_heads
+            use_custom = _use_rocm_custom_paged_attention(
+                decode_query.dtype, head_size, block_size, gqa_ratio,
+                decode_meta.max_decode_seq_len)
+            if use_custom:
+                max_seq_len = decode_meta.max_decode_seq_len
+                max_num_partitions = (
+                    (max_seq_len + _PARTITION_SIZE_ROCM - 1) //
+                    _PARTITION_SIZE_ROCM)
+                assert _PARTITION_SIZE_ROCM % block_size == 0
+                tmp_output = torch.empty(
+                    size=(num_seqs, num_heads, max_num_partitions, head_size),
+                    dtype=output.dtype,
+                    device=output.device,
+                )
+                exp_sums = torch.empty(
+                    size=(num_seqs, num_heads, max_num_partitions),
+                    dtype=torch.float32,
+                    device=output.device,
+                )
+                max_logits = torch.empty_like(exp_sums)
+                ops.paged_attention_rocm(
+                    output[num_prefill_tokens:],
+                    exp_sums,
+                    max_logits,
+                    tmp_output,
+                    decode_query,
+                    key_cache,
+                    value_cache,
+                    self.num_kv_heads,
+                    self.scale,
+                    decode_meta.block_tables,
+                    decode_meta.seq_lens_tensor,
+                    block_size,
+                    max_seq_len,
+                    self.alibi_slopes,
+                    self.kv_cache_dtype,
+                    k_scale,
+                    v_scale,
+                )
+            else:
+                output[num_prefill_tokens:] = PagedAttention.forward_decode(
+                    decode_query,
+                    key_cache,
+                    value_cache,
+                    decode_meta.block_tables,
+                    decode_meta.seq_lens_tensor,
+                    decode_meta.max_decode_seq_len,
+                    self.kv_cache_dtype,
+                    self.num_kv_heads,
+                    self.scale,
+                    self.alibi_slopes,
+                    k_scale,
+                    v_scale,
+                )
 
         # Reshape the output tensor.
         return output.view(num_tokens, hidden_size)
@@ -532,3 +662,14 @@ def _sdpa_attention(
             start = end
 
     return output
+
+
+def _use_rocm_custom_paged_attention(qtype: torch.dtype, head_size: int,
+                                     block_size: int, gqa_ratio: int,
+                                     max_seq_len: int) -> bool:
+    # rocm custom page attention not support on navi (gfx1*)
+    return (_ON_MI250_MI300 and not _ON_NAVI
+            and (qtype == torch.half or qtype == torch.bfloat16)
+            and (head_size == 64 or head_size == 128)
+            and (block_size == 16 or block_size == 32)
+            and (gqa_ratio >= 1 and gqa_ratio <= 16) and max_seq_len <= 32768)

@@ -99,6 +99,13 @@ class TensorizerConfig:
                 "Loading a model using Tensorizer with quantization on vLLM"
                 " is unstable and may lead to errors.")
 
+    def open_stream(self, tensorizer_args: Optional["TensorizerArgs"] = None):
+        if tensorizer_args is None:
+            tensorizer_args = self._construct_tensorizer_args()
+
+        return open_stream(self.tensorizer_uri,
+                           **tensorizer_args.stream_params)
+
 
 def load_with_tensorizer(tensorizer_config: TensorizerConfig,
                          **extra_kwargs) -> nn.Module:
@@ -401,9 +408,7 @@ def is_vllm_tensorized(tensorizer_config: "TensorizerConfig") -> bool:
             "inferred as vLLM models, so setting vllm_tensorized=True is "
             "only necessary for models serialized prior to this change.")
         return True
-    if (".vllm_tensorized_marker" in deserializer):
-        return True
-    return False
+    return ".vllm_tensorized_marker" in deserializer
 
 
 def serialize_vllm_model(

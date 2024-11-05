@@ -1,6 +1,6 @@
 """Utility functions used for tests and benchmarks"""
 
-from typing import List
+from typing import List, Optional
 
 import numpy as np
 import torch
@@ -92,8 +92,11 @@ def get_weight_perm(num_bits: int):
     return perm
 
 
-def marlin_quantize(w: torch.Tensor, quant_type: ScalarType, group_size: int,
-                    act_order: bool):
+def marlin_quantize(w: torch.Tensor,
+                    quant_type: ScalarType,
+                    group_size: int,
+                    act_order: bool,
+                    test_perm: Optional[torch.Tensor] = None):
     size_k, size_n = w.shape
     num_bits = quant_type.size_bits
 
@@ -104,7 +107,7 @@ def marlin_quantize(w: torch.Tensor, quant_type: ScalarType, group_size: int,
 
     # Quantize (and apply act_order if provided)
     w_ref, q_w, s, g_idx, rand_perm = gptq_quantize_weights(
-        w, quant_type, group_size, act_order)
+        w, quant_type, group_size, act_order, test_perm)
 
     # For act_order, sort the "weights" and "g_idx" so that group ids are
     # increasing

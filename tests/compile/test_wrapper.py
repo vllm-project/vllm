@@ -2,7 +2,7 @@ from typing import Optional
 
 import torch
 
-from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispacther
+from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
 
 
 class MyMod(torch.nn.Module):
@@ -13,7 +13,7 @@ class MyMod(torch.nn.Module):
         return x * 2
 
 
-class MyWrapper(TorchCompileWrapperWithCustomDispacther):
+class MyWrapper(TorchCompileWrapperWithCustomDispatcher):
 
     def __init__(self, model):
         self.model = model

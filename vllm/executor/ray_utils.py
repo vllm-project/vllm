@@ -1,3 +1,4 @@
+import os
 import time
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple, Union
@@ -9,7 +10,7 @@ from vllm.executor.msgspec_utils import decode_hook, encode_hook
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.sequence import ExecuteModelRequest, IntermediateTensors
-from vllm.utils import get_ip, is_hip, is_xpu
+from vllm.utils import get_ip
 from vllm.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
@@ -17,9 +18,14 @@ PG_WAIT_TIMEOUT = 1800
 
 try:
     import ray
-    from ray._private.state import available_resources_per_node
     from ray.util import placement_group_table
     from ray.util.placement_group import PlacementGroup
+    try:
+        from ray._private.state import available_resources_per_node
+    except ImportError:
+        # Ray 2.9.x doesn't expose `available_resources_per_node`
+        from ray._private.state import state as _state
+        available_resources_per_node = _state._available_resources_per_node
 
     class RayWorkerWrapper(WorkerWrapperBase):
         """Ray wrapper for vllm.worker.Worker, allowing Worker to be
@@ -83,6 +89,9 @@ try:
                 output = self.output_encoder.encode(output)
 
             return output
+
+        def override_env_vars(self, vars: Dict[str, str]):
+            os.environ.update(vars)
 
     ray_import_err = None
 
@@ -222,10 +231,17 @@ def initialize_ray_cluster(
     assert_ray_available()
 
     # Connect to a ray cluster.
-    if is_hip() or is_xpu():
-        ray.init(address=ray_address,
-                 ignore_reinit_error=True,
-                 num_gpus=parallel_config.world_size)
+    if current_platform.is_rocm() or current_platform.is_xpu():
+        # Try to connect existing ray instance and create a new one if not found
+        try:
+            ray.init("auto")
+        except ConnectionError:
+            logger.warning(
+                "No existing RAY instance detected. "
+                "A new instance will be launched with current node resources.")
+            ray.init(address=ray_address,
+                     ignore_reinit_error=True,
+                     num_gpus=parallel_config.world_size)
     else:
         ray.init(address=ray_address, ignore_reinit_error=True)
 
@@ -291,3 +307,28 @@ def initialize_ray_cluster(
     _verify_bundles(current_placement_group, parallel_config, device_str)
     # Set the placement group in the parallel config
     parallel_config.placement_group = current_placement_group
+
+
+def get_num_tpu_nodes() -> int:
+    from ray._private.accelerators import TPUAcceleratorManager
+    cluster_resources = ray.cluster_resources()
+    total_tpus = int(cluster_resources["TPU"])
+    tpus_per_node = TPUAcceleratorManager.get_current_node_num_accelerators()
+    assert total_tpus % tpus_per_node == 0
+    return total_tpus // tpus_per_node
+
+
+def get_num_nodes_in_placement_group() -> int:
+    pg_table = ray.util.placement_group_table()
+    current_pg = ray.util.get_current_placement_group()
+    num_nodes = 0
+
+    if current_pg:
+        nodes_in_pg = set()
+        for pg_key, pg in pg_table.items():
+            if pg_key == current_pg.id.hex():
+                for _, node in pg["bundles_to_node_id"].items():
+                    nodes_in_pg.add(node)
+        num_nodes = len(nodes_in_pg)
+
+    return num_nodes

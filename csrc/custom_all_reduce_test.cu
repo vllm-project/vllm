@@ -1,15 +1,15 @@
 /**
  * This is a standalone test for custom allreduce.
  * To compile, make sure you have MPI and NCCL installed in your system.
- * export MPI_HOME=XXX
+ * export MPI_HOME=xxx
  * nvcc -O2 -arch=native -std=c++17 custom_all_reduce_test.cu -o
- * custom_all_reduce_test -lnccl -I${MPI_HOME}/include -lmpi
+ * custom_all_reduce_test -lnccl -I${MPI_HOME} -lmpi
  *
  * Warning: this C++ test is not designed to be very readable and was used
  * during the rapid prototyping process.
  *
  * To run:
- * mpirun -np 8 ./custom_all_reduce_test
+ * mpirun --allow-run-as-root -np 8 ./custom_all_reduce_test
  */
 #include <cuda.h>
 #include <curand_kernel.h>
@@ -44,7 +44,14 @@
   } while (0)
 
 __global__ void dummy_kernel() {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 700
   for (int i = 0; i < 100; i++) __nanosleep(1000000);  // 100ms
+#else
+  for (int i = 0; i < 100; i++) {
+    long long int start = clock64();
+    while (clock64() - start < 150000000);  // approximately 98.4ms on P40
+  }
+#endif
 }
 
 template <typename T>
@@ -302,15 +309,19 @@ int main(int argc, char** argv) {
 
   bool performance_test = true;
   cudaProfilerStart();
-  // for (int threads : {256, 512}) {
+  // Uncomment to scan through different block size configs.
+  // for (int threads : {256, 512, 1024}) {
   //   for (int block_limit = 16; block_limit < 112; block_limit += 4) {
-  //     run<half>(myRank, nRanks, comm, threads, block_limit, 4096 * 1024);
+  //     run<half>(myRank, nRanks, comm, threads, block_limit, 1024 * 1024,
+  //     performance_test);
   //   }
   // }
+  // Scan through different sizes to test performance.
   for (int sz = 512; sz <= (8 << 20); sz *= 2) {
     run<half>(myRank, nRanks, comm, 512, 36, sz + 8 * 47, performance_test);
   }
 
   cudaProfilerStop();
+  MPICHECK(MPI_Finalize());
   return EXIT_SUCCESS;
 }

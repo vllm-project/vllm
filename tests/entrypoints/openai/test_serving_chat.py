@@ -3,23 +3,34 @@ from contextlib import suppress
 from dataclasses import dataclass
 from unittest.mock import MagicMock
 
-from vllm.engine.async_llm_engine import AsyncLLMEngine
+from vllm.config import MultiModalConfig
+from vllm.engine.multiprocessing.client import MQLLMEngineClient
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
+from vllm.entrypoints.openai.serving_engine import BaseModelPath
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
 MODEL_NAME = "openai-community/gpt2"
 CHAT_TEMPLATE = "Dummy chat template for testing {}"
+BASE_MODEL_PATHS = [BaseModelPath(name=MODEL_NAME, model_path=MODEL_NAME)]
+
+
+@dataclass
+class MockHFConfig:
+    model_type: str = "any"
 
 
 @dataclass
 class MockModelConfig:
+    task = "generate"
     tokenizer = MODEL_NAME
     trust_remote_code = False
     tokenizer_mode = "auto"
+    chat_template_text_format = "string"
     max_model_len = 100
     tokenizer_revision = None
-    embedding_mode = False
+    multimodal_config = MultiModalConfig()
+    hf_config = MockHFConfig()
 
 
 @dataclass
@@ -35,7 +46,7 @@ async def _async_serving_chat_init():
 
     serving_completion = OpenAIServingChat(engine,
                                            model_config,
-                                           served_model_names=[MODEL_NAME],
+                                           BASE_MODEL_PATHS,
                                            response_role="assistant",
                                            chat_template=CHAT_TEMPLATE,
                                            lora_modules=None,
@@ -50,12 +61,13 @@ def test_async_serving_chat_init():
 
 
 def test_serving_chat_should_set_correct_max_tokens():
-    mock_engine = MagicMock(spec=AsyncLLMEngine)
+    mock_engine = MagicMock(spec=MQLLMEngineClient)
     mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
+    mock_engine.errored = False
 
     serving_chat = OpenAIServingChat(mock_engine,
                                      MockModelConfig(),
-                                     served_model_names=[MODEL_NAME],
+                                     BASE_MODEL_PATHS,
                                      response_role="assistant",
                                      chat_template=CHAT_TEMPLATE,
                                      lora_modules=None,

@@ -318,11 +318,10 @@ class TestPrefixCachingBlockAllocator:
     @staticmethod
     @pytest.mark.parametrize("num_blocks", [4])
     @pytest.mark.parametrize("block_size", [8])
-    def test_prefix_caching_block_get_num_blocks_touched(
+    def test_prefix_caching_block_get_num_full_blocks_touched(
             num_blocks, block_size):
         """ Verify the allocator can correctly return the number of
-        blocks touched, when there are cached prefixes and different
-        lookahead slots.
+        blocks touched, when there are cached prefixes.
         """
         allocator_src = PrefixCachingBlockAllocator(num_blocks=num_blocks,
                                                     block_size=block_size)
@@ -346,28 +345,30 @@ class TestPrefixCachingBlockAllocator:
                 token_ids=token_ids,
                 allocator=allocator_src,
             )
-
         # All blocks are cached
-        assert allocator_dst.get_num_blocks_touched(blocks_to_swap_in) == 0
+        assert allocator_dst.get_num_full_blocks_touched(
+            blocks_to_swap_in) == 0
 
         # Free the first block in the dst
         allocator_dst.free(cached_blocks[0])
 
         # Now the first block becomes dangling, the swapped blocks need
         # to reclaim the first block in the dst
-        assert allocator_dst.get_num_blocks_touched(blocks_to_swap_in) == 1
+        assert allocator_dst.get_num_full_blocks_touched(
+            blocks_to_swap_in) == 1
 
         # Insert one non-full block in the src
         non_full_block = allocator_src.allocate_mutable_block(
             blocks_to_swap_in[-1])
         non_full_block.append_token_ids([0])
         blocks_to_swap_in.append(non_full_block)
-        assert allocator_dst.get_num_blocks_touched(blocks_to_swap_in,
-                                                    num_lookahead_slots=1) == 2
-        assert allocator_dst.get_num_blocks_touched(
-            blocks_to_swap_in, num_lookahead_slots=block_size - 1) == 2
-        assert allocator_dst.get_num_blocks_touched(
-            blocks_to_swap_in, num_lookahead_slots=block_size) == 3
+        assert allocator_dst.get_num_full_blocks_touched(
+            blocks_to_swap_in) == 1
+        # Fill up the last mutable block and invoke get_num_blocks_touched.
+        # Note: The last block is not cached so it will be touched.
+        non_full_block.append_token_ids([0] * (block_size - 1))
+        assert allocator_dst.get_num_full_blocks_touched(
+            blocks_to_swap_in) == 2
 
     @staticmethod
     @pytest.mark.parametrize("num_blocks", [1024])

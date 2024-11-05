@@ -49,21 +49,12 @@ class GPUExecutor(ExecutorBase):
             distributed_init_method = get_distributed_init_method(
                 get_ip(), get_open_port())
         return dict(
-            model_config=self.model_config,
-            parallel_config=self.parallel_config,
-            scheduler_config=self.scheduler_config,
-            device_config=self.device_config,
-            cache_config=self.cache_config,
-            load_config=self.load_config,
+            vllm_config=self.vllm_config,
             local_rank=local_rank,
             rank=rank,
             distributed_init_method=distributed_init_method,
-            lora_config=self.lora_config,
-            speculative_config=self.speculative_config,
-            prompt_adapter_config=self.prompt_adapter_config,
             is_driver_worker=(not self.parallel_config)
             or (rank % self.parallel_config.tensor_parallel_size == 0),
-            observability_config=self.observability_config,
         )
 
     def _get_worker_module_and_class(
@@ -121,6 +112,10 @@ class GPUExecutor(ExecutorBase):
         # remains to abstract away the device for non-GPU configurations.
         logger.info("# GPU blocks: %d, # CPU blocks: %d", num_gpu_blocks,
                     num_cpu_blocks)
+        max_concurrency = (num_gpu_blocks * self.cache_config.block_size /
+                           self.model_config.max_model_len)
+        logger.info("Maximum concurrency for %s tokens per request: %.2fx",
+                    self.model_config.max_model_len, max_concurrency)
 
         self.driver_worker.initialize_cache(num_gpu_blocks, num_cpu_blocks)
 
@@ -168,6 +163,12 @@ class GPUExecutor(ExecutorBase):
         # GPUExecutor will always be healthy as long as
         # it's running.
         return
+
+    def start_profile(self) -> None:
+        self.driver_worker.start_profile()
+
+    def stop_profile(self) -> None:
+        self.driver_worker.stop_profile()
 
 
 class GPUExecutorAsync(GPUExecutor, ExecutorAsyncBase):
