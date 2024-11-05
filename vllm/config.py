@@ -998,9 +998,6 @@ class SchedulerConfig:
             a single iteration.
         max_num_seqs: Maximum number of sequences to be processed in a single
             iteration.
-        max_num_prefill_seqs: Maximum number of prefill sequences to be
-             processed in a single iteration. Used only with padding-aware 
-             scheduling.
         max_model_len: Maximum length of a sequence (including prompt
             and generated text).
         num_lookahead_slots: The number of slots to allocate per sequence per
@@ -1022,6 +1019,9 @@ class SchedulerConfig:
             when SPMD worker architecture is enabled. I.e.,
             VLLM_USE_RAY_SPMD_WORKER=1
         policy: The scheduling policy to use. "fcfs" (default) or "priority".
+        max_num_prefill_seqs: Maximum number of prefill sequences to be
+             processed in a single iteration. Used only with padding-aware 
+             scheduling.
         use_padding_aware_scheduling: If True, scheduler will consider padded
             tokens in prefill.
     """
@@ -1030,7 +1030,6 @@ class SchedulerConfig:
                  task: _Task,
                  max_num_batched_tokens: Optional[int],
                  max_num_seqs: int,
-                 max_num_prefill_seqs: Optional[int],
                  max_model_len: int,
                  num_lookahead_slots: int = 0,
                  delay_factor: float = 0.0,
@@ -1041,6 +1040,7 @@ class SchedulerConfig:
                  multi_step_stream_outputs: bool = False,
                  send_delta_data: bool = False,
                  policy: str = "fcfs",
+                 max_num_prefill_seqs: Optional[int] = None,
                  use_padding_aware_scheduling=False) -> None:
         if max_num_batched_tokens is None:
             if enable_chunked_prefill:

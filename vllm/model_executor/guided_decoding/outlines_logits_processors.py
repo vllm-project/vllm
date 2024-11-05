@@ -30,11 +30,48 @@ from pydantic import BaseModel
 from transformers import PreTrainedTokenizerBase
 
 
+# Unfortunately we cannot use lru_cache as it breaks pickling
+# so we use a simpler implementation
+def _cached(fn):
+    cache = {}
+
+    def cached_fn(*args):
+        if args in cache:
+            result = cache[args]
+        else:
+            result = fn(*args)
+            cache[args] = result
+        return result
+
+    return cached_fn
+
+
 class BaseLogitsProcessor:
 
     def __init__(self, guide: Guide):
         self._guide: Guide = guide
         self._fsm_state: DefaultDict[int, int] = defaultdict(int)
+        self._cached_get_mask_tensor = _cached(self._get_mask_tensor)
+
+    @staticmethod
+    @lru_cache(maxsize=128)
+    def _create_mask_tensor(allowed_tokens, vocab_size, device):
+        mask = torch.full((vocab_size, ), -math.inf, device=device)
+        mask[list(allowed_tokens)] = 0
+        return mask
+
+    def _get_mask_tensor(self, state_id, vocab_size, device):
+        instruction = self._guide.get_next_instruction(state=state_id)
+        if type(instruction) == Generate:  # noqa: E721
+            allowed_tokens = instruction.tokens
+        elif type(instruction) == Write:  # noqa: E721
+            # TODO: support fast forward tokens
+            allowed_tokens = [instruction.tokens[0]]
+        else:
+            raise TypeError(
+                f"Unsupported instruction type {type(instruction)}")
+        return BaseLogitsProcessor._create_mask_tensor(tuple(allowed_tokens),
+                                                       vocab_size, device)
 
     def __call__(self, input_ids: List[int],
                  scores: torch.Tensor) -> torch.Tensor:
@@ -64,30 +101,9 @@ class BaseLogitsProcessor:
                     import_paths=[grammars.GRAMMAR_PATH],
                 )
 
-        instruction = self._guide.get_next_instruction(
-            state=self._fsm_state[seq_id])
-
-        if type(instruction) == Generate:  # noqa: E721
-            allowed_tokens = instruction.tokens
-        elif type(instruction) == Write:  # noqa: E721
-            # TODO: support fast forward tokens
-            allowed_tokens = [instruction.tokens[0]]
-        else:
-            raise TypeError(
-                f"Unsupported instruction type {type(instruction)}")
-
-        mask = torch.full((scores.shape[-1], ),
-                          -torch.inf,
-                          device=scores.device)
-        # The tokenizer may support more token ids than the model can generate,
-        # eg. Llama 3.2 Vision models have an `<|image|>` token with id 128256
-        # but scores.shape == torch.Size([128256])
-        # Using NumPy is faster for filtering token ids
-        allowed_tokens = np.array(allowed_tokens, dtype=np.int64)
-        allowed_tokens = torch.tensor(allowed_tokens, device=scores.device)
-        allowed_tokens = allowed_tokens.masked_select(
-            allowed_tokens < scores.shape[-1])
-        mask.index_fill_(0, allowed_tokens, 0)
+        state_id = self._fsm_state[seq_id]
+        mask = self._cached_get_mask_tensor(state_id, scores.size(-1),
+                                            scores.device)
         scores.add_(mask)
         return scores
 

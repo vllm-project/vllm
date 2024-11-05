@@ -27,6 +27,14 @@ TEST_DATA_FILE = os.environ.get(
 TP_SIZE = os.environ.get("LM_EVAL_TP_SIZE", 1)
 
 
+def setup_fp8(model_path, device_type):
+    flavor = f"g{device_type[-1]}"
+    normalized_model_name = Path(model_path).parts[-1].lower()
+    os.environ[
+        "QUANT_CONFIG"] = \
+            f"/software/data/vllm-benchmarks/inc/{normalized_model_name}/maxabs_quant_{flavor}.json"
+
+
 def fail_on_exit():
     os._exit(1)
 
@@ -42,6 +50,10 @@ def launch_lm_eval(eval_config):
                  f"max_model_len=4096," \
                  f"max_num_seqs={max_num_seqs}," \
                  f"trust_remote_code={trust_remote_code}"
+    if eval_config.get("fp8"):
+        model_args += ",quantization=inc," \
+            "kv_cache_dtype=fp8_inc," \
+            "weights_load_device=cpu"
     kwargs = {}
     if 'fewshot_as_multiturn' in eval_config:
         kwargs['fewshot_as_multiturn'] = eval_config['fewshot_as_multiturn']
@@ -134,6 +146,9 @@ def test_lm_eval_correctness(record_xml_attribute, record_property):
                     f'tp{TP_SIZE}')
         record_xml_attribute("name", testname)
 
+        # Set up environment for FP8 inference
+        if eval_config.get("fp8"):
+            setup_fp8(eval_config["model_name"], platform)
         # Launch eval requests.
         start_time = time.perf_counter()
         results = launch_lm_eval(eval_config)

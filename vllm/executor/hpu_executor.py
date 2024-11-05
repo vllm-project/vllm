@@ -54,9 +54,16 @@ class HPUExecutor(ExecutorBase):
                        local_rank: int = 0,
                        rank: int = 0,
                        distributed_init_method: Optional[str] = None):
+        if self.scheduler_config.is_multi_step:
+            module_name = "vllm.worker.multi_step_hpu_worker"
+            class_name = "MultiStepHPUWorker"
+        else:
+            module_name = "vllm.worker.hpu_worker"
+            class_name = "HPUWorker"
+
         wrapper = WorkerWrapperBase(
-            worker_module_name="vllm.worker.hpu_worker",
-            worker_class_name="HPUWorker",
+            worker_module_name=module_name,
+            worker_class_name=class_name,
         )
         wrapper.init_worker(**self._get_worker_kwargs(local_rank, rank,
                                                       distributed_init_method))
