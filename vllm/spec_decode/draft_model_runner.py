@@ -326,14 +326,15 @@ class TP1DraftModelRunner(ModelRunner):
             )
             outputs.append(output)
 
-            if step == 0 and model_input.attn_metadata.num_prefills == 0:
+            if step == 0 and \
+                model_input.attn_metadata.num_prefills == 0 \
+                and self.indices_of_seq_with_bonus_tokens is not None:
                 assert output.sampled_token_ids is not None
                 # output.sampled_token_ids should be of shape (num_seqs, 1)
                 nums_seqs, num_tokens_per_seq = output.sampled_token_ids.shape
                 assert num_tokens_per_seq == 1
                 count = 0
                 for i in range(nums_seqs):
-                    assert self.indices_of_seq_with_bonus_tokens is not None
                     bonus_seq_idx = self.indices_of_seq_with_bonus_tokens[
                         count]
                     if i != bonus_seq_idx:
