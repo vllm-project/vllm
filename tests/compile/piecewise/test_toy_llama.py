@@ -83,10 +83,12 @@ class LlamaMLP(nn.Module):
         else:
             nn.init.xavier_normal_(self.gate_up_projection.weight.data,
                                    generator=torch.Generator().manual_seed(
-                                       config.random_seed))
+                                       config.random_seed),
+                                   gain=0.001)
             nn.init.xavier_normal_(self.down_projection.weight.data,
                                    generator=torch.Generator().manual_seed(
-                                       config.random_seed))
+                                       config.random_seed),
+                                   gain=0.001)
 
     def forward(self, x):
         # for tractable_init and positive input, this is
@@ -124,10 +126,12 @@ class LlamaAttention(nn.Module):
         else:
             nn.init.xavier_normal_(self.qkv_projection.weight.data,
                                    generator=torch.Generator().manual_seed(
-                                       config.random_seed))
+                                       config.random_seed),
+                                   gain=0.001)
             nn.init.xavier_normal_(self.output_projection.weight.data,
                                    generator=torch.Generator().manual_seed(
-                                       config.random_seed))
+                                       config.random_seed),
+                                   gain=0.001)
 
     def forward(
         self,
