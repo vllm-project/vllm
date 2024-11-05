@@ -5,7 +5,6 @@
 #if defined CUDA_VERSION && CUDA_VERSION >= 12000
 
 #include "scaled_mm_c3x.cuh"
-
 #include "scaled_mm_c3x_sm90_fp8_dispatch.cuh"
 #include "scaled_mm_c3x_sm90_int8_dispatch.cuh"
 // clang-format on
