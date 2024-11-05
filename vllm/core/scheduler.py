@@ -1661,24 +1661,19 @@ class Scheduler:
         # in a decode phase. Do not chunk.
         elif enable_chunking and len(seqs) == 1:
             # Get the budget for this chunk
-            remaining_token_budget = self._get_budget_for_chunk(budget=budget)
+            chunk_size = self._get_budget_for_chunk(budget=budget)
 
             if self.cache_config.enable_prefix_caching:
                 # When prefix caching is enabled, we always allocate
                 # the number of new tokens that is dividable by the block
                 # size to avoid partial block matching.
                 block_size = self.cache_config.block_size
-                remainder = budget.token_budget % block_size
-                if remainder != 0:
-                    raise ValueError("When enabling chunked prefill and "
-                                     "prefix caching, max_num_batched_tokens "
-                                     "(default chunk size) must be dividable "
-                                     "by block size, but got chunk_size "
-                                     f"({budget.token_budget}) % block_size "
-                                     f"({block_size}) = {remainder}")
-                if remaining_token_budget < num_new_tokens:
-                    num_new_tokens = (remaining_token_budget //
-                                      block_size) * block_size
-            else:
-                num_new_tokens = min(num_new_tokens, remaining_token_budget)
+                # Set chunk size to the next lowest multiple of block size
+                # so we don't exceed our budget
+                chunk_size = (chunk_size // block_size) * block_size
+                # Pad num_mew_tokens to the next block size
+                if remainder := num_new_tokens % block_size > 0:
+                    num_new_tokens += (block_size - remainder)
+
+            num_new_tokens = min(num_new_tokens, chunk_size)
         return num_new_tokens
