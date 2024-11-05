@@ -15,7 +15,7 @@
 """Inference-only Idefics3 model compatible with HuggingFace weights."""
 
 import math
-from typing import (Dict, Iterable, List, Literal, Mapping, Optional, Tuple,
+from typing import (Iterable, List, Literal, Mapping, Optional, Tuple,
                     TypedDict, Union)
 
 import torch
@@ -104,53 +104,40 @@ def input_mapper_for_idefics3(
     return MultiModalInputs(batch_data)
 
 
-def _resize_output_size_rescale_to_max_len(
-        height: int,
-        width: int,
-        min_len: Optional[int] = 1,
-        max_len: Optional[int] = None) -> Tuple[int, int]:
+def _resize_output_size(height: int,
+                        width: int,
+                        max_len: Optional[int] = None,
+                        min_len: Optional[int] = 1,
+                        max_size: Optional[int] = None) -> Tuple[int, int]:
+    # Set default value for max_len if not provided
     max_len = max(height, width) if max_len is None else max_len
     aspect_ratio = width / height
 
+    # Handle the maximum size constraint
+    if max_size is not None:
+        max_len = min(max_len, max_size)
+
+    # Adjust dimensions according to the aspect ratio
     if width >= height:
         width = max_len
         height = int(width / aspect_ratio)
-        if height % 2 != 0:
-            height += 1
-    elif height > width:
+    else:
         height = max_len
         width = int(height * aspect_ratio)
-        if width % 2 != 0:
-            width += 1
 
-    # Avoid resizing to a size smaller than min_len
+    # Ensure both width and height are even (if needed)
+    height += 1 if height % 2 != 0 else 0
+    width += 1 if width % 2 != 0 else 0
+
+    # Ensure dimensions are not smaller than the minimum length
     height = max(height, min_len)
     width = max(width, min_len)
-    return height, width
 
-
-def _resize_output_size_scale_below_upper_bound(
-        height: int,
-        width: int,
-        max_len: Optional[Dict[str, int]] = None) -> Tuple[int, int]:
-    max_len = max(height, width) if max_len is None else max_len
-
-    aspect_ratio = width / height
-    if width >= height and width > max_len:
-        width = max_len
-        height = int(width / aspect_ratio)
-    elif height > width and height > max_len:
-        height = max_len
-        width = int(height * aspect_ratio)
-
-    # Avoid resizing to a size smaller than 1
-    height = max(height, 1)
-    width = max(width, 1)
     return height, width
 
 
 def _get_resize_output_image_size(
-    image_size,
+    image_size: Tuple[int, int],
     resolution_max_side: int,
     max_image_size: int = 1820,
 ) -> Tuple[int, int]:
@@ -162,17 +149,16 @@ def _get_resize_output_image_size(
 
     # Find the output size, when rescaling the longest edge to max_len and
     # preserving the aspect ratio
-    height, width = _resize_output_size_rescale_to_max_len(
-        height, width, max_len=resolution_max_side)
-    # Find the output size when scaling the image to be below the max_image_size
-    height, width = _resize_output_size_scale_below_upper_bound(
-        height, width, max_len=max_image_size)
+    height, width = _resize_output_size(height,
+                                        width,
+                                        max_len=resolution_max_side)
+
     return height, width
 
 
-def _prompt_split_image(image_seq_len, image_rows, image_cols,
-                        fake_token_around_image, image_token,
-                        global_img_token):
+def _prompt_split_image(image_seq_len: int, image_rows: int, image_cols: int,
+                        fake_token_around_image: str, image_token: str,
+                        global_img_token: str) -> str:
     """
     Prompt with expanded image tokens for when the image is split 
     into patches.
@@ -192,16 +178,16 @@ def _prompt_split_image(image_seq_len, image_rows, image_cols,
     return text_split_images
 
 
-def _prompt_single_image(image_seq_len, fake_token_around_image, image_token,
-                         global_img_token):
+def _prompt_single_image(image_seq_len: int, fake_token_around_image: str,
+                         image_token: str, global_img_token: str):
     """Prompt with expanded image tokens for a single image."""
     return (f"{fake_token_around_image}" + f"{global_img_token}" +
             f"{image_token}" * image_seq_len + f"{fake_token_around_image}")
 
 
-def _get_image_prompt_string(image_rows, image_cols, image_seq_len,
-                             fake_token_around_image, image_token,
-                             global_img_token):
+def _get_image_prompt_string(image_rows: int, image_cols: int,
+                             image_seq_len: int, fake_token_around_image: str,
+                             image_token: str, global_img_token: str):
     if image_rows == 0 and image_cols == 0:
         return _prompt_single_image(
             image_seq_len,
