@@ -243,6 +243,10 @@ To consume the server, you can use the OpenAI client like in the example below:
 A full code example can be found in `examples/openai_chat_completion_client_for_multimodal.py <https://github.com/vllm-project/vllm/blob/main/examples/openai_chat_completion_client_for_multimodal.py>`_.
 
 .. tip::
+    Loading from local file paths is also supported on vLLM: You can specify the allowed local media path via ``--allowed-local-media-path`` when launching the API server/engine,
+    and pass the file path as ``url`` in the API request.
+
+.. tip::
     There is no need to place image placeholders in the text content of the API request - they are already represented by the image content.
     In fact, you can place image placeholders in the middle of the text by interleaving text and image content.
 

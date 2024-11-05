@@ -1,7 +1,7 @@
 import os
 from typing import Optional, Tuple
 
-from vllm.config import EngineConfig
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils import get_distributed_init_method, get_ip, get_open_port
 from vllm.v1.outputs import ModelRunnerOutput
@@ -12,10 +12,8 @@ logger = init_logger(__name__)
 
 class GPUExecutor:
 
-    def __init__(
-        self,
-        vllm_config: EngineConfig,
-    ) -> None:
+    def __init__(self, vllm_config: VllmConfig) -> None:
+        self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
         self.lora_config = vllm_config.lora_config
@@ -44,19 +42,10 @@ class GPUExecutor:
             distributed_init_method = get_distributed_init_method(
                 get_ip(), get_open_port())
         return Worker(
-            model_config=self.model_config,
-            parallel_config=self.parallel_config,
-            scheduler_config=self.scheduler_config,
-            device_config=self.device_config,
-            cache_config=self.cache_config,
-            load_config=self.load_config,
+            vllm_config=self.vllm_config,
             local_rank=local_rank,
             rank=rank,
             distributed_init_method=distributed_init_method,
-            lora_config=self.lora_config,
-            speculative_config=self.speculative_config,
-            prompt_adapter_config=self.prompt_adapter_config,
-            observability_config=self.observability_config,
         )
 
     def determine_num_available_blocks(self) -> Tuple[int, int]:

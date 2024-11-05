@@ -1,6 +1,6 @@
 from typing import Dict, List, Mapping, Optional, Type, Union
 
-from vllm.config import EngineConfig
+from vllm.config import VllmConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics_types import StatLoggerBase
 from vllm.envs import VLLM_DISABLE_V1_MULTIPROCESSING
@@ -26,7 +26,7 @@ class LLMEngine:
 
     def __init__(
         self,
-        vllm_config: EngineConfig,
+        vllm_config: VllmConfig,
         executor_class: Type[GPUExecutor],
         log_stats: bool,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
@@ -91,7 +91,7 @@ class LLMEngine:
                    multiprocess_mode=enable_multiprocessing)
 
     @classmethod
-    def _get_executor_cls(cls, engine_config: EngineConfig):
+    def _get_executor_cls(cls, vllm_config: VllmConfig):
         return GPUExecutor
 
     def stop_remote_worker_execution_loop(self) -> None:
