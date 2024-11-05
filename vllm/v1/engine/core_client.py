@@ -1,3 +1,5 @@
+import multiprocessing
+import time
 from typing import List, Union
 
 import msgspec
@@ -131,18 +133,28 @@ class MPClient(EngineCoreClient):
         self.input_socket.bind(input_path)
 
         # Start EngineCore in background process.
+        self.should_shutdown = multiprocessing.Value('b', False, lock=False)
         self.proc = EngineCoreProc.make_engine_core_process(
             *args,
             input_path=input_path,
             output_path=output_path,
             ready_path=ready_path,
+            should_shutdown=self.should_shutdown,
             **kwargs,
         )
 
     def __del__(self):
-        # TODO: clean shutdown.
-        if hasattr(self, "proc"):
-            self.proc.kill()
+
+        # Send shutdown signal to background process.
+        self.should_shutdown = True
+
+        # Shutdown the process if needed.
+        if hasattr(self, "proc") and self.proc.is_alive():
+            self.proc.terminate()
+
+            time.sleep(5)
+            if self.proc.is_alive():
+                self.proc.kill()
 
 
 class SyncMPClient(MPClient):
@@ -154,11 +166,11 @@ class SyncMPClient(MPClient):
     def get_output(self) -> List[EngineCoreOutput]:
 
         while self.output_socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
-            logger.debug("Waiting for output from EngineCore.")
+            logger.debug(
+                "EngineCoreClient waiting for output from EngineCore.")
 
         frames = self.output_socket.recv_multipart(copy=False)
         engine_core_outputs = self.decoder.decode(frames[0].buffer).outputs
-
         return engine_core_outputs
 
     def _send_input(self, request_type: EngineCoreRequestType,
@@ -184,7 +196,8 @@ class AsyncMPClient(MPClient):
     async def get_output_async(self) -> List[EngineCoreOutput]:
 
         while await self.output_socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
-            logger.debug("Waiting for output from EngineCore.")
+            logger.debug(
+                "EngineCoreClient waiting for output from EngineCore.")
 
         frames = await self.output_socket.recv_multipart(copy=False)
         engine_core_outputs = self.decoder.decode(frames[0].buffer).outputs

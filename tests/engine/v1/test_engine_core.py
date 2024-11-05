@@ -1,16 +1,16 @@
 import os
 import time
-import pytest
 import uuid
 
-from transformers import AutoTokenizer, PreTrainedTokenizer
+import pytest
+from transformers import AutoTokenizer
 
 from vllm import SamplingParams
 from vllm.engine.arg_utils import EngineArgs
-from vllm.v1.engine import EngineCoreRequest
-from vllm.v1.engine.core import EngineCore
-from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.usage.usage_lib import UsageContext
+from vllm.v1.engine import EngineCoreRequest
+from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.v1.engine.core import EngineCore
 
 MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
 TOKENIZER = AutoTokenizer.from_pretrained(MODEL_NAME)
@@ -22,7 +22,7 @@ PROMPT_TOKENS = TOKENIZER(PROMPT).input_ids
 @pytest.fixture(scope="function")
 def engine_core():
 
-    # Set V1 enviornment variable.
+    # Set V1 environment variable.
     previous = os.getenv("VLLM_USE_V1", None)
     os.environ["VLLM_USE_V1"] = "1"
 
@@ -34,7 +34,7 @@ def engine_core():
                      executor_class=executor_class,
                      usage_context=UsageContext.UNKNOWN_CONTEXT)
 
-    # Cleanup V1 enviornment variables.
+    # Cleanup V1 environment variables.
     if previous is None:
         del os.environ["VLLM_USE_V1"]
     else:
@@ -143,7 +143,6 @@ def test_abort_request(engine_core):
     assert len(engine_core.scheduler.running) == 2
 
     # Abort the other requests at the same time.
-    engine_core.abort_requests([req2.request_id,
-                                req0.request_id])
+    engine_core.abort_requests([req2.request_id, req0.request_id])
     assert len(engine_core.scheduler.waiting) == 0
     assert len(engine_core.scheduler.running) == 0
