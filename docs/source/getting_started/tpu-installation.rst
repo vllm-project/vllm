@@ -114,6 +114,7 @@ Clone the vLLM repository and go to the vLLM directory:
     git clone https://github.com/vllm-project/vllm.git && cd vllm
 
 Uninstall the existing `torch` and `torch_xla` packages:
+
 .. code-block:: bash
     pip uninstall torch torch-xla -y
 
@@ -127,6 +128,7 @@ Install build dependencies:
 Run the setup script:
 
 .. code-block:: bash
+
    VLLM_TARGET_DEVICE="tpu" python setup.py develop
 
 
