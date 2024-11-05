@@ -41,9 +41,9 @@ class ExecutorBase(ABC):
 
     @abstractmethod
     def create_worker(self,
-                       local_rank: int = 0,
-                       rank: int = 0,
-                       distributed_init_method: Optional[str] = None):
+                      local_rank: int = 0,
+                      rank: int = 0,
+                      distributed_init_method: Optional[str] = None):
         """Creates the driver worker for the Executor.
        """
         raise NotImplementedError

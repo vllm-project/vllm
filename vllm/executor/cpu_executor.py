@@ -122,10 +122,11 @@ class CPUExecutor(ExecutorBase):
         distributed_init_method: Optional[str] = None,
     ):
         if distributed_init_method is None:
-          # Multiprocessing-based executor does not support multi-node setting.
-          # Since it only works for single node, we can use the loopback address
-          # 127.0.0.1 for communication.
-          self.distributed_init_method = get_distributed_init_method("127.0.0.1", get_open_port())
+            # Multiprocessing-based executor does not support multi-node
+            # setting. Since it only works for single node, we can use the
+            # loopback address 127.0.0.1 for communication.
+            self.distributed_init_method = get_distributed_init_method(
+                "127.0.0.1", get_open_port())
 
         worker_module_name = "vllm.worker.cpu_worker"
         worker_class_name = "CPUWorker"

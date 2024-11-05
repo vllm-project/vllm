@@ -27,18 +27,17 @@ class NeuronExecutor(ExecutorBase):
         self.driver_worker.load_model()
 
     def create_worker(self,
-                       local_rank: int = 0,
-                       rank: int = 0,
-                       distributed_init_method: Optional[str] = None):
+                      local_rank: int = 0,
+                      rank: int = 0,
+                      distributed_init_method: Optional[str] = None):
         from vllm.worker.neuron_worker import NeuronWorker
         if distributed_init_method is None:
             distributed_init_method = get_distributed_init_method(
                 get_ip(), get_open_port())
-        return NeuronWorker(
-            vllm_config=self.vllm_config,
-            local_rank=local_rank,
-            rank=rank,
-            distributed_init_method=distributed_init_method)
+        return NeuronWorker(vllm_config=self.vllm_config,
+                            local_rank=local_rank,
+                            rank=rank,
+                            distributed_init_method=distributed_init_method)
 
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         """Determine the number of available KV blocks by invoking the

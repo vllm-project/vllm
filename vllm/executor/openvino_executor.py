@@ -40,9 +40,9 @@ class OpenVINOExecutor(ExecutorBase):
         self.driver_worker.load_model()
 
     def create_worker(self,
-                       local_rank: int = 0,
-                       rank: int = 0,
-                       distributed_init_method: Optional[str] = None):
+                      local_rank: int = 0,
+                      rank: int = 0,
+                      distributed_init_method: Optional[str] = None):
         from vllm.worker.openvino_worker import OpenVINOWorker
 
         assert (
