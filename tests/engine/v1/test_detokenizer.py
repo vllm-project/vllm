@@ -15,6 +15,9 @@ FULL_STRINGS = [
     "Red Hat is the best open source company by far across Linux, K8s, and AI.",
     "Nick is the name of my brother in addition to my colleague from Red Hat.",
 ]
+
+STOP_STRINGS = ["I love working on", "company by far", "brother in"]
+
 FULL_TOKENS = [tokenizer(text).input_ids for text in FULL_STRINGS]
 PROMPT_LEN = 5
 PROMPT_TOKENS = [
@@ -59,10 +62,10 @@ class MockEngineCore:
         return outputs
 
 
-pytest.mark.parametrize()
-
-
-def test_delta_outputs():
+@pytest.mark.parametrize(
+    "request_output_kind",
+    [RequestOutputKind.DELTA, RequestOutputKind.FINAL_ONLY])
+def test_incremental_detokenization(request_output_kind: RequestOutputKind):
     detokenizer = Detokenizer(TOKENIZER_NAME)
     engine_core = MockEngineCore(GENERATION_TOKENS)
 
@@ -74,7 +77,7 @@ def test_delta_outputs():
             prompt_token_ids=prompt_tokens,
             skip_special_tokens=False,
             spaces_between_special_tokens=False,
-            output_kind=RequestOutputKind.DELTA,
+            output_kind=request_output_kind,
             stop=[],
             include_stop_str_in_output=False,
         ) for idx, (
@@ -95,8 +98,8 @@ def test_delta_outputs():
             break
 
         # Step the Detokenizer.
-        request_outputs, request_to_abort = detokenizer.step(outputs)
-        assert len(request_to_abort) == 0
+        request_outputs, requests_to_abort = detokenizer.step(outputs)
+        assert len(requests_to_abort) == 0
 
         # Update tracking.
         for request_output in request_outputs:
@@ -118,6 +121,86 @@ def test_delta_outputs():
 
         assert gen_str == ref_gen_str, f"{gen_str=}, {ref_gen_str=}"
         assert gen_toks == ref_gen_toks, f"{gen_toks=}, {ref_gen_toks=}"
-    
+
+    assert detokenizer.get_num_unfinished_requests() == 0
+    assert not detokenizer.has_unfinished_requests()
+
+
+@pytest.mark.parametrize("include_stop_str_in_output", [True, False])
+def test_stop_string(include_stop_str_in_output: bool):
+    detokenizer = Detokenizer(TOKENIZER_NAME)
+    engine_core = MockEngineCore(GENERATION_TOKENS)
+
+    # Make N requests.
+    requests = [
+        DetokenizerRequest(
+            request_id=f"request-{idx}",
+            prompt=prompt,
+            prompt_token_ids=prompt_tokens,
+            skip_special_tokens=False,
+            spaces_between_special_tokens=False,
+            output_kind=RequestOutputKind.DELTA,
+            stop=STOP_STRINGS,
+            include_stop_str_in_output=include_stop_str_in_output,
+        ) for idx, (
+            prompt,
+            prompt_tokens) in enumerate(zip(PROMPT_STRINGS, PROMPT_TOKENS))
+    ]
+
+    # Add requests to the detokenizer.
+    for request in requests:
+        detokenizer.add_request(request)
+
+    gen_strings = {}
+    aborted = []
+    while True:
+        # Mock output from the EngineCore.
+        outputs = engine_core.get_outputs()
+        if len(outputs) == 0:
+            break
+
+        # Step the Detokenizer.
+        request_outputs, requests_to_abort = detokenizer.step(outputs)
+        for request_output in request_outputs:
+            # If aborted, we should not get a request output.
+            assert request_output.request_id not in aborted
+        aborted.extend(requests_to_abort)
+
+        # Update tracking.
+        for request_output in request_outputs:
+            if request_output.finished:
+                assert request_output.outputs[0].finish_reason == "stop"
+                print(f"{request_output.outputs[0].stop_reason=}")
+
+            request_id = request_output.request_id
+            new_text = request_output.outputs[0].text
+            if request_id not in gen_strings:
+                gen_strings[request_id] = new_text
+            else:
+                gen_strings[request_id] += new_text
+
+    # Confirmed tracked values matches what we expected.
+    for idx, (ref_gen_str,
+              stop_str) in enumerate(zip(GENERATION_STRINGS, STOP_STRINGS)):
+
+        # Request should be aborted.
+        request_id = f"request-{idx}"
+        assert request_id in aborted
+
+        # Collected values that were generated.
+        gen_str = gen_strings[request_id]
+
+        # Construct reference strings.
+        stop_str_idx = ref_gen_str.find(stop_str)
+        ref_str_exc_stop = ref_gen_str[:stop_str_idx]
+        ref_str_inc_stop = ref_gen_str[:stop_str_idx] + stop_str
+
+        if include_stop_str_in_output:
+            assert (gen_str == ref_str_inc_stop, 
+                    f"{gen_str=}, {ref_str_inc_stop=}")
+        else:
+            assert (gen_str == ref_str_exc_stop, 
+                    f"{gen_str=}, {ref_str_exc_stop=}")
+
     assert detokenizer.get_num_unfinished_requests() == 0
     assert not detokenizer.has_unfinished_requests()

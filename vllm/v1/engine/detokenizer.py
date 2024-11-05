@@ -50,6 +50,11 @@ class IncrementalDetokenizer:
     # Streaming RequestOutputs to clients in async mode.
     stream: Optional[AsyncStream] = None
 
+    @property
+    def output_token_ids(self) -> List[int]:
+        assert len(self.token_ids) >= len(self.prompt_token_ids)
+        return self.token_ids[len(self.prompt_token_ids):]
+
     @classmethod
     def from_new_request(
         cls,
@@ -154,7 +159,7 @@ class IncrementalDetokenizer:
 
         delta = self.output_kind == RequestOutputKind.DELTA
         output_text = self._get_next_output_text(finished, delta)
-        token_ids = new_token_ids if delta else self.token_ids
+        token_ids = new_token_ids if delta else self.output_token_ids
 
         request_output = RequestOutput.new(
             self.request_id,
