@@ -8,8 +8,9 @@ import pytest
 
 from tests.mq_llm_engine.utils import RemoteMQLLMEngine, generate
 from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.sampling_params import RequestOutputKind, SamplingParams
 
-MODEL = "google/gemma-1.1-2b-it"
+MODEL = "facebook/opt-125m"
 NUM_EXPECTED_TOKENS = 10
 NUM_REQUESTS = 10000
 
@@ -53,5 +54,51 @@ async def test_load(tmp_socket):
             f"{failed_request_id} generated {tokens} but "
             f"expected {NUM_EXPECTED_TOKENS}")
 
+        # Shutdown.
+        client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("min_chunk_size", [512, 64])
+async def test_chunked_prefill(tmp_socket, min_chunk_size):
+    ENGINE_ARGS = AsyncEngineArgs(
+        model=MODEL,
+        disable_log_requests=True,
+        enable_chunked_prefill=True,
+        max_num_batched_tokens=512,
+        min_chunk_size=min_chunk_size,
+    )
+    with RemoteMQLLMEngine(engine_args=ENGINE_ARGS,
+                           ipc_path=tmp_socket) as engine:
+
+        client = await engine.make_client()
+
+        large_request = "hello" * 1000
+        small_request = "hello"
+
+        async def generate(prompt, req_id):
+            async for out in client.generate(
+                    request_id=req_id,
+                    prompt=prompt,
+                    sampling_params=SamplingParams(
+                        max_tokens=1,
+                        output_kind=RequestOutputKind.FINAL_ONLY),
+            ):
+                return out
+
+        large_task = asyncio.create_task(generate(large_request, "one"))
+
+        small_task = asyncio.create_task(generate(small_request, "two"))
+
+        done, _ = await asyncio.wait((large_task, small_task),
+                                     return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            if min_chunk_size == 512:
+                assert large_task in done
+                assert len(done) == 2
+            else:
+                assert small_task in done
+                assert len(done) == 1
+            assert task.exception() is not None
         # Shutdown.
         client.close()
