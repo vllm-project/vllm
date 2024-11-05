@@ -297,34 +297,25 @@ class CustomAllreduce {
   std::map<IPC_KEY, char*> ipc_handles_;
 
   /**
-   * meta is a pointer to device metadata and temporary buffer for allreduce.
+   * Signals are an array of ipc-enabled buffers from all ranks.
+   * For each of the buffer, the layout is as follows:
+   * | -- sizeof(Signal) -- | ------ a few MB ----- |
+   * The first section is for allreduce synchronization, and the second section
+   * is for storing the intermediate results required by some allreduce algos.
    *
-   * There's a total of sizeof(Signal) of prefix before the actual data,
-   * so meta + 1 points to actual temporary buffer.
-   *
-   * note: this class does not own any device memory. Any required buffers
-   * are passed in from the constructor
+   * Note: this class does not own any device memory. Any required buffers
+   * are passed in from the constructor.
    */
-  CustomAllreduce(Signal* meta, void* rank_data, size_t rank_data_sz,
-                  const cudaIpcMemHandle_t* handles,
-                  const std::vector<int64_t>& offsets, int rank,
-                  bool full_nvlink = true)
+  CustomAllreduce(Signal** signals, void* rank_data, size_t rank_data_sz,
+                  int rank, int world_size, bool full_nvlink = true)
       : rank_(rank),
-        world_size_(offsets.size()),
+        world_size_(world_size),
         full_nvlink_(full_nvlink),
-        self_sg_(meta),
+        self_sg_(signals[rank]),
         d_rank_data_base_(reinterpret_cast<RankData*>(rank_data)),
         d_rank_data_end_(d_rank_data_base_ + rank_data_sz / sizeof(RankData)) {
     for (int i = 0; i < world_size_; i++) {
-      Signal* rank_sg;
-      if (i != rank_) {
-        char* handle = open_ipc_handle(&handles[i]);
-        handle += offsets[i];
-        rank_sg = (Signal*)handle;
-      } else {
-        rank_sg = self_sg_;
-      }
-      sg_.signals[i] = rank_sg;
+      sg_.signals[i] = signals[i];
     }
   }
 
@@ -370,26 +361,22 @@ class CustomAllreduce {
           std::to_string(d_rank_data_base_ + num - d_rank_data_end_));
   }
 
-  void register_buffer(const std::vector<std::string>& handles,
-                       const std::vector<int64_t>& offsets, void* self) {
+  /**
+   * Register already-shared IPC pointers.
+   */
+  void register_buffer(void** ptrs) {
     check_rank_data_capacity();
     RankData data;
     for (int i = 0; i < world_size_; i++) {
-      if (i != rank_) {
-        char* handle = open_ipc_handle(handles[i].data());
-        handle += offsets[i];
-        data.ptrs[i] = handle;
-      } else {
-        data.ptrs[i] = self;
-      }
+      data.ptrs[i] = ptrs[i];
     }
     auto d_data = d_rank_data_base_++;
     CUDACHECK(
         cudaMemcpy(d_data, &data, sizeof(RankData), cudaMemcpyHostToDevice));
-    buffers_[self] = d_data;
+    buffers_[ptrs[rank_]] = d_data;
   }
 
-  // note: when registering graph buffers, we intentionally choose to not
+  // Note: when registering graph buffers, we intentionally choose to not
   // deduplicate the addresses. That means if the allocator reuses some
   // addresses, they will be registered again. This is to account for the remote
   // possibility of different allocation patterns between ranks. For example,
@@ -424,11 +411,13 @@ class CustomAllreduce {
   }
 
   /**
-   * This is the result after careful grid search. Using 36 blocks give the best
-   * or close to the best runtime on the devices I tried: A100, A10, A30, T4,
-   * V100. You'll notice that NCCL kernels also only take a small amount of SMs.
-   * Not quite sure the underlying reason, but my guess is that too many SMs
-   * will cause contention on NVLink bus.
+   * Performs allreduce, assuming input has already been registered.
+   *
+   * Block and grid default configs are results after careful grid search. Using
+   * 36 blocks give the best or close to the best runtime on the devices I
+   * tried: A100, A10, A30, T4, V100. You'll notice that NCCL kernels also only
+   * take a small amount of SMs. Not quite sure the underlying reason, but my
+   * guess is that too many SMs will cause contention on NVLink bus.
    */
   template <typename T>
   void allreduce(cudaStream_t stream, T* input, T* output, int size,

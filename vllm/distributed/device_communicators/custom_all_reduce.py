@@ -5,6 +5,7 @@ from typing import Any, List, Optional, Union
 import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
+from torch.multiprocessing.reductions import reduce_tensor
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
@@ -147,7 +148,7 @@ class CustomAllreduce:
             return
 
         self.disabled = False
-        # buffers memory are owned by this Python class and passed to C++
+        # Buffers memory are owned by this Python class and passed to C++
         # meta data composes of two parts: meta data for synchronization
         # (256 bytes) and a temporary buffer for storing intermediate
         # allreduce results.
@@ -170,10 +171,11 @@ class CustomAllreduce:
         self.max_size = max_size
         self.rank = rank
         self.world_size = world_size
-        handles, offsets = self._get_ipc_meta(self.meta)
+        # Retain reference to IPC tensors to prevent garbage collection.
+        self._ipc_tensors: List[torch.Tensor] = []
         self.full_nvlink = full_nvlink
-        self._ptr = ops.init_custom_ar(self.meta, self.rank_data, handles,
-                                       offsets, rank, self.full_nvlink)
+        self._ptr = ops.init_custom_ar(self._get_ipc_tensors(self.meta),
+                                       self.rank_data, rank, self.full_nvlink)
         self.register_buffer(self.buffer)
 
     @staticmethod
@@ -220,33 +222,30 @@ class CustomAllreduce:
             if not self.disabled:
                 self.register_graph_buffers()
 
-    def _get_ipc_meta(self, inp: torch.Tensor):
-        data = inp.untyped_storage()._share_cuda_()
-        handle = data[1]
-        # https://github.com/pytorch/pytorch/pull/130890 changes
-        # the binary format of the ipc handle
-        # it starts from pytorch 2.5
-        if len(handle) > 64:
-            assert len(handle) == 66
-            # only support SHAREABLE_HANDLE_VERSION = 1
-            assert int(handle[0]) == 1
-            # only support SHAREABLE_CUDA_MALLOC = 'c'
-            assert handle[1] == ord("c")
-            handle = handle[2:]
-            # TODO: support expandable segment
-        shard_data = (
-            handle,  # ipc handle to base ptr
-            data[3],  # offset of base ptr
-        )
-        return self._gather_ipc_meta(shard_data)
+    def _get_ipc_tensors(self, inp: torch.Tensor) -> List[torch.Tensor]:
+        """Gather the ipc-enabled tensors of `inp` from all ranks."""
+        all_meta = self._all_gather_object(reduce_tensor(inp))
+        all_tensors = []
+        for i, obj in enumerate(all_meta):
+            func = obj[0][0]
+            args = list(obj[0][1])
+            # This might break in the future since what `args` encompasses
+            # may change.
+            args[6] = inp.device.index
+            if i != self.rank:
+                all_tensors.append(func(*args))
+            else:
+                all_tensors.append(inp)
+        self._ipc_tensors.extend(all_tensors)
+        return all_tensors
 
-    def _gather_ipc_meta(self, shard_data):
-        # Note: don't use `[[None]] * self.world_size` here
-        # because it will create a list of the same reference
-        all_data: List[Optional[Any]] = [[None]
-                                         for i in range(self.world_size)]
-        all_data[self.rank][0] = shard_data
-
+    def _all_gather_object(self, data: Any) -> List[List[Any]]:
+        """All gather serializable objects."""
+        all_data: List[List[Any]] = [[None] for i in range(self.world_size)]
+        all_data[self.rank][0] = data
+        # We cannot directly use `dist.all_gather_object` here
+        # because it is incompatible with `gloo` backend under inference mode.
+        # see https://github.com/pytorch/pytorch/issues/126032 for details.
         ranks = dist.get_process_group_ranks(group=self.group)
         ranks.sort()
         for i, rank in enumerate(ranks):
@@ -255,9 +254,12 @@ class CustomAllreduce:
                                        group=self.group,
                                        device="cpu")
 
-        # we cannot directly use `dist.all_gather_object` here
-        # because it is incompatible with `gloo` backend under inference mode.
-        # see https://github.com/pytorch/pytorch/issues/126032 for details.
+        return all_data
+
+    def _gather_ipc_meta(self, shard_data):
+        # Note: don't use `[[None]] * self.world_size` here
+        # because it will create a list of the same reference.
+        all_data = self._all_gather_object(shard_data)
 
         handles = []
         offsets = []
@@ -267,8 +269,7 @@ class CustomAllreduce:
         return handles, offsets
 
     def register_buffer(self, inp: torch.Tensor):
-        handles, offsets = self._get_ipc_meta(inp)
-        ops.register_buffer(self._ptr, inp, handles, offsets)
+        ops.register_buffer(self._ptr, self._get_ipc_tensors(inp))
 
     def register_graph_buffers(self):
         handle, offset = ops.get_graph_buffer_ipc_meta(self._ptr)
@@ -291,23 +292,30 @@ class CustomAllreduce:
             return inp_size < self.max_size
         return False
 
-    # all reduce, assuming inp tensor is IPC registered with register_buffer,
-    # or, in the context of cuda graphs, register_graph_buffers
     def all_reduce_reg(self, inp: torch.Tensor, out: torch.Tensor = None):
+        """Performs all reduce.
+        
+        This method assumes inp tensor is IPC registered with register_buffer,
+        or, in the context of cuda graphs, register_graph_buffers.
+        """
         if out is None:
             out = torch.empty_like(inp)
         ops.all_reduce_reg(self._ptr, inp, out)
         return out
 
-    # all reduce, assuming inp tensor is NOT IPC registered
     def all_reduce_unreg(self, inp: torch.Tensor, out: torch.Tensor = None):
+        """Performs all reduce, assuming inp tensor is not IPC registered."""
         if out is None:
             out = torch.empty_like(inp)
         ops.all_reduce_unreg(self._ptr, inp, self.buffer, out)
         return out
 
     def custom_all_reduce(self, input: torch.Tensor) -> Optional[torch.Tensor]:
-        # when custom allreduce is disabled, this will be None
+        """Conditionally performs custom allreduce.
+        
+        Returns the allreduced result, or None if custom allreduce is not
+        suitable for the given Tensor under the current context.
+        """
         if self.disabled or not self.should_custom_ar(input):
             return None
         if self._IS_CAPTURING:
@@ -323,8 +331,6 @@ class CustomAllreduce:
             # be small(<=1% of overall latency) compared to the performance
             # gains of using custom kernels
             return self.all_reduce_unreg(input)
-
-        return None
 
     def close(self):
         if not self.disabled and self._ptr:

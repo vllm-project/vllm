@@ -912,11 +912,10 @@ def get_max_shared_memory_per_block_device_attribute(device: int) -> int:
 
 
 # custom ar
-def init_custom_ar(meta: torch.Tensor, rank_data: torch.Tensor,
-                   handles: List[str], offsets: List[int], rank: int,
-                   full_nvlink: bool) -> int:
-    return torch.ops._C_custom_ar.init_custom_ar(meta, rank_data, handles,
-                                                 offsets, rank, full_nvlink)
+def init_custom_ar(ipc_tensors: List[torch.Tensor], rank_data: torch.Tensor,
+                   rank: int, full_nvlink: bool) -> int:
+    return torch.ops._C_custom_ar.init_custom_ar(ipc_tensors, rank_data, rank,
+                                                 full_nvlink)
 
 
 def all_reduce_reg(fa: int, inp: torch.Tensor, out: torch.Tensor) -> None:
@@ -936,9 +935,8 @@ def meta_size() -> int:
     return torch.ops._C_custom_ar.meta_size()
 
 
-def register_buffer(fa: int, t: torch.Tensor, handles: List[str],
-                    offsets: List[int]) -> None:
-    return torch.ops._C_custom_ar.register_buffer(fa, t, handles, offsets)
+def register_buffer(fa: int, ipc_tensors: List[torch.Tensor]) -> None:
+    return torch.ops._C_custom_ar.register_buffer(fa, ipc_tensors)
 
 
 def get_graph_buffer_ipc_meta(fa: int) -> Tuple[List[str], List[int]]:

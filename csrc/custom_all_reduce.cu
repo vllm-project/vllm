@@ -9,28 +9,24 @@
 using fptr_t = int64_t;
 static_assert(sizeof(void*) == sizeof(fptr_t));
 
-fptr_t init_custom_ar(torch::Tensor& meta, torch::Tensor& rank_data,
-                      const std::vector<std::string>& handles,
-                      const std::vector<int64_t>& offsets, int64_t rank,
+fptr_t init_custom_ar(const std::vector<torch::Tensor>& ipc_tensors,
+                      torch::Tensor& rank_data, int64_t rank,
                       bool full_nvlink) {
-  int world_size = offsets.size();
+  int world_size = ipc_tensors.size();
   if (world_size > 8)
     throw std::invalid_argument("world size > 8 is not supported");
   if (world_size % 2 != 0)
     throw std::invalid_argument("Odd num gpus is not supported for now");
-  if (world_size != handles.size())
-    throw std::invalid_argument(
-        "handles length should equal to offsets length");
   if (rank < 0 || rank >= world_size)
     throw std::invalid_argument("invalid rank passed in");
 
-  cudaIpcMemHandle_t ipc_handles[8];
+  vllm::Signal* ipc_ptrs[8];
   for (int i = 0; i < world_size; i++) {
-    std::memcpy(&ipc_handles[i], handles[i].data(), sizeof(cudaIpcMemHandle_t));
+    ipc_ptrs[i] = reinterpret_cast<vllm::Signal*>(ipc_tensors[i].data_ptr());
   }
-  return (fptr_t) new vllm::CustomAllreduce(
-      reinterpret_cast<vllm::Signal*>(meta.data_ptr()), rank_data.data_ptr(),
-      rank_data.numel(), ipc_handles, offsets, rank, full_nvlink);
+  return (fptr_t) new vllm::CustomAllreduce(ipc_ptrs, rank_data.data_ptr(),
+                                            rank_data.numel(), rank, world_size,
+                                            full_nvlink);
 }
 
 /**
@@ -115,11 +111,15 @@ void dispose(fptr_t _fa) {
 
 int64_t meta_size() { return sizeof(vllm::Signal); }
 
-void register_buffer(fptr_t _fa, torch::Tensor& t,
-                     const std::vector<std::string>& handles,
-                     const std::vector<int64_t>& offsets) {
+void register_buffer(fptr_t _fa,
+                     const std::vector<torch::Tensor>& ipc_tensors) {
   auto fa = reinterpret_cast<vllm::CustomAllreduce*>(_fa);
-  fa->register_buffer(handles, offsets, t.data_ptr());
+  TORCH_CHECK(ipc_tensors.size() == fa->world_size_);
+  void* ipc_ptrs[8];
+  for (int i = 0; i < ipc_tensors.size(); i++) {
+    ipc_ptrs[i] = reinterpret_cast<vllm::Signal*>(ipc_tensors[i].data_ptr());
+  }
+  fa->register_buffer(ipc_ptrs);
 }
 
 std::tuple<torch::Tensor, std::vector<int64_t>> get_graph_buffer_ipc_meta(

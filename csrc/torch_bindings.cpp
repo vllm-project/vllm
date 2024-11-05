@@ -411,9 +411,8 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cuda_utils), cuda_utils) {
 TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _custom_ar), custom_ar) {
   // Custom all-reduce kernels
   custom_ar.def(
-      "init_custom_ar(Tensor meta, Tensor rank_data, "
-      "str[] handles, int[] offsets, int rank, "
-      "bool full_nvlink) -> int");
+      "init_custom_ar(Tensor[] ipc_tensors, Tensor rank_data, "
+      "int rank, bool full_nvlink) -> int");
   custom_ar.impl("init_custom_ar", torch::kCUDA, &init_custom_ar);
 
   custom_ar.def("all_reduce_reg(int fa, Tensor inp, Tensor! out) -> ()");
@@ -427,9 +426,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _custom_ar), custom_ar) {
   custom_ar.def("dispose", &dispose);
   custom_ar.def("meta_size", &meta_size);
 
-  custom_ar.def(
-      "register_buffer(int fa, Tensor t, str[] handles, "
-      "int[] offsets) -> ()");
+  custom_ar.def("register_buffer(int fa, Tensor[] ipc_tensors) -> ()");
   custom_ar.impl("register_buffer", torch::kCUDA, &register_buffer);
 
   custom_ar.def("get_graph_buffer_ipc_meta", &get_graph_buffer_ipc_meta);
