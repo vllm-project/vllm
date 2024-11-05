@@ -260,7 +260,7 @@ def run_model(llama_config,
     output = output.cpu()
 
     expected_output = tractable_computation(input_ids[:2], positions[:2],
-                                            llama_config.num_layers).cpu()
+                                            llama_config).cpu()
 
     assert torch.allclose(output, expected_output)
 
