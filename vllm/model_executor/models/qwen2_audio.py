@@ -31,8 +31,8 @@ from transformers import Qwen2AudioConfig, Qwen2AudioEncoder
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
-from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, InputContext,
-                         token_inputs)
+from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
+                         InputContext, token_inputs)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
@@ -44,6 +44,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.models.qwen2 import Qwen2Model
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalInputs
+from vllm.multimodal.utils import consecutive_placeholder_ranges
 from vllm.sequence import IntermediateTensors, SequenceData
 
 from .interfaces import SupportsMultiModal, SupportsPP
@@ -85,7 +86,8 @@ class Qwen2AudioMultiModalProjector(nn.Module):
 def dummy_data_for_qwen2_audio(ctx: InputContext, seq_len: int,
                                mm_counts: Mapping[str, int]):
     num_audios = mm_counts["audio"]
-    max_llm_audio_tokens = get_max_qwen2_audio_audio_tokens(ctx) * num_audios
+    max_tokens_per_audio = get_max_qwen2_audio_audio_tokens(ctx)
+    max_llm_audio_tokens = max_tokens_per_audio * num_audios
     if seq_len - max_llm_audio_tokens - 2 < 0:
         raise RuntimeError(
             f"Qwen2-Audio cannot process {num_audios} audios in a prompt, "
@@ -99,7 +101,12 @@ def dummy_data_for_qwen2_audio(ctx: InputContext, seq_len: int,
         (0, seq_len - max_llm_audio_tokens),
     )
     dummy_audio = np.full((max_llm_audio_tokens * 2 * 2 * 160, ), 0.)
-    return dummy_seqdata, {"audio": [(dummy_audio, 16000)] * num_audios}
+    return DummyData(
+        dummy_seqdata, {"audio": [(dummy_audio, 16000)] * num_audios}, {
+            "audio":
+            consecutive_placeholder_ranges(num_items=num_audios,
+                                           item_size=max_tokens_per_audio)
+        })
 
 
 def get_processor(

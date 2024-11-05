@@ -159,7 +159,12 @@ class ChatCompletionRequest(OpenAIBaseModel):
     logit_bias: Optional[Dict[str, float]] = None
     logprobs: Optional[bool] = False
     top_logprobs: Optional[int] = 0
-    max_tokens: Optional[int] = None
+    # TODO(#9845): remove max_tokens when field is removed from OpenAI API
+    max_tokens: Optional[int] = Field(
+        default=None,
+        deprecated=
+        'max_tokens is deprecated in favor of the max_completion_tokens field')
+    max_completion_tokens: Optional[int] = None
     n: Optional[int] = 1
     presence_penalty: Optional[float] = 0.0
     response_format: Optional[ResponseFormat] = None
@@ -295,7 +300,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
     def to_beam_search_params(self,
                               default_max_tokens: int) -> BeamSearchParams:
-        max_tokens = self.max_tokens
+        # TODO(#9845): remove max_tokens when field is removed from OpenAI API
+        max_tokens = self.max_completion_tokens or self.max_tokens
         if max_tokens is None:
             max_tokens = default_max_tokens
 
@@ -308,10 +314,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
             ignore_eos=self.ignore_eos,
             temperature=temperature,
             length_penalty=self.length_penalty,
-        )
+            include_stop_str_in_output=self.include_stop_str_in_output)
 
     def to_sampling_params(self, default_max_tokens: int) -> SamplingParams:
-        max_tokens = self.max_tokens
+        # TODO(#9845): remove max_tokens when field is removed from OpenAI API
+        max_tokens = self.max_completion_tokens or self.max_tokens
         if max_tokens is None:
             max_tokens = default_max_tokens
 
@@ -606,7 +613,7 @@ class CompletionRequest(OpenAIBaseModel):
             ignore_eos=self.ignore_eos,
             temperature=temperature,
             length_penalty=self.length_penalty,
-        )
+            include_stop_str_in_output=self.include_stop_str_in_output)
 
     def to_sampling_params(self, default_max_tokens: int) -> SamplingParams:
         max_tokens = self.max_tokens
@@ -701,7 +708,7 @@ class CompletionRequest(OpenAIBaseModel):
         return data
 
 
-class EmbeddingRequest(OpenAIBaseModel):
+class EmbeddingCompletionRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/embeddings
     model: str
@@ -713,10 +720,15 @@ class EmbeddingRequest(OpenAIBaseModel):
 
     # doc: begin-embedding-pooling-params
     additional_data: Optional[Any] = None
-
     # doc: end-embedding-pooling-params
 
     # doc: begin-embedding-extra-params
+    add_special_tokens: bool = Field(
+        default=True,
+        description=(
+            "If true (the default), special tokens (e.g. BOS) will be added to "
+            "the prompt."),
+    )
     priority: int = Field(
         default=0,
         description=(
@@ -728,6 +740,82 @@ class EmbeddingRequest(OpenAIBaseModel):
 
     def to_pooling_params(self):
         return PoolingParams(additional_data=self.additional_data)
+
+
+class EmbeddingChatRequest(OpenAIBaseModel):
+    model: str
+    messages: List[ChatCompletionMessageParam]
+
+    encoding_format: Literal["float", "base64"] = "float"
+    dimensions: Optional[int] = None
+    user: Optional[str] = None
+    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
+
+    # doc: begin-chat-embedding-pooling-params
+    additional_data: Optional[Any] = None
+    # doc: end-chat-embedding-pooling-params
+
+    # doc: begin-chat-embedding-extra-params
+    add_generation_prompt: bool = Field(
+        default=True,
+        description=
+        ("If true, the generation prompt will be added to the chat template. "
+         "This is a parameter used by chat template in tokenizer config of the "
+         "model."),
+    )
+    continue_final_message: bool = Field(
+        default=False,
+        description=
+        ("If this is set, the chat will be formatted so that the final "
+         "message in the chat is open-ended, without any EOS tokens. The "
+         "model will continue this message rather than starting a new one. "
+         "This allows you to \"prefill\" part of the model's response for it. "
+         "Cannot be used at the same time as `add_generation_prompt`."),
+    )
+    add_special_tokens: bool = Field(
+        default=False,
+        description=(
+            "If true, special tokens (e.g. BOS) will be added to the prompt "
+            "on top of what is added by the chat template. "
+            "For most models, the chat template takes care of adding the "
+            "special tokens so this should be set to false (as is the "
+            "default)."),
+    )
+    chat_template: Optional[str] = Field(
+        default=None,
+        description=(
+            "A Jinja template to use for this conversion. "
+            "As of transformers v4.44, default chat template is no longer "
+            "allowed, so you must provide a chat template if the tokenizer "
+            "does not define one."),
+    )
+    chat_template_kwargs: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description=("Additional kwargs to pass to the template renderer. "
+                     "Will be accessible by the chat template."),
+    )
+    priority: int = Field(
+        default=0,
+        description=(
+            "The priority of the request (lower means earlier handling; "
+            "default: 0). Any priority other than 0 will raise an error "
+            "if the served model does not use priority scheduling."))
+    # doc: end-chat-embedding-extra-params
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_generation_prompt(cls, data):
+        if data.get("continue_final_message") and data.get(
+                "add_generation_prompt"):
+            raise ValueError("Cannot set both `continue_final_message` and "
+                             "`add_generation_prompt` to True.")
+        return data
+
+    def to_pooling_params(self):
+        return PoolingParams(additional_data=self.additional_data)
+
+
+EmbeddingRequest = Union[EmbeddingCompletionRequest, EmbeddingChatRequest]
 
 
 class CompletionLogProbs(OpenAIBaseModel):
@@ -792,7 +880,7 @@ class EmbeddingResponseData(OpenAIBaseModel):
 
 
 class EmbeddingResponse(OpenAIBaseModel):
-    id: str = Field(default_factory=lambda: f"cmpl-{random_uuid()}")
+    id: str = Field(default_factory=lambda: f"embd-{random_uuid()}")
     object: str = "list"
     created: int = Field(default_factory=lambda: int(time.time()))
     model: str

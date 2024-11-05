@@ -1,6 +1,6 @@
 import enum
 import json
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field
 from typing import (TYPE_CHECKING, Any, ClassVar, Dict, Final, List, Literal,
                     Mapping, Optional, Set, Tuple, Type, Union)
 
@@ -23,9 +23,13 @@ if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
 
     from vllm.executor.executor_base import ExecutorBase
+    from vllm.model_executor.layers.quantization.base_config import (
+        QuantizationConfig)
     from vllm.model_executor.model_loader.loader import BaseModelLoader
     from vllm.transformers_utils.tokenizer_group.base_tokenizer_group import (
         BaseTokenizerGroup)
+else:
+    QuantizationConfig = None
 
 logger = init_logger(__name__)
 
@@ -55,6 +59,10 @@ class ModelConfig:
             "mistral" will always use the tokenizer from `mistral_common`.
         trust_remote_code: Trust remote code (e.g., from HuggingFace) when
             downloading the model and tokenizer.
+        allowed_local_media_path: Allowing API requests to read local images or
+            videos from directories specified by the server file system.
+            This is a security risk. Should only be enabled in trusted
+            environments.
         dtype: Data type for model weights and activations. The "auto" option
             will use FP16 precision for FP32 and FP16 models, and BF16 precision
             for BF16 models.
@@ -84,9 +92,6 @@ class ModelConfig:
             disable CUDA graph and always execute the model in eager mode.
             If False, we will use CUDA graph and eager execution in hybrid.
             If None, the user did not specify, so default to False.
-        max_context_len_to_capture: Maximum context len covered by CUDA graphs.
-            When a sequence has context length larger than this, we fall back
-            to eager mode (DEPRECATED. Use max_seq_len_to_capture instead).
         max_seq_len_to_capture: Maximum sequence len covered by CUDA graphs.
             When a sequence has context length larger than this, we fall back
             to eager mode. Additionally for encoder-decoder models, if the
@@ -112,42 +117,63 @@ class ModelConfig:
             Defaults to 'auto' which defaults to 'hf'.
         mm_processor_kwargs: Arguments to be forwarded to the model's processor
             for multi-modal data, e.g., image processor.
+        pooling_type: Used to configure the pooling method in the embedding 
+            model.
+        pooling_norm: Used to determine whether to normalize the pooled 
+            data in the embedding model.
+        pooling_softmax: Used to determine whether to softmax the pooled 
+            data in the embedding model.
+        pooling_step_tag_id: When pooling_step_tag_id is not -1, it indicates 
+            that the score corresponding to the pooling_step_tag_id in the 
+            generated sentence should be returned. Otherwise, it returns 
+            the scores for all tokens.
+        pooling_returned_token_ids: pooling_returned_token_ids represents a 
+            list of indices for the vocabulary dimensions to be extracted, 
+            such as the token IDs of good_token and bad_token in the 
+            math-shepherd-mistral-7b-prm model.
     """
 
-    def __init__(self,
-                 model: str,
-                 task: Union[TaskOption, _Task],
-                 tokenizer: str,
-                 tokenizer_mode: str,
-                 trust_remote_code: bool,
-                 dtype: Union[str, torch.dtype],
-                 seed: int,
-                 revision: Optional[str] = None,
-                 code_revision: Optional[str] = None,
-                 rope_scaling: Optional[dict] = None,
-                 rope_theta: Optional[float] = None,
-                 tokenizer_revision: Optional[str] = None,
-                 max_model_len: Optional[int] = None,
-                 spec_target_max_model_len: Optional[int] = None,
-                 quantization: Optional[str] = None,
-                 quantization_param_path: Optional[str] = None,
-                 enforce_eager: Optional[bool] = None,
-                 max_context_len_to_capture: Optional[int] = None,
-                 max_seq_len_to_capture: Optional[int] = None,
-                 max_logprobs: int = 20,
-                 disable_sliding_window: bool = False,
-                 skip_tokenizer_init: bool = False,
-                 served_model_name: Optional[Union[str, List[str]]] = None,
-                 limit_mm_per_prompt: Optional[Mapping[str, int]] = None,
-                 use_async_output_proc: bool = True,
-                 override_neuron_config: Optional[Dict[str, Any]] = None,
-                 config_format: ConfigFormat = ConfigFormat.AUTO,
-                 chat_template_text_format: str = "string",
-                 mm_processor_kwargs: Optional[Dict[str, Any]] = None) -> None:
+    def __init__(
+            self,
+            model: str,
+            task: Union[TaskOption, _Task],
+            tokenizer: str,
+            tokenizer_mode: str,
+            trust_remote_code: bool,
+            dtype: Union[str, torch.dtype],
+            seed: int,
+            allowed_local_media_path: str = "",
+            revision: Optional[str] = None,
+            code_revision: Optional[str] = None,
+            rope_scaling: Optional[dict] = None,
+            rope_theta: Optional[float] = None,
+            tokenizer_revision: Optional[str] = None,
+            max_model_len: Optional[int] = None,
+            spec_target_max_model_len: Optional[int] = None,
+            quantization: Optional[str] = None,
+            quantization_param_path: Optional[str] = None,
+            enforce_eager: Optional[bool] = None,
+            max_seq_len_to_capture: Optional[int] = None,
+            max_logprobs: int = 20,
+            disable_sliding_window: bool = False,
+            skip_tokenizer_init: bool = False,
+            served_model_name: Optional[Union[str, List[str]]] = None,
+            limit_mm_per_prompt: Optional[Mapping[str, int]] = None,
+            use_async_output_proc: bool = True,
+            override_neuron_config: Optional[Dict[str, Any]] = None,
+            config_format: ConfigFormat = ConfigFormat.AUTO,
+            chat_template_text_format: str = "string",
+            mm_processor_kwargs: Optional[Dict[str, Any]] = None,
+            pooling_type: Optional[str] = None,
+            pooling_norm: Optional[bool] = None,
+            pooling_softmax: Optional[bool] = None,
+            pooling_step_tag_id: Optional[int] = None,
+            pooling_returned_token_ids: Optional[List[int]] = None) -> None:
         self.model = model
         self.tokenizer = tokenizer
         self.tokenizer_mode = tokenizer_mode
         self.trust_remote_code = trust_remote_code
+        self.allowed_local_media_path = allowed_local_media_path
         self.seed = seed
         self.revision = revision
         self.code_revision = code_revision
@@ -161,9 +187,6 @@ class ModelConfig:
         self.quantization = quantization
         self.quantization_param_path = quantization_param_path
         self.enforce_eager = enforce_eager
-        if max_context_len_to_capture is not None:
-            raise ValueError("`max_context_len_to_capture` is deprecated. "
-                             "Use `max_seq_len_to_capture` instead.")
         self.max_seq_len_to_capture = max_seq_len_to_capture
         self.max_logprobs = max_logprobs
         self.disable_sliding_window = disable_sliding_window
@@ -224,6 +247,13 @@ class ModelConfig:
         supported_tasks, task = self._resolve_task(task, self.hf_config)
         self.supported_tasks = supported_tasks
         self.task: Final = task
+        self.pooler_config = self._init_pooler_config(
+            pooling_type,
+            pooling_norm,
+            pooling_softmax,
+            pooling_step_tag_id,
+            pooling_returned_token_ids,
+        )
 
         self._verify_quantization()
         self._verify_cuda_graph()
@@ -240,6 +270,23 @@ class ModelConfig:
             raise ValueError("`limit_mm_per_prompt` is only supported for "
                              "multimodal models.")
 
+        return None
+
+    def _init_pooler_config(
+        self,
+        pooling_type: Optional[str] = None,
+        pooling_norm: Optional[bool] = None,
+        pooling_softmax: Optional[bool] = None,
+        pooling_step_tag_id: Optional[int] = None,
+        pooling_returned_token_ids: Optional[List[int]] = None
+    ) -> Optional["PoolerConfig"]:
+        if self.task == "embedding":
+            return PoolerConfig(
+                pooling_type=pooling_type,
+                pooling_norm=pooling_norm,
+                pooling_softmax=pooling_softmax,
+                pooling_step_tag_id=pooling_step_tag_id,
+                pooling_returned_token_ids=pooling_returned_token_ids)
         return None
 
     def _init_attention_free(self) -> bool:
@@ -1311,6 +1358,8 @@ class SpeculativeConfig:
                 tokenizer=target_model_config.tokenizer,
                 tokenizer_mode=target_model_config.tokenizer_mode,
                 trust_remote_code=target_model_config.trust_remote_code,
+                allowed_local_media_path=target_model_config.
+                allowed_local_media_path,
                 dtype=target_model_config.dtype,
                 seed=target_model_config.seed,
                 revision=draft_revision,
@@ -1676,6 +1725,17 @@ class MultiModalConfig:
     # TODO: Add configs to init vision tower or not.
 
 
+@dataclass
+class PoolerConfig:
+    """Controls the behavior of pooler in embedding model"""
+
+    pooling_type: Optional[str] = None
+    pooling_norm: Optional[bool] = None
+    pooling_softmax: Optional[bool] = None
+    pooling_step_tag_id: Optional[int] = None
+    pooling_returned_token_ids: Optional[List[int]] = None
+
+
 _STR_DTYPE_TO_TORCH_DTYPE = {
     "half": torch.float16,
     "float16": torch.float16,
@@ -1928,17 +1988,10 @@ class ObservabilityConfig:
                 "'otlp_traces_endpoint'. Ensure OpenTelemetry packages are "
                 f"installed. Original error:\n{otel_import_error_traceback}")
 
-        if ((self.collect_model_forward_time
-             or self.collect_model_execute_time)
-                and self.otlp_traces_endpoint is None):
-            raise ValueError(
-                "collect_model_forward_time or collect_model_execute_time "
-                "requires --otlp-traces-endpoint to be set.")
 
-
-@dataclass(frozen=True)
-class EngineConfig:
-    """Dataclass which contains all engine-related configuration. This
+@dataclass
+class VllmConfig:
+    """Dataclass which contains all vllm-related configuration. This
     simplifies passing around the distinct configurations in the codebase.
     """
 
@@ -1948,11 +2001,40 @@ class EngineConfig:
     scheduler_config: SchedulerConfig
     device_config: DeviceConfig
     load_config: LoadConfig
-    lora_config: Optional[LoRAConfig]
-    speculative_config: Optional[SpeculativeConfig]
-    decoding_config: Optional[DecodingConfig]
-    observability_config: Optional[ObservabilityConfig]
-    prompt_adapter_config: Optional[PromptAdapterConfig]
+    lora_config: Optional[LoRAConfig] = None
+    speculative_config: Optional[SpeculativeConfig] = None
+    decoding_config: Optional[DecodingConfig] = None
+    observability_config: Optional[ObservabilityConfig] = None
+    prompt_adapter_config: Optional[PromptAdapterConfig] = None
+    quant_config: Optional[QuantizationConfig] = None
+
+    @staticmethod
+    def _get_quantization_config(
+            model_config: ModelConfig,
+            load_config: LoadConfig) -> Optional[QuantizationConfig]:
+        """Get the quantization config."""
+        if model_config.quantization is not None:
+            from vllm.model_executor.model_loader.weight_utils import (
+                get_quant_config)
+            quant_config = get_quant_config(model_config, load_config)
+            capability_tuple = current_platform.get_device_capability()
+
+            if capability_tuple is not None:
+                capability = capability_tuple.to_int()
+                if capability < quant_config.get_min_capability():
+                    raise ValueError(
+                        f"The quantization method {model_config.quantization} "
+                        "is not supported for the current GPU. Minimum "
+                        f"capability: {quant_config.get_min_capability()}. "
+                        f"Current capability: {capability}.")
+            supported_dtypes = quant_config.get_supported_act_dtypes()
+            if model_config.dtype not in supported_dtypes:
+                raise ValueError(
+                    f"{model_config.dtype} is not supported for quantization "
+                    f"method {model_config.quantization}. Supported dtypes: "
+                    f"{supported_dtypes}")
+            return quant_config
+        return None
 
     def __post_init__(self):
         """Verify configs are valid & consistent with each other.
@@ -1971,8 +2053,7 @@ class EngineConfig:
             self.prompt_adapter_config.verify_with_model_config(
                 self.model_config)
 
-    def to_dict(self):
-        """Return the configs as a dictionary, for use in **kwargs.
-        """
-        return dict(
-            (field.name, getattr(self, field.name)) for field in fields(self))
+        if self.quant_config is None and \
+            self.model_config is not None and self.load_config is not None:
+            self.quant_config = VllmConfig._get_quantization_config(
+                self.model_config, self.load_config)

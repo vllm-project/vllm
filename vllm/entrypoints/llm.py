@@ -58,6 +58,10 @@ class LLM:
             from the input.
         trust_remote_code: Trust remote code (e.g., from HuggingFace) when
             downloading the model and tokenizer.
+        allowed_local_media_path: Allowing API requests to read local images
+            or videos from directories specified by the server file system.
+            This is a security risk. Should only be enabled in trusted
+            environments.
         tensor_parallel_size: The number of GPUs to use for distributed
             execution with tensor parallelism.
         dtype: The data type for the model weights and activations. Currently,
@@ -93,9 +97,6 @@ class LLM:
         enforce_eager: Whether to enforce eager execution. If True, we will
             disable CUDA graph and always execute the model in eager mode.
             If False, we will use CUDA graph and eager execution in hybrid.
-        max_context_len_to_capture: Maximum context len covered by CUDA graphs.
-            When a sequence has context length larger than this, we fall back
-            to eager mode (DEPRECATED. Use `max_seq_len_to_capture` instead).
         max_seq_len_to_capture: Maximum sequence len covered by CUDA graphs.
             When a sequence has context length larger than this, we fall back
             to eager mode. Additionally for encoder-decoder models, if the
@@ -142,6 +143,7 @@ class LLM:
         tokenizer_mode: str = "auto",
         skip_tokenizer_init: bool = False,
         trust_remote_code: bool = False,
+        allowed_local_media_path: str = "",
         tensor_parallel_size: int = 1,
         dtype: str = "auto",
         quantization: Optional[str] = None,
@@ -152,13 +154,17 @@ class LLM:
         swap_space: float = 4,
         cpu_offload_gb: float = 0,
         enforce_eager: Optional[bool] = None,
-        max_context_len_to_capture: Optional[int] = None,
         max_seq_len_to_capture: int = 8192,
         disable_custom_all_reduce: bool = False,
         disable_async_output_proc: bool = False,
         mm_processor_kwargs: Optional[Dict[str, Any]] = None,
         # After positional args are removed, move this right below `model`
         task: TaskOption = "auto",
+        pooling_type: Optional[str] = None,
+        pooling_norm: Optional[bool] = None,
+        pooling_softmax: Optional[bool] = None,
+        pooling_step_tag_id: Optional[int] = None,
+        pooling_returned_token_ids: Optional[List[int]] = None,
         **kwargs,
     ) -> None:
         '''
@@ -178,6 +184,7 @@ class LLM:
             tokenizer_mode=tokenizer_mode,
             skip_tokenizer_init=skip_tokenizer_init,
             trust_remote_code=trust_remote_code,
+            allowed_local_media_path=allowed_local_media_path,
             tensor_parallel_size=tensor_parallel_size,
             dtype=dtype,
             quantization=quantization,
@@ -188,11 +195,15 @@ class LLM:
             swap_space=swap_space,
             cpu_offload_gb=cpu_offload_gb,
             enforce_eager=enforce_eager,
-            max_context_len_to_capture=max_context_len_to_capture,
             max_seq_len_to_capture=max_seq_len_to_capture,
             disable_custom_all_reduce=disable_custom_all_reduce,
             disable_async_output_proc=disable_async_output_proc,
             mm_processor_kwargs=mm_processor_kwargs,
+            pooling_type=pooling_type,
+            pooling_norm=pooling_norm,
+            pooling_softmax=pooling_softmax,
+            pooling_step_tag_id=pooling_step_tag_id,
+            pooling_returned_token_ids=pooling_returned_token_ids,
             **kwargs,
         )
         self.llm_engine = LLMEngine.from_engine_args(

@@ -6,7 +6,6 @@ import torch
 
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.platforms import current_platform
-from vllm.utils import seed_everything
 
 from .allclose_default import get_default_atol, get_default_rtol
 
@@ -52,7 +51,7 @@ def test_rotary_embedding(
     if rotary_dim is None:
         rotary_dim = head_size
 
-    seed_everything(seed)
+    current_platform.seed_everything(seed)
     torch.set_default_device(device)
     if rotary_dim is None:
         rotary_dim = head_size
@@ -106,7 +105,7 @@ def test_batched_rotary_embedding(
     max_position: int = 8192,
     base: int = 10000,
 ) -> None:
-    seed_everything(seed)
+    current_platform.seed_everything(seed)
     torch.set_default_device(device)
     if rotary_dim is None:
         rotary_dim = head_size
@@ -168,7 +167,7 @@ def test_batched_rotary_embedding_multi_lora(
     max_position: int = 8192,
     base: int = 10000,
 ) -> None:
-    seed_everything(seed)
+    current_platform.seed_everything(seed)
     torch.set_default_device(device)
     if rotary_dim is None:
         rotary_dim = head_size

@@ -136,6 +136,7 @@ Documentation
    :caption: Developer Documentation
 
    dev/sampling_params
+   dev/pooling_params
    dev/offline_inference/offline_index
    dev/engine/engine_index
    dev/kernel/paged_attention
