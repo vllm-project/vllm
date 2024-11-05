@@ -136,8 +136,7 @@ class GPTBigMLP(nn.Module):
             bias=True,
             quant_config=quant_config,
         )
-        self.act = get_act_fn(config.activation_function, quant_config,
-                              intermediate_size)
+        self.act = get_act_fn(config.activation_function)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         hidden_states, _ = self.c_fc(hidden_states)

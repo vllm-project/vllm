@@ -204,7 +204,7 @@ class QwenVMLP(nn.Module):
                                          intermediate_size,
                                          bias=True,
                                          quant_config=quant_config)
-        self.act_fn = get_act_fn("gelu", quant_config, intermediate_size)
+        self.act_fn = get_act_fn("gelu")
         self.c_proj = RowParallelLinear(
             intermediate_size,
             hidden_size,
