@@ -2,7 +2,7 @@ import functools
 from collections import UserDict
 from dataclasses import dataclass
 from typing import (TYPE_CHECKING, Any, Callable, Dict, Mapping, NamedTuple,
-                    Optional, Protocol, Type)
+                    Optional, Protocol, Type, cast)
 
 from torch import nn
 from transformers import PretrainedConfig
@@ -12,7 +12,7 @@ from vllm.logger import init_logger
 from vllm.utils import (get_allowed_kwarg_only_overrides, print_warning_once,
                         resolve_mm_processor_kwargs)
 
-from .data import DecoderOnlyInputs
+from .data import ProcessorInputs
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -109,7 +109,7 @@ class _MultiModalCounts(UserDict):
             raise KeyError(msg) from exc
 
 
-InputProcessor = Callable[[InputContext, DecoderOnlyInputs], DecoderOnlyInputs]
+InputProcessor = Callable[[InputContext, ProcessorInputs], ProcessorInputs]
 """Preprocess the inputs to the model."""
 
 
@@ -254,8 +254,8 @@ class InputRegistry:
     def _default_input_processor(
         self,
         ctx: InputContext,
-        inputs: DecoderOnlyInputs,
-    ) -> DecoderOnlyInputs:
+        inputs: ProcessorInputs,
+    ) -> ProcessorInputs:
         """The default input processor is a no-op."""
         return inputs
 
@@ -288,7 +288,7 @@ class InputRegistry:
             .get(model_cls, self._default_input_processor)
 
     def process_input(self, model_config: "ModelConfig",
-                      inputs: DecoderOnlyInputs) -> DecoderOnlyInputs:
+                      inputs: ProcessorInputs) -> ProcessorInputs:
         """
         Apply an input processor to an instance of model inputs.
 
@@ -308,7 +308,7 @@ class InputRegistry:
         # If it's empty, it'll fall back to the default kwarg values
         mm_processor_kwargs = resolve_mm_processor_kwargs(
             model_config.mm_processor_kwargs,
-            inputs.get("mm_processor_kwargs"),
+            cast(Dict[str, Any], inputs.get("mm_processor_kwargs")),
             processor,
         )
 

@@ -1,11 +1,12 @@
 import asyncio
 from abc import ABC, abstractmethod
-from typing import AsyncGenerator, List, Mapping, Optional, Union
+from typing import AsyncGenerator, List, Mapping, Optional
 
 from vllm.beam_search import BeamSearchSequence, create_sort_beams_key_function
 from vllm.config import DecodingConfig, ModelConfig
 from vllm.core.scheduler import SchedulerOutputs
 from vllm.inputs.data import PromptType, TokensPrompt
+from vllm.inputs.parse import is_explicit_encoder_decoder_prompt
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -60,7 +61,7 @@ class EngineClient(ABC):
 
     async def beam_search(
         self,
-        prompt: Union[PromptType, List[int]],
+        prompt: PromptType,
         model_config: ModelConfig,
         request_id: str,
         params: BeamSearchParams,
@@ -76,11 +77,19 @@ class EngineClient(ABC):
         tokenizer = await self.get_tokenizer()
         input_preprocessor = InputPreprocessor(model_config, tokenizer)
 
-        (prompt_text, prompt_token_ids, multi_modal_data,
-         mm_processor_kwargs) = input_preprocessor._extract_prompt_components(
-             prompt,
-             request_id=request_id,
-         )
+        if is_explicit_encoder_decoder_prompt(prompt):
+            raise NotImplementedError
+        else:
+            processed_inputs = input_preprocessor._prompt_to_llm_inputs(
+                prompt,
+                request_id=request_id,
+            )
+
+        prompt_token_ids = processed_inputs["prompt_token_ids"]
+        prompt_text = processed_inputs.get("prompt")
+        multi_modal_data = processed_inputs.get("multi_modal_data")
+        mm_processor_kwargs = processed_inputs.get("mm_processor_kwargs")
+
         tokenized_length = len(prompt_token_ids)
 
         sort_beams_key = create_sort_beams_key_function(
