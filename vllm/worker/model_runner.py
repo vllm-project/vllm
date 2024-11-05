@@ -1384,14 +1384,14 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         per sequence in the batch.
         """
         assert not self.model_config.enforce_eager
-        logger.info("Capturing the model for CUDA graphs. This may lead to "
+        logger.info("Capturing cudagraphs for decoding. This may lead to "
                     "unexpected consequences if the model is not static. To "
                     "run the model in eager mode, set 'enforce_eager=True' or "
                     "use '--enforce-eager' in the CLI.")
-        logger.info("If you are running out of memory, consider decreasing "
-                    "`gpu_memory_utilization` or enforcing eager mode. "
-                    "You can also reduce the `max_num_seqs` as needed "
-                    "to decrease memory usage.")
+        logger.info("If out-of-memory error occurs during cudagraph capture,"
+                    " consider decreasing `gpu_memory_utilization` or "
+                    "switching to eager mode. You can also reduce the "
+                    "`max_num_seqs` as needed to decrease memory usage.")
         start_time = time.perf_counter()
         start_free_gpu_memory = torch.cuda.mem_get_info()[0]
 
