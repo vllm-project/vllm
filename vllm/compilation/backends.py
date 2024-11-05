@@ -499,15 +499,29 @@ class PiecewiseBackend:
             ]
             entry.input_addresses = input_addresses
             cudagraph = torch.cuda.CUDAGraph()
+
+            # mind-exploding: carefully manage the reference and memory.
             with torch.cuda.graph(cudagraph, pool=self.graph_pool):
+                # `output` is managed by pytorch's cudagraph pool
                 output = entry.runnable(*args)
                 if self.is_last_graph:
+                    # by converting it to weak ref,
+                    # the original `output` will immediately be released
+                    # to save memory. It is only safe to do this for
+                    # the last graph, because the output of the last graph
+                    # will not be used by any other cuda graph.
                     output = weak_ref_tensors(output)
+
+            # here we always use weak ref for the output
+            # to save memory
             entry.output = weak_ref_tensors(output)
             entry.cudagraph = cudagraph
 
             compilation_counter.num_cudagraph_caputured += 1
 
+            # important: we need to return the output, rather than
+            # the weak ref of the output, so that pytorch can correctly
+            # manage the memory during cuda graph capture
             return output
 
         if self.is_debugging_mode:
