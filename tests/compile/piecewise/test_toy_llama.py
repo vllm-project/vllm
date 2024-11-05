@@ -1,6 +1,8 @@
 """
 Test the piecewise compilation with a simple model, comparing the output
 with and without the piecewise compilation.
+
+This is a tractable model, the weights and computation are specially designed.
 """
 import os
 from dataclasses import dataclass
@@ -50,6 +52,9 @@ class LlamaConfig:
     vocab_size: int = 128
     num_layers: int = 2
 
+    def __post_init__(self):
+        assert self.mlp_size >= self.hidden_size
+
 
 class LlamaMLP(nn.Module):
 
@@ -66,10 +71,12 @@ class LlamaMLP(nn.Module):
             bias=False,
         )
 
-        self.gate_up_projection.weight.data.fill_(0.0)
-        self.down_projection.weight.data.fill_(0.0)
+        nn.init.eye_(self.gate_up_projection.weight.data[:config.mlp_size])
+        nn.init.eye_(self.gate_up_projection.weight.data[config.mlp_size:])
+        nn.init.eye_(self.down_projection.weight.data)
 
     def forward(self, x):
+        # for positive input, this is essentially an elementwise-square
         x = self.gate_up_projection(x)
         x = x[:, :x.size(1) // 2] * torch.nn.functional.relu(
             x[:, x.size(1) // 2:])
@@ -91,14 +98,18 @@ class LlamaAttention(nn.Module):
             out_features=config.hidden_size,
         )
 
-        self.qkv_projection.weight.data.fill_(0.0)
-        self.output_projection.weight.data.fill_(0.0)
+        nn.init.eye_(self.qkv_projection.weight.data[:config.hidden_size])
+        nn.init.eye_(self.qkv_projection.weight.data[config.hidden_size:2 *
+                                                     config.hidden_size])
+        nn.init.eye_(self.qkv_projection.weight.data[2 * config.hidden_size:])
+        nn.init.eye_(self.output_projection.weight.data)
 
     def forward(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
+        # output = (hidden_states * 3 + positions * 2)
         qkv = self.qkv_projection(hidden_states)
         hidden_size = qkv.size(-1) // 3
         q, k, v = qkv.split([hidden_size, hidden_size, hidden_size], dim=-1)
@@ -126,20 +137,29 @@ class LlamaDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Summarize the computation:
+        - if residual is None, the outputs are:
+            - residual = (hidden_states + 1) * 3 + positions * 2 + hidden_states = hidden_states * 4 + positions * 2 + 3
+            - hidden_states = (residual + 1) ** 2
+        - if residual is not None, the outputs are:
+            - residual = (hidden_states + residual + 1) * 3 + positions * 2 + hidden_states + residual = (hidden_states + residual) * 4 + positions * 2 + 3
+            - hidden_states = (residual + 1) ** 2
+        """ # noqa
         if residual is None:
             residual = hidden_states
-            hidden_states = hidden_states / 2
+            hidden_states = hidden_states + 1
         else:
             hidden_states = hidden_states + residual
             residual = hidden_states
-            hidden_states = hidden_states / 2
+            hidden_states = hidden_states + 1
 
         hidden_states = self.self_attention(positions=positions,
                                             hidden_states=hidden_states)
 
         hidden_states = hidden_states + residual
         residual = hidden_states
-        hidden_states = hidden_states / 2
+        hidden_states = hidden_states + 1
         hidden_states = self.mlp(hidden_states)
 
         return hidden_states, residual
@@ -156,7 +176,9 @@ class LlamaModel(nn.Module):
         self.layers = nn.ModuleList(
             [LlamaDecoderLayer(config) for _ in range(config.num_layers)])
 
-        self.embedding_tokens.weight.data.fill_(0.0)
+        # initialize the weights to 1
+        # this is the initial value of the hidden states
+        self.embedding_tokens.weight.data.fill_(1)
 
     def forward(
         self,
@@ -168,6 +190,25 @@ class LlamaModel(nn.Module):
         for layer in self.layers:
             hidden_states, residual = layer(positions, hidden_states, residual)
         return hidden_states
+
+
+def tractable_computation(input_ids: torch.Tensor,
+                          positions: torch.Tensor,
+                          num_layers: int,
+                          init_value: float = 1.0) -> torch.Tensor:
+    hidden_states = torch.ones_like(input_ids) * init_value
+
+    # first layer
+    residual = hidden_states * 4 + positions * 2 + 3
+    hidden_states = (residual + 1)**2
+
+    # following layers
+    for _ in range(num_layers - 1):
+        hidden_states = hidden_states + residual
+        residual = hidden_states * 4 + positions * 2 + 3
+        hidden_states = (residual + 1)**2
+
+    return hidden_states
 
 
 @torch.inference_mode
@@ -213,7 +254,12 @@ def run_model(llama_config,
     del os.environ["VLLM_TORCH_COMPILE_LEVEL"]
     set_compilation_config(None)
 
-    return output.cpu()
+    output = output.cpu()
+
+    expected_output = tractable_computation(input_ids[:2], positions[:2],
+                                            llama_config.num_layers).cpu()
+
+    assert torch.allclose(output, expected_output)
 
 
 def test_toy_llama():
@@ -257,9 +303,6 @@ def test_toy_llama():
     ):
         outputs.append(
             run_model(llama_config, use_compile=True, split_attn=True))
-
-    for i in range(1, len(outputs)):
-        assert torch.allclose(outputs[0], outputs[i])
 
 
 @torch.inference_mode
