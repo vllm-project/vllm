@@ -1,4 +1,4 @@
-ARG NIGHTLY_DATE="20240828"
+ARG NIGHTLY_DATE="20241017"
 ARG BASE_IMAGE="us-central1-docker.pkg.dev/tpu-pytorch-releases/docker/xla:nightly_3.10_tpuvm_$NIGHTLY_DATE"
 
 FROM $BASE_IMAGE
@@ -25,7 +25,7 @@ ENV VLLM_TARGET_DEVICE="tpu"
 RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=bind,source=.git,target=.git \
     python3 -m pip install \
-        cmake>=3.26 ninja packaging setuptools-scm>=8 wheel jinja2 \
+        'cmake>=3.26' ninja packaging 'setuptools-scm>=8' wheel jinja2 \
         -r requirements-tpu.txt
 RUN python3 setup.py develop
 

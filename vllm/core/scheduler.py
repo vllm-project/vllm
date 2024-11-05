@@ -828,8 +828,7 @@ class Scheduler:
                                          num_running_seqs)
 
                 #Preempt out the victim sequence group
-                self._preempt(vseq_group, blocks_to_swap_out,
-                              PreemptionMode.RECOMPUTE)
+                self._preempt(vseq_group, blocks_to_swap_out)
                 waiting_queue.appendleft(vseq_group)
                 force_preemption_count += 1
             #Put the sequence back into the waiting queue
@@ -1309,6 +1308,8 @@ class Scheduler:
                     # `multi_modal_data` will be None.
                     multi_modal_data=seq_group.multi_modal_data
                     if scheduler_outputs.num_prefill_groups > 0 else None,
+                    multi_modal_placeholders=seq_group.multi_modal_placeholders
+                    if scheduler_outputs.num_prefill_groups > 0 else None,
                     mm_processor_kwargs=seq_group.mm_processor_kwargs,
                     prompt_adapter_request=seq_group.prompt_adapter_request,
                 )
@@ -1451,12 +1452,8 @@ class Scheduler:
             if len(cows) > 0:
                 blocks_to_copy.extend(cows)
 
-    def _preempt(
-        self,
-        seq_group: SequenceGroup,
-        blocks_to_swap_out: List[Tuple[int, int]],
-        preemption_mode: Optional[PreemptionMode] = None,
-    ) -> PreemptionMode:
+    def _preempt(self, seq_group: SequenceGroup,
+                 blocks_to_swap_out: List[Tuple[int, int]]) -> PreemptionMode:
         # If preemption mode is not specified, we determine the mode as follows:
         # We use recomputation by default since it incurs lower overhead than
         # swapping. However, when the sequence group has multiple sequences

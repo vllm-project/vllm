@@ -1,6 +1,6 @@
 import enum
 import json
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field
 from typing import (TYPE_CHECKING, Any, ClassVar, Dict, Final, List, Literal,
                     Mapping, Optional, Set, Tuple, Type, Union)
 
@@ -17,15 +17,19 @@ from vllm.transformers_utils.config import (ConfigFormat, get_config,
                                             get_hf_image_processor_config,
                                             get_hf_text_config)
 from vllm.utils import (GiB_bytes, cuda_device_count_stateless, get_cpu_memory,
-                        is_hip, print_warning_once)
+                        print_warning_once)
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
 
     from vllm.executor.executor_base import ExecutorBase
+    from vllm.model_executor.layers.quantization.base_config import (
+        QuantizationConfig)
     from vllm.model_executor.model_loader.loader import BaseModelLoader
     from vllm.transformers_utils.tokenizer_group.base_tokenizer_group import (
         BaseTokenizerGroup)
+else:
+    QuantizationConfig = None
 
 logger = init_logger(__name__)
 
@@ -43,7 +47,7 @@ class ModelConfig:
 
     Args:
         model: Name or path of the huggingface model to use.
-            It is also used as the content for `model_name` tag in metrics 
+            It is also used as the content for `model_name` tag in metrics
             output when `served_model_name` is not specified.
         task: The task to use the model for. Each vLLM instance only supports
             one task, even if the same model can be used for multiple tasks.
@@ -55,6 +59,10 @@ class ModelConfig:
             "mistral" will always use the tokenizer from `mistral_common`.
         trust_remote_code: Trust remote code (e.g., from HuggingFace) when
             downloading the model and tokenizer.
+        allowed_local_media_path: Allowing API requests to read local images or
+            videos from directories specified by the server file system.
+            This is a security risk. Should only be enabled in trusted
+            environments.
         dtype: Data type for model weights and activations. The "auto" option
             will use FP16 precision for FP32 and FP16 models, and BF16 precision
             for BF16 models.
@@ -84,9 +92,6 @@ class ModelConfig:
             disable CUDA graph and always execute the model in eager mode.
             If False, we will use CUDA graph and eager execution in hybrid.
             If None, the user did not specify, so default to False.
-        max_context_len_to_capture: Maximum context len covered by CUDA graphs.
-            When a sequence has context length larger than this, we fall back
-            to eager mode (DEPRECATED. Use max_seq_len_to_capture instead).
         max_seq_len_to_capture: Maximum sequence len covered by CUDA graphs.
             When a sequence has context length larger than this, we fall back
             to eager mode. Additionally for encoder-decoder models, if the
@@ -99,55 +104,76 @@ class ModelConfig:
         skip_tokenizer_init: If true, skip initialization of tokenizer and
             detokenizer.
         served_model_name: The model name used in metrics tag `model_name`,
-            matches the model name exposed via the APIs. If multiple model 
-            names provided, the first name will be used. If not specified, 
+            matches the model name exposed via the APIs. If multiple model
+            names provided, the first name will be used. If not specified,
             the model name will be the same as `model`.
-        limit_mm_per_prompt: Maximum number of data instances per modality 
+        limit_mm_per_prompt: Maximum number of data instances per modality
             per prompt. Only applicable for multimodal models.
-        override_neuron_config: Initialize non default neuron config or 
-            override default neuron config that are specific to Neuron devices, 
-            this argument will be used to configure the neuron config that 
-            can not be gathered from the vllm arguments. 
+        override_neuron_config: Initialize non default neuron config or
+            override default neuron config that are specific to Neuron devices,
+            this argument will be used to configure the neuron config that
+            can not be gathered from the vllm arguments.
         config_format: The config format which shall be loaded.
             Defaults to 'auto' which defaults to 'hf'.
         mm_processor_kwargs: Arguments to be forwarded to the model's processor
             for multi-modal data, e.g., image processor.
+        pooling_type: Used to configure the pooling method in the embedding 
+            model.
+        pooling_norm: Used to determine whether to normalize the pooled 
+            data in the embedding model.
+        pooling_softmax: Used to determine whether to softmax the pooled 
+            data in the embedding model.
+        pooling_step_tag_id: When pooling_step_tag_id is not -1, it indicates 
+            that the score corresponding to the pooling_step_tag_id in the 
+            generated sentence should be returned. Otherwise, it returns 
+            the scores for all tokens.
+        pooling_returned_token_ids: pooling_returned_token_ids represents a 
+            list of indices for the vocabulary dimensions to be extracted, 
+            such as the token IDs of good_token and bad_token in the 
+            math-shepherd-mistral-7b-prm model.
     """
 
-    def __init__(self,
-                 model: str,
-                 task: Union[TaskOption, _Task],
-                 tokenizer: str,
-                 tokenizer_mode: str,
-                 trust_remote_code: bool,
-                 dtype: Union[str, torch.dtype],
-                 seed: int,
-                 revision: Optional[str] = None,
-                 code_revision: Optional[str] = None,
-                 rope_scaling: Optional[dict] = None,
-                 rope_theta: Optional[float] = None,
-                 tokenizer_revision: Optional[str] = None,
-                 max_model_len: Optional[int] = None,
-                 spec_target_max_model_len: Optional[int] = None,
-                 quantization: Optional[str] = None,
-                 quantization_param_path: Optional[str] = None,
-                 enforce_eager: Optional[bool] = None,
-                 max_context_len_to_capture: Optional[int] = None,
-                 max_seq_len_to_capture: Optional[int] = None,
-                 max_logprobs: int = 20,
-                 disable_sliding_window: bool = False,
-                 skip_tokenizer_init: bool = False,
-                 served_model_name: Optional[Union[str, List[str]]] = None,
-                 limit_mm_per_prompt: Optional[Mapping[str, int]] = None,
-                 use_async_output_proc: bool = True,
-                 override_neuron_config: Optional[Dict[str, Any]] = None,
-                 config_format: ConfigFormat = ConfigFormat.AUTO,
-                 chat_template_text_format: str = "string",
-                 mm_processor_kwargs: Optional[Dict[str, Any]] = None) -> None:
+    def __init__(
+            self,
+            model: str,
+            task: Union[TaskOption, _Task],
+            tokenizer: str,
+            tokenizer_mode: str,
+            trust_remote_code: bool,
+            dtype: Union[str, torch.dtype],
+            seed: int,
+            allowed_local_media_path: str = "",
+            revision: Optional[str] = None,
+            code_revision: Optional[str] = None,
+            rope_scaling: Optional[dict] = None,
+            rope_theta: Optional[float] = None,
+            tokenizer_revision: Optional[str] = None,
+            max_model_len: Optional[int] = None,
+            spec_target_max_model_len: Optional[int] = None,
+            quantization: Optional[str] = None,
+            quantization_param_path: Optional[str] = None,
+            enforce_eager: Optional[bool] = None,
+            max_seq_len_to_capture: Optional[int] = None,
+            max_logprobs: int = 20,
+            disable_sliding_window: bool = False,
+            skip_tokenizer_init: bool = False,
+            served_model_name: Optional[Union[str, List[str]]] = None,
+            limit_mm_per_prompt: Optional[Mapping[str, int]] = None,
+            use_async_output_proc: bool = True,
+            override_neuron_config: Optional[Dict[str, Any]] = None,
+            config_format: ConfigFormat = ConfigFormat.AUTO,
+            chat_template_text_format: str = "string",
+            mm_processor_kwargs: Optional[Dict[str, Any]] = None,
+            pooling_type: Optional[str] = None,
+            pooling_norm: Optional[bool] = None,
+            pooling_softmax: Optional[bool] = None,
+            pooling_step_tag_id: Optional[int] = None,
+            pooling_returned_token_ids: Optional[List[int]] = None) -> None:
         self.model = model
         self.tokenizer = tokenizer
         self.tokenizer_mode = tokenizer_mode
         self.trust_remote_code = trust_remote_code
+        self.allowed_local_media_path = allowed_local_media_path
         self.seed = seed
         self.revision = revision
         self.code_revision = code_revision
@@ -161,9 +187,6 @@ class ModelConfig:
         self.quantization = quantization
         self.quantization_param_path = quantization_param_path
         self.enforce_eager = enforce_eager
-        if max_context_len_to_capture is not None:
-            raise ValueError("`max_context_len_to_capture` is deprecated. "
-                             "Use `max_seq_len_to_capture` instead.")
         self.max_seq_len_to_capture = max_seq_len_to_capture
         self.max_logprobs = max_logprobs
         self.disable_sliding_window = disable_sliding_window
@@ -224,6 +247,13 @@ class ModelConfig:
         supported_tasks, task = self._resolve_task(task, self.hf_config)
         self.supported_tasks = supported_tasks
         self.task: Final = task
+        self.pooler_config = self._init_pooler_config(
+            pooling_type,
+            pooling_norm,
+            pooling_softmax,
+            pooling_step_tag_id,
+            pooling_returned_token_ids,
+        )
 
         self._verify_quantization()
         self._verify_cuda_graph()
@@ -240,6 +270,23 @@ class ModelConfig:
             raise ValueError("`limit_mm_per_prompt` is only supported for "
                              "multimodal models.")
 
+        return None
+
+    def _init_pooler_config(
+        self,
+        pooling_type: Optional[str] = None,
+        pooling_norm: Optional[bool] = None,
+        pooling_softmax: Optional[bool] = None,
+        pooling_step_tag_id: Optional[int] = None,
+        pooling_returned_token_ids: Optional[List[int]] = None
+    ) -> Optional["PoolerConfig"]:
+        if self.task == "embedding":
+            return PoolerConfig(
+                pooling_type=pooling_type,
+                pooling_norm=pooling_norm,
+                pooling_softmax=pooling_softmax,
+                pooling_step_tag_id=pooling_step_tag_id,
+                pooling_returned_token_ids=pooling_returned_token_ids)
         return None
 
     def _init_attention_free(self) -> bool:
@@ -350,7 +397,7 @@ class ModelConfig:
                 raise ValueError(
                     f"Unknown quantization method: {self.quantization}. Must "
                     f"be one of {supported_quantization}.")
-            if is_hip(
+            if current_platform.is_rocm(
             ) and self.quantization not in rocm_supported_quantization:
                 raise ValueError(
                     f"{self.quantization} quantization is currently not "
@@ -365,7 +412,7 @@ class ModelConfig:
                     "%s quantization is not fully "
                     "optimized yet. The speed can be slower than "
                     "non-quantized models.", self.quantization)
-            if (self.quantization == "awq" and is_hip()
+            if (self.quantization == "awq" and current_platform.is_rocm()
                     and not envs.VLLM_USE_TRITON_AWQ):
                 logger.warning(
                     "Using AWQ quantization with ROCm, but VLLM_USE_TRITON_AWQ"
@@ -385,7 +432,7 @@ class ModelConfig:
 
     def _verify_bnb_config(self) -> None:
         """
-        The current version of bitsandbytes (0.44.0) with 8-bit models does not 
+        The current version of bitsandbytes (0.44.0) with 8-bit models does not
         yet support CUDA graph.
         """
         is_bitsandbytes = self.quantization == "bitsandbytes"
@@ -810,7 +857,7 @@ class LoadConfig:
                 fast weight loading.
             "bitsandbytes" will load nf4 type weights.
         ignore_patterns: The list of patterns to ignore when loading the model.
-            Default to "original/**/*" to avoid repeated loading of llama's 
+            Default to "original/**/*" to avoid repeated loading of llama's
             checkpoints.
 
     """
@@ -843,7 +890,8 @@ class LoadConfig:
         self.load_format = LoadFormat(load_format)
 
         rocm_not_supported_load_format: List[str] = []
-        if is_hip() and load_format in rocm_not_supported_load_format:
+        if current_platform.is_rocm(
+        ) and load_format in rocm_not_supported_load_format:
             rocm_supported_load_format = [
                 f for f in LoadFormat.__members__
                 if (f not in rocm_not_supported_load_format)
@@ -967,7 +1015,7 @@ class ParallelConfig:
         if self.use_ray:
             from vllm.executor import ray_utils
             ray_utils.assert_ray_available()
-        if is_hip():
+        if current_platform.is_rocm():
             self.disable_custom_all_reduce = True
             logger.info(
                 "Disabled the custom all-reduce kernel because it is not "
@@ -996,7 +1044,7 @@ class SchedulerConfig:
             prompt latency) before scheduling next prompt.
         enable_chunked_prefill: If True, prefill requests can be chunked based
             on the remaining max_num_batched_tokens.
-        preemption_mode: Whether to perform preemption by swapping or 
+        preemption_mode: Whether to perform preemption by swapping or
             recomputation. If not specified, we determine the mode as follows:
             We use recomputation by default since it incurs lower overhead than
             swapping. However, when the sequence group has multiple sequences
@@ -1215,7 +1263,7 @@ class SpeculativeConfig:
             typical_acceptance_sampler_posterior_threshold (Optional[float]):
                 A threshold value that sets a lower bound on the posterior
                 probability of a token in the target model for it to be
-                accepted. This threshold is used only when we use the 
+                accepted. This threshold is used only when we use the
                 TypicalAcceptanceSampler for token acceptance.
             typical_acceptance_sampler_posterior_alpha (Optional[float]):
                 A scaling factor for the entropy-based threshold in the
@@ -1225,7 +1273,7 @@ class SpeculativeConfig:
                 If set to False, token log probabilities are returned
                 according to the log probability settings in SamplingParams.
                 If not specified, it defaults to True.
-    
+
         Returns:
             Optional["SpeculativeConfig"]: An instance of SpeculativeConfig if
                 the necessary conditions are met, else None.
@@ -1281,6 +1329,8 @@ class SpeculativeConfig:
                 tokenizer=target_model_config.tokenizer,
                 tokenizer_mode=target_model_config.tokenizer_mode,
                 trust_remote_code=target_model_config.trust_remote_code,
+                allowed_local_media_path=target_model_config.
+                allowed_local_media_path,
                 dtype=target_model_config.dtype,
                 seed=target_model_config.seed,
                 revision=draft_revision,
@@ -1470,13 +1520,13 @@ class SpeculativeConfig:
             typical_acceptance_sampler_posterior_threshold (Optional[float]):
                 A threshold value that sets a lower bound on the posterior
                 probability of a token in the target model for it to be
-                accepted. This threshold is used only when we use the 
+                accepted. This threshold is used only when we use the
                 TypicalAcceptanceSampler for token acceptance.
             typical_acceptance_sampler_posterior_alpha (Optional[float]):
                 A scaling factor for the entropy-based threshold in the
                 TypicalAcceptanceSampler.
             disable_logprobs: If set to True, token log probabilities will not
-                be returned even if requested by sampling parameters. This 
+                be returned even if requested by sampling parameters. This
                 reduces latency by skipping logprob calculation in proposal
                 sampling, target sampling, and after accepted tokens are
                 determined. If set to False, log probabilities will be
@@ -1644,6 +1694,17 @@ class MultiModalConfig:
     """
 
     # TODO: Add configs to init vision tower or not.
+
+
+@dataclass
+class PoolerConfig:
+    """Controls the behavior of pooler in embedding model"""
+
+    pooling_type: Optional[str] = None
+    pooling_norm: Optional[bool] = None
+    pooling_softmax: Optional[bool] = None
+    pooling_step_tag_id: Optional[int] = None
+    pooling_returned_token_ids: Optional[List[int]] = None
 
 
 _STR_DTYPE_TO_TORCH_DTYPE = {
@@ -1843,10 +1904,10 @@ def get_min_sliding_window(
 def get_served_model_name(model: str,
                           served_model_name: Optional[Union[str, List[str]]]):
     """
-    If the input is a non-empty list, the first model_name in 
-    `served_model_name` is taken. 
-    If the input is a non-empty string, it is used directly. 
-    For cases where the input is either an empty string or an 
+    If the input is a non-empty list, the first model_name in
+    `served_model_name` is taken.
+    If the input is a non-empty string, it is used directly.
+    For cases where the input is either an empty string or an
     empty list, the fallback is to use `self.model`.
     """
     if not served_model_name:
@@ -1891,17 +1952,10 @@ class ObservabilityConfig:
                 "'otlp_traces_endpoint'. Ensure OpenTelemetry packages are "
                 f"installed. Original error:\n{otel_import_error_traceback}")
 
-        if ((self.collect_model_forward_time
-             or self.collect_model_execute_time)
-                and self.otlp_traces_endpoint is None):
-            raise ValueError(
-                "collect_model_forward_time or collect_model_execute_time "
-                "requires --otlp-traces-endpoint to be set.")
 
-
-@dataclass(frozen=True)
-class EngineConfig:
-    """Dataclass which contains all engine-related configuration. This
+@dataclass
+class VllmConfig:
+    """Dataclass which contains all vllm-related configuration. This
     simplifies passing around the distinct configurations in the codebase.
     """
 
@@ -1911,11 +1965,40 @@ class EngineConfig:
     scheduler_config: SchedulerConfig
     device_config: DeviceConfig
     load_config: LoadConfig
-    lora_config: Optional[LoRAConfig]
-    speculative_config: Optional[SpeculativeConfig]
-    decoding_config: Optional[DecodingConfig]
-    observability_config: Optional[ObservabilityConfig]
-    prompt_adapter_config: Optional[PromptAdapterConfig]
+    lora_config: Optional[LoRAConfig] = None
+    speculative_config: Optional[SpeculativeConfig] = None
+    decoding_config: Optional[DecodingConfig] = None
+    observability_config: Optional[ObservabilityConfig] = None
+    prompt_adapter_config: Optional[PromptAdapterConfig] = None
+    quant_config: Optional[QuantizationConfig] = None
+
+    @staticmethod
+    def _get_quantization_config(
+            model_config: ModelConfig,
+            load_config: LoadConfig) -> Optional[QuantizationConfig]:
+        """Get the quantization config."""
+        if model_config.quantization is not None:
+            from vllm.model_executor.model_loader.weight_utils import (
+                get_quant_config)
+            quant_config = get_quant_config(model_config, load_config)
+            capability_tuple = current_platform.get_device_capability()
+
+            if capability_tuple is not None:
+                capability = capability_tuple.to_int()
+                if capability < quant_config.get_min_capability():
+                    raise ValueError(
+                        f"The quantization method {model_config.quantization} "
+                        "is not supported for the current GPU. Minimum "
+                        f"capability: {quant_config.get_min_capability()}. "
+                        f"Current capability: {capability}.")
+            supported_dtypes = quant_config.get_supported_act_dtypes()
+            if model_config.dtype not in supported_dtypes:
+                raise ValueError(
+                    f"{model_config.dtype} is not supported for quantization "
+                    f"method {model_config.quantization}. Supported dtypes: "
+                    f"{supported_dtypes}")
+            return quant_config
+        return None
 
     def __post_init__(self):
         """Verify configs are valid & consistent with each other.
@@ -1934,8 +2017,7 @@ class EngineConfig:
             self.prompt_adapter_config.verify_with_model_config(
                 self.model_config)
 
-    def to_dict(self):
-        """Return the configs as a dictionary, for use in **kwargs.
-        """
-        return dict(
-            (field.name, getattr(self, field.name)) for field in fields(self))
+        if self.quant_config is None and \
+            self.model_config is not None and self.load_config is not None:
+            self.quant_config = VllmConfig._get_quantization_config(
+                self.model_config, self.load_config)

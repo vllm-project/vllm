@@ -1,3 +1,4 @@
+import time
 from typing import TYPE_CHECKING
 from typing import Counter as CollectionsCounter
 from typing import Dict, List, Optional, Type, Union, cast
@@ -133,7 +134,31 @@ class Metrics:
             name="vllm:e2e_request_latency_seconds",
             documentation="Histogram of end to end request latency in seconds.",
             labelnames=labelnames,
-            buckets=[1.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0, 40.0, 50.0, 60.0])
+            buckets=[
+                0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0,
+                40.0, 50.0, 60.0
+            ])
+        self.histogram_time_in_queue_request = self._histogram_cls(
+            name="vllm:time_in_queue_requests",
+            documentation=
+            "Histogram of time the request spent in the queue in seconds.",
+            labelnames=labelnames,
+            buckets=[
+                0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0,
+                40.0, 50.0, 60.0
+            ])
+        self.histogram_model_forward_time_request = self._histogram_cls(
+            name="vllm:model_forward_time_milliseconds",
+            documentation=
+            "Histogram of time spent in the model forward pass in ms.",
+            labelnames=labelnames,
+            buckets=build_1_2_3_5_8_buckets(3000))
+        self.histogram_model_execute_time_request = self._histogram_cls(
+            name="vllm:model_execute_time_milliseconds",
+            documentation=
+            "Histogram of time spent in the model execute function in ms.",
+            labelnames=labelnames,
+            buckets=build_1_2_3_5_8_buckets(3000))
         #   Metadata
         self.histogram_num_prompt_tokens_request = self._histogram_cls(
             name="vllm:request_prompt_tokens",
@@ -153,6 +178,12 @@ class Metrics:
             documentation="Histogram of the n request parameter.",
             labelnames=labelnames,
             buckets=[1, 2, 5, 10, 20],
+        )
+        self.histogram_max_tokens_request = self._histogram_cls(
+            name="vllm:request_params_max_tokens",
+            documentation="Histogram of the max_tokens request parameter.",
+            labelnames=labelnames,
+            buckets=build_1_2_5_buckets(max_model_len),
         )
         self.counter_request_success = self._counter_cls(
             name="vllm:request_success_total",
@@ -229,6 +260,10 @@ class _RayGaugeWrapper:
     def set(self, value: Union[int, float]):
         return self._gauge.set(value)
 
+    def set_to_current_time(self):
+        # ray metrics doesn't have set_to_current time, https://docs.ray.io/en/latest/_modules/ray/util/metrics.html
+        return self._gauge.set(time.time())
+
 
 class _RayCounterWrapper:
     """Wraps around ray.util.metrics.Counter to provide same API as
@@ -299,16 +334,12 @@ class RayMetrics(Metrics):
         pass
 
 
-def build_1_2_5_buckets(max_value: int) -> List[int]:
+def build_buckets(mantissa_lst: List[int], max_value: int) -> List[int]:
     """
-    Builds a list of buckets with increasing powers of 10 multiplied by 
-    mantissa values (1, 2, 5) until the value exceeds the specified maximum.
+    Builds a list of buckets with increasing powers of 10 multiplied by
+    mantissa values until the value exceeds the specified maximum.
 
-    Example:
-    >>> build_1_2_5_buckets(100)
-    [1, 2, 5, 10, 20, 50, 100]
     """
-    mantissa_lst = [1, 2, 5]
     exponent = 0
     buckets: List[int] = []
     while True:
@@ -319,6 +350,24 @@ def build_1_2_5_buckets(max_value: int) -> List[int]:
             else:
                 return buckets
         exponent += 1
+
+
+def build_1_2_5_buckets(max_value: int) -> List[int]:
+    """
+    Example:
+    >>> build_1_2_5_buckets(100)
+    [1, 2, 5, 10, 20, 50, 100]
+    """
+    return build_buckets([1, 2, 5], max_value)
+
+
+def build_1_2_3_5_8_buckets(max_value: int) -> List[int]:
+    """
+    Example:
+    >>> build_1_2_3_5_8_buckets(100)
+    [1, 2, 3, 5, 8, 10, 20, 30, 50, 80, 100]
+    """
+    return build_buckets([1, 2, 3, 5, 8], max_value)
 
 
 def local_interval_elapsed(now: float, last_log: float,
@@ -441,7 +490,7 @@ class PrometheusStatLogger(StatLoggerBase):
             histogram.labels(**self.labels).observe(datum)
 
     def _log_gauge_string(self, gauge, data: Dict[str, str]) -> None:
-        gauge.labels(**data).set(1)
+        gauge.labels(**data).set_to_current_time()
 
     def _log_prometheus(self, stats: Stats) -> None:
         # System state data
@@ -486,6 +535,12 @@ class PrometheusStatLogger(StatLoggerBase):
         # Latency
         self._log_histogram(self.metrics.histogram_e2e_time_request,
                             stats.time_e2e_requests)
+        self._log_histogram(self.metrics.histogram_time_in_queue_request,
+                            stats.time_in_queue_requests)
+        self._log_histogram(self.metrics.histogram_model_forward_time_request,
+                            stats.model_forward_time_requests)
+        self._log_histogram(self.metrics.histogram_model_execute_time_request,
+                            stats.model_execute_time_requests)
         # Metadata
         finished_reason_counter = CollectionsCounter(
             stats.finished_reason_requests)
@@ -498,6 +553,8 @@ class PrometheusStatLogger(StatLoggerBase):
             self.metrics.histogram_num_generation_tokens_request,
             stats.num_generation_tokens_requests)
         self._log_histogram(self.metrics.histogram_n_request, stats.n_requests)
+        self._log_histogram(self.metrics.histogram_max_tokens_request,
+                            stats.max_tokens_requests)
 
     def _log_prometheus_interval(self, prompt_throughput: float,
                                  generation_throughput: float) -> None:

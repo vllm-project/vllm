@@ -1,4 +1,5 @@
 import importlib
+import os
 import pickle
 import subprocess
 import sys
@@ -12,7 +13,7 @@ import cloudpickle
 import torch.nn as nn
 
 from vllm.logger import init_logger
-from vllm.utils import is_hip
+from vllm.platforms import current_platform
 
 from .interfaces import (has_inner_state, is_attention_free,
                          supports_multimodal, supports_pp)
@@ -94,13 +95,30 @@ _EMBEDDING_MODELS = {
     # [Text-only]
     "BertModel": ("bert", "BertEmbeddingModel"),
     "Gemma2Model": ("gemma2", "Gemma2EmbeddingModel"),
+    "LlamaModel": ("llama", "LlamaEmbeddingModel"),
     "MistralModel": ("llama", "LlamaEmbeddingModel"),
     "Qwen2ForRewardModel": ("qwen2_rm", "Qwen2ForRewardModel"),
     "Qwen2ForSequenceClassification": (
         "qwen2_cls", "Qwen2ForSequenceClassification"),
+    "LlamaForCausalLM": ("llama", "LlamaForCausalLM"),
+    "Phi3ForCausalLM": ("phi3", "Phi3ForCausalLM"),
+    "DeciLMForCausalLM": ("decilm", "DeciLMForCausalLM"),
     # [Multimodal]
     "LlavaNextForConditionalGeneration": ("llava_next", "LlavaNextForConditionalGeneration"),  # noqa: E501
     "Phi3VForCausalLM": ("phi3v", "Phi3VForCausalLM"),
+}
+
+def add_embedding_models(base_models, embedding_models):
+    with_pooler_method_models = {}
+    embedding_models_name = embedding_models.keys()
+    for name, (path, arch) in base_models.items():
+        if arch in embedding_models_name:
+            with_pooler_method_models[name] = (path, arch)
+    return with_pooler_method_models
+
+_EMBEDDING_MODELS = {
+    **add_embedding_models(_TEXT_GENERATION_MODELS, _EMBEDDING_MODELS),
+    **_EMBEDDING_MODELS,
 }
 
 _MULTIMODAL_MODELS = {
@@ -110,6 +128,7 @@ _MULTIMODAL_MODELS = {
     "ChatGLMModel": ("chatglm", "ChatGLMForCausalLM"),
     "ChatGLMForConditionalGeneration": ("chatglm", "ChatGLMForCausalLM"),
     "FuyuForCausalLM": ("fuyu", "FuyuForCausalLM"),
+    "H2OVLChatModel": ("h2ovl", "H2OVLChatModel"),
     "InternVLChatModel": ("internvl", "InternVLChatModel"),
     "LlavaForConditionalGeneration": ("llava", "LlavaForConditionalGeneration"),
     "LlavaNextForConditionalGeneration": ("llava_next", "LlavaNextForConditionalGeneration"),  # noqa: E501
@@ -247,7 +266,7 @@ def _try_load_model_cls(
     model_arch: str,
     model: _BaseRegisteredModel,
 ) -> Optional[Type[nn.Module]]:
-    if is_hip():
+    if current_platform.is_rocm():
         if model_arch in _ROCM_UNSUPPORTED_MODELS:
             raise ValueError(f"Model architecture '{model_arch}' is not "
                              "supported by ROCm for now.")
@@ -423,9 +442,13 @@ _T = TypeVar("_T")
 
 
 def _run_in_subprocess(fn: Callable[[], _T]) -> _T:
-    with tempfile.NamedTemporaryFile() as output_file:
+    # NOTE: We use a temporary directory instead of a temporary file to avoid
+    # issues like https://stackoverflow.com/questions/23212435/permission-denied-to-write-to-my-temporary-file
+    with tempfile.TemporaryDirectory() as tempdir:
+        output_filepath = os.path.join(tempdir, "registry_output.tmp")
+
         # `cloudpickle` allows pickling lambda functions directly
-        input_bytes = cloudpickle.dumps((fn, output_file.name))
+        input_bytes = cloudpickle.dumps((fn, output_filepath))
 
         # cannot use `sys.executable __file__` here because the script
         # contains relative imports
@@ -442,7 +465,7 @@ def _run_in_subprocess(fn: Callable[[], _T]) -> _T:
             raise RuntimeError(f"Error raised in subprocess:\n"
                                f"{returned.stderr.decode()}") from e
 
-        with open(output_file.name, "rb") as f:
+        with open(output_filepath, "rb") as f:
             return pickle.load(f)
 
 
