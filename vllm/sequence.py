@@ -6,7 +6,8 @@ from array import array
 from collections import defaultdict
 from dataclasses import dataclass, field
 from functools import cached_property, reduce
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Mapping, Optional
+from typing import (TYPE_CHECKING, Any, Callable, DefaultDict, Dict, List,
+                    Mapping, Optional)
 from typing import Sequence as GenericSequence
 from typing import Set, Tuple, Union
 
@@ -258,7 +259,8 @@ class SequenceData(msgspec.Struct,
         return tuple(self._output_token_ids)
 
     @output_token_ids.setter
-    def output_token_ids(self, new_output_token_ids: List[int]) -> None:
+    def output_token_ids(self,
+                         new_output_token_ids: GenericSequence[int]) -> None:
         self._output_token_ids = array(VLLM_TOKEN_ID_ARRAY_TYPE,
                                        new_output_token_ids)
         self._update_cached_all_tokens()
@@ -487,6 +489,18 @@ class Sequence:
 
         assert_never(inputs)
 
+    @property
+    def multi_modal_placeholders(self) -> MultiModalPlaceholderDict:
+        inputs = self.inputs
+
+        if inputs["type"] == "token":
+            return inputs.get("multi_modal_placeholders", {})
+
+        if inputs["type"] == "embed":
+            return {}
+
+        assert_never(inputs)
+
     @cached_property
     def mm_processor_kwargs(self) -> Dict[str, Any]:
         inputs = self.inputs
@@ -496,15 +510,6 @@ class Sequence:
 
         if inputs["type"] == "embed":
             return {}
-
-        assert_never(inputs)
-
-    @property
-    def multi_modal_placeholders(self) -> MultiModalPlaceholderDict:
-        inputs = self.inputs
-
-        if inputs["type"] == "token":
-            return inputs.get("multi_modal_placeholders", {})
 
         assert_never(inputs)
 
@@ -1179,7 +1184,7 @@ def get_all_seq_ids_and_request_ids(
     sequence ids.
     """
     seq_ids: List[int] = []
-    request_id_seq_ids_mapping: Dict[str, Set[int]] = defaultdict(set)
+    request_id_seq_ids_mapping: DefaultDict[str, Set[int]] = defaultdict(set)
     for sg in seq_group_metadata_list:
         for seq_id in sg.seq_data:
             seq_ids.append(seq_id)

@@ -278,8 +278,10 @@ class InputPreprocessor:
             )
 
         if parsed["type"] == "embeds":
-            prompt_embeds = parsed["content"]["prompt_embeds"]
-            multi_modal_data = parsed["content"].get("multi_modal_data")
+            embeds_content = parsed["content"]
+
+            prompt_embeds = embeds_content["prompt_embeds"]
+            multi_modal_data = embeds_content.get("multi_modal_data")
 
             return embed_inputs(
                 prompt_embeds=prompt_embeds,
@@ -343,8 +345,10 @@ class InputPreprocessor:
             )
 
         if parsed["type"] == "embeds":
-            prompt_embeds = parsed["content"]["prompt_embeds"]
-            multi_modal_data = parsed["content"].get("multi_modal_data")
+            embeds_content = parsed["content"]
+
+            prompt_embeds = embeds_content["prompt_embeds"]
+            multi_modal_data = embeds_content.get("multi_modal_data")
 
             return embed_inputs(
                 prompt_embeds=prompt_embeds,

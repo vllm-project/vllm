@@ -58,6 +58,10 @@ class LLM:
             from the input.
         trust_remote_code: Trust remote code (e.g., from HuggingFace) when
             downloading the model and tokenizer.
+        allowed_local_media_path: Allowing API requests to read local images
+            or videos from directories specified by the server file system.
+            This is a security risk. Should only be enabled in trusted
+            environments.
         tensor_parallel_size: The number of GPUs to use for distributed
             execution with tensor parallelism.
         dtype: The data type for the model weights and activations. Currently,
@@ -139,6 +143,7 @@ class LLM:
         tokenizer_mode: str = "auto",
         skip_tokenizer_init: bool = False,
         trust_remote_code: bool = False,
+        allowed_local_media_path: str = "",
         tensor_parallel_size: int = 1,
         dtype: str = "auto",
         quantization: Optional[str] = None,
@@ -179,6 +184,7 @@ class LLM:
             tokenizer_mode=tokenizer_mode,
             skip_tokenizer_init=skip_tokenizer_init,
             trust_remote_code=trust_remote_code,
+            allowed_local_media_path=allowed_local_media_path,
             tensor_parallel_size=tensor_parallel_size,
             dtype=dtype,
             quantization=quantization,
