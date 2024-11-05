@@ -53,14 +53,16 @@ class AsyncLLM:
             enable_lora=bool(vllm_config.lora_config))
         self.tokenizer.ping()
 
+        # Map (request_id -> Stream)
+        self.request_streams: Dict[str, AsyncStream] = {}
+
         # Processor (converts Inputs --> EngineCoreRequests)
         self.processor = Processor(vllm_config.model_config,
                                    vllm_config.lora_config, self.tokenizer,
                                    input_registry)
 
         # Detokenizer (converts EngineCoreOutputs --> RequestOutput)
-        self.detokenizer = Detokenizer(vllm_config.model_config.tokenizer,
-                                       stream_mode=True)
+        self.detokenizer = Detokenizer(vllm_config.model_config.tokenizer)
 
         # EngineCore (starts the engine in background process).
         self.engine_core = EngineCoreClient.make_client(
@@ -110,8 +112,37 @@ class AsyncLLM:
     def _get_executor_cls(cls, engine_config: EngineConfig):
         return GPUExecutor
 
+    def _add_request_to_streams(self, request_id: str) -> AsyncStream:
+        if request_id in self.request_streams:
+            raise ValueError(f"Request id {request_id} already running.")
+
+        # TODO: handle abort.
+        # IDEA(Nick): we could batch up aborts rather than sending
+        # them individually, so that we send at most one batch of
+        # aborts per step (added to any that we're doing due to
+        # stop string matches for that step)
+        def _abort():
+            pass
+
+        stream = AsyncStream(request_id, _abort)
+        self.request_streams[request_id] = stream
+        return stream
+
+    def _send_to_streams(self, request_outputs: List[RequestOutput]):
+        """Put the RequestOutputs into the corresponding AsyncStreams"""
+
+        for request_output in request_outputs:
+            request_id = request_output.request_id
+            assert request_id in self.request_streams
+
+            self.request_streams[request_id].put(request_output)
+
     async def abort_request(self, request_ids: List[str]) -> None:
-        await self.engine_core.abort_requests_async(request_ids)
+        """Remove request_ids from EngineCore and Detokenizer."""
+
+        if request_ids:
+            await self.engine_core.abort_requests_async(request_ids)
+            self.detokenizer.abort_requests(request_ids)
 
     async def add_request(
         self,
@@ -128,29 +159,19 @@ class AsyncLLM:
         if self.detokenizer.is_request_active(request_id):
             raise KeyError(f"Request {request_id} already exists.")
 
-        # TODO: handle abort.
-        # IDEA(Nick): we could batch up aborts rather than sending
-        # them individually, so that we send at most one batch of
-        # aborts per step (added to any that we're doing due to
-        # stop string matches for that step)
-        def _abort():
-            pass
+        # 1) Make AsyncStream and add to self.request_streams.
+        stream = self._add_request_to_streams(request_id)
 
-        # AsyncStream generator
-        stream = AsyncStream(request_id, _abort)
-
-        # 1) Convert input --> DetokenizerRequest / EngineCoreRequest.
+        # 2) Convert input --> DetokenizerRequest / EngineCoreRequest.
         detokenizer_req, engine_core_req = self.processor.process_inputs(
             request_id, prompt, params, arrival_time, lora_request,
             trace_headers, prompt_adapter_request, priority)
 
-        # 2) Add the request to Detokenizer (this process).
-        self.detokenizer.add_request(detokenizer_req, stream)
+        # 3) Add the request to Detokenizer (this process).
+        self.detokenizer.add_request(detokenizer_req)
 
-        # 3) Add the EngineCoreRequest to EngineCore (separate process).
+        # 4) Add the EngineCoreRequest to EngineCore (separate process).
         await self.engine_core.add_request_async(engine_core_req)
-
-        logger.debug("Added request %s.", request_id)
 
         return stream.generator()
 
@@ -190,25 +211,30 @@ class AsyncLLM:
             yield output
 
     async def _run_output_handler(self):
+
         # TODO: add weakref from current AsyncLLMEngine
-        # TODO: shutdown remote worker execution loop
+        # TODO: shutdown remote worker execution loop (once TP enabled)
 
         logger.debug("Starting output handler busy loop in background loop.")
 
         try:
             while True:
+                # Get EngineCoreOutput from the EngineCore.
                 outputs = await self.engine_core.get_output_async()
 
-                # Make RequestOutputs and push to the per-client output queues
-                # NOTE: we could simplify the Detokenizer code by returning full
-                # List[RequestOutput] rather than pushing to the Queue at the
-                # expense of doing another loop through List[RequestOutput].
-                requests_to_abort = self.detokenizer.step_streaming(outputs)
+                # Detokenize based on the output.
+                request_outputs, reqs_to_abort = self.detokenizer.step(outputs)
 
-                if requests_to_abort:
-                    await self.abort_request(requests_to_abort)
+                # Put the RequestOutputs into the per-request AsyncStream.
+                # NOTE(rob): we could do the streaming in the detokenizer.
+                self._send_to_streams(request_outputs)
+
+                # Abort any requests that finished due to stop strings.
+                await self.abort_request(reqs_to_abort)
+
         except BaseException as e:
             logger.error(e)
+            raise e
 
     # TODO: can we eliminate these (used by OpenAI server)
 

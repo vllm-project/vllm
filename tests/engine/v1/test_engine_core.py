@@ -17,6 +17,7 @@ TOKENIZER = AutoTokenizer.from_pretrained(MODEL_NAME)
 PROMPT = "Hello my name is Robert and I love quanitzation kernels"
 PROMPT_TOKENS = TOKENIZER(PROMPT).input_ids
 
+
 @pytest.fixture(scope="module")
 def engine_core():
 
@@ -29,14 +30,15 @@ def engine_core():
     executor_class = AsyncLLM._get_executor_cls(vllm_config)
 
     yield EngineCore(vllm_config=vllm_config,
-                      executor_class=executor_class,
-                      usage_context=UsageContext.UNKNOWN_CONTEXT)
+                     executor_class=executor_class,
+                     usage_context=UsageContext.UNKNOWN_CONTEXT)
 
     # Cleanup V1 enviornment variables.
     if previous is None:
         del os.environ["VLLM_USE_V1"]
     else:
         os.environ["VLLM_USE_V1"] = previous
+
 
 def make_request() -> EngineCoreRequest:
     return EngineCoreRequest(
@@ -48,6 +50,7 @@ def make_request() -> EngineCoreRequest:
         arrival_time=time.time(),
         lora_request=None,
     )
+
 
 def test_request_lifecycle(engine_core):
     engine_core.add_request(make_request())
@@ -66,14 +69,8 @@ def test_request_lifecycle(engine_core):
     assert len(engine_core.scheduler.waiting) == 0
     assert len(engine_core.scheduler.running) == 2
 
-    
     while len(engine_core.step()) > 0:
         pass
 
     assert len(engine_core.scheduler.waiting) == 0
     assert len(engine_core.scheduler.running) == 0
-
-
-
-    
-

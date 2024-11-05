@@ -163,16 +163,12 @@ class SyncMPClient(MPClient):
 
         return engine_core_outputs
 
-    def _send_input(self,
-                   request_type: EngineCoreRequestType,
-                   request: Union[EngineCoreRequest, List[str]]) \
-                           -> None:
-        self.input_socket.send_multipart((
-            request_type.value,
-            self.encoder.encode(request),
-        ),
-                                         copy=False,
-                                         flags=zmq.NOBLOCK)
+    def _send_input(self, request_type: EngineCoreRequestType,
+                    request: Union[EngineCoreRequest, List[str]]) -> None:
+
+        # (RequestType, SerializedRequest)
+        msg = (request_type.value, self.encoder.encode(request))
+        self.input_socket.send_multipart(msg, copy=False, flags=zmq.NOBLOCK)
 
     def add_request(self, request: EngineCoreRequest) -> None:
         self._send_input(EngineCoreRequestType.AddRequest, request)
@@ -197,14 +193,12 @@ class AsyncMPClient(MPClient):
 
         return engine_core_outputs
 
-    async def _send_input(self,
-                   request_type: EngineCoreRequestType,
-                   request: Union[EngineCoreRequest, List[str]])\
-                           -> None:
-        await self.input_socket.send_multipart((
-            request_type.value,
-            self.encoder.encode(request),
-        ),
+    async def _send_input(
+            self, request_type: EngineCoreRequestType,
+            request: Union[EngineCoreRequest, List[str]]) -> None:
+
+        msg = (request_type.value, self.encoder.encode(request))
+        await self.input_socket.send_multipart(msg,
                                                copy=False,
                                                flags=zmq.NOBLOCK)
 

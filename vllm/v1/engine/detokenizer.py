@@ -9,7 +9,6 @@ from vllm.transformers_utils.detokenizer_utils import (
     AnyTokenizer, convert_prompt_ids_to_tokens, detokenize_incrementally)
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.v1.engine import DetokenizerRequest, EngineCoreOutput
-from vllm.v1.engine.async_stream import AsyncStream
 
 logger = init_logger(__name__)
 
@@ -47,9 +46,6 @@ class IncrementalDetokenizer:
     buffer_length: int
     _last_output_text_offset: int = 0
 
-    # Streaming RequestOutputs to clients in async mode.
-    stream: Optional[AsyncStream] = None
-
     @property
     def output_token_ids(self) -> List[int]:
         assert len(self.token_ids) >= len(self.prompt_token_ids)
@@ -60,7 +56,6 @@ class IncrementalDetokenizer:
         cls,
         tokenizer: AnyTokenizer,
         request: DetokenizerRequest,
-        stream: Optional[AsyncStream] = None,
     ) -> "IncrementalDetokenizer":
 
         tokens, prefix_offset, read_offset = convert_prompt_ids_to_tokens(
@@ -94,7 +89,6 @@ class IncrementalDetokenizer:
             prompt_token_ids=request.prompt_token_ids,
             tokenizer=tokenizer,
             buffer_length=buffer_length,
-            stream=stream,
         )
 
     def add_tokens(
@@ -196,11 +190,10 @@ class IncrementalDetokenizer:
 
 class Detokenizer:
 
-    def __init__(self, tokenizer_name: str, stream_mode: bool = False):
+    def __init__(self, tokenizer_name: str):
         # TODO: once we support LoRA, we should should pass the tokenizer
         # here. We currently have two copies (this + in the LLMEngine).
         self.tokenizer = get_tokenizer(tokenizer_name)
-        self.stream_mode = stream_mode
 
         # Request id -> IncrementalDetokenizer
         self.request_states: Dict[str, IncrementalDetokenizer] = {}
@@ -214,27 +207,32 @@ class Detokenizer:
     def has_unfinished_requests(self) -> bool:
         return len(self.request_states) > 0
 
+    def abort_requests(
+        self,
+        request_ids: List[str],
+    ) -> None:
+        """Remove the request_ids from the Detokenizer."""
+
+        for request_id in request_ids:
+            if request_id in self.request_states:
+                self.request_states.pop(request_id)
+
     def add_request(
         self,
         request: DetokenizerRequest,
-        stream: Optional[AsyncStream] = None,
     ):
         """Add new request to the Detokenizer."""
 
         assert (request.request_id not in self.request_states)
-        assert ((self.stream_mode and stream is not None)
-                or (not self.stream_mode and stream is None))
 
         request_state = IncrementalDetokenizer.from_new_request(
-            self.tokenizer, request, stream)
+            self.tokenizer, request)
         self.request_states[request.request_id] = request_state
 
     def step(
         self, encore_core_outputs: List[EngineCoreOutput]
     ) -> Tuple[List[RequestOutput], List[str]]:
         """Update state and request the RequestOutputs to the LLMEngine."""
-
-        assert not self.stream_mode
 
         request_outputs: List[RequestOutput] = []
         requests_to_abort: List[str] = []
@@ -264,43 +262,3 @@ class Detokenizer:
 
         # Return to EngineClient.
         return request_outputs, requests_to_abort
-
-    def step_streaming(
-            self, encore_core_outputs: List[EngineCoreOutput]) -> List[str]:
-        """Update state and put the RequestOutput in the per request queues."""
-
-        assert self.stream_mode
-
-        requests_to_abort: List[str] = []
-        for engine_core_output in encore_core_outputs:
-            request_id = engine_core_output.request_id
-            detokenizer = self.request_states.get(request_id)
-            if detokenizer is None:
-                # Ignore output for already-aborted request.
-                continue
-
-            # Detokenize and update state.
-            request_output = detokenizer.add_tokens(
-                new_token_ids=engine_core_output.new_token_ids,
-                finish_reason=engine_core_output.finish_reason,
-                stop_reason=engine_core_output.stop_reason,
-            )
-
-            if request_output is not None:
-                # Send the RequestOutput to the per client output queue.
-                stream = detokenizer.stream
-                assert stream is not None
-                stream.put(request_output)
-                # TODO: is caching RequestOutput sound?
-                # What happens if the reader from the stream falls behind?
-                # Won't the object in the queue get mutated?
-
-                # Free completed requests.
-                if request_output.finished:
-                    stream.finish()
-                    self.request_states.pop(request_id)
-                    logger.debug("Finished request %s.", request_id)
-                    if not engine_core_output.finished:
-                        requests_to_abort.append(request_id)
-
-        return requests_to_abort

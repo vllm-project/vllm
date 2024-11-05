@@ -2,7 +2,7 @@ import multiprocessing
 import queue
 from multiprocessing.process import BaseProcess
 from threading import Thread
-from typing import List, Tuple, Type, Any
+from typing import List, Tuple, Type, Union
 
 import msgspec
 import zmq
@@ -12,9 +12,9 @@ from vllm.config import CacheConfig, EngineConfig
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.core.scheduler import Scheduler
-from vllm.v1.engine import (POLLING_TIMEOUT_MS, EngineCoreOutput,
-                            EngineCoreOutputs, EngineCoreRequest,
-                            EngineCoreRequestType)
+from vllm.v1.engine import (POLLING_TIMEOUT_MS, POLLING_TIMEOUT_S,
+                            EngineCoreOutput, EngineCoreOutputs,
+                            EngineCoreRequest, EngineCoreRequestType)
 from vllm.v1.executor.gpu_executor import GPUExecutor
 from vllm.v1.request import Request, RequestStatus
 from vllm.version import __version__ as VLLM_VERSION
@@ -176,6 +176,9 @@ class EngineCoreProc(EngineCore):
         self.output_socket = self.ctx.socket(zmq.constants.PUSH)
         self.output_socket.bind(output_path)
 
+        # Background Threads for IO. These run in Threads such that we can
+        # overlap ZMQ socket push/pull with GPU execution. This is possible
+        # because PyTorch releases the GIL during the forward pass.
         Thread(target=self.process_input_socket, daemon=True).start()
         Thread(target=self.process_output_socket, daemon=True).start()
 
@@ -188,38 +191,6 @@ class EngineCoreProc(EngineCore):
         finally:
             if ready_socket:
                 ready_socket.close(linger=0)
-
-    def process_input_socket(self):
-
-        def get_decoder_from_request_type(req_type: bytes) \
-                    -> msgspec.msgpack.Decoder:
-            # Identify msgpack decoder based on request_type.
-            if req_type == EngineCoreRequestType.AddRequest.value:
-                return self.msgpack_add_request_decoder
-            elif req_type == EngineCoreRequestType.AbortRequest.value:
-                return self.msgpack_abort_requests_decoder
-            else:
-                raise ValueError(f"Unhandled request type {request_type}")
-
-        while True:
-            request_type, request_data = \
-                self.input_socket.recv_multipart(copy=False)
-
-            # Decode request_data
-            msgpack_decoder: msgspec.msgpack.Decoder = \
-                  get_decoder_from_request_type(request_type.buffer)
-            request_data: Any = msgpack_decoder.decode(request_data.buffer)
-
-            self.input_queue.put_nowait((request_type.buffer, request_data))
-
-    def process_output_socket(self):
-        while True:
-            engine_core_outputs = self.output_queue.get()
-            outputs = EngineCoreOutputs(outputs=engine_core_outputs)
-            outputs_serialized = self.msgpack_encoder.encode(outputs)
-            self.output_socket.send_multipart((outputs_serialized, ),
-                                              copy=False,
-                                              flags=zmq.NOBLOCK)
 
     @staticmethod
     def wait_for_startup(
@@ -287,53 +258,94 @@ class EngineCoreProc(EngineCore):
         engine_core.run_busy_loop()
 
     def run_busy_loop(self):
-        """Core busy loop of the EngineCoreProc"""
+        """Core busy loop of the EngineCore."""
 
         while True:
-            # Poll the input socket until there is work to do.
+            # If no work, poll the input queue until there is.
             if not self.scheduler.has_unfinished_requests():
-                self._handle_request(self.input_queue.get())
 
-            # Handle new input from the socket.
-            self._handle_new_input()
+                while True:
+                    try:
+                        req = self.input_queue.get(timeout=POLLING_TIMEOUT_S)
+                        self._handle_client_request(req)
+                        break
+                    except queue.Empty:
+                        logger.debug("EngineCore busy loop waiting.")
 
-            # Forward pass.
+            # Handle any new requests from the client is there is any.
+            while not self.input_queue.empty():
+                req = self.input_queue.get_nowait()
+                self._handle_client_request(req)
+
+            # Step the engine core.
             outputs = self.step()
 
-            # Send outputs to the EngineCoreClient.
-            self._send_outputs(outputs)
+            # Put EngineCoreOutputs into the output queue.
+            self.output_queue.put_nowait(outputs)
 
-    def _handle_new_input(self):
-        """Handle new input from the AsyncLLMEngine for async mode."""
-        while not self.input_queue.empty():
-            self._handle_request(self.input_queue.get_nowait())
-
-    def _handle_request(self, request: Tuple[bytes, Any]):
+    def _handle_client_request(
+            self, request: Tuple[bytes, Union[EngineCoreRequest,
+                                              List[str]]]) -> None:
+        """Handle EngineCoreRequest or EngineCoreAbortRequest from Client."""
 
         try:
             request_type, request_data = request
-            # Process request_data based on request_type
             if request_type == EngineCoreRequestType.AddRequest.value:
-                assert isinstance(request_data, EngineCoreRequest), \
-                    f'Unexpected datatype {type(request_data)}'
+                assert isinstance(request_data, EngineCoreRequest)
                 self.add_request(request_data)
             elif request_type == EngineCoreRequestType.AbortRequest.value:
-                assert isinstance(request_data, list), \
-                    f'Unexpected datatype {type(request_data)}'
-                self.scheduler.finish_requests(request_data,
-                                               RequestStatus.FINISHED_ABORTED)
+                assert isinstance(request_data, list)
+                self.abort_requests(request)
             else:
-                raise ValueError(f"Unhandled request type {request_type}")
+                raise ValueError(f"Unknown RequestType: {request_type}")
 
             # TODO: handle logits processors via cloudpickle
             # TODO: handle profiling
+
         except Exception as e:
             # TODO: handle gracefully
             raise e
 
-    def _send_outputs(self,
-                      engine_core_outputs: List[EngineCoreOutput]) -> None:
-        """Serialize and send output to the AsyncLLMEngine for async mode."""
+    def process_input_socket(self):
+        """Input socket IO thread."""
 
-        if engine_core_outputs:
-            self.output_queue.put_nowait(engine_core_outputs)
+        def get_decoder(req_type: bytes) -> msgspec.msgpack.Decoder:
+            """Get msgpack decoder from RequestType"""
+
+            if req_type == EngineCoreRequestType.AddRequest.value:
+                return self.msgpack_add_request_decoder
+            elif req_type == EngineCoreRequestType.AbortRequest.value:
+                return self.msgpack_abort_requests_decoder
+            else:
+                raise ValueError(f"Unhandled request type {request_type}")
+
+        while True:
+            while self.input_socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
+                logger.debug("EngineCore process input thread waiting.")
+
+            # (RequestType, RequestData)
+            frames = self.input_socket.recv_multipart(copy=False)
+            request_type = frames[0].buffer
+            request_data = frames[1].buffer
+
+            # Deseialize the RequestData.
+            request = get_decoder(request_type).decode(request_data)
+
+            # Push to input queue for core busy loop.
+            self.input_queue.put_nowait((request_type, request))
+
+    def process_output_socket(self):
+        """Output socket IO thread."""
+
+        while True:
+            try:
+                engine_core_outputs = self.output_queue.get(
+                    timeout=POLLING_TIMEOUT_S)
+                outputs = EngineCoreOutputs(outputs=engine_core_outputs)
+                outputs_serialized = self.msgpack_encoder.encode(outputs)
+                self.output_socket.send_multipart((outputs_serialized, ),
+                                                  copy=False,
+                                                  flags=zmq.NOBLOCK)
+            except queue.Empty as e:
+                logger.debug(
+                    "EngineCore process_output_socket thread waiting.")
