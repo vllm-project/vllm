@@ -61,9 +61,6 @@ class Scheduler:
         # Request id -> RunningRequestData
         self.running_reqs_data: Dict[str, RunningRequestData] = {}
 
-    def is_request_active(self, request_id: str) -> bool:
-        return request_id in self.requests
-
     def schedule(self) -> "SchedulerOutput":
         scheduled_new_reqs: List[Request] = []
         scheduled_resumed_reqs: List[Request] = []

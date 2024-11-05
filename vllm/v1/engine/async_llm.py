@@ -82,7 +82,7 @@ class AsyncLLM:
     def from_engine_args(
         cls,
         engine_args: AsyncEngineArgs,
-        vllm_config: Optional[VllmConfig] = None,
+        engine_config: Optional[VllmConfig] = None,
         start_engine_loop: bool = True,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
@@ -90,8 +90,10 @@ class AsyncLLM:
         """Creates an AsyncLLMEngine from the EngineArgs."""
 
         # Create the engine configs.
-        if vllm_config is None:
+        if engine_config is None:
             vllm_config = engine_args.create_engine_config()
+        else:
+            vllm_config = engine_config
 
         executor_class = cls._get_executor_cls(vllm_config)
 
