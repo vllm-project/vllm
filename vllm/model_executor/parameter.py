@@ -1,5 +1,5 @@
 from fractions import Fraction
-from typing import Callable, List, Optional, Tuple, Union
+from typing import Callable, Optional, Union
 
 import torch
 from torch.nn import Parameter
@@ -326,60 +326,6 @@ class PackedvLLMParameter(ModelWeightParameter):
             shard_offset=shard_offset,
             packed_factor=self.packed_factor,
             marlin_tile_size=self.marlin_tile_size)
-
-
-# Qweights in HQQ need to be reshaped such that the shape of the stored tensors
-# is the actual shape used in weight multiplication. This is needed to correctly
-# repack to Marlin. We also store shard size and offsets in order to be able to
-# correctly unpack (shard by shard) from 4-bit to 8-bit.
-class HQQQweightParameter(PackedvLLMParameter):
-
-    def __init__(self, packed_factor: int, packed_dim: int, **kwargs):
-        super().__init__(packed_factor, packed_dim, None, **kwargs)
-        self.shard_offsets: List[Tuple[int, int]] = []
-        self.pack_factor = packed_factor
-
-    def load_merged_column_weight(self, loaded_weight: torch.Tensor, **kwargs):
-        shard_offset = kwargs.get("shard_offset")
-        shard_size = kwargs.get("shard_size")
-        shard_size, shard_offset = self.adjust_shard_indexes_for_packing(
-            shard_offset=shard_offset, shard_size=shard_size)
-        self.shard_offsets.append((shard_offset, shard_size))
-
-        loaded_weight = loaded_weight.reshape(-1, self.shape[1])
-        super().load_merged_column_weight(loaded_weight, **kwargs)
-
-    def load_row_parallel_weight(self, loaded_weight: torch.Tensor):
-        self.shard_offsets.append((0, self.shape[self.output_dim]))
-
-        loaded_weight = loaded_weight.reshape(-1, self.shape[1])
-        super().load_row_parallel_weight(loaded_weight)
-
-    def load_qkv_weight(self, loaded_weight: torch.Tensor, **kwargs):
-        shard_offset = kwargs.get("shard_offset")
-        shard_size = kwargs.get("shard_size")
-        shard_size, shard_offset = self.adjust_shard_indexes_for_packing(
-            shard_offset=shard_offset, shard_size=shard_size)
-        self.shard_offsets.append((shard_offset, shard_size))
-
-        loaded_weight = loaded_weight.reshape(-1, self.shape[1])
-        super().load_qkv_weight(loaded_weight, **kwargs)
-
-
-# Zero points and scales in HQQ must also be reshaped to their actual shapes.
-class HQQZeroScaleParameter(GroupQuantScaleParameter):
-
-    def load_merged_column_weight(self, loaded_weight: torch.Tensor, **kwargs):
-        loaded_weight = loaded_weight.reshape(-1, self.shape[1])
-        super().load_merged_column_weight(loaded_weight, **kwargs)
-
-    def load_row_parallel_weight(self, loaded_weight: torch.Tensor):
-        loaded_weight = loaded_weight.reshape(-1, self.shape[1])
-        super().load_row_parallel_weight(loaded_weight)
-
-    def load_qkv_weight(self, loaded_weight: torch.Tensor, **kwargs):
-        loaded_weight = loaded_weight.reshape(-1, self.shape[1])
-        super().load_qkv_weight(loaded_weight, **kwargs)
 
 
 def permute_param_layout_(param: BasevLLMParameter, input_dim: int,
