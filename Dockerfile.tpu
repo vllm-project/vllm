@@ -9,12 +9,6 @@ RUN apt-get update && apt-get install -y \
     git \
     ffmpeg libsm6 libxext6 libgl1
 
-# Install the TPU and Pallas dependencies.
-RUN --mount=type=cache,target=/root/.cache/pip \
-    python3 -m pip install torch_xla[tpu] -f https://storage.googleapis.com/libtpu-releases/index.html
-RUN --mount=type=cache,target=/root/.cache/pip \
-    python3 -m pip install torch_xla[pallas] -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html -f https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html
-
 # Build vLLM.
 COPY . .
 ARG GIT_REPO_CHECK=0
@@ -25,7 +19,6 @@ ENV VLLM_TARGET_DEVICE="tpu"
 RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=bind,source=.git,target=.git \
     python3 -m pip install \
-        'cmake>=3.26' ninja packaging 'setuptools-scm>=8' wheel jinja2 \
         -r requirements-tpu.txt
 RUN python3 setup.py develop
 
