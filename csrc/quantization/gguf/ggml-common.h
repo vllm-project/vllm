@@ -1,7 +1,7 @@
 // copied from https://github.com/ggerganov/llama.cpp/blob/b2899/ggml-common.h
 #define QK_K 256
 #define K_QUANTS_PER_ITERATION 2
-#define WARP_SIZE 32
+#define WARP_SIZE_GGUF 32
 #define K_SCALE_SIZE 12
 #define CUDA_DEQUANTIZE_BLOCK_SIZE 256
 #define CUDA_QUANTIZE_BLOCK_SIZE 256
