@@ -1,22 +1,8 @@
 from abc import ABC, abstractmethod
 from collections import UserDict, defaultdict
-from typing import (
-    TYPE_CHECKING,
-    Any,
-    Callable,
-    Dict,
-    List,
-    Mapping,
-    NamedTuple,
-    Optional,
-    Tuple,
-    Type,
-    TypedDict,
-    TypeVar,
-    Union,
-    cast,
-    final,
-)
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Mapping,
+                    NamedTuple, Optional, Tuple, Type, TypedDict, TypeVar,
+                    Union, cast, final)
 
 import numpy as np
 import torch
@@ -27,13 +13,8 @@ from typing_extensions import TypeAlias
 
 from vllm.inputs import InputContext
 from vllm.logger import init_logger
-from vllm.utils import (
-    JSONTree,
-    get_allowed_kwarg_only_overrides,
-    is_list_of,
-    json_map_leaves,
-    resolve_mm_processor_kwargs,
-)
+from vllm.utils import (JSONTree, get_allowed_kwarg_only_overrides, is_list_of,
+                        json_map_leaves, resolve_mm_processor_kwargs)
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig

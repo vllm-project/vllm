@@ -254,7 +254,8 @@ def SummarizeEntries(entries, extra_step_types):
     # Warn if the sum of weighted times is off by more than half a second.
     if abs(length - weighted_total) > 500:
         print('Warning: Possible corrupt ninja log, results may be '
-              'untrustworthy. Length = {:.3f}, weighted total = {:.3f}'.format(length, weighted_total))
+              'untrustworthy. Length = {:.3f}, weighted total = {:.3f}'.format(
+                  length, weighted_total))
 
     entries_by_ext = defaultdict(list)
     for target in entries:
@@ -265,11 +266,14 @@ def SummarizeEntries(entries, extra_step_types):
         print('    Longest build steps for {}:'.format(key))
         values.sort(key=lambda x: x.WeightedDuration())
         for target in values[-long_count:]:
-            print('      {:8.1f} weighted s to build {} ({:.1f} s elapsed time)'.format(target.WeightedDuration(), target.DescribeTargets(),
-                   target.Duration()))
+            print(
+                '      {:8.1f} weighted s to build {} ({:.1f} s elapsed time)'.
+                format(target.WeightedDuration(), target.DescribeTargets(),
+                       target.Duration()))
 
     print('    {:.1f} s weighted time ({:.1f} s elapsed time sum, {:1.1f}x '
-          'parallelism)'.format(length, total_cpu_time, total_cpu_time * 1.0 / length))
+          'parallelism)'.format(length, total_cpu_time,
+                                total_cpu_time * 1.0 / length))
     print('    %d build steps completed, average of %1.2f/s' %
           (len(entries), len(entries) / (length)))
 
@@ -299,7 +303,8 @@ def main():
             entries = ReadTargets(log, False)
             SummarizeEntries(entries, args.step_types)
     except OSError:
-        print('Log file {!r} not found, no build summary created.'.format(log_file))
+        print('Log file {!r} not found, no build summary created.'.format(
+            log_file))
         return errno.ENOENT
 
 
