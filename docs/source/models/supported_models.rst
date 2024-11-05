@@ -446,6 +446,12 @@ Text Generation
     - :code:`h2oai/h2ovl-mississippi-800m`, :code:`h2oai/h2ovl-mississippi-2b`, etc.
     - 
     - ✅︎
+  * - :code:`Idefics3ForConditionalGeneration`
+    - Idefics3
+    - T + I
+    - :code:`HuggingFaceM4/Idefics3-8B-Llama3` etc.
+    - 
+    - ✅︎
   * - :code:`InternVLChatModel`
     - InternVL2
     - T + I\ :sup:`E+`
