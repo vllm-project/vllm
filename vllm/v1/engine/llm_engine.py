@@ -2,11 +2,9 @@ import time
 from typing import (Any, Dict, Iterable, List, Mapping, Optional, Tuple, Type,
                     Union)
 
-from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
-                         EngineConfig, LoadConfig, LoRAConfig, ModelConfig,
-                         ObservabilityConfig, ParallelConfig,
-                         PromptAdapterConfig, SchedulerConfig,
-                         SpeculativeConfig)
+from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
+                         ObservabilityConfig, ParallelConfig, SchedulerConfig,
+                         VllmConfig)
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics_types import StatLoggerBase
 from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs,
@@ -35,17 +33,7 @@ class LLMEngine:
 
     def __init__(
         self,
-        model_config: ModelConfig,
-        cache_config: CacheConfig,
-        parallel_config: ParallelConfig,
-        scheduler_config: SchedulerConfig,
-        device_config: DeviceConfig,
-        load_config: LoadConfig,
-        lora_config: Optional[LoRAConfig],
-        speculative_config: Optional[SpeculativeConfig],
-        decoding_config: Optional[DecodingConfig],
-        observability_config: Optional[ObservabilityConfig],
-        prompt_adapter_config: Optional[PromptAdapterConfig],
+        vllm_config: VllmConfig,
         executor_class: Type[GPUExecutor],
         log_stats: bool,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
@@ -53,6 +41,22 @@ class LLMEngine:
         input_registry: InputRegistry = INPUT_REGISTRY,
         use_cached_outputs: bool = False,
     ) -> None:
+
+        # TODO: remove the local variables and use self.* throughout the class.
+        model_config = self.model_config = vllm_config.model_config
+        cache_config = self.cache_config = vllm_config.cache_config
+        lora_config = self.lora_config = vllm_config.lora_config
+        parallel_config = self.parallel_config = vllm_config.parallel_config
+        scheduler_config = self.scheduler_config = vllm_config.scheduler_config
+        device_config = self.device_config = vllm_config.device_config
+        speculative_config = self.speculative_config = vllm_config.speculative_config  # noqa
+        load_config = self.load_config = vllm_config.load_config
+        decoding_config = self.decoding_config = vllm_config.decoding_config or DecodingConfig(  # noqa
+        )
+        prompt_adapter_config = self.prompt_adapter_config = vllm_config.prompt_adapter_config  # noqa
+        observability_config = self.observability_config = vllm_config.observability_config or ObservabilityConfig(  # noqa
+        )
+
         # Override the configs for V1.
         # FIXME
         if usage_context == UsageContext.LLM_CLASS:
@@ -112,18 +116,6 @@ class LLMEngine:
             model_config.mm_processor_kwargs,
         )
 
-        self.model_config = model_config
-        self.cache_config = cache_config
-        self.lora_config = lora_config
-        self.parallel_config = parallel_config
-        self.scheduler_config = scheduler_config
-        self.device_config = device_config
-        self.speculative_config = speculative_config
-        self.load_config = load_config
-        self.decoding_config = decoding_config or DecodingConfig()
-        self.prompt_adapter_config = prompt_adapter_config
-        self.observability_config = observability_config or ObservabilityConfig(
-        )
         self.log_stats = log_stats
 
         assert not self.model_config.skip_tokenizer_init
@@ -154,18 +146,7 @@ class LLMEngine:
         # Request id -> RequestOutput
         self.request_outputs: Dict[str, RequestOutput] = {}
 
-        self.model_executor = executor_class(
-            model_config=model_config,
-            cache_config=cache_config,
-            parallel_config=parallel_config,
-            scheduler_config=scheduler_config,
-            device_config=device_config,
-            lora_config=lora_config,
-            speculative_config=speculative_config,
-            load_config=load_config,
-            prompt_adapter_config=prompt_adapter_config,
-            observability_config=self.observability_config,
-        )
+        self.model_executor = executor_class(vllm_config=vllm_config)
         assert self.model_config.task != "embedding"
         self._initialize_kv_caches()
 
@@ -203,7 +184,7 @@ class LLMEngine:
         executor_class = cls._get_executor_cls(engine_config)
         # Create the LLM engine.
         engine = cls(
-            **engine_config.to_dict(),
+            vllm_config=engine_config,
             executor_class=executor_class,
             log_stats=not engine_args.disable_log_stats,
             usage_context=usage_context,
@@ -497,7 +478,7 @@ class LLMEngine:
         return self.lora_config
 
     @classmethod
-    def _get_executor_cls(cls, engine_config: EngineConfig):
+    def _get_executor_cls(cls, engine_config: VllmConfig):
         return GPUExecutor
 
     def is_tracing_enabled(self) -> bool:
