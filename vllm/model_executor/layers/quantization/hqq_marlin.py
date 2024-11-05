@@ -249,7 +249,6 @@ class HQQMarlinMethod(LinearMethodBase):
                 HQQEmptyParameter(data=torch.empty(0),
                                   weight_loader=weight_loader))
 
-    # Unpack weights from the HQQ format and repack them to GPTQ -> Marlin
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         dev = layer.W_q.device
 
