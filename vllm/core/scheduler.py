@@ -1636,33 +1636,34 @@ class Scheduler:
         for seq in seqs:
             num_new_tokens += seq.get_num_new_tokens()
         assert num_new_tokens > 0
-        # Chunk if a running request cannot fit in the given budget.
+
+        if self.scheduler_config.is_multi_step:
+            # The current multi-step + chunked prefill capability does
+            # not actually support chunking prompts.
+            #
+            # Therefore, `num_new_tokens` is computed in the same fashion
+            # for both multi-step+chunked-prefill &
+            # multi-step+chunked-prefill+APC
+            #
+            # Prompts with more tokens than the current remaining budget
+            # are postponed to future scheduler steps
+            if num_new_tokens > self._get_prompt_limit(seq_group):
+                # If the seq_group is in prompt-stage, pass the
+                # num_new_tokens as-is so the caller can ignore
+                # the sequence.
+                pass
+            else:
+                num_new_tokens = 0 \
+                    if num_new_tokens > budget.remaining_token_budget() \
+                    else num_new_tokens
+
         # If number of seq > 1, it means it is doing beam search
         # in a decode phase. Do not chunk.
-        if enable_chunking and len(seqs) == 1:
+        elif enable_chunking and len(seqs) == 1:
             # Get the budget for this chunk
             remaining_token_budget = self._get_budget_for_chunk(budget=budget)
 
-            if self.scheduler_config.is_multi_step:
-                # The current multi-step + chunked prefill capability does
-                # not actually support chunking prompts.
-                #
-                # Therefore, `num_new_tokens` is computed in the same fashion
-                # for both multi-step+chunked-prefill &
-                # multi-step+chunked-prefill+APC
-                #
-                # Prompts with more tokens than the current remaining budget
-                # are postponed to future scheduler steps
-                if num_new_tokens > self._get_prompt_limit(seq_group):
-                    # If the seq_group is in prompt-stage, pass the
-                    # num_new_tokens as-is so the caller can ignore
-                    # the sequence.
-                    pass
-                else:
-                    num_new_tokens = 0 \
-                        if num_new_tokens > remaining_token_budget \
-                        else num_new_tokens
-            elif self.cache_config.enable_prefix_caching:
+            if self.cache_config.enable_prefix_caching:
                 # When prefix caching is enabled, we always allocate
                 # the number of new tokens that is dividable by the block
                 # size to avoid partial block matching.
@@ -1671,8 +1672,8 @@ class Scheduler:
                 if remainder != 0:
                     raise ValueError("When enabling chunked prefill and "
                                      "prefix caching, max_num_batched_tokens "
-                                     "(chunk size) must be dividable by "
-                                     "block size, but got chunk_size "
+                                     "(default chunk size) must be dividable "
+                                     "by block size, but got chunk_size "
                                      f"({budget.token_budget}) % block_size "
                                      f"({block_size}) = {remainder}")
                 if remaining_token_budget < num_new_tokens:
