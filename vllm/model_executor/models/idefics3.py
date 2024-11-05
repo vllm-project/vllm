@@ -318,7 +318,7 @@ def get_max_idefics3_image_tokens(ctx: InputContext,
 
 
 def dummy_data_for_idefics3(ctx: InputContext, seq_len: int,
-                            mm_counts: Mapping[str, int]):
+                            mm_counts: Mapping[str, int]) -> DummyData:
     hf_config = ctx.get_hf_config()
     num_images = mm_counts["image"]
 
@@ -345,7 +345,7 @@ class Idefics3SimpleMLP(nn.Module):
         output_size = config.text_config.hidden_size
         self.proj = ReplicatedLinear(input_size, output_size, bias=False)
 
-    def forward(self, x) -> torch.Tensor:
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         out, _ = self.proj(x)
         return out
 
@@ -357,7 +357,9 @@ class Idefics3Connector(nn.Module):
         self.scale_factor = config.scale_factor
         self.modality_projection = Idefics3SimpleMLP(config)
 
-    def pixel_shuffle(self, x, scale_factor=2):
+    def pixel_shuffle(self,
+                      x: torch.Tensor,
+                      scale_factor: int = 2) -> torch.Tensor:
         bsz, seq, embed_dim = x.size()
         height = width = int(seq**0.5)
         x = x.view(bsz, height, width, embed_dim)
@@ -375,7 +377,7 @@ class Idefics3Connector(nn.Module):
                       embed_dim * (scale_factor**2))
         return x
 
-    def forward(self, image_hidden_states):
+    def forward(self, image_hidden_states: torch.Tensor) -> torch.Tensor:
         image_hidden_states = self.pixel_shuffle(image_hidden_states,
                                                  self.scale_factor)
         image_hidden_states = self.modality_projection(image_hidden_states)
@@ -467,7 +469,6 @@ class Idefics3Model(nn.Module):
 
     def _image_pixels_to_features(
         self,
-        vision_model: Idefics3VisionTransformer,
         pixel_values: torch.Tensor,
         pixel_attention_mask: Optional[torch.BoolTensor] = None,
     ) -> torch.Tensor:
@@ -511,7 +512,7 @@ class Idefics3Model(nn.Module):
         patch_attention_mask = (patches_subgrid.sum(dim=(-1, -2)) > 0).bool()
 
         # Get sequence from the vision encoder
-        image_hidden_states = vision_model(
+        image_hidden_states = self.vision_model(
             pixel_values=pixel_values,
             patch_attention_mask=patch_attention_mask,
         )
@@ -525,7 +526,7 @@ class Idefics3Model(nn.Module):
         pixel_values = inputs["data"]
         pixel_attention_mask = inputs["pixel_attention_mask"]
 
-        return self._image_pixels_to_features(self.vision_model, pixel_values,
+        return self._image_pixels_to_features(pixel_values,
                                               pixel_attention_mask)
 
     def _process_image_input(self, image_input: ImageInputs) -> torch.Tensor:

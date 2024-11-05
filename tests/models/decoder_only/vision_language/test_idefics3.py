@@ -1,7 +1,7 @@
 from typing import List, Optional, Tuple, Type
 
 import pytest
-from transformers import AutoTokenizer
+from transformers import AutoModelForVision2Seq, AutoTokenizer
 
 from vllm.multimodal.utils import rescale_image_size
 from vllm.sequence import SampleLogprobs
@@ -61,10 +61,6 @@ def run_test(
     Note, the text input is also adjusted to abide by vllm contract.
     The text output is sanitized to be able to compare with hf.
     """
-    # HACK - this is an attempted workaround for the following bug
-    # https://github.com/huggingface/transformers/issues/34307
-    from transformers import AutoModelForVision2Seq  # noqa: F401
-
     # NOTE: take care of the order. run vLLM first, and then run HF.
     # vLLM needs a fresh new process without cuda initialization.
     # if we run HF first, the cuda initialization will be done and it
