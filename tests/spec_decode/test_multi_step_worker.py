@@ -303,6 +303,7 @@ def test_multi_step_with_batch_expansion_correct_output():
         seed,
         model_runner_cls=TP1DraftModelRunner,
     )
+    multi_step_worker.set_include_gpu_probs_tensor()
     worker = create_worker(
         Worker,
         model_name,
@@ -397,6 +398,7 @@ def test_multi_step_with_batch_expansion_incorrect_output():
         seed,
         model_runner_cls=TP1DraftModelRunner,
     )
+    multi_step_worker.set_include_gpu_probs_tensor()
     worker = create_worker(
         Worker,
         model_name,
