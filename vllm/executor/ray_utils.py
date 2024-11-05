@@ -10,7 +10,7 @@ from vllm.executor.msgspec_utils import decode_hook, encode_hook
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.sequence import ExecuteModelRequest, IntermediateTensors
-from vllm.utils import get_ip, is_hip, is_xpu
+from vllm.utils import get_ip
 from vllm.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
@@ -231,10 +231,17 @@ def initialize_ray_cluster(
     assert_ray_available()
 
     # Connect to a ray cluster.
-    if is_hip() or is_xpu():
-        ray.init(address=ray_address,
-                 ignore_reinit_error=True,
-                 num_gpus=parallel_config.world_size)
+    if current_platform.is_rocm() or current_platform.is_xpu():
+        # Try to connect existing ray instance and create a new one if not found
+        try:
+            ray.init("auto")
+        except ConnectionError:
+            logger.warning(
+                "No existing RAY instance detected. "
+                "A new instance will be launched with current node resources.")
+            ray.init(address=ray_address,
+                     ignore_reinit_error=True,
+                     num_gpus=parallel_config.world_size)
     else:
         ray.init(address=ray_address, ignore_reinit_error=True)
 

@@ -31,8 +31,8 @@ cleanup_docker() {
     echo "Disk usage is above $threshold%. Cleaning up Docker images and volumes..."
     # Remove dangling images (those that are not tagged and not used by any container)
     docker image prune -f
-    # Remove unused volumes
-    docker volume prune -f
+    # Remove unused volumes / force the system prune for old images as well.
+    docker volume prune -f && docker system prune --force --filter "until=72h" --all
     echo "Docker images and volumes cleanup completed."
   else
     echo "Disk usage is below $threshold%. No cleanup needed."
@@ -107,11 +107,12 @@ fi
 PARALLEL_JOB_COUNT=8
 # check if the command contains shard flag, we will run all shards in parallel because the host have 8 GPUs. 
 if [[ $commands == *"--shard-id="* ]]; then
+  # assign job count as the number of shards used   
+  commands=${commands//"--num-shards= "/"--num-shards=${PARALLEL_JOB_COUNT} "}
   for GPU in $(seq 0 $(($PARALLEL_JOB_COUNT-1))); do
-    #replace shard arguments
-    commands=${commands//"--shard-id= "/"--shard-id=${GPU} "}
-    commands=${commands//"--num-shards= "/"--num-shards=${PARALLEL_JOB_COUNT} "}
-    echo "Shard ${GPU} commands:$commands"
+    # assign shard-id for each shard
+    commands_gpu=${commands//"--shard-id= "/"--shard-id=${GPU} "}
+    echo "Shard ${GPU} commands:$commands_gpu"
     docker run \
         --device /dev/kfd --device /dev/dri \
         --network host \
@@ -123,7 +124,7 @@ if [[ $commands == *"--shard-id="* ]]; then
         -e HF_HOME=${HF_MOUNT} \
         --name ${container_name}_${GPU}  \
         ${image_name} \
-        /bin/bash -c "${commands}" \
+        /bin/bash -c "${commands_gpu}" \
         |& while read -r line; do echo ">>Shard $GPU: $line"; done &
     PIDS+=($!)
   done

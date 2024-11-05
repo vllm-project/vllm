@@ -7,6 +7,8 @@ from typing import (TYPE_CHECKING, Any, Dict, Generic, List, Optional, Set,
 
 import torch
 
+from vllm.multimodal import MultiModalPlaceholderMap
+
 if TYPE_CHECKING:
     from vllm.worker.model_runner_base import (ModelRunnerBase,
                                                ModelRunnerInputBase,
@@ -111,6 +113,14 @@ class AttentionMetadata:
     # Number of original input tokens (without any decoding).
     # Some models (phi3-LongRoPE) need this info to decide model settings
     num_orig_input_tokens_tensor: Optional[torch.Tensor]
+    # The index maps that relate multi-modal embeddings to the corresponding
+    # placeholders.
+    #
+    # N.B. These aren't really related to attention and don't belong on this
+    # type -- this is just a temporary solution to make them available to
+    # `model_executable`.
+    multi_modal_placeholder_index_maps: Optional[Dict[
+        str, MultiModalPlaceholderMap.IndexMap]]
 
     @property
     @abstractmethod

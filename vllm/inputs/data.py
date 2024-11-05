@@ -1,10 +1,10 @@
-from typing import (TYPE_CHECKING, Any, Dict, Generic, Iterable, List,
+from typing import (TYPE_CHECKING, Any, Dict, Generic, Iterable, List, Literal,
                     Optional, Tuple, Union, cast)
 
 from typing_extensions import NotRequired, TypedDict, TypeVar
 
 if TYPE_CHECKING:
-    from vllm.multimodal import MultiModalDataDict
+    from vllm.multimodal import MultiModalDataDict, MultiModalPlaceholderDict
 
 
 class TextPrompt(TypedDict):
@@ -122,21 +122,30 @@ both decoder-only and encoder/decoder input types:
 
 class TokenInputs(TypedDict):
     """Represents token-based inputs."""
+
+    type: Literal["token"]
+    """The type of inputs."""
+
     prompt_token_ids: List[int]
     """The token IDs of the prompt."""
 
-    prompt: NotRequired[Optional[str]]
+    prompt: NotRequired[str]
     """
     The original prompt text corresponding to the token IDs, if available.
     """
 
-    multi_modal_data: NotRequired[Optional["MultiModalDataDict"]]
+    multi_modal_data: NotRequired["MultiModalDataDict"]
     """
     Optional multi-modal data to pass to the model,
     if the model supports it.
     """
 
-    mm_processor_kwargs: NotRequired[Optional[Dict[str, Any]]]
+    multi_modal_placeholders: NotRequired["MultiModalPlaceholderDict"]
+    """
+    Placeholder ranges for the multi-modal data.
+    """
+
+    mm_processor_kwargs: NotRequired[Dict[str, Any]]
     """
     Optional multi-modal processor kwargs to be forwarded to the
     multimodal input mapper & processor. Note that if multiple modalities
@@ -149,26 +158,23 @@ def token_inputs(
     prompt_token_ids: List[int],
     prompt: Optional[str] = None,
     multi_modal_data: Optional["MultiModalDataDict"] = None,
+    multi_modal_placeholders: Optional["MultiModalPlaceholderDict"] = None,
     mm_processor_kwargs: Optional[Dict[str, Any]] = None,
 ) -> TokenInputs:
     """Construct :class:`TokenInputs` from optional values."""
-    inputs = TokenInputs(prompt_token_ids=prompt_token_ids)
+    inputs = TokenInputs(type="token", prompt_token_ids=prompt_token_ids)
 
     if prompt is not None:
         inputs["prompt"] = prompt
     if multi_modal_data is not None:
         inputs["multi_modal_data"] = multi_modal_data
+    if multi_modal_placeholders is not None:
+        inputs["multi_modal_placeholders"] = multi_modal_placeholders
     if mm_processor_kwargs is not None:
         inputs["mm_processor_kwargs"] = mm_processor_kwargs
 
     return inputs
 
-
-SingletonInputs = TokenInputs
-"""
-A processed :class:`SingletonPrompt` which can be passed to
-:class:`vllm.sequence.Sequence`.
-"""
 
 DecoderOnlyInputs = TokenInputs
 """
@@ -178,28 +184,30 @@ This specifies the data required for decoder-only models.
 """
 
 
-class EncoderDecoderInputs(TokenInputs):
+class EncoderDecoderInputs(TypedDict):
     """
     The inputs in :class:`~vllm.LLMEngine` before they are
     passed to the model executor.
 
     This specifies the required data for encoder-decoder models.
     """
-    encoder_prompt_token_ids: List[int]
-    """The token IDs of the encoder prompt."""
+    encoder: TokenInputs
+    """The inputs for the encoder portion."""
 
-    encoder_prompt: NotRequired[Optional[str]]
-    """
-    The original encoder prompt text corresponding to the token IDs, if
-    available.
-    """
+    decoder: TokenInputs
+    """The inputs for the decoder portion."""
 
-    encoder_multi_modal_data: NotRequired[Optional["MultiModalDataDict"]]
-    """
-    Optional multi-modal data to pass to the encoder model,
-    if the model supports it.
-    """
 
+SingletonInputs = TokenInputs
+"""
+A processed :class:`SingletonPrompt` which can be passed to
+:class:`vllm.sequence.Sequence`.
+"""
+
+ProcessorInputs = Union[DecoderOnlyInputs, EncoderDecoderInputs]
+"""
+The inputs to :data:`vllm.inputs.InputProcessor`.
+"""
 
 _T1 = TypeVar("_T1", bound=SingletonPrompt, default=SingletonPrompt)
 _T2 = TypeVar("_T2", bound=SingletonPrompt, default=SingletonPrompt)

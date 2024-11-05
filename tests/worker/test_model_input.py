@@ -74,6 +74,7 @@ def test_model_runner_input():
         num_decode_tokens=3,
         slot_mapping=torch.zeros(1),
         num_orig_input_tokens_tensor=torch.tensor([10]),
+        multi_modal_placeholder_index_maps=None,
     )
     model_input = ModelInputForGPUWithSamplingMetadata(
         input_tokens=torch.ones(10),
@@ -126,6 +127,7 @@ def test_embedding_model_runner_input():
         num_decode_tokens=3,
         slot_mapping=torch.zeros(1),
         num_orig_input_tokens_tensor=torch.tensor([10]),
+        multi_modal_placeholder_index_maps=None,
     )
     model_input = ModelInputForGPUWithPoolingMetadata(
         input_tokens=torch.ones(10),
@@ -177,6 +179,7 @@ def test_multi_step_model_runner_input():
         num_decode_tokens=3,
         slot_mapping=torch.zeros(1),
         num_orig_input_tokens_tensor=torch.tensor([10]),
+        multi_modal_placeholder_index_maps=None,
     )
     frozen_model_input = ModelInputForGPUWithSamplingMetadata(
         input_tokens=torch.ones(10),
