@@ -51,6 +51,7 @@ class LlamaConfig:
     mlp_size: int = 256
     vocab_size: int = 128
     num_layers: int = 2
+    init_value: float = 1.0
 
     def __post_init__(self):
         assert self.mlp_size >= self.hidden_size
@@ -176,9 +177,8 @@ class LlamaModel(nn.Module):
         self.layers = nn.ModuleList(
             [LlamaDecoderLayer(config) for _ in range(config.num_layers)])
 
-        # initialize the weights to 1
         # this is the initial value of the hidden states
-        self.embedding_tokens.weight.data.fill_(1)
+        self.embedding_tokens.weight.data.fill_(config.init_value)
 
     def forward(
         self,
@@ -194,16 +194,19 @@ class LlamaModel(nn.Module):
 
 def tractable_computation(input_ids: torch.Tensor,
                           positions: torch.Tensor,
-                          num_layers: int,
+                          config: LlamaConfig,
                           init_value: float = 1.0) -> torch.Tensor:
-    hidden_states = torch.ones_like(input_ids) * init_value
+    hidden_states = torch.ones(input_ids.size(0),
+                               config.hidden_size,
+                               device=input_ids.device,
+                               dtype=input_ids.dtype) * init_value
 
     # first layer
     residual = hidden_states * 4 + positions * 2 + 3
     hidden_states = (residual + 1)**2
 
     # following layers
-    for _ in range(num_layers - 1):
+    for _ in range(config.num_layers - 1):
         hidden_states = hidden_states + residual
         residual = hidden_states * 4 + positions * 2 + 3
         hidden_states = (residual + 1)**2
