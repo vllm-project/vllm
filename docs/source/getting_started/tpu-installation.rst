@@ -119,27 +119,19 @@ Uninstall the existing `torch` and `torch_xla` packages:
 
     pip uninstall torch torch-xla -y
 
-Install `torch` and `torch_xla`
-
-.. code-block:: bash
-
-    pip install --pre torch==2.6.0.dev20241028+cpu torchvision==0.20.0.dev20241028+cpu --index-url https://download.pytorch.org/whl/nightly/cpu
-    pip install 'torch_xla[tpu] @ https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch_xla-2.6.0.dev-cp310-cp310-linux_x86_64.whl' -f https://storage.googleapis.com/libtpu-releases/index.html
-
-Install JAX and Pallas:
-
-.. code-block:: bash
-
-    pip install torch_xla[pallas] -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html -f https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html
-    pip install jaxlib==0.4.32.dev20240829 jax==0.4.32.dev20240829 -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html -f https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html
-
-Install other build dependencies:
+Install build dependencies:
 
 .. code-block:: bash
 
     pip install -r requirements-tpu.txt
-    VLLM_TARGET_DEVICE="tpu" python setup.py develop
     sudo apt-get install libopenblas-base libopenmpi-dev libomp-dev 
+
+Run the setup script:
+
+.. code-block:: bash
+
+   VLLM_TARGET_DEVICE="tpu" python setup.py develop
+
 
 Provision Cloud TPUs with GKE 
 -----------------------------
@@ -167,45 +159,6 @@ Run the Docker image with the following command:
 
     $ # Make sure to add `--privileged --net host --shm-size=16G`.
     $ docker run --privileged --net host --shm-size=16G -it vllm-tpu
-
-
-.. _build_from_source_tpu:
-
-Build from source
------------------
-
-You can also build and install the TPU backend from source.
-
-First, install the dependencies:
-
-.. code-block:: console
-
-    $ # (Recommended) Create a new conda environment.
-    $ conda create -n myenv python=3.10 -y
-    $ conda activate myenv
-
-    $ # Clean up the existing torch and torch-xla packages.
-    $ pip uninstall torch torch-xla -y
-
-    $ # Install PyTorch and PyTorch XLA.
-    $ export DATE="20241017"
-    $ export TORCH_VERSION="2.6.0"
-    $ pip install https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch-${TORCH_VERSION}.dev${DATE}-cp310-cp310-linux_x86_64.whl
-    $ pip install https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch_xla-${TORCH_VERSION}.dev${DATE}-cp310-cp310-linux_x86_64.whl
-
-    $ # Install JAX and Pallas.
-    $ pip install torch_xla[tpu] -f https://storage.googleapis.com/libtpu-releases/index.html
-    $ pip install torch_xla[pallas] -f https://storage.googleapis.com/jax-releases/jax_nightly_releases.html -f https://storage.googleapis.com/jax-releases/jaxlib_nightly_releases.html
-
-    $ # Install other build dependencies.
-    $ pip install -r requirements-tpu.txt
-
-
-Next, build vLLM from source. This will only take a few seconds:
-
-.. code-block:: console
-
-    $ VLLM_TARGET_DEVICE="tpu" python setup.py develop
 
 .. note::
 
