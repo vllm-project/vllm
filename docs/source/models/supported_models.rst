@@ -451,7 +451,7 @@ Text Generation
     - T + I
     - :code:`HuggingFaceM4/Idefics3-8B-Llama3` etc.
     - 
-    - ✅︎
+    - 
   * - :code:`InternVLChatModel`
     - InternVL2
     - T + I\ :sup:`E+`
