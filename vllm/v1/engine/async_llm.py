@@ -137,6 +137,10 @@ class AsyncLLM:
 
             self.request_streams[request_id].put(request_output)
 
+            if request_output.finished:
+                self.request_streams[request_id].finish()
+                self.request_streams.pop(request_id)
+
     async def abort_request(self, request_ids: List[str]) -> None:
         """Remove request_ids from EngineCore and Detokenizer."""
 

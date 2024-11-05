@@ -244,8 +244,13 @@ class EngineCoreProc(EngineCore):
             "usage_context": usage_context,
         }
         # Run EngineCore busy loop in background process.
-        return context.Process(target=EngineCoreProc.run_engine_core,
+        proc = context.Process(target=EngineCoreProc.run_engine_core,
                                kwargs=process_kwargs)
+        proc.start()
+        
+        # Wait for startup
+        EngineCoreProc.wait_for_startup(proc, ready_path)
+        return proc
 
     @staticmethod
     def run_engine_core(*args, **kwargs):
@@ -261,9 +266,8 @@ class EngineCoreProc(EngineCore):
         """Core busy loop of the EngineCore."""
 
         while True:
-            # If no work, poll the input queue until there is.
+            # 1) Poll the input queue until there is work to do.
             if not self.scheduler.has_unfinished_requests():
-
                 while True:
                     try:
                         req = self.input_queue.get(timeout=POLLING_TIMEOUT_S)
@@ -272,15 +276,15 @@ class EngineCoreProc(EngineCore):
                     except queue.Empty:
                         logger.debug("EngineCore busy loop waiting.")
 
-            # Handle any new requests from the client is there is any.
+            # 2) Handle any new client requests (Abort or Add).
             while not self.input_queue.empty():
                 req = self.input_queue.get_nowait()
                 self._handle_client_request(req)
 
-            # Step the engine core.
+            # 3) Step the engine core.
             outputs = self.step()
 
-            # Put EngineCoreOutputs into the output queue.
+            # 4) Put EngineCoreOutputs into the output queue.
             self.output_queue.put_nowait(outputs)
 
     def _handle_client_request(

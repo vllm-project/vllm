@@ -138,8 +138,6 @@ class MPClient(EngineCoreClient):
             ready_path=ready_path,
             **kwargs,
         )
-        self.proc.start()
-        EngineCoreProc.wait_for_startup(self.proc, ready_path)
 
     def __del__(self):
         # TODO: clean shutdown.
