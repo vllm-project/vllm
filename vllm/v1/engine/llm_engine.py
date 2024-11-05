@@ -3,7 +3,7 @@ from typing import Dict, List, Mapping, Optional, Type, Union
 from vllm.config import VllmConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics_types import StatLoggerBase
-from vllm.envs import VLLM_DISABLE_V1_MULTIPROCESSING
+from vllm.envs import VLLM_ENABLE_V1_MULTIPROCESSING
 from vllm.inputs import INPUT_REGISTRY, InputRegistry, PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -78,9 +78,9 @@ class LLMEngine:
         vllm_config = engine_args.create_engine_config()
         executor_class = cls._get_executor_cls(vllm_config)
 
-        if VLLM_DISABLE_V1_MULTIPROCESSING:
-            logger.debug("Disabling multiprocessing for LLMEngine.")
-            enable_multiprocessing = False
+        if VLLM_ENABLE_V1_MULTIPROCESSING:
+            logger.debug("Enabling multiprocessing for LLMEngine.")
+            enable_multiprocessing = True
 
         # Create the LLMEngine.
         return cls(vllm_config=vllm_config,

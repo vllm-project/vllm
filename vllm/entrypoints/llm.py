@@ -208,10 +208,11 @@ class LLM:
         )
 
         if envs.VLLM_USE_V1:
+            # TODO(rob): enable mp by default (issue with fork vs spawn)
             self.llm_engine = LLMEngine.from_engine_args(
                 engine_args,
                 usage_context=UsageContext.LLM_CLASS,
-                enable_multiprocessing=True)
+                enable_multiprocessing=False)
         else:
             self.llm_engine = LLMEngine.from_engine_args(
                 engine_args, usage_context=UsageContext.LLM_CLASS)
