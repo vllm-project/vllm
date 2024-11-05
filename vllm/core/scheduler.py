@@ -807,17 +807,17 @@ class Scheduler:
                                                       SequenceStatus.WAITING,
                                                       False, budget)
 
-            #Only preempt if priority inversion exists
+            # Only preempt if priority inversion exists
             while running_queue and self._get_priority(
                     running_queue[-1]) > self._get_priority(seq_group):
-                #Only preempt if waiting sequence cannot be allocated
+                # Only preempt if waiting sequence cannot be allocated
                 can_allocate = self.block_manager.can_allocate(seq_group)
                 if (num_new_tokens and can_allocate == AllocStatus.OK
                         and budget.can_schedule(num_new_tokens=num_new_tokens,
                                                 num_new_seqs=num_new_seqs)):
                     break
 
-                #Adjust budget to remove the victim sequence group
+                # Adjust budget to remove the victim sequence group
                 vseq_group = running_queue.pop()
                 num_running_tokens = self._get_num_new_tokens(
                     vseq_group, SequenceStatus.RUNNING, False, budget)
@@ -827,11 +827,11 @@ class Scheduler:
                 budget.subtract_num_seqs(vseq_group.request_id,
                                          num_running_seqs)
 
-                #Preempt out the victim sequence group
+                # Preempt out the victim sequence group
                 self._preempt(vseq_group, blocks_to_swap_out)
                 waiting_queue.appendleft(vseq_group)
                 force_preemption_count += 1
-            #Put the sequence back into the waiting queue
+            # Put the sequence back into the waiting queue
             waiting_queue.appendleft(seq_group)
 
         waiting_queue = deque(sorted(waiting_queue, key=self._get_priority))
@@ -1585,6 +1585,25 @@ class Scheduler:
 
         return self.scheduler_config.num_lookahead_slots
 
+    def _modify_remaining_token_budget(self, budget: SchedulingBudget) -> int:
+        prefilling = 0
+        for i in range(len(self.running)):
+            for seq in self.running[i].seqs:
+                if seq.data.stage == SequenceStage.PREFILL:
+                    prefilling += 1
+        waiting_and_prefilling = len(self.waiting) + prefilling
+
+        remaining_token_budget = budget.remaining_token_budget()
+
+        if waiting_and_prefilling > 1:
+            chunk_size = int(remaining_token_budget / waiting_and_prefilling)
+            chunk_size = max(chunk_size, self.scheduler_config.min_chunk_size)
+            remaining_token_budget = min(budget.remaining_token_budget(),
+                                         chunk_size)
+
+        logger.debug("Remaining token budget: %d", remaining_token_budget)
+        return remaining_token_budget
+
     def _get_num_new_tokens(self, seq_group: SequenceGroup,
                             status: SequenceStatus, enable_chunking: bool,
                             budget: SchedulingBudget) -> int:
@@ -1607,26 +1626,28 @@ class Scheduler:
         # If number of seq > 1, it means it is doing beam search
         # in a decode phase. Do not chunk.
         if enable_chunking and len(seqs) == 1:
+            remaining_token_budget = self._modify_remaining_token_budget(
+                budget=budget)
             # Only schedule up to a maximum of min_chunk_size
             # remaining_token_budget = min(budget.remaining_token_budget(), self.scheduler_config.min_chunk_size)
 
             # TODO: Refactor this to a method
-            prefilling = 0
-            for i in range(len(self.running)):
-                for seq in self.running[i].seqs:
-                    if seq.data.stage == SequenceStage.PREFILL:
-                        prefilling += 1
-            waiting_and_prefilling = len(self.waiting) + prefilling
+            # prefilling = 0
+            # for i in range(len(self.running)):
+            #     for seq in self.running[i].seqs:
+            #         if seq.data.stage == SequenceStage.PREFILL:
+            #             prefilling += 1
+            # waiting_and_prefilling = len(self.waiting) + prefilling
 
-            remaining_token_budget = budget.remaining_token_budget()
-            if waiting_and_prefilling > 1:
+            # remaining_token_budget = budget.remaining_token_budget()
+            # if waiting_and_prefilling > 1:
 
-                chunk_size = int(remaining_token_budget / waiting_and_prefilling)
-                chunk_size = max(chunk_size, self.scheduler_config.min_chunk_size)
+            #     chunk_size = int(remaining_token_budget / waiting_and_prefilling)
+            #     chunk_size = max(chunk_size, self.scheduler_config.min_chunk_size)
 
-                remaining_token_budget = min(budget.remaining_token_budget(), chunk_size)
-                print("Modified that chunk size: ", remaining_token_budget)
-                # TODO: deal with min chunk size
+            #     remaining_token_budget = min(budget.remaining_token_budget(), chunk_size)
+            #     print("Modified that chunk size: ", remaining_token_budget)
+            # TODO: deal with min chunk size
 
             if self.scheduler_config.is_multi_step:
                 # The current multi-step + chunked prefill capability does
