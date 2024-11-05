@@ -1119,9 +1119,9 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             batch_size * num_image * num_patch, -1).contiguous()
 
         image_input_idx = image_input_idx * valid.to(image_input_idx.dtype)
-        offset = torch.cat(
-            [seq_len.new_zeros(
-                (1)), seq_len.cumsum(dim=0)[:-1]], dim=0)[:, None]
+        offset = torch.cat([seq_len.new_zeros(1),
+                            seq_len.cumsum(dim=0)[:-1]],
+                           dim=0)[:, None]
         image_input_idx = image_input_idx + offset.to(image_input_idx.dtype)
         image_input_idx = image_input_idx.flatten()[:, None]
         mat = image_input_idx == torch.arange(
