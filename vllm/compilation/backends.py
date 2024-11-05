@@ -6,6 +6,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 import torch
 import torch.fx as fx
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils import weak_ref_tensors
 
@@ -390,6 +391,10 @@ class ConcreteSizeEntry:
     cudagraph: Optional[torch.cuda.CUDAGraph] = None
     output: Optional[Any] = None
 
+    # for cudagraph debugging, track the input addresses
+    # during capture, and check if they are the same during replay
+    input_addresses: Optional[List[int]] = None
+
 
 class PiecewiseBackend:
 
@@ -432,6 +437,8 @@ class PiecewiseBackend:
         self.compiled_graph_for_general_shape = compiled_graph_for_general_shape  # noqa
 
         self.sym_shape_indices = sym_shape_indices
+
+        self.is_debugging_mode = envs.VLLM_LOGGING_LEVEL == "DEBUG"
 
         # the entries for different shapes that we need to either
         # compile or capture cudagraph
@@ -487,14 +494,31 @@ class PiecewiseBackend:
                 logger.info("Capturing a cudagraph for shape %s",
                             runtime_shape)
 
+            input_addresses = [
+                x.data_ptr() for x in args if isinstance(x, torch.Tensor)
+            ]
+            entry.input_addresses = input_addresses
             cudagraph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(cudagraph, pool=self.graph_pool):
-                entry.output = weak_ref_tensors(entry.runnable(*args))
+                output = entry.runnable(*args)
+                if self.is_last_graph:
+                    output = weak_ref_tensors(output)
+            entry.output = weak_ref_tensors(output)
+            entry.cudagraph = cudagraph
 
             compilation_counter.num_cudagraph_caputured += 1
 
-            entry.cudagraph = cudagraph
-            return entry.output
+            return output
+
+        if self.is_debugging_mode:
+            # check if the input addresses are the same
+            new_input_addresses = [
+                x.data_ptr() for x in args if isinstance(x, torch.Tensor)
+            ]
+            assert new_input_addresses == entry.input_addresses, (
+                "Input addresses for cudagraphs are different during replay."
+                f" Expected {entry.input_addresses}, got {new_input_addresses}"
+            )
 
         entry.cudagraph.replay()
         return entry.output
