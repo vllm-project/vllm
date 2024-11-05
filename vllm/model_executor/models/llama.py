@@ -289,7 +289,6 @@ class LlamaDecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual, scale)
-
         hidden_states = self.self_attn(positions=positions,
                                        hidden_states=hidden_states,
                                        kv_cache=kv_cache,
@@ -299,9 +298,7 @@ class LlamaDecoderLayer(nn.Module):
         scale = None if not self.use_fp8 else self.mlp.gate_up_proj.input_scale
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual, scale)
-        
         hidden_states = self.mlp(hidden_states)
-
         return hidden_states, residual
 
 
@@ -374,9 +371,6 @@ class LlamaModel(nn.Module):
             residual = intermediate_tensors["residual"]
 
         for i in range(self.start_layer, self.end_layer):
-            global layer_id
-            layer_id = i
-
             layer = self.layers[i]
             hidden_states, residual = layer(positions, hidden_states,
                                             kv_caches[i - self.start_layer],
