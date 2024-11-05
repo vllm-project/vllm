@@ -194,6 +194,7 @@ def wrap_inductor(graph,
 @dataclasses.dataclass
 class SplitItem:
     submod_name: str
+    graph_id: int
     is_splitting_graph: bool
     graph: fx.GraphModule
 
@@ -227,9 +228,7 @@ def split_graph(graph: fx.GraphModule,
 
     outputs = []
 
-    # sort the names to make sure the order is deterministic
     names = [name for (name, module) in split_gm.named_modules()]
-    names.sort()
 
     for name in names:
         if "." in name or name == "":
@@ -239,7 +238,11 @@ def split_graph(graph: fx.GraphModule,
         module = getattr(split_gm, name)
 
         graph_id = int(name.replace("submod_", ""))
-        outputs.append(SplitItem(name, graph_id in split_op_graphs, module))
+        outputs.append(
+            SplitItem(name, graph_id, (graph_id in split_op_graphs), module))
+
+    # sort by intetger graph_id, rather than string name
+    outputs.sort(key=lambda x: x.graph_id)
 
     return split_gm, outputs
 
