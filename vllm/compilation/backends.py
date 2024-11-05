@@ -1,7 +1,9 @@
 import copy
 import dataclasses
 import operator
+from contextlib import ExitStack
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
+from unittest.mock import patch
 
 import torch
 import torch.fx as fx
@@ -15,6 +17,10 @@ from .counter import compilation_counter
 from .levels import CompilationLevel
 
 logger = init_logger(__name__)
+
+
+def no_op():
+    return
 
 
 def fix_functionalization(graph: fx.Graph):
@@ -503,17 +509,28 @@ class PiecewiseBackend:
             entry.input_addresses = input_addresses
             cudagraph = torch.cuda.CUDAGraph()
 
-            # mind-exploding: carefully manage the reference and memory.
-            with torch.cuda.graph(cudagraph, pool=self.graph_pool):
-                # `output` is managed by pytorch's cudagraph pool
-                output = entry.runnable(*args)
-                if self.is_last_graph:
-                    # by converting it to weak ref,
-                    # the original `output` will immediately be released
-                    # to save memory. It is only safe to do this for
-                    # the last graph, because the output of the last graph
-                    # will not be used by any other cuda graph.
-                    output = weak_ref_tensors(output)
+            with ExitStack() as stack:
+                if not self.is_first_graph:
+                    # during every model forward, we will capture
+                    # many pieces of cudagraphs (roughly one per layer).
+                    # running gc again and again across layers will
+                    # make the cudagraph capture very slow.
+                    # therefore, we only run gc for the first graph,
+                    # and disable gc for the rest of the graphs.
+                    stack.enter_context(patch("gc.collect", no_op))
+                    stack.enter_context(patch("torch.cuda.empty_cache", no_op))
+
+                # mind-exploding: carefully manage the reference and memory.
+                with torch.cuda.graph(cudagraph, pool=self.graph_pool):
+                    # `output` is managed by pytorch's cudagraph pool
+                    output = entry.runnable(*args)
+                    if self.is_last_graph:
+                        # by converting it to weak ref,
+                        # the original `output` will immediately be released
+                        # to save memory. It is only safe to do this for
+                        # the last graph, because the output of the last graph
+                        # will not be used by any other cuda graph.
+                        output = weak_ref_tensors(output)
 
             # here we always use weak ref for the output
             # to save memory
