@@ -72,7 +72,6 @@ from .utils import (PPMissingLayer, get_vit_attn_backend,
 
 logger = init_logger(__name__)
 
-
 # === Vision Inputs === #
 
 
@@ -98,7 +97,7 @@ class Qwen2VLImageEmbeddingInputs(TypedDict):
 
 
 Qwen2VLImageInputs = Union[Qwen2VLImagePixelInputs,
-Qwen2VLImageEmbeddingInputs]
+                           Qwen2VLImageEmbeddingInputs]
 
 
 class Qwen2VLVideoInputs(TypedDict):
@@ -121,11 +120,11 @@ class Qwen2VLVideoInputs(TypedDict):
 class Qwen2VisionMLP(nn.Module):
 
     def __init__(
-            self,
-            in_features: int,
-            hidden_features: int = None,
-            act_layer: Type[nn.Module] = QuickGELU,
-            quant_config: Optional[QuantizationConfig] = None,
+        self,
+        in_features: int,
+        hidden_features: int = None,
+        act_layer: Type[nn.Module] = QuickGELU,
+        quant_config: Optional[QuantizationConfig] = None,
     ):
         super().__init__()
         self.fc1 = ColumnParallelLinear(in_features,
@@ -191,11 +190,11 @@ def apply_rotary_pos_emb_vision(t: torch.Tensor,
 class Qwen2VisionAttention(nn.Module):
 
     def __init__(
-            self,
-            embed_dim: Optional[int] = None,
-            num_heads: Optional[int] = None,
-            projection_size: Optional[int] = None,
-            quant_config: Optional[QuantizationConfig] = None,
+        self,
+        embed_dim: Optional[int] = None,
+        num_heads: Optional[int] = None,
+        projection_size: Optional[int] = None,
+        quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
         # Per attention head and per partition values.
@@ -215,16 +214,16 @@ class Qwen2VisionAttention(nn.Module):
         # Detect attention implementation.
         self.attn_backend: _Backend = get_vit_attn_backend()
         if self.attn_backend not in {
-            _Backend.FLASH_ATTN, _Backend.TORCH_SDPA, _Backend.XFORMERS
+                _Backend.FLASH_ATTN, _Backend.TORCH_SDPA, _Backend.XFORMERS
         }:
             raise RuntimeError(
                 f"Qwen2-VL does not support {self.attn_backend} backend now.")
 
     def forward(
-            self,
-            x: torch.Tensor,
-            cu_seqlens: torch.Tensor,
-            rotary_pos_emb: torch.Tensor = None,
+        self,
+        x: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        rotary_pos_emb: torch.Tensor = None,
     ) -> torch.Tensor:
         # [s, b, c] --> [s, b, head * 3 * head_dim]
         x, _ = self.qkv(x)
@@ -276,7 +275,7 @@ class Qwen2VisionAttention(nn.Module):
                                          dtype=torch.bool)
             for i in range(1, len(cu_seqlens)):
                 attention_mask[..., cu_seqlens[i - 1]:cu_seqlens[i],
-                cu_seqlens[i - 1]:cu_seqlens[i]] = True
+                               cu_seqlens[i - 1]:cu_seqlens[i]] = True
             output = F.scaled_dot_product_attention(q,
                                                     k,
                                                     v,
@@ -303,13 +302,13 @@ class Qwen2VisionAttention(nn.Module):
 class Qwen2VisionBlock(nn.Module):
 
     def __init__(
-            self,
-            dim: int,
-            num_heads: int,
-            mlp_ratio: float,
-            act_layer: Type[nn.Module] = QuickGELU,
-            norm_layer: Type[nn.Module] = None,
-            quant_config: Optional[QuantizationConfig] = None,
+        self,
+        dim: int,
+        num_heads: int,
+        mlp_ratio: float,
+        act_layer: Type[nn.Module] = QuickGELU,
+        norm_layer: Type[nn.Module] = None,
+        quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
         if norm_layer is None:
@@ -339,11 +338,11 @@ class Qwen2VisionBlock(nn.Module):
 class Qwen2VisionPatchEmbed(nn.Module):
 
     def __init__(
-            self,
-            patch_size: int = 14,
-            temporal_patch_size: int = 2,
-            in_chans: int = 3,
-            embed_dim: int = 1152,
+        self,
+        patch_size: int = 14,
+        temporal_patch_size: int = 2,
+        in_chans: int = 3,
+        embed_dim: int = 1152,
     ) -> None:
         super().__init__()
         self.patch_size = patch_size
@@ -368,15 +367,15 @@ class Qwen2VisionPatchEmbed(nn.Module):
 class Qwen2VisionPatchMerger(nn.Module):
 
     def __init__(
-            self,
-            d_model: int,
-            context_dim: int,
-            norm_layer: Type[nn.Module] = None,
-            spatial_merge_size: int = 2,
-            quant_config: Optional[QuantizationConfig] = None,
+        self,
+        d_model: int,
+        context_dim: int,
+        norm_layer: Type[nn.Module] = None,
+        spatial_merge_size: int = 2,
+        quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
-        self.hidden_size = context_dim * (spatial_merge_size ** 2)
+        self.hidden_size = context_dim * (spatial_merge_size**2)
         if norm_layer is None:
             norm_layer = partial(nn.LayerNorm, eps=1e-6)
         self.ln_q = norm_layer(context_dim)
@@ -410,7 +409,7 @@ class Qwen2VisionRotaryEmbedding(nn.Module):
         self.dim = dim
         self.theta = theta
         inv_freq = 1.0 / (theta
-                          ** (torch.arange(0, dim, 2, dtype=torch.float) / dim))
+                          **(torch.arange(0, dim, 2, dtype=torch.float) / dim))
         self.register_buffer("inv_freq", inv_freq, persistent=False)
         self._seq_len_cached = 0
         self._freqs_cached = None
@@ -419,9 +418,9 @@ class Qwen2VisionRotaryEmbedding(nn.Module):
         if seqlen > self._seq_len_cached:
             seqlen *= 2
             self._seq_len_cached = seqlen
-            self.inv_freq = 1.0 / (self.theta ** (torch.arange(
+            self.inv_freq = 1.0 / (self.theta**(torch.arange(
                 0, self.dim, 2, dtype=torch.float, device=self.inv_freq.device)
-                                                  / self.dim))
+                                                / self.dim))
             seq = torch.arange(seqlen,
                                device=self.inv_freq.device,
                                dtype=self.inv_freq.dtype)
@@ -436,10 +435,10 @@ class Qwen2VisionRotaryEmbedding(nn.Module):
 class Qwen2VisionTransformer(nn.Module):
 
     def __init__(
-            self,
-            vision_config: Qwen2VLVisionConfig,
-            norm_eps: float = 1e-6,
-            quant_config: Optional[QuantizationConfig] = None,
+        self,
+        vision_config: Qwen2VLVisionConfig,
+        norm_eps: float = 1e-6,
+        quant_config: Optional[QuantizationConfig] = None,
     ) -> None:
         super().__init__()
 
@@ -516,9 +515,9 @@ class Qwen2VisionTransformer(nn.Module):
         return rotary_pos_emb
 
     def forward(
-            self,
-            x: torch.Tensor,
-            grid_thw: torch.Tensor,
+        self,
+        x: torch.Tensor,
+        grid_thw: torch.Tensor,
     ) -> torch.Tensor:
         # patchify
         x = x.to(device=self.device, dtype=self.dtype)
@@ -530,7 +529,7 @@ class Qwen2VisionTransformer(nn.Module):
         # compute cu_seqlens
         cu_seqlens = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2],
                                              grid_thw[:, 0]).cumsum(
-            dim=0, dtype=torch.int32)
+                                                 dim=0, dtype=torch.int32)
         cu_seqlens = F.pad(cu_seqlens, (1, 0), "constant", 0)
 
         # transformers
@@ -549,9 +548,9 @@ cached_get_processor = lru_cache(get_processor)
 
 
 def mm_input_mapper_for_qwen2_vl(
-        ctx: InputContext,
-        data: MultiModalData[object],
-        data_type_key: str,
+    ctx: InputContext,
+    data: MultiModalData[object],
+    data_type_key: str,
 ) -> MultiModalInputs:
     """Input mapper for Qwen2-VL."""
     if data_type_key == "image" and isinstance(data, dict):
@@ -592,14 +591,14 @@ video_input_mapper_for_qwen2_vl = partial(mm_input_mapper_for_qwen2_vl,
 
 
 def _get_vision_info(
-        image_processor,
-        height: int,
-        width: int,
-        min_pixels: int,
-        max_pixels: int,
-        do_resize: bool = True,
-        data_type_key: str = "image",
-        mm_count: int = 1,
+    image_processor,
+    height: int,
+    width: int,
+    min_pixels: int,
+    max_pixels: int,
+    do_resize: bool = True,
+    data_type_key: str = "image",
+    mm_count: int = 1,
 ):
     """Get information (resized height / width and number of vision tokens)
     of input image / video frame."""
@@ -631,9 +630,9 @@ def _get_vision_info(
 
 
 def _get_max_image_info(
-        image_processor,
-        data_type_key: str = "image",
-        mm_count: int = 1,
+    image_processor,
+    data_type_key: str = "image",
+    mm_count: int = 1,
 ):
     return _get_vision_info(
         image_processor,
@@ -663,7 +662,7 @@ get_max_qwen2_vl_video_tokens = partial(get_max_qwen2_vl_mm_tokens,
 
 
 def dummy_data_for_qwen2_vl(
-        ctx: InputContext, seq_len: int, mm_counts: Mapping[str, int]
+    ctx: InputContext, seq_len: int, mm_counts: Mapping[str, int]
 ) -> Tuple[SequenceData, Optional[MultiModalDataDict]]:
     image_processor = cached_get_image_processor(ctx.model_config.model)
 
@@ -706,9 +705,9 @@ def dummy_data_for_qwen2_vl(
 
 
 def _get_llm_num_vision_tokens(
-        mm_inputs: list,
-        data_type_key: str,
-        image_processor,
+    mm_inputs: list,
+    data_type_key: str,
+    image_processor,
 ):
     """Get number of vision tokens of multimodal inputs.
 
@@ -774,8 +773,8 @@ def _expand_pad_tokens(inputs: list, token_id: int, make_batched_fn: Callable,
 
 
 def input_processor_for_qwen2_vl(
-        ctx: InputContext,
-        inputs: DecoderOnlyInputs,
+    ctx: InputContext,
+    inputs: DecoderOnlyInputs,
 ) -> DecoderOnlyInputs:
     multi_modal_data = inputs.get("multi_modal_data", None)
     if multi_modal_data is None:
@@ -926,7 +925,7 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
 
     def _validate_and_reshape_mm_tensor(self,
                                         mm_input: Union[torch.Tensor,
-                                        List[torch.Tensor]],
+                                                        List[torch.Tensor]],
                                         name: str) -> torch.Tensor:
         if not isinstance(mm_input, (torch.Tensor, list)):
             raise ValueError(f"Incorrect type of {name}. "
@@ -1011,24 +1010,24 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         return video_embeds
 
     def _merge_multimodal_embeddings(
-            self,
-            input_ids: torch.Tensor,
-            inputs_embeds: torch.Tensor,
-            multimodal_embeddings: torch.Tensor,
-            placeholder_token_id: int,
+        self,
+        input_ids: torch.Tensor,
+        inputs_embeds: torch.Tensor,
+        multimodal_embeddings: torch.Tensor,
+        placeholder_token_id: int,
     ) -> torch.Tensor:
         mask = (input_ids == placeholder_token_id)
         inputs_embeds[mask, :] = multimodal_embeddings
         return inputs_embeds
 
     def forward(
-            self,
-            input_ids: torch.Tensor,
-            positions: torch.Tensor,
-            kv_caches: List[torch.Tensor],
-            attn_metadata: AttentionMetadata,
-            intermediate_tensors: Optional[IntermediateTensors] = None,
-            **kwargs: object,
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        kv_caches: List[torch.Tensor],
+        attn_metadata: AttentionMetadata,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        **kwargs: object,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         """Run forward pass for Qwen2-VL.
 
@@ -1103,9 +1102,9 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         return logits
 
     def sample(
-            self,
-            logits: torch.Tensor,
-            sampling_metadata: SamplingMetadata,
+        self,
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
