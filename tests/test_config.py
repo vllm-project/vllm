@@ -2,6 +2,7 @@ import pytest
 
 from vllm.config import ModelConfig
 from vllm.model_executor.layers.pooler import PoolingType
+from vllm.platforms import current_platform
 
 
 @pytest.mark.parametrize(("model_id", "expected_task"), [
@@ -103,6 +104,8 @@ def test_get_sliding_window():
     assert mistral_model_config.get_sliding_window() == TEST_SLIDING_WINDOW
 
 
+@pytest.mark.skipif(current_platform.is_rocm(),
+                    reason="Xformers backend is not supported on ROCm.")
 def test_get_pooling_config():
     model_id = "sentence-transformers/all-MiniLM-L12-v2"
     minilm_model_config = ModelConfig(
@@ -127,6 +130,8 @@ def test_get_pooling_config():
     assert minilm_pooling_config.pooling_type == PoolingType.MEAN.name
 
 
+@pytest.mark.skipif(current_platform.is_rocm(),
+                    reason="Xformers backend is not supported on ROCm.")
 def test_get_pooling_config_from_args():
     model_id = "sentence-transformers/all-MiniLM-L12-v2"
     minilm_model_config = ModelConfig(model_id,
