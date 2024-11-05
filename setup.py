@@ -498,7 +498,6 @@ setup(
         "Documentation": "https://vllm.readthedocs.io/en/latest/",
     },
     classifiers=[
-        "Programming Language :: Python :: 3.8",
         "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
@@ -512,7 +511,7 @@ setup(
     ],
     packages=find_packages(exclude=("benchmarks", "csrc", "docs", "examples",
                                     "tests*")),
-    python_requires=">=3.8",
+    python_requires=">=3.9",
     install_requires=get_requirements(),
     ext_modules=ext_modules,
     extras_require={

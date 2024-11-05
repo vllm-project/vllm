@@ -93,6 +93,7 @@ _groups: Dict[str, Callable[[], "GroupCoordinator"]] = {}
 
 
 def _register_group(group: "GroupCoordinator") -> None:
+    # TODO - revisit this now that we dropped 3.8 support
     # looks like Python 3.8 does not understand `ReferenceType`
     _groups[group.unique_name] = weakref.ref(group)  # type: ignore
 
