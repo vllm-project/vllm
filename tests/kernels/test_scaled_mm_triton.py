@@ -32,7 +32,7 @@ def get_8bit_types():
     types = [torch.int8]
     if current_platform.is_rocm():
         types.append(torch.float8_e4m3fnuz)
-    else:
+    elif current_platform.is_cuda():
         types.append(torch.float8_e4m3fn)
     return types
 
