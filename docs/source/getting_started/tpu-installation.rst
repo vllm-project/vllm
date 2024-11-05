@@ -122,8 +122,13 @@ Install build dependencies:
 .. code-block:: bash
 
     pip install -r requirements-tpu.txt
-    VLLM_TARGET_DEVICE="tpu" python setup.py develop
     sudo apt-get install libopenblas-base libopenmpi-dev libomp-dev 
+
+Run the setup script:
+
+.. code-block:: bash
+   VLLM_TARGET_DEVICE="tpu" python setup.py develop
+
 
 Provision Cloud TPUs with GKE 
 -----------------------------
@@ -151,35 +156,6 @@ Run the Docker image with the following command:
 
     $ # Make sure to add `--privileged --net host --shm-size=16G`.
     $ docker run --privileged --net host --shm-size=16G -it vllm-tpu
-
-
-.. _build_from_source_tpu:
-
-Build from source
------------------
-
-You can also build and install the TPU backend from source.
-
-First, install the dependencies:
-
-.. code-block:: console
-
-    $ # (Recommended) Create a new conda environment.
-    $ conda create -n myenv python=3.10 -y
-    $ conda activate myenv
-
-    $ # Clean up the existing torch and torch-xla packages.
-    $ pip uninstall torch torch-xla -y
-
-    $ # Install other build dependencies.
-    $ pip install -r requirements-tpu.txt
-
-
-Next, build vLLM from source. This will only take a few seconds:
-
-.. code-block:: console
-
-    $ VLLM_TARGET_DEVICE="tpu" python setup.py develop
 
 .. note::
 
