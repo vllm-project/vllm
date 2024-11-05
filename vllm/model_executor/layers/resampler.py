@@ -177,7 +177,7 @@ class BaseResampler(nn.Module):
                                             embed_dim,
                                             bias=False,
                                             quant_config=quant_config,
-                                            prefix=prefix)
+                                            prefix=f"{prefix}.kv_proj")
         else:
             # Maintain the same return value with ReplicatedLinear.forward
             self.kv_proj = lambda *args, **kwargs: (  # type: ignore # noqa 
