@@ -187,6 +187,23 @@ VLM_TEST_SETTINGS = {
         marks=[large_gpu_mark(min_gb=48)],
         patch_hf_runner=model_utils.glm_patch_hf_runner,
     ),
+    "h2ovl": VLMTestInfo(
+        models = [
+            "h2oai/h2ovl-mississippi-800m",
+            "h2oai/h2ovl-mississippi-2b",
+        ],
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        prompt_formatter=lambda img_prompt: f"<|prompt|>{img_prompt}<|end|><|answer|>", # noqa: E501
+        single_image_prompts=IMAGE_ASSETS.prompts({
+            "stop_sign": "<image>\nWhat's the content in the center of the image?",  # noqa: E501
+            "cherry_blossom": "<image>\nWhat is the season?",
+        }),
+        multi_image_prompt="Image-1: <image>\nImage-2: <image>\nDescribe the two images in short.",  # noqa: E501
+        max_model_len=8192,
+        dtype="bfloat16",
+        use_tokenizer_eos=True,
+        patch_hf_runner=model_utils.h2ovl_patch_hf_runner,
+    ),
     "intern_vl": VLMTestInfo(
         models=[
             "OpenGVLab/InternVL2-1B",
@@ -291,6 +308,15 @@ VLM_TEST_SETTINGS = {
     #     vllm_output_post_proc=model_utils.phi3v_vllm_to_hf_output,
     #     num_logprobs=10,
     # ),
+    "pixtral_hf": VLMTestInfo(
+        models=["nm-testing/pixtral-12b-FP8-dynamic"],
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        prompt_formatter=lambda img_prompt: f"<s>[INST]{img_prompt}[/INST]",
+        img_idx_to_prompt=lambda idx: "[IMG]",
+        max_model_len=8192,
+        max_num_seqs=2,
+        auto_cls=AutoModelForVision2Seq,
+    ),
     "qwen": VLMTestInfo(
         models=["Qwen/Qwen-VL"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),

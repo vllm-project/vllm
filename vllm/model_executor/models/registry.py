@@ -128,6 +128,7 @@ _MULTIMODAL_MODELS = {
     "ChatGLMModel": ("chatglm", "ChatGLMForCausalLM"),
     "ChatGLMForConditionalGeneration": ("chatglm", "ChatGLMForCausalLM"),
     "FuyuForCausalLM": ("fuyu", "FuyuForCausalLM"),
+    "H2OVLChatModel": ("h2ovl", "H2OVLChatModel"),
     "InternVLChatModel": ("internvl", "InternVLChatModel"),
     "LlavaForConditionalGeneration": ("llava", "LlavaForConditionalGeneration"),
     "LlavaNextForConditionalGeneration": ("llava_next", "LlavaNextForConditionalGeneration"),  # noqa: E501
@@ -341,6 +342,11 @@ class _ModelRegistry:
 
     def _raise_for_unsupported(self, architectures: List[str]):
         all_supported_archs = self.get_supported_archs()
+
+        if any(arch in all_supported_archs for arch in architectures):
+            raise ValueError(
+                f"Model architectures {architectures} failed "
+                "to be inspected. Please check the logs for more details.")
 
         raise ValueError(
             f"Model architectures {architectures} are not supported for now. "

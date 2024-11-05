@@ -44,8 +44,8 @@ Requirements
 Provision Cloud TPUs
 ====================
 
-You can provision Cloud TPUs using the `Cloud TPU API <https://cloud.google.com/tpu/docs/reference/rest>`_` 
-or the `queued resources <https://cloud.google.com/tpu/docs/queued-resources>`_` 
+You can provision Cloud TPUs using the `Cloud TPU API <https://cloud.google.com/tpu/docs/reference/rest>`_ 
+or the `queued resources <https://cloud.google.com/tpu/docs/queued-resources>`_ 
 API. This section shows how to create TPUs using the queued resource API. 
 For more information about using the Cloud TPU API, see `Create a Cloud TPU using the Create Node API <https://cloud.google.com/tpu/docs/managing-tpus-tpu-vm#create-node-api>`_. 
 `Queued resources <https://cloud.devsite.corp.google.com/tpu/docs/queued-resources>`_
@@ -85,7 +85,7 @@ Create a TPU v5e with 4 TPU chips:
         want to create your Cloud TPU.
     * - ACCELERATOR_TYPE
       - The TPU version you want to use. Specify the TPU version, followed by a 
-        '-' and the number of TPU cores. For example `v5-litepod-4` specifies a 
+        '-' and the number of TPU cores. For example `v5litepod-4` specifies a 
         v5e TPU with 4 cores. For more information, see `TPU versions <https://cloud.devsite.corp.google.com/tpu/docs/system-architecture-tpu-vm#versions>`_.
     * - RUNTIME_VERSION
       - The TPU VM runtime version to use. For more information see `TPU VM images <https://cloud.google.com/tpu/docs/runtimes>`_.
@@ -94,13 +94,39 @@ Create a TPU v5e with 4 TPU chips:
         Cloud Console under *Service Accounts*. For example: 
         `tpu-service-account@<your_project_ID>.iam.gserviceaccount.com`
 
+Queued resouce requests are not guarenteed to be available immediately. To check
+the status of your queued resource request run the following command:
+
+.. code-block:: bash
+
+    gcloud compute tpus queued-resources describe $QUEUED_RESOURCE_ID --project \
+    $PROJECT_ID \
+    --zone $ZONE
+
+When your queued resource request is in the ACTIVE state you can continue by
+connecting to your TPU VM. For more information about queued resources, see
+`Manage queued resources <https://cloud.google.com/tpu/docs/queued-resources>`_.
+
 Connect to your TPU using SSH:
 
 .. code-block:: bash
 
     gcloud compute tpus tpu-vm ssh TPU_NAME
 
-Create and activate a Conda environment for vLLM:
+Install Miniconda:
+
+.. code-block:: bash
+
+    wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
+    bash Miniconda3-latest-Linux-x86_64.sh
+
+Source ~/.bashrc to complete the Miniconda installation:
+
+.. code-block:: bash
+
+    source ~/.bashrc
+
+Create and activate a conda environment for vLLM:
 
 .. code-block:: bash
 
@@ -123,8 +149,8 @@ Install `torch` and `torch_xla`
 
 .. code-block:: bash
 
-    pip install --pre torch==2.6.0.dev20241028+cpu torchvision==0.20.0.dev20241028+cpu --index-url https://download.pytorch.org/whl/nightly/cpu
-    pip install 'torch_xla[tpu] @ https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch_xla-2.6.0.dev-cp310-cp310-linux_x86_64.whl' -f https://storage.googleapis.com/libtpu-releases/index.html
+    pip3 install --pre torch==2.6.0.dev20241028+cpu torchvision==0.20.0.dev20241028+cpu --index-url https://download.pytorch.org/whl/nightly/cpu
+    pip install "torch_xla[tpu] @ https://storage.googleapis.com/pytorch-xla-releases/wheels/tpuvm/torch_xla-2.6.0.dev20241028-cp310-cp310-linux_x86_64.whl" -f https://storage.googleapis.com/libtpu-releases/index.html
 
 Install JAX and Pallas:
 
@@ -137,9 +163,10 @@ Install other build dependencies:
 
 .. code-block:: bash
 
+    sudo apt install -y libopenblas-base 
     pip install -r requirements-tpu.txt
     VLLM_TARGET_DEVICE="tpu" python setup.py develop
-    sudo apt-get install libopenblas-base libopenmpi-dev libomp-dev 
+    sudo apt-get install libopenmpi-dev libomp-dev 
 
 Provision Cloud TPUs with GKE 
 -----------------------------
@@ -229,3 +256,4 @@ Next, build vLLM from source. This will only take a few seconds:
 
         $ sudo apt-get install libopenblas-base libopenmpi-dev libomp-dev
 
+ 

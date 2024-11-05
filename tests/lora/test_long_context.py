@@ -138,13 +138,7 @@ def test_rotary_emb_replaced(dist_init):
                              enable_lora=True)
     engine_config = engine_args.create_engine_config()
     model_runner = ModelRunner(
-        model_config=engine_config.model_config,
-        parallel_config=engine_config.parallel_config,
-        scheduler_config=engine_config.scheduler_config,
-        device_config=engine_config.device_config,
-        cache_config=engine_config.cache_config,
-        load_config=engine_config.load_config,
-        lora_config=engine_config.lora_config,
+        vllm_config=engine_config,
         is_driver_worker=True,
     )
     model_runner.load_model()
