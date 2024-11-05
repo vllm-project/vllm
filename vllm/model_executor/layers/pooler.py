@@ -28,7 +28,7 @@ class Pooler(nn.Module):
     3. Returns structured results as `PoolerOutput`.
 
     Attributes:
-        pooling_type: The type of pooling to use (LAST, ALL, CLS, MEAN).
+        pooling_type: The type of pooling to use.
         normalize: Whether to normalize the pooled data.
     """
 
