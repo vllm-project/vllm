@@ -91,9 +91,9 @@ class Scheduler:
             assert num_new_tokens > 0
 
             while True:
-                new_block_ids = self.kv_cache_manager.append_slots(
+                new_blocks = self.kv_cache_manager.append_slots(
                     request, num_new_tokens)
-                if new_block_ids is None:
+                if new_blocks is None:
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.
                     preempted_req = self.running.pop()
@@ -110,7 +110,9 @@ class Scheduler:
                     # The request can be scheduled.
                     scheduled_running_reqs.append(request)
 
-                    req_to_new_block_ids[request.request_id] = new_block_ids
+                    req_to_new_block_ids[request.request_id] = [
+                        b.block_id for b in new_blocks
+                    ]
                     num_scheduled_tokens[request.request_id] = num_new_tokens
                     token_budget -= num_new_tokens
                     req_index += 1
@@ -126,12 +128,12 @@ class Scheduler:
 
                 request = self.waiting[0]
                 # Get already-cached tokens.
-                computed_block_ids = self.kv_cache_manager.get_computed_blocks(
+                computed_blocks = self.kv_cache_manager.get_computed_blocks(
                     request)
                 # NOTE(woosuk): Since incomplete blocks are not eligible for
                 # sharing, `num_computed_tokens` is always a multiple of
                 # `block_size`.
-                num_computed_tokens = len(computed_block_ids) * self.block_size
+                num_computed_tokens = len(computed_blocks) * self.block_size
                 # Number of tokens to be scheduled.
                 # We use `request.num_tokens` instead of
                 # `request.num_prompt_tokens` to consider the resumed requests,
@@ -143,12 +145,12 @@ class Scheduler:
                     # the last token.
                     num_computed_tokens -= 1
                     num_new_tokens = 1
-                    computed_block_ids.pop()
+                    computed_blocks.pop()
                 num_new_tokens = min(num_new_tokens, token_budget)
                 assert num_new_tokens > 0
-                new_block_ids = self.kv_cache_manager.allocate_slots(
-                    request, num_new_tokens, computed_block_ids)
-                if new_block_ids is None:
+                new_blocks = self.kv_cache_manager.allocate_slots(
+                    request, num_new_tokens, computed_blocks)
+                if new_blocks is None:
                     # The request cannot be scheduled.
                     break
                 request.num_computed_tokens = num_computed_tokens
@@ -163,8 +165,9 @@ class Scheduler:
                     raise RuntimeError(
                         f"Invalid request status: {request.status}")
 
-                req_to_new_block_ids[request.request_id] = (
-                    computed_block_ids + new_block_ids)
+                req_to_new_block_ids[request.request_id] = [
+                    b.block_id for b in computed_blocks + new_blocks
+                ]
                 num_scheduled_tokens[request.request_id] = num_new_tokens
                 token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
