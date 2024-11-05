@@ -28,6 +28,7 @@ def scaled_mm_torch(a: torch.Tensor,
 
     return out
 
+
 def get_8bit_types():
     types = [torch.int8]
     if current_platform.is_rocm():
@@ -35,6 +36,7 @@ def get_8bit_types():
     elif current_platform.is_cuda():
         types.append(torch.float8_e4m3fn)
     return types
+
 
 @pytest.mark.parametrize("M", [1, 16, 32, 64, 128, 256, 512, 222, 33, 1])
 @pytest.mark.parametrize("N", [2048, 8192, 16384, 256, 1024])
