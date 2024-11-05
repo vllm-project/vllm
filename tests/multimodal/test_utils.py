@@ -1,11 +1,12 @@
 import base64
 import mimetypes
-from tempfile import NamedTemporaryFile
+import os
+from tempfile import NamedTemporaryFile, TemporaryDirectory
 from typing import Dict, Tuple
 
 import numpy as np
 import pytest
-from PIL import Image
+from PIL import Image, ImageChops
 from transformers import AutoConfig, AutoTokenizer
 
 from vllm.multimodal.utils import (async_fetch_image, fetch_image,
@@ -84,6 +85,40 @@ async def test_fetch_image_base64(url_images: Dict[str, Image.Image],
         assert _image_equals(data_image_sync, data_image_async)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
+async def test_fetch_image_local_files(image_url: str):
+    with TemporaryDirectory() as temp_dir:
+        origin_image = fetch_image(image_url)
+        origin_image.save(os.path.join(temp_dir, os.path.basename(image_url)),
+                          quality=100,
+                          icc_profile=origin_image.info.get('icc_profile'))
+
+        image_async = await async_fetch_image(
+            f"file://{temp_dir}/{os.path.basename(image_url)}",
+            allowed_local_media_path=temp_dir)
+
+        image_sync = fetch_image(
+            f"file://{temp_dir}/{os.path.basename(image_url)}",
+            allowed_local_media_path=temp_dir)
+        # Check that the images are equal
+        assert not ImageChops.difference(image_sync, image_async).getbbox()
+
+        with pytest.raises(ValueError):
+            await async_fetch_image(
+                f"file://{temp_dir}/../{os.path.basename(image_url)}",
+                allowed_local_media_path=temp_dir)
+        with pytest.raises(ValueError):
+            await async_fetch_image(
+                f"file://{temp_dir}/../{os.path.basename(image_url)}")
+
+        with pytest.raises(ValueError):
+            fetch_image(f"file://{temp_dir}/../{os.path.basename(image_url)}",
+                        allowed_local_media_path=temp_dir)
+        with pytest.raises(ValueError):
+            fetch_image(f"file://{temp_dir}/../{os.path.basename(image_url)}")
+
+
 @pytest.mark.parametrize("model", ["llava-hf/llava-v1.6-mistral-7b-hf"])
 def test_repeat_and_pad_placeholder_tokens(model):
     config = AutoConfig.from_pretrained(model)
@@ -92,18 +127,50 @@ def test_repeat_and_pad_placeholder_tokens(model):
     tokenizer = AutoTokenizer.from_pretrained(model)
 
     test_cases = [
-        ("<image>", 2, "<image><image>", [32000, 32000]),
-        ("<image><image>", 2, "<image><image><image>", [32000, 32000, 32000]),
-        ("<image><image>", [3, 2], "<image><image><image><image><image>",
-         [32000, 32000, 32000, 32000, 32000]),
-        ("Image:<image>Image:<image>!", [3, 2],
-         "Image:<image><image><image>Image:<image><image>!",
-         [9833, 28747, 32000, 32000, 32000, 9833, 28747, 32000, 32000, 918]),
-        ("<image>", [3, 2], "<image><image><image>", [32000, 32000, 32000]),
-    ]
+        (
+            "<image>",
+            2,
+            "<image><image>",
+            [32000, 32000],
+            [{ "offset": 0, "length": 2 }],
+        ),
+        (
+            "<image><image>",
+            2,
+            "<image><image><image>",
+            [32000, 32000, 32000],
+            [{ "offset": 0, "length": 2 }]),
+        (
+            "<image><image>",
+            [3, 2],
+            "<image><image><image><image><image>",
+            [32000, 32000, 32000, 32000, 32000],
+            [{ "offset": 0, "length": 3 }, { "offset": 3, "length": 2 }],
+        ),
+        (
+            "Image:<image>Image:<image>!",
+            [3, 2],
+            "Image:<image><image><image>Image:<image><image>!",
+            [9833, 28747, 32000, 32000, 32000, 9833, 28747, 32000, 32000, 918],
+            [{ "offset": 2, "length": 3 }, { "offset": 7, "length": 2 }],
+        ),
+        (
+            "<image>",
+            [3, 2],
+            "<image><image><image>",
+            [32000, 32000, 32000],
+            [{ "offset": 0, "length": 3 }],
+        ),
+    ]  # yapf: disable
 
-    for prompt, repeat_count, expected_prompt, expected_token_ids in test_cases:
-        new_prompt, new_token_ids = repeat_and_pad_placeholder_tokens(
+    for (
+            prompt,
+            repeat_count,
+            expected_prompt,
+            expected_token_ids,
+            expected_ranges,
+    ) in test_cases:
+        new_prompt, new_token_ids, ranges = repeat_and_pad_placeholder_tokens(
             tokenizer=tokenizer,
             prompt=prompt,
             prompt_token_ids=tokenizer.encode(prompt,
@@ -113,3 +180,4 @@ def test_repeat_and_pad_placeholder_tokens(model):
         )
         assert new_prompt == expected_prompt
         assert new_token_ids == expected_token_ids
+        assert ranges == expected_ranges
