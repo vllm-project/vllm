@@ -127,6 +127,7 @@ class EngineCore:
         self.scheduler.add_request(req)
 
     def abort_requests(self, request_ids: List[str]):
+        request_ids = filter(self.scheduler.is_request_active, request_ids)
         self.scheduler.finish_requests(request_ids,
                                        RequestStatus.FINISHED_ABORTED)
 
