@@ -116,6 +116,7 @@ Clone the vLLM repository and go to the vLLM directory:
 Uninstall the existing `torch` and `torch_xla` packages:
 
 .. code-block:: bash
+
     pip uninstall torch torch-xla -y
 
 Install build dependencies:
