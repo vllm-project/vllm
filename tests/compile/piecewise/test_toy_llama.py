@@ -92,11 +92,13 @@ class LlamaAttention(nn.Module):
         self.qkv_projection = nn.Linear(
             in_features=config.hidden_size,
             out_features=config.hidden_size * 3,
+            bias=False,
         )
 
         self.output_projection = nn.Linear(
             in_features=config.hidden_size,
             out_features=config.hidden_size,
+            bias=False,
         )
 
         nn.init.eye_(self.qkv_projection.weight.data[:config.hidden_size])
@@ -202,13 +204,13 @@ def tractable_computation(input_ids: torch.Tensor,
                                dtype=input_ids.dtype) * init_value
 
     # first layer
-    residual = hidden_states * 4 + positions * 2 + 3
+    residual = hidden_states * 4 + positions.unsqueeze(1) * 2 + 3
     hidden_states = (residual + 1)**2
 
     # following layers
     for _ in range(config.num_layers - 1):
         hidden_states = hidden_states + residual
-        residual = hidden_states * 4 + positions * 2 + 3
+        residual = hidden_states * 4 + positions.unsqueeze(1) * 2 + 3
         hidden_states = (residual + 1)**2
 
     return hidden_states
