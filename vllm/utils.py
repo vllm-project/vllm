@@ -1153,7 +1153,7 @@ class SortedHelpFormatter(argparse.HelpFormatter):
 
     def add_arguments(self, actions):
         actions = sorted(actions, key=lambda x: x.option_strings)
-        super(SortedHelpFormatter, self).add_arguments(actions)
+        super().add_arguments(actions)
 
 
 class FlexibleArgumentParser(argparse.ArgumentParser):
