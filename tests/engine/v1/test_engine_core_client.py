@@ -105,25 +105,34 @@ def test_engine_core_client(monkeypatch, multiprocessing_mode: bool):
 
         # Note: this code pathway will only work for multiprocessing
         # since we have to call get_output() explicitly
-        if multiprocessing_mode:
 
-            # Add requests to the engine.
-            for idx, request in enumerate(requests):
-                client.add_request(request)
-                time.sleep(0.01)
-                if idx % 2 == 0:
-                    client.abort_requests([request.request_id])
+        # Add requests to the engine.
+        for idx, request in enumerate(requests):
+            client.add_request(request)
+            time.sleep(0.01)
+            if idx % 2 == 0:
+                client.abort_requests([request.request_id])
 
-            outputs = {req_id: [] for req_id in request_ids}
-            loop_until_done(client, outputs)
+        outputs = {req_id: [] for req_id in request_ids}
+        loop_until_done(client, outputs)
 
-            for idx, req_id in enumerate(request_ids):
-                if idx % 2 == 0:
-                    assert len(outputs[req_id]) < MAX_TOKENS, (
-                        f"{len(outputs[req_id])=}, {MAX_TOKENS=}")
-                else:
-                    assert len(outputs[req_id]) == MAX_TOKENS, (
-                        f"{len(outputs[req_id])=}, {MAX_TOKENS=}")
+        for idx, req_id in enumerate(request_ids):
+            if idx % 2 == 0:
+                assert len(outputs[req_id]) < MAX_TOKENS, (
+                    f"{len(outputs[req_id])=}, {MAX_TOKENS=}")
+            else:
+                assert len(outputs[req_id]) == MAX_TOKENS, (
+                    f"{len(outputs[req_id])=}, {MAX_TOKENS=}")
+        """Abort after request is finished."""
+
+        # Note: this code pathway will only work for multiprocessing
+        # since we have to call get_output() explicitly
+
+        request = requests[0]
+        client.add_request(request)
+        time.sleep(10.)
+
+        client.abort_requests([request.request_id])
 
         # Shutdown the client.
         client.shutdown()

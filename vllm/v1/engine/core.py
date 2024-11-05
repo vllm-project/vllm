@@ -127,8 +127,14 @@ class EngineCore:
         self.scheduler.add_request(req)
 
     def abort_requests(self, request_ids: List[str]):
-        request_ids = filter(self.scheduler.is_request_active, request_ids)
-        self.scheduler.finish_requests(request_ids,
+        filtered_request_id = []
+        for request_id in request_ids:
+            if self.scheduler.is_request_active(request_id):
+                filtered_request_id.append(request_id)
+            else:
+                print(f"MISSING: {request_id}")
+
+        self.scheduler.finish_requests(filtered_request_id,
                                        RequestStatus.FINISHED_ABORTED)
 
     def step(self) -> List[EngineCoreOutput]:
@@ -198,11 +204,10 @@ class EngineCoreProc(EngineCore):
             yield socket
 
         except KeyboardInterrupt:
-            logger.debug("EngineCore io thread interrupted.")
+            logger.debug("EngineCore had Keyboard Interrupt.")
 
         finally:
             ctx.destroy(linger=0)
-            logger.debug("EngineCore io thread shutting down.")
 
     @staticmethod
     def wait_for_startup(

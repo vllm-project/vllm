@@ -94,7 +94,8 @@ class KVCacheManager:
         return new_block_ids
 
     def free(self, request: Request) -> None:
-        block_ids = self.req_to_block_ids.pop(request.request_id)
+        # Default to [] in case a request is freed (aborted) before alloc.
+        block_ids = self.req_to_block_ids.pop(request.request_id, [])
         self.ref_cnts[block_ids] -= 1
         for block_id in block_ids:
             ref_cnt = self.ref_cnts[block_id]
