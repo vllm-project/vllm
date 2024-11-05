@@ -15,7 +15,7 @@ from vllm.lora.request import LoRARequest
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
                            SequenceGroupMetadata, SequenceGroupMetadataDelta,
-                           SequenceStatus)
+                           SequenceStatus, SequenceStage)
 from vllm.utils import Device, PyObjectCache
 
 logger = init_logger(__name__)
@@ -1105,6 +1105,8 @@ class Scheduler:
         )
         curr_loras: Set[int] = set()
 
+        # print("Doing chunked prefill scheduling")
+
         prefills = SchedulerPrefillOutputs.create_empty()
         swapped_in = SchedulerSwappedInOutputs.create_empty()
 
@@ -1605,7 +1607,27 @@ class Scheduler:
         # If number of seq > 1, it means it is doing beam search
         # in a decode phase. Do not chunk.
         if enable_chunking and len(seqs) == 1:
+            # Only schedule up to a maximum of min_chunk_size
+            # remaining_token_budget = min(budget.remaining_token_budget(), self.scheduler_config.min_chunk_size)
+
+            # TODO: Refactor this to a method
+            prefilling = 0
+            for i in range(len(self.running)):
+                for seq in self.running[i].seqs:
+                    if seq.data.stage == SequenceStage.PREFILL:
+                        prefilling += 1
+            waiting_and_prefilling = len(self.waiting) + prefilling
+
             remaining_token_budget = budget.remaining_token_budget()
+            if waiting_and_prefilling > 1:
+
+                chunk_size = int(remaining_token_budget / waiting_and_prefilling)
+                chunk_size = max(chunk_size, self.scheduler_config.min_chunk_size)
+
+                remaining_token_budget = min(budget.remaining_token_budget(), chunk_size)
+                print("Modified that chunk size: ", remaining_token_budget)
+                # TODO: deal with min chunk size
+
             if self.scheduler_config.is_multi_step:
                 # The current multi-step + chunked prefill capability does
                 # not actually support chunking prompts.

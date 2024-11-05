@@ -1070,7 +1070,8 @@ class SchedulerConfig:
                  num_scheduler_steps: int = 1,
                  multi_step_stream_outputs: bool = False,
                  send_delta_data: bool = False,
-                 policy: str = "fcfs") -> None:
+                 policy: str = "fcfs",
+                 min_chunk_size: Optional[int] = None) -> None:
         if max_num_batched_tokens is None:
             if enable_chunked_prefill:
                 if num_scheduler_steps > 1:
@@ -1102,6 +1103,13 @@ class SchedulerConfig:
                 )
 
         self.max_num_batched_tokens = max_num_batched_tokens
+
+        if min_chunk_size is None:
+            min_chunk_size = self.max_num_batched_tokens
+        else:
+            assert min_chunk_size < self.max_num_batched_tokens, f"Max chunk size {min_chunk_size} must be smaller than the maximum number of batched tokens {self.max_num_batched_tokens}"
+        
+        self.min_chunk_size = min_chunk_size
 
         if enable_chunked_prefill:
             logger.info(
