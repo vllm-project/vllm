@@ -31,7 +31,8 @@ def make_request(params: SamplingParams) -> EngineCoreRequest:
 
 
 @pytest.mark.parametrize("multiprocessing_mode", [True, False])
-def test_engine_core(monkeypatch, multiprocessing_mode: bool):
+def test_engine_core_client(monkeypatch, multiprocessing_mode: bool):
+
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
 
@@ -46,12 +47,10 @@ def test_engine_core(monkeypatch, multiprocessing_mode: bool):
             asyncio_mode=False,
         )
 
-        NUM_REQS = 10
         MAX_TOKENS = 10
-
         params = SamplingParams(max_tokens=MAX_TOKENS)
 
-        requests = [make_request(params) for _ in range(NUM_REQS)]
+        requests = [make_request(params) for _ in range(10)]
         request_ids = [req.request_id for req in requests]
         outputs: Dict[str, List] = {req_id: [] for req_id in request_ids}
 
