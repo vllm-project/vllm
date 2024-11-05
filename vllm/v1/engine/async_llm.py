@@ -108,6 +108,13 @@ class AsyncLLM:
             stat_loggers=stat_loggers,
         )
 
+    def shutdown(self):
+        """Shutdown the EngineCore."""
+        self.engine_core.shutdown()
+
+        if hasattr(self, "output_handler"):
+            self.output_handler.cancel()
+
     @classmethod
     def _get_executor_cls(cls, engine_config: EngineConfig):
         return GPUExecutor
