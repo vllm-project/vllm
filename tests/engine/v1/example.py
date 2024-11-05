@@ -1,9 +1,9 @@
 from multiprocessing import freeze_support
 
 from vllm.engine.arg_utils import EngineArgs
-from vllm.v1.engine.core_client import EngineCoreClient
-from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.usage.usage_lib import UsageContext
+from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.v1.engine.core_client import EngineCoreClient
 
 MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
 
