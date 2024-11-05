@@ -121,8 +121,9 @@ def get_gemm_rs_ag_gemm(use_flux: bool,
                         gemm_2_weights: torch.Size):
 
     if use_flux:
+        print(f"DG = {get_tp_group().device_group}")
         gemm_rs_op = flux.GemmRS(
-            get_tp_group().device_group,
+            get_tp_group().device_group,  # XXXXXXXXXXXXXXX 
             1,  # One node
             8192,  # Max M. TODO: Pass in correctly.
             gemm_1_weights[0],  # N
@@ -138,7 +139,7 @@ def get_gemm_rs_ag_gemm(use_flux: bool,
         )
 
         ag_gemm_op = flux.AGKernel(
-            get_tp_group().device_group,
+            get_tp_group().device_group,  # XXXXXXXXXXXXXXX 
             1,  # One node
             8192,  # Max M. TODO: Pass in correctly.
             gemm_2_weights[0],  # N
@@ -166,7 +167,7 @@ def get_gemm_rs_ag_gemm(use_flux: bool,
         name = (f"gemm_rs_ag_gemm_{gemm_1_str}_{gemm_1_weights[0]}_"
                 f"{gemm_2_str}_{gemm_2_weights[0]}_{gemm_2_weights[1]}")
     else:
-        group_name = get_world_name()
+        group_name = get_world_name()  # XXXXXXXXXXXXXXXX make parameter
 
         gemm_rs = lambda act, wt: \
             torch.ops.symm_mem.fused_matmul_reduce_scatter.default(
