@@ -28,7 +28,8 @@ from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
-from vllm.model_executor.layers.linear import ReplicatedLinear
+from vllm.model_executor.layers.linear import (ReplicatedLinear,
+                                               RowParallelLinear)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.model_loader.tensorizer import (
@@ -39,7 +40,7 @@ from vllm.model_executor.model_loader.utils import (get_model_architecture,
 from vllm.model_executor.model_loader.weight_utils import (
     download_safetensors_index_file_from_hf, download_weights_from_hf,
     filter_duplicate_safetensors_files, filter_files_not_needed_for_inference,
-    get_gguf_extra_tensor_names, get_quant_config, gguf_quant_weights_iterator,
+    get_gguf_extra_tensor_names, gguf_quant_weights_iterator,
     initialize_dummy_weights, np_cache_weights_iterator, pt_weights_iterator,
     safetensors_weights_iterator)
 from vllm.model_executor.models import (has_inner_state, supports_lora,
@@ -91,32 +92,6 @@ def device_loading_context(module: torch.nn.Module,
 
 
 logger = init_logger(__name__)
-
-
-def _get_quantization_config(
-        model_config: ModelConfig,
-        load_config: LoadConfig) -> Optional[QuantizationConfig]:
-    """Get the quantization config."""
-    if model_config.quantization is not None:
-        quant_config = get_quant_config(model_config, load_config)
-        capability_tuple = current_platform.get_device_capability()
-
-        if capability_tuple is not None:
-            capability = capability_tuple.to_int()
-            if capability < quant_config.get_min_capability():
-                raise ValueError(
-                    f"The quantization method {model_config.quantization} "
-                    "is not supported for the current GPU. "
-                    f"Minimum capability: {quant_config.get_min_capability()}. "
-                    f"Current capability: {capability}.")
-        supported_dtypes = quant_config.get_supported_act_dtypes()
-        if model_config.dtype not in supported_dtypes:
-            raise ValueError(
-                f"{model_config.dtype} is not supported for quantization "
-                f"method {model_config.quantization}. Supported dtypes: "
-                f"{supported_dtypes}")
-        return quant_config
-    return None
 
 
 def _get_model_initialization_kwargs(
@@ -185,7 +160,6 @@ def _initialize_model(vllm_config: VllmConfig) -> nn.Module:
     lora_config = vllm_config.lora_config
     scheduler_config = vllm_config.scheduler_config
     cache_config = vllm_config.cache_config
-    load_config = vllm_config.load_config
     model_class, _ = get_model_architecture(model_config)
 
     return build_model(
@@ -193,7 +167,7 @@ def _initialize_model(vllm_config: VllmConfig) -> nn.Module:
         vllm_config,
         model_config.hf_config,
         cache_config=cache_config,
-        quant_config=_get_quantization_config(model_config, load_config),
+        quant_config=vllm_config.quant_config,
         lora_config=lora_config,
         multimodal_config=model_config.multimodal_config,
         scheduler_config=scheduler_config,
@@ -518,8 +492,7 @@ class TensorizerLoader(BaseModelLoader):
         with set_default_torch_dtype(model_config.dtype):
             with torch.device(device_config.device):
                 model_class = get_model_architecture(model_config)[0]
-                quant_config = _get_quantization_config(
-                    model_config, self.load_config)
+                quant_config = vllm_config.quant_config
                 extra_kwargs = _get_model_initialization_kwargs(
                     model_class, lora_config, model_config.multimodal_config)
                 extra_kwargs["quant_config"] = quant_config
@@ -755,6 +728,10 @@ class BitsAndBytesModelLoader(BaseModelLoader):
     def __init__(self, load_config: LoadConfig):
         super().__init__(load_config)
 
+        # Save the module names without sharding.
+        self.unsharded_weights_modules: List[str] = []
+        # Save the module names that are sharded by column.
+        self.column_sharded_weights_modules: List[str] = []
         # we don't need to quantize the whole model, only the target modules
         # that are specified in the adapter config file. If the adapter config
         # file is not provided, we will quantize the default modules.
@@ -772,8 +749,6 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         with open(config_file_path, "r") as f:
             config = json.load(f)
             self.target_modules = config["target_modules"]
-        # Save the module names without sharding.
-        self.unsharded_weights_modules: List[str] = []
 
     def _get_config_file(self, qlora_adapter: str) -> str:
         is_local = os.path.isdir(qlora_adapter)
@@ -999,9 +974,9 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                         for module in self.unsharded_weights_modules):
                     weight_sub_tensor = weight_tensor
                 # Shard by column
-                elif any(module in weight_name
-                         for module in self.column_parallel_weights_modules):
-
+                elif any(
+                        weight_name.startswith(module)
+                        for module in self.column_sharded_weights_modules):
                     total_size = weight_tensor.size(-1)
                     start_index = total_size // tp_size * tp_rank
                     end_index = total_size // tp_size * (tp_rank + 1)
@@ -1056,20 +1031,17 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             else:
                 self.target_modules = self.default_target_modules
 
-        if hasattr(model, 'column_parallel_weights_modules'):
-            self.column_parallel_weights_modules = \
-                model.column_parallel_weights_modules
-        else:
-            self.column_parallel_weights_modules = []
-        # Some modules like `ReplicatedLinear` should not have their weights
-        # sharded. The reason for implementing it this way is to avoid new
-        # static variable in the model implementation.
-        # TODO: Can we reduce the static variables needed for BNB based on
-        #  model information?
-        self.unsharded_weights_modules = [
-            name for name, module in model.named_modules()
-            if isinstance(module, (ReplicatedLinear, ))
-        ]
+        for name, module in model.named_modules():
+            # Some modules like `ReplicatedLinear` should not have their weights
+            # sharded. The reason for implementing it this way is to avoid new
+            # static variable in the model implementation.
+            if isinstance(module, (ReplicatedLinear, )):
+                self.unsharded_weights_modules.append(name)
+            # In TP, these weights are partitioned along the column
+            # dimension (dim=-1)
+            elif isinstance(module, (RowParallelLinear, )):
+                self.column_sharded_weights_modules.append(name)
+
         self.model_type = type(model).__name__
 
         logger.info("Loading weights with BitsAndBytes quantization. "

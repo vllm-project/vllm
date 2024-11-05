@@ -854,10 +854,6 @@ class MiniCPMV2_5(MiniCPMVBaseModel, SupportsLoRA):
         # resampler
         ".kv_proj.",
     ]
-    # in TP, these weights are partitioned along the column dimension (dim=-1)
-    column_parallel_weights_modules = [
-        ".down_proj.", ".o_proj.", ".self_attn.out_proj.", ".fc2."
-    ]
     bitsandbytes_stacked_params_mapping = {
         # shard_name, weight_name, index
         "q_proj": ("qkv_proj", 0),
@@ -1007,10 +1003,6 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
         ".self_attn.out_proj.",
         # resampler
         ".kv_proj.",
-    ]
-    # in TP, these weights are partitioned along the column dimension (dim=-1)
-    column_parallel_weights_modules = [
-        ".down_proj.", ".o_proj.", ".self_attn.out_proj.", ".fc2."
     ]
     bitsandbytes_stacked_params_mapping = {
         # shard_name, weight_name, index
