@@ -212,8 +212,9 @@ class FlashAttentionMetadata(AttentionMetadata):
                     self.seq_lens[:self.num_prefills])
         seq_lens_tensor = (None if self.seq_lens_tensor is None else
                            self.seq_lens_tensor[:self.num_prefills])
-        num_orig_input_tokens_tensor = (None if self.num_orig_input_tokens_tensor is None else
-                           self.num_orig_input_tokens_tensor[:self.num_prefills])
+        num_orig_input_tokens_tensor = (
+            None if self.num_orig_input_tokens_tensor is None else
+            self.num_orig_input_tokens_tensor[:self.num_prefills])
         seq_start_loc = (None if self.seq_start_loc is None else
                          self.seq_start_loc[:self.num_prefills + 1])
         context_lens_tensor = (None if self.context_lens_tensor is None else
@@ -264,8 +265,9 @@ class FlashAttentionMetadata(AttentionMetadata):
                         self.slot_mapping[self.num_prefill_tokens:])
         seq_lens_tensor = (None if self.seq_lens_tensor is None else
                            self.seq_lens_tensor[self.num_prefills:])
-        num_orig_input_tokens_tensor = (None if self.num_orig_input_tokens_tensor is None else
-                           self.num_orig_input_tokens_tensor[self.num_prefills:])
+        num_orig_input_tokens_tensor = (
+            None if self.num_orig_input_tokens_tensor is None else
+            self.num_orig_input_tokens_tensor[self.num_prefills:])
         block_tables = (None if self.block_tables is None else
                         self.block_tables[self.num_prefills:])
 
