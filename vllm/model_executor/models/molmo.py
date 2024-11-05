@@ -21,8 +21,8 @@ from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               split_tensor_along_last_dim,
                               tensor_model_parallel_all_gather)
-from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, InputContext,
-                         token_inputs)
+from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
+                         InputContext, token_inputs)
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.activation import QuickGELU, SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -913,7 +913,7 @@ def dummy_data_for_molmo(ctx: InputContext, seq_len: int,
     if "image_masks" in out:
         dummy_imgdata["image_masks"] = out["image_masks"]
     dummy_imgdata["seq_len"] = torch.tensor(seq_len, dtype=torch.long)
-    return dummy_seqdata, {"image": dummy_imgdata}
+    return DummyData(dummy_seqdata, {"image": dummy_imgdata})
 
 
 def pad_images(
