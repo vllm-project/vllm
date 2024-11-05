@@ -58,9 +58,6 @@ class VideoURL(TypedDict, total=False):
     url: Required[str]
     """
     Either a URL of the video or a data URL with base64 encoded video data.
-
-    Learn more in the
-    [Vision guide](https://cookbook.openai.com/examples/gpt_with_vision_for_video_understanding).
     """
 
 
