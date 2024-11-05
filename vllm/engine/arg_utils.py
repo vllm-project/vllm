@@ -471,10 +471,14 @@ class EngineArgs:
                             default=EngineArgs.max_num_batched_tokens,
                             help='Maximum number of batched tokens per '
                             'iteration.')
-        parser.add_argument('--min-chunk-size',
-                            type=int,
-                            default=EngineArgs.min_chunk_size,
-                            help='For chunked prefill, the minimum number of tokens from a single prompt to process in a single iteration. Must be less than or equal to max-num-batched-tokens.')
+        parser.add_argument(
+            '--min-chunk-size',
+            type=int,
+            default=EngineArgs.min_chunk_size,
+            help=
+            'For chunked prefill, the minimum number of tokens from a single '
+            'prompt to process in a single iteration. Must be less than or '
+            'equal to --max-num-batched-tokens.')
         parser.add_argument('--max-num-seqs',
                             type=int,
                             default=EngineArgs.max_num_seqs,
@@ -1138,8 +1142,7 @@ class EngineArgs:
             send_delta_data=(envs.VLLM_USE_RAY_SPMD_WORKER
                              and parallel_config.use_ray),
             policy=self.scheduling_policy,
-            min_chunk_size=self.min_chunk_size
-        )
+            min_chunk_size=self.min_chunk_size)
         lora_config = LoRAConfig(
             max_lora_rank=self.max_lora_rank,
             max_loras=self.max_loras,

@@ -1107,7 +1107,10 @@ class SchedulerConfig:
         if min_chunk_size is None:
             min_chunk_size = self.max_num_batched_tokens
         else:
-            assert min_chunk_size <= self.max_num_batched_tokens, f"Max chunk size {min_chunk_size} must be less than or equal to the maximum number of batched tokens {self.max_num_batched_tokens}"
+            assert min_chunk_size <= self.max_num_batched_tokens, \
+            f"Max chunk size {min_chunk_size} must be less than or equal to "
+            "the maximum number of batched tokens "
+            f"{self.max_num_batched_tokens}"
 
         self.min_chunk_size = min_chunk_size
 

@@ -15,7 +15,7 @@ from vllm.lora.request import LoRARequest
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
                            SequenceGroupMetadata, SequenceGroupMetadataDelta,
-                           SequenceStatus, SequenceStage)
+                           SequenceStage, SequenceStatus)
 from vllm.utils import Device, PyObjectCache
 
 logger = init_logger(__name__)
@@ -1585,24 +1585,38 @@ class Scheduler:
 
         return self.scheduler_config.num_lookahead_slots
 
-    def _modify_remaining_token_budget(self, budget: SchedulingBudget) -> int:
-        prefilling = 0
+    def _get_budget_for_chunk(self, budget: SchedulingBudget) -> int:
+        """When doing chunked prefill, calculate the token budget for a single
+        chunk. This dynamically scales the chunk size down as the number of
+        sequences that require prefilling increases. This ensures that a single
+        sequence with a very large prompt to prefill doesn't take the entire
+        remaining token budget, allowing other sequences to prefill and decode
+        concurrently."""
+
+        # First get the number of sequences that require prefill
+        prefilling_seqs = 0
         for i in range(len(self.running)):
             for seq in self.running[i].seqs:
                 if seq.data.stage == SequenceStage.PREFILL:
-                    prefilling += 1
-        waiting_and_prefilling = len(self.waiting) + prefilling
+                    prefilling_seqs += 1
+        # Queued requests will also need to prefill
+        prefilling_seqs += len(self.waiting)
 
+        # Get the current remaining token budget
         remaining_token_budget = budget.remaining_token_budget()
-
-        if waiting_and_prefilling > 1:
-            chunk_size = int(remaining_token_budget / waiting_and_prefilling)
+        if prefilling_seqs > 1:
+            # If there are multiple sequences that need to share this budget,
+            # calculate a chunk size that shares it evenly
+            chunk_size = int(remaining_token_budget / prefilling_seqs)
+            # Ensure the chunk size is at least the minimum configured by the
+            # user, to limit the number of requests doing prefill
             chunk_size = max(chunk_size, self.scheduler_config.min_chunk_size)
-            remaining_token_budget = min(budget.remaining_token_budget(),
-                                         chunk_size)
+            # And cap that at our actual budget so we don't spend tokens we
+            # don't have.
+            chunk_size = min(remaining_token_budget, chunk_size)
 
-        logger.debug("Remaining token budget: %d", remaining_token_budget)
-        return remaining_token_budget
+        logger.debug("Prefill chunk size: %d", chunk_size)
+        return chunk_size
 
     def _get_num_new_tokens(self, seq_group: SequenceGroup,
                             status: SequenceStatus, enable_chunking: bool,
@@ -1626,28 +1640,8 @@ class Scheduler:
         # If number of seq > 1, it means it is doing beam search
         # in a decode phase. Do not chunk.
         if enable_chunking and len(seqs) == 1:
-            remaining_token_budget = self._modify_remaining_token_budget(
-                budget=budget)
-            # Only schedule up to a maximum of min_chunk_size
-            # remaining_token_budget = min(budget.remaining_token_budget(), self.scheduler_config.min_chunk_size)
-
-            # TODO: Refactor this to a method
-            # prefilling = 0
-            # for i in range(len(self.running)):
-            #     for seq in self.running[i].seqs:
-            #         if seq.data.stage == SequenceStage.PREFILL:
-            #             prefilling += 1
-            # waiting_and_prefilling = len(self.waiting) + prefilling
-
-            # remaining_token_budget = budget.remaining_token_budget()
-            # if waiting_and_prefilling > 1:
-
-            #     chunk_size = int(remaining_token_budget / waiting_and_prefilling)
-            #     chunk_size = max(chunk_size, self.scheduler_config.min_chunk_size)
-
-            #     remaining_token_budget = min(budget.remaining_token_budget(), chunk_size)
-            #     print("Modified that chunk size: ", remaining_token_budget)
-            # TODO: deal with min chunk size
+            # Get the budget for this chunk
+            remaining_token_budget = self._get_budget_for_chunk(budget=budget)
 
             if self.scheduler_config.is_multi_step:
                 # The current multi-step + chunked prefill capability does
