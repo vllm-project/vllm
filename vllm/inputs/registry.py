@@ -5,10 +5,12 @@ from typing import (TYPE_CHECKING, Any, Callable, Dict, Mapping, NamedTuple,
                     Optional, Protocol, Type, cast)
 
 from torch import nn
-from transformers import PretrainedConfig
+from transformers import PretrainedConfig, ProcessorMixin
 from typing_extensions import TypeVar
 
 from vllm.logger import init_logger
+from vllm.transformers_utils.processor import cached_get_processor
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import (get_allowed_kwarg_only_overrides, print_warning_once,
                         resolve_mm_processor_kwargs)
 
@@ -59,6 +61,19 @@ class InputContext:
         """
 
         return self.model_config.hf_image_processor_config
+
+
+@dataclass(frozen=True)
+class InputProcessingContext(InputContext):
+    tokenizer: AnyTokenizer
+    """The tokenizer used to tokenize the inputs."""
+
+    def get_hf_processor(self) -> ProcessorMixin:
+        return cached_get_processor(
+            self.model_config.tokenizer,
+            tokenizer=self.tokenizer,  # Override the tokenizer with ours
+            trust_remote_code=self.model_config.trust_remote_code,
+        )
 
 
 N = TypeVar("N", bound=Type[nn.Module])

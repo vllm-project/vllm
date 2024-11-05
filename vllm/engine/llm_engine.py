@@ -39,6 +39,7 @@ from vllm.lora.request import LoRARequest
 from vllm.model_executor.guided_decoding import (
     get_local_guided_decoding_logits_processor)
 from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.outputs import (EmbeddingRequestOutput, RequestOutput,
                           RequestOutputFactory)
 from vllm.pooling_params import PoolingParams
@@ -226,6 +227,7 @@ class LLMEngine:
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
         input_registry: InputRegistry = INPUT_REGISTRY,
+        mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         use_cached_outputs: bool = False,
     ) -> None:
 
@@ -338,7 +340,8 @@ class LLMEngine:
             model_config)
 
         self.input_preprocessor = InputPreprocessor(model_config,
-                                                    self.tokenizer)
+                                                    self.tokenizer,
+                                                    mm_registry)
 
         self.input_registry = input_registry
         self.input_processor = input_registry.create_input_processor(

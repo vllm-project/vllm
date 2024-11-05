@@ -31,7 +31,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.glm4_vision_encoder import EVA2CLIPModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalInputs
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.multimodal.base import MultiModalData
 from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
@@ -74,7 +74,7 @@ def mm_input_mapper_for_glmv(
         raise
     pixel_values = raw_batch_data['images']
 
-    return MultiModalInputs({'pixel_values': pixel_values})
+    return MultiModalKwargs({'pixel_values': pixel_values})
 
 
 def merge_glm_vision_embeddings(

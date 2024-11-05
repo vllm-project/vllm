@@ -38,7 +38,7 @@ from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 from vllm.model_executor.models import supports_lora, supports_multimodal
 from vllm.model_executor.models.utils import set_cpu_offload_max_bytes
 from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
-                             MultiModalInputs, MultiModalPlaceholderMap,
+                             MultiModalKwargs, MultiModalPlaceholderMap,
                              MultiModalRegistry)
 from vllm.platforms import current_platform
 from vllm.prompt_adapter.layers import PromptAdapterMapping
@@ -240,7 +240,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             prompt_adapter_request: Optional[PromptAdapterRequest] = None,
 
             # Multi-modal inputs.
-            multi_modal_inputs: Optional[MultiModalInputs] = None,
+            multi_modal_kwargs: Optional[MultiModalKwargs] = None,
             multi_modal_placeholder_maps: Optional[Dict[
                 str, MultiModalPlaceholderMap]] = None,
 
@@ -361,7 +361,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                     prompt_adapter_prompt_mapping or [])
 
             self.prompt_adapter_request = prompt_adapter_request
-            self.multi_modal_inputs = multi_modal_inputs
+            self.multi_modal_kwargs = multi_modal_kwargs
             self.multi_modal_placeholder_maps = multi_modal_placeholder_maps
             self.prefix_cache_hit = prefix_cache_hit
 
@@ -646,10 +646,13 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         if not mm_data:
             return
 
-        mm_kwargs = self.multi_modal_input_mapper(
-            mm_data,
-            mm_processor_kwargs=seq_group_metadata.mm_processor_kwargs)
-        inter_data.multi_modal_inputs = mm_kwargs
+        if seq_group_metadata.needs_mm_mapper:
+            mm_kwargs = self.multi_modal_input_mapper(
+                mm_data, seq_group_metadata.mm_processor_kwargs)
+        else:
+            mm_kwargs = mm_data
+
+        inter_data.multi_modal_kwargs = mm_kwargs
         inter_data.multi_modal_placeholder_maps = placeholder_maps
 
         # special processing for mrope position deltas.
@@ -923,11 +926,11 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             )
 
         # Multi-modal data.
-        multi_modal_inputs_list = [
-            data.multi_modal_inputs for data in self.inter_data_list
-            if data.multi_modal_inputs is not None
+        multi_modal_kwargs_list = [
+            data.multi_modal_kwargs for data in self.inter_data_list
+            if data.multi_modal_kwargs is not None
         ]
-        multi_modal_kwargs = MultiModalInputs.batch(multi_modal_inputs_list)
+        multi_modal_kwargs = MultiModalKwargs.batch(multi_modal_kwargs_list)
 
         return self.model_input_cls(
             input_tokens=input_tokens_tensor,
@@ -1640,7 +1643,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                 kv_caches=kv_caches,
                 attn_metadata=model_input.attn_metadata,
                 intermediate_tensors=intermediate_tensors,
-                **MultiModalInputs.as_kwargs(multi_modal_kwargs,
+                **MultiModalKwargs.as_kwargs(multi_modal_kwargs,
                                              device=self.device),
                 **seqlen_agnostic_kwargs)
 

@@ -8,10 +8,11 @@ from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics_types import StatLoggerBase
 from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs,
-                         EncoderDecoderLLMInputs, InputRegistry, PromptType)
+                         EncoderDecoderInputs, InputRegistry, PromptType)
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
@@ -39,6 +40,7 @@ class LLMEngine:
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
         input_registry: InputRegistry = INPUT_REGISTRY,
+        mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         use_cached_outputs: bool = False,
     ) -> None:
 
@@ -128,8 +130,11 @@ class LLMEngine:
 
         self.generation_config_fields = _load_generation_config_dict(
             model_config)
-        self.input_preprocessor = InputPreprocessor(model_config,
-                                                    self.tokenizer)
+        self.input_preprocessor = InputPreprocessor(
+            model_config,
+            self.tokenizer,
+            mm_registry,
+        )
         self.input_registry = input_registry
         self.input_processor = input_registry.create_input_processor(
             model_config)
@@ -213,7 +218,7 @@ class LLMEngine:
     def _add_processed_request(
         self,
         request_id: str,
-        processed_inputs: Union[DecoderOnlyInputs, EncoderDecoderLLMInputs],
+        processed_inputs: Union[DecoderOnlyInputs, EncoderDecoderInputs],
         params: Union[SamplingParams, PoolingParams],
         arrival_time: float,
         lora_request: Optional[LoRARequest],
@@ -436,7 +441,7 @@ class LLMEngine:
         self.model_executor.check_health()
 
     def _validate_model_inputs(self, inputs: Union[DecoderOnlyInputs,
-                                                   EncoderDecoderLLMInputs]):
+                                                   EncoderDecoderInputs]):
         prompt_ids = inputs.get("prompt_token_ids")
         if prompt_ids is None or len(prompt_ids) == 0:
             raise ValueError("Prompt cannot be empty")

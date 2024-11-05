@@ -15,7 +15,7 @@ from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
-                             MultiModalInputs, MultiModalPlaceholderMap)
+                             MultiModalKwargs, MultiModalPlaceholderMap)
 from vllm.sequence import (IntermediateTensors, SequenceData,
                            SequenceGroupMetadata)
 from vllm.transformers_utils.config import uses_mrope
@@ -159,7 +159,11 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
         if not mm_data:
             return
 
-        mm_kwargs = self.multi_modal_input_mapper(mm_data, mm_processor_kwargs)
+        if "needs_mm_mapper" in mm_processor_kwargs:
+            mm_kwargs = self.multi_modal_input_mapper(mm_data,
+                                                      mm_processor_kwargs)
+        else:
+            mm_kwargs = mm_data
 
         # special processing for mrope position deltas.
         mrope_positions = None
@@ -201,7 +205,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
 
         slot_mapping: List[int] = []
         seq_lens: List[int] = []
-        multi_modal_inputs_list: List[MultiModalInputs] = []
+        multi_modal_kwargs_list: List[MultiModalKwargs] = []
         multi_modal_placeholder_maps: Dict[
             str,
             MultiModalPlaceholderMap] = defaultdict(MultiModalPlaceholderMap)
@@ -226,7 +230,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
                     ._compute_multi_modal_input(
                         seq_group_metadata, seq_data, computed_len,
                     seq_group_metadata.mm_processor_kwargs)
-                multi_modal_inputs_list.append(mm_kwargs)
+                multi_modal_kwargs_list.append(mm_kwargs)
                 for modality, placeholder_map in placeholder_maps.items():
                     multi_modal_placeholder_maps[modality].extend(
                         placeholder_map)
@@ -298,7 +302,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
             multi_modal_placeholder_index_maps=placeholder_index_maps,
         )
 
-        multi_modal_kwargs = MultiModalInputs.batch(multi_modal_inputs_list)
+        multi_modal_kwargs = MultiModalKwargs.batch(multi_modal_kwargs_list)
 
         return (input_tokens, input_positions, attn_metadata, seq_lens,
                 multi_modal_kwargs)
@@ -527,7 +531,7 @@ class CPUModelRunner(ModelRunnerBase[ModelInputForCPU]):
             kv_caches,
             "attn_metadata":
             model_input.attn_metadata,
-            **MultiModalInputs.as_kwargs(model_input.multi_modal_kwargs or {},
+            **MultiModalKwargs.as_kwargs(model_input.multi_modal_kwargs or {},
                                          device=self.device),
             "intermediate_tensors":
             intermediate_tensors,

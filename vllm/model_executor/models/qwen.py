@@ -44,7 +44,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.base import MultiModalInputs
+from vllm.multimodal.base import MultiModalKwargs
 from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.sequence import IntermediateTensors, SequenceData
 from vllm.utils import is_list_of
@@ -723,8 +723,8 @@ def input_processor_for_qwen(ctx: InputContext,
                         multi_modal_data=multi_modal_data)
 
 
-def input_mapper_for_qwen(ctx: InputContext, data: object) -> MultiModalInputs:
-    """Maps the input data to its MultiModalInputs (if any).
+def input_mapper_for_qwen(ctx: InputContext, data: object) -> MultiModalKwargs:
+    """Maps the input data to its MultiModalKwargs (if any).
 
     Args:
         ctx: Context of the loaded model.
@@ -732,7 +732,7 @@ def input_mapper_for_qwen(ctx: InputContext, data: object) -> MultiModalInputs:
             to pixel_values in .forward() for a visual QWenLMHeadModel model.
 
     Returns:
-        MultiModalInputs containing the stacked normalized images tensor or
+        MultiModalKwargs containing the stacked normalized images tensor or
         image embeddings.
     """
     # Early exit if we have provided an image to a language only Qwen model
@@ -741,7 +741,7 @@ def input_mapper_for_qwen(ctx: InputContext, data: object) -> MultiModalInputs:
         logger.warning(
             "Images were provided but this model has no visual config; "
             "multimodal inputs will not be forwarded to the model.")
-        return MultiModalInputs()
+        return MultiModalKwargs()
 
     model_config = ctx.model_config
     tokenizer = cached_get_tokenizer(
@@ -785,7 +785,7 @@ def input_mapper_for_qwen(ctx: InputContext, data: object) -> MultiModalInputs:
             data = [data]
         transformed_images = [transform(datum) for datum in data]
         pixel_values = torch.stack(transformed_images, dim=0)
-    return MultiModalInputs({"pixel_values": pixel_values})
+    return MultiModalKwargs({"pixel_values": pixel_values})
 
 
 def build_normalization_transform(image_size: int) -> transforms.Compose:

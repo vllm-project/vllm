@@ -58,7 +58,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.qwen2 import Qwen2Model
 from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalDataDict,
-                             MultiModalInputs)
+                             MultiModalKwargs)
 from vllm.multimodal.base import MultiModalData
 from vllm.multimodal.image import cached_get_image_processor
 from vllm.multimodal.utils import cached_get_tokenizer
@@ -567,10 +567,10 @@ def mm_input_mapper_for_qwen2_vl(
     *,
     min_pixels: Optional[int] = None,
     max_pixels: Optional[int] = None,
-) -> MultiModalInputs:
+) -> MultiModalKwargs:
     """Input mapper for Qwen2-VL."""
     if data_type_key == "image" and isinstance(data, dict):
-        return MultiModalInputs({
+        return MultiModalKwargs({
             "image_embeds": data.get("image_embeds"),
             "image_grid_thw": data.get("image_grid_thw"),
         })
@@ -608,7 +608,7 @@ def mm_input_mapper_for_qwen2_vl(
         logger.error("Failed to process image (%s)", data)
         raise
 
-    return MultiModalInputs(batch_data)
+    return MultiModalKwargs(batch_data)
 
 
 image_input_mapper_for_qwen2_vl = partial(mm_input_mapper_for_qwen2_vl,

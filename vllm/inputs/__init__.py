@@ -3,7 +3,8 @@ from .data import (DecoderOnlyInputs, EncoderDecoderInputs,
                    SingletonInputs, SingletonPrompt, TextPrompt, TokenInputs,
                    TokensPrompt, build_explicit_enc_dec_prompt,
                    to_enc_dec_tuple_list, token_inputs, zip_enc_dec_prompts)
-from .registry import DummyData, InputContext, InputRegistry
+from .registry import (DummyData, InputContext, InputProcessingContext,
+                       InputRegistry)
 
 INPUT_REGISTRY = InputRegistry()
 """
@@ -32,6 +33,7 @@ __all__ = [
     "INPUT_REGISTRY",
     "DummyData",
     "InputContext",
+    "InputProcessingContext",
     "InputRegistry",
 ]
 

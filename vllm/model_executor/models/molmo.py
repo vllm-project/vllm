@@ -37,7 +37,7 @@ from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalInputs
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
                            SequenceData)
@@ -865,7 +865,7 @@ def image_input_mapper_for_molmo(
     ctx: InputContext,
     data: object,
 ):
-    return MultiModalInputs(data)
+    return MultiModalKwargs(data)
 
 
 def dummy_data_for_molmo(ctx: InputContext, seq_len: int,

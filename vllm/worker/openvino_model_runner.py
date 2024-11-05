@@ -13,7 +13,7 @@ from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader.openvino import get_model
 from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
-                             MultiModalInputs, MultiModalPlaceholderMap)
+                             MultiModalKwargs, MultiModalPlaceholderMap)
 from vllm.sequence import SequenceGroupMetadata
 from vllm.worker.model_runner_base import ModelRunnerBase
 
@@ -102,7 +102,7 @@ class OpenVINOModelRunner(ModelRunnerBase):
         seq_lens: List[int] = []
         past_lens: List[int] = []
         query_lens: List[int] = []
-        multi_modal_inputs_list: List[MultiModalInputs] = []
+        multi_modal_kwargs_list: List[MultiModalKwargs] = []
         multi_modal_placeholder_maps: Dict[
             str,
             MultiModalPlaceholderMap] = defaultdict(MultiModalPlaceholderMap)
@@ -222,11 +222,16 @@ class OpenVINOModelRunner(ModelRunnerBase):
                     mm_data, placeholder_maps = MultiModalPlaceholderMap \
                         .from_seq_group(seq_group_metadata, positions_range)
 
-                    mm_kwargs = self.multi_modal_input_mapper(
-                        mm_data,
-                        mm_processor_kwargs=seq_group_metadata.
-                        mm_processor_kwargs)
-                    multi_modal_inputs_list.append(mm_kwargs)
+                    if seq_group_metadata.needs_mm_mapper:
+                        mm_kwargs = self.multi_modal_input_mapper(
+                            mm_data,
+                            mm_processor_kwargs=seq_group_metadata.
+                            mm_processor_kwargs,
+                        )
+                    else:
+                        mm_kwargs = mm_data
+
+                    multi_modal_kwargs_list.append(mm_kwargs)
 
                     for modality, placeholder_map in placeholder_maps.items():
                         multi_modal_placeholder_maps[modality].extend(
@@ -275,7 +280,7 @@ class OpenVINOModelRunner(ModelRunnerBase):
             multi_modal_placeholder_index_maps=placeholder_index_maps,
         )
 
-        multi_modal_kwargs = MultiModalInputs.batch(multi_modal_inputs_list)
+        multi_modal_kwargs = MultiModalKwargs.batch(multi_modal_kwargs_list)
 
         return ModelInput(
             input_tokens,
@@ -341,7 +346,7 @@ class OpenVINOModelRunner(ModelRunnerBase):
             kv_caches,
             "attn_metadata":
             attn_metadata,
-            **MultiModalInputs.as_kwargs(multi_modal_kwargs or {},
+            **MultiModalKwargs.as_kwargs(multi_modal_kwargs or {},
                                          device=self.device),
         }
 

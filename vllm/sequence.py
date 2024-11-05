@@ -435,7 +435,7 @@ class Sequence:
     def prompt(self) -> Optional[str]:
         inputs = self.inputs
 
-        if inputs["type"] == "token":
+        if inputs["type"] == "token" or inputs["type"] == "multimodal":
             return inputs.get("prompt")
 
         assert_never(inputs)
@@ -444,7 +444,7 @@ class Sequence:
     def prompt_token_ids(self) -> List[int]:
         inputs = self.inputs
 
-        if inputs["type"] == "token":
+        if inputs["type"] == "token" or inputs["type"] == "multimodal":
             return inputs.get("prompt_token_ids", [])
 
         assert_never(inputs)
@@ -453,7 +453,7 @@ class Sequence:
     def prompt_embeds(self) -> Optional[torch.Tensor]:
         inputs = self.inputs
 
-        if inputs["type"] == "token":
+        if inputs["type"] == "token" or inputs["type"] == "multimodal":
             return None
 
         assert_never(inputs)
@@ -465,14 +465,8 @@ class Sequence:
         if inputs["type"] == "token":
             return inputs.get("multi_modal_data", {})
 
-        assert_never(inputs)
-
-    @cached_property
-    def mm_processor_kwargs(self) -> Dict[str, Any]:
-        inputs = self.inputs
-
-        if inputs["type"] == "token":
-            return inputs.get("mm_processor_kwargs", {})
+        if inputs["type"] == "multimodal":
+            return inputs.get("mm_kwargs", {})
 
         assert_never(inputs)
 
@@ -482,6 +476,24 @@ class Sequence:
 
         if inputs["type"] == "token":
             return inputs.get("multi_modal_placeholders", {})
+
+        if inputs["type"] == "multimodal":
+            return inputs.get("mm_placeholders", {})
+
+        assert_never(inputs)
+
+    @cached_property
+    def mm_processor_kwargs(self) -> Dict[str, Any]:
+        inputs = self.inputs
+
+        if inputs["type"] == "token":
+            return {
+                "needs_mm_mapper": True,
+                **inputs.get("mm_processor_kwargs", {}),
+            }
+
+        if inputs["type"] == "multimodal":
+            return {}
 
         assert_never(inputs)
 
@@ -952,6 +964,13 @@ class SequenceGroupMetadata(
                     self.seq_data.values())).get_len()
             else:
                 self.token_chunk_size = 1
+
+    @property
+    def needs_mm_mapper(self):
+        # Interim measure so we can handle models that have yet to be
+        # updated to use the new multi-modal processor
+        return (self.mm_processor_kwargs is not None
+                and self.mm_processor_kwargs.get("needs_mm_mapper", False))
 
     @property
     def lora_int_id(self) -> int:

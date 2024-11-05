@@ -8,7 +8,7 @@ from vllm.logger import init_logger
 from vllm.transformers_utils.processor import get_video_processor
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
-from .base import MultiModalData, MultiModalInputs
+from .base import MultiModalData, MultiModalKwargs
 from .image import ImagePlugin
 
 if TYPE_CHECKING:
@@ -54,7 +54,7 @@ class VideoPlugin(ImagePlugin):
         ctx: InputContext,
         data: MultiModalData[object],
         **mm_processor_kwargs,
-    ) -> MultiModalInputs:
+    ) -> MultiModalKwargs:
         model_config = ctx.model_config
 
         if isinstance(data, list) and len(data) == 1:
@@ -78,7 +78,7 @@ class VideoPlugin(ImagePlugin):
                 logger.error("Failed to process video (%s)", data)
                 raise
 
-            return MultiModalInputs(batch_data)
+            return MultiModalKwargs(batch_data)
 
         raise TypeError(f"Invalid video type: {type(data)}")
 

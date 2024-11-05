@@ -5,6 +5,7 @@ from typing_extensions import NotRequired, TypedDict, TypeVar
 
 if TYPE_CHECKING:
     from vllm.multimodal import MultiModalDataDict, MultiModalPlaceholderDict
+    from vllm.multimodal.inputs import MultiModalInputsV2
 
 
 class TextPrompt(TypedDict):
@@ -36,13 +37,13 @@ class TokensPrompt(TypedDict):
 
     multi_modal_data: NotRequired["MultiModalDataDict"]
     """
-    Optional multi-modal data to pass to the model,
+    DEPRECATED: Optional multi-modal data to pass to the model,
     if the model supports it.
     """
 
     mm_processor_kwargs: NotRequired[Dict[str, Any]]
     """
-    Optional multi-modal processor kwargs to be forwarded to the
+    DEPRECATED: Optional multi-modal processor kwargs to be forwarded to the
     multimodal input mapper & processor. Note that if multiple modalities
     have registered mappers etc for the model being considered, we attempt
     to pass the mm_processor_kwargs to each of them.
@@ -176,7 +177,7 @@ def token_inputs(
     return inputs
 
 
-DecoderOnlyInputs = TokenInputs
+DecoderOnlyInputs = Union[TokenInputs, "MultiModalInputsV2"]
 """
 The inputs in :class:`~vllm.LLMEngine` before they are
 passed to the model executor.
@@ -191,14 +192,14 @@ class EncoderDecoderInputs(TypedDict):
 
     This specifies the required data for encoder-decoder models.
     """
-    encoder: TokenInputs
+    encoder: Union[TokenInputs, "MultiModalInputsV2"]
     """The inputs for the encoder portion."""
 
-    decoder: TokenInputs
+    decoder: Union[TokenInputs, "MultiModalInputsV2"]
     """The inputs for the decoder portion."""
 
 
-SingletonInputs = TokenInputs
+SingletonInputs = Union[TokenInputs, "MultiModalInputsV2"]
 """
 A processed :class:`SingletonPrompt` which can be passed to
 :class:`vllm.sequence.Sequence`.
