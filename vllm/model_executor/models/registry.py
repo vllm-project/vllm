@@ -128,6 +128,7 @@ _MULTIMODAL_MODELS = {
     "ChatGLMModel": ("chatglm", "ChatGLMForCausalLM"),
     "ChatGLMForConditionalGeneration": ("chatglm", "ChatGLMForCausalLM"),
     "FuyuForCausalLM": ("fuyu", "FuyuForCausalLM"),
+    "H2OVLChatModel": ("h2ovl", "H2OVLChatModel"),
     "InternVLChatModel": ("internvl", "InternVLChatModel"),
     "Idefics3ForConditionalGeneration":("idefics3","Idefics3ForConditionalGeneration"),
     "LlavaForConditionalGeneration": ("llava", "LlavaForConditionalGeneration"),
