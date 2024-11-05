@@ -1,4 +1,4 @@
-from typing import Dict, Iterable, List, Mapping, Optional, Type, Union
+from typing import Dict, List, Mapping, Optional, Type, Union
 
 from vllm.config import EngineConfig
 from vllm.engine.arg_utils import EngineArgs
@@ -107,10 +107,8 @@ class LLMEngine:
     def validate_outputs(cls, outputs, output_type):
         return outputs
 
-    def abort_request(self, request_id: Union[str, Iterable[str]]) -> None:
-        # TODO: send to EngineCore
-        # TODO: send to Detokenizer
-        pass
+    def abort_request(self, request_ids: List[str]) -> None:
+        self.engine_core.abort_requests(request_ids)
 
     def add_request(
         self,
@@ -141,9 +139,11 @@ class LLMEngine:
         engine_core_outputs = self.engine_core.get_output()
 
         # 2) Detokenizer the EngineCoreOutput.
-        request_outputs, to_abort = self.detokenizer.step(engine_core_outputs)
+        request_outputs, requests_to_abort = self.detokenizer.step(
+            engine_core_outputs)
 
         # 3) Abort requests that finished due to stopping criteria.
-        self.abort_request(to_abort)
+        if requests_to_abort:
+            self.abort_request(requests_to_abort)
 
         return request_outputs

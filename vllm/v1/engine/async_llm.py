@@ -1,5 +1,5 @@
 import asyncio
-from typing import AsyncGenerator, Dict, Mapping, Optional, Type, Union
+from typing import AsyncGenerator, Dict, List, Mapping, Optional, Type, Union
 
 from vllm.config import EngineConfig, ModelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -110,6 +110,9 @@ class AsyncLLM:
     def _get_executor_cls(cls, engine_config: EngineConfig):
         return GPUExecutor
 
+    async def abort_request(self, request_ids: List[str]) -> None:
+        await self.engine_core.abort_requests_async(request_ids)
+
     async def add_request(
         self,
         request_id: str,
@@ -200,9 +203,10 @@ class AsyncLLM:
                 # NOTE: we could simplify the Detokenizer code by returning full
                 # List[RequestOutput] rather than pushing to the Queue at the
                 # expense of doing another loop through List[RequestOutput].
-                _to_abort = self.detokenizer.step_streaming(outputs)
+                requests_to_abort = self.detokenizer.step_streaming(outputs)
 
-                # TODO: send aborts (in one message)
+                if requests_to_abort:
+                    await self.abort_request(requests_to_abort)
         except BaseException as e:
             logger.error(e)
 
