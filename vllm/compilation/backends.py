@@ -356,8 +356,9 @@ class VllmBackend:
             graph, self.compilation_configs.non_cudagraph_ops)
 
         from torch._dynamo.utils import lazy_format_graph_code
-        logger.debug("%s",
-                     lazy_format_graph_code("stiching module", self.split_gm))
+        logger.debug("%s", lazy_format_graph_code("before split", self.graph))
+        logger.debug("%s", lazy_format_graph_code("after split",
+                                                  self.split_gm))
 
         compilation_counter.num_piecewise_graphs_seen += len(
             self.piecewise_graphs)
