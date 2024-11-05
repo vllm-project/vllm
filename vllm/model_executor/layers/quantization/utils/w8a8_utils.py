@@ -97,41 +97,44 @@ def apply_fp8_linear(
     #   If dynamic, layer.input_scale is None and x_scale computed from x.
     #   If static, layer.input_scale is scalar and x_scale is input_scale.
 
+    # View input as 2D matrix for fp8 methods
+    input_2d = input.view(-1, input.shape[-1])
+    output_shape = [*input.shape[:-1], weight.shape[1]]
+
     if out_dtype is None:
         out_dtype = input.dtype
 
     # cutlass_scaled_mm supports per tensor/channel W and per tensor/token A
     if cutlass_fp8_supported:
         qinput, x_scale = ops.scaled_fp8_quant(
-            input,
+            input_2d,
             input_scale,
             scale_ub=input_scale_ub,
             use_per_token_if_dynamic=use_per_token_if_dynamic)
 
         # Fused GEMM_DQ
-        return ops.cutlass_scaled_mm(qinput,
-                                     weight,
-                                     out_dtype=input.dtype,
-                                     scale_a=x_scale,
-                                     scale_b=weight_scale,
-                                     bias=bias)
+        output = ops.cutlass_scaled_mm(qinput,
+                                       weight,
+                                       out_dtype=input.dtype,
+                                       scale_a=x_scale,
+                                       scale_b=weight_scale,
+                                       bias=bias)
+        return output.view(*output_shape)
 
     # torch.scaled_mm supports per tensor weights + activations only
     # so fallback to naive if per channel or per token
     else:
-        batched = input.dim() == 3
         # Note: we pad the input because torch._scaled_mm is more performant
         # for matrices with batch dimension > 16.
         # This could change in the future.
-        inp_view = input.view(-1, input.shape[-1]) if batched else input
         if input.dtype != torch.float8_e4m3fnuz:
             qinput, x_scale = ops.scaled_fp8_quant(
-                inp_view,
+                input_2d,
                 input_scale,
                 num_token_padding=17,
                 use_per_token_if_dynamic=use_per_token_if_dynamic)
         else:
-            qinput, x_scale = inp_view, input_scale
+            qinput, x_scale = input_2d, input_scale
 
         per_tensor_weights = (weight_scale.numel() == 1)
         per_tensor_activations = (x_scale.numel() == 1)
@@ -148,9 +151,9 @@ def apply_fp8_linear(
             # for torch < 2.5 and a single value in torch >= 2.5
             if type(output) is tuple and len(output) == 2:
                 output = output[0]
-            return (torch.narrow(
-                output, 0, 0, input.shape[0]) if not batched else output.view(
-                    input.shape[0], input.shape[1], weight.shape[1]))
+
+            return torch.narrow(output, 0, 0,
+                                input_2d.shape[0]).view(*output_shape)
 
         else:
             # Fallback for channelwise case, where we use unfused DQ
@@ -187,15 +190,15 @@ def apply_fp8_linear(
             if type(output) is tuple and len(output) == 2:
                 output = output[0]
             # Unpad (undo num_token_padding)
-            output = torch.narrow(output, 0, 0, input.shape[0])
-            x_scale = torch.narrow(x_scale, 0, 0, input.shape[0])
+            output = torch.narrow(output, 0, 0, input_2d.shape[0])
+            x_scale = torch.narrow(x_scale, 0, 0, input_2d.shape[0])
 
             # DQ
             # C = sw * sx * (X * W) + bias
             output = output * x_scale * weight_scale.t()
             if bias is not None:
                 output = output + bias
-            return output.to(dtype=input.dtype)
+            return output.to(dtype=input.dtype).view(*output_shape)
 
 
 def apply_int8_linear(
