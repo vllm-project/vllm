@@ -278,20 +278,17 @@ class ModelConfig:
         pooling_returned_token_ids: Optional[List[int]] = None
     ) -> Optional["PoolerConfig"]:
         if self.task == "embedding":
-            pooling_type_ = pooling_type
-            normalize_ = pooling_norm
             pooling_config = get_pooling_config(self.model, self.revision)
             if pooling_config is not None:
-                pooling_type_ = pooling_config["pooling_type"]
-                normalize_ = pooling_config["normalize"]
-                # override if user specifies pooling_type and/or pooling_norm
-                if pooling_type is not None:
-                    pooling_type_ = pooling_type
-                if pooling_norm is not None:
-                    normalize_ = pooling_norm
+                # override if user does not
+                # specifies pooling_type and/or pooling_norm
+                if pooling_type is None:
+                    pooling_type = pooling_config["pooling_type"]
+                if pooling_norm is None:
+                    pooling_norm = pooling_config["normalize"]
             return PoolerConfig(
-                pooling_type=pooling_type_,
-                pooling_norm=normalize_,
+                pooling_type=pooling_type,
+                pooling_norm=pooling_norm,
                 pooling_softmax=pooling_softmax,
                 pooling_step_tag_id=pooling_step_tag_id,
                 pooling_returned_token_ids=pooling_returned_token_ids)

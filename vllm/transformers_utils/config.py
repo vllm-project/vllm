@@ -235,9 +235,9 @@ def get_config(
     return config
 
 
-def get_hf_file_to_dict(file_name,
-                        model,
-                        revision,
+def get_hf_file_to_dict(file_name: str,
+                        model: Union[str, Path],
+                        revision: Optional[str] = 'main',
                         token: Optional[str] = None):
     """
     Downloads a file from the Hugging Face Hub and returns 
@@ -273,13 +273,13 @@ def get_hf_file_to_dict(file_name,
             file_path = Path(hf_hub_file)
 
         with open(file_path, "r") as file:
-            config_dict = json.load(file)
-
-        return config_dict
+            return json.load(file)
     return None
 
 
-def get_pooling_config(model, revision='main', token: Optional[str] = None):
+def get_pooling_config(model: str,
+                       revision: Optional[str] = 'main',
+                       token: Optional[str] = None):
     """
     This function gets the pooling and normalize 
     config from the model - only applies to 
@@ -326,7 +326,7 @@ def get_pooling_config(model, revision='main', token: Optional[str] = None):
     return None
 
 
-def get_pooling_config_name(pooling_name):
+def get_pooling_config_name(pooling_name: str) -> Union[str, None]:
     if "pooling_mode_" in pooling_name:
         pooling_name = pooling_name.replace("pooling_mode_", "")
 
@@ -345,10 +345,11 @@ def get_pooling_config_name(pooling_name):
     except NotImplementedError as e:
         logger.debug("Pooling type not supported", e)
         return None
+    return None
 
 
-def get_sentence_transformer_tokenizer_config(model,
-                                              revision='main',
+def get_sentence_transformer_tokenizer_config(model: str,
+                                              revision: Optional[str] = 'main',
                                               token: Optional[str] = None):
     """
     Returns the tokenization configuration dictionary for a 
@@ -448,8 +449,8 @@ def maybe_register_config_serialize_by_value(trust_remote_code: bool) -> None:
             exc_info=e)
 
 
-def load_params_config(model,
-                       revision,
+def load_params_config(model: Union[str, Path],
+                       revision: Optional[str],
                        token: Optional[str] = None) -> PretrainedConfig:
     # This function loads a params.json config which
     # should be used when loading models in mistral format
