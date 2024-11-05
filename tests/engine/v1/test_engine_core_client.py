@@ -3,6 +3,8 @@ import uuid
 from typing import Dict, List
 
 import pytest
+import pytest_asyncio
+
 from transformers import AutoTokenizer
 
 from vllm import SamplingParams
@@ -30,10 +32,30 @@ def make_request(params: SamplingParams) -> EngineCoreRequest:
     )
 
 
-def loop_until_done(client, outputs):
+def loop_until_done(client: EngineCoreClient, 
+                    outputs: Dict):
 
     while True:
         engine_core_outputs = client.get_output()
+
+        if len(engine_core_outputs) == 0:
+            break
+
+        all_finished = True
+        for out in engine_core_outputs:
+            outputs[out.request_id].append(out)
+            if not out.finished:
+                all_finished = False
+
+        if all_finished:
+            break
+
+
+async def loop_until_done_async(client: EngineCoreClient, 
+                                outputs: Dict):
+
+    while True:
+        engine_core_outputs = await client.get_output_async()
 
         if len(engine_core_outputs) == 0:
             break
@@ -97,6 +119,65 @@ def test_engine_core_client(monkeypatch, multiprocessing_mode: bool):
 
             outputs = {req_id: [] for req_id in request_ids}
             loop_until_done(client, outputs)
+
+            for idx, req_id in enumerate(request_ids):
+                if idx % 2 == 0:
+                    assert len(outputs[req_id]) < MAX_TOKENS, (
+                        f"{len(outputs[req_id])=}, {MAX_TOKENS=}")
+                else:
+                    assert len(outputs[req_id]) == MAX_TOKENS, (
+                        f"{len(outputs[req_id])=}, {MAX_TOKENS=}")
+
+        # Shutdown the client.
+        client.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_engine_core_client_asyncio(monkeypatch):
+
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_USE_V1", "1")
+
+        engine_args = EngineArgs(model=MODEL_NAME)
+        vllm_config = engine_args.create_engine_config()
+        executor_class = AsyncLLM._get_executor_cls(vllm_config)
+        client = EngineCoreClient.make_client(
+            vllm_config,
+            executor_class,
+            UsageContext.UNKNOWN_CONTEXT,
+            multiprocess_mode=True,
+            asyncio_mode=True,
+        )
+
+        MAX_TOKENS = 20
+        params = SamplingParams(max_tokens=MAX_TOKENS)
+        """Normal Request Cycle."""
+        requests = [make_request(params) for _ in range(10)]
+        request_ids = [req.request_id for req in requests]
+
+        # Add requests to the engine.
+        for request in requests:
+            await client.add_request_async(request)
+            time.sleep(0.01)
+
+        outputs: Dict[str, List] = {req_id: [] for req_id in request_ids}
+        await loop_until_done_async(client, outputs)
+
+        for req_id in request_ids:
+            assert len(outputs[req_id]) == MAX_TOKENS, (
+                f"{outputs[req_id]=}, {MAX_TOKENS=}")
+
+        """Abort Request Cycle."""
+
+        # Add requests to the engine.
+        for idx, request in enumerate(requests):
+            client.add_request(request)
+            time.sleep(0.01)
+            if idx % 2 == 0:
+                await client.abort_requests_async([request.request_id])
+
+            outputs = {req_id: [] for req_id in request_ids}
+            await loop_until_done_async(client, outputs)
 
             for idx, req_id in enumerate(request_ids):
                 if idx % 2 == 0:
