@@ -303,7 +303,7 @@ def test_toy_llama():
     llama_config = LlamaConfig(hidden_size=128,
                                mlp_size=256,
                                vocab_size=128,
-                               num_layers=2)
+                               num_layers=12)
 
     tractable_config = LlamaConfig(hidden_size=128,
                                    mlp_size=256,
