@@ -41,7 +41,7 @@ def test_contexted_kv_attention(
     device: str,
 ) -> None:
 
-    if kv_cache_dtype == 'fp8' and not current_platform.has_device_capability(
+    if 'fp8' in kv_cache_dtype and not current_platform.has_device_capability(
             89):
         pytest.skip(
             'Triton limitation: fp8e4nv data type is not supported on CUDA'
@@ -243,7 +243,7 @@ def test_contexted_kv_attention_alibi(
     device: str,
 ) -> None:
 
-    if kv_cache_dtype == 'fp8' and not current_platform.has_device_capability(
+    if 'fp8' in kv_cache_dtype and not current_platform.has_device_capability(
             89):
         pytest.skip(
             'Triton limitation: fp8e4nv data type is not supported on CUDA'
