@@ -23,7 +23,7 @@ Requirements
 * **Operating System**: Linux or macOS
 * **Docker**: Required if running on macOS
 * **Compiler**: gcc/g++ >= 12.3.0 (optional, but recommended)
-* **Instruction Set Architecture (ISA)**: NEON support is required
+* **Instruction Set Architecture (ISA)**: NEON support and BF16 extension is required
 
 .. _arm_backend_quick_start_dockerfile:
 
