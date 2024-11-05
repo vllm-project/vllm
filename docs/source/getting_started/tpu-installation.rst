@@ -113,6 +113,9 @@ Clone the vLLM repository and go to the vLLM directory:
 
     git clone https://github.com/vllm-project/vllm.git && cd vllm
 
+Uninstall the existing `torch` and `torch_xla` packages:
+.. code-block:: bash
+    pip uninstall torch torch-xla -y
 
 Install build dependencies:
 
@@ -164,6 +167,9 @@ First, install the dependencies:
     $ # (Recommended) Create a new conda environment.
     $ conda create -n myenv python=3.10 -y
     $ conda activate myenv
+
+    $ # Clean up the existing torch and torch-xla packages.
+    $ pip uninstall torch torch-xla -y
 
     $ # Install other build dependencies.
     $ pip install -r requirements-tpu.txt
