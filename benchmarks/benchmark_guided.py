@@ -140,7 +140,7 @@ def run_vllm(
     num_scheduler_steps: int = 1,
     disable_async_output_proc: bool = False,
     guided_decoding: bool = False,
-    debug: bool = False,
+    warmup: bool = False,
 ) -> float:
     from vllm import LLM, SamplingParams
     llm = LLM(
@@ -207,7 +207,7 @@ async def run_vllm_async(
     num_scheduler_steps: int = 1,
     disable_async_output_proc: bool = False,
     guided_decoding: bool = False,
-    debug: bool = False,
+    warmup: bool = False,
     disable_frontend_multiprocessing: bool = False,
 ) -> float:
     from vllm import SamplingParams
@@ -241,6 +241,32 @@ async def run_vllm_async(
         # Add the requests to the engine.
         prompts: List[str] = []
         sampling_params: List[SamplingParams] = []
+        if warmup:
+            print("Running warmup prompt, for the first 5")
+            # We setup the first 5 requests to warmup FSM
+            warmup_requests = requests[:5]
+            requests = requests[5:]
+            for prompt, _, output_len in warmup_requests:
+                prompts.append(prompt)
+                sampling_params.append(
+                    SamplingParams(
+                        n=n,
+                        temperature=1.0,
+                        top_p=1.0,
+                        ignore_eos=True,
+                        max_tokens=output_len,
+                        guided_decoding=GuidedDecodingParams(json=SCHEMA) if guided_decoding else None,
+                    ))
+            generators = []
+            for i, (prompt, sp) in enumerate(zip(prompts, sampling_params)):
+                generator = llm.generate(prompt, sp, request_id=f"test{i}")
+                generators.append(generator)
+            all_gens = merge_async_iterators(*generators)
+            all_gens = merge_async_iterators(*generators)
+            async for i, res in all_gens: pass
+
+        prompts = []
+        sampling_params = []
         for prompt, _, output_len in requests:
             prompts.append(prompt)
             sampling_params.append(
@@ -259,8 +285,7 @@ async def run_vllm_async(
             generator = llm.generate(prompt, sp, request_id=f"test{i}")
             generators.append(generator)
         all_gens = merge_async_iterators(*generators)
-        async for i, res in all_gens:
-          if debug: print(res.outputs[0].text)
+        async for i, res in all_gens: pass
         end = time.perf_counter()
         return end - start
 
@@ -285,7 +310,7 @@ def main(args: argparse.Namespace):
         args.enable_prefix_caching, args.enable_chunked_prefill,
         args.max_num_batched_tokens, args.distributed_executor_backend,
         args.gpu_memory_utilization, args.num_scheduler_steps,
-        args.disable_async_output_proc, args.guided_decoding, args.debug,
+        args.disable_async_output_proc, args.guided_decoding, args.warmup,
     ]
 
     if args.async_engine:
@@ -416,7 +441,7 @@ if __name__ == "__main__":
                         action='store_true',
                         default=False,
                         help="Disable decoupled async engine frontend.")
-    parser.add_argument("--debug", action="store_true", default=False)
+    parser.add_argument("--warmup", action="store_true", default=False)
     args = parser.parse_args()
     if args.tokenizer is None:
         args.tokenizer = args.model
