@@ -127,14 +127,9 @@ class EngineCore:
         self.scheduler.add_request(req)
 
     def abort_requests(self, request_ids: List[str]):
-        filtered_request_id = []
-        for request_id in request_ids:
-            if self.scheduler.is_request_active(request_id):
-                filtered_request_id.append(request_id)
-            else:
-                print(f"MISSING: {request_id}")
+        """Abort requests from the scheduler."""
 
-        self.scheduler.finish_requests(filtered_request_id,
+        self.scheduler.finish_requests(request_ids,
                                        RequestStatus.FINISHED_ABORTED)
 
     def step(self) -> List[EngineCoreOutput]:
