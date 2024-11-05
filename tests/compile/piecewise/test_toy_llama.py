@@ -2,7 +2,9 @@
 Test the piecewise compilation with a simple model, comparing the output
 with and without the piecewise compilation.
 
-This is a tractable model, the weights and computation are specially designed.
+This is a tractable model, the weights and computation are specially designed
+if the config `tractable_init` is set to True. Otherwise, the weights are
+initialized randomly with a fixed seed.
 """
 import os
 from dataclasses import dataclass
@@ -52,6 +54,8 @@ class LlamaConfig:
     vocab_size: int = 128
     num_layers: int = 2
     init_value: float = 1.0
+    tractable_init: bool = False
+    random_seed: int = 0
 
     def __post_init__(self):
         assert self.mlp_size >= self.hidden_size
@@ -72,12 +76,21 @@ class LlamaMLP(nn.Module):
             bias=False,
         )
 
-        nn.init.eye_(self.gate_up_projection.weight.data[:config.mlp_size])
-        nn.init.eye_(self.gate_up_projection.weight.data[config.mlp_size:])
-        nn.init.eye_(self.down_projection.weight.data)
+        if config.tractable_init:
+            nn.init.eye_(self.gate_up_projection.weight.data[:config.mlp_size])
+            nn.init.eye_(self.gate_up_projection.weight.data[config.mlp_size:])
+            nn.init.eye_(self.down_projection.weight.data)
+        else:
+            nn.init.xavier_normal_(self.gate_up_projection.weight.data,
+                                   generator=torch.Generator().manual_seed(
+                                       config.random_seed))
+            nn.init.xavier_normal_(self.down_projection.weight.data,
+                                   generator=torch.Generator().manual_seed(
+                                       config.random_seed))
 
     def forward(self, x):
-        # for positive input, this is essentially an elementwise-square
+        # for tractable_init and positive input, this is
+        # essentially an elementwise-square
         x = self.gate_up_projection(x)
         x = x[:, :x.size(1) // 2] * torch.nn.functional.relu(
             x[:, x.size(1) // 2:])
@@ -101,17 +114,27 @@ class LlamaAttention(nn.Module):
             bias=False,
         )
 
-        nn.init.eye_(self.qkv_projection.weight.data[:config.hidden_size])
-        nn.init.eye_(self.qkv_projection.weight.data[config.hidden_size:2 *
-                                                     config.hidden_size])
-        nn.init.eye_(self.qkv_projection.weight.data[2 * config.hidden_size:])
-        nn.init.eye_(self.output_projection.weight.data)
+        if config.tractable_init:
+            nn.init.eye_(self.qkv_projection.weight.data[:config.hidden_size])
+            nn.init.eye_(self.qkv_projection.weight.data[config.hidden_size:2 *
+                                                         config.hidden_size])
+            nn.init.eye_(self.qkv_projection.weight.data[2 *
+                                                         config.hidden_size:])
+            nn.init.eye_(self.output_projection.weight.data)
+        else:
+            nn.init.xavier_normal_(self.qkv_projection.weight.data,
+                                   generator=torch.Generator().manual_seed(
+                                       config.random_seed))
+            nn.init.xavier_normal_(self.output_projection.weight.data,
+                                   generator=torch.Generator().manual_seed(
+                                       config.random_seed))
 
     def forward(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
+        # for tractable_init, this is:
         # output = (hidden_states * 3 + positions * 2)
         qkv = self.qkv_projection(hidden_states)
         hidden_size = qkv.size(-1) // 3
@@ -141,7 +164,7 @@ class LlamaDecoderLayer(nn.Module):
         residual: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
-        Summarize the computation:
+        For tractable computation:
         - if residual is None, the outputs are:
             - residual = (hidden_states + 1) * 3 + positions * 2 + hidden_states = hidden_states * 4 + positions * 2 + 3
             - hidden_states = (residual + 1) ** 2
@@ -261,10 +284,13 @@ def run_model(llama_config,
 
     output = output.cpu()
 
-    expected_output = tractable_computation(input_ids[:2], positions[:2],
-                                            llama_config).cpu()
+    if llama_config.tractable_init:
+        expected_output = tractable_computation(input_ids[:2], positions[:2],
+                                                llama_config).cpu()
 
-    assert torch.allclose(output, expected_output)
+        assert torch.allclose(output, expected_output)
+    else:
+        return output.cpu()
 
 
 def test_toy_llama():
@@ -275,6 +301,12 @@ def test_toy_llama():
                                vocab_size=128,
                                num_layers=2)
 
+    tractable_config = LlamaConfig(hidden_size=128,
+                                   mlp_size=256,
+                                   vocab_size=128,
+                                   num_layers=2,
+                                   tractable_init=True)
+
     outputs = []
     with compilation_counter.expect(
             num_graphs_seen=0,
@@ -284,6 +316,8 @@ def test_toy_llama():
             num_cudagraph_caputured=0,
     ):
         outputs.append(run_model(llama_config, use_compile=False))
+    run_model(tractable_config, use_compile=False)
+
     with compilation_counter.expect(
             num_graphs_seen=1,  # one graph for the model
             num_piecewise_graphs_seen=1,
@@ -293,6 +327,7 @@ def test_toy_llama():
             2,  # num_cudagraph_sizes * num_piecewise_capturable_graphs_seen
     ):
         outputs.append(run_model(llama_config, use_compile=True))
+    run_model(tractable_config, use_compile=True)
 
     with compilation_counter.expect(
             num_graphs_seen=1,  # one graph for the model
@@ -308,6 +343,10 @@ def test_toy_llama():
     ):
         outputs.append(
             run_model(llama_config, use_compile=True, split_attn=True))
+    run_model(tractable_config, use_compile=True, split_attn=True)
+
+    for i in range(1, len(outputs)):
+        assert torch.allclose(outputs[0], outputs[i])
 
 
 @torch.inference_mode
