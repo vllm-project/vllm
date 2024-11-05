@@ -31,6 +31,8 @@ if envs.VLLM_USE_FLUX:
         use_flux = False
 
 # TODO: factor out somehow
+# register multiple patterns for all tp names (0-numgpus-1)?
+# or pass as additional args?
 TP_GROUP_NAME = "tp:0"
 
 
@@ -220,8 +222,8 @@ def get_gemm_rs_ag_gemm(use_flux: bool,
             slice_size = residual.shape[0]
 
         if not should_slice(residual.shape):
-            output = torch.matmul(gemm_1_activations,
-                                  gemm_1_weights.transpose(1, 0))
+            output = torch.ops.aten.mm.default(gemm_1_activations,
+                                               gemm_1_weights.transpose(1, 0))
             reduced_output = tensor_model_parallel_all_reduce(output)
 
             ops.fused_add_rms_norm(input=reduced_output,
@@ -229,7 +231,8 @@ def get_gemm_rs_ag_gemm(use_flux: bool,
                                    weight=rms_norm_weight,
                                    epsilon=1e-05)
 
-            mm_2 = torch.matmul(reduced_output, gemm_2_weights.transpose(1, 0))
+            mm_2 = torch.ops.aten.mm.default(reduced_output,
+                                             gemm_2_weights.transpose(1, 0))
             return mm_2, my_residual, my_residual.clone()
         else:
             output = gemm_rs(gemm_1_activations, gemm_1_weights)
@@ -308,7 +311,7 @@ def match_final_custom_ar(my_residual: torch.Tensor, gemm_1_weights: torch.Tenso
     return normalized
 
 
-# Register this as a custom op since all reduce cannot be torch.compiled.
+# Register this as a custom op since all reduce cannot be torch.compiled yet.
 def replace_final(my_residual: torch.Tensor, gemm_1_weights: torch.Tensor,
                   gemm_1_activations: torch.Tensor,
                   rms_norm_weights: torch.Tensor) -> torch.Tensor:
@@ -318,16 +321,7 @@ def replace_final(my_residual: torch.Tensor, gemm_1_weights: torch.Tensor,
     reduced = tensor_model_parallel_all_reduce(mm_1)
 
     if should_slice(gemm_1_activations.shape):
-        if True: #not use_flux:
-            group_name = get_world_name()
-            world_size = get_tensor_model_parallel_world_size()
-            all_gather = (
-                torch.ops._c10d_functional.all_gather_into_tensor.default(
-                    my_residual, world_size, group_name))
-            wait_tensor = torch.ops._c10d_functional.wait_tensor.default(
-                all_gather)
-        else:
-            wait_tensor = tensor_model_parallel_all_gather(my_residual)
+        wait_tensor = tensor_model_parallel_all_gather(my_residual)
     else:
         wait_tensor = my_residual
 
@@ -355,7 +349,10 @@ direct_register_custom_op(
     fake_impl=replace_final_fake
 )
 
-# Copied from pattern_matcher.py fwd_only so we can use tracing_mode="fake"
+# Copied from pattern_matcher.py fwd_only so we can use tracing_mode="fake".
+# "real" mode chokes on custom ar primitives since the custom ar data structure(s)
+# have not been set up.  We could also try to only register the custom_ar patterns
+# if custom ar has been initialized.  Not sure how hard that is.
 # TODO: convert args to fake tenors and forward to original fwd_only.
 @torch.no_grad()
 def fake_fwd_only(
@@ -375,6 +372,7 @@ def fake_fwd_only(
         decompositions = (
             get_decomp_fn() if get_decomp_fn is not None else select_decomp_table()
         )
+        # This doesn't seem to work.
         #with torch._dynamo.utils.detect_fake_mode(args) as fm:
         #    new_args = []
         #    for arg in args:
@@ -408,6 +406,8 @@ class CollectiveFusionPass(InductorPass):
         resid_w = torch.empty([4, 4], device='cuda')
         x2 = torch.empty([4, 4], device='cuda')
         inputs = [resid, x, w, resid_w, x2]
+
+        # register multiple patterns for all group/world names?
 
         for m in [match_gemm_rs_ag_gemm, match_gemm_rs_ag_gemm_custom_ar]:
             register_replacement(m,
