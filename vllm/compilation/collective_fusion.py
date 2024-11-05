@@ -30,11 +30,6 @@ if envs.VLLM_USE_FLUX:
     except ImportError:
         use_flux = False
 
-# TODO: factor out somehow
-# register multiple patterns for all tp names (0-numgpus-1)?
-# or pass as additional args?
-TP_GROUP_NAME = "tp:0"
-
 
 # how to do this properly?
 def get_world_name() -> str:
@@ -52,65 +47,43 @@ def slice_residual(residual) -> List[torch.Tensor]:
     return torch.chunk(residual, n_slices, dim=0)
 
 
-def match_gemm_rs_ag_gemm(
-    residual: torch.Tensor,
-    gemm_1_weights: torch.Tensor,
-    gemm_1_activations: torch.Tensor,
-    rms_norm_weight: torch.Tensor,
-    gemm_2_weights: torch.Tensor,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    gemm_1_w_perm = torch.ops.aten.permute.default(gemm_1_weights, [1, 0])
-    mm_1 = torch.ops.aten.mm.default(gemm_1_activations, gemm_1_w_perm)
+def get_match_gemm_rs_ag_gemm(tp_group_name: str, custom_ar: bool):
+    def match_gemm_rs_ag_gemm(
+            residual: torch.Tensor,
+            gemm_1_weights: torch.Tensor,
+            gemm_1_activations: torch.Tensor,
+            rms_norm_weight: torch.Tensor,
+            gemm_2_weights: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        gemm_1_w_perm = torch.ops.aten.permute.default(gemm_1_weights, [1, 0])
+        mm_1 = torch.ops.aten.mm.default(gemm_1_activations, gemm_1_w_perm)
 
-    #all_reduce = tensor_model_parallel_all_reduce(mm_1)
-    all_reduce = torch.ops.higher_order.auto_functionalized(
-        torch.ops.vllm.inplace_all_reduce.default,
-        tensor=mm_1,
-        group_name=TP_GROUP_NAME)
-    all_reduce = all_reduce[1]
+        #all_reduce = tensor_model_parallel_all_reduce(mm_1)
+        if custom_ar:
+            all_reduce = torch.ops.vllm.outplace_all_reduce.default(mm_1,
+                                                                    tp_group_name)
+        else:
+            all_reduce = torch.ops.higher_order.auto_functionalized(
+                torch.ops.vllm.inplace_all_reduce.default,
+                tensor=mm_1,
+                group_name=tp_group_name)
+            all_reduce = all_reduce[1]
 
-    norm_res = torch.ops.higher_order.auto_functionalized(
-        torch.ops._C.fused_add_rms_norm.default,
-        input=all_reduce,
-        residual=residual,
-        weight=rms_norm_weight,
-        epsilon=1e-05)
-    normalized = norm_res[1]
-    new_residual = norm_res[2]
+        norm_res = torch.ops.higher_order.auto_functionalized(
+            torch.ops._C.fused_add_rms_norm.default,
+            input=all_reduce,
+            residual=residual,
+            weight=rms_norm_weight,
+            epsilon=1e-05)
+        normalized = norm_res[1]
+        new_residual = norm_res[2]
 
-    gemm_2_w_perm = torch.ops.aten.permute.default(gemm_2_weights, [1, 0])
-    mm_2 = torch.ops.aten.mm.default(normalized, gemm_2_w_perm)
+        gemm_2_w_perm = torch.ops.aten.permute.default(gemm_2_weights, [1, 0])
+        mm_2 = torch.ops.aten.mm.default(normalized, gemm_2_w_perm)
 
-    return mm_2, new_residual
+        return mm_2, new_residual
 
-
-def match_gemm_rs_ag_gemm_custom_ar(
-    residual: torch.Tensor,
-    gemm_1_weights: torch.Tensor,
-    gemm_1_activations: torch.Tensor,
-    rms_norm_weight: torch.Tensor,
-    gemm_2_weights: torch.Tensor,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    gemm_1_w_perm = torch.ops.aten.permute.default(gemm_1_weights, [1, 0])
-    mm_1 = torch.ops.aten.mm.default(gemm_1_activations, gemm_1_w_perm)
-
-    #all_reduce = tensor_model_parallel_all_reduce(mm_1)
-    all_reduce = torch.ops.vllm.outplace_all_reduce.default(mm_1,
-                                                            TP_GROUP_NAME)
-
-    norm_res = torch.ops.higher_order.auto_functionalized(
-        torch.ops._C.fused_add_rms_norm.default,
-        input=all_reduce,
-        residual=residual,
-        weight=rms_norm_weight,
-        epsilon=1e-05)
-    normalized = norm_res[1]
-    new_residual = norm_res[2]
-
-    gemm_2_w_perm = torch.ops.aten.permute.default(gemm_2_weights, [1, 0])
-    mm_2 = torch.ops.aten.mm.default(normalized, gemm_2_w_perm)
-
-    return mm_2, new_residual
+    return match_gemm_rs_ag_gemm
 
 
 def gemm_rs_ag_gemm_fake(
@@ -267,48 +240,36 @@ def get_gemm_rs_ag_gemm(use_flux: bool,
     return getattr(torch.ops.vllm, name).default
 
 
-def match_final(my_residual: torch.Tensor, gemm_1_weights: torch.Tensor,
-                gemm_1_activations: torch.Tensor,
-                rms_norm_weights: torch.Tensor) -> torch.Tensor:
-    gemm_1_w_perm = torch.ops.aten.permute.default(gemm_1_weights, [1, 0])
-    mm_1 = torch.ops.aten.mm.default(gemm_1_activations, gemm_1_w_perm)
+def get_match_final(tp_group_name: str, use_custom_ar: bool):
+    def match_final(my_residual: torch.Tensor, gemm_1_weights: torch.Tensor,
+                    gemm_1_activations: torch.Tensor,
+                    rms_norm_weights: torch.Tensor,
+                    ) -> torch.Tensor:
+        gemm_1_w_perm = torch.ops.aten.permute.default(gemm_1_weights, [1, 0])
+        mm_1 = torch.ops.aten.mm.default(gemm_1_activations, gemm_1_w_perm)
 
-    #all_reduce = tensor_model_parallel_all_reduce(mm_1)
-    all_reduce = torch.ops.higher_order.auto_functionalized(
-        torch.ops.vllm.inplace_all_reduce.default,
-        tensor=mm_1,
-        group_name=TP_GROUP_NAME)
-    all_reduce = all_reduce[1]
+        #all_reduce = tensor_model_parallel_all_reduce(mm_1)
+        if use_custom_ar:
+            all_reduce = torch.ops.vllm.outplace_all_reduce.default(mm_1,
+                                                                    tp_group_name)
+        else:
+            all_reduce = torch.ops.higher_order.auto_functionalized(
+                torch.ops.vllm.inplace_all_reduce.default,
+                tensor=mm_1,
+                group_name=tp_group_name)
+            all_reduce = all_reduce[1]
 
-    norm_res = torch.ops.higher_order.auto_functionalized(
-        torch.ops._C.fused_add_rms_norm.default,
-        input=all_reduce,
-        residual=my_residual,
-        weight=rms_norm_weights,
-        epsilon=1e-05)
-    normalized = norm_res[1]
+        norm_res = torch.ops.higher_order.auto_functionalized(
+            torch.ops._C.fused_add_rms_norm.default,
+            input=all_reduce,
+            residual=my_residual,
+            weight=rms_norm_weights,
+            epsilon=1e-05)
+        normalized = norm_res[1]
 
-    return normalized
+        return normalized
 
-
-def match_final_custom_ar(my_residual: torch.Tensor, gemm_1_weights: torch.Tensor,
-                          gemm_1_activations: torch.Tensor,
-                          rms_norm_weights: torch.Tensor) -> torch.Tensor:
-    gemm_1_w_perm = torch.ops.aten.permute.default(gemm_1_weights, [1, 0])
-    mm_1 = torch.ops.aten.mm.default(gemm_1_activations, gemm_1_w_perm)
-
-    all_reduce = torch.ops.vllm.outplace_all_reduce.default(mm_1,
-                                                            TP_GROUP_NAME)
-
-    norm_res = torch.ops.higher_order.auto_functionalized(
-        torch.ops._C.fused_add_rms_norm.default,
-        input=all_reduce,
-        residual=my_residual,
-        weight=rms_norm_weights,
-        epsilon=1e-05)
-    normalized = norm_res[1]
-
-    return normalized
+    return match_final
 
 
 # Register this as a custom op since all reduce cannot be torch.compiled yet.
@@ -406,26 +367,30 @@ class CollectiveFusionPass(InductorPass):
         resid_w = torch.empty([4, 4], device='cuda')
         x2 = torch.empty([4, 4], device='cuda')
         inputs = [resid, x, w, resid_w, x2]
-
-        # register multiple patterns for all group/world names?
-
-        for m in [match_gemm_rs_ag_gemm, match_gemm_rs_ag_gemm_custom_ar]:
-            register_replacement(m,
-                                 match_gemm_rs_ag_gemm,
-                                 inputs,
-                                 fake_fwd_only,
-                                 [self.gemm_rs_ag_gemm_pattern],
-                                 extra_check=lambda m: self.record_match(m))
-
         final_inputs = [x, w, resid, resid_w]
-        for m in [match_final, match_final_custom_ar]:
-            register_replacement(
-                m,
-                torch.ops.vllm.gemm_ag_final,
-                #replace_final,
-                final_inputs,
-                fake_fwd_only,
-                [self.final_pattern])
+
+        # register multiple patterns for all group names, fill out to max_gpus.
+        group_names = ["tp:0"]
+
+        for group_name in group_names:
+            for m in [get_match_gemm_rs_ag_gemm(group_name, False),
+                      get_match_gemm_rs_ag_gemm(group_name, True)]:
+                register_replacement(m,
+                                     m,
+                                     inputs,
+                                     fake_fwd_only,
+                                     [self.gemm_rs_ag_gemm_pattern],
+                                     extra_check=lambda m: self.record_match(m))
+
+            for m in [get_match_final(group_name, False),
+                      get_match_final(group_name, True)]:
+                register_replacement(
+                    m,
+                    torch.ops.vllm.gemm_ag_final,
+                    #replace_final,
+                    final_inputs,
+                    fake_fwd_only,
+                    [self.final_pattern])
 
     def record_match(self, match: Match) -> bool:
         # Hijack the extra_check to record the match and
