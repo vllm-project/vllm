@@ -6,9 +6,21 @@ on:
   push:
     branches:
       - main
+    paths:
+      - '**/*.h'
+      - '**/*.cpp'
+      - '**/*.cu'
+      - '**/*.cuh'
+      - '.github/workflows/clang-format.yml'
   pull_request:
     branches:
       - main
+    paths:
+      - '**/*.h'
+      - '**/*.cpp'
+      - '**/*.cu'
+      - '**/*.cuh'
+      - '.github/workflows/clang-format.yml'
 
 jobs:
   clang-format:

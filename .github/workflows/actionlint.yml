@@ -6,12 +6,14 @@ on:
     paths:
       - '.github/workflows/*.ya?ml'
       - '.github/workflows/actionlint.*'
+      - '.github/workflows/matchers/actionlint.json'
   pull_request:
     branches:
       - "main"
     paths:
       - '.github/workflows/*.ya?ml'
       - '.github/workflows/actionlint.*'
+      - '.github/workflows/matchers/actionlint.json'
 
 env:
   LC_ALL: en_US.UTF-8

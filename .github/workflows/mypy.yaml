@@ -6,9 +6,19 @@ on:
   push:
     branches:
       - main
+    paths:
+      - '**/*.py'
+      - '.github/workflows/mypy.yaml'
+      - 'tools/mypy.sh'
+      - 'pyproject.toml'
   pull_request:
     branches:
       - main
+    paths:
+      - '**/*.py'
+      - '.github/workflows/mypy.yaml'
+      - 'tools/mypy.sh'
+      - 'pyproject.toml'
 
 jobs:
   mypy:
