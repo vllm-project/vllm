@@ -10,6 +10,7 @@ MAX_MODEL_LEN = 128
 MODEL_NAME = os.environ.get("MODEL_NAME", "BAAI/bge-base-en-v1.5")
 REVISION = os.environ.get("REVISION", "main")
 
+
 @pytest.mark.skipif(current_platform.is_rocm(),
                     reason="Xformers backend is not supported on ROCm.")
 def test_model_loading_with_params(vllm_runner):
