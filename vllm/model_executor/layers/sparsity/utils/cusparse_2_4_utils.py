@@ -9,7 +9,7 @@ from torch.sparse import (SparseSemiStructuredTensor,
 
 from vllm import _custom_ops as ops
 from vllm._custom_ops import (semi_structured_fp8_compress,
-                              semi_structured_fp8_mm)
+                              semi_structured_fp8_mm, semi_structured_fp8_mm2)
 from vllm.platforms import current_platform
 
 SparseSemiStructuredTensor._FORCE_CUTLASS = False
@@ -80,16 +80,24 @@ def semi_structured_sparse_dense_gemm(a_packed: torch.Tensor,
     '''
     assert a_packed.dtype in [
         torch.float16, torch.bfloat16, torch.int8, torch.float8_e4m3fn
-    ], f"Semi structured sparse-dense matmul does not support {a_packed.dtype}"
-    if b_dense.is_contiguous() and a_packed.dtype in [torch.int8, torch.float8_e4m3fn]:
-        raise ValueError("cuSparseLt does not support contiguous dense matrix for int8 and fp8 types")
-    if a_packed.dtype == torch.float8_e4m3fn:
-        return semi_structured_fp8_mm(a_packed.packed,
-                                      b_dense,
-                                      bias=bias,
-                                      transpose_result=False)
-    else:
-        return torch.mm(a_packed, b_dense)
+    ], f"Semi structured sparse-dense matmul does not support {a_sparse.dtype}"
+    scale = torch.tensor(1.0, device="cuda", dtype=torch.float32)
+    return semi_structured_fp8_mm(a_sparse.packed, b_dense, scale=scale)
+
+    # if a_sparse.dtype == torch.float8_e4m3fn:
+    #     scale = torch.tensor(1.0, device="cuda", dtype=torch.float32)
+    #     return semi_structured_fp8_mm(a_sparse.packed, b_dense, scale=scale)
+    # else:
+    #     return torch.mm(a_sparse, b_dense)
+
+
+def semi_structured_sparse_dense_gemm2(a_sparse: torch.Tensor,
+                                       b_dense: torch.Tensor):
+    assert a_sparse.dtype in [
+        torch.float8_e4m3fn
+    ], f"Semi structured sparse-dense matmul does not support {a_sparse.dtype}"
+    scale = 1.0
+    return semi_structured_fp8_mm2(a_sparse.packed, b_dense, scale=scale)
 
 
 def semi_structured_dense_sparse_T_gemm(a_dense: torch.Tensor,

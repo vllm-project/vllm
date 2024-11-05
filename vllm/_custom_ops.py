@@ -704,28 +704,23 @@ def semi_structured_fp8_compress(input: torch.Tensor) -> torch.Tensor:
     return torch.ops._C.cslt_compress_fp8_semi_structured(input)
 
 
-def semi_structured_fp8_mm(A_compressed: torch.Tensor,
-                           B_dense: torch.Tensor,
-                           bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-    assert A_compressed.dtype == torch.float8_e4m3fn
+def semi_structured_fp8_mm(
+        A_compressed: torch.Tensor,
+        B_dense: torch.Tensor,
+        scale: Optional[torch.Tensor] = None,
+        bias: Optional[torch.Tensor] = None) -> torch.Tensor:
     return torch.ops._C.cslt_mm_fp8_semi_structured(A_compressed, B_dense,
-                                                    bias)
+                                                    scale, bias)
 
 
-def semi_structured_fp8_prepare_mm(A_compressed: torch.Tensor,
-                                   B_dense: torch.Tensor,
-                                   bias: Optional[torch.Tensor] = None) -> int:
+def semi_structured_fp8_mm2(
+        A_compressed: torch.Tensor,
+        B_dense: torch.Tensor,
+        scale: Optional[float] = None,
+        bias: Optional[torch.Tensor] = None) -> torch.Tensor:
     assert A_compressed.dtype == torch.float8_e4m3fn
-    return torch.ops._C.cslt_prepare_mm_fp8_semi_structured(
-        A_compressed, B_dense, bias)
-
-
-def semi_structured_fp8_mm_prepared(cacheId: int) -> torch.Tensor:
-    return torch.ops._C.cslt_mm_fp8_semi_structured_prepared(cacheId)
-
-
-def semi_structured_fp8_destroy(cacheId: int):
-    torch.ops._C.cslt_fp8_semi_structured_destroy(cacheId)
+    return torch.ops._C.cslt_mm_fp8_semi_structured2(A_compressed, B_dense,
+                                                     scale, bias)
 
 
 # int8

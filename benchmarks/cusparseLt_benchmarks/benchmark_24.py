@@ -1,8 +1,8 @@
 import argparse
 import copy
 import itertools
-import pickle as pkl
-import time
+# import pickle as pkl
+# import time
 from typing import Callable, Iterable, List, Tuple
 
 import torch
@@ -12,8 +12,7 @@ from weight_shapes import WEIGHT_SHAPES
 
 from vllm.model_executor.layers.sparsity.utils.cusparse_2_4_utils import (
     compress_to_torch_sparse_semi_structured_mat, dense_matmul, get_random_mat,
-    is_semi_structured_supported, semi_structured_sparse_dense_gemm)
-from vllm._custom_ops import (semi_structured_fp8_prepare_mm, semi_structured_fp8_mm_prepared, semi_structured_fp8_destroy)
+    is_semi_structured_supported, semi_structured_sparse_dense_gemm2)
 from vllm.utils import FlexibleArgumentParser
 
 DEFAULT_MODELS = list(WEIGHT_SHAPES.keys())
@@ -78,17 +77,35 @@ def bench(m: int, k: int, n: int, label: str, sub_label: str,
             compress_to_torch_sparse_semi_structured_mat(
                 a.to(dtype=torch.bfloat16)), b.to(torch.bfloat16)))
 
-    a, b = make_rand_tensors(torch.int8, m, n, k)
+    # a_compressed = compress_to_torch_sparse_semi_structured_mat(
+    #         a.to(dtype=torch.bfloat16))
+    # b = b.to(torch.bfloat16)
+    a, b = make_rand_tensors(torch.float16, m, n, k)
+    a_compressed = compress_to_torch_sparse_semi_structured_mat(
+        a.to(dtype=torch.bfloat16))
+    # warmup
+    semi_structured_sparse_dense_gemm2(a_compressed, b)
+    timers.append(
+        bench_fn(label, sub_label, "cusparseLt_bf16_bf16_2_4_v2",
+                 semi_structured_sparse_dense_gemm2, a_compressed, b))
+
+    # a, b = make_rand_tensors(torch.int8, m, n, k)
     # cutlass i8
     # timers.append(
     #     bench_fn(label, sub_label, "cutlass_i8_i8_matmul-w-scales",
     #              dense_matmul, a, b, torch.int8))
-
+    # a_compressed = compress_to_torch_sparse_semi_structured_mat(a)
     # cusparseLt i8
     # timers.append(
     #     bench_fn(label, sub_label, "cusparseLt_i8_i8_2_4",
     #              semi_structured_sparse_dense_gemm,
     #              compress_to_torch_sparse_semi_structured_mat(a), b))
+
+    # warmup
+    # semi_structured_sparse_dense_gemm2(a_compressed, b)
+    # timers.append(
+    #     bench_fn(label, sub_label, "cusparseLt_i8_i8_2_4_v2",
+    #              semi_structured_sparse_dense_gemm2, a_compressed, b))
 
     if use_fp8:
         a, b = make_rand_tensors(torch.float8_e4m3fn, m, n, k)
@@ -97,21 +114,27 @@ def bench(m: int, k: int, n: int, label: str, sub_label: str,
             bench_fn(label, sub_label, "cutlass_fp8_fp8_matmul-w-scales",
                      dense_matmul, a, b, torch.float8_e4m3fn))
 
-        # cusparseLt fp8
-        timers.append(
-            bench_fn(label, sub_label, "cusparseLt_fp8_fp8_2_4",
-                     semi_structured_sparse_dense_gemm,
-                     compress_to_torch_sparse_semi_structured_mat(a), b))
-        
         a_compressed = compress_to_torch_sparse_semi_structured_mat(a)
-        handle = semi_structured_fp8_prepare_mm(a_compressed.packed, b)
-        # id = torch.tensor([handle], dtype=torch.int64, device='cuda')
-        id = int(handle)
+        # cusparseLt fp8
+        # timers.append(
+        #     bench_fn(label, sub_label, "cusparseLt_fp8_fp8_2_4",
+        #              semi_structured_sparse_dense_gemm,
+        #              a_compressed, b))
+
+        # warmup
+        semi_structured_sparse_dense_gemm2(a_compressed, b)
         timers.append(
-            bench_fn(label, sub_label, "cusparseLt_fp8_fp8_2_4_prepared",
-                     semi_structured_fp8_mm_prepared,
-                     id))
-        semi_structured_fp8_destroy(id)
+            bench_fn(label, sub_label, "cusparseLt_fp8_fp8_2_4_v2",
+                     semi_structured_sparse_dense_gemm2, a_compressed, b))
+
+        # handle = semi_structured_fp8_prepare_mm(a_compressed.packed, b)
+        # id = int(handle)
+        # scale = torch.tensor(1.0, device='cuda', dtype=torch.float32)
+        # # scale = None
+        # timers.append(
+        #     bench_fn(label, sub_label, "cusparseLt_fp8_fp8_2_4_prepared",
+        #              semi_structured_fp8_mm_prepared, id, scale=scale))
+        # semi_structured_fp8_destroy(id)
     return timers
 
 
@@ -124,7 +147,9 @@ def print_timers(timers: Iterable[TMeasurement]):
 def run(MKNs: Iterable[Tuple[int, int, int]],
         use_fp8: bool) -> Iterable[TMeasurement]:
     results = []
+    # MKNs = [(1024, 8192, 14336)]
     # MKNs = [(2048, 8192, 14336)]
+    # MKNs = [(2048, 8192, 14336), (2048, 8192, 14336)]
     # MKNs = [(32, 11008, 4096)]
     # MKNs = [(2048, 11008, 14336)]
 
@@ -186,11 +211,11 @@ def run_model_bench(args):
         print(f"== Results cuSparseLt {model}-TP{tp_size} ====")
         print_timers(data)
 
-    timestamp = int(time.time())
+    # timestamp = int(time.time())
 
-    all_data = []
-    for d in model_bench_data:
-        all_data.extend(d)
+    # all_data = []
+    # for d in model_bench_data:
+    #     all_data.extend(d)
     # pickle all data
     # with open(f"model_bench-{timestamp}.pkl", "wb") as f:
     #     pkl.dump(all_data, f)
