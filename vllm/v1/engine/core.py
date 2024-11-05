@@ -3,7 +3,6 @@ import queue
 from multiprocessing.process import BaseProcess
 from threading import Thread
 from typing import List, Tuple, Type, Any
-from collections import namedtuple
 
 import msgspec
 import zmq
