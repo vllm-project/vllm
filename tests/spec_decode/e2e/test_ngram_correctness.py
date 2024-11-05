@@ -76,7 +76,7 @@ def test_ngram_e2e_greedy_correctness(vllm_runner, common_llm_kwargs,
                 "max_num_seqs": prefill_chunk_size
             })
     else:
-        common_llm_kwargs["enable_chunked_prefill"] = True
+        common_llm_kwargs["enable_chunked_prefill"] = False
     run_equality_correctness_test(vllm_runner,
                                   common_llm_kwargs,
                                   per_test_common_llm_kwargs,
