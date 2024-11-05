@@ -86,8 +86,8 @@ def test_delta_outputs():
     for request in requests:
         detokenizer.add_request(request)
 
-    generation_strings = {}
-    generation_tokens = {}
+    gen_strings = {}
+    gen_tokens = {}
     while True:
         # Mock output from the EngineCore.
         outputs = engine_core.get_outputs()
@@ -98,22 +98,23 @@ def test_delta_outputs():
         request_outputs, request_to_abort = detokenizer.step(outputs)
         assert len(request_to_abort) == 0
 
+        # Update tracking.
         for request_output in request_outputs:
             request_id = request_output.request_id
-            if request_id not in generation_strings:
-                generation_strings[request_id] = request_output.outputs[0].text
-                generation_tokens[request_id] = request_output.outputs[
-                    0].token_ids
+            new_text = request_output.outputs[0].text
+            new_tokens = request_output.outputs[0].token_ids
+            if request_id not in gen_strings:
+                gen_strings[request_id] = new_text
+                gen_tokens[request_id] = new_tokens
             else:
-                generation_strings[request_id] += request_output.outputs[
-                    0].text
-                generation_tokens[request_id].extend(
-                    request_output.outputs[0].token_ids)
+                gen_strings[request_id] += new_text
+                gen_tokens[request_id].extend(new_tokens)
 
+    # Confirmed tracked values matches what we expected.
     for idx, (ref_gen_str, ref_gen_tokens) in enumerate(
             zip(GENERATION_STRINGS, GENERATION_TOKENS)):
-        gen_str = generation_strings[f"request-{idx}"]
-        gen_tokens = generation_tokens[f"request-{idx}"]
+        gen_str = gen_strings[f"request-{idx}"]
+        gen_tokens = gen_strings[f"request-{idx}"]
 
         assert gen_str == ref_gen_str, f"{gen_str=}, {ref_gen_str=}"
         assert gen_tokens == ref_gen_tokens, f"{gen_tokens=}, {ref_gen_tokens=}"
