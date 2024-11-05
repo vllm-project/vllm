@@ -150,3 +150,20 @@ class LLMEngine:
             self.abort_request(requests_to_abort)
 
         return request_outputs
+
+    # TODO(rob): Can we get rid of these?
+
+    def get_model_config(self):
+        pass
+
+    def is_encoder_decoder_model(self):
+        pass
+
+    def start_profile(self):
+        pass
+
+    def stop_profile(self):
+        pass
+
+    def get_tokenizer_group(self):
+        pass

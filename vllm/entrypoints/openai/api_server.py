@@ -60,7 +60,7 @@ from vllm.utils import FlexibleArgumentParser, get_open_zmq_ipc_path
 from vllm.version import __version__ as VLLM_VERSION
 
 if envs.VLLM_USE_V1:
-    from vllm.v1.engine.async_llm import AsyncLLM as AsyncLLMEngine
+    from vllm.v1.engine.async_llm import AsyncLLMEngine
 else:
     from vllm.engine.async_llm_engine import AsyncLLMEngine
 
