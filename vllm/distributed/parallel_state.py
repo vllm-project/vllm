@@ -370,6 +370,10 @@ class GroupCoordinator:
             # TPU handles Dynamo with its own logic.
             return self.tpu_communicator.all_reduce(input_)
 
+        if self.hpu_communicator is not None and \
+            not self.hpu_communicator.disabled:
+            return self.hpu_communicator.all_reduce(input_)
+
         if self.ca_comm is not None and \
             not self.ca_comm.disabled and \
                 self.ca_comm.should_custom_ar(input_):
