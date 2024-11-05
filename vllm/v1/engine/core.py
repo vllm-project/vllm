@@ -10,7 +10,7 @@ import zmq
 import zmq.asyncio
 from msgspec import msgpack
 
-from vllm.config import CacheConfig, EngineConfig
+from vllm.config import CacheConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.core.scheduler import Scheduler
@@ -29,7 +29,7 @@ class EngineCore:
 
     def __init__(
         self,
-        vllm_config: EngineConfig,
+        vllm_config: VllmConfig,
         executor_class: Type[GPUExecutor],
         usage_context: UsageContext,
     ):
@@ -152,7 +152,7 @@ class EngineCoreProc(EngineCore):
 
     def __init__(
         self,
-        vllm_config: EngineConfig,
+        vllm_config: VllmConfig,
         executor_class: Type[GPUExecutor],
         usage_context: UsageContext,
         input_path: str,
@@ -235,7 +235,7 @@ class EngineCoreProc(EngineCore):
 
     @staticmethod
     def make_engine_core_process(
-        vllm_config: EngineConfig,
+        vllm_config: VllmConfig,
         executor_class: Type[GPUExecutor],
         usage_context: UsageContext,
         input_path: str,

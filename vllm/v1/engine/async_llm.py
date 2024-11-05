@@ -1,7 +1,7 @@
 import asyncio
 from typing import AsyncGenerator, Dict, List, Mapping, Optional, Type, Union
 
-from vllm.config import EngineConfig, ModelConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.metrics_types import StatLoggerBase
 from vllm.inputs import INPUT_REGISTRY, InputRegistry, PromptType
@@ -27,7 +27,7 @@ class AsyncLLM:
 
     def __init__(
         self,
-        vllm_config: EngineConfig,
+        vllm_config: VllmConfig,
         executor_class: Type[GPUExecutor],
         log_stats: bool,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
@@ -82,7 +82,7 @@ class AsyncLLM:
     def from_engine_args(
         cls,
         engine_args: AsyncEngineArgs,
-        engine_config: Optional[EngineConfig] = None,
+        vllm_config: Optional[VllmConfig] = None,
         start_engine_loop: bool = True,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
@@ -90,10 +90,8 @@ class AsyncLLM:
         """Creates an AsyncLLMEngine from the EngineArgs."""
 
         # Create the engine configs.
-        if engine_config is None:
+        if vllm_config is None:
             vllm_config = engine_args.create_engine_config()
-        else:
-            vllm_config = engine_config
 
         executor_class = cls._get_executor_cls(vllm_config)
 
@@ -116,7 +114,7 @@ class AsyncLLM:
             self.output_handler.cancel()
 
     @classmethod
-    def _get_executor_cls(cls, engine_config: EngineConfig):
+    def _get_executor_cls(cls, vllm_config: VllmConfig):
         return GPUExecutor
 
     def _add_request_to_streams(self, request_id: str) -> AsyncStream:
