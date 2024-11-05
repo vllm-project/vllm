@@ -171,39 +171,44 @@ async def build_async_engine_client_from_engine_args(
         # so we need to spawn a new process
         context = multiprocessing.get_context("spawn")
 
+        # The Process can raise an exception during startup, which may
+        # not actually result in an exitcode being reported. As a result
+        # we use a shared variable to communicate the information.
+        engine_alive = multiprocessing.Value('b', True, lock=False)
         engine_process = context.Process(target=run_mp_engine,
                                          args=(engine_args,
                                                UsageContext.OPENAI_API_SERVER,
-                                               ipc_path))
+                                               ipc_path, engine_alive))
         engine_process.start()
         engine_pid = engine_process.pid
-        assert engine_pid is not None, "Engine process failed to start"
+        assert engine_pid is not None, "Engine process failed to start."
         logger.info("Started engine process with PID %d", engine_pid)
 
         # Build RPCClient, which conforms to EngineClient Protocol.
-        # NOTE: Actually, this is not true yet. We still need to support
-        # embedding models via RPC (see TODO above)
         engine_config = engine_args.create_engine_config()
-        mp_engine_client = MQLLMEngineClient(ipc_path, engine_config,
-                                             engine_pid)
-
+        build_client = partial(MQLLMEngineClient, ipc_path, engine_config,
+                               engine_pid)
+        mq_engine_client = await asyncio.get_running_loop().run_in_executor(
+            None, build_client)
         try:
             while True:
                 try:
-                    await mp_engine_client.setup()
+                    await mq_engine_client.setup()
                     break
                 except TimeoutError:
-                    if not engine_process.is_alive():
+                    if (not engine_process.is_alive()
+                            or not engine_alive.value):
                         raise RuntimeError(
-                            "Engine process failed to start") from None
+                            "Engine process failed to start. See stack "
+                            "trace for the root cause.") from None
 
-            yield mp_engine_client  # type: ignore[misc]
+            yield mq_engine_client  # type: ignore[misc]
         finally:
             # Ensure rpc server process was terminated
             engine_process.terminate()
 
             # Close all open connections to the backend
-            mp_engine_client.close()
+            mq_engine_client.close()
 
             # Wait for engine process to join
             engine_process.join(4)
