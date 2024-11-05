@@ -244,6 +244,10 @@ class InputRegistry:
         if dummy_data.multi_modal_data is not None:
             for k, v in dummy_data.multi_modal_data.items():
                 num_items = len(v) if isinstance(v, list) else 1
+                #fix for molmo 
+                if k == "image" and model_config.hf_config.model_type == "molmo":
+                    if isinstance(v, dict) and "images" in v:
+                        num_items = len(v["images"])
                 num_expected = mm_counts[k]
                 assert num_items >= num_expected, (
                     f"Expected at least {num_expected} dummy '{k}' instances "
