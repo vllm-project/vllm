@@ -47,7 +47,7 @@ from .idefics2_vision_model import (
 # yapf: enable
 from .interfaces import SupportsMultiModal
 from .llama import LlamaModel
-from .utils import AutoWeightsLoader, flatten_bn
+from .utils import AutoWeightsLoader, flatten_bn, merge_multimodal_embeddings
 
 logger = init_logger(__name__)
 
@@ -166,23 +166,24 @@ def _prompt_split_image(image_seq_len: int, image_rows: int, image_cols: int,
     text_split_images = ""
     for n_h in range(image_rows):
         for n_w in range(image_cols):
-            text_split_images += (f"{fake_token_around_image}" +
+            text_split_images += (fake_token_around_image +
                                   f"<row_{n_h + 1}_col_{n_w + 1}>" +
-                                  f"{image_token}" * image_seq_len)
+                                  image_token * image_seq_len)
         text_split_images += "\n"
 
-    text_split_images += (f"\n{fake_token_around_image}" +
-                          f"{global_img_token}" +
-                          f"{image_token}" * image_seq_len +
-                          f"{fake_token_around_image}")
+    text_split_images += "\n" + _prompt_single_image(
+        image_seq_len=image_seq_len,
+        fake_token_around_image=fake_token_around_image,
+        image_token=image_token,
+        global_img_token=global_img_token)
     return text_split_images
 
 
 def _prompt_single_image(image_seq_len: int, fake_token_around_image: str,
                          image_token: str, global_img_token: str):
     """Prompt with expanded image tokens for a single image."""
-    return (f"{fake_token_around_image}" + f"{global_img_token}" +
-            f"{image_token}" * image_seq_len + f"{fake_token_around_image}")
+    return (fake_token_around_image + global_img_token +
+            image_token * image_seq_len + fake_token_around_image)
 
 
 def _get_image_prompt_string(image_rows: int, image_cols: int,
@@ -190,7 +191,7 @@ def _get_image_prompt_string(image_rows: int, image_cols: int,
                              image_token: str, global_img_token: str):
     if image_rows == 0 and image_cols == 0:
         return _prompt_single_image(
-            image_seq_len,
+            image_seq_len=image_seq_len,
             fake_token_around_image=fake_token_around_image,
             image_token=image_token,
             global_img_token=global_img_token,
@@ -523,24 +524,6 @@ class Idefics3Model(nn.Module):
         image_features = self._process_image_pixels(image_input)
         return self.connector(image_features)
 
-    def _merge_multimodal_embeddings(
-        self,
-        input_ids: torch.LongTensor,
-        inputs_embeds: Optional[torch.Tensor],
-        vision_embeddings: Optional[torch.Tensor],
-    ):
-        num_images, _, vision_hidden_size = vision_embeddings.shape
-        special_image_token_mask = input_ids == self.image_token_id
-        new_inputs_embeds = inputs_embeds.clone()
-        reshaped_vision_embeddings = vision_embeddings.view(
-            -1, vision_hidden_size)
-        # cast to the dtype of the input_embeds to support quantized models
-        reshaped_vision_embeddings = reshaped_vision_embeddings.to(
-            inputs_embeds.dtype)
-        new_inputs_embeds[
-            special_image_token_mask] = reshaped_vision_embeddings
-        return new_inputs_embeds
-
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -562,11 +545,9 @@ class Idefics3Model(nn.Module):
                 vision_embeddings = self._process_image_input(image_input)
                 inputs_embeds = self.text_model.get_input_embeddings(input_ids)
 
-                inputs_embeds = self._merge_multimodal_embeddings(
-                    input_ids,
-                    inputs_embeds,
-                    vision_embeddings,
-                )
+                inputs_embeds = merge_multimodal_embeddings(
+                    input_ids, inputs_embeds, vision_embeddings,
+                    self.image_token_id)
             else:
                 inputs_embeds = self.text_model.get_input_embeddings(input_ids)
             input_ids = None
