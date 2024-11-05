@@ -326,8 +326,7 @@ class TP1DraftModelRunner(ModelRunner):
             )
             outputs.append(output)
 
-            if step == 0 and \
-                model_input.attn_metadata.num_prefills == 0 \
+            if model_input.attn_metadata.num_prefills == 0 \
                 and self.indices_of_seq_with_bonus_tokens is not None:
                 assert output.sampled_token_ids is not None
                 # output.sampled_token_ids should be of shape (num_seqs, 1)
