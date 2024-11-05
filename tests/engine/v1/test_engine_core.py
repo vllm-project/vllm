@@ -56,6 +56,7 @@ def make_request() -> EngineCoreRequest:
 def test_request_lifecycle(engine_core):
     """Test request lifecycle."""
 
+    # First request.
     engine_core.add_request(make_request())
     assert len(engine_core.scheduler.waiting) == 1
     assert len(engine_core.scheduler.running) == 0
@@ -64,6 +65,7 @@ def test_request_lifecycle(engine_core):
     assert len(engine_core.scheduler.waiting) == 0
     assert len(engine_core.scheduler.running) == 1
 
+    # Second request.
     engine_core.add_request(make_request())
     assert len(engine_core.scheduler.waiting) == 1
     assert len(engine_core.scheduler.running) == 1
@@ -72,6 +74,17 @@ def test_request_lifecycle(engine_core):
     assert len(engine_core.scheduler.waiting) == 0
     assert len(engine_core.scheduler.running) == 2
 
+    # Add two requests in a row.
+    engine_core.add_request(make_request())
+    engine_core.add_request(make_request())
+    assert len(engine_core.scheduler.waiting) == 2
+    assert len(engine_core.scheduler.running) == 2
+
+    _ = engine_core.step()
+    assert len(engine_core.scheduler.waiting) == 0
+    assert len(engine_core.scheduler.running) == 4
+
+    # Loop through until they are all done.
     while len(engine_core.step()) > 0:
         pass
 
