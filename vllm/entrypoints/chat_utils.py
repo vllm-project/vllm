@@ -213,6 +213,9 @@ def _detect_content_format(
         next(_iter_nodes_define_content_item(jinja_ast))
     except StopIteration:
         return "string"
+    except Exception:
+        logger.exception("Error when parsing AST of Jinja template")
+        return default
     else:
         return "openai"
 
