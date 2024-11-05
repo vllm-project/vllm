@@ -12,6 +12,7 @@ def has_good_tensor_strides(x: torch.Tensor):
     is_transpose = strides[1] == 1 and (strides[0] >= max(1, sizes[1]))
     return is_transpose or is_not_transpose
 
+
 @triton.jit
 def scaled_mm_kernel(a_ptr, b_ptr, scale_a_ptr, scale_b_ptr, c_ptr, bias_ptr,
                      M, N, K, stride_am, stride_ak, stride_bk, stride_bn,
