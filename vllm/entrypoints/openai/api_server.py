@@ -569,7 +569,8 @@ async def run_server(args, **uvicorn_kwargs) -> None:
     # This avoids race conditions with ray.
     # see https://github.com/vllm-project/vllm/issues/8204
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.bind(("", args.port))
+    sock.bind((args.host or "", args.port))
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
     def signal_handler(*_) -> None:
         # Interrupt server on sigterm while initializing
@@ -593,12 +594,13 @@ async def run_server(args, **uvicorn_kwargs) -> None:
             ssl_certfile=args.ssl_certfile,
             ssl_ca_certs=args.ssl_ca_certs,
             ssl_cert_reqs=args.ssl_cert_reqs,
-            fd=sock.fileno(),
             **uvicorn_kwargs,
         )
 
     # NB: Await server shutdown only after the backend context is exited
     await shutdown_task
+
+    sock.close()
 
 
 if __name__ == "__main__":
