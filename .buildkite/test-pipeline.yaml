@@ -321,7 +321,6 @@ steps:
   - tests/models/decoder_only/language
   commands:
     - pytest -v -s models/decoder_only/language/test_models.py
-    - pytest -v -s models/decoder_only/language/test_big_models.py
 
 - label: Decoder-only Language Models Test (Extended) # 1h20min
   nightly: true
@@ -329,7 +328,7 @@ steps:
   - vllm/
   - tests/models/decoder_only/language
   commands:
-    - pytest -v -s models/decoder_only/language --ignore=models/decoder_only/language/test_models.py --ignore=models/decoder_only/language/test_big_models.py
+    - pytest -v -s models/decoder_only/language --ignore=models/decoder_only/language/test_models.py
 
 - label: Decoder-only Multi-Modal Models Test (Standard)
   #mirror_hardwares: [amd]
