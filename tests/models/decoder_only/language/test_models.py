@@ -32,9 +32,12 @@ if not current_platform.is_cpu():
         "openbmb/MiniCPM3-4B",
     ]
 
+# TODO: remove this after CPU float16 support ready
+target_dtype = "float" if current_platform.is_cpu() else "half"
+
 
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype", ["float"])
+@pytest.mark.parametrize("dtype", [target_dtype])
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("num_logprobs", [5])
 def test_models(
@@ -46,8 +49,6 @@ def test_models(
     max_tokens: int,
     num_logprobs: int,
 ) -> None:
-    # To pass the small model tests, we need full precision.
-    assert dtype == "float"
 
     with hf_runner(model, dtype=dtype) as hf_model:
         hf_outputs = hf_model.generate_greedy_logprobs_limit(
