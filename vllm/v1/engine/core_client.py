@@ -49,6 +49,9 @@ class EngineCoreClient:
 
         return InprocClient(*args, **kwargs)
 
+    def shutdown(self):
+        pass
+
     def get_output(self) -> List[EngineCoreOutput]:
         raise NotImplementedError
 
@@ -143,8 +146,7 @@ class MPClient(EngineCoreClient):
             **kwargs,
         )
 
-    def __del__(self):
-
+    def shutdown(self):
         # Send shutdown signal to background process.
         self.should_shutdown = True
 
@@ -155,6 +157,9 @@ class MPClient(EngineCoreClient):
             time.sleep(5)
             if self.proc.is_alive():
                 self.proc.kill()
+
+    def __del__(self):
+        self.shutdown()
 
 
 class SyncMPClient(MPClient):

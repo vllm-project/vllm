@@ -30,6 +30,24 @@ def make_request(params: SamplingParams) -> EngineCoreRequest:
     )
 
 
+def loop_until_done(client, outputs):
+
+    while True:
+        engine_core_outputs = client.get_output()
+
+        if len(engine_core_outputs) == 0:
+            break
+
+        all_finished = True
+        for out in engine_core_outputs:
+            outputs[out.request_id].append(out)
+            if not out.finished:
+                all_finished = False
+
+        if all_finished:
+            break
+
+
 @pytest.mark.parametrize("multiprocessing_mode", [True, False])
 def test_engine_core_client(monkeypatch, multiprocessing_mode: bool):
 
@@ -47,35 +65,46 @@ def test_engine_core_client(monkeypatch, multiprocessing_mode: bool):
             asyncio_mode=False,
         )
 
-        MAX_TOKENS = 10
+        MAX_TOKENS = 20
         params = SamplingParams(max_tokens=MAX_TOKENS)
-
+        """Normal Request Cycle."""
         requests = [make_request(params) for _ in range(10)]
         request_ids = [req.request_id for req in requests]
-        outputs: Dict[str, List] = {req_id: [] for req_id in request_ids}
 
         # Add requests to the engine.
         for request in requests:
             client.add_request(request)
-            time.sleep(0.1)
+            time.sleep(0.01)
 
-        while True:
-            engine_core_outputs = client.get_output()
-
-            if len(engine_core_outputs) == 0:
-                break
-
-            all_finished = True
-            for out in engine_core_outputs:
-                outputs[out.request_id].append(out)
-                if not out.finished:
-                    all_finished = False
-
-            if all_finished:
-                break
+        outputs: Dict[str, List] = {req_id: [] for req_id in request_ids}
+        loop_until_done(client, outputs)
 
         for req_id in request_ids:
             assert len(outputs[req_id]) == MAX_TOKENS, (
                 f"{outputs[req_id]=}, {MAX_TOKENS=}")
+        """Abort Request Cycle."""
 
-        del client
+        # Note: this code pathway will only work for multiprocessing
+        # since we have to call get_output() explicitly
+        if multiprocessing_mode:
+
+            # Add requests to the engine.
+            for idx, request in enumerate(requests):
+                client.add_request(request)
+                time.sleep(0.01)
+                if idx % 2 == 0:
+                    client.abort_requests([request.request_id])
+
+            outputs = {req_id: [] for req_id in request_ids}
+            loop_until_done(client, outputs)
+
+            for idx, req_id in enumerate(request_ids):
+                if idx % 2 == 0:
+                    assert len(outputs[req_id]) < MAX_TOKENS, (
+                        f"{len(outputs[req_id])=}, {MAX_TOKENS=}")
+                else:
+                    assert len(outputs[req_id]) == MAX_TOKENS, (
+                        f"{len(outputs[req_id])=}, {MAX_TOKENS=}")
+
+        # Shutdown the client.
+        client.shutdown()

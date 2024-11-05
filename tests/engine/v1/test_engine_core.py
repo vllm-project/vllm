@@ -1,8 +1,6 @@
-import os
 import time
 import uuid
 
-import pytest
 from transformers import AutoTokenizer
 
 from vllm import SamplingParams
@@ -17,6 +15,7 @@ TOKENIZER = AutoTokenizer.from_pretrained(MODEL_NAME)
 PROMPT = "Hello my name is Robert and I love quanitzation kernels"
 PROMPT_TOKENS = TOKENIZER(PROMPT).input_ids
 
+
 def make_request() -> EngineCoreRequest:
     return EngineCoreRequest(
         request_id=uuid.uuid4(),
@@ -28,23 +27,21 @@ def make_request() -> EngineCoreRequest:
         lora_request=None,
     )
 
+
 def test_engine_core(monkeypatch):
-    
+
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
-
         """Setup the EngineCore."""
         engine_args = EngineArgs(model=MODEL_NAME)
         vllm_config = engine_args.create_engine_config()
         executor_class = AsyncLLM._get_executor_cls(vllm_config)
 
-        engine_core = EngineCore(
-            vllm_config=vllm_config,
-            executor_class=executor_class,
-            usage_context=UsageContext.UNKNOWN_CONTEXT)
-
+        engine_core = EngineCore(vllm_config=vllm_config,
+                                 executor_class=executor_class,
+                                 usage_context=UsageContext.UNKNOWN_CONTEXT)
         """Test basic request lifecycle."""
-        
+
         # First request.
         engine_core.add_request(make_request())
         assert len(engine_core.scheduler.waiting) == 1
@@ -79,7 +76,6 @@ def test_engine_core(monkeypatch):
 
         assert len(engine_core.scheduler.waiting) == 0
         assert len(engine_core.scheduler.running) == 0
-
         """Test abort cycle."""
 
         # Basic abort.
