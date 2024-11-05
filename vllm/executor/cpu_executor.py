@@ -314,6 +314,8 @@ class CPUExecutorAsync(CPUExecutor, ExecutorAsyncBase):
 
 
 def _verify_and_get_model_config(config: ModelConfig) -> ModelConfig:
+    # Reminder: Please update docs/source/serving/compatibility_matrix.rst
+    # If the feature combo become valid
     if not config.enforce_eager:
         logger.warning(
             "CUDA graph is not supported on CPU, fallback to the eager "
