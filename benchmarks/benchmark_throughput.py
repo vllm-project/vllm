@@ -343,8 +343,8 @@ def main(args: argparse.Namespace):
                               for request in requests)
     if is_multi_modal:
         print("\033[91mWARNING\033[0m: Multi-modal request detected. The "
-              "following metrics is not accurate because image tokens are not "
-              "counted. See vllm-project/vllm/issues/9778 for details.")
+              "following metrics are not accurate because image tokens are not"
+              " counted. See vllm-project/vllm/issues/9778 for details.")
         # TODO(vllm-project/vllm/issues/9778): Count molti-modal token length.
     print(f"Throughput: {len(requests) / elapsed_time:.2f} requests/s, "
           f"{total_num_tokens / elapsed_time:.2f} total tokens/s, "
