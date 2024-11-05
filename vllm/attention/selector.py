@@ -181,9 +181,12 @@ def _cached_get_attn_backend(
         raise ValueError("Invalid attention backend.")
 
 
-def which_attn_to_use(head_size: int, dtype: torch.dtype,
-                      kv_cache_dtype: Optional[str], block_size: int,
-                      is_attention_free: bool, use_v1: bool) -> _Backend:
+def which_attn_to_use(head_size: int,
+                      dtype: torch.dtype,
+                      kv_cache_dtype: Optional[str],
+                      block_size: int,
+                      is_attention_free: bool,
+                      use_v1: bool = False) -> _Backend:
     """Returns which flash attention backend to use."""
     # Default case.
     selected_backend = _Backend.FLASH_ATTN
