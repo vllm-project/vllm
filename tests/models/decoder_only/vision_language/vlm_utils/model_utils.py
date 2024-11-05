@@ -259,6 +259,66 @@ def glm_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     return hf_model
 
 
+def h2ovl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
+    """Patches and returns an instance of the HfRunner to use for H2OVL."""
+
+    class H2OVLProcessor:
+        """A simple processor for H2OVL models."""
+
+        def __init__(self, hf_runner: HfRunner):
+            self.num_image_token = hf_runner.model.num_image_token
+            self.tokenizer = hf_runner.tokenizer
+            self.dtype = hf_runner.model.dtype
+
+            self.config = AutoConfig.from_pretrained(hf_runner.model_name,
+                                                     trust_remote_code=True)
+            self.vision_config = self.config.vision_config
+            self.use_thumbnail = self.config.use_thumbnail
+            self.min_num = self.config.min_dynamic_patch
+            self.max_num = self.config.max_dynamic_patch
+            self.image_size = self.vision_config.image_size
+
+        def __call__(self, text: str, images: Union[Image, List[Image]],
+                     **kwargs):
+            # yapf: disable
+            from vllm.model_executor.models.h2ovl import (
+                IMG_CONTEXT, IMG_END, IMG_START, image_to_pixel_values)
+
+            # yapf: enable
+            images = [images] if isinstance(images, Image) else images
+            pixel_values = [
+                image_to_pixel_values(image,
+                                      self.image_size,
+                                      self.min_num,
+                                      self.max_num,
+                                      self.use_thumbnail,
+                                      use_MSAC=self.config.use_msac).to(
+                                          self.dtype) for image in images
+            ]
+            num_patches_list = [
+                pixel_value.shape[0] for pixel_value in pixel_values
+            ]
+            pixel_values = torch.cat(pixel_values, dim=0)
+            for num_patches in num_patches_list:
+                context_tokens = IMG_CONTEXT * self.num_image_token \
+                    * num_patches
+                image_tokens = IMG_START + context_tokens + IMG_END
+                text = text.replace('<image>', image_tokens, 1)
+            prompt = self.tokenizer(text, return_tensors="pt")
+            prompt.update({"pixel_values": pixel_values})
+            return prompt
+
+    img_context_token_id = hf_model.tokenizer.convert_tokens_to_ids(
+        "<IMG_CONTEXT>")
+    hf_model.model.img_context_token_id = img_context_token_id
+    hf_model.processor = H2OVLProcessor(hf_model)
+    hf_model.model.get_output_embeddings = lambda: \
+        hf_model.model.language_model.get_output_embeddings()
+    hf_model.model.generate = types.MethodType(_internvl_generate,
+                                               hf_model.model)
+    return hf_model
+
+
 def internvl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     """Patches and returns an instance of the HfRunner to use for InternVL."""
 

@@ -327,7 +327,8 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
             if model_type.startswith("llava"):
                 return self._cached_token_str(self._tokenizer,
                                               hf_config.image_token_index)
-            if model_type in ("chameleon", "internvl_chat", "NVLM_D"):
+            if model_type in ("chameleon", "internvl_chat", "NVLM_D",
+                              "h2ovl_chat"):
                 return "<image>"
             if model_type == "mllama":
                 return "<|image|>"
@@ -446,7 +447,9 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         self._tracker = tracker
 
     def parse_image(self, image_url: str) -> None:
-        image = get_and_parse_image(image_url)
+        image = get_and_parse_image(image_url,
+                                    allowed_local_media_path=self._tracker.
+                                    _model_config.allowed_local_media_path)
 
         placeholder = self._tracker.add("image", image)
         self._add_placeholder(placeholder)
@@ -466,7 +469,10 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         self._tracker = tracker
 
     def parse_image(self, image_url: str) -> None:
-        image_coro = async_get_and_parse_image(image_url)
+        image_coro = async_get_and_parse_image(
+            image_url,
+            allowed_local_media_path=self._tracker._model_config.
+            allowed_local_media_path)
 
         placeholder = self._tracker.add("image", image_coro)
         self._add_placeholder(placeholder)

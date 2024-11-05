@@ -9,10 +9,11 @@ import torch
 
 import vllm.envs as envs
 from vllm.config import (CacheConfig, ConfigFormat, DecodingConfig,
-                         DeviceConfig, EngineConfig, LoadConfig, LoadFormat,
-                         LoRAConfig, ModelConfig, ObservabilityConfig,
-                         ParallelConfig, PromptAdapterConfig, SchedulerConfig,
-                         SpeculativeConfig, TaskOption, TokenizerPoolConfig)
+                         DeviceConfig, LoadConfig, LoadFormat, LoRAConfig,
+                         ModelConfig, ObservabilityConfig, ParallelConfig,
+                         PromptAdapterConfig, SchedulerConfig,
+                         SpeculativeConfig, TaskOption, TokenizerPoolConfig,
+                         VllmConfig)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
@@ -90,6 +91,7 @@ class EngineArgs:
     skip_tokenizer_init: bool = False
     tokenizer_mode: str = 'auto'
     trust_remote_code: bool = False
+    allowed_local_media_path: str = ""
     download_dir: Optional[str] = None
     load_format: str = 'auto'
     config_format: ConfigFormat = ConfigFormat.AUTO
@@ -259,6 +261,13 @@ class EngineArgs:
         parser.add_argument('--trust-remote-code',
                             action='store_true',
                             help='Trust remote code from huggingface.')
+        parser.add_argument(
+            '--allowed-local-media-path',
+            type=str,
+            help="Allowing API requests to read local images or videos"
+            "from directories specified by the server file system."
+            "This is a security risk."
+            "Should only be enabled in trusted environments")
         parser.add_argument('--download-dir',
                             type=nullable_str,
                             default=EngineArgs.download_dir,
@@ -909,6 +918,7 @@ class EngineArgs:
             tokenizer=cast(str, self.tokenizer),
             tokenizer_mode=self.tokenizer_mode,
             trust_remote_code=self.trust_remote_code,
+            allowed_local_media_path=self.allowed_local_media_path,
             dtype=self.dtype,
             seed=self.seed,
             revision=self.revision,
@@ -945,7 +955,7 @@ class EngineArgs:
             ignore_patterns=self.ignore_patterns,
         )
 
-    def create_engine_config(self) -> EngineConfig:
+    def create_engine_config(self) -> VllmConfig:
         # gguf file needs a specific model loader and doesn't use hf_repo
         if check_gguf_file(self.model):
             self.quantization = self.load_format = "gguf"
@@ -1157,7 +1167,7 @@ class EngineArgs:
             or "all" in detailed_trace_modules,
         )
 
-        return EngineConfig(
+        return VllmConfig(
             model_config=model_config,
             cache_config=cache_config,
             parallel_config=parallel_config,
