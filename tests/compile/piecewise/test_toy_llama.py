@@ -15,6 +15,7 @@ from vllm.compilation.config import CompilationConfig
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.decorators import support_torch_compile
 from vllm.compilation.levels import CompilationLevel
+from vllm.model_executor.utils import set_random_seed
 from vllm.plugins import set_compilation_config
 from vllm.utils import direct_register_custom_op
 
@@ -66,8 +67,10 @@ class LlamaMLP(nn.Module):
             bias=False,
         )
 
-        self.gate_up_projection.weight.data.fill_(0.0)
-        self.down_projection.weight.data.fill_(0.0)
+        self.gate_up_projection.weight.data.uniform_(
+            -1.0 / config.hidden_size**0.5, 1.0 / config.hidden_size**0.5)
+        self.down_projection.weight.data.uniform_(
+            -1.0 / config.hidden_size**0.5, 1.0 / config.hidden_size**0.5)
 
     def forward(self, x):
         x = self.gate_up_projection(x)
@@ -91,8 +94,10 @@ class LlamaAttention(nn.Module):
             out_features=config.hidden_size,
         )
 
-        self.qkv_projection.weight.data.fill_(0.0)
-        self.output_projection.weight.data.fill_(0.0)
+        self.qkv_projection.weight.data.uniform_(
+            -1.0 / config.hidden_size**0.5, 1.0 / config.hidden_size**0.5)
+        self.output_projection.weight.data.uniform_(
+            -1.0 / config.hidden_size**0.5, 1.0 / config.hidden_size**0.5)
 
     def forward(
         self,
@@ -156,7 +161,8 @@ class LlamaModel(nn.Module):
         self.layers = nn.ModuleList(
             [LlamaDecoderLayer(config) for _ in range(config.num_layers)])
 
-        self.embedding_tokens.weight.data.fill_(0.0)
+        self.embedding_tokens.weight.data.uniform_(
+            -1.0 / config.hidden_size**0.5, 1.0 / config.hidden_size**0.5)
 
     def forward(
         self,
@@ -192,22 +198,24 @@ def run_model(llama_config,
             CompilationLevel.NO_COMPILATION)
         set_compilation_config(None)
 
+    set_random_seed(0)
     cls = LlamaModel
     if use_compile:
         cls = support_torch_compile(LlamaModel)
     model = cls(llama_config).eval().cuda()
 
+    set_random_seed(0)
     B = 16  # max batch size
     input_ids = torch.randint(0, llama_config.vocab_size, (B, )).cuda()
     positions = torch.arange(B).cuda()
 
-    with set_compile_context([1, 2]):
+    with set_compile_context([2, 8]):
         model(input_ids, positions)
         model(input_ids[:2], positions[:2])
-        model(input_ids[:1], positions[:1])
+        model(input_ids[:8], positions[:8])
 
-    input_ids[:2].zero_()
-    output = model(input_ids[:2], positions[:2])
+    input_ids.random_(0, llama_config.vocab_size)
+    output = model(input_ids[:8], positions[:8])
 
     # manual cleanup
     del os.environ["VLLM_TORCH_COMPILE_LEVEL"]
@@ -259,7 +267,8 @@ def test_toy_llama():
             run_model(llama_config, use_compile=True, split_attn=True))
 
     for i in range(1, len(outputs)):
-        assert torch.allclose(outputs[0], outputs[i])
+        assert torch.allclose(outputs[0], outputs[i], atol=1e-5), (
+            f"{torch.max(torch.abs(outputs[0] - outputs[i])):.3f}")
 
 
 @torch.inference_mode
@@ -343,4 +352,4 @@ def benchmark():
 
 
 if __name__ == "__main__":
-    benchmark()
+    test_toy_llama()
