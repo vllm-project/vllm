@@ -154,6 +154,8 @@ def test_get_pooling_config_from_args():
     assert minilm_pooling_config.pooling_type == PoolingType.CLS.name
 
 
+@pytest.mark.skipif(current_platform.is_rocm(),
+                    reason="Xformers backend is not supported on ROCm.")
 def test_get_bert_tokenization_sentence_transformer_config():
     bge_model_config = ModelConfig(
         model="BAAI/bge-base-en-v1.5",
