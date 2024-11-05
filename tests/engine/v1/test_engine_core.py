@@ -57,6 +57,15 @@ def test_request_lifecycle(engine_core):
     _ = engine_core.step()
     assert len(engine_core.scheduler.waiting) == 0
     assert len(engine_core.scheduler.running) == 1
+
+    engine_core.add_request(make_request())
+    assert len(engine_core.scheduler.waiting) == 1
+    assert len(engine_core.scheduler.running) == 1
+
+    _ = engine_core.step()
+    assert len(engine_core.scheduler.waiting) == 0
+    assert len(engine_core.scheduler.running) == 2
+
     
     while len(engine_core.step()) > 0:
         pass
