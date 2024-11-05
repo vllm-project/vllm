@@ -56,12 +56,6 @@ def is_ninja_available() -> bool:
     return which("ninja") is not None
 
 
-def remove_prefix(text, prefix):
-    if text.startswith(prefix):
-        return text[len(prefix):]
-    return text
-
-
 class CMakeExtension(Extension):
 
     def __init__(self, name: str, cmake_lists_dir: str = '.', **kwa) -> None:
@@ -198,8 +192,8 @@ class cmake_build_ext(build_ext):
             os.makedirs(self.build_temp)
 
         targets = []
-        target_name = lambda s: remove_prefix(remove_prefix(s, "vllm."),
-                                              "vllm_flash_attn.")
+        target_name = lambda s: s.removeprefix("vllm.").removeprefix(
+            "vllm_flash_attn.")
         # Build all the extensions
         for ext in self.extensions:
             self.configure(ext)
