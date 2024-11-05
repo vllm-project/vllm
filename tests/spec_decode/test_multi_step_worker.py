@@ -483,6 +483,9 @@ def test_multi_step_with_batch_expansion_incorrect_output():
 
 @torch.inference_mode()
 @pytest.mark.parametrize('num_steps', [1, 2, 3, 4])
+# The choice of backends forces the multi_step_worker to choose between
+# the vanilla model_runner and TP1DraftModelRunner and that we can test
+# both code paths.
 @pytest.mark.parametrize('attn_backend',
                          [_Backend.XFORMERS, _Backend.FLASH_ATTN])
 def test_multi_step_correct_kvcache(num_steps, attn_backend):

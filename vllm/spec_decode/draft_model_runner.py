@@ -308,6 +308,8 @@ class TP1DraftModelRunner(ModelRunner):
                         count]
                     if i != bonus_seq_idx:
                         # The following might cause a cpu->gpu sync
+                        # However, the performance impact is negligible as we
+                        # benchmarked on H100.
                         output.sampled_token_ids[
                             i, :] = model_input.input_tokens[bonus_seq_idx]
                     else:
