@@ -96,7 +96,7 @@ elseif (ASIMD_FOUND)
     message(STATUS "ARMv8 architecture detected")
     list(APPEND CXX_COMPILE_FLAGS
         "-mcpu=native"
-        "-march=armv8.6-a"
+        "-mtune=native"
         )
         
 else()
