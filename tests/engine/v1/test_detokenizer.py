@@ -111,10 +111,13 @@ def test_delta_outputs():
                 gen_tokens[request_id].extend(new_tokens)
 
     # Confirmed tracked values matches what we expected.
-    for idx, (ref_gen_str, ref_gen_tokens) in enumerate(
+    for idx, (ref_gen_str, ref_gen_toks) in enumerate(
             zip(GENERATION_STRINGS, GENERATION_TOKENS)):
         gen_str = gen_strings[f"request-{idx}"]
-        gen_tokens = gen_strings[f"request-{idx}"]
+        gen_toks = gen_tokens[f"request-{idx}"]
 
         assert gen_str == ref_gen_str, f"{gen_str=}, {ref_gen_str=}"
-        assert gen_tokens == ref_gen_tokens, f"{gen_tokens=}, {ref_gen_tokens=}"
+        assert gen_toks == ref_gen_toks, f"{gen_toks=}, {ref_gen_toks=}"
+    
+    assert detokenizer.get_num_unfinished_requests() == 0
+    assert not detokenizer.has_unfinished_requests()
