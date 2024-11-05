@@ -15,11 +15,11 @@
 # limitations under the License.
 import copy
 import json
+import math
 from collections import defaultdict
 from functools import lru_cache
 from typing import Callable, DefaultDict, Dict, List, Union
 
-import numpy as np
 import torch
 from lark import Lark
 from outlines import grammars

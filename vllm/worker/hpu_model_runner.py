@@ -27,9 +27,7 @@ from vllm_hpu_extension.profiler import (HabanaHighLevelProfiler,
 
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.attention.backends.hpu_attn import HPUAttentionBackend
-from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, ObservabilityConfig, ParallelConfig,
-                         PromptAdapterConfig, SchedulerConfig, VllmConfig)
+from vllm.config import DeviceConfig, VllmConfig
 from vllm.distributed import broadcast_tensor_dict
 from vllm.distributed.parallel_state import get_world_group
 from vllm.logger import init_logger
@@ -569,8 +567,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
 
         self.sliding_window = (self.model_config.get_sliding_window()
                                if self.model_config is not None else None)
-        self.device_config = (self.device_config
-                              if self.device_config is not None else DeviceConfig())
+        self.device_config = (self.device_config if self.device_config
+                              is not None else DeviceConfig())
         if is_fake_hpu():
             self.device_config.device = torch.device('cpu')
             self.device_config.device_type = 'cpu'
@@ -955,7 +953,6 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                                            dtype=torch.long,
                                            device=self.device)
 
-
         block_indices, block_offsets = precompute_indices_and_offsets(
             self.block_size, slot_mapping, True)
         attn_metadata = self.attn_backend.make_metadata(
@@ -974,7 +971,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             num_prefill_tokens=sum_query_len,
             num_decode_tokens=0,
             slot_mapping=slot_mapping,
-            multi_modal_placeholder_index_maps=None # FIXME(kzawora): mutli-modality will not work here
+            multi_modal_placeholder_index_maps=
+            None  # FIXME(kzawora): mutli-modality will not work here
         )
         multi_modal_kwargs = MultiModalInputs.batch(multi_modal_inputs_list)
 
@@ -1183,8 +1181,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             num_prefill_tokens=0,
             num_decode_tokens=num_decode_tokens,
             slot_mapping=slot_mapping,
-            multi_modal_placeholder_index_maps=None
-        )
+            multi_modal_placeholder_index_maps=None)
         return PrepareDecodeMetadata(input_tokens=input_tokens,
                                      input_positions=input_positions,
                                      attn_metadata=attn_metadata,

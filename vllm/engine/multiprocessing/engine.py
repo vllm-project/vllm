@@ -31,6 +31,7 @@ else:
 
 logger = init_logger(__name__)
 
+POLLING_TIMEOUT_MS = 10000
 HEALTHY_RESPONSE = (pickle.dumps(VLLM_RPC_SUCCESS_STR), )
 
 

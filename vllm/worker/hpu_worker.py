@@ -12,10 +12,7 @@ import torch.distributed
 from vllm_hpu_extension.profiler import HabanaMemoryProfiler, format_bytes
 
 import vllm.envs as envs
-from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, ObservabilityConfig, ParallelConfig,
-                         PromptAdapterConfig, SchedulerConfig,
-                         SpeculativeConfig, VllmConfig)
+from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.logger import init_logger
@@ -27,7 +24,8 @@ from vllm.utils import hpu_backend_string, hpu_device_string, is_fake_hpu
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.hpu_model_runner import HPUModelRunner
 from vllm.worker.model_runner_base import ModelRunnerBase
-from vllm.worker.worker_base import LocalOrDistributedWorkerBase, WorkerBase, WorkerInput
+from vllm.worker.worker_base import (LocalOrDistributedWorkerBase, WorkerBase,
+                                     WorkerInput)
 
 logger = init_logger(__name__)
 
@@ -64,8 +62,7 @@ class HPUWorker(LocalOrDistributedWorkerBase):
             init_cached_hf_modules()
 
         self.model_runner: HPUModelRunner = HPUModelRunner(
-            vllm_config = vllm_config,
-            is_driver_worker=is_driver_worker)
+            vllm_config=vllm_config, is_driver_worker=is_driver_worker)
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
         self.cache_engine: List[HPUCacheEngine]
