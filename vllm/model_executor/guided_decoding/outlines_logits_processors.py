@@ -18,7 +18,7 @@ import json
 import math
 from collections import defaultdict
 from functools import lru_cache
-from typing import Callable, DefaultDict, Dict, List, Union
+from typing import Any, Callable, DefaultDict, Dict, List, Union
 
 import torch
 from lark import Lark
@@ -33,7 +33,7 @@ from transformers import PreTrainedTokenizerBase
 # Unfortunately we cannot use lru_cache as it breaks pickling
 # so we use a simpler implementation
 def _cached(fn):
-    cache = {}
+    cache: Dict[Any, Any] = {}
 
     def cached_fn(*args):
         if args in cache:
