@@ -48,9 +48,10 @@ from vllm.prompt_adapter.worker_manager import (
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
 from vllm.transformers_utils.config import uses_mrope
-from vllm.utils import (DeviceMemoryProfiler, PyObjectCache, async_tensor_h2d,
-                        flatten_2d_lists, is_pin_memory_available,
-                        supports_dynamo, weak_ref_tensor)
+from vllm.utils import (DeviceMemoryProfiler, GiB_bytes, PyObjectCache,
+                        async_tensor_h2d, flatten_2d_lists,
+                        is_pin_memory_available, supports_dynamo,
+                        weak_ref_tensor)
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase, ModelRunnerInputBuilderBase,
     _add_attn_metadata_broadcastable_dict,
@@ -1387,12 +1388,12 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     "unexpected consequences if the model is not static. To "
                     "run the model in eager mode, set 'enforce_eager=True' or "
                     "use '--enforce-eager' in the CLI.")
-        logger.info("CUDA graphs can take additional 1~3 GiB memory per GPU. "
-                    "If you are running out of memory, consider decreasing "
+        logger.info("If you are running out of memory, consider decreasing "
                     "`gpu_memory_utilization` or enforcing eager mode. "
                     "You can also reduce the `max_num_seqs` as needed "
                     "to decrease memory usage.")
         start_time = time.perf_counter()
+        start_free_gpu_memory = torch.cuda.mem_get_info()[0]
 
         # Prepare dummy inputs. These will be reused for all batch sizes.
         max_batch_size = self.max_batchsize_to_capture
@@ -1497,9 +1498,12 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         graph_runner)
 
         end_time = time.perf_counter()
+        end_free_gpu_memory = torch.cuda.mem_get_info()[0]
         elapsed_time = end_time - start_time
+        cuda_graph_size = start_free_gpu_memory - end_free_gpu_memory
         # This usually takes < 10 seconds.
-        logger.info("Graph capturing finished in %.0f secs.", elapsed_time)
+        logger.info("Graph capturing finished in %.0f secs, took %.2f GiB",
+                    elapsed_time, cuda_graph_size / GiB_bytes)
 
     def _update_inputs_to_capture_for_enc_dec_model(self,
                                                     capture_inputs: Dict[str,
