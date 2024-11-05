@@ -61,9 +61,6 @@ from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (AutoWeightsLoader, PPMissingLayer, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers)
 
-is_inference = False
-decode_iteration_id = 0
-layer_id = 0
 
 class LlamaMLP(nn.Module):
 
@@ -208,23 +205,9 @@ class LlamaAttention(nn.Module):
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
     ) -> torch.Tensor:
-
-        global is_inference
-        global decode_iteration_id
-        global layer_id
-
         qkv, _ = self.qkv_proj(hidden_states)
-
-        if is_inference and decode_iteration_id == 36 and layer_id == 0:
-            torch.save(qkv, f'/root/workspace/outputs/rocm/self_attn_qkv_proj_output_{decode_iteration_id}_{layer_id}.pt')
-
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
-
-        if is_inference and decode_iteration_id == 36 and layer_id == 0:
-            torch.save(q, f'/root/workspace/outputs/rocm/self_attn_q_output_{decode_iteration_id}_{layer_id}.pt')
-            torch.save(k, f'/root/workspace/outputs/rocm/self_attn_k_output_{decode_iteration_id}_{layer_id}.pt')
-
         attn_output = self.attn(q,
                                 k,
                                 v,
@@ -232,17 +215,7 @@ class LlamaAttention(nn.Module):
                                 attn_metadata,
                                 fp8_out_scale=self.o_proj.input_scale
                                 if self.attn_fp8_out else None)
-
-        if is_inference and decode_iteration_id == 36 and layer_id == 0:
-            print(f"{attn_metadata=}")
-            torch.save(kv_cache, f'/root/workspace/outputs/rocm/self_attn_kv_cache_{decode_iteration_id}_{layer_id}.pt')
-            torch.save(attn_output, f'/root/workspace/outputs/rocm/self_attn_attn_output_{decode_iteration_id}_{layer_id}.pt')
-
         output, _ = self.o_proj(attn_output)
-
-        if is_inference and decode_iteration_id == 36 and layer_id == 0:
-            torch.save(output, f'/root/workspace/outputs/rocm/self_attn_o_proj_output_{decode_iteration_id}_{layer_id}.pt')
-
         return output
 
 
@@ -317,34 +290,17 @@ class LlamaDecoderLayer(nn.Module):
             hidden_states, residual = self.input_layernorm(
                 hidden_states, residual, scale)
 
-        global is_inference
-        global decode_iteration_id
-        global layer_id
-        if is_inference and decode_iteration_id == 36 and layer_id == 0:
-            torch.save(hidden_states, f'/root/workspace/outputs/rocm/layernorm_hidden_states_output_{decode_iteration_id}_{layer_id}.pt')
-            torch.save(residual, f'/root/workspace/outputs/rocm/layernorm_residual_output_{decode_iteration_id}_{layer_id}.pt')
-
         hidden_states = self.self_attn(positions=positions,
                                        hidden_states=hidden_states,
                                        kv_cache=kv_cache,
                                        attn_metadata=attn_metadata)
 
-        if is_inference and decode_iteration_id == 36 and layer_id == 0:
-            torch.save(hidden_states, f'/root/workspace/outputs/rocm/self_attn_hidden_states_output_{decode_iteration_id}_{layer_id}.pt')
-
         # Fully Connected
         scale = None if not self.use_fp8 else self.mlp.gate_up_proj.input_scale
         hidden_states, residual = self.post_attention_layernorm(
             hidden_states, residual, scale)
-    
-        if is_inference and decode_iteration_id == 36 and layer_id == 0:
-            torch.save(hidden_states, f'/root/workspace/outputs/rocm/post_attention_layernorm_hidden_states_output_{decode_iteration_id}_{layer_id}.pt')
-            torch.save(residual, f'/root/workspace/outputs/rocm/post_attention_layernorm_residual_output_{decode_iteration_id}_{layer_id}.pt')
-
+        
         hidden_states = self.mlp(hidden_states)
-
-        if is_inference and decode_iteration_id == 36 and layer_id == 0:
-            torch.save(hidden_states, f'/root/workspace/outputs/rocm/mlp_hidden_states_output_{decode_iteration_id}_{layer_id}.pt')
 
         return hidden_states, residual
 
@@ -425,12 +381,6 @@ class LlamaModel(nn.Module):
             hidden_states, residual = layer(positions, hidden_states,
                                             kv_caches[i - self.start_layer],
                                             attn_metadata, residual)
-
-            global is_inference
-            global decode_iteration_id
-            if is_inference:
-                torch.save(hidden_states, f'/root/workspace/outputs/rocm/hidden_states_{decode_iteration_id}_{layer_id}.pt')
-                torch.save(residual, f'/root/workspace/outputs/rocm/residual_{decode_iteration_id}_{layer_id}.pt')
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
@@ -642,13 +592,6 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     ) -> Union[torch.Tensor, IntermediateTensors]:
         model_output = self.model(input_ids, positions, kv_caches,
                                   attn_metadata, intermediate_tensors)
-        
-        global is_inference
-        global decode_iteration_id
-        if is_inference:
-            torch.save(model_output, f'/root/workspace/outputs/rocm/model_output_{decode_iteration_id}.pt')
-            decode_iteration_id = decode_iteration_id + 1
-
         return model_output
 
     def compute_logits(
