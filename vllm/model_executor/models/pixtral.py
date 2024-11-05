@@ -19,7 +19,7 @@ from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, ModelConfig, MultiModalConfig
 from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, InputContext,
                          token_inputs)
-from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.activation import get_act_and_mul_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
@@ -802,12 +802,11 @@ class PixtralHFMLP(nn.Module):
                                            bias=False,
                                            quant_config=quant_config,
                                            prefix=f"{prefix}.down_proj")
-        self.act = get_act_fn(config.hidden_act)
+        self.act_and_mul = get_act_and_mul_fn(config.hidden_act)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         gate_up, _ = self.gate_up_proj(x)
-        d = gate_up.shape[-1] // 2
-        x = self.act(gate_up[..., :d]) * gate_up[..., d:]
+        x = self.act_and_mul(gate_up)
         x, _ = self.down_proj(x)
         return x
 
