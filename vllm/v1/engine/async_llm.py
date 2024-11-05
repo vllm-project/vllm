@@ -93,7 +93,7 @@ class AsyncLLM:
         else:
             vllm_config = engine_config
 
-        executor_class = cls._get_executor_cls(engine_config)
+        executor_class = cls._get_executor_cls(vllm_config)
 
         # Create the AsyncLLMEngine.
         return cls(

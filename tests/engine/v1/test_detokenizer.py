@@ -196,10 +196,10 @@ def test_stop_string(include_stop_str_in_output: bool):
         ref_str_inc_stop = ref_gen_str[:stop_str_idx] + stop_str
 
         if include_stop_str_in_output:
-            assert (gen_str == ref_str_inc_stop, 
+            assert (gen_str == ref_str_inc_stop,
                     f"{gen_str=}, {ref_str_inc_stop=}")
         else:
-            assert (gen_str == ref_str_exc_stop, 
+            assert (gen_str == ref_str_exc_stop,
                     f"{gen_str=}, {ref_str_exc_stop=}")
 
     assert detokenizer.get_num_unfinished_requests() == 0
