@@ -745,7 +745,7 @@ void paged_attention_v2_launcher(
 }
 
 #define CALL_V2_LAUNCHER(T, CACHE_T, BLOCK_SIZE, KV_DTYPE, IS_BLOCK_SPARSE,   \
-                          NUM_THREADS, PARTITION_SIZE)                        \
+                         NUM_THREADS, PARTITION_SIZE)                         \
   paged_attention_v2_launcher<T, CACHE_T, BLOCK_SIZE, KV_DTYPE,               \
                               IS_BLOCK_SPARSE>(                               \
       out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache,      \
@@ -754,24 +754,29 @@ void paged_attention_v2_launcher(
       blocksparse_vert_stride, blocksparse_block_size,                        \
       blocksparse_head_sliding_step);
 
-#define CALL_V2_LAUNCHER_W_NUM_THREADS(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, IS_BLOCK_SPARSE) \
-  switch (num_threads) {                                                                        \
-    case 128:                                                                                   \
-      CALL_V2_LAUNCHER(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, IS_BLOCK_SPARSE, 128, 512);     \
-      break;                                                                                    \
-    case 1024:                                                                                  \
-      CALL_V2_LAUNCHER(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, IS_BLOCK_SPARSE, 1024, 1024);   \
-      break;                                                                                    \
-    default:                                                                                    \
-      TORCH_CHECK(false, "Unsupported num threads: ", num_threads);                             \
-      break;                                                                                    \
+#define CALL_V2_LAUNCHER_W_NUM_THREADS(T, CACHE_T, BLOCK_SIZE,           \
+                                       IS_FP8_KV_CACHE, IS_BLOCK_SPARSE) \
+  switch (num_threads) {                                                 \
+    case 128:                                                            \
+      CALL_V2_LAUNCHER(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE,          \
+                       IS_BLOCK_SPARSE, 128, 512);                       \
+      break;                                                             \
+    case 1024:                                                           \
+      CALL_V2_LAUNCHER(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE,          \
+                       IS_BLOCK_SPARSE, 1024, 1024);                     \
+      break;                                                             \
+    default:                                                             \
+      TORCH_CHECK(false, "Unsupported num threads: ", num_threads);      \
+      break;                                                             \
   }
 
-#define CALL_V2_LAUNCHER_SPARSITY(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE)          \
-  if (is_block_sparse) {                                                            \
-    CALL_V2_LAUNCHER_W_NUM_THREADS(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, true);  \
-  } else {                                                                          \
-    CALL_V2_LAUNCHER_W_NUM_THREADS(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, false); \
+#define CALL_V2_LAUNCHER_SPARSITY(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE)  \
+  if (is_block_sparse) {                                                    \
+    CALL_V2_LAUNCHER_W_NUM_THREADS(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, \
+                                   true);                                   \
+  } else {                                                                  \
+    CALL_V2_LAUNCHER_W_NUM_THREADS(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, \
+                                   false);                                  \
   }
 
 // NOTE(woosuk): To reduce the compilation time, we omitted block sizes

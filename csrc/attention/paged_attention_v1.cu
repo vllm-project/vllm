@@ -769,32 +769,38 @@ void paged_attention_v1_launcher(
   }
 }
 
-#define CALL_V1_LAUNCHER(T, CACHE_T, BLOCK_SIZE, KV_DTYPE, IS_BLOCK_SPARSE, NUM_THREADS)  \
-  paged_attention_v1_launcher<T, CACHE_T, BLOCK_SIZE, KV_DTYPE,                           \
-                              IS_BLOCK_SPARSE, NUM_THREADS>(                              \
-      out, query, key_cache, value_cache, num_kv_heads, scale, block_tables,              \
-      seq_lens, max_seq_len, alibi_slopes, k_scale, v_scale, tp_rank,                     \
-      blocksparse_local_blocks, blocksparse_vert_stride,                                  \
+#define CALL_V1_LAUNCHER(T, CACHE_T, BLOCK_SIZE, KV_DTYPE, IS_BLOCK_SPARSE,  \
+                         NUM_THREADS)                                        \
+  paged_attention_v1_launcher<T, CACHE_T, BLOCK_SIZE, KV_DTYPE,              \
+                              IS_BLOCK_SPARSE, NUM_THREADS>(                 \
+      out, query, key_cache, value_cache, num_kv_heads, scale, block_tables, \
+      seq_lens, max_seq_len, alibi_slopes, k_scale, v_scale, tp_rank,        \
+      blocksparse_local_blocks, blocksparse_vert_stride,                     \
       blocksparse_block_size, blocksparse_head_sliding_step);
 
-#define CALL_V1_LAUNCHER_W_NUM_THREADS(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, IS_BLOCK_SPARSE) \
-  switch (num_threads) {                                                                  \
-    case 128:                                                                             \
-      CALL_V1_LAUNCHER(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, IS_BLOCK_SPARSE, 128);    \
-      break;                                                                              \
-    case 1024:                                                                            \
-      CALL_V1_LAUNCHER(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, IS_BLOCK_SPARSE, 1024);   \
-      break;                                                                              \
-    default:                                                                              \
-      TORCH_CHECK(false, "Unsupported num threads: ", num_threads);                       \
-      break;                                                                              \
+#define CALL_V1_LAUNCHER_W_NUM_THREADS(T, CACHE_T, BLOCK_SIZE,           \
+                                       IS_FP8_KV_CACHE, IS_BLOCK_SPARSE) \
+  switch (num_threads) {                                                 \
+    case 128:                                                            \
+      CALL_V1_LAUNCHER(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE,          \
+                       IS_BLOCK_SPARSE, 128);                            \
+      break;                                                             \
+    case 1024:                                                           \
+      CALL_V1_LAUNCHER(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE,          \
+                       IS_BLOCK_SPARSE, 1024);                           \
+      break;                                                             \
+    default:                                                             \
+      TORCH_CHECK(false, "Unsupported num threads: ", num_threads);      \
+      break;                                                             \
   }
 
-#define CALL_V1_LAUNCHER_SPARSITY(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE)          \
-  if (is_block_sparse) {                                                            \
-    CALL_V1_LAUNCHER_W_NUM_THREADS(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, true);  \
-  } else {                                                                          \
-    CALL_V1_LAUNCHER_W_NUM_THREADS(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, false); \
+#define CALL_V1_LAUNCHER_SPARSITY(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE)  \
+  if (is_block_sparse) {                                                    \
+    CALL_V1_LAUNCHER_W_NUM_THREADS(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, \
+                                   true);                                   \
+  } else {                                                                  \
+    CALL_V1_LAUNCHER_W_NUM_THREADS(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, \
+                                   false);                                  \
   }
 
 // NOTE(woosuk): To reduce the compilation time, we omitted block sizes
