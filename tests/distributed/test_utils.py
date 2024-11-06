@@ -55,6 +55,7 @@ def cpu_worker(rank, WORLD_SIZE):
     if rank <= 2:
         dist.all_reduce(data, op=dist.ReduceOp.SUM, group=pg2)
     item = data[0].item()
+    print(f"rank: {rank}, item: {item}")
     if rank == 3:
         assert item == 6
     else:
@@ -77,6 +78,7 @@ def gpu_worker(rank, WORLD_SIZE):
     if rank <= 2:
         dist.all_reduce(data, op=dist.ReduceOp.SUM, group=pg2)
     item = data[0].item()
+    print(f"rank: {rank}, item: {item}")
     if rank == 3:
         assert item == 6
     else:
