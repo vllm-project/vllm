@@ -928,8 +928,8 @@ def input_processor_for_qwen2_vl(
     "video", get_max_qwen2_vl_video_tokens)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_qwen2_vl)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_qwen2_vl)
-class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLoRA,
-                                      SupportsPP):
+class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
+                                      SupportsLoRA, SupportsPP):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
