@@ -100,3 +100,6 @@ def test_stateless_init_process_group(worker):
         p.start()
     for p in processes:
         p.join()
+    for p in processes:
+        assert not p.exitcode
+    print("All processes finished.")
