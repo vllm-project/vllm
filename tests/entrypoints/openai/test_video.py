@@ -1,8 +1,5 @@
 from typing import Dict, List
 
-import numpy as np
-import numpy.typing as npt
-
 import openai
 import pytest
 import pytest_asyncio
@@ -20,6 +17,7 @@ TEST_VIDEO_URLS = [
     "http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerBlazes.mp4",
     "http://commondatastorage.googleapis.com/gtv-videos-bucket/sample/ForBiggerFun.mp4",
 ]
+
 
 @pytest.fixture(scope="module")
 def server():
