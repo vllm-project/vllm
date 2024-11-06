@@ -73,7 +73,7 @@ class Detokenizer:
         return None
 
     def terminate(self) -> None:
-        self.push_socket.send(b"", flags=zmq.NOBLOCK)
+        self.detokenizer.kill()
         self.detokenizer.join()
 
 
@@ -108,10 +108,10 @@ class DetokenizerProc(multiprocessing.Process):
         self.push_socket.bind(f"tcp://*:{self.push_port}")
 
         while True:
+            if self.pull_socket.poll(timeout=1000) == 0:
+                # Nothing to read
+                continue
             message = self.pull_socket.recv()
-            if message == b"":
-                # Terminate signal.
-                break
             inputs = self.msgpack_decoder.decode(message)
 
             for req_id in inputs.free_req_ids:
