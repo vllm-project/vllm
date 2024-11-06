@@ -156,3 +156,29 @@ def test_model_with_failure(vllm_runner) -> None:
                           ModelInputForGPUWithSamplingMetadata)
     finally:
         os.remove(filename)
+
+
+def test_failure_with_async_out_proc(vllm_runner) -> None:
+
+    filename = None
+    try:
+        with vllm_runner("facebook/opt-125m",
+                         dtype="half",
+                         enforce_eager=False,
+                         gpu_memory_utilization=0.7) as vllm_model,\
+             patch("vllm.model_executor.models.opt.OPTForCausalLM.forward",
+                       side_effect=ValueError()):
+            model_config = vllm_model.model.llm_engine.model_config
+            assert model_config.use_async_output_proc
+            with pytest.raises(ValueError) as exc_info:
+                vllm_model.generate_greedy('how to make pizza?', 250)
+            matches = re.search(r"input dumped to (.+).pkl",
+                                str(exc_info.value))
+            assert matches is not None
+
+            filename = f"{matches.group(1)}.pkl"
+    finally:
+        # Clean up
+        if filename is not None:
+            os.remove(filename)
+        pass

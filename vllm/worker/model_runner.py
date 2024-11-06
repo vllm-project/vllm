@@ -136,6 +136,18 @@ class ModelInputForGPU(ModelRunnerInputBase):
                 attn_backend, tensor_dict)
         return cls(**tensor_dict)
 
+    # Exclude `async_callback` to be able to pickle this object
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        del state["async_callback"]
+        return state
+
+    # TODO: What happens when we depickle this object?
+    # How can we update this callback to properly pass it to the engine?
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self.__dict__.update({'async_callback': None})
+
 
 @dataclass(frozen=True)
 class ModelInputForGPUWithSamplingMetadata(ModelInputForGPU):
