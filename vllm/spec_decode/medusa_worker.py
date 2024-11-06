@@ -5,14 +5,29 @@ import torch
 
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.platforms import current_platform
 from vllm.sequence import ExecuteModelRequest, SequenceGroupMetadata
 from vllm.spec_decode.interfaces import SpeculativeProposals
 from vllm.spec_decode.proposer_worker_base import NonLLMProposerWorkerBase
 from vllm.spec_decode.top1_proposer import Top1Proposer
-from vllm.worker.worker import Worker
+
+if current_platform.is_neuron():
+    from vllm.worker.neuron_worker import NeuronWorker as WorkerCls
+elif current_platform.is_hpu():
+    from vllm.worker.hpu_worker import HPUWorker as WorkerCls
+elif current_platform.is_openvino():
+    from vllm.worker.openvino_worker import OpenVINOWorker as WorkerCls
+elif current_platform.is_cpu():
+    from vllm.worker.cpu_worker import CPUWorker as WorkerCls
+elif current_platform.is_tpu():
+    from vllm.worker.tpu_worker import TPUWorker as WorkerCls
+elif current_platform.is_xpu():
+    from vllm.worker.xpu_worker import XPUWorker as WorkerCls
+else:
+    from vllm.worker.worker import Worker as WorkerCls
 
 
-class MedusaWorker(NonLLMProposerWorkerBase, Worker):
+class MedusaWorker(NonLLMProposerWorkerBase, WorkerCls):
     """Worker for Medusa.
     """
 
