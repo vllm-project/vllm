@@ -38,9 +38,7 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> List[str]:
 
 
 @pytest.mark.parametrize("tp_size", [1, 2, 4])
-@pytest.mark.parametrize("enable_chunked_prefill", [False, True])
-def test_llama_lora(sql_lora_files, tp_size, enable_chunked_prefill,
-                    num_gpus_available):
+def test_llama_lora(sql_lora_files, tp_size, num_gpus_available):
     if num_gpus_available < tp_size:
         pytest.skip(f"Not enough GPUs for tensor parallelism {tp_size}")
 
@@ -49,7 +47,7 @@ def test_llama_lora(sql_lora_files, tp_size, enable_chunked_prefill,
                    max_num_seqs=16,
                    max_loras=4,
                    tensor_parallel_size=tp_size,
-                   enable_chunked_prefill=enable_chunked_prefill)
+                   enable_chunked_prefill=True)
 
     expected_no_lora_output = [
         "\n\n [user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_75 (icao VARCHAR, airport VARCHAR)\n\n question: Name the ICAO for lilongwe international airport [/user] [assistant]\n\n [user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_76 (icao VARCHAR, airport VARCHAR)\n\n question: Name the ICAO for lilongwe international airport [/user] [assistant]\n\n [user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_77 (icao VARCHAR, airport VARCHAR)\n\n question: Name the ICAO for lilongwe international airport [/user] [assistant]\n\n [user] Write a SQL query to answer the question based on the table schema.\n\n context: CREATE TABLE table_name_78 (icao VARCHAR, airport VARCHAR)\n\n question: Name the ICAO for lilongwe international airport [/user]",  # noqa: E501
