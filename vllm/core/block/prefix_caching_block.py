@@ -9,6 +9,7 @@ from vllm.core.block.naive_block import (BlockPool, NaiveBlock,
                                          NaiveBlockAllocator)
 from vllm.core.evictor import EvictionPolicy, Evictor, make_evictor
 from vllm.sequence import Sequence
+from vllm.utils import cdiv
 
 PrefixHash = int
 
@@ -183,12 +184,12 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         self,
         prev_block: Optional[Block],
         block_token_ids: List[List[int]],
-        block_hashes: Optional[List[int]] = None,
+        block_hashes: List[Optional[int]],
     ) -> List[Block]:
         blocks = []
-        assert (
-            block_hashes is not None
-        ), "block_hashes must be provided for immutable prefix cache blocks"
+        assert len(block_token_ids) == len(
+            block_hashes
+        ), "block_token_ids and block_hashes must have the same length"
 
         for token_ids, block_hash in zip(block_token_ids, block_hashes):
             prev_block = self.allocate_immutable_block(
@@ -658,48 +659,35 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
             block.block_id = block_id  # Assign block_id
 
-    def get_allocated_cached_blocks(self, block_hashes: List[PrefixHash]) -> List[PrefixHash]:
+    def find_cached_blocks_prefix(
+        self, block_hashes: List[PrefixHash], allocated: bool = False
+    ) -> List[PrefixHash]:
         """
-        Get the list of blocks that are already computed and allocated so that they can
-        be shared by multiple sequences, and no needed to be allocated again.
+        Return the prefix of the block hashes that are already computed and
+        cached.
 
-        INVARIANCE:
-            For a sequence of blocks, it's also guaranteed that if a block is allocated (i.e.
-            block_is_active_computed(block_hash) == True), then the previous block must also be
-            allocated (i.e. block_is_active_computed(prev_block_hash) == True).
-
-            This is because we allocate and free entire sequence of blocks atomically (no partial
-            sequence is allocated or freed). Therefore, because block hash includes the previous
-            block's hash, if a current block is allocated, this means the previous block must also
-            be allocated.
-
-        NOTE: we exclude computed blocks in evictor because they are already freed even if they
-        are cached. They would still have to be allocated by a sequence. If not, consider a
-        scenario with a seqeuence of 3 token blocks, and a block pool of only 2 blocks:
-            [b0, b1, b2], where b0 and b1 are computed but evicted, b2 is not computed.
-            So b0, b1 are the 2 free blocks, in evictor.
-        When deciding how many more blocks need to be allocated for this sequence, it should be
-        all 3 blocks (b0, b1, b2) rather than just 1 block (b2).
+        When `allocated` is True, only return the blocks that are allocated.
         """
-        # Search for the longest prefix in `block_hashes` that are present cached blocks.
-        def block_is_active_computed(block_hash: PrefixHash) -> bool:
+
+        def block_is_cached(block_hash: PrefixHash) -> bool:
             if block_hash not in self._cached_blocks:
                 return False
 
             cached_block_id = self._cached_blocks[block_hash]
-            if cached_block_id in self.evictor:
+            if allocated and cached_block_id in self.evictor:
+                # When we require the block to be allocated even if it's cached,
+                # it must not be in evictor.
                 return False
 
             # We only consider the blocks that are marked as computed.
-            if not self._block_tracker[cached_block_id].computed:
-                return False
-
-            return True
+            return self.block_is_computed(cached_block_id)
 
         from bisect import bisect_left
 
+        # Look for the first block that's not cached, and returns the prefix
+        # , i.e. blocks that are cached.
         idx = bisect_left(
-            block_hashes, True, key=lambda x: not block_is_active_computed(x)
+            block_hashes, True, key=lambda x: not block_is_cached(x)
         )
         return block_hashes[:idx]
 
@@ -736,7 +724,9 @@ class PrefixCachingBlock(Block):
         assert isinstance(allocator, PrefixCachingBlockAllocator), (
             "Currently this class is only tested with "
             "PrefixCachingBlockAllocator. Got instead allocator = {}".format(
-                allocator))
+                allocator
+            )
+        )
         assert_prefix_caching_block_or_none(prev_block)
 
         self._prev_block = prev_block
@@ -879,8 +869,11 @@ class PrefixCachingBlock(Block):
         self._cached_content_hash = content_hash
 
     @staticmethod
-    def hash_block_tokens(is_first_block: bool, prev_block_hash: Optional[int],
-                          cur_block_token_ids: List[int]) -> int:
+    def hash_block_tokens(
+        is_first_block: bool,
+        prev_block_hash: Optional[int],
+        cur_block_token_ids: List[int],
+    ) -> int:
         """Computes a hash value corresponding to the contents of a block and
         the contents of the preceding block(s). The hash value is used for
         prefix caching.
@@ -901,44 +894,163 @@ class PrefixCachingBlock(Block):
         assert (prev_block_hash is None) == is_first_block
         return hash((is_first_block, prev_block_hash, *cur_block_token_ids))
 
-# TODO(rickyx): This is not used anymore. Or it could be used to track 
-# cached blocks for a sequence, so the sequence would be decoupled from the computed
-# block hash calculation.
+
 class ComputedBlocksTracker:
-    """Handles caching of per-sequence computed block ids. 
-        When a sequence appears for the first time, it traverses all of the 
-        blocks and detects the prefix of blocks that is computed. On the
-        subsequent times, it only traverses the new blocks that were added 
-        and updates the already recorded prefix of blocks with the newly 
-        computed blocks.
-
-        To avoid redundant traversals, the algorithm also detects when there
-        is a "gap" in the computed prefix. For example, if we have blocks =
-        [1,2,3,4,5], and we have detected [1,2,3] as the computed prefix, then
-        we won't try to add more computed blocks to [1,2,3] in this sequence
-        iteration, and will add more computed blocks only after the sequence is
-        freed and reused again.
-
-        Note that currently, for a given sequence, we also skip the last 
-        block id for caching purposes, to avoid caching of a full sequence
+    """
+    Tracks the computed blocks for a sequence.
     """
 
-    def __init__(self, allocator):
+    def __init__(
+        self, allocator: BlockAllocator, block_size: int, enable_caching: bool
+    ):
         self._allocator = allocator
-        self._cached_computed_seq_blocks: Dict[int, Tuple[List[int],
-                                                          bool]] = {}
+        self._block_size = block_size
+        self._enable_caching = enable_caching
+        # A map from seq_id to the list of block hashes for the
+        # sequence. This is so that we don't have to recompute the block hashes
+        # for the sequence when we need to check if the sequence is cached.
+        self._full_blocks_hashes: Dict[int, List[int]] = {}
 
-    def add_seq(self, seq_id: int) -> None:
+        # A map from (seq_id, and allocated status) to the number of tokens
+        # that are cached for the sequence.
+        self._num_tokens_computed: Dict[Tuple[int, bool], int] = {}
+
+    def _add_seq(self, seq: Sequence) -> None:
         """Start tracking seq_id
         """
-        assert seq_id not in self._cached_computed_seq_blocks
-        self._cached_computed_seq_blocks[seq_id] = ([], False)
+        if not self._enable_caching:
+            return
+        assert seq.seq_id not in self._full_blocks_hashes
+        self._full_blocks_hashes[seq.seq_id] = []
 
-    def remove_seq(self, seq_id: int) -> None:
+    def remove_seq(self, seq: Sequence) -> None:
         """Stop tracking seq_id
         """
-        assert seq_id in self._cached_computed_seq_blocks
-        del self._cached_computed_seq_blocks[seq_id]
+        if not self._enable_caching:
+            return
+        assert seq.seq_id in self._full_blocks_hashes
+        del self._full_blocks_hashes[seq.seq_id]
+        if (seq.seq_id, True) in self._num_tokens_computed:
+            del self._num_tokens_computed[(seq.seq_id, True)]
+        if (seq.seq_id, False) in self._num_tokens_computed:
+            del self._num_tokens_computed[(seq.seq_id, False)]
+
+    def update_seq(self, seq: Sequence) -> None:
+        if not self._enable_caching:
+            return
+
+        if seq.seq_id not in self._full_blocks_hashes:
+            self._add_seq(seq)
+
+        block_hashes = self._full_blocks_hashes[seq.seq_id]
+        cur_num_blocks_recorded = len(block_hashes)
+        token_ids = seq.get_token_ids()
+        assert len(token_ids) >= cur_num_blocks_recorded * self._block_size, (
+            f"The sequence has {len(token_ids)} tokens, but"
+            f" already recorded {cur_num_blocks_recorded} blocks. "
+            "This should not happen since we assume blocks are "
+            "only added. When the sequence is recomputed, we should have "
+            "removed the info of the old blocks."
+        )
+        # Update the computed block hashes for the sequence
+        num_total_blocks = len(token_ids) // self._block_size
+
+        # We need to know the hash of the previous block to compute the hash of
+        # the current block so that blocks could be uniquely identified across
+        # sequences of prefixes.
+        prev_block_hash = (
+            None if cur_num_blocks_recorded == 0 else block_hashes[-1]
+        )
+        # Only update the computed block hashes for the new blocks
+        for i in range(cur_num_blocks_recorded, num_total_blocks):
+            block_hash = seq.hash_of_block(
+                prev_block_hash=prev_block_hash, cur_block_idx=i
+            )
+            block_hashes.append(block_hash)
+            prev_block_hash = block_hash
+
+    def get_block_hashes(
+        self, seq: Sequence, start_block_idx: int = 0, end_block_idx: int = -1
+    ) -> List[Optional[int]]:
+        """
+        Returns the list of block hashes for the sequence.
+        If the last block is not yet full, its hash is None.
+
+        Args:
+            start_block_idx: The index of the first block to return.
+            end_block_idx: The index of the last block to return.
+
+        Returns:
+            The list of block hashes for the sequence.
+        """
+        num_blocks = cdiv(len(seq.get_token_ids()), self._block_size)
+        if end_block_idx == -1:
+            end_block_idx = num_blocks
+
+        if not self._enable_caching:
+            return [None] * (end_block_idx - start_block_idx)
+
+        # Prefix caching is enabled.
+        if seq.seq_id not in self._full_blocks_hashes:
+            self.update_seq(seq)
+
+        seq_block_hashes = self._full_blocks_hashes[seq.seq_id]
+        num_full_blocks = len(seq_block_hashes)
+        assert num_blocks - num_full_blocks <= 1, (
+            "There should only be at most one block in the end of the "
+            f"sequence that's not yet computed and full. Got {num_blocks} "
+            f"blocks, {num_full_blocks} full blocks."
+        )
+        # Add the None block if the last block is not yet full.
+        seq_block_hashes = seq_block_hashes + [None] * (
+            num_blocks - num_full_blocks
+        )
+        return seq_block_hashes[start_block_idx:end_block_idx]
+
+    def get_num_tokens_computed(self, seq: Sequence, allocated: bool) -> int:
+        """
+        Returns the number of tokens that are computed for the sequence.
+
+        When `allocated` is True, only the blocks that are allocated are
+        returned. (Excluding those blocks that are currently in the evictor.)
+
+        This routine is not O(1) because it needs to search through the
+        list of blocks for the sequence. Caller should cache the result
+        if possible.
+
+        Args:
+            allocated: Whether the returned blocks are allocated.
+
+        Returns:
+            The number of tokens that are computed for the sequence.
+        """
+        if not self._enable_caching:
+            return 0
+
+        if seq.seq_id not in self._full_blocks_hashes:
+            self.update_seq(seq)
+
+        num_computed_tokens_prev = self._num_tokens_computed.get(
+            (seq.seq_id, allocated), None
+        )
+        if num_computed_tokens_prev is not None and seq.is_prefill():
+            # For a sequence that is still in prefill, we don't have to
+            # recompute the number of cached tokens.
+            # This also handles correctly chunked prefill since currently
+            # we mark blocks as computed even if the sequence is still partially
+            # prefilled. So a continuously prefilled sequence should not
+            # see its cached token count change while running.
+            return num_computed_tokens_prev
+
+        block_hashes = self._full_blocks_hashes[seq.seq_id]
+
+        # This is currently O(logN), where N is the number of blocks.
+        num_cached_blocks = len(
+            self._allocator.find_cached_blocks_prefix(block_hashes, allocated)
+        )
+        num_cached_tokens = num_cached_blocks * self._block_size
+        self._num_tokens_computed[(seq.seq_id, allocated)] = num_cached_tokens
+        return num_cached_tokens
 
 
 class LastAccessBlocksTracker:

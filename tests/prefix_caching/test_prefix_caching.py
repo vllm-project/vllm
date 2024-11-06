@@ -18,6 +18,7 @@ MODELS = [
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [5])
 @pytest.mark.parametrize("cached_position", [0, 1])
+@pytest.mark.parametrize("enable_chunked_prefill", [True, False])
 def test_mixed_requests(
     hf_runner,
     vllm_runner,
@@ -27,6 +28,7 @@ def test_mixed_requests(
     dtype: str,
     max_tokens: int,
     cached_position: int,
+    enable_chunked_prefill: bool,
     monkeypatch,
 ) -> None:
     """
@@ -41,9 +43,10 @@ def test_mixed_requests(
 
     cached_prompt = example_prompts[cached_position]
     with vllm_runner(
-            model,
-            dtype=dtype,
-            enable_prefix_caching=True,
+        model,
+        dtype=dtype,
+        enable_prefix_caching=True,
+        enable_chunked_prefill=enable_chunked_prefill,
     ) as vllm_model:
         # Run the first prompt so the cache is populated
         vllm_outputs = vllm_model.generate_greedy([cached_prompt], max_tokens)

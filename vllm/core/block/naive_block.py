@@ -338,6 +338,11 @@ class NaiveBlockAllocator(BlockAllocator):
     def get_allocated_cached_blocks(self, block_hashes: List[int]) -> List[int]:
         return []
 
+    def find_cached_blocks_prefix(
+        self, block_hashes: List[int], allocated: bool = False
+    ) -> List[int]:
+        return []
+
 
 class NaiveBlock(Block):
     """An implementation of the Block class that does not support prefix

@@ -5,7 +5,6 @@ from typing import Tuple
 
 from vllm.core.block.block_table import BlockTable
 from vllm.core.block.cpu_gpu_block_allocator import CpuGpuBlockAllocator
-from vllm.core.block.interfaces import Block
 from vllm.core.block.prefix_caching_block import (ComputedBlocksTracker,
                                                   LastAccessBlocksTracker)
 from vllm.core.block.utils import check_no_caching_or_swa_for_blockmgr_encdec
@@ -101,7 +100,8 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         self.cross_block_tables: Dict[EncoderSeqId, BlockTable] = {}
 
         self._computed_blocks_tracker = ComputedBlocksTracker(
-            self.block_allocator)
+            self.block_allocator, self.block_size, enable_caching
+        )
         self._last_access_blocks_tracker = LastAccessBlocksTracker(
             self.block_allocator)
 
@@ -118,7 +118,26 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         Returns:
             int: The number of new blocks to allocate.
         """
-        num_cached_tokens = seq.get_num_cached_tokens()
+
+        # It's important to exclude the blocks that are currently in the
+        # evictor for cached blocks when calculating the number of new blocks
+        # to allocate.
+        #
+        # This is because the blocks that are in the evictor are not yet
+        # allocated, and so we should not count them towards the number of
+        # blocks we need to allocate.
+        #
+        # consider a scenario with a seqeuence of 3 token blocks, and a block
+        # pool of only 2 blocks: [b0, b1, b2], where b0 and b1 are computed
+        # but evicted, b2 is not computed. So b0, b1 are the 2 free blocks,
+        # in evictor. When deciding how many more blocks need to be allocated for
+        # this sequence, it should be all 3 blocks (b0, b1, b2) rather than
+        # just 1 block (b2).
+        num_cached_tokens = (
+            self._computed_blocks_tracker.get_num_tokens_computed(
+                seq, allocated=True
+            )
+        )
 
         assert (
             num_cached_tokens % self.block_size == 0
@@ -128,24 +147,23 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
 
         return num_required_blocks - num_cached_blocks
 
-    def get_num_computed_tokens(self, seq: Sequence) -> int:
+    def get_num_cached_tokens(self, seq: Sequence, allocated: bool) -> int:
         """
-        Get the number of computed tokens for a sequence.
-
-        NOTE: This only returns tokens in blocks that are BOTH cached and allocated (active).
+        Get the number of cached tokens for a sequence (which might be
+        unscheduled yet).
 
         Args:
-            seq (Sequence): The sequence to get the number of computed tokens for.
+            seq (Sequence): The sequence to get the number of cached tokens for.
+            allocated (bool): Whether the cached tokens should be in blocks that
+                are allocated.
 
         Returns:
-            int: The number of allocated and cached computed tokens.
+            int: The number of cached tokens.
         """
-        seq_blocks = seq.get_block_hashes()
-        cached_seq_blocks = self.block_allocator.get_allocated_cached_blocks(
-            block_hashes=seq_blocks,
-            device=Device.GPU,
+
+        return self._computed_blocks_tracker.get_num_tokens_computed(
+            seq, allocated
         )
-        return len(cached_seq_blocks) * self.block_size
 
     def can_allocate(self,
                      seq_group: SequenceGroup,
@@ -156,6 +174,8 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         check_no_caching_or_swa_for_blockmgr_encdec(self, seq_group)
 
         seq = seq_group.get_seqs(status=SequenceStatus.WAITING)[0]
+        self._computed_blocks_tracker.update_seq(seq)
+
         num_blocks_to_allocate = self._get_num_blocks_to_allocate(
             seq, num_lookahead_slots
         )
@@ -163,6 +183,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         if seq_group.is_encoder_decoder():
             encoder_seq = seq_group.get_encoder_seq()
             assert encoder_seq is not None
+            self._computed_blocks_tracker.update_seq(encoder_seq)
             num_blocks_to_allocate += self._get_num_blocks_to_allocate(
                 encoder_seq, num_lookahead_slots=0
             )
@@ -187,11 +208,18 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
             block_size=self.block_size,
             block_allocator=self.block_allocator,
             max_block_sliding_window=self.max_block_sliding_window,
-            enable_prefix_caching=self.enable_caching,
         )
+        # TODO(rickyx): With chunked prefill, we actually still allocate the
+        # entire sequence of blocks here. It's possible to allocate only the
+        # blocks that are actually being prefilled.
         if seq.get_token_ids():
             # Add blocks to the block table only if the sequence is non empty.
-            block_table.allocate(seq)
+            block_table.allocate(
+                token_ids=seq.get_token_ids(),
+                block_hashes=self._computed_blocks_tracker.get_block_hashes(
+                    seq
+                ),
+            )
 
         return block_table
 
@@ -209,7 +237,6 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         self.block_tables[seq.seq_id] = block_table
 
         # Track seq
-        self._computed_blocks_tracker.add_seq(seq.seq_id)
         self._last_access_blocks_tracker.add_seq(seq.seq_id)
 
         # Assign the block table for each sequence.
@@ -217,7 +244,6 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
             self.block_tables[seq.seq_id] = block_table.fork()
 
             # Track seq
-            self._computed_blocks_tracker.add_seq(seq.seq_id)
             self._last_access_blocks_tracker.add_seq(seq.seq_id)
 
         # Allocate cross-attention block table for encoder sequence
@@ -257,6 +283,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         # The newly appended tokens might create one or more full blocks, which
         # could be reused from the cache.
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
+            self._computed_blocks_tracker.update_seq(seq)
             block_table = self.block_tables[seq.seq_id]
             num_touched_blocks += block_table.get_num_blocks_touched_by_append_slots(
                 token_ids=block_table.get_unseen_token_ids(seq.get_token_ids()),
@@ -278,8 +305,19 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
 
         # Extend the block table for any new decoded tokens, as well as reserve
         # space for lookahead slots.
+        unseen_token_ids = block_table.get_unseen_token_ids(seq.get_token_ids())
+        if len(unseen_token_ids) == 0:
+            block_hashes = []
+        else:
+            block_hashes = self._computed_blocks_tracker.get_block_hashes(
+                seq,
+                start_block_idx=block_table.num_full_slots // self.block_size,
+            )
+
         block_table.append_slots(
-            seq=seq,
+            token_ids=unseen_token_ids,
+            block_hashes=block_hashes,
+            num_computed_slots=seq.data.get_num_computed_tokens(),
             num_lookahead_slots=num_lookahead_slots,
         )
         # Return any new copy-on-writes.
@@ -299,7 +337,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
 
         # Untrack seq
         self._last_access_blocks_tracker.remove_seq(seq_id)
-        self._computed_blocks_tracker.remove_seq(seq_id)
+        self._computed_blocks_tracker.remove_seq(seq)
 
         # Free table/blocks
         self.block_tables[seq_id].free()
@@ -356,10 +394,14 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         computed_seq_block_ids = []
         for seq in seqs:
             all_blocks = self.block_tables[seq.seq_id].physical_block_ids
-            num_cached_token = seq.get_num_cached_tokens()
-            assert num_cached_token % self.block_size == 0
-            num_cached_block = num_cached_token // self.block_size
-            computed_block_ids = all_blocks[:num_cached_block]
+            num_cached_tokens = (
+                self._computed_blocks_tracker.get_num_tokens_computed(
+                    seq, allocated=True
+                )
+            )
+            assert num_cached_tokens % self.block_size == 0
+            num_cached_blocks = num_cached_tokens // self.block_size
+            computed_block_ids = all_blocks[:num_cached_blocks]
             computed_seq_block_ids.append(computed_block_ids)
 
         # NOTE(sang): This assumes seq_block_ids doesn't contain any None.
@@ -374,7 +416,6 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         self.block_tables[child_seq.seq_id] = src_block_table.fork()
 
         # Track child seq
-        self._computed_blocks_tracker.add_seq(child_seq.seq_id)
         self._last_access_blocks_tracker.add_seq(child_seq.seq_id)
 
     def can_swap_in(self, seq_group: SequenceGroup,

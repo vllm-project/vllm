@@ -625,23 +625,40 @@ class Sequence:
     def set_num_prefix_cached_tokens(self, num_prefix_cached_tokens: int):
         self.data.set_num_prefix_cached_tokens(num_prefix_cached_tokens)
 
-    def hash_of_block(self, logical_idx: int) -> int:
-        # TODO This can produce incorrect hash when block size > prompt size
+    def hash_of_block(
+        self, prev_block_hash: Optional[int], cur_block_idx: int
+    ) -> int:
+        """
+        Get the hash of a given block of the sequence.
 
-        # Compute the number of tokens in the sequence
-        # TODO: The current hashing function is O(L^2). We should optimize
-        # this in the future.
-        num_tokens = self.num_hashed_tokens_of_block(logical_idx)
-        hashed_tokens = self.data.get_prefix_token_ids(num_tokens)
-        return hash((hashed_tokens, self.lora_int_id))
+        Args:
+            prev_block_hash: The hash of the previous block.
+            block_idx: The index of the block. It should be a valid block index
+                       of the sequence, i.e. it's a full block.
 
-    def num_hashed_tokens_of_block(self, logical_idx: int):
-        return logical_idx * self.block_size + self.block_size
+        Returns:
+            The hash of the block.
+        """
+        token_ids = self.get_token_ids()
+        assert (cur_block_idx + 1) * self.block_size <= len(token_ids), (
+            f"Invalid block index: {cur_block_idx}. The sequence only has "
+            f"{len(token_ids) // self.block_size} blocks."
+        )
+        block_token_ids = token_ids[
+            cur_block_idx * self.block_size : (cur_block_idx + 1)
+            * self.block_size
+        ]
+        return hash(
+            (
+                prev_block_hash,
+                self.lora_int_id,
+                *block_token_ids,
+            )
+        )
 
     def reset_state_for_recompute(self):
         """Reset the sequence states for recomputation."""
         self.data.reset_state_for_recompute()
-        self._reset_block_hashes()
 
     def append_token_id(self, token_id: int, logprobs: Dict[int,
                                                             Logprob]) -> None:
@@ -688,20 +705,20 @@ class Sequence:
     def get_num_computed_tokens(self) -> int:
         return self.data.get_num_computed_tokens()
 
-    def get_num_new_tokens(self) -> int:
-        """Get the number of new tokens to be computed.
+    # def get_num_new_tokens(self) -> int:
+    #     """Get the number of new tokens to be computed.
 
-        Returns:
-            The new number of tokens to be computed. I.e., 1 for decode, or
-            the remaining prompt size for prefill.
-        """
-        if self.data.stage == SequenceStage.DECODE:
-            return 1
+    #     Returns:
+    #         The new number of tokens to be computed. I.e., 1 for decode, or
+    #         the remaining prompt size for prefill.
+    #     """
+    #     if self.data.stage == SequenceStage.DECODE:
+    #         return 1
 
-        return self.data.get_num_uncomputed_tokens()
+    #     return self.data.get_num_uncomputed_tokens()
 
-    def get_num_cached_tokens(self) -> int:
-        return self.data.get_num_prefix_cached_tokens()
+    # def get_num_cached_tokens(self) -> int:
+    #     return self.data.get_num_prefix_cached_tokens()
 
     def is_prefill(self) -> bool:
         return self.data.stage == SequenceStage.PREFILL

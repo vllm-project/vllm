@@ -131,6 +131,7 @@ def main(args):
                              ] * args.num_prompts
 
     engine_args = EngineArgs.from_cli_args(args)
+    engine_args.enable_chunked_prefill = True
 
     llm = LLM(**dataclasses.asdict(engine_args))
 

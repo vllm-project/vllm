@@ -45,7 +45,6 @@ class BlockTable:
         block_allocator: DeviceAwareBlockAllocator,
         _blocks: Optional[List[Block]] = None,
         max_block_sliding_window: Optional[int] = None,
-        enable_prefix_caching: bool = False,
     ):
         self._block_size = block_size
         self._allocator = block_allocator
@@ -56,51 +55,56 @@ class BlockTable:
         self._max_block_sliding_window = max_block_sliding_window
         self._num_full_slots = self._get_num_token_ids()
 
-        # Whether to enable prefix caching.
-        self._enable_prefix_caching = enable_prefix_caching
+    # @staticmethod
+    # def get_num_required_blocks(token_ids: List[int],
+    #                            block_size: int,
+    #                            num_lookahead_slots: int = 0) -> int:
+    #    """Calculates the minimum number of blocks required to store a given
+    #    sequence of token IDs along with any look-ahead slots that may be
+    #    required (like in multi-step + chunked-prefill).
 
-    @staticmethod
-    def get_num_required_blocks(token_ids: List[int],
-                                block_size: int,
-                                num_lookahead_slots: int = 0) -> int:
-        """Calculates the minimum number of blocks required to store a given
-        sequence of token IDs along with any look-ahead slots that may be
-        required (like in multi-step + chunked-prefill).
+    #    This assumes worst-case scenario, where every block requires a new
+    #    allocation (e.g. ignoring prefix caching).
 
-        This assumes worst-case scenario, where every block requires a new
-        allocation (e.g. ignoring prefix caching).
+    #    Args:
+    #        token_ids (List[int]): The sequence of token IDs to be stored.
+    #        block_size (int): The maximum number of tokens that can be stored in
+    #            a single block.
+    #        num_lookahead_slots (int): look-ahead slots that the sequence may
+    #            require.
 
-        Args:
-            token_ids (List[int]): The sequence of token IDs to be stored.
-            block_size (int): The maximum number of tokens that can be stored in
-                a single block.
-            num_lookahead_slots (int): look-ahead slots that the sequence may
-                require.
+    #    Returns:
+    #        int: The minimum number of blocks required to store the given
+    #            sequence of token IDs along with any required look-ahead slots.
+    #    """
+    #    return cdiv(len(token_ids) + num_lookahead_slots, block_size)
 
-        Returns:
-            int: The minimum number of blocks required to store the given
-                sequence of token IDs along with any required look-ahead slots.
-        """
-        return cdiv(len(token_ids) + num_lookahead_slots, block_size)
-
-    def allocate(self, seq: Sequence, device: Device = Device.GPU) -> None:
-        """Allocates memory blocks for storing the given sequence of token IDs.
+    def allocate(
+        self,
+        token_ids: List[int],
+        block_hashes: List[Optional[int]],
+        device: Device = Device.GPU,
+    ) -> None:
+        """Allocates memory blocks for storing the given sequence.
 
         This method allocates the required number of blocks to store the given
         sequence of token IDs.
 
         Args:
-            seq (Sequence): The sequence to allocate blocks for.
+            token_ids (List[int]): The sequence of token IDs to be stored.
+            block_hashes (List[int]): The list of block hashes for the sequence.
             device (Device, optional): The device on which the blocks should be
                 allocated. Defaults to Device.GPU.
         """
         assert not self._is_allocated
-        if not seq.get_token_ids():
+        if not token_ids:
             return
 
-        blocks = self._allocate_blocks_for_token_ids(seq=seq, device=device)
+        blocks = self._allocate_blocks_for_token_ids(
+            token_ids, block_hashes, device
+        )
         self.update(blocks)
-        self._num_full_slots = len(seq.get_token_ids())
+        self._num_full_slots = len(token_ids)
 
     def update(self, blocks: List[Block]) -> None:
         """Resets the table to the newly provided blocks 
@@ -110,7 +114,9 @@ class BlockTable:
 
     def append_slots(
         self,
-        seq: Sequence,
+        token_ids: List[int],
+        block_hashes: List[Optional[int]],
+        num_computed_slots: Optional[int],
         num_lookahead_slots: int = 0,
     ) -> None:
         """Appends a sequence of token IDs to the existing blocks in the
@@ -138,9 +144,6 @@ class BlockTable:
         assert self._is_allocated, "no blocks have been allocated"
         assert len(self._blocks) > 0
 
-        token_ids = self.get_unseen_token_ids(seq.get_token_ids())
-        num_computed_slots = seq.data.get_num_computed_tokens()
-
         # Drop blocks that are no longer needed due to sliding window
         if self._max_block_sliding_window is not None:
             null_block = self._allocator.allocate_or_get_null_block()
@@ -162,13 +165,15 @@ class BlockTable:
         first_block_idx = self._num_full_slots // self._block_size
         token_blocks = self._chunk_token_blocks_for_append(token_ids)
 
+        if len(token_blocks) != len(block_hashes):
+            breakpoint()
+
+        assert len(token_blocks) == len(
+            block_hashes
+        ), "chunked token_ids and block_hashes must have the same length"
+
         for i, token_block in enumerate(token_blocks):
-            if self._enable_prefix_caching:
-                block_hash: Optional[int] = seq.update_and_get_block_hash(
-                    first_block_idx + i
-                )
-            else:
-                block_hash = None
+            block_hash = block_hashes[i]
             self._blocks.append_token_ids(first_block_idx + i, token_block, block_hash)
 
         self._num_full_slots += len(token_ids)
@@ -223,7 +228,6 @@ class BlockTable:
             block_allocator=self._allocator,
             _blocks=forked_blocks,
             max_block_sliding_window=self._max_block_sliding_window,
-            enable_prefix_caching=self._enable_prefix_caching,
         )
 
     def free(self) -> None:
@@ -274,33 +278,33 @@ class BlockTable:
         return sequence_token_ids[self.num_full_slots:]
 
     def _allocate_blocks_for_token_ids(
-        self, seq: Sequence, device: Device
+        self,
+        token_ids: List[int],
+        block_hashes: List[Optional[int]],
+        device: Device,
     ) -> List[Block]:
         blocks: List[Block] = []
-        block_hashes: List[Optional[int]] = []
         prev_block: Optional[Block] = None
 
         block_token_ids = []
         tail_token_ids = []
-        token_ids = seq.get_token_ids()
-        chunked_block_token_ids = chunk_list(token_ids, self._block_size)
-        for block_idx, cur_token_ids in enumerate(chunked_block_token_ids):
+        chunked_block_token_ids = list(chunk_list(token_ids, self._block_size))
+        assert len(block_hashes) == len(
+            chunked_block_token_ids
+        ), "block_hashes and chunked token_ids must have the same length"
+
+        for cur_token_ids in chunked_block_token_ids:
             if len(cur_token_ids) == self._block_size:
                 block_token_ids.append(cur_token_ids)
-                if self._enable_prefix_caching:
-                    block_hashes.append(seq.update_and_get_block_hash(block_idx))
-                else:
-                    block_hashes.append(None)
             else:
                 tail_token_ids.append(cur_token_ids)
-                block_hashes.append(None)
 
         if block_token_ids:
             blocks.extend(
                 self._allocator.allocate_immutable_blocks(
                     prev_block,
                     block_token_ids=block_token_ids,
-                    block_hashes=block_hashes,
+                    block_hashes=block_hashes[: len(block_token_ids)],
                     device=device,
                 )
             )

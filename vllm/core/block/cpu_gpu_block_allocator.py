@@ -353,6 +353,15 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         self._swap_mapping.clear()
         return list(mapping.items())
 
+    def find_cached_blocks_prefix(
+        self, block_hashes: List[int], allocated: bool
+    ) -> List[int]:
+        # Prefix caching only supported on GPU.
+        device = Device.GPU
+        return self._allocators[device].find_cached_blocks_prefix(
+            block_hashes, allocated
+        )
+
 
 class NullBlock(Block):
     """

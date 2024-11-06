@@ -123,7 +123,7 @@ class BlockAllocator(ABC):
         self,
         prev_block: Optional[Block],
         block_token_ids: List[List[int]],
-        block_hashes: Optional[List[Optional[int]]] = None,
+        block_hashes: List[Optional[int]],
     ) -> List[Block]:
         pass
 
@@ -204,7 +204,9 @@ class BlockAllocator(ABC):
         pass
 
     @abstractmethod
-    def get_allocated_cached_blocks(self, block_hashes: List[int]) -> List[int]:
+    def find_cached_blocks_prefix(
+        self, block_hashes: List[int], allocated: bool
+    ) -> List[int]:
         pass
 
     class NoFreeBlocksError(ValueError):
@@ -306,5 +308,11 @@ class DeviceAwareBlockAllocator(ABC):
     @abstractmethod
     def get_allocated_cached_blocks(
         self, block_hashes: List[int], device: Device
+    ) -> List[int]:
+        pass
+
+    @abstractmethod
+    def find_cached_blocks_prefix(
+        self, block_hashes: List[int], allocated: bool, device: Device
     ) -> List[int]:
         pass
