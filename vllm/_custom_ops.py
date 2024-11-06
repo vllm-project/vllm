@@ -38,9 +38,6 @@ else:
     except ImportError:
         from torch.library import impl_abstract as register_fake
 
-with contextlib.suppress(ImportError):
-    import vllm._custom_C  # noqa: F401
-
 
 def hint_on_error(fn):
 
