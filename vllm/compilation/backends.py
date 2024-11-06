@@ -496,8 +496,11 @@ class PiecewiseBackend:
                 return entry.runnable(*args)
 
             if self.is_first_graph:
-                logger.info("Capturing a cudagraph for shape %s",
-                            runtime_shape)
+                # Since we capture cudagraph for many different shapes and
+                # capturing is fast, we don't need to log it for every shape.
+                # We only log it in the debug mode.
+                logger.debug("Capturing a cudagraph for shape %s",
+                             runtime_shape)
 
             input_addresses = [
                 x.data_ptr() for x in args if isinstance(x, torch.Tensor)
