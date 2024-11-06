@@ -191,8 +191,10 @@ class cmake_build_ext(build_ext):
             os.makedirs(self.build_temp)
 
         targets = []
-        target_name = lambda s: s.removeprefix("vllm.").removeprefix(
-            "vllm_flash_attn.")
+
+        def target_name(s: str) -> str:
+            return s.removeprefix("vllm.").removeprefix("vllm_flash_attn.")
+
         # Build all the extensions
         for ext in self.extensions:
             self.configure(ext)
