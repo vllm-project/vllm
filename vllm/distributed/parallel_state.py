@@ -89,12 +89,11 @@ def _get_unique_name(name: str) -> str:
     return newname
 
 
-_groups: Dict[str, Callable[[], "GroupCoordinator"]] = {}
+_groups: Dict[str, Callable[[], Optional["GroupCoordinator"]]] = {}
 
 
 def _register_group(group: "GroupCoordinator") -> None:
-    # looks like Python 3.8 does not understand `ReferenceType`
-    _groups[group.unique_name] = weakref.ref(group)  # type: ignore
+    _groups[group.unique_name] = weakref.ref(group)
 
 
 if supports_custom_op():

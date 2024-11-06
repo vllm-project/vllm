@@ -66,7 +66,7 @@ If you want to access the wheels for previous commits, you can specify the commi
     $ export VLLM_COMMIT=33f460b17a54acb3b6cc0b03f4a17876cff5eafd # use full commit hash from the main branch
     $ pip install https://vllm-wheels.s3.us-west-2.amazonaws.com/${VLLM_COMMIT}/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl
 
-Note that the wheels are built with Python 3.8 ABI (see `PEP 425 <https://peps.python.org/pep-0425/>`_ for more details about ABI), so **they are compatible with Python 3.8 and later**. The version string in the wheel file name (``1.0.0.dev``) is just a placeholder to have a unified URL for the wheels. The actual versions of wheels are contained in the wheel metadata.
+Note that the wheels are built with Python 3.9 ABI (see `PEP 425 <https://peps.python.org/pep-0425/>`_ for more details about ABI), so **they are compatible with Python 3.9 and later**. The version string in the wheel file name (``1.0.0.dev``) is just a placeholder to have a unified URL for the wheels. The actual versions of wheels are contained in the wheel metadata.
 
 Another way to access the latest code is to use the docker images:
 
