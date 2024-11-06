@@ -29,11 +29,7 @@ class NeuronExecutor(ExecutorBase):
         distributed_init_method = get_distributed_init_method(
             get_ip(), get_open_port())
         self.driver_worker = NeuronWorker(
-            model_config=self.model_config,
-            parallel_config=self.parallel_config,
-            scheduler_config=self.scheduler_config,
-            device_config=self.device_config,
-            cache_config=self.cache_config,
+            vllm_config=self.vllm_config,
             local_rank=0,
             rank=0,
             distributed_init_method=distributed_init_method)

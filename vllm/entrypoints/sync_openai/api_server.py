@@ -17,7 +17,7 @@ from prometheus_client import make_asgi_app
 import vllm
 import vllm.envs as envs
 from vllm import FastSyncLLM as LLM
-from vllm.config import EngineConfig
+from vllm.config import VllmConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.chat_utils import (MultiModalItemTracker,
                                          _parse_chat_message_content,
@@ -53,7 +53,7 @@ class BackgroundRunner:
     def __init__(self):
         self.value = 0
         self.engine_args: EngineArgs
-        self.engine_config: EngineConfig
+        self.engine_config: VllmConfig
         self.input_queue: multiprocessing.Queue = mp.Queue()
         self.result_queue: multiprocessing.Queue = mp.Queue()
         self.result_queues: Dict[str, asyncio.Queue] = {}

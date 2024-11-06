@@ -785,16 +785,16 @@ void paged_attention_v1_launcher(
     case 1024:                                                                            \
       CALL_V1_LAUNCHER(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, IS_BLOCK_SPARSE, 1024);   \
       break;                                                                              \
+    default:                                                                              \
+      TORCH_CHECK(false, "Unsupported num threads: ", num_threads);                       \
+      break;                                                                              \
   }
 
-#define CALL_V1_LAUNCHER_SPARSITY(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE)            \
-  switch (is_block_sparse) {                                                          \
-    case true:                                                                        \
-      CALL_V1_LAUNCHER_W_NUM_THREADS(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, true);  \
-      break;                                                                          \
-    case false:                                                                       \
-      CALL_V1_LAUNCHER_W_NUM_THREADS(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, false); \
-      break;                                                                          \
+#define CALL_V1_LAUNCHER_SPARSITY(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE)          \
+  if (is_block_sparse) {                                                            \
+    CALL_V1_LAUNCHER_W_NUM_THREADS(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, true);  \
+  } else {                                                                          \
+    CALL_V1_LAUNCHER_W_NUM_THREADS(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, false); \
   }
 
 // NOTE(woosuk): To reduce the compilation time, we omitted block sizes

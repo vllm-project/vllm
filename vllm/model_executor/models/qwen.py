@@ -20,10 +20,11 @@ from torchvision.transforms import InterpolationMode
 from transformers import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, LoRAConfig, MultiModalConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
-from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, InputContext,
-                         token_inputs)
+from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
+                         InputContext, token_inputs)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul, get_act_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -549,6 +550,7 @@ class QWenBlock(nn.Module):
         return hidden_states, residual
 
 
+@support_torch_compile
 class QWenModel(nn.Module):
 
     def __init__(
@@ -808,7 +810,7 @@ def dummy_data_for_qwen(
     ctx: InputContext,
     seq_len: int,
     mm_counts: Mapping[str, int],
-) -> Tuple[SequenceData, Optional[Dict]]:
+) -> DummyData:
     """Build dummy data for warming up Qwen models; this will only contain text
     matching the defaults for VLLM unless the model has a visual config.
 
@@ -827,7 +829,7 @@ def dummy_data_for_qwen(
     if not hasattr(hf_config, "visual"):
         seq_data = SequenceData.from_prompt_token_counts((0, seq_len))
         mm_data = None
-        return seq_data, mm_data
+        return DummyData(seq_data, mm_data)
 
     # We have a visual component - use images to warm up
     num_images = mm_counts["image"]
@@ -859,7 +861,7 @@ def dummy_data_for_qwen(
     # the data will get resized and the # of tokens per image is constant
     image = Image.new("RGB", (224, 224), color=0)
     mm_data = {"image": image if num_images == 1 else [image] * num_images}
-    return seq_data, mm_data
+    return DummyData(seq_data, mm_data)
 
 
 class QWenBaseModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
@@ -1048,7 +1050,7 @@ class QWenVL(QWenBaseModel):
 @MULTIMODAL_REGISTRY.register_max_image_tokens(MAX_QWEN_IMG_TOKENS)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_qwen)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_qwen)
-class QWenLMHeadModel(QWenBaseModel):
+class QWenLMHeadModel(QWenBaseModel, SupportsLoRA):
     """
     QWenLMHeadModel is not only applicable to LLM  but also to VL, which is not 
     conducive to the current integration logic of LoRA in vLLM. Therefore, it 

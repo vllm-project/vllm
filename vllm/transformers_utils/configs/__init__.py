@@ -7,6 +7,7 @@ from vllm.transformers_utils.configs.exaone import ExaoneConfig
 # `FalconConfig` class from the official HuggingFace transformers library.
 from vllm.transformers_utils.configs.falcon import RWConfig
 from vllm.transformers_utils.configs.grok1 import Grok1Config
+from vllm.transformers_utils.configs.h2ovl import H2OVLChatConfig
 from vllm.transformers_utils.configs.internvl import InternVLChatConfig
 from vllm.transformers_utils.configs.jais import JAISConfig
 from vllm.transformers_utils.configs.medusa import MedusaConfig
@@ -23,6 +24,7 @@ __all__ = [
     "DbrxConfig",
     "MPTConfig",
     "RWConfig",
+    "H2OVLChatConfig",
     "InternVLChatConfig",
     "JAISConfig",
     "MedusaConfig",

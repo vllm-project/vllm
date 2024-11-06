@@ -19,12 +19,13 @@ from vllm.logger import init_logger
 # yapf: disable
 from vllm.transformers_utils.configs import (ChatGLMConfig, DbrxConfig,
                                              EAGLEConfig, ExaoneConfig,
-                                             Grok1Config, InternVLChatConfig,
-                                             JAISConfig, MedusaConfig,
-                                             MllamaConfig, MLPSpeculatorConfig,
-                                             MPTConfig, NemotronConfig,
-                                             NVLM_D_Config, RWConfig,
-                                             SolarConfig, UltravoxConfig)
+                                             Grok1Config, H2OVLChatConfig,
+                                             InternVLChatConfig, JAISConfig,
+                                             MedusaConfig, MllamaConfig,
+                                             MLPSpeculatorConfig, MPTConfig,
+                                             NemotronConfig, NVLM_D_Config,
+                                             RWConfig, SolarConfig,
+                                             UltravoxConfig)
 # yapf: enable
 from vllm.transformers_utils.utils import check_gguf_file
 
@@ -52,6 +53,7 @@ _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     "medusa": MedusaConfig,
     "eagle": EAGLEConfig,
     "exaone": ExaoneConfig,
+    "h2ovl_chat": H2OVLChatConfig,
     "internvl_chat": InternVLChatConfig,
     "nemotron": NemotronConfig,
     "NVLM_D": NVLM_D_Config,
