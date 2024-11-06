@@ -1604,16 +1604,20 @@ class Scheduler:
 
         # Get the current remaining token budget
         remaining_token_budget = budget.remaining_token_budget()
-        if prefilling_seqs > 1:
-            # If there are multiple sequences that need to share this budget,
-            # calculate a chunk size that shares it evenly
-            chunk_size = int(remaining_token_budget / prefilling_seqs)
-            # Ensure the chunk size is at least the minimum configured by the
-            # user, to limit the number of requests doing prefill
-            chunk_size = max(chunk_size, self.scheduler_config.min_chunk_size)
-            # And cap that at our actual budget so we don't spend tokens we
-            # don't have.
-            chunk_size = min(remaining_token_budget, chunk_size)
+
+        if prefilling_seqs == 0:
+            # Return immediately if there are no sequences that require prefill
+            return remaining_token_budget
+
+        # calculate a chunk size that shares it evenly across sequences that
+        # need to prefill
+        chunk_size = int(remaining_token_budget / prefilling_seqs)
+        # Ensure the chunk size is at least the minimum configured by the
+        # user, to limit the number of requests doing prefill
+        chunk_size = max(chunk_size, self.scheduler_config.min_chunk_size)
+        # And cap that at our actual budget so we don't spend tokens we
+        # don't have.
+        chunk_size = min(remaining_token_budget, chunk_size)
 
         logger.debug("Prefill chunk size: %d", chunk_size)
         return chunk_size
