@@ -157,7 +157,7 @@ class FlashAttentionImpl(AttentionImpl):
 
 
 def unified_flash_attention(
-    out: torch.Tensor,
+    output: torch.Tensor,
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
@@ -202,7 +202,7 @@ def unified_flash_attention(
         v_scale,
     )
 
-    output = flash_attn_varlen_func(
+    attn_output = flash_attn_varlen_func(
         q=query[:num_actual_tokens],
         k=key_cache,
         v=value_cache,
@@ -217,13 +217,13 @@ def unified_flash_attention(
         block_table=attn_metadata.block_table,
         softcap=logits_soft_cap,
     )
-    output = output.view(num_actual_tokens, -1)
+    attn_output = attn_output.view(num_actual_tokens, -1)
     # TODO(woosuk): Optimize this.
-    out[:num_actual_tokens].copy_(output, non_blocking=True)
+    output[:num_actual_tokens].copy_(attn_output)
 
 
 def unified_flash_attention_fake(
-    out: torch.Tensor,
+    output: torch.Tensor,
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
@@ -245,6 +245,6 @@ def unified_flash_attention_fake(
 direct_register_custom_op(
     op_name="unified_flash_attention",
     op_func=unified_flash_attention,
-    mutates_args=["kv_cache", "out"],
+    mutates_args=["kv_cache", "output"],
     fake_impl=unified_flash_attention_fake,
 )

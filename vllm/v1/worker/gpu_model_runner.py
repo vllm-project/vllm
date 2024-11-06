@@ -1,3 +1,4 @@
+import os
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List, Optional, Set
@@ -407,7 +408,7 @@ class GPUModelRunner:
             # FIXME(woosuk): Currently, the custom ops are not supported
             # in the piecewise compilation mode. We rely on TorchInductor
             # to optimize the model.
-            envs.VLLM_CUSTOM_OPS = "none"
+            os.environ["VLLM_CUSTOM_OPS"] = "none"
             set_compilation_config(
                 CompilationConfig(
                     use_cudagraph=True,
@@ -451,7 +452,7 @@ class GPUModelRunner:
 
     @torch.inference_mode()
     def capture_model(self) -> None:
-        if self.use_cuda_graph:
+        if not self.use_cuda_graph:
             logger.warning(
                 "Skipping CUDA graph capture. Please set "
                 "VLLM_TORCH_COMPILE_LEVEL=%d to use CUDA graphs.",
