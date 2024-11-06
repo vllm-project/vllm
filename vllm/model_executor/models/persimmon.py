@@ -60,7 +60,7 @@ class PersimmonMLP(nn.Module):
         self.dense_4h_to_h = RowParallelLinear(config.intermediate_size,
                                                config.hidden_size,
                                                quant_config=quant_config)
-        self.act = get_act_fn(config.hidden_act, quant_config)
+        self.act = get_act_fn(config.hidden_act)
 
     def forward(self, hidden_states) -> torch.Tensor:
         hidden_states, _ = self.dense_h_to_4h(hidden_states)
