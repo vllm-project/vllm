@@ -77,9 +77,6 @@ class AWQConfig(QuantizationConfig):
             return AWQLinearMethod(self)
         return None
 
-    def get_scaled_act_names(self) -> List[str]:
-        return ["gelu", "gelu_fast", "gelu_new", "gelu_pytorch_tanh"]
-
 
 def is_layer_skipped_awq(prefix: str, modules_to_not_convert: List[str]):
     return any(module_name in prefix for module_name in modules_to_not_convert)

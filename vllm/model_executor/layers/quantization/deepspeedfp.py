@@ -50,9 +50,6 @@ class DeepSpeedFPConfig(QuantizationConfig):
     def get_linear_method(self) -> "DeepSpeedFPLinearMethod":
         return DeepSpeedFPLinearMethod(self)
 
-    def get_scaled_act_names(self) -> List[str]:
-        return []
-
     @classmethod
     def get_supported_act_dtypes(cls) -> List[torch.dtype]:
         return [torch.half, torch.bfloat16]

@@ -80,9 +80,6 @@ class GPTQConfig(QuantizationConfig):
             return GPTQLinearMethod(self)
         return None
 
-    def get_scaled_act_names(self) -> List[str]:
-        return []
-
 
 class ExllamaState(Enum):
 

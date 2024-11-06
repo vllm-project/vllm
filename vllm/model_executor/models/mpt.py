@@ -153,7 +153,7 @@ class MPTMLP(nn.Module):
             bias=not config.no_bias,
             quant_config=quant_config,
         )
-        self.act = get_act_fn("gelu", quant_config, intermediate_size)
+        self.act = get_act_fn("gelu")
         self.down_proj = RowParallelLinear(
             intermediate_size,
             hidden_size,

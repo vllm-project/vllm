@@ -93,12 +93,6 @@ class IPEXConfig(QuantizationConfig):
             return self.quant_method(self)
         return None
 
-    def get_scaled_act_names(self) -> List[str]:
-        if self.method == "awq":
-            return ["gelu", "gelu_fast", "gelu_new", "gelu_pytorch_tanh"]
-        else:
-            return []
-
 
 class IPEXAWQLinearMethod(AWQLinearMethod):
     """AWQ linear method using IPEX for the CPU backend.

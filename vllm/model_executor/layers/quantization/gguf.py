@@ -48,9 +48,6 @@ class GGUFConfig(QuantizationConfig):
             return GGUFEmbeddingMethod(self)
         return None
 
-    def get_scaled_act_names(self) -> List[str]:
-        return []
-
 
 def _fuse_mul_mat(x: torch.Tensor, qweight: torch.Tensor,
                   qweight_type: int) -> torch.Tensor:

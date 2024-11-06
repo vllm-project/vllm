@@ -92,9 +92,6 @@ class Fp8Config(QuantizationConfig):
             return Fp8KVCacheMethod(self)
         return None
 
-    def get_scaled_act_names(self) -> List[str]:
-        return []
-
 
 class Fp8LinearMethod(LinearMethodBase):
     """Linear method for FP8.
