@@ -110,7 +110,10 @@ class BlockAllocator(ABC):
     @abstractmethod
     def allocate_immutable_blocks(
             self, prev_block: Optional[Block],
-            block_token_ids: List[List[int]]) -> List[Block]:
+            block_token_ids: List[List[int]],
+            allow_swap: Optional[bool] = False,
+            dual_allocator: Optional['BlockAllocator'] = None,
+            swap_mapping: Optional[Dict[int, int]] = None,) -> List[Block]:
         pass
 
     @abstractmethod
@@ -189,6 +192,20 @@ class BlockAllocator(ABC):
         """Prefix cache hit rate. -1 means not supported or disabled."""
         pass
 
+    @abstractmethod
+    def get_block_ref_count(self, block: Block) -> int:
+        '''Get reference count of block.'''
+        pass
+
+    @abstractmethod
+    def get_block_last_access_time(self, block: Block) -> float:
+        '''Get last access time of block.'''
+        pass
+
+    @abstractmethod
+    def is_block_cached(self, block: Block) -> bool:
+        pass
+
     class NoFreeBlocksError(ValueError):
         pass
 
@@ -260,6 +277,11 @@ class DeviceAwareBlockAllocator(ABC):
     @abstractmethod
     def get_num_full_blocks_touched(self, blocks: List[Block],
                                     device: Device) -> int:
+        pass
+
+    @abstractmethod
+    def get_and_reset_swaps(
+            self) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int]]]:
         pass
 
     @abstractmethod

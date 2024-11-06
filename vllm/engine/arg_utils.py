@@ -115,6 +115,7 @@ class EngineArgs:
     # smaller sizes still work, but very inefficiently
     block_size: int = 16 if not current_platform.is_hpu() else 128
     enable_prefix_caching: bool = False
+    enable_host_memory_caching: bool = False
     disable_sliding_window: bool = False
     use_v2_block_manager: bool = True
     swap_space: float = 4  # GiB
@@ -415,6 +416,9 @@ class EngineArgs:
         parser.add_argument('--enable-prefix-caching',
                             action='store_true',
                             help='Enables automatic prefix caching.')
+        parser.add_argument('--enable-host-memory-caching',
+                            action='store_true',
+                            help='Enables host memory for prefix kv caching.')
         parser.add_argument('--disable-sliding-window',
                             action='store_true',
                             help='Disables sliding window, '
@@ -1031,6 +1035,7 @@ class EngineArgs:
             num_gpu_blocks_override=self.num_gpu_blocks_override,
             sliding_window=model_config.get_sliding_window(),
             enable_prefix_caching=self.enable_prefix_caching,
+            enable_host_memory_caching=self.enable_host_memory_caching,
             cpu_offload_gb=self.cpu_offload_gb,
         )
         parallel_config = ParallelConfig(

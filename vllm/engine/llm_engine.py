@@ -261,6 +261,7 @@ class LLMEngine:
             "seed=%d, served_model_name=%s, "
             "num_scheduler_steps=%d, chunked_prefill_enabled=%s "
             "multi_step_stream_outputs=%s, enable_prefix_caching=%s, "
+            "enable_host_memory_caching=%s, "
             "use_async_output_proc=%s, use_cached_outputs=%s, "
             "chat_template_text_format=%s, mm_processor_kwargs=%s, "
             "pooler_config=%r)",
@@ -294,6 +295,7 @@ class LLMEngine:
             scheduler_config.chunked_prefill_enabled,
             scheduler_config.multi_step_stream_outputs,
             cache_config.enable_prefix_caching,
+            cache_config.enable_host_memory_caching,
             model_config.use_async_output_proc,
             use_cached_outputs,
             model_config.chat_template_text_format,
@@ -380,6 +382,8 @@ class LLMEngine:
                     bool(prompt_adapter_config),
                     "enable_prefix_caching":
                     cache_config.enable_prefix_caching,
+                    "enable_host_memory_caching":
+                    cache_config.enable_host_memory_caching,
                     "enforce_eager":
                     model_config.enforce_eager,
                     "disable_custom_all_reduce":

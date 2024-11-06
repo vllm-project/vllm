@@ -1,5 +1,5 @@
 from collections import deque
-from typing import Deque, FrozenSet, Iterable, List, Optional, Tuple
+from typing import Deque, FrozenSet, Iterable, List, Optional, Tuple, Dict
 
 from vllm.core.block.common import (BlockPool, CopyOnWriteTracker, RefCounter,
                                     get_all_blocks_recursively)
@@ -85,6 +85,9 @@ class NaiveBlockAllocator(BlockAllocator):
             self,
             prev_block: Optional[Block],
             block_token_ids: List[List[int]],
+            allow_swap: Optional[bool] = False,
+            dual_allocator: Optional[BlockAllocator] = None,
+            swap_mapping: Optional[Dict[int, int]] = None,
             device: Optional[Device] = None) -> List[Block]:
         assert device is None
         num_blocks = len(block_token_ids)
@@ -328,6 +331,17 @@ class NaiveBlockAllocator(BlockAllocator):
 
     def get_prefix_cache_hit_rate(self) -> float:
         return -1
+
+    def get_block_ref_count(self, block: Block) -> int:
+        block_id = block.block_id
+        assert block_id is not None
+        return self._refcounter.get(block_id)
+
+    def get_block_last_access_time(self, block: Block) -> float:
+        return -1
+
+    def is_block_cached(self, block: Block) -> bool:
+        return False
 
 
 class NaiveBlock(Block):

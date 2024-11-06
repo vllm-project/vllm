@@ -1,4 +1,5 @@
 """Token blocks."""
+import time
 from os.path import commonprefix
 from typing import Dict, FrozenSet, Iterable, List, Optional, Set, Tuple
 
@@ -176,6 +177,9 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             self,
             prev_block: Optional[Block],
             block_token_ids: List[List[int]],
+            allow_swap: Optional[bool] = False,
+            dual_allocator: Optional[BlockAllocator] = None,
+            swap_mapping: Optional[Dict[int, int]] = None,
             device: Optional[Device] = None) -> List[Block]:
         blocks = []
         for token_ids in block_token_ids:
@@ -183,6 +187,28 @@ class PrefixCachingBlockAllocator(BlockAllocator):
                                                        token_ids=token_ids,
                                                        device=device)
             blocks.append(prev_block)
+
+        if allow_swap:
+            assert dual_allocator is not None and swap_mapping is not None
+            for block in blocks:
+                assert block.content_hash is not None
+                block_id = block.block_id
+                assert block_id is not None
+                # Check uncomputed blocks
+                if not self.block_is_computed(block_id) and \
+                        dual_allocator.is_block_cached(block):
+                    block.computed = True
+                    self._block_tracker[block_id].computed = True
+                    dual_block = dual_allocator.allocate_immutable_block(
+                        block.prev_block, block.token_ids)
+                    dual_block_id = dual_block.block_id
+                    assert dual_block_id is not None
+                    swap_mapping[dual_block_id] = block_id
+                    dual_allocator.free(dual_block)
+            # Update last access time of dual blocks
+            if len(swap_mapping) != 0:
+                dual_allocator.mark_blocks_as_accessed(
+                    list(swap_mapping.keys()), time.time())
         return blocks
 
     def allocate_mutable_block(self,
@@ -413,6 +439,16 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
     def get_prefix_cache_hit_rate(self) -> float:
         return self.metric_data.get_hit_rate()
+
+    def get_block_ref_count(self, block: Block) -> int:
+        block_id = block.block_id
+        assert block_id is not None
+        return self._refcounter.get(block_id)
+
+    def get_block_last_access_time(self, block: Block) -> float:
+        block_id = block.block_id
+        assert block_id is not None
+        return self._block_tracker[block_id].last_accessed
 
     def is_block_cached(self, block: Block) -> bool:
         assert block.content_hash is not None
