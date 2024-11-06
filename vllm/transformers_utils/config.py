@@ -377,15 +377,15 @@ def get_sentence_transformer_tokenizer_config(model: str,
             "sentence_xlm-roberta_config.json",
             "sentence_xlnet_config.json",
     ]:
-        bert_dict = get_hf_file_to_dict(config_name, model, revision, token)
-        if bert_dict:
+        encoder_dict = get_hf_file_to_dict(config_name, model, revision, token)
+        if encoder_dict:
             break
 
-    if not bert_dict:
+    if not encoder_dict:
         return None
 
-    if all(k in bert_dict for k in ("max_seq_length", "do_lower_case")):
-        return bert_dict
+    if all(k in encoder_dict for k in ("max_seq_length", "do_lower_case")):
+        return encoder_dict
     return None
 
 

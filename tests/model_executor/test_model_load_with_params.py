@@ -29,8 +29,8 @@ def test_model_loading_with_params(vllm_runner):
         model_tokenizer = model.model.llm_engine.tokenizer
 
         # asserts on the bert model config file
-        assert model_config.bert_config["max_seq_length"] == 512
-        assert model_config.bert_config["do_lower_case"]
+        assert model_config.encoder_config["max_seq_length"] == 512
+        assert model_config.encoder_config["do_lower_case"]
 
         # asserts on the pooling config files
         assert model_config.pooler_config.pooling_type == PoolingType.CLS.name

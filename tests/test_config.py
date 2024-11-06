@@ -168,7 +168,7 @@ def test_get_bert_tokenization_sentence_transformer_config():
         revision=None,
     )
 
-    bert_bge_model_config = bge_model_config._get_bert_config()
+    bert_bge_model_config = bge_model_config._get_encoder_config()
 
     assert bert_bge_model_config["max_seq_length"] == 512
     assert bert_bge_model_config["do_lower_case"]

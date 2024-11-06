@@ -197,7 +197,7 @@ class ModelConfig:
                                     code_revision, rope_scaling, rope_theta,
                                     config_format)
         self.hf_text_config = get_hf_text_config(self.hf_config)
-        self.bert_config = self._get_bert_config()
+        self.encoder_config = self._get_encoder_config()
         self.hf_image_processor_config = get_hf_image_processor_config(
             self.model, revision)
         self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
@@ -231,7 +231,7 @@ class ModelConfig:
             disable_sliding_window=self.disable_sliding_window,
             sliding_window_len=self.get_hf_config_sliding_window(),
             spec_target_max_model_len=spec_target_max_model_len,
-            bert_config=self.bert_config)
+            encoder_config=self.encoder_config)
         self.served_model_name = get_served_model_name(model,
                                                        served_model_name)
         self.multimodal_config = self._init_multimodal_config(
@@ -275,7 +275,7 @@ class ModelConfig:
 
         return None
 
-    def _get_bert_config(self):
+    def _get_encoder_config(self):
         return get_sentence_transformer_tokenizer_config(
             self.model, self.revision)
 
@@ -1808,7 +1808,7 @@ def _get_and_verify_max_len(
     disable_sliding_window: bool,
     sliding_window_len: Optional[Union[int, List[Optional[int]]]],
     spec_target_max_model_len: Optional[int] = None,
-    bert_config: Optional[Any] = None,
+    encoder_config: Optional[Any] = None,
 ) -> int:
     """Get and verify the model's maximum length."""
     derived_max_model_len = float("inf")
@@ -1891,8 +1891,8 @@ def _get_and_verify_max_len(
                     "original_max_position_embeddings"]
             derived_max_model_len *= scaling_factor
 
-    if bert_config and "max_seq_length" in bert_config:
-        derived_max_model_len = bert_config["max_seq_length"]
+    if encoder_config and "max_seq_length" in encoder_config:
+        derived_max_model_len = encoder_config["max_seq_length"]
 
     # If the user specified a max length, make sure it is smaller than the
     # derived length from the HF model config.
