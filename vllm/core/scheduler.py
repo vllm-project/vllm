@@ -1675,9 +1675,8 @@ class Scheduler:
                 # Set chunk size to the next lowest multiple of block size
                 # so we don't exceed our budget
                 chunk_size = (chunk_size // block_size) * block_size
-                # Pad num_mew_tokens to the next block size
-                if remainder := num_new_tokens % block_size > 0:
-                    num_new_tokens += (block_size - remainder)
+                # NB: In the case where num_new_tokens < chunk_size, this does
+                # not allocate a multiple of `block_size` tokens.
 
             num_new_tokens = min(num_new_tokens, chunk_size)
         return num_new_tokens
