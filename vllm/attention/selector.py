@@ -23,6 +23,7 @@ class _Backend(enum.Enum):
     TORCH_SDPA = enum.auto()
     OPENVINO = enum.auto()
     FLASHINFER = enum.auto()
+    HPU_ATTN = enum.auto()
     PALLAS = enum.auto()
     IPEX = enum.auto()
     NO_ATTENTION = enum.auto()
@@ -98,7 +99,6 @@ def get_attn_backend(
     is_blocksparse: bool = False,
 ) -> Type[AttentionBackend]:
     """Selects which attention backend to use and lazily imports it."""
-
     if is_blocksparse:
         logger.info("Using BlocksparseFlashAttention backend.")
         from vllm.attention.backends.blocksparse_attn import (
@@ -108,6 +108,7 @@ def get_attn_backend(
     backend = which_attn_to_use(head_size, dtype, kv_cache_dtype, block_size,
                                 is_attention_free)
     if backend == _Backend.FLASH_ATTN:
+        logger.info("Using Flash Attention backend.")
         from vllm.attention.backends.flash_attn import (  # noqa: F401
             FlashAttentionBackend)
         return FlashAttentionBackend
@@ -145,6 +146,10 @@ def get_attn_backend(
         logger.info("Using Flashinfer backend.")
         from vllm.attention.backends.flashinfer import FlashInferBackend
         return FlashInferBackend
+    elif backend == _Backend.HPU_ATTN:
+        logger.info("Using HPUAttention backend.")
+        from vllm.attention.backends.hpu_attn import HPUAttentionBackend
+        return HPUAttentionBackend
     elif backend == _Backend.PALLAS:
         logger.info("Using Pallas backend.")
         from vllm.attention.backends.pallas import PallasAttentionBackend
@@ -219,6 +224,9 @@ def which_attn_to_use(
         else:
             logger.info("%s is not supported in AMD GPUs.", selected_backend)
         return _Backend.ROCM_FLASH
+
+    if current_platform.is_hpu():
+        return _Backend.HPU_ATTN
 
     if envs.VLLM_USE_V1:
         return _Backend.FLASH_ATTN_VLLM_V1

@@ -1,4 +1,3 @@
-# coding=utf-8
 # Adapted from
 # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/qwen2_moe/modeling_qwen2_moe.py
 # Copyright 2024 The Qwen team.
@@ -30,6 +29,7 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig
 from vllm.distributed import (get_pp_group,
                               get_tensor_model_parallel_world_size,
@@ -312,6 +312,7 @@ class Qwen2MoeDecoderLayer(nn.Module):
         return hidden_states, residual
 
 
+@support_torch_compile
 class Qwen2MoeModel(nn.Module):
 
     def __init__(

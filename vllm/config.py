@@ -1,6 +1,6 @@
 import enum
 import json
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field
 from typing import (TYPE_CHECKING, Any, ClassVar, Dict, Final, List, Literal,
                     Mapping, Optional, Set, Tuple, Type, Union)
 
@@ -24,9 +24,13 @@ if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
 
     from vllm.executor.executor_base import ExecutorBase
+    from vllm.model_executor.layers.quantization.base_config import (
+        QuantizationConfig)
     from vllm.model_executor.model_loader.loader import BaseModelLoader
     from vllm.transformers_utils.tokenizer_group.base_tokenizer_group import (
         BaseTokenizerGroup)
+else:
+    QuantizationConfig = None
 
 logger = init_logger(__name__)
 
@@ -56,6 +60,10 @@ class ModelConfig:
             "mistral" will always use the tokenizer from `mistral_common`.
         trust_remote_code: Trust remote code (e.g., from HuggingFace) when
             downloading the model and tokenizer.
+        allowed_local_media_path: Allowing API requests to read local images or
+            videos from directories specified by the server file system.
+            This is a security risk. Should only be enabled in trusted
+            environments.
         dtype: Data type for model weights and activations. The "auto" option
             will use FP16 precision for FP32 and FP16 models, and BF16 precision
             for BF16 models.
@@ -135,6 +143,7 @@ class ModelConfig:
             trust_remote_code: bool,
             dtype: Union[str, torch.dtype],
             seed: int,
+            allowed_local_media_path: str = "",
             revision: Optional[str] = None,
             code_revision: Optional[str] = None,
             rope_scaling: Optional[dict] = None,
@@ -165,6 +174,7 @@ class ModelConfig:
         self.tokenizer = tokenizer
         self.tokenizer_mode = tokenizer_mode
         self.trust_remote_code = trust_remote_code
+        self.allowed_local_media_path = allowed_local_media_path
         self.seed = seed
         self.revision = revision
         self.code_revision = code_revision
@@ -471,9 +481,10 @@ class ModelConfig:
 
         # Reminder: Please update docs/source/serving/compatibility_matrix.rst
         # If the feature combo become valid
-        if device_config.device_type not in ("cuda", "tpu", "xpu"):
+        if device_config.device_type not in ("cuda", "tpu", "xpu", "hpu"):
             logger.warning(
-                "Async output processing is only supported for CUDA, TPU, XPU. "
+                "Async output processing is only supported for CUDA, TPU, XPU "
+                "and HPU."
                 "Disabling it for other platforms.")
             self.use_async_output_proc = False
             return
@@ -673,9 +684,10 @@ class ModelConfig:
     @property
     def is_encoder_decoder_model(self) -> bool:
         """Extract the HF encoder/decoder model flag."""
-        return getattr(self.hf_config, "is_encoder_decoder", False) or (
-            (hasattr(self.hf_config, "text_config") and getattr(
-                self.hf_config.text_config, "is_encoder_decoder", False)))
+        return getattr(
+            self.hf_config, "is_encoder_decoder",
+            False) or (hasattr(self.hf_config, "text_config") and getattr(
+                self.hf_config.text_config, "is_encoder_decoder", False))
 
     @property
     def is_multimodal_model(self) -> bool:
@@ -864,7 +876,6 @@ class LoadConfig:
         ignore_patterns: The list of patterns to ignore when loading the model.
             Default to "original/**/*" to avoid repeated loading of llama's
             checkpoints.
-
     """
 
     load_format: Union[str, LoadFormat, "BaseModelLoader"] = LoadFormat.AUTO
@@ -967,6 +978,13 @@ class ParallelConfig:
             if self.distributed_executor_backend != "ray":
                 raise ValueError(
                     "TPU backend only supports Ray for distributed inference.")
+
+        if current_platform.is_hpu() and self.world_size > 1:
+            if self.distributed_executor_backend is None:
+                self.distributed_executor_backend = "ray"
+            if self.distributed_executor_backend != "ray":
+                raise ValueError(
+                    "HPU backend only supports Ray for distributed inference.")
 
         if self.distributed_executor_backend is None and self.world_size > 1:
             # We use multiprocessing by default if world_size fits on the
@@ -1170,6 +1188,8 @@ class DeviceConfig:
                 self.device_type = "cuda"
             elif current_platform.is_neuron():
                 self.device_type = "neuron"
+            elif current_platform.is_hpu():
+                self.device_type = "hpu"
             elif current_platform.is_openvino():
                 self.device_type = "openvino"
             elif current_platform.is_tpu():
@@ -1334,6 +1354,8 @@ class SpeculativeConfig:
                 tokenizer=target_model_config.tokenizer,
                 tokenizer_mode=target_model_config.tokenizer_mode,
                 trust_remote_code=target_model_config.trust_remote_code,
+                allowed_local_media_path=target_model_config.
+                allowed_local_media_path,
                 dtype=target_model_config.dtype,
                 seed=target_model_config.seed,
                 revision=draft_revision,
@@ -1747,6 +1769,13 @@ def _get_and_verify_dtype(
                     torch_dtype = torch.float16
             else:
                 torch_dtype = config_dtype
+
+            if current_platform.is_hpu() and config_dtype == torch.float16:
+                logger.info(
+                    "For HPU, we cast models to bfloat16 instead of"
+                    "using float16 by default. Please specify `dtype` if you "
+                    "want to use float16.")
+                torch_dtype = torch.bfloat16
         else:
             if dtype not in _STR_DTYPE_TO_TORCH_DTYPE:
                 raise ValueError(f"Unknown dtype: {dtype}")
@@ -1960,9 +1989,9 @@ class ObservabilityConfig:
                 f"installed. Original error:\n{otel_import_error_traceback}")
 
 
-@dataclass(frozen=True)
-class EngineConfig:
-    """Dataclass which contains all engine-related configuration. This
+@dataclass
+class VllmConfig:
+    """Dataclass which contains all vllm-related configuration. This
     simplifies passing around the distinct configurations in the codebase.
     """
 
@@ -1972,11 +2001,40 @@ class EngineConfig:
     scheduler_config: SchedulerConfig
     device_config: DeviceConfig
     load_config: LoadConfig
-    lora_config: Optional[LoRAConfig]
-    speculative_config: Optional[SpeculativeConfig]
-    decoding_config: Optional[DecodingConfig]
-    observability_config: Optional[ObservabilityConfig]
-    prompt_adapter_config: Optional[PromptAdapterConfig]
+    lora_config: Optional[LoRAConfig] = None
+    speculative_config: Optional[SpeculativeConfig] = None
+    decoding_config: Optional[DecodingConfig] = None
+    observability_config: Optional[ObservabilityConfig] = None
+    prompt_adapter_config: Optional[PromptAdapterConfig] = None
+    quant_config: Optional[QuantizationConfig] = None
+
+    @staticmethod
+    def _get_quantization_config(
+            model_config: ModelConfig,
+            load_config: LoadConfig) -> Optional[QuantizationConfig]:
+        """Get the quantization config."""
+        if model_config.quantization is not None:
+            from vllm.model_executor.model_loader.weight_utils import (
+                get_quant_config)
+            quant_config = get_quant_config(model_config, load_config)
+            capability_tuple = current_platform.get_device_capability()
+
+            if capability_tuple is not None:
+                capability = capability_tuple.to_int()
+                if capability < quant_config.get_min_capability():
+                    raise ValueError(
+                        f"The quantization method {model_config.quantization} "
+                        "is not supported for the current GPU. Minimum "
+                        f"capability: {quant_config.get_min_capability()}. "
+                        f"Current capability: {capability}.")
+            supported_dtypes = quant_config.get_supported_act_dtypes()
+            if model_config.dtype not in supported_dtypes:
+                raise ValueError(
+                    f"{model_config.dtype} is not supported for quantization "
+                    f"method {model_config.quantization}. Supported dtypes: "
+                    f"{supported_dtypes}")
+            return quant_config
+        return None
 
     def __post_init__(self):
         """Verify configs are valid & consistent with each other.
@@ -1995,8 +2053,7 @@ class EngineConfig:
             self.prompt_adapter_config.verify_with_model_config(
                 self.model_config)
 
-    def to_dict(self):
-        """Return the configs as a dictionary, for use in **kwargs.
-        """
-        return dict(
-            (field.name, getattr(self, field.name)) for field in fields(self))
+        if self.quant_config is None and \
+            self.model_config is not None and self.load_config is not None:
+            self.quant_config = VllmConfig._get_quantization_config(
+                self.model_config, self.load_config)

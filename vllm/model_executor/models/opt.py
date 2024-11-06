@@ -1,4 +1,3 @@
-# coding=utf-8
 # Adapted from
 # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/opt/modeling_opt.py
 # Copyright 2023 The vLLM team.
@@ -343,8 +342,6 @@ class OPTForCausalLM(nn.Module, SupportsPP):
     default_bitsandbytes_target_modules = [
         ".q_proj.", ".k_proj.", ".v_proj.", ".out_proj.", ".fc1.", ".fc2."
     ]
-    # in TP, these weights are partitioned along the column dimension (dim=-1)
-    column_parallel_weights_modules = [".out_proj.", ".fc2."]
 
     def __init__(
         self,

@@ -1,4 +1,3 @@
-# coding=utf-8
 # Adapted from
 # https://github.com/huggingface/transformers/blob/19e6e80e10118f855137b90740936c0b11ac397f/src/transformers/models/qwen2_vl/modeling_qwen2_vl.py
 # Copyright 2024 The Qwen team.
@@ -44,8 +43,8 @@ from vllm.attention.selector import _Backend
 from vllm.config import CacheConfig, MultiModalConfig
 from vllm.distributed import get_pp_group, parallel_state
 from vllm.distributed import utils as dist_utils
-from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, InputContext,
-                         token_inputs)
+from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
+                         InputContext, token_inputs)
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.activation import QuickGELU
@@ -246,9 +245,8 @@ class Qwen2VisionAttention(nn.Module):
         q, k, v = dist_utils.split_tensor_along_last_dim(x, 3)
         batch_size = q.shape[1]
 
-        q, k, v = [
-            rearrange(x, "s b ... -> b s ...").contiguous() for x in (q, k, v)
-        ]
+        q, k, v = (rearrange(x, "s b ... -> b s ...").contiguous()
+                   for x in (q, k, v))
         if rotary_pos_emb is not None:
             q = apply_rotary_pos_emb_vision(q, rotary_pos_emb)
             k = apply_rotary_pos_emb_vision(k, rotary_pos_emb)
@@ -258,7 +256,7 @@ class Qwen2VisionAttention(nn.Module):
             #   flash_attn_varlen_func)
             from flash_attn import flash_attn_varlen_func
 
-            q, k, v = [rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v]]
+            q, k, v = (rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
 
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
             output = flash_attn_varlen_func(q,
@@ -276,7 +274,7 @@ class Qwen2VisionAttention(nn.Module):
                                       b=batch_size)
         elif self.attn_backend == _Backend.TORCH_SDPA:
             seq_length = q.size(1)
-            q, k, v = [rearrange(x, "b s h d -> b h s d") for x in [q, k, v]]
+            q, k, v = (rearrange(x, "b s h d -> b h s d") for x in [q, k, v])
             attention_mask = torch.zeros([1, seq_length, seq_length],
                                          device=q.device,
                                          dtype=torch.bool)
@@ -744,9 +742,10 @@ def dummy_data_for_qwen2_vl(
     dummy_image = Image.new("RGB", (max_resized_width, max_resized_height),
                             color=0)
 
-    return dummy_seqdata, {
-        "image": dummy_image if num_images == 1 else [dummy_image] * num_images
-    }
+    return DummyData(dummy_seqdata, {
+        "image":
+        dummy_image if num_images == 1 else [dummy_image] * num_images
+    })
 
 
 def _get_llm_num_vision_tokens(

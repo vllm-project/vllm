@@ -1,4 +1,3 @@
-# coding=utf-8
 # Copyright 2024 The vLLM team.
 # Copyright 2024 Microsoft and the HuggingFace Inc. team. All rights reserved.
 #
@@ -28,8 +27,8 @@ from transformers import CLIPVisionConfig, PretrainedConfig
 from vllm.attention import AttentionMetadata
 from vllm.config import (CacheConfig, ModelConfig, MultiModalConfig,
                          PoolerConfig)
-from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, InputContext,
-                         token_inputs)
+from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
+                         InputContext, token_inputs)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.pooler import Pooler, PoolingType
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -380,7 +379,7 @@ def dummy_data_for_phi3v(ctx: InputContext,
 
     image_feature_size = get_max_phi3v_image_tokens(ctx, num_crops=num_crops)
 
-    seq_data = dummy_seq_data_for_clip(
+    seq_data, ranges = dummy_seq_data_for_clip(
         CLIP_VIT_LARGE_PATCH14_336_CONFIG,
         seq_len,
         num_images,
@@ -394,7 +393,7 @@ def dummy_data_for_phi3v(ctx: InputContext,
         image_height_override=MAX_IMAGE_FEATURE_SIZE_HEIGHT,
     )
 
-    return seq_data, mm_data
+    return DummyData(seq_data, mm_data, ranges)
 
 
 @lru_cache
@@ -679,7 +678,6 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                 intermediate_tensors: Optional[IntermediateTensors] = None,
                 **kwargs: object):
         if intermediate_tensors is not None:
-            input_ids = None
             inputs_embeds = None
         else:
             image_input = self._parse_and_validate_image_input(**kwargs)
@@ -690,9 +688,14 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                 inputs_embeds = merge_multimodal_embeddings(
                     input_ids, inputs_embeds, vision_embeddings,
                     self.image_token_id)
-                input_ids = None
             else:
-                inputs_embeds = None
+                inputs_embeds = self.language_model.model.embed_tokens(
+                    input_ids)
+
+        # always pass the input via `inputs_embeds`
+        # to make sure the computation graph is consistent
+        # for `torch.compile` integration
+        input_ids = None
 
         hidden_states = self.language_model.model(input_ids,
                                                   positions,

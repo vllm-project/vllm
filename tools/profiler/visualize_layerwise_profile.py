@@ -434,7 +434,7 @@ def main(
                 f"{', Sparsity ' + sparsity if sparsity else ''}")
 
     profile_json = None
-    with open(json_trace, "r") as f:
+    with open(json_trace) as f:
         profile_json = json.load(f)
     assert profile_json is not None
 

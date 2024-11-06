@@ -1,4 +1,5 @@
 import base64
+import os
 from functools import lru_cache
 from io import BytesIO
 from typing import Any, List, Optional, Tuple, TypeVar, Union
@@ -10,7 +11,7 @@ from PIL import Image
 from vllm.connections import global_http_connection
 from vllm.envs import VLLM_AUDIO_FETCH_TIMEOUT, VLLM_IMAGE_FETCH_TIMEOUT
 from vllm.logger import init_logger
-from vllm.multimodal.base import MultiModalDataDict
+from vllm.multimodal.base import MultiModalDataDict, PlaceholderRange
 from vllm.transformers_utils.tokenizer import AnyTokenizer, get_tokenizer
 
 logger = init_logger(__name__)
@@ -18,19 +19,60 @@ logger = init_logger(__name__)
 cached_get_tokenizer = lru_cache(get_tokenizer)
 
 
-def _load_image_from_bytes(b: bytes):
+def _load_image_from_bytes(b: bytes) -> Image.Image:
     image = Image.open(BytesIO(b))
     image.load()
     return image
 
 
-def _load_image_from_data_url(image_url: str):
+def _is_subpath(image_path: str, allowed_local_media_path: str) -> bool:
+    # Get the common path
+    common_path = os.path.commonpath([
+        os.path.abspath(image_path),
+        os.path.abspath(allowed_local_media_path)
+    ])
+    # Check if the common path is the same as allowed_local_media_path
+    return common_path == os.path.abspath(allowed_local_media_path)
+
+
+def _load_image_from_file(image_url: str,
+                          allowed_local_media_path: str) -> Image.Image:
+    if not allowed_local_media_path:
+        raise ValueError("Invalid 'image_url': Cannot load local files without"
+                         "'--allowed-local-media-path'.")
+    if allowed_local_media_path:
+        if not os.path.exists(allowed_local_media_path):
+            raise ValueError(
+                "Invalid '--allowed-local-media-path': "
+                f"The path {allowed_local_media_path} does not exist.")
+        if not os.path.isdir(allowed_local_media_path):
+            raise ValueError(
+                "Invalid '--allowed-local-media-path': "
+                f"The path {allowed_local_media_path} must be a directory.")
+
+    # Only split once and assume the second part is the image path
+    _, image_path = image_url.split("file://", 1)
+    if not _is_subpath(image_path, allowed_local_media_path):
+        raise ValueError(
+            f"Invalid 'image_url': The file path {image_path} must"
+            " be a subpath of '--allowed-local-media-path'"
+            f" '{allowed_local_media_path}'.")
+
+    image = Image.open(image_path)
+    image.load()
+    return image
+
+
+def _load_image_from_data_url(image_url: str) -> Image.Image:
     # Only split once and assume the second part is the base64 encoded image
     _, image_base64 = image_url.split(",", 1)
     return load_image_from_base64(image_base64)
 
 
-def fetch_image(image_url: str, *, image_mode: str = "RGB") -> Image.Image:
+def fetch_image(image_url: str,
+                *,
+                image_mode: str = "RGB",
+                allowed_local_media_path: str = "") -> Image.Image:
     """
     Load a PIL image from a HTTP or base64 data URL.
 
@@ -43,16 +85,19 @@ def fetch_image(image_url: str, *, image_mode: str = "RGB") -> Image.Image:
 
     elif image_url.startswith('data:image'):
         image = _load_image_from_data_url(image_url)
+    elif image_url.startswith('file://'):
+        image = _load_image_from_file(image_url, allowed_local_media_path)
     else:
         raise ValueError("Invalid 'image_url': A valid 'image_url' must start "
-                         "with either 'data:image' or 'http'.")
+                         "with either 'data:image', 'file://' or 'http'.")
 
     return image.convert(image_mode)
 
 
 async def async_fetch_image(image_url: str,
                             *,
-                            image_mode: str = "RGB") -> Image.Image:
+                            image_mode: str = "RGB",
+                            allowed_local_media_path: str = "") -> Image.Image:
     """
     Asynchronously load a PIL image from a HTTP or base64 data URL.
 
@@ -65,9 +110,11 @@ async def async_fetch_image(image_url: str,
 
     elif image_url.startswith('data:image'):
         image = _load_image_from_data_url(image_url)
+    elif image_url.startswith('file://'):
+        image = _load_image_from_file(image_url, allowed_local_media_path)
     else:
         raise ValueError("Invalid 'image_url': A valid 'image_url' must start "
-                         "with either 'data:image' or 'http'.")
+                         "with either 'data:image', 'file://' or 'http'.")
 
     return image.convert(image_mode)
 
@@ -126,8 +173,12 @@ def get_and_parse_audio(audio_url: str) -> MultiModalDataDict:
     return {"audio": (audio, sr)}
 
 
-def get_and_parse_image(image_url: str) -> MultiModalDataDict:
-    image = fetch_image(image_url)
+def get_and_parse_image(
+        image_url: str,
+        *,
+        allowed_local_media_path: str = "") -> MultiModalDataDict:
+    image = fetch_image(image_url,
+                        allowed_local_media_path=allowed_local_media_path)
     return {"image": image}
 
 
@@ -136,8 +187,12 @@ async def async_get_and_parse_audio(audio_url: str) -> MultiModalDataDict:
     return {"audio": (audio, sr)}
 
 
-async def async_get_and_parse_image(image_url: str) -> MultiModalDataDict:
-    image = await async_fetch_image(image_url)
+async def async_get_and_parse_image(
+        image_url: str,
+        *,
+        allowed_local_media_path: str = "") -> MultiModalDataDict:
+    image = await async_fetch_image(
+        image_url, allowed_local_media_path=allowed_local_media_path)
     return {"image": image}
 
 
@@ -258,7 +313,7 @@ def repeat_and_pad_placeholder_tokens(
     repeat_count: Union[int, List[int]],
     pad_token_left: Optional[int] = None,
     pad_token_right: Optional[int] = None,
-) -> Tuple[Optional[str], List[int]]:
+) -> Tuple[Optional[str], List[int], List[PlaceholderRange]]:
     if isinstance(repeat_count, int):
         repeat_count = [repeat_count]
 
@@ -301,6 +356,7 @@ def repeat_and_pad_placeholder_tokens(
         new_prompt += prompt_parts[-1]
 
     new_token_ids: List[int] = []
+    placeholder_ranges: List[PlaceholderRange] = []
     placeholder_token_idx = 0
     for i, token in enumerate(prompt_token_ids):
         if token == placeholder_token_id:
@@ -310,6 +366,10 @@ def repeat_and_pad_placeholder_tokens(
                 pad_token_left=pad_token_left,
                 pad_token_right=pad_token_right,
             )
+            placeholder_ranges.append({
+                "offset": len(new_token_ids),
+                "length": len(replacement_ids)
+            })
             new_token_ids.extend(replacement_ids)
             placeholder_token_idx += 1
 
@@ -320,4 +380,14 @@ def repeat_and_pad_placeholder_tokens(
         else:
             new_token_ids.append(token)
 
-    return new_prompt, new_token_ids
+    return new_prompt, new_token_ids, placeholder_ranges
+
+
+def consecutive_placeholder_ranges(num_items: int,
+                                   item_size: int) -> List[PlaceholderRange]:
+    """Returns a list of consecutive PlaceholderRanges of a fixed size"""
+
+    return [
+        PlaceholderRange(offset=i * item_size, length=item_size)
+        for i in range(num_items)
+    ]

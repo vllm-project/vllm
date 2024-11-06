@@ -37,7 +37,7 @@ from torch.distributed import Backend, ProcessGroup
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import supports_custom_op
+from vllm.utils import direct_register_custom_op, supports_custom_op
 
 
 @dataclass
@@ -99,8 +99,6 @@ def _register_group(group: "GroupCoordinator") -> None:
 
 if supports_custom_op():
 
-    @torch.library.custom_op("vllm::inplace_all_reduce",
-                             mutates_args=["tensor"])
     def inplace_all_reduce(tensor: torch.Tensor, group_name: str) -> None:
         assert group_name in _groups, f"Group {group_name} is not found."
         group = _groups[group_name]()
@@ -108,11 +106,16 @@ if supports_custom_op():
             raise ValueError(f"Group {group_name} is destroyed.")
         group._all_reduce_in_place(tensor)
 
-    @inplace_all_reduce.register_fake
-    def _(tensor: torch.Tensor, group_name: str) -> None:
+    def inplace_all_reduce_fake(tensor: torch.Tensor, group_name: str) -> None:
         return
 
-    @torch.library.custom_op("vllm::outplace_all_reduce", mutates_args=[])
+    direct_register_custom_op(
+        op_name="inplace_all_reduce",
+        op_func=inplace_all_reduce,
+        mutates_args=["tensor"],
+        fake_impl=inplace_all_reduce_fake,
+    )
+
     def outplace_all_reduce(tensor: torch.Tensor,
                             group_name: str) -> torch.Tensor:
         assert group_name in _groups, f"Group {group_name} is not found."
@@ -121,9 +124,16 @@ if supports_custom_op():
             raise ValueError(f"Group {group_name} is destroyed.")
         return group._all_reduce_out_place(tensor)
 
-    @outplace_all_reduce.register_fake
-    def _(tensor: torch.Tensor, group_name: str) -> torch.Tensor:
+    def outplace_all_reduce_fake(tensor: torch.Tensor,
+                                 group_name: str) -> torch.Tensor:
         return torch.empty_like(tensor)
+
+    direct_register_custom_op(
+        op_name="outplace_all_reduce",
+        op_func=outplace_all_reduce,
+        mutates_args=[],
+        fake_impl=outplace_all_reduce_fake,
+    )
 
 
 class GroupCoordinator:
@@ -167,6 +177,7 @@ class GroupCoordinator:
         use_pynccl: bool,
         use_custom_allreduce: bool,
         use_tpu_communicator: bool,
+        use_hpu_communicator: bool,
         use_message_queue_broadcaster: bool = False,
         group_name: Optional[str] = None,
     ):
@@ -203,6 +214,7 @@ class GroupCoordinator:
         self.use_pynccl = use_pynccl
         self.use_custom_allreduce = use_custom_allreduce
         self.use_tpu_communicator = use_tpu_communicator
+        self.use_hpu_communicator = use_hpu_communicator
 
         # lazy import to avoid documentation build error
         from vllm.distributed.device_communicators.custom_all_reduce import (
@@ -230,6 +242,12 @@ class GroupCoordinator:
         self.tpu_communicator: Optional[TpuCommunicator] = None
         if use_tpu_communicator and self.world_size > 1:
             self.tpu_communicator = TpuCommunicator(group=self.cpu_group)
+
+        from vllm.distributed.device_communicators.hpu_communicator import (
+            HpuCommunicator)
+        self.hpu_communicator: Optional[HpuCommunicator]
+        if use_hpu_communicator and self.world_size > 1:
+            self.hpu_communicator = HpuCommunicator(group=self.device_group)
 
         from vllm.distributed.device_communicators.shm_broadcast import (
             MessageQueue)
@@ -338,6 +356,11 @@ class GroupCoordinator:
         if self.world_size == 1:
             return input_
 
+        if input_.is_cpu:
+            import intel_extension_for_pytorch as ipex
+            ipex.distributed.all_reduce(input_, group=self.device_group)
+            return input_
+
         if not supports_custom_op():
             self._all_reduce_in_place(input_)
             return input_
@@ -346,6 +369,10 @@ class GroupCoordinator:
             not self.tpu_communicator.disabled:
             # TPU handles Dynamo with its own logic.
             return self.tpu_communicator.all_reduce(input_)
+
+        if self.hpu_communicator is not None and \
+            not self.hpu_communicator.disabled:
+            return self.hpu_communicator.all_reduce(input_)
 
         if self.ca_comm is not None and \
             not self.ca_comm.disabled and \
@@ -369,9 +396,6 @@ class GroupCoordinator:
         pynccl_comm = self.pynccl_comm
         if (pynccl_comm is not None and not pynccl_comm.disabled):
             pynccl_comm.all_reduce(input_)
-        elif input_.is_cpu:
-            import intel_extension_for_pytorch as ipex
-            ipex.distributed.all_reduce(input_, group=self.device_group)
         else:
             torch.distributed.all_reduce(input_, group=self.device_group)
 
@@ -387,6 +411,11 @@ class GroupCoordinator:
         tpu_comm = self.tpu_communicator
         if tpu_comm is not None and not tpu_comm.disabled:
             return tpu_comm.all_gather(input_, dim)
+
+        # For HPUs, use HPU communicator.
+        hpu_comm = self.hpu_communicator
+        if hpu_comm is not None and not hpu_comm.disabled:
+            return hpu_comm.all_gather(input_, dim)
 
         if dim < 0:
             # Convert negative dim to positive.
@@ -867,6 +896,7 @@ def init_world_group(ranks: List[int], local_rank: int,
         use_pynccl=False,
         use_custom_allreduce=False,
         use_tpu_communicator=False,
+        use_hpu_communicator=False,
         group_name="world",
     )
 
@@ -888,6 +918,7 @@ def init_model_parallel_group(
         use_pynccl=True,
         use_custom_allreduce=use_custom_allreduce,
         use_tpu_communicator=True,
+        use_hpu_communicator=True,
         use_message_queue_broadcaster=use_message_queue_broadcaster,
         group_name=group_name,
     )
