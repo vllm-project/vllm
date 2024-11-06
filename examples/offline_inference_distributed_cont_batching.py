@@ -7,7 +7,7 @@ set the batch size.
 Learn more about Ray Core in https://docs.ray.io/en/latest/ray-core/walkthrough.html
 """
 
-from typing import Any, List
+from typing import List
 
 import ray
 
