@@ -332,9 +332,9 @@ class EngineCoreProc(EngineCore):
         with self.make_socket(input_path, zmq.constants.PULL) as socket:
             while True:
                 # (RequestType, RequestData)
-                frames = socket.recv_multipart(copy=False)
-                request_type = frames[0].buffer
-                request_data = frames[1].buffer
+                type_frame, data_frame = socket.recv_multipart(copy=False)
+                request_type = type_frame.buffer
+                request_data = data_frame.buffer
 
                 # Deserialize the request data.
                 if request_type == EngineCoreRequestType.ADD.value:
