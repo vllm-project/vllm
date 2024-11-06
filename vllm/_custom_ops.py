@@ -704,13 +704,12 @@ def semi_structured_fp8_compress(input: torch.Tensor) -> torch.Tensor:
     return torch.ops._C.cslt_compress_fp8_semi_structured(input)
 
 
-def semi_structured_fp8_mm(
-        A_compressed: torch.Tensor,
-        B_dense: torch.Tensor,
-        scale: Optional[torch.Tensor] = None,
-        bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-    return torch.ops._C.cslt_mm_fp8_semi_structured(A_compressed, B_dense,
-                                                    scale, bias)
+def semi_structured_mm(A_compressed: torch.Tensor,
+                       B_dense: torch.Tensor,
+                       scale: Optional[float] = None,
+                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    return torch.ops._C.cslt_mm_semi_structured(A_compressed, B_dense, scale,
+                                                bias)
 
 
 def semi_structured_fp8_mm2(
@@ -718,9 +717,11 @@ def semi_structured_fp8_mm2(
         B_dense: torch.Tensor,
         scale: Optional[float] = None,
         bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-    assert A_compressed.dtype == torch.float8_e4m3fn
     return torch.ops._C.cslt_mm_fp8_semi_structured2(A_compressed, B_dense,
                                                      scale, bias)
+
+def semi_structured_clear_cache() -> None:
+    return torch.ops._C.cslt_clear_cache()
 
 
 # int8
