@@ -344,6 +344,11 @@ class _ModelRegistry:
     def _raise_for_unsupported(self, architectures: List[str]):
         all_supported_archs = self.get_supported_archs()
 
+        if any(arch in all_supported_archs for arch in architectures):
+            raise ValueError(
+                f"Model architectures {architectures} failed "
+                "to be inspected. Please check the logs for more details.")
+
         raise ValueError(
             f"Model architectures {architectures} are not supported for now. "
             f"Supported architectures: {all_supported_archs}")

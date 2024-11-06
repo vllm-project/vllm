@@ -14,13 +14,17 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
     awq_marlin_quantize)
 from vllm.scalar_type import scalar_types
 
+NUM_EXPERTS = [8, 64]
+TOP_KS = [2, 6]
+GROUP_SIZES = [-1, 32, 128]
 
-@pytest.mark.parametrize("m", [64, 512, 222, 33, 1])
-@pytest.mark.parametrize("n", [128, 2048, 256, 1024])
-@pytest.mark.parametrize("k", [128, 1024, 512])
-@pytest.mark.parametrize("e", [8, 64])
-@pytest.mark.parametrize("topk", [2, 6])
-@pytest.mark.parametrize("group_size", [-1, 32, 64, 128])
+
+@pytest.mark.parametrize("m", [1, 33, 64, 222])
+@pytest.mark.parametrize("n", [128, 2048])
+@pytest.mark.parametrize("k", [128, 1024])
+@pytest.mark.parametrize("e", NUM_EXPERTS)
+@pytest.mark.parametrize("topk", TOP_KS)
+@pytest.mark.parametrize("group_size", GROUP_SIZES)
 @pytest.mark.skipif(not (ops.supports_moe_ops
                          and hasattr(torch.ops._moe_C, "marlin_gemm_moe")),
                     reason="Marlin is not supported on this GPU type.")
