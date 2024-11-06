@@ -97,4 +97,5 @@ markers = [
     "skip_global_cleanup",
     "core_model: run this model test in each PR instead of just daily",
     "distributed_2_gpus: run this test only in distributed tests for 2 GPUs",
+    "skip_v1: do not run this test with v1",
 ]

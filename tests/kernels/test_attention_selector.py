@@ -44,6 +44,8 @@ def test_env(name: str, device: str, monkeypatch):
 
 def test_flash_attn(monkeypatch):
     """Test FlashAttn validation."""
+    # TODO: When testing for v1, pipe in `use_v1` as an argument to
+    # which_attn_to_use
 
     override_backend_env_variable(monkeypatch, STR_FLASH_ATTN_VAL)
 

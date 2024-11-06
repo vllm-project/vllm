@@ -10,7 +10,7 @@ from vllm.config import CacheConfig
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.bart import (BartDecoder, BartEncoder,
                                              BartParallelLMHead,
@@ -112,7 +112,7 @@ class Florence2LanguageForConditionalGeneration(nn.Module):
 
         self.logits_processor = LogitsProcessor(self.vocab_size,
                                                 config.vocab_size)
-        self.sampler = Sampler()
+        self.sampler = get_sampler()
 
     def forward(
         self,

@@ -30,6 +30,15 @@ if envs.VLLM_USE_FLASHINFER_SAMPLER and find_spec("flashinfer"):
 else:
     flashinfer_top_k_top_p_sampling = None
 
+
+def get_sampler() -> torch.nn.Module:
+    if envs.VLLM_USE_V1:
+        # Lazy import: the v1 package isn't distributed
+        from vllm.v1.sample.sampler import Sampler as V1Sampler
+        return V1Sampler()
+    return Sampler()
+
+
 # (num_token_ids, num_parent_ids) per sequence group.
 SampleResultType = List[Tuple[List[int], List[int]]]
 
