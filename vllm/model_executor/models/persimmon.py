@@ -27,6 +27,7 @@ from torch import nn
 from transformers import PersimmonConfig
 
 from vllm.attention import Attention, AttentionMetadata
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
@@ -209,6 +210,7 @@ class PersimmonDecoderLayer(nn.Module):
         return outputs
 
 
+@support_torch_compile
 class PersimmonModel(nn.Module):
 
     def __init__(self,

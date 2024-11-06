@@ -6,10 +6,10 @@ from typing import (Any, ClassVar, Dict, List, Optional, Sequence, Tuple,
 
 from tqdm import tqdm
 
+from vllm import envs
 from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
                               BeamSearchSequence, get_beam_search_score)
-from vllm.engine.arg_utils import EngineArgs
-from vllm.engine.llm_engine import LLMEngine
+from vllm.engine.arg_utils import EngineArgs, TaskOption
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          apply_hf_chat_template,
                                          apply_mistral_chat_template,
@@ -29,7 +29,12 @@ from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
                                                get_cached_tokenizer)
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import Counter, deprecate_kwargs, is_list_of
+from vllm.utils import Counter, deprecate_args, deprecate_kwargs, is_list_of
+
+if envs.VLLM_USE_V1:
+    from vllm.v1.engine.llm_engine import LLMEngine  # type: ignore
+else:
+    from vllm.engine.llm_engine import LLMEngine  # type: ignore
 
 logger = init_logger(__name__)
 
@@ -53,6 +58,10 @@ class LLM:
             from the input.
         trust_remote_code: Trust remote code (e.g., from HuggingFace) when
             downloading the model and tokenizer.
+        allowed_local_media_path: Allowing API requests to read local images
+            or videos from directories specified by the server file system.
+            This is a security risk. Should only be enabled in trusted
+            environments.
         tensor_parallel_size: The number of GPUs to use for distributed
             execution with tensor parallelism.
         dtype: The data type for the model weights and activations. Currently,
@@ -88,9 +97,6 @@ class LLM:
         enforce_eager: Whether to enforce eager execution. If True, we will
             disable CUDA graph and always execute the model in eager mode.
             If False, we will use CUDA graph and eager execution in hybrid.
-        max_context_len_to_capture: Maximum context len covered by CUDA graphs.
-            When a sequence has context length larger than this, we fall back
-            to eager mode (DEPRECATED. Use `max_seq_len_to_capture` instead).
         max_seq_len_to_capture: Maximum sequence len covered by CUDA graphs.
             When a sequence has context length larger than this, we fall back
             to eager mode. Additionally for encoder-decoder models, if the
@@ -108,6 +114,12 @@ class LLM:
     DEPRECATE_LEGACY: ClassVar[bool] = False
     """A flag to toggle whether to deprecate the legacy generate/encode API."""
 
+    DEPRECATE_INIT_POSARGS: ClassVar[bool] = True
+    """
+    A flag to toggle whether to deprecate positional arguments in
+    :meth:`LLM.__init__`.
+    """
+
     @classmethod
     @contextmanager
     def deprecate_legacy_api(cls):
@@ -117,6 +129,13 @@ class LLM:
 
         cls.DEPRECATE_LEGACY = False
 
+    @deprecate_args(
+        start_index=2,  # Ignore self and model
+        is_deprecated=lambda: LLM.DEPRECATE_INIT_POSARGS,
+        additional_message=(
+            "All positional arguments other than `model` will be "
+            "replaced with keyword arguments in an upcoming version."),
+    )
     def __init__(
         self,
         model: str,
@@ -124,6 +143,7 @@ class LLM:
         tokenizer_mode: str = "auto",
         skip_tokenizer_init: bool = False,
         trust_remote_code: bool = False,
+        allowed_local_media_path: str = "",
         tensor_parallel_size: int = 1,
         dtype: str = "auto",
         quantization: Optional[str] = None,
@@ -134,11 +154,17 @@ class LLM:
         swap_space: float = 4,
         cpu_offload_gb: float = 0,
         enforce_eager: Optional[bool] = None,
-        max_context_len_to_capture: Optional[int] = None,
         max_seq_len_to_capture: int = 8192,
         disable_custom_all_reduce: bool = False,
         disable_async_output_proc: bool = False,
         mm_processor_kwargs: Optional[Dict[str, Any]] = None,
+        # After positional args are removed, move this right below `model`
+        task: TaskOption = "auto",
+        pooling_type: Optional[str] = None,
+        pooling_norm: Optional[bool] = None,
+        pooling_softmax: Optional[bool] = None,
+        pooling_step_tag_id: Optional[int] = None,
+        pooling_returned_token_ids: Optional[List[int]] = None,
         **kwargs,
     ) -> None:
         '''
@@ -153,10 +179,12 @@ class LLM:
 
         engine_args = EngineArgs(
             model=model,
+            task=task,
             tokenizer=tokenizer,
             tokenizer_mode=tokenizer_mode,
             skip_tokenizer_init=skip_tokenizer_init,
             trust_remote_code=trust_remote_code,
+            allowed_local_media_path=allowed_local_media_path,
             tensor_parallel_size=tensor_parallel_size,
             dtype=dtype,
             quantization=quantization,
@@ -167,11 +195,15 @@ class LLM:
             swap_space=swap_space,
             cpu_offload_gb=cpu_offload_gb,
             enforce_eager=enforce_eager,
-            max_context_len_to_capture=max_context_len_to_capture,
             max_seq_len_to_capture=max_seq_len_to_capture,
             disable_custom_all_reduce=disable_custom_all_reduce,
             disable_async_output_proc=disable_async_output_proc,
             mm_processor_kwargs=mm_processor_kwargs,
+            pooling_type=pooling_type,
+            pooling_norm=pooling_norm,
+            pooling_softmax=pooling_softmax,
+            pooling_step_tag_id=pooling_step_tag_id,
+            pooling_returned_token_ids=pooling_returned_token_ids,
             **kwargs,
         )
         self.llm_engine = LLMEngine.from_engine_args(
@@ -193,7 +225,8 @@ class LLM:
             tokenizer_group.tokenizer = get_cached_tokenizer(tokenizer)
 
     def finish_measurements(self):
-        self.llm_engine.finish_measurements()
+        assert not envs.VLLM_USE_V1, "INC does not support vLLM V1"
+        self.llm_engine.finish_measurements()  # type: ignore[attr-defined]
 
     @overload  # LEGACY: single (prompt + optional token ids)
     def generate(
@@ -319,10 +352,21 @@ class LLM:
             considered legacy and may be deprecated in the future. You should
             instead pass them via the ``inputs`` parameter.
         """
-        if self.llm_engine.model_config.embedding_mode:
-            raise ValueError(
+        task = self.llm_engine.model_config.task
+        if task != "generate":
+            messages = [
                 "LLM.generate() is only supported for (conditional) generation "
-                "models (XForCausalLM, XForConditionalGeneration).")
+                "models (XForCausalLM, XForConditionalGeneration).",
+            ]
+
+            supported_tasks = self.llm_engine.model_config.supported_tasks
+            if "generate" in supported_tasks:
+                messages.append(
+                    "Your model supports the 'generate' task, but is "
+                    f"currently initialized for the '{task}' task. Please "
+                    "initialize the model using `--task generate`.")
+
+            raise ValueError(" ".join(messages))
 
         if prompt_token_ids is not None:
             parsed_prompts = self._convert_v1_inputs(
@@ -436,6 +480,7 @@ class LLM:
                         for token_id, logprob_obj in logprobs.items():
                             new_beam = BeamSearchSequence(
                                 tokens=current_beam.tokens + [token_id],
+                                logprobs=current_beam.logprobs + [logprobs],
                                 cum_logprob=current_beam.cum_logprob +
                                 logprob_obj.logprob)
 
@@ -694,10 +739,18 @@ class LLM:
             considered legacy and may be deprecated in the future. You should
             instead pass them via the ``inputs`` parameter.
         """
-        if not self.llm_engine.model_config.embedding_mode:
-            raise ValueError(
-                "LLM.encode() is only supported for embedding models (XModel)."
-            )
+        task = self.llm_engine.model_config.task
+        if task != "embedding":
+            messages = ["LLM.encode() is only supported for embedding models."]
+
+            supported_tasks = self.llm_engine.model_config.supported_tasks
+            if "embedding" in supported_tasks:
+                messages.append(
+                    "Your model supports the 'embedding' task, but is "
+                    f"currently initialized for the '{task}' task. Please "
+                    "initialize the model using `--task embedding`.")
+
+            raise ValueError(" ".join(messages))
 
         if prompt_token_ids is not None:
             parsed_prompts = self._convert_v1_inputs(
@@ -907,6 +960,3 @@ class LLM:
 
     def _is_encoder_decoder_model(self):
         return self.llm_engine.is_encoder_decoder_model()
-
-    def _is_embedding_model(self):
-        return self.llm_engine.is_embedding_model()
