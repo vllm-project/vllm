@@ -2161,7 +2161,8 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                     )
                     if num_steps > 1:
                         output = output.sampled_token_ids
-                        self.cached_step_outputs.append(output)
+                        self.cached_step_outputs.append(
+                            output.detach().clone())
                 htorch.core.mark_step()
                 if i < num_steps - 1:
                     if i == 0:
