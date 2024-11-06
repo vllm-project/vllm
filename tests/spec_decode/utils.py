@@ -68,12 +68,14 @@ def create_worker(cls: Callable[..., T],
                   seed: int,
                   is_driver_worker: bool = True,
                   enforce_eager: bool = True,
-                  model_runner_cls: Optional[ModelRunner] = None) -> T:
+                  model_runner_cls: Optional[ModelRunner] = None,
+                  dtype: Optional[str] = "auto") -> T:
     engine_args = EngineArgs(
         model=model_name,
         seed=seed,
         block_size=block_size,
         enforce_eager=enforce_eager,
+        dtype=dtype,
     )
     engine_config = engine_args.create_engine_config()
 

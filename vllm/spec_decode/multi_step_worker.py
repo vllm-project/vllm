@@ -81,6 +81,8 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
             # Here we run the draft_model_runner with multi-step prepare
             # on the GPU directly
             expanded_request.num_steps = sample_len
+            self.model_runner.set_indices_of_seq_with_bonus_tokens(
+                indices_of_seq_with_bonus_tokens)
             model_outputs = self.execute_model(
                 execute_model_req=expanded_request)
         else:
@@ -97,7 +99,8 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
                 model_output = model_output[0]
 
                 self._append_new_tokens(
-                    model_output, expanded_request.seq_group_metadata_list)
+                    model_output, expanded_request.seq_group_metadata_list,
+                    indices_of_seq_with_bonus_tokens)
                 model_outputs.append(model_output)
 
         filtered_model_outputs = self._filter_model_output(
@@ -221,13 +224,15 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
     @staticmethod
     def _append_new_tokens(
             model_output: List[SamplerOutput],
-            seq_group_metadata_list: List[SequenceGroupMetadata]) -> None:
+            seq_group_metadata_list: List[SequenceGroupMetadata],
+            indices_of_seq_with_bonus_tokens: List[int]) -> None:
         """Given model output from a single run, append the tokens to the
         sequences. This is normally done outside of the worker, but it is
         required if the worker is to perform multiple forward passes.
         """
-        for seq_group_metadata, sequence_group_outputs in zip(
-                seq_group_metadata_list, model_output):
+        count = 0
+        for index, (seq_group_metadata, sequence_group_outputs) in enumerate(
+                zip(seq_group_metadata_list, model_output)):
             seq_group_metadata.is_prompt = False
 
             for seq_output in sequence_group_outputs.samples:
@@ -237,6 +242,16 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
 
                 token_id = seq_output.output_token
                 token_logprob = seq_output.logprobs[token_id]
+                # Determine the actual token ID to be generated,
+                # considering bonus tokens
+                if index != indices_of_seq_with_bonus_tokens[count]:
+                    bonus_seq_metadata = seq_group_metadata_list[
+                        indices_of_seq_with_bonus_tokens[count]]
+                    _, bonus_token_seq_data = next(
+                        iter(bonus_seq_metadata.seq_data.items()))
+                    token_id = bonus_token_seq_data.output_token_ids[-1]
+                else:
+                    count += 1
 
                 seq.append_token_id(token_id, token_logprob.logprob)
                 seq.update_num_computed_tokens(1)
