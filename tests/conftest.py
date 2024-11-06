@@ -1,6 +1,5 @@
 import json
 import os
-import sys
 import tempfile
 from collections import UserList
 from enum import Enum
@@ -62,14 +61,8 @@ class _ImageAssetPrompts(TypedDict):
     cherry_blossom: str
 
 
-if sys.version_info < (3, 9):
-    # UserList cannot be subscripted
-    class _ImageAssetsBase(UserList):
-        pass
-else:
-
-    class _ImageAssetsBase(UserList[ImageAsset]):
-        pass
+class _ImageAssetsBase(UserList[ImageAsset]):
+    pass
 
 
 class _ImageAssets(_ImageAssetsBase):
@@ -94,14 +87,8 @@ class _VideoAssetPrompts(TypedDict):
     sample_demo_1: str
 
 
-if sys.version_info < (3, 9):
-    # UserList cannot be subscripted
-    class _VideoAssetsBase(UserList):
-        pass
-else:
-
-    class _VideoAssetsBase(UserList[VideoAsset]):
-        pass
+class _VideoAssetsBase(UserList[VideoAsset]):
+    pass
 
 
 class _VideoAssets(_VideoAssetsBase):
