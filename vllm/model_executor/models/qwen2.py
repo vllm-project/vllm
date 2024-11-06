@@ -1,4 +1,3 @@
-# coding=utf-8
 # Adapted from
 # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/qwen2/modeling_qwen2.py
 # Copyright 2024 The Qwen team.
@@ -418,9 +417,9 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 and hasattr(config, "max_window_layers")):
             raise ValueError("Sliding window for some but all layers is not "
                              "supported. This model uses sliding window "
-                             "but `max_window_layers` = %s is less than "
-                             "`num_hidden_layers` = %s. Please open an issue "
-                             "to discuss this feature." % (
+                             "but `max_window_layers` = {} is less than "
+                             "`num_hidden_layers` = {}. Please open an issue "
+                             "to discuss this feature.".format(
                                  config.max_window_layers,
                                  config.num_hidden_layers,
                              ))
