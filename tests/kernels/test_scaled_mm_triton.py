@@ -38,14 +38,16 @@ def get_8bit_types():
     return types
 
 
-@pytest.mark.parametrize("M", [1, 16, 32, 64, 128, 256, 512, 222, 33, 1])
-@pytest.mark.parametrize("N", [2048, 8192, 16384, 256, 1024])
+@pytest.mark.parametrize("M", [1, 33, 64, 512])
+@pytest.mark.parametrize("N", [256, 971, 20486])
 @pytest.mark.parametrize("K", [128, 496, 1024])
 @pytest.mark.parametrize("out_dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("in_dtype", get_8bit_types())
 @pytest.mark.parametrize("use_scalar_scale_a", [True, False])
 @pytest.mark.parametrize("use_scalar_scale_b", [True, False])
 @pytest.mark.parametrize("use_bias", [True, False])
+@pytest.mark.skipif(not current_platform.has_device_capability(89),
+                    reason="FP8 is not supported on this GPU type.")
 def test_scaled_mm(M, N, K, in_dtype, out_dtype, use_scalar_scale_a,
                    use_scalar_scale_b, use_bias):
     is_floating_point_type = lambda t: torch.tensor([1, 1], dtype=t

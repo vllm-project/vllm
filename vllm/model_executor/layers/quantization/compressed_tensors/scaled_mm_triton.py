@@ -5,7 +5,7 @@ import triton
 import triton.language as tl
 
 
-def has_good_tensor_strides(x: torch.Tensor):
+def is_weak_contiguous(x: torch.Tensor):
     strides = x.stride()
     sizes = x.shape
     is_not_transpose = strides[0] == 1 and (strides[1] >= max(1, sizes[0]))
@@ -142,8 +142,8 @@ def scaled_mm_triton(input: torch.Tensor,
         [N, 1])
     assert out_dtype.is_floating_point
     assert bias is None or bias.is_floating_point()
-    assert has_good_tensor_strides(input)
-    assert has_good_tensor_strides(weight)
+    assert is_weak_contiguous(input)
+    assert is_weak_contiguous(weight)
 
     grid = lambda META: (triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(
         N, META['BLOCK_SIZE_N']), )
