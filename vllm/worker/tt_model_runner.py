@@ -374,13 +374,13 @@ class TTModelRunner(ModelRunnerBase[TTModelInput]):
             # Capture trace for the first decode execution
             if self.execute_trace_kwargs is None:
                 logger.info("Capturing trace for first decode execution")
-                trace_id, tt_inp, rot_mat, cache_idxs_tt, tt_logits, tt_page_table = self.model.capture_trace(
+                trace_id, tt_inp, rot_idxs_tt, cache_idxs_tt, tt_logits, tt_page_table = self.model.capture_trace(
                     **execute_model_kwargs
                 )
                 self.execute_trace_kwargs = {
                     "trace_id": trace_id,
                     "tt_inp": tt_inp,
-                    "rot_mat": rot_mat,
+                    "rot_idxs_tt": rot_idxs_tt,
                     "cache_idxs_tt": cache_idxs_tt,
                     "tt_logits": tt_logits,
                     "tt_page_table": tt_page_table,
