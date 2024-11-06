@@ -274,7 +274,7 @@ def get_hf_file_to_dict(file_name: str,
                 return None
             file_path = Path(hf_hub_file)
 
-        with open(file_path, "r") as file:
+        with open(file_path) as file:
             return json.load(file)
     return None
 
