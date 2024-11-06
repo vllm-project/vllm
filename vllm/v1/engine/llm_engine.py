@@ -165,5 +165,5 @@ class LLMEngine:
     def stop_profile(self):
         pass
 
-    def get_tokenizer_group(self):
+    def get_tokenizer_group(self, group_type):
         pass
