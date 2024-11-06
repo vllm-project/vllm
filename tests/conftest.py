@@ -1,6 +1,5 @@
 import json
 import os
-import sys
 import tempfile
 from collections import UserList
 from enum import Enum
@@ -52,7 +51,7 @@ PromptVideoInput = _PromptMultiModalInput[np.ndarray]
 
 
 def _read_prompts(filename: str) -> List[str]:
-    with open(filename, "r") as f:
+    with open(filename) as f:
         prompts = f.readlines()
         return prompts
 
@@ -62,14 +61,8 @@ class _ImageAssetPrompts(TypedDict):
     cherry_blossom: str
 
 
-if sys.version_info < (3, 9):
-    # UserList cannot be subscripted
-    class _ImageAssetsBase(UserList):
-        pass
-else:
-
-    class _ImageAssetsBase(UserList[ImageAsset]):
-        pass
+class _ImageAssetsBase(UserList[ImageAsset]):
+    pass
 
 
 class _ImageAssets(_ImageAssetsBase):
@@ -94,14 +87,8 @@ class _VideoAssetPrompts(TypedDict):
     sample_demo_1: str
 
 
-if sys.version_info < (3, 9):
-    # UserList cannot be subscripted
-    class _VideoAssetsBase(UserList):
-        pass
-else:
-
-    class _VideoAssetsBase(UserList[VideoAsset]):
-        pass
+class _VideoAssetsBase(UserList[VideoAsset]):
+    pass
 
 
 class _VideoAssets(_VideoAssetsBase):
@@ -966,7 +953,7 @@ def dummy_opt_path():
                               "*.msgpack"
                           ])
         assert os.path.exists(json_path)
-        with open(json_path, "r") as f:
+        with open(json_path) as f:
             config = json.load(f)
         config["architectures"] = ["MyOPTForCausalLM"]
         with open(json_path, "w") as f:
@@ -985,7 +972,7 @@ def dummy_llava_path():
                               "*.msgpack"
                           ])
         assert os.path.exists(json_path)
-        with open(json_path, "r") as f:
+        with open(json_path) as f:
             config = json.load(f)
         config["architectures"] = ["MyLlava"]
         with open(json_path, "w") as f:
@@ -1004,7 +991,7 @@ def dummy_gemma2_embedding_path():
                               "*.msgpack"
                           ])
         assert os.path.exists(json_path)
-        with open(json_path, "r") as f:
+        with open(json_path) as f:
             config = json.load(f)
         config["architectures"] = ["MyGemma2Embedding"]
         with open(json_path, "w") as f:

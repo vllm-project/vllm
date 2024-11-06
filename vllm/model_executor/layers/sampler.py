@@ -358,7 +358,7 @@ def _get_bin_counts_and_mask(
     return bin_counts, mask
 
 
-class ApplyToppTopkScalar():
+class ApplyToppTopkScalar:
     """
     The original implementation of _apply_top_k_top_p is more general
     as it uses vector topp, topk
