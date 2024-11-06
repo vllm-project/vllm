@@ -1,4 +1,3 @@
-# coding=utf-8
 # Copyright 2024 BigCode and the HuggingFace Inc. team. All rights reserved.
 #
 # This code is based on EleutherAI's GPT-NeoX library and the GPT-NeoX
@@ -140,8 +139,7 @@ class Starcoder2MLP(nn.Module):
             bias=config.use_bias,
             quant_config=quant_config,
         )
-        self.act = get_act_fn(config.hidden_act, quant_config,
-                              config.intermediate_size)
+        self.act = get_act_fn(config.hidden_act)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         hidden_states, _ = self.c_fc(hidden_states)

@@ -1,11 +1,14 @@
 import copy
 import dataclasses
 import operator
+from contextlib import ExitStack
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
+from unittest.mock import patch
 
 import torch
 import torch.fx as fx
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils import weak_ref_tensors
 
@@ -193,6 +196,7 @@ def wrap_inductor(graph,
 @dataclasses.dataclass
 class SplitItem:
     submod_name: str
+    graph_id: int
     is_splitting_graph: bool
     graph: fx.GraphModule
 
@@ -226,9 +230,7 @@ def split_graph(graph: fx.GraphModule,
 
     outputs = []
 
-    # sort the names to make sure the order is deterministic
     names = [name for (name, module) in split_gm.named_modules()]
-    names.sort()
 
     for name in names:
         if "." in name or name == "":
@@ -238,7 +240,11 @@ def split_graph(graph: fx.GraphModule,
         module = getattr(split_gm, name)
 
         graph_id = int(name.replace("submod_", ""))
-        outputs.append(SplitItem(name, graph_id in split_op_graphs, module))
+        outputs.append(
+            SplitItem(name, graph_id, (graph_id in split_op_graphs), module))
+
+    # sort by intetger graph_id, rather than string name
+    outputs.sort(key=lambda x: x.graph_id)
 
     return split_gm, outputs
 
@@ -252,6 +258,11 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
     It runs the given graph with fake inputs, and compile some
     submodules specified by `compile_submod_names` with the given
     compilation configs.
+
+    NOTE: the order in `compile_submod_names` matters, because
+    it will be used to determine the order of the compiled piecewise
+    graphs. The first graph will handle logging, and the last graph
+    has some special cudagraph output handling.
     """
 
     def __init__(self, module: torch.fx.GraphModule,
@@ -263,7 +274,6 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
         self.compile_submod_names = compile_submod_names
         self.compilation_configs = compilation_configs
         self.graph_pool = graph_pool
-        self.have_seen_first_graph = False
 
     def run(self, *args):
         fake_args = [
@@ -279,6 +289,7 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
         output = super().call_module(target, args, kwargs)
 
         if target in self.compile_submod_names:
+            index = self.compile_submod_names.index(target)
             submod = self.fetch_attr(target)
             sym_shape_indices = [
                 i for i, x in enumerate(args) if isinstance(x, torch.SymInt)
@@ -288,15 +299,14 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
                 args,
                 self.compilation_configs.inductor_compile_config,
                 runtime_shape=None,
-                do_logging=not self.have_seen_first_graph,
+                do_logging=index == 0,
                 use_inductor=self.compilation_configs.use_inductor)
 
             self.module.__dict__[target] = PiecewiseBackend(
-                submod, self.compilation_configs, self.graph_pool,
-                not self.have_seen_first_graph, sym_shape_indices,
+                submod, self.compilation_configs, self.graph_pool, index,
+                len(self.compile_submod_names), sym_shape_indices,
                 compiled_graph_for_general_shape)
 
-            self.have_seen_first_graph = True
             compilation_counter.num_piecewise_capturable_graphs_seen += 1
 
         return output
@@ -352,8 +362,9 @@ class VllmBackend:
             graph, self.compilation_configs.non_cudagraph_ops)
 
         from torch._dynamo.utils import lazy_format_graph_code
-        logger.debug("%s",
-                     lazy_format_graph_code("stiching module", self.split_gm))
+        logger.debug("%s", lazy_format_graph_code("before split", self.graph))
+        logger.debug("%s", lazy_format_graph_code("after split",
+                                                  self.split_gm))
 
         compilation_counter.num_piecewise_graphs_seen += len(
             self.piecewise_graphs)
@@ -385,12 +396,17 @@ class ConcreteSizeEntry:
     cudagraph: Optional[torch.cuda.CUDAGraph] = None
     output: Optional[Any] = None
 
+    # for cudagraph debugging, track the input addresses
+    # during capture, and check if they are the same during replay
+    input_addresses: Optional[List[int]] = None
+
 
 class PiecewiseBackend:
 
     def __init__(self, graph: fx.GraphModule,
                  compilation_configs: CompilationConfig, graph_pool: Any,
-                 is_first_graph: bool, sym_shape_indices: List[int],
+                 piecewise_compile_index: int, total_piecewise_compiles: int,
+                 sym_shape_indices: List[int],
                  compiled_graph_for_general_shape: Callable):
         """
         The backend for piecewise compilation.
@@ -408,7 +424,12 @@ class PiecewiseBackend:
         self.graph = graph
         self.compilation_configs = compilation_configs
         self.graph_pool = graph_pool
-        self.is_first_graph = is_first_graph
+        self.piecewise_compile_index = piecewise_compile_index
+        self.total_piecewise_compiles = total_piecewise_compiles
+
+        self.is_first_graph = piecewise_compile_index == 0
+        self.is_last_graph = (
+            piecewise_compile_index == total_piecewise_compiles - 1)
 
         self.compile_sizes: Set[int] = set(
             self.compilation_configs.compile_sizes)
@@ -421,6 +442,8 @@ class PiecewiseBackend:
         self.compiled_graph_for_general_shape = compiled_graph_for_general_shape  # noqa
 
         self.sym_shape_indices = sym_shape_indices
+
+        self.is_debugging_mode = envs.VLLM_LOGGING_LEVEL == "DEBUG"
 
         # the entries for different shapes that we need to either
         # compile or capture cudagraph
@@ -473,17 +496,63 @@ class PiecewiseBackend:
                 return entry.runnable(*args)
 
             if self.is_first_graph:
-                logger.info("Capturing a cudagraph for shape %s",
-                            runtime_shape)
+                # Since we capture cudagraph for many different shapes and
+                # capturing is fast, we don't need to log it for every shape.
+                # We only log it in the debug mode.
+                logger.debug("Capturing a cudagraph for shape %s",
+                             runtime_shape)
 
+            input_addresses = [
+                x.data_ptr() for x in args if isinstance(x, torch.Tensor)
+            ]
+            entry.input_addresses = input_addresses
             cudagraph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(cudagraph, pool=self.graph_pool):
-                entry.output = weak_ref_tensors(entry.runnable(*args))
+
+            with ExitStack() as stack:
+                if not self.is_first_graph:
+                    # during every model forward, we will capture
+                    # many pieces of cudagraphs (roughly one per layer).
+                    # running gc again and again across layers will
+                    # make the cudagraph capture very slow.
+                    # therefore, we only run gc for the first graph,
+                    # and disable gc for the rest of the graphs.
+                    stack.enter_context(patch("gc.collect", lambda: None))
+                    stack.enter_context(
+                        patch("torch.cuda.empty_cache", lambda: None))
+
+                # mind-exploding: carefully manage the reference and memory.
+                with torch.cuda.graph(cudagraph, pool=self.graph_pool):
+                    # `output` is managed by pytorch's cudagraph pool
+                    output = entry.runnable(*args)
+                    if self.is_last_graph:
+                        # by converting it to weak ref,
+                        # the original `output` will immediately be released
+                        # to save memory. It is only safe to do this for
+                        # the last graph, because the output of the last graph
+                        # will not be used by any other cuda graph.
+                        output = weak_ref_tensors(output)
+
+            # here we always use weak ref for the output
+            # to save memory
+            entry.output = weak_ref_tensors(output)
+            entry.cudagraph = cudagraph
 
             compilation_counter.num_cudagraph_caputured += 1
 
-            entry.cudagraph = cudagraph
-            return entry.output
+            # important: we need to return the output, rather than
+            # the weak ref of the output, so that pytorch can correctly
+            # manage the memory during cuda graph capture
+            return output
+
+        if self.is_debugging_mode:
+            # check if the input addresses are the same
+            new_input_addresses = [
+                x.data_ptr() for x in args if isinstance(x, torch.Tensor)
+            ]
+            assert new_input_addresses == entry.input_addresses, (
+                "Input addresses for cudagraphs are different during replay."
+                f" Expected {entry.input_addresses}, got {new_input_addresses}"
+            )
 
         entry.cudagraph.replay()
         return entry.output

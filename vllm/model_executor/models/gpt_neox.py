@@ -1,4 +1,3 @@
-# coding=utf-8
 # Adapted from
 # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/gpt_neox/modeling_gpt_neox.py
 # Copyright 2023 The vLLM team.
@@ -129,8 +128,7 @@ class GPTNeoXMLP(nn.Module):
             config.hidden_size,
             quant_config=quant_config,
         )
-        self.act = get_act_fn(config.hidden_act, quant_config,
-                              config.intermediate_size)
+        self.act = get_act_fn(config.hidden_act)
 
     def forward(self, hidden_states):
         hidden_states, _ = self.dense_h_to_4h(hidden_states)

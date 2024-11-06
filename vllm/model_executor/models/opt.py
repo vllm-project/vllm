@@ -1,4 +1,3 @@
-# coding=utf-8
 # Adapted from
 # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/opt/modeling_opt.py
 # Copyright 2023 The vLLM team.
@@ -148,8 +147,7 @@ class OPTDecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.fc1",
         )
-        self.activation_fn = get_act_fn(config.activation_function,
-                                        quant_config, config.ffn_dim)
+        self.activation_fn = get_act_fn(config.activation_function)
         self.fc2 = RowParallelLinear(
             config.ffn_dim,
             self.embed_dim,

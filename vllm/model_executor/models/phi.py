@@ -1,4 +1,3 @@
-# coding=utf-8
 # Adapted from
 # https://huggingface.co/microsoft/phi-1_5/blob/main/modeling_phi.py
 # Copyright 2023 The vLLM team.
@@ -153,7 +152,7 @@ class PhiMLP(nn.Module):
             config.hidden_size,
             quant_config=quant_config,
         )
-        self.act = get_act_fn(config.hidden_act, quant_config, n_inner)
+        self.act = get_act_fn(config.hidden_act)
 
     def forward(self, hidden_states):
         hidden_states, _ = self.fc1(hidden_states)

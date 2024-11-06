@@ -1,4 +1,3 @@
-# coding=utf-8
 # Adapted from
 # https://github.com/huggingface/transformers/blob/19e6e80e10118f855137b90740936c0b11ac397f/src/transformers/models/qwen2_vl/modeling_qwen2_vl.py
 # Copyright 2024 The Qwen team.
@@ -41,7 +40,7 @@ from transformers.models.qwen2_vl.image_processing_qwen2_vl import (
 
 from vllm.attention import AttentionMetadata
 from vllm.attention.selector import _Backend
-from vllm.config import CacheConfig, MultiModalConfig
+from vllm.config import CacheConfig, LoRAConfig, MultiModalConfig
 from vllm.distributed import get_pp_group, parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
@@ -66,7 +65,7 @@ from vllm.sequence import IntermediateTensors, SequenceData
 from vllm.transformers_utils.config import uses_mrope
 from vllm.transformers_utils.processor import cached_get_processor
 
-from .interfaces import SupportsMultiModal, SupportsPP
+from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsPP
 from .utils import (PPMissingLayer, get_vit_attn_backend,
                     is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory)
@@ -246,9 +245,8 @@ class Qwen2VisionAttention(nn.Module):
         q, k, v = dist_utils.split_tensor_along_last_dim(x, 3)
         batch_size = q.shape[1]
 
-        q, k, v = [
-            rearrange(x, "s b ... -> b s ...").contiguous() for x in (q, k, v)
-        ]
+        q, k, v = (rearrange(x, "s b ... -> b s ...").contiguous()
+                   for x in (q, k, v))
         if rotary_pos_emb is not None:
             q = apply_rotary_pos_emb_vision(q, rotary_pos_emb)
             k = apply_rotary_pos_emb_vision(k, rotary_pos_emb)
@@ -258,7 +256,7 @@ class Qwen2VisionAttention(nn.Module):
             #   flash_attn_varlen_func)
             from flash_attn import flash_attn_varlen_func
 
-            q, k, v = [rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v]]
+            q, k, v = (rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
 
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
             output = flash_attn_varlen_func(q,
@@ -276,7 +274,7 @@ class Qwen2VisionAttention(nn.Module):
                                       b=batch_size)
         elif self.attn_backend == _Backend.TORCH_SDPA:
             seq_length = q.size(1)
-            q, k, v = [rearrange(x, "b s h d -> b h s d") for x in [q, k, v]]
+            q, k, v = (rearrange(x, "b s h d -> b h s d") for x in [q, k, v])
             attention_mask = torch.zeros([1, seq_length, seq_length],
                                          device=q.device,
                                          dtype=torch.bool)
@@ -929,13 +927,37 @@ def input_processor_for_qwen2_vl(
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_qwen2_vl)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_qwen2_vl)
 class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
-                                      SupportsPP):
+                                      SupportsLoRA, SupportsPP):
+    packed_modules_mapping = {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+    }
+
+    # LoRA specific attributes
+    # TODO Support LoRA for the visual encoder in the future.
+    supported_lora_modules = [
+        "qkv_proj",
+        "o_proj",
+        "gate_up_proj",
+        "down_proj",
+    ]
+    embedding_modules = {}
+    embedding_padding_modules = []
 
     def __init__(self,
                  config: Qwen2VLConfig,
                  multimodal_config: MultiModalConfig,
                  cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None) -> None:
+                 quant_config: Optional[QuantizationConfig] = None,
+                 lora_config: Optional[LoRAConfig] = None) -> None:
+
         super().__init__()
 
         assert not cache_config.enable_prefix_caching, \

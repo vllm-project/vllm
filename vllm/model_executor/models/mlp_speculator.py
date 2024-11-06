@@ -37,7 +37,7 @@ class MLPSpeculatorLayerNorm(nn.Module):
         eps=1e-06,
         elementwise_scale_and_shift=True,
     ):
-        super(MLPSpeculatorLayerNorm, self).__init__()
+        super().__init__()
         self.elementwise_scale_and_shift = elementwise_scale_and_shift
         if self.elementwise_scale_and_shift:
             self.weight = nn.Parameter(torch.empty(normalized_shape))
