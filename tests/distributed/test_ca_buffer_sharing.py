@@ -11,33 +11,40 @@ from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
 from vllm.distributed.device_communicators.custom_all_reduce import (  # noqa
     CustomAllreduce)
 
+# create a cpu process group for communicating metadata (ipc handle)
 dist.init_process_group(backend="gloo")
 rank = local_rank = dist.get_rank()
 world_size = dist.get_world_size()
-torch.cuda.set_device(local_rank)
 
-pointers = CustomAllreduce.create_shared_buffer(1024)
+# every process sets its own device (differently)
+lib = CudaRTLibrary()
+lib.cudaSetDevice(rank)
+
+buffer_size_in_bytes = 1024
+byte_value = 2  # the value we write to the buffer for verification
+
+pointers = CustomAllreduce.create_shared_buffer(buffer_size_in_bytes)
 
 dist.barrier()
 torch.cuda.synchronize()
-
-lib = CudaRTLibrary()
 
 if rank == 0:
+    # the first rank tries to write to all buffers
     for p in pointers:
         pointer = ctypes.c_void_p(p)
-        lib.cudaMemset(pointer, 2, 1024)
+        lib.cudaMemset(pointer, byte_value, buffer_size_in_bytes)
 
 dist.barrier()
 torch.cuda.synchronize()
 
-host_data = (ctypes.c_char * 1024)()
+host_data = (ctypes.c_char * buffer_size_in_bytes)()
 
+# all ranks read from all buffers, and check if the data is correct
 for p in pointers:
     pointer = ctypes.c_void_p(p)
-    lib.cudaMemcpy(host_data, pointer, 1024)
-    for i in range(1024):
-        assert ord(host_data[i]) == 2
+    lib.cudaMemcpy(host_data, pointer, buffer_size_in_bytes)
+    for i in range(buffer_size_in_bytes):
+        assert ord(host_data[i]) == byte_value
 
 dist.barrier()
 torch.cuda.synchronize()
