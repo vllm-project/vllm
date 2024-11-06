@@ -99,13 +99,11 @@ class TestPrefixCachingBlock:
 
         token_ids = [random.randint(0, 50_000) for _ in range(num_tokens)]
 
-        first_chain, second_chain = [
-            TestPrefixCachingBlock.create_chain(
-                block_size=block_size,
-                token_ids=token_ids,
-                num_empty_trailing_blocks=num_empty_trailing_blocks)
-            for _ in range(2)
-        ]
+        first_chain, second_chain = (TestPrefixCachingBlock.create_chain(
+            block_size=block_size,
+            token_ids=token_ids,
+            num_empty_trailing_blocks=num_empty_trailing_blocks)
+                                     for _ in range(2))
 
         for first_chain_block, second_chain_block in zip(
                 first_chain, second_chain):
