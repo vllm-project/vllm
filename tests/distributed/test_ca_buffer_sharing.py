@@ -1,12 +1,15 @@
 # can only run on machines with p2p access across GPUs
-# can only run with torchrun --nproc_per_node=n 
+# can only run with torchrun:
+# torchrun --nproc_per_node=2 tests/distributed/test_ca_buffer_sharing.py
 
 import ctypes
+
 import torch
 import torch.distributed as dist
 
-from vllm.distributed.device_communicators.custom_all_reduce import CustomAllreduce
 from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
+from vllm.distributed.device_communicators.custom_all_reduce import (  # noqa
+    CustomAllreduce)
 
 dist.init_process_group(backend="gloo")
 rank = local_rank = dist.get_rank()

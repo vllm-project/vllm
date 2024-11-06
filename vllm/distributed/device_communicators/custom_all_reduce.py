@@ -1,3 +1,4 @@
+import ctypes
 from contextlib import contextmanager
 from typing import Any, List, Optional, Union
 
@@ -7,9 +8,9 @@ from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
+from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
 from vllm.distributed.device_communicators.custom_all_reduce_utils import (
     gpu_p2p_access_check)
-from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
 from vllm.distributed.parallel_state import in_the_same_node_as
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -176,7 +177,9 @@ class CustomAllreduce:
         self.register_buffer(self.buffer)
 
     @staticmethod
-    def create_shared_buffer(size_in_bytes: int, group: Optional[ProcessGroup] = None) -> List[int]:
+    def create_shared_buffer(
+            size_in_bytes: int,
+            group: Optional[ProcessGroup] = None) -> List[int]:
         lib = CudaRTLibrary()
         pointer = lib.cudaMalloc(size_in_bytes)
         handle = lib.cudaIpcGetMemHandle(pointer)
@@ -188,15 +191,16 @@ class CustomAllreduce:
         pointers: List[int] = []
         for i, h in enumerate(handles):
             if i == rank:
-                pointers.append(pointer.value)
+                pointers.append(pointer.value)  # type: ignore
             else:
-                pointers.append(lib.cudaIpcOpenMemHandle(h).value)
+                pointers.append(
+                    lib.cudaIpcOpenMemHandle(h).value)  # type: ignore
 
         return pointers
 
     @staticmethod
-    def free_shared_buffer(pointers: List[int], group: Optional[ProcessGroup] = None) -> None:
-        world_size = dist.get_world_size(group=group)
+    def free_shared_buffer(pointers: List[int],
+                           group: Optional[ProcessGroup] = None) -> None:
         rank = dist.get_rank(group=group)
         lib = CudaRTLibrary()
         lib.cudaFree(ctypes.c_void_p(pointers[rank]))
