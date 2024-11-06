@@ -1583,7 +1583,7 @@ class Scheduler:
 
         return self.scheduler_config.num_lookahead_slots
 
-    def _get_budget_for_chunk(self, budget: SchedulingBudget) -> int:
+    def _get_token_budget_for_request(self, budget: SchedulingBudget) -> int:
         """When doing chunked prefill, calculate the token budget for a single
         chunk. This dynamically scales the chunk size down as the number of
         sequences that require prefilling increases. This ensures that a single
@@ -1617,7 +1617,6 @@ class Scheduler:
         # don't have.
         chunk_size = min(remaining_token_budget, chunk_size)
 
-        logger.debug("Prefill chunk size: %d", chunk_size)
         return chunk_size
 
     def _get_num_new_tokens(self, seq_group: SequenceGroup,
@@ -1663,7 +1662,7 @@ class Scheduler:
         # in a decode phase. Do not chunk.
         elif enable_chunking and len(seqs) == 1:
             # Get the budget for this chunk
-            chunk_size = self._get_budget_for_chunk(budget=budget)
+            chunk_size = self._get_token_budget_for_request(budget=budget)
 
             if self.cache_config.enable_prefix_caching:
                 # When prefix caching is enabled, we always allocate
