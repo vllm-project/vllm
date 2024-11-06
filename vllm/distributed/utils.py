@@ -108,7 +108,8 @@ def stateless_init_process_group(init_method: str, rank: int, world_size: int,
     can call `stateless_init_process_group` to form a group, and then process A, B,
     C, and D can call `stateless_init_process_group` to form another group.
     """ # noqa
-    backend = Backend(backend)
+
+    backend = Backend(backend)  # it is basically string
     timeout = _get_default_timeout(backend)
 
     store, rank, world_size = next(
@@ -122,21 +123,36 @@ def stateless_init_process_group(init_method: str, rank: int, world_size: int,
     # different systems (e.g. RPC) in case the store is multi-tenant.
     prefix_store = PrefixStore(init_method, store)
 
+    pg: ProcessGroup = ProcessGroup(
+        prefix_store,
+        group_rank,
+        group_size,
+    )
+
+    pg._set_default_backend(Backend.backend_type_map[backend])
+
     if backend == "gloo":
         from torch.distributed.distributed_c10d import ProcessGroupGloo
         backend_class = ProcessGroupGloo(prefix_store,
                                          group_rank,
                                          group_size,
                                          timeout=timeout)
+        backend_type = ProcessGroup.BackendType.GLOO
+        device = torch.device("cpu")
     elif backend == "nccl":
         assert is_nccl_available()
         from torch.distributed.distributed_c10d import ProcessGroupNCCL
 
         backend_options = ProcessGroupNCCL.Options()
+        backend_options._timeout = timeout
 
         backend_class = ProcessGroupNCCL(prefix_store, group_rank, group_size,
                                          backend_options)
+        backend_type = ProcessGroup.BackendType.NCCL
+        device = torch.device("cuda")
 
     backend_class._set_sequence_number_for_group()
 
-    return backend_class
+    pg._register_backend(device, backend_type, backend_class)
+
+    return pg
