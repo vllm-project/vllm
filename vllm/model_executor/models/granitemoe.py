@@ -28,6 +28,7 @@ from torch import nn
 from transformers.models.granitemoe import GraniteMoeConfig
 
 from vllm.attention import Attention, AttentionMetadata
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, LoRAConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.fused_moe import FusedMoE
@@ -244,6 +245,7 @@ class GraniteMoeDecoderLayer(nn.Module):
         return hidden_states
 
 
+@support_torch_compile
 class GraniteMoeModel(nn.Module):
 
     def __init__(
@@ -324,6 +326,7 @@ class GraniteMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         "o_proj",
         "embed_tokens",
         "lm_head",
+        "layer",
     ]
     embedding_modules = {
         "embed_tokens": "input_embeddings",

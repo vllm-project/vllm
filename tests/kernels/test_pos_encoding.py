@@ -6,7 +6,6 @@ import torch
 
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.platforms import current_platform
-from vllm.utils import seed_everything
 
 from .allclose_default import get_default_atol, get_default_rtol
 
@@ -52,7 +51,7 @@ def test_rotary_embedding(
     if rotary_dim is None:
         rotary_dim = head_size
 
-    seed_everything(seed)
+    current_platform.seed_everything(seed)
     torch.set_default_device(device)
     if rotary_dim is None:
         rotary_dim = head_size
@@ -106,12 +105,12 @@ def test_batched_rotary_embedding(
     max_position: int = 8192,
     base: int = 10000,
 ) -> None:
-    seed_everything(seed)
+    current_platform.seed_everything(seed)
     torch.set_default_device(device)
     if rotary_dim is None:
         rotary_dim = head_size
     rope = get_rope(head_size, rotary_dim, max_position, base, is_neox_style, {
-        "type": "linear",
+        "rope_type": "linear",
         "factor": (1, )
     })
     rope = rope.to(dtype=dtype)
@@ -168,13 +167,13 @@ def test_batched_rotary_embedding_multi_lora(
     max_position: int = 8192,
     base: int = 10000,
 ) -> None:
-    seed_everything(seed)
+    current_platform.seed_everything(seed)
     torch.set_default_device(device)
     if rotary_dim is None:
         rotary_dim = head_size
     scaling_factors: List[int] = [1, 2, 4]
     rope = get_rope(head_size, rotary_dim, max_position, base, is_neox_style, {
-        "type": "linear",
+        "rope_type": "linear",
         "factor": tuple(scaling_factors)
     })
     rope = rope.to(dtype=dtype)
@@ -221,10 +220,10 @@ def test_rope_module_cache():
     MAX_POSITIONS = [123, 1234]
     BASES = [10000, 1000000]
     ROPE_SCALINGS = (None, {
-        "type": "linear",
+        "rope_type": "linear",
         "factor": (1, )
     }, {
-        "type": "dynamic",
+        "rope_type": "dynamic",
         "factor": 1
     })
     settings = (HEAD_SIZES, ROTARY_DIMS, MAX_POSITIONS, BASES, IS_NEOX_STYLE,

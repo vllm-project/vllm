@@ -28,6 +28,7 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig
 from vllm.distributed import (get_pp_group,
                               get_tensor_model_parallel_world_size,
@@ -242,7 +243,7 @@ class DeepseekV2Attention(nn.Module):
                                         bias=False,
                                         quant_config=quant_config,
                                         prefix=f"{prefix}.o_proj")
-        rope_scaling['type'] = 'deepseek_yarn'
+        rope_scaling["rope_type"] = 'deepseek_yarn'
         self.rotary_emb = get_rope(qk_rope_head_dim,
                                    rotary_dim=qk_rope_head_dim,
                                    max_position=max_position_embeddings,
@@ -403,6 +404,7 @@ class DeepseekV2DecoderLayer(nn.Module):
         return hidden_states, residual
 
 
+@support_torch_compile
 class DeepseekV2Model(nn.Module):
 
     fall_back_to_pt_during_load = False

@@ -17,7 +17,6 @@ NUM_PROMPTS = [10]
 
 DEFAULT_SERVER_ARGS: List[str] = [
     "--disable-log-requests",
-    "--use-v2-block-manager",
     "--worker-use-ray",
     "--gpu-memory-utilization",
     "0.85",

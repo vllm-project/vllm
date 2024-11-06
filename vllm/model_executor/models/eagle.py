@@ -44,7 +44,7 @@ class EAGLE(nn.Module):
         self.model = model_cls(self.config.model, *args, **kwargs)
         self.fc = nn.Linear(config.model.hidden_size * 2,
                             config.model.hidden_size,
-                            bias=getattr(self.config, "bias", False))
+                            bias=getattr(self.config, "eagle_fc_bias", False))
 
         self.orig_vocab_size = config.vocab_size
         self.truncated_vocab_size = config.truncated_vocab_size

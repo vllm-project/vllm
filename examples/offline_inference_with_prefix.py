@@ -1,4 +1,5 @@
 from vllm import LLM, SamplingParams
+from vllm.distributed import cleanup_dist_env_and_memory
 
 # NOTE: This is just a running example. For benchmarking purpose,
 # please see benchmarks/benchmark_prefix_caching.py
@@ -28,12 +29,9 @@ generating_prompts = [prefix + prompt for prompt in prompts]
 # Create a sampling params object.
 sampling_params = SamplingParams(temperature=0.0)
 
-# Create an LLM.
+# Create an LLM without prefix caching as a baseline.
 regular_llm = LLM(model="facebook/opt-125m", gpu_memory_utilization=0.4)
 
-prefix_cached_llm = LLM(model="facebook/opt-125m",
-                        enable_prefix_caching=True,
-                        gpu_memory_utilization=0.4)
 print("Results without `enable_prefix_caching`")
 
 # Generate texts from the prompts. The output is a list of RequestOutput objects
@@ -49,6 +47,15 @@ for output in outputs:
     print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 
 print("-" * 80)
+
+# Destroy the LLM object and free up the GPU memory.
+del regular_llm
+cleanup_dist_env_and_memory()
+
+# Create an LLM with prefix caching enabled.
+prefix_cached_llm = LLM(model="facebook/opt-125m",
+                        enable_prefix_caching=True,
+                        gpu_memory_utilization=0.4)
 
 # Warmup so that the shared prompt's KV cache is computed.
 prefix_cached_llm.generate(generating_prompts[0], sampling_params)

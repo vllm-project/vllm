@@ -1,12 +1,11 @@
 from typing import Callable, List, Optional
 
 import torch
+from compressed_tensors.quantization import QuantizationStrategy
 from torch.nn import Parameter
 
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
-from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
-    QuantizationStrategy)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     apply_fp8_linear, cutlass_fp8_supported, normalize_e4m3fn_to_e4m3fnuz,
     requantize_with_max_scale)
@@ -14,7 +13,6 @@ from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
                                            ModelWeightParameter,
                                            PerTensorScaleParameter)
 from vllm.platforms import current_platform
-from vllm.utils import is_hip
 
 __all__ = ["CompressedTensorsW8A8Fp8"]
 
@@ -43,7 +41,7 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
                 logical_widths=layer.logical_widths,
             )
 
-            if is_hip():
+            if current_platform.is_rocm():
                 weight, max_w_scale, input_scale = normalize_e4m3fn_to_e4m3fnuz(
                     weight=weight,
                     weight_scale=max_w_scale,
@@ -59,7 +57,7 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         elif self.strategy == QuantizationStrategy.CHANNEL:
             weight = layer.weight
 
-            if is_hip():
+            if current_platform.is_rocm():
                 weight, weight_scale, input_scale = \
                     normalize_e4m3fn_to_e4m3fnuz(
                         weight=weight,
