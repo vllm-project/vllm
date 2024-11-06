@@ -54,8 +54,9 @@ def mm_input_mapper_for_glmv(
     data: MultiModalData[object],
 ) -> Dict:
     model_config = ctx.model_config
-    tokenizer = cached_get_tokenizer(model_config.tokenizer,
-                                     trust_remote_code=True)
+    tokenizer = cached_get_tokenizer(
+        model_config.tokenizer,
+        trust_remote_code=model_config.trust_remote_code)
     if tokenizer is None:
         raise RuntimeError("No HuggingFace processor is available "
                            "to process the image object")
@@ -525,7 +526,7 @@ class ChatGLMModel(nn.Module):
             elif isinstance(pixel_values, list):
                 return torch.concat(pixel_values)
             else:
-                raise TypeError("""pixel_values must be a torch.Tensor 
+                raise TypeError("""pixel_values must be a torch.Tensor
                     or a list of torch.Tensor
                     """)
         return GLMImagePixelInputs(pixel_values=pixel_values)
