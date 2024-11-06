@@ -327,6 +327,22 @@ VLM_TEST_SETTINGS = {
         vllm_output_post_proc=model_utils.qwen_vllm_to_hf_output,
         prompt_path_encoder=model_utils.qwen_prompt_path_encoder,
     ),
+    "idefics3": VLMTestInfo(
+        models=["HuggingFaceM4/Idefics3-8B-Llama3"],
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        prompt_formatter=lambda img_prompt:f"<|begin_of_text|>User:{img_prompt}<end_of_utterance>\nAssistant:",  # noqa: E501
+        img_idx_to_prompt=lambda idx: "<image>",
+        max_model_len=8192,
+        max_num_seqs=2,
+        auto_cls=AutoModelForVision2Seq,
+        marks=[
+            pytest.mark.skipif(
+                transformers.__version__ < "4.46.0",
+                reason="Model introduced in HF >= 4.46.0"
+            ),
+            large_gpu_mark(min_gb=48),
+        ],
+    ),
     ### Tensor parallel / multi-gpu broadcast tests
     "broadcast-chameleon": VLMTestInfo(
         models=["facebook/chameleon-7b"],
