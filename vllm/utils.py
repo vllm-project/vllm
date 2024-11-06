@@ -1180,7 +1180,7 @@ class SortedHelpFormatter(argparse.HelpFormatter):
 
     def add_arguments(self, actions):
         actions = sorted(actions, key=lambda x: x.option_strings)
-        super(SortedHelpFormatter, self).add_arguments(actions)
+        super().add_arguments(actions)
 
 
 class FlexibleArgumentParser(argparse.ArgumentParser):
@@ -1306,7 +1306,7 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
 
         config: Dict[str, Union[int, str]] = {}
         try:
-            with open(file_path, 'r') as config_file:
+            with open(file_path) as config_file:
                 config = yaml.safe_load(config_file)
         except Exception as ex:
             logger.error(

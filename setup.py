@@ -1,5 +1,4 @@
 import importlib.util
-import io
 import logging
 import os
 import re
@@ -345,7 +344,7 @@ def get_neuronxcc_version():
                                 "__init__.py")
 
     # Check if the command was executed successfully
-    with open(version_file, "rt") as fp:
+    with open(version_file) as fp:
         content = fp.read()
 
     # Extract the version using a regular expression
@@ -445,7 +444,8 @@ def read_readme() -> str:
     """Read the README file if present."""
     p = get_path("README.md")
     if os.path.isfile(p):
-        return io.open(get_path("README.md"), "r", encoding="utf-8").read()
+        with open(get_path("README.md"), encoding="utf-8") as f:
+            return f.read()
     else:
         return ""
 
@@ -541,7 +541,6 @@ setup(
         "Documentation": "https://vllm.readthedocs.io/en/latest/",
     },
     classifiers=[
-        "Programming Language :: Python :: 3.8",
         "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
@@ -555,7 +554,7 @@ setup(
     ],
     packages=find_packages(exclude=("benchmarks", "csrc", "docs", "examples",
                                     "tests*")),
-    python_requires=">=3.8",
+    python_requires=">=3.9",
     install_requires=get_requirements(),
     ext_modules=ext_modules,
     extras_require={

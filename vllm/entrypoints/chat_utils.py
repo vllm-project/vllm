@@ -22,7 +22,6 @@ from openai.types.chat import (ChatCompletionMessageToolCallParam,
                                ChatCompletionToolMessageParam)
 # yapf: enable
 # pydantic needs the TypedDict from typing_extensions
-from pydantic import ConfigDict
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 from typing_extensions import Required, TypeAlias, TypedDict
 
@@ -52,17 +51,10 @@ class ChatCompletionContentPartAudioParam(TypedDict, total=False):
     """The type of the content part."""
 
 
-class CustomChatCompletionContentPartParam(TypedDict, total=False):
-    __pydantic_config__ = ConfigDict(extra="allow")  # type: ignore
-
-    type: Required[str]
-    """The type of the content part."""
-
-
 class CustomChatCompletionContentSimpleImageParam(TypedDict, total=False):
     """A simpler version of the param that only accepts a plain image_url.
     This is supported by OpenAI API, although it is not documented.
-    
+
     Example:
     {
         "image_url": "https://example.com/image.jpg"
@@ -73,7 +65,7 @@ class CustomChatCompletionContentSimpleImageParam(TypedDict, total=False):
 
 class CustomChatCompletionContentSimpleAudioParam(TypedDict, total=False):
     """A simpler version of the param that only accepts a plain audio_url.
-    
+
     Example:
     {
         "audio_url": "https://example.com/audio.mp3"
@@ -85,7 +77,6 @@ class CustomChatCompletionContentSimpleAudioParam(TypedDict, total=False):
 ChatCompletionContentPartParam: TypeAlias = Union[
     OpenAIChatCompletionContentPartParam, ChatCompletionContentPartAudioParam,
     ChatCompletionContentPartRefusalParam,
-    CustomChatCompletionContentPartParam,
     CustomChatCompletionContentSimpleImageParam,
     CustomChatCompletionContentSimpleAudioParam, str]
 
@@ -371,7 +362,7 @@ def load_chat_template(
     if chat_template is None:
         return None
     try:
-        with open(chat_template, "r") as f:
+        with open(chat_template) as f:
             resolved_chat_template = f.read()
     except OSError as e:
         if isinstance(chat_template, Path):

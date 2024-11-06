@@ -1554,8 +1554,8 @@ class LLMEngine:
                 seq_group.state.remaining_steps != ref_remaining_steps
                 for seq_group in seq_group_metadata_list[1:]
         ]):
-            raise AssertionError(("All running sequence groups should "
-                                  "have the same remaining steps."))
+            raise AssertionError("All running sequence groups should "
+                                 "have the same remaining steps.")
 
         return ref_remaining_steps > 0
 
