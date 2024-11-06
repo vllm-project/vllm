@@ -1,7 +1,8 @@
 import functools
 from collections import UserDict
-from typing import TYPE_CHECKING, Any, Dict, Mapping, Optional, Sequence
+from typing import Any, Dict, Mapping, Optional, Sequence
 
+from vllm.config import ModelConfig
 from vllm.logger import init_logger
 
 from .audio import AudioPlugin
@@ -9,9 +10,6 @@ from .base import (MultiModalDataDict, MultiModalInputMapper, MultiModalInputs,
                    MultiModalPlugin, MultiModalTokensCalc, NestedTensors)
 from .image import ImagePlugin
 from .video import VideoPlugin
-
-if TYPE_CHECKING:
-    from vllm.config import ModelConfig
 
 logger = init_logger(__name__)
 
@@ -22,7 +20,7 @@ class _MultiModalLimits(UserDict):
     when attempting to access a model that does not exist.
     """
 
-    def __getitem__(self, key: "ModelConfig") -> Dict[str, int]:
+    def __getitem__(self, key: ModelConfig) -> Dict[str, int]:
         try:
             return super().__getitem__(key)
         except KeyError as exc:
@@ -100,7 +98,7 @@ class MultiModalRegistry:
 
     def map_input(
         self,
-        model_config: "ModelConfig",
+        model_config: ModelConfig,
         data: MultiModalDataDict,
         mm_processor_kwargs: Optional[Dict[str, Any]] = None,
     ) -> MultiModalInputs:
@@ -141,7 +139,7 @@ class MultiModalRegistry:
 
         return MultiModalInputs(merged_dict)
 
-    def create_input_mapper(self, model_config: "ModelConfig"):
+    def create_input_mapper(self, model_config: ModelConfig):
         """
         Create an input mapper (see :meth:`map_input`) for a specific model.
         """
@@ -179,7 +177,7 @@ class MultiModalRegistry:
         """
         return self.register_max_multimodal_tokens("image", max_mm_tokens)
 
-    def get_max_multimodal_tokens(self, model_config: "ModelConfig") -> int:
+    def get_max_multimodal_tokens(self, model_config: ModelConfig) -> int:
         """
         Get the maximum number of multi-modal tokens
         for profiling the memory usage of a model.
@@ -197,7 +195,7 @@ class MultiModalRegistry:
 
     def init_mm_limits_per_prompt(
         self,
-        model_config: "ModelConfig",
+        model_config: ModelConfig,
     ) -> None:
         """
         Initialize the maximum number of multi-modal input instances for each
@@ -233,7 +231,7 @@ class MultiModalRegistry:
 
     def get_mm_limits_per_prompt(
         self,
-        model_config: "ModelConfig",
+        model_config: ModelConfig,
     ) -> Mapping[str, int]:
         """
         Get the maximum number of multi-modal input instances for each modality

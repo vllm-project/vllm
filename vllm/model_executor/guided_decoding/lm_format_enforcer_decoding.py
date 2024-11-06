@@ -9,8 +9,7 @@ from lmformatenforcer.integrations.vllm import (
     build_vllm_logits_processor, build_vllm_token_enforcer_tokenizer_data)
 from transformers import PreTrainedTokenizerBase
 
-from vllm.logits_process import LogitsProcessor
-from vllm.sampling_params import GuidedDecodingParams
+from vllm.sampling_params import GuidedDecodingParams, LogitsProcessor
 
 
 def get_local_lm_format_enforcer_guided_decoding_logits_processor(

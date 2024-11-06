@@ -4,7 +4,8 @@ from typing import List
 import pytest
 
 from vllm import LLM, EmbeddingRequestOutput, PoolingParams
-from vllm.distributed import cleanup_dist_env_and_memory
+
+from ...conftest import cleanup
 
 MODEL_NAME = "intfloat/e5-mistral-7b-instruct"
 
@@ -40,7 +41,7 @@ def llm():
 
         del llm
 
-    cleanup_dist_env_and_memory()
+    cleanup()
 
 
 def assert_outputs_equal(o1: List[EmbeddingRequestOutput],

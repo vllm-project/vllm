@@ -5,10 +5,11 @@ import weakref
 import jsonschema
 import pytest
 
-from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.entrypoints.llm import LLM
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import GuidedDecodingParams, SamplingParams
+
+from ...conftest import cleanup
 
 MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
 
@@ -22,7 +23,7 @@ def llm():
     with llm.deprecate_legacy_api():
         yield weakref.proxy(llm)
         del llm
-    cleanup_dist_env_and_memory()
+    cleanup()
 
 
 @pytest.mark.skip_global_cleanup

@@ -55,6 +55,9 @@ from .conftest import (get_output_from_llm_generator,
 
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
+
+        # Required for spec decode.
+        "use_v2_block_manager": True,
     }])
 @pytest.mark.parametrize(
     "per_test_common_llm_kwargs",
@@ -121,6 +124,9 @@ def test_spec_decode_e2e_with_detokenization(test_llm_generator,
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
 
+        # Required for spec decode.
+        "use_v2_block_manager": True,
+
         # Print spec metrics.
         "disable_log_stats": False,
     }])
@@ -184,6 +190,9 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_bs1(
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
 
+        # Required for spec decode.
+        "use_v2_block_manager": True,
+
         # Print spec metrics.
         "disable_log_stats": False,
     }])
@@ -237,6 +246,9 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_large_bs(
     [{
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
+
+        # Required for spec decode.
+        "use_v2_block_manager": True
     }])
 @pytest.mark.parametrize(
     "per_test_common_llm_kwargs",
@@ -291,6 +303,9 @@ def test_spec_decode_e2e_greedy_correctness_tiny_model_large_bs_diff_output_len(
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
 
+        # Required for spec decode.
+        "use_v2_block_manager": True,
+
         # Print spec metrics.
         "disable_log_stats": False,
     }])
@@ -337,6 +352,9 @@ def test_spec_decode_e2e_greedy_correctness_real_model_bs1(
 
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
+
+        # Required for spec decode.
+        "use_v2_block_manager": True,
 
         # Print spec metrics.
         "disable_log_stats": False,
@@ -386,6 +404,9 @@ def test_spec_decode_e2e_greedy_correctness_real_model_large_bs(
 
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
+
+        # Required for spec decode.
+        "use_v2_block_manager": True
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [
     {
@@ -433,6 +454,9 @@ def test_spec_decode_e2e_greedy_correctness_with_preemption(
 
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
+
+        # Required for spec decode.
+        "use_v2_block_manager": True
     }])
 @pytest.mark.parametrize(
     "per_test_common_llm_kwargs",
@@ -490,6 +514,9 @@ def test_spec_decode_different_block_size(vllm_runner, common_llm_kwargs,
 
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
+
+        # Required for spec decode.
+        "use_v2_block_manager": True
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
@@ -543,6 +570,9 @@ def test_skip_speculation(vllm_runner, common_llm_kwargs,
 
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
+
+        # Required for spec decode.
+        "use_v2_block_manager": True
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
@@ -581,6 +611,9 @@ def test_disable_speculation(vllm_runner, common_llm_kwargs,
 
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
+
+        # Required for spec decode.
+        "use_v2_block_manager": True
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
@@ -627,6 +660,9 @@ def test_many_k(vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
 
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
+
+        # Required for spec decode.
+        "use_v2_block_manager": True
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])

@@ -6,9 +6,10 @@ from typing import List
 import pytest
 
 import vllm
-from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.lora.request import LoRARequest
-from vllm.platforms import current_platform
+from vllm.utils import is_hip
+
+from .conftest import cleanup
 
 
 @dataclass
@@ -19,7 +20,7 @@ class ModelWithQuantization:
 
 MODELS: List[ModelWithQuantization]
 #AWQ quantization is currently not supported in ROCm.
-if current_platform.is_rocm():
+if is_hip():
     MODELS = [
         ModelWithQuantization(
             model_path="TheBloke/TinyLlama-1.1B-Chat-v0.3-GPTQ",
@@ -159,7 +160,7 @@ def test_quant_model_lora(tinyllama_lora_files, num_gpus_available, model,
     print("removing lora")
 
     del llm
-    cleanup_dist_env_and_memory()
+    cleanup()
 
 
 @pytest.mark.parametrize("model", MODELS)
@@ -180,7 +181,7 @@ def test_quant_model_tp_equality(tinyllama_lora_files, num_gpus_available,
     output_tp1 = do_sample(llm_tp1, tinyllama_lora_files, lora_id=1)
 
     del llm_tp1
-    cleanup_dist_env_and_memory()
+    cleanup()
 
     llm_tp2 = vllm.LLM(
         model=model.model_path,
@@ -193,6 +194,6 @@ def test_quant_model_tp_equality(tinyllama_lora_files, num_gpus_available,
     output_tp2 = do_sample(llm_tp2, tinyllama_lora_files, lora_id=1)
 
     del llm_tp2
-    cleanup_dist_env_and_memory()
+    cleanup()
 
     assert output_tp1 == output_tp2

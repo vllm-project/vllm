@@ -7,8 +7,7 @@ from transformers import PaliGemmaConfig
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
-from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
-                         InputContext, token_inputs)
+from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import SamplerOutput
@@ -58,7 +57,7 @@ def dummy_data_for_paligemma(ctx: InputContext, seq_len: int,
     vision_config = hf_config.vision_config
     num_images = mm_counts["image"]
 
-    seq_data, ranges = dummy_seq_data_for_siglip(
+    seq_data = dummy_seq_data_for_siglip(
         vision_config,
         seq_len,
         num_images,
@@ -66,11 +65,10 @@ def dummy_data_for_paligemma(ctx: InputContext, seq_len: int,
     )
 
     mm_data = dummy_image_for_siglip(vision_config, num_images)
-    return DummyData(seq_data, mm_data, ranges)
+    return seq_data, mm_data
 
 
-def input_processor_for_paligemma(ctx: InputContext,
-                                  inputs: DecoderOnlyInputs):
+def input_processor_for_paligemma(ctx: InputContext, llm_inputs: LLMInputs):
 
     """
     The correct prompt format needs to be:
@@ -79,9 +77,9 @@ def input_processor_for_paligemma(ctx: InputContext,
     See https://github.com/huggingface/transformers/blob/25245ec26dc29bcf6102e1b4ddd0dfd02e720cf5/src/transformers/models/paligemma/processing_paligemma.py#L55
     """ # noqa
 
-    multi_modal_data = inputs.get("multi_modal_data")
+    multi_modal_data = llm_inputs.get("multi_modal_data")
     if multi_modal_data is None or "image" not in multi_modal_data:
-        return inputs
+        return llm_inputs
 
     model_config = ctx.model_config
     hf_config = ctx.get_hf_config(PaliGemmaConfig)
@@ -93,8 +91,8 @@ def input_processor_for_paligemma(ctx: InputContext,
     image_token_str_pad = image_token_str * image_feature_size
     image_token_ids_pad = [hf_config.image_token_index] * image_feature_size
 
-    orig_prompt = inputs.get("prompt")
-    orig_prompt_ids = inputs.get("prompt_token_ids")
+    orig_prompt = llm_inputs.get("prompt")
+    orig_prompt_ids = llm_inputs.get("prompt_token_ids")
 
     if orig_prompt is not None and image_token_str in orig_prompt:
         logger.warning(
@@ -108,9 +106,9 @@ def input_processor_for_paligemma(ctx: InputContext,
     new_token_ids = image_token_ids_pad + orig_prompt_ids + [108]  #newline
 
     # NOTE: Create a defensive copy of the original inputs
-    return token_inputs(prompt_token_ids=new_token_ids,
-                        prompt=new_prompt,
-                        multi_modal_data=multi_modal_data)
+    return LLMInputs(prompt_token_ids=new_token_ids,
+                     prompt=new_prompt,
+                     multi_modal_data=multi_modal_data)
 
 
 class PaliGemmaMultiModalProjector(nn.Module):
@@ -142,18 +140,14 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.config = config
         self.multimodal_config = multimodal_config
 
-        self.vision_tower = SiglipVisionModel(config.vision_config,
-                                              quant_config,
-                                              prefix="vision_tower")
+        self.vision_tower = SiglipVisionModel(config.vision_config)
         self.multi_modal_projector = PaliGemmaMultiModalProjector(
             vision_hidden_size=config.vision_config.hidden_size,
             projection_dim=config.vision_config.projection_dim)
 
         self.quant_config = quant_config
         self.language_model = GemmaForCausalLM(config.text_config,
-                                               cache_config,
-                                               quant_config,
-                                               prefix="language_model")
+                                               cache_config, quant_config)
         logit_scale = getattr(config, "logit_scale", 1.0)
         self.language_model.logits_processor.scale *= logit_scale
 

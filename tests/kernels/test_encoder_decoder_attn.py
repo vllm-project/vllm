@@ -16,13 +16,13 @@ from tests.kernels.utils import *
 from vllm.attention import (Attention, AttentionBackend, AttentionMetadata,
                             AttentionType)
 from vllm.attention.backends.utils import STR_NOT_IMPL_ENC_DEC_ROCM_HIP
-from vllm.attention.selector import (_Backend, get_attn_backend,
+from vllm.attention.selector import (_Backend,
                                      global_force_attn_backend_context_manager)
-from vllm.forward_context import set_forward_context
-from vllm.platforms import current_platform
+from vllm.utils import is_hip
 
 # List of support backends for encoder/decoder models
-LIST_ENC_DEC_SUPPORTED_BACKENDS = [_Backend.XFORMERS, _Backend.FLASH_ATTN]
+LIST_ENC_DEC_SUPPORTED_BACKENDS = [_Backend.XFORMERS]
+
 HEAD_SIZES = [64, 256]
 
 NUM_HEADS = [1, 16]
@@ -82,7 +82,7 @@ class TestResources(NamedTuple):
         will leverage attn_backend for the purpose of
         constructing backend-compatible attention
         metadata instances
-
+   
     Attributes:
 
     * scale: 1/sqrt(d) scale factor for attn
@@ -105,10 +105,10 @@ def _make_test_resources(test_pt: TestPoint, ) -> TestResources:
     Build key components for performing encoder/decoder attention test.
 
     Note that
-    (1) The Attention instance constructed here, automatically selects
+    (1) The Attention instance constructed here, automatically selects 
         an attention backend class based on platform info & a set of canned
         heuristics, so
-    (2) The attention backend instance constructed here is thus *not
+    (2) The attention backend instance constructed here is thus *not 
         the same backend instance* used by attn, but rather it is
         intended to be a *different instance* of the *same backend class*;
         therefore,
@@ -145,8 +145,7 @@ def _make_test_resources(test_pt: TestPoint, ) -> TestResources:
                              test_pt.num_heads,
                              test_pt.head_size,
                              test_pt.block_size,
-                             device=CUDA_DEVICE,
-                             backend=test_pt.backend_name)
+                             device=CUDA_DEVICE)
     return TestResources(scale, attn_backend, attn, kv_cache)
 
 
@@ -157,7 +156,7 @@ def _encoder_attn_setup(
     '''
     Set up test vectors & data structures for encoder attention test.
 
-    A triplet of synthetic query/key/value tensors are constructed.
+    A triplet of synthetic query/key/value tensors are constructed. 
     Given this is an encoder attention test, the key & value
     sequences will have the same length as the corresponding queries.
 
@@ -170,14 +169,14 @@ def _encoder_attn_setup(
     Arguments:
 
     * test_pt: TestPoint data structure; this function relies on the
-               following fields: batch_size, num_heads, head_size,
+               following fields: batch_size, num_heads, head_size, 
                block_size, max_q_seq_len
     * test_rsrcs: TestResources data structure; this function relies on the
                   scale field
 
-
+    
     Returns:
-
+    
     * PhaseTestParameters data structure comprising (1) packed query/key/value
       tensors, (2) the ideal output of attention computed using a naive
       implementation, and (3) KVCache field set to None
@@ -266,7 +265,7 @@ def _decoder_attn_setup(
     Arguments:
 
     * test_pt: TestPoint data structure; this function relies on the
-               following fields: batch_size, num_heads, head_size,
+               following fields: batch_size, num_heads, head_size, 
                block_size, max_q_seq_len
     * test_rsrcs: TestResources data structure; this function relies on the
                   scale field
@@ -276,14 +275,14 @@ def _decoder_attn_setup(
     * qkv: Unpacked (batch_size x padded_seq_len x num_heads x
            head_size) query/key/value tensors
     * Prefill-phase decoder self-attention PhaseTestParameters data structure,
-      including (1) packed (number_of_tokens x num_heads x head_size)
+      including (1) packed (number_of_tokens x num_heads x head_size) 
       query/key/value tensors along with (2) ideal attention output
-      computed using a naive implementation, and (3) memory-mapping data
+      computed using a naive implementation, and (3) memory-mapping data 
       structures appropriate for prefill phase.
-    * Decode-phase decoder self-attention PhaseTestParameters data structure,
-      including (1) packed (number_of_tokens x num_heads x head_size)
-      query/key/value tensors along with (2) ideal attention output
-      computed using a naive implementation, and (3) memory-mapping data
+    * Decode-phase decoder self-attention PhaseTestParameters data structure, 
+      including (1) packed (number_of_tokens x num_heads x head_size) 
+      query/key/value tensors along with (2) ideal attention output 
+      computed using a naive implementation, and (3) memory-mapping data 
       structures appropriate for decode phase.
     * max_block_idx: max physical address in decoder self-attention block-table
                      (intended to be used as the base address for the encoder/
@@ -437,12 +436,12 @@ def _enc_dec_cross_attn_setup_reuses_query(
 
     This function also constructs the cross-attention KV cache memory mapping
     (slot mapping and block table), ensuring that the block table starts at
-    block_base_addr.
+    block_base_addr. 
 
     Arguments:
 
     * decoder_qkv: pre-existing unpacked (batch_size x padded_seq_len x
-                   num_heads x head_size) decoder self-attention inputs;
+                   num_heads x head_size) decoder self-attention inputs; 
                    this function relies on the query and q_seq_lens
                    fields
     * encoder_test_params: PhaseTestParameters data structure which was
@@ -453,7 +452,7 @@ def _enc_dec_cross_attn_setup_reuses_query(
                                          self-attention; all fields
                                          including KV cache required
     * test_pt: TestPoint data structure; this function relies on the
-               following fields: batch_size, num_heads, head_size,
+               following fields: batch_size, num_heads, head_size, 
                block_size, max_q_seq_len
     * test_rsrcs: TestResources data structure; this function relies on the
                   scale field
@@ -461,16 +460,16 @@ def _enc_dec_cross_attn_setup_reuses_query(
 
     Returns:
 
-    * Prefill-phase encoder/decoder cross-attention PhaseTestParameters data
-      structure, including (1) packed
+    * Prefill-phase encoder/decoder cross-attention PhaseTestParameters data 
+      structure, including (1) packed 
       (number_of_tokens x num_heads x head_size) query/key/value tensors
-      along with (2) ideal attention output computed using a
+      along with (2) ideal attention output computed using a 
       naive implementation, and (3) memory-mapping data structures appropriate
       for prefill phase.
-    * Decode-phase encoder/decoder cross-attention PhaseTestParameters data
+    * Decode-phase encoder/decoder cross-attention PhaseTestParameters data 
       structure, including (1) packed
       (number_of_tokens x num_heads x head_size) query/key/value tensors
-      along with (2) ideal attention output computed using a
+      along with (2) ideal attention output computed using a 
       naive implementation, and (3) memory-mapping data structures appropriate
       for decode phase.
     '''
@@ -593,12 +592,11 @@ def _run_encoder_attention_test(
     attn: Attention,
     encoder_test_params: PhaseTestParameters,
     attn_metadata: AttentionMetadata,
-    test_pt: TestPoint,
 ) -> torch.Tensor:
     '''
     Run encoder attention.
 
-    attn.forward() is passed attn_type=AttentionType.ENCODER in order
+    attn.forward() is passed attn_type=AttentionType.ENCODER in order 
     to configure the kernel invocation for encoder attention
 
     Requires attn_metadata.num_decode_tokens == 0
@@ -609,11 +607,9 @@ def _run_encoder_attention_test(
     * attn: Attention wrapper instance
     * encoder_test_params: encoder PhaseTestParameters data structure;
                            this function relies on the packed
-                           (number_of_tokens x num_heads x head_size)
+                           (number_of_tokens x num_heads x head_size) 
                            query/key/value fields
     * attn_metadata: attention metadata for encoder/decoder-self attention
-    * test_pt: The TestPoint object containing test details like number of
-               model heads, head size, name of the backend being used etc.
 
     Returns:
     * Attention.forward() applied to packed {query,key,value} and
@@ -623,31 +619,20 @@ def _run_encoder_attention_test(
     attn_type = AttentionType.ENCODER
     packed_qkv = encoder_test_params.packed_qkvo.packed_qkv
     assert packed_qkv is not None
-    with set_forward_context(attn_metadata):
-        # In the test setup the shape of the query is
-        # [batch_size, seq_len, num_heads, head_size]. However
-        # the attention backend expect the shape to be
-        # [num_tokens, hidden_size]. Hence reshape the query before
-        # invoking the forward method.
-        # TODO - Update the way we construct the query so that it
-        # is shaped as [num_tokens, hidden_size] and we can skip the reshape.
-        reshaped_query = packed_qkv.query.view(
-            -1, test_pt.num_heads * test_pt.head_size)
-        return attn.forward(reshaped_query,
-                            packed_qkv.key,
-                            packed_qkv.value,
-                            torch.tensor([],
-                                         dtype=torch.float32,
-                                         device=packed_qkv.query.device),
-                            attn_metadata,
-                            attn_type=attn_type)
+    return attn.forward(packed_qkv.query,
+                        packed_qkv.key,
+                        packed_qkv.value,
+                        torch.tensor([],
+                                     dtype=torch.float32,
+                                     device=packed_qkv.query.device),
+                        attn_metadata,
+                        attn_type=attn_type)
 
 
 def _run_decoder_self_attention_test(
     test_rsrcs: TestResources,
     decoder_test_params: PhaseTestParameters,
     attn_metadata: AttentionMetadata,
-    test_pt: TestPoint,
 ) -> torch.Tensor:
     '''
     Run decoder self-attention test.
@@ -661,12 +646,10 @@ def _run_decoder_self_attention_test(
                   and attn (Attention wrapper instance) fields
     * decoder_test_params: decoder PhaseTestParameters data structure;
                            this function relies on the packed
-                           (number_of_tokens x num_heads x head_size)
+                           (number_of_tokens x num_heads x head_size) 
                            query/key/value fields
     * attn_metadata: attention metadata for decoder-self attention
                      (contains KV cache memory-mapping)
-    * test_pt: The TestPoint object containing test details like number of
-               model heads, head size, name of the backend being used etc.
 
     Returns:
     * Attention.forward() applied to packed_{query,key,value}, kv_cache
@@ -677,22 +660,12 @@ def _run_decoder_self_attention_test(
     kv_cache = test_rsrcs.kv_cache
     packed_qkv = decoder_test_params.packed_qkvo.packed_qkv
     assert packed_qkv is not None
-    with set_forward_context(attn_metadata):
-        # In the test setup the shape of the query is
-        # [batch_size, seq_len, num_heads, head_size]. However
-        # the attention backend expect the shape to be
-        # [num_tokens, hidden_size]. Hence reshape the query before
-        # invoking the forward method.
-        # TODO - Update the way we construct the query so that it
-        # is shaped as [num_tokens, hidden_size] and we can skip the reshape.
-        reshaped_query = packed_qkv.query.view(
-            -1, test_pt.num_heads * test_pt.head_size)
-        return attn.forward(reshaped_query,
-                            packed_qkv.key,
-                            packed_qkv.value,
-                            kv_cache,
-                            attn_metadata,
-                            attn_type=attn_type)
+    return attn.forward(packed_qkv.query,
+                        packed_qkv.key,
+                        packed_qkv.value,
+                        kv_cache,
+                        attn_metadata,
+                        attn_type=attn_type)
 
 
 def _run_encoder_decoder_cross_attention_test(
@@ -700,7 +673,6 @@ def _run_encoder_decoder_cross_attention_test(
     decoder_test_params: PhaseTestParameters,
     cross_test_params: Optional[PhaseTestParameters],
     attn_metadata: AttentionMetadata,
-    test_pt: TestPoint,
 ) -> torch.Tensor:
     '''
     Run encoder/decoder cross-attention test.
@@ -722,15 +694,13 @@ def _run_encoder_decoder_cross_attention_test(
                   and attn (Attention wrapper instance) fields
     * decoder_test_params: decoder PhaseTestParameters data structure;
                            this function relies on the packed
-                           (number_of_tokens x num_heads x head_size)
+                           (number_of_tokens x num_heads x head_size) 
                            query field
     * cross_test_params: encoder/decoder PhaseTestParameters data structure;
                          this function relies on the packed
-                         (number_of_tokens x num_heads x head_size)
+                         (number_of_tokens x num_heads x head_size) 
                          key/value fields
     * attn_metadata: attention metadata for encoder/decoder-self attention
-    * test_pt: The TestPoint object containing test details like number of
-               model heads, head size, name of the backend being used etc.
 
     Returns:
     * Attention.forward() applied to packed_{query,key,value}, kv_cache
@@ -748,41 +718,15 @@ def _run_encoder_decoder_cross_attention_test(
         cross_pckd_qkv = cross_test_params.packed_qkvo.packed_qkv
         key = (None if cross_pckd_qkv is None else cross_pckd_qkv.key)
         value = (None if cross_pckd_qkv is None else cross_pckd_qkv.value)
-    with set_forward_context(attn_metadata):
-        # In the test setup the shape of the query is
-        # [batch_size, seq_len, num_heads, head_size]. However
-        # the attention backend expect the shape to be
-        # [num_tokens, hidden_size]. Hence reshape the query before
-        # invoking the forward method.
-        # TODO - Update the way we construct the query so that it
-        # is shaped as [num_tokens, hidden_size] and we can skip the reshape.
-        reshaped_query = decoder_test_params.packed_qkvo.packed_qkv.query.view(
-            -1, test_pt.num_heads * test_pt.head_size)
-        return attn.forward(reshaped_query,
-                            key,
-                            value,
-                            kv_cache,
-                            attn_metadata,
-                            attn_type=attn_type)
+    return attn.forward(decoder_test_params.packed_qkvo.packed_qkv.query,
+                        key,
+                        value,
+                        kv_cache,
+                        attn_metadata,
+                        attn_type=attn_type)
 
 
-@pytest.fixture(autouse=True)
-def set_reset_environment(attn_backend):
-    # Set the default torch datatype to bfloat16 to enable
-    # testing of the Flash Attention backend. Also clear the
-    # cached value of the backend.
-    default_dtype = torch.get_default_dtype()
-    if attn_backend.name == 'FLASH_ATTN':
-        torch.set_default_dtype(torch.bfloat16)
-    get_attn_backend.cache_clear()
-    yield
-    # Reset the torch datatype to what it was before the test
-    # so as not to impact the remaining tests.
-    torch.set_default_dtype(default_dtype)
-
-
-@pytest.mark.skipif(current_platform.is_rocm(),
-                    reason=STR_NOT_IMPL_ENC_DEC_ROCM_HIP)
+@pytest.mark.skipif(is_hip(), reason=STR_NOT_IMPL_ENC_DEC_ROCM_HIP)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("attn_backend", LIST_ENC_DEC_SUPPORTED_BACKENDS)
@@ -811,8 +755,7 @@ def test_encoder_only(
     No KV cache is required for encoder-only attention.
 
     Note on ROCm/HIP: currently encoder/decoder models are not supported on
-    AMD GPUs, therefore this test simply is skipped if
-    current_platform.is_rocm().
+    AMD GPUs, therefore this test simply is skipped if is_hip(). 
 
     This test globally forces an override of the usual backend
     auto-selection process, forcing the specific backend-under-test
@@ -828,8 +771,10 @@ def test_encoder_only(
     * max_dec_seq_len: max length of decoder input sequences
     * max_enc_seq_len: max length of encoder input sequences
     '''
+
     # Force Attention wrapper backend
     with global_force_attn_backend_context_manager(attn_backend):
+
         # Note: KV cache size of 4096 is arbitrary & chosen intentionally
         # to be more than necessary, since exceeding the kv cache size
         # is not part of this test
@@ -860,18 +805,13 @@ def test_encoder_only(
         # PREFILL: encoder attention
 
         enc_pckd_act_out: torch.Tensor = (_run_encoder_attention_test(
-            test_rsrcs.attn,
-            enc_test_params,
-            prephase_attn_metadata,
-            test_pt=test_pt))
+            test_rsrcs.attn, enc_test_params, prephase_attn_metadata))
 
         # - Is encoder attention result correct?
-        assert_actual_matches_ideal(enc_test_params, enc_pckd_act_out,
-                                    attn_backend.name)
+        assert_actual_matches_ideal(enc_test_params, enc_pckd_act_out)
 
 
-@pytest.mark.skipif(current_platform.is_rocm(),
-                    reason=STR_NOT_IMPL_ENC_DEC_ROCM_HIP)
+@pytest.mark.skipif(is_hip(), reason=STR_NOT_IMPL_ENC_DEC_ROCM_HIP)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
 @pytest.mark.parametrize("attn_backend", LIST_ENC_DEC_SUPPORTED_BACKENDS)
@@ -897,14 +837,14 @@ def test_e2e_enc_dec_attn(
       attributes for prefill-phase, and (2) an analogous attention metadata
       structure but for decode-phase
     * Test attention steps in the following order
-
+    
         * Encoder attention
         * Prefill self-attention
         * Prefill cross-attention
         * Decode self-attention
         * Decode cross-attention
-        * Besides being reflective of realistic use-cases, this order would
-          exacerbate any accidental overlap in the self-/cross-attention
+        * Besides being reflective of realistic use-cases, this order would 
+          exacerbate any accidental overlap in the self-/cross-attention 
           block tables, which one hopes to avoid
 
 
@@ -924,11 +864,10 @@ def test_e2e_enc_dec_attn(
     to be utilized.
 
     Note on ROCm/HIP: currently encoder/decoder models are not supported on
-    AMD GPUs, therefore this test simply is skipped if
-    current_platform.is_rocm().
+    AMD GPUs, therefore this test simply is skipped if is_hip(). 
 
     Note on metadata: there is a single attention metadata structure shared by
-    all prefill-phase attention operations (encoder, decoder, enc/dec cross),
+    all prefill-phase attention operations (encoder, decoder, enc/dec cross), 
     and a single one shared by all decode-phase attention operations
     (decoder & enc/dec cross.) This is intended to reflect the behavior
     of EncoderDecoderModelRunner, which constructs a single attention metadata
@@ -949,8 +888,10 @@ def test_e2e_enc_dec_attn(
     * max_dec_seq_len: max length of decoder input sequences
     * max_enc_seq_len: max length of encoder input sequences
     '''
+
     # Force Attention wrapper backend
     with global_force_attn_backend_context_manager(attn_backend):
+
         # Note: KV cache size of 4096 is arbitrary & chosen intentionally
         # to be more than necessary, since exceeding the kv cache size
         # is not part of this test
@@ -1010,39 +951,29 @@ def test_e2e_enc_dec_attn(
 
         enc_pckd_act_out = _run_encoder_attention_test(test_rsrcs.attn,
                                                        enc_test_params,
-                                                       prephase_attn_metadata,
-                                                       test_pt=test_pt)
+                                                       prephase_attn_metadata)
 
         # - Is encoder attention result correct?
-        assert_actual_matches_ideal(enc_test_params, enc_pckd_act_out,
-                                    attn_backend.name)
+        assert_actual_matches_ideal(enc_test_params, enc_pckd_act_out)
 
         # PREFILL: decoder self-attention test
 
         prephase_dec_pckd_act_out = _run_decoder_self_attention_test(
-            test_rsrcs,
-            prephase_dec_test_params,
-            prephase_attn_metadata,
-            test_pt=test_pt)
+            test_rsrcs, prephase_dec_test_params, prephase_attn_metadata)
 
         # - Is prefill decoder self-attention correct?
         assert_actual_matches_ideal(prephase_dec_test_params,
-                                    prephase_dec_pckd_act_out,
-                                    attn_backend.name)
+                                    prephase_dec_pckd_act_out)
 
         # PREFILL: encoder/decoder cross-attention test
 
         prephase_cross_pckd_act_out = _run_encoder_decoder_cross_attention_test(
-            test_rsrcs,
-            prephase_dec_test_params,
-            prephase_cross_test_params,
-            prephase_attn_metadata,
-            test_pt=test_pt)
+            test_rsrcs, prephase_dec_test_params, prephase_cross_test_params,
+            prephase_attn_metadata)
 
         # - Is prefill encoder/decoder cross-attention correct?
         assert_actual_matches_ideal(prephase_cross_test_params,
-                                    prephase_cross_pckd_act_out,
-                                    attn_backend.name)
+                                    prephase_cross_pckd_act_out)
 
         # DECODE: build decode-phase attention metadata
 
@@ -1058,26 +989,17 @@ def test_e2e_enc_dec_attn(
         # DECODE: decoder self-attention test
 
         decphase_dec_pckd_act_out = _run_decoder_self_attention_test(
-            test_rsrcs,
-            decphase_dec_test_params,
-            decphase_attn_metadata,
-            test_pt=test_pt)
+            test_rsrcs, decphase_dec_test_params, decphase_attn_metadata)
 
         # - Is decode-phase decoder self-attention correct?
         assert_actual_matches_ideal(decphase_dec_test_params,
-                                    decphase_dec_pckd_act_out,
-                                    attn_backend.name)
+                                    decphase_dec_pckd_act_out)
 
         # DECODE: encoder/decoder cross-attention test
 
         decphase_cross_pckd_act_out = _run_encoder_decoder_cross_attention_test(
-            test_rsrcs,
-            decphase_dec_test_params,
-            None,
-            decphase_attn_metadata,
-            test_pt=test_pt)
+            test_rsrcs, decphase_dec_test_params, None, decphase_attn_metadata)
 
         # - Is decode-phase encoder/decoder cross-attention correct?
         assert_actual_matches_ideal(decphase_cross_test_params,
-                                    decphase_cross_pckd_act_out,
-                                    attn_backend.name)
+                                    decphase_cross_pckd_act_out)

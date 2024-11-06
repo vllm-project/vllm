@@ -87,19 +87,8 @@ def test_traces(trace_service):
             f"The fake trace service didn't receive a trace within "
             f"the {timeout} seconds timeout")
 
-    request = trace_service.request
-    assert len(request.resource_spans) == 1, (
-        f"Expected 1 resource span, "
-        f"but got {len(request.resource_spans)}")
-    assert len(request.resource_spans[0].scope_spans) == 1, (
-        f"Expected 1 scope span, "
-        f"but got {len(request.resource_spans[0].scope_spans)}")
-    assert len(request.resource_spans[0].scope_spans[0].spans) == 1, (
-        f"Expected 1 span, "
-        f"but got {len(request.resource_spans[0].scope_spans[0].spans)}")
-
-    attributes = decode_attributes(
-        request.resource_spans[0].scope_spans[0].spans[0].attributes)
+    attributes = decode_attributes(trace_service.request.resource_spans[0].
+                                   scope_spans[0].spans[0].attributes)
     assert attributes.get(SpanAttributes.LLM_RESPONSE_MODEL) == model
     assert attributes.get(
         SpanAttributes.LLM_REQUEST_ID) == outputs[0].request_id
@@ -153,19 +142,8 @@ def test_traces_with_detailed_steps(trace_service):
             f"The fake trace service didn't receive a trace within "
             f"the {timeout} seconds timeout")
 
-    request = trace_service.request
-    assert len(request.resource_spans) == 1, (
-        f"Expected 1 resource span, "
-        f"but got {len(request.resource_spans)}")
-    assert len(request.resource_spans[0].scope_spans) == 1, (
-        f"Expected 1 scope span, "
-        f"but got {len(request.resource_spans[0].scope_spans)}")
-    assert len(request.resource_spans[0].scope_spans[0].spans) == 1, (
-        f"Expected 1 span, "
-        f"but got {len(request.resource_spans[0].scope_spans[0].spans)}")
-
-    attributes = decode_attributes(
-        request.resource_spans[0].scope_spans[0].spans[0].attributes)
+    attributes = decode_attributes(trace_service.request.resource_spans[0].
+                                   scope_spans[0].spans[0].attributes)
     assert attributes.get(SpanAttributes.LLM_RESPONSE_MODEL) == model
     assert attributes.get(
         SpanAttributes.LLM_REQUEST_ID) == outputs[0].request_id

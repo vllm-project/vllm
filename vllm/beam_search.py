@@ -1,10 +1,5 @@
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
-
-from vllm.sequence import Logprob
-
-if TYPE_CHECKING:
-    from vllm.multimodal import MultiModalDataDict
+from typing import List, Optional
 
 
 @dataclass
@@ -16,13 +11,8 @@ class BeamSearchSequence:
     """
     # The tokens includes the prompt.
     tokens: List[int]
-    logprobs: List[Dict[int, Logprob]]
     cum_logprob: float = 0.0
     text: Optional[str] = None
-    finish_reason: Optional[str] = None
-    stop_reason: Union[int, str, None] = None
-    multi_modal_data: Optional["MultiModalDataDict"] = None
-    mm_processor_kwargs: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -38,7 +28,7 @@ class BeamSearchInstance:
 
     def __init__(self, prompt_tokens: List[int]):
         self.beams: List[BeamSearchSequence] = [
-            BeamSearchSequence(tokens=prompt_tokens, logprobs=[])
+            BeamSearchSequence(tokens=prompt_tokens)
         ]
         self.completed: List[BeamSearchSequence] = []
 

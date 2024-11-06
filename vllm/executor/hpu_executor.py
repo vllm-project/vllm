@@ -37,10 +37,16 @@ class HPUExecutor(ExecutorBase):
             distributed_init_method = get_distributed_init_method(
                 get_ip(), get_open_port())
         return dict(
-            vllm_config=self.vllm_config,
+            model_config=self.model_config,
+            parallel_config=self.parallel_config,
+            scheduler_config=self.scheduler_config,
+            device_config=self.device_config,
+            cache_config=self.cache_config,
+            load_config=self.load_config,
             local_rank=local_rank,
             rank=rank,
             distributed_init_method=distributed_init_method,
+            lora_config=self.lora_config,
             is_driver_worker=rank == 0,
         )
 

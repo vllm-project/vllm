@@ -1,13 +1,14 @@
 # Copyright (c) 2024, Tri Dao, Albert Gu.
 # Adapted from https://github.com/state-spaces/mamba/blob/main/mamba_ssm/ops/triton/selective_state_update.py
 
+from typing import Tuple
+
 import torch
 import triton
 import triton.language as tl
 from packaging import version
 
 from vllm import _custom_ops as ops
-from vllm.attention.backends.utils import PAD_SLOT_ID
 
 TRITON3 = version.parse(triton.__version__) >= version.parse("3.0.0")
 
@@ -49,7 +50,6 @@ def _selective_scan_update_kernel(
     z_ptr,
     out_ptr,
     state_batch_indices_ptr,
-    pad_slot_id,
     # Matrix dimensions
     batch,
     nheads,
@@ -143,11 +143,10 @@ def _selective_scan_update_kernel(
     if HAS_Z:
         z_ptrs = z_ptr + offs_m * stride_z_dim
     out_ptrs = out_ptr + offs_m * stride_out_dim
-    mask = (offs_m[:, None] < dim) & (offs_n[None, :] < dstate)
-    if HAS_STATE_BATCH_INDICES:
-        mask &= (state_batch_idx != pad_slot_id)
-    state = tl.load(state_ptrs, mask=mask, other=0.0)
 
+    state = tl.load(state_ptrs,
+                    mask=(offs_m[:, None] < dim) & (offs_n[None, :] < dstate),
+                    other=0.0)
     x = tl.load(x_ptrs, mask=offs_m < dim, other=0.0).to(tl.float32)
     if not TIE_HDIM:
         dt = tl.load(dt_ptrs, mask=offs_m < dim, other=0.0).to(tl.float32)
@@ -178,11 +177,9 @@ def _selective_scan_update_kernel(
 
     dB = B[None, :] * dt[:, None] if not TIE_HDIM else B * dt
     state = state * dA + dB * x[:, None]
-
-    mask = (offs_m[:, None] < dim) & (offs_n[None, :] < dstate)
-    if HAS_STATE_BATCH_INDICES:
-        mask &= (state_batch_idx != pad_slot_id)
-    tl.store(state_ptrs, state, mask=mask)
+    tl.store(state_ptrs,
+             state,
+             mask=(offs_m[:, None] < dim) & (offs_n[None, :] < dstate))
     out = tl.sum(state * C[None, :], axis=1)
     if HAS_D:
         out += x * D
@@ -201,8 +198,7 @@ def selective_state_update(state,
                            z=None,
                            dt_bias=None,
                            dt_softplus=False,
-                           state_batch_indices=None,
-                           pad_slot_id=PAD_SLOT_ID):
+                           state_batch_indices=None):
     """
     Argument:
         state: (batch, dim, dstate) or (batch, nheads, dim, dstate)
@@ -214,12 +210,6 @@ def selective_state_update(state,
         D: (dim,) or (nheads, dim)
         z: (batch, dim) or (batch, nheads, dim)
         dt_bias: (dim,) or (nheads, dim)
-        pad_slot_id: int
-            if cache_indices is passed, lets the kernel identify padded 
-            entries that will not be processed, 
-            for example: cache_indices = [pad_slot_id, 1, 20, pad_slot_id] 
-            in this case, the kernel will not process entries at 
-            indices 0 and 3
     Return:
         out: (batch, dim) or (batch, nheads, dim)
     """
@@ -286,7 +276,6 @@ def selective_state_update(state,
             z,
             out,
             state_batch_indices,
-            pad_slot_id,
             batch,
             nheads,
             dim,
@@ -330,25 +319,22 @@ def selective_state_update(state,
     return out
 
 
-def selective_scan_fn(u,
-                      ssm_states,
-                      delta,
-                      A,
-                      B,
-                      C,
-                      D=None,
-                      z=None,
-                      delta_bias=None,
-                      delta_softplus=False,
-                      query_start_loc=None,
-                      cache_indices=None,
-                      has_initial_state=None,
-                      pad_slot_id=PAD_SLOT_ID) -> torch.Tensor:
+def selective_scan_fn(
+        u,
+        ssm_states,
+        delta,
+        A,
+        B,
+        C,
+        D=None,
+        z=None,
+        delta_bias=None,
+        delta_softplus=False,
+        query_start_loc=None,
+        cache_indices=None,
+        has_initial_state=None) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     u: (dim, total_length) for varlen or (batch, dim, seqlen) 
-        applies changes in place.
-    ssm_states: (batch, dim, dstate) or (batch, nheads, dim, dstate)
-        applies changes in place.
     delta: (dim, total_length) for varlen or (batch, dim, seqlen)
     A: (dim, dstate) 
     B: (ngroups, dstate, total_length) for varlen or 
@@ -371,14 +357,12 @@ def selective_scan_fn(u,
         indicate if the ssm_state at the corresponding index should be 
         used as initial state. Not providing argument assumes 
         there's no initial state
-    pad_slot_id: int
-        if cache_indices is passed, lets the kernel identify padding entries 
-        that will not be processed, 
-        for example: cache_indices = [pad_slot_id, 1 ,20 ,pad_slot_id] 
-        in this case, the kernel will not process entries at indices 0 and 3
+
     returns
         output: (dim, total_length) for varlen or (batch, dim, seqlen) 
                 supports inplace replacement
+        last_state has shape (batch, dim, dstate). 
+                supports inplace replacement if ssm_state was provided
     """
     if u.stride(-1) != 1:
         u = u.contiguous()
@@ -403,7 +387,7 @@ def selective_scan_fn(u,
 
     ops.selective_scan_fwd(u, delta, A, B, C, D, z, delta_bias, delta_softplus,
                            query_start_loc, cache_indices, has_initial_state,
-                           ssm_states, pad_slot_id)
+                           ssm_states)
 
     if z is None:
         return delta  # output written inplace to delta

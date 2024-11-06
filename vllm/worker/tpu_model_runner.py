@@ -12,7 +12,8 @@ import torch_xla.runtime as xr
 
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
-from vllm.config import VllmConfig
+from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, ModelConfig,
+                         ParallelConfig, SchedulerConfig)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader import get_model
@@ -89,10 +90,20 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
 
     def __init__(
         self,
-        vllm_config: VllmConfig,
+        model_config: ModelConfig,
+        parallel_config: ParallelConfig,
+        scheduler_config: SchedulerConfig,
+        device_config: DeviceConfig,
+        cache_config: CacheConfig,
+        load_config: LoadConfig,
         is_driver_worker: bool = False,
     ):
-        ModelRunnerBase.__init__(self, vllm_config=vllm_config)
+        self.model_config = model_config
+        self.parallel_config = parallel_config
+        self.scheduler_config = scheduler_config
+        self.device_config = device_config
+        self.cache_config = cache_config
+        self.load_config = load_config
         self.is_driver_worker = is_driver_worker
 
         self.block_size = self.cache_config.block_size
@@ -103,6 +114,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             dtype=np.int32)
         self.attn_backend = get_attn_backend(
             self.model_config.get_head_size(),
+            self.model_config.get_sliding_window(),
             self.model_config.dtype,
             self.cache_config.cache_dtype,
             self.block_size,
@@ -110,15 +122,6 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             False,
         )
         self.cached_step_outputs: List[torch.Tensor] = []
-
-        smem_size = 512 * 1024
-        block_table_size = 4 * self.block_tables.size
-        if block_table_size >= smem_size:
-            logger.warning(
-                "The max_model_len (%d) is too large. This may degrade the "
-                "performance due to the insufficient smem size. Consider "
-                "setting --max-model-len to a smaller value.",
-                self.model_config.max_model_len)
 
     def load_model(self) -> None:
         self.device = self.device_config.device
@@ -137,7 +140,15 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                 "vllm.model_executor.layers.vocab_parallel_embedding."
                 "get_tensor_model_parallel_rank",
                 return_value=xm_tp_rank):
-            model = get_model(vllm_config=self.vllm_config)
+            model = get_model(
+                model_config=self.model_config,
+                load_config=self.load_config,
+                device_config=self.device_config,
+                parallel_config=self.parallel_config,
+                cache_config=self.cache_config,
+                scheduler_config=self.scheduler_config,
+                lora_config=None,
+            )
         model = model.eval()
         xm.wait_device_ops()
         self.model = ModelWrapper(model)
@@ -165,7 +176,6 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                 num_prefill_tokens=batch_size * seq_len,
                 num_decode_tokens=0,
                 slot_mapping=slot_mapping,
-                multi_modal_placeholder_index_maps=None,
                 block_tables=None,
                 context_lens=None,
             )
@@ -198,7 +208,6 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                 num_prefill_tokens=0,
                 num_decode_tokens=batch_size * seq_len,
                 slot_mapping=slot_mapping,
-                multi_modal_placeholder_index_maps=None,
                 block_tables=block_tables,
                 context_lens=context_lens,
             )
@@ -343,7 +352,6 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             num_prefill_tokens=0,  # NOTE: This is not used.
             num_decode_tokens=0,
             slot_mapping=slot_mapping,
-            multi_modal_placeholder_index_maps=None,
             block_tables=None,
             context_lens=None,
         )
@@ -413,7 +421,6 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             num_prefill_tokens=0,
             num_decode_tokens=batch_size,
             slot_mapping=slot_mapping,
-            multi_modal_placeholder_index_maps=None,
             block_tables=block_tables,
             context_lens=context_lens,
         )

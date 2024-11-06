@@ -6,7 +6,8 @@ import torch_xla.core.xla_model as xm
 import torch_xla.runtime as xr
 
 import vllm.envs as envs
-from vllm.config import VllmConfig
+from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, ModelConfig,
+                         ParallelConfig, SchedulerConfig)
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.logger import init_logger
@@ -15,8 +16,7 @@ from vllm.sequence import ExecuteModelRequest
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size
 from vllm.worker.tpu_model_runner import TPUModelRunner
 from vllm.worker.worker_base import (LocalOrDistributedWorkerBase,
-                                     LoraNotSupportedWorkerBase, WorkerBase,
-                                     WorkerInput)
+                                     LoraNotSupportedWorkerBase, WorkerInput)
 
 logger = init_logger(__name__)
 
@@ -25,14 +25,24 @@ class TPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
 
     def __init__(
         self,
-        vllm_config: VllmConfig,
+        model_config: ModelConfig,
+        parallel_config: ParallelConfig,
+        scheduler_config: SchedulerConfig,
+        device_config: DeviceConfig,
+        cache_config: CacheConfig,
+        load_config: LoadConfig,
         local_rank: int,
         rank: int,
         distributed_init_method: str,
         is_driver_worker: bool,
     ) -> None:
-        WorkerBase.__init__(self, vllm_config=vllm_config)
+        self.model_config = model_config
+        self.parallel_config = parallel_config
         self.parallel_config.rank = rank
+        self.scheduler_config = scheduler_config
+        self.device_config = device_config
+        self.cache_config = cache_config
+        self.load_config = load_config
         self.local_rank = local_rank
         self.rank = rank
         self.distributed_init_method = distributed_init_method
@@ -46,7 +56,13 @@ class TPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
                 self.cache_config.cache_dtype]
 
         self.model_runner: TPUModelRunner = TPUModelRunner(
-            vllm_config=vllm_config, is_driver_worker=is_driver_worker)
+            model_config,
+            parallel_config,
+            scheduler_config,
+            device_config,
+            cache_config,
+            load_config,
+            is_driver_worker=is_driver_worker)
 
     def init_device(self) -> None:
         os.environ["PJRT_DEVICE"] = "TPU"
@@ -117,19 +133,18 @@ class TPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         # Synchronize before measuring the memory usage.
         xm.wait_device_ops()
 
-        # Get the maximum amount of memory used by the model weights and
-        # intermediate activations.
-        m = xm.get_memory_info(self.device)
-        total_memory_size = m["bytes_limit"]
-        profiled = m["peak_bytes_used"]  # Weights + intermediate activations.
+        dtype_btyes = get_dtype_size(self.cache_dtype)
+        block_size = self.cache_config.block_size
+        block_size_bytes = (dtype_btyes * block_size * num_layers * 2 *
+                            head_size * num_kv_heads)
 
         # Calculate the TPU KV cache size based on profiling.
+        m = xm.get_memory_info(self.device)
+        total_memory_size = m["bytes_limit"]
         usable_memory_size = int(total_memory_size *
                                  self.cache_config.gpu_memory_utilization)
+        profiled = m["bytes_used"]  # Weights + intermediate activations.
         tpu_kv_cache_bytes = max(usable_memory_size - profiled, 0)
-        dtype_btyes = get_dtype_size(self.cache_dtype)
-        block_size_bytes = (dtype_btyes * self.cache_config.block_size *
-                            num_layers * 2 * head_size * num_kv_heads)
         num_tpu_blocks = tpu_kv_cache_bytes // block_size_bytes
         num_tpu_blocks = (num_tpu_blocks // 8) * 8  # Round down to 8.
 

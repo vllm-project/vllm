@@ -53,8 +53,7 @@ class Hermes2ProToolParser(ToolParser):
         self.tool_call_start_token_id = self.vocab.get(
             self.tool_call_start_token)
         self.tool_call_end_token_id = self.vocab.get(self.tool_call_end_token)
-        if (self.tool_call_start_token_id is None
-                or self.tool_call_end_token_id is None):
+        if not self.tool_call_start_token_id or not self.tool_call_end_token_id:
             raise RuntimeError(
                 "Hermes 2 Pro Tool parser could not locate tool call start/end "
                 "tokens in the tokenizer!")
@@ -104,9 +103,9 @@ class Hermes2ProToolParser(ToolParser):
                     tool_calls=tool_calls,
                     content=content if content else None)
 
-            except Exception:
-                logger.exception(
-                    "Error in extracting tool call from response.")
+            except Exception as e:
+                logger.error("Error in extracting tool call from response %s",
+                             e)
                 return ExtractedToolCallInformation(tools_called=False,
                                                     tool_calls=[],
                                                     content=model_output)
@@ -334,6 +333,6 @@ class Hermes2ProToolParser(ToolParser):
 
             return delta
 
-        except Exception:
-            logger.exception("Error trying to handle streaming tool call.")
+        except Exception as e:
+            logger.error("Error trying to handle streaming tool call: %s", e)
             return None  # do not stream a delta. skip this token ID.

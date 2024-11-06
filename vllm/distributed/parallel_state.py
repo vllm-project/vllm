@@ -7,7 +7,7 @@ It takes over the control of the distributed environment from PyTorch.
 The typical workflow is:
 
 - call `init_distributed_environment` to initialize the distributed environment.
-- call `initialize_model_parallel` or `ensure_model_parallel_initialized` to
+- call `initialize_model_parallel` or `ensure_model_parallel_initialized` to 
  initialize the model parallel groups.
 
 - any code dealing with the distributed stuff
@@ -20,7 +20,6 @@ If you only need to use the distributed environment without model/pipeline
  steps.
 """
 import contextlib
-import gc
 import pickle
 import weakref
 from collections import namedtuple
@@ -37,7 +36,7 @@ from torch.distributed import Backend, ProcessGroup
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import direct_register_custom_op, supports_custom_op
+from vllm.utils import supports_custom_op
 
 
 @dataclass
@@ -99,6 +98,8 @@ def _register_group(group: "GroupCoordinator") -> None:
 
 if supports_custom_op():
 
+    @torch.library.custom_op("vllm::inplace_all_reduce",
+                             mutates_args=["tensor"])
     def inplace_all_reduce(tensor: torch.Tensor, group_name: str) -> None:
         assert group_name in _groups, f"Group {group_name} is not found."
         group = _groups[group_name]()
@@ -106,16 +107,11 @@ if supports_custom_op():
             raise ValueError(f"Group {group_name} is destroyed.")
         group._all_reduce_in_place(tensor)
 
-    def inplace_all_reduce_fake(tensor: torch.Tensor, group_name: str) -> None:
+    @inplace_all_reduce.register_fake
+    def _(tensor: torch.Tensor, group_name: str) -> None:
         return
 
-    direct_register_custom_op(
-        op_name="inplace_all_reduce",
-        op_func=inplace_all_reduce,
-        mutates_args=["tensor"],
-        fake_impl=inplace_all_reduce_fake,
-    )
-
+    @torch.library.custom_op("vllm::outplace_all_reduce", mutates_args=[])
     def outplace_all_reduce(tensor: torch.Tensor,
                             group_name: str) -> torch.Tensor:
         assert group_name in _groups, f"Group {group_name} is not found."
@@ -124,16 +120,9 @@ if supports_custom_op():
             raise ValueError(f"Group {group_name} is destroyed.")
         return group._all_reduce_out_place(tensor)
 
-    def outplace_all_reduce_fake(tensor: torch.Tensor,
-                                 group_name: str) -> torch.Tensor:
+    @outplace_all_reduce.register_fake
+    def _(tensor: torch.Tensor, group_name: str) -> torch.Tensor:
         return torch.empty_like(tensor)
-
-    direct_register_custom_op(
-        op_name="outplace_all_reduce",
-        op_func=outplace_all_reduce,
-        mutates_args=[],
-        fake_impl=outplace_all_reduce_fake,
-    )
 
 
 class GroupCoordinator:
@@ -356,11 +345,6 @@ class GroupCoordinator:
         if self.world_size == 1:
             return input_
 
-        if input_.is_cpu:
-            import intel_extension_for_pytorch as ipex
-            ipex.distributed.all_reduce(input_, group=self.device_group)
-            return input_
-
         if not supports_custom_op():
             self._all_reduce_in_place(input_)
             return input_
@@ -369,10 +353,6 @@ class GroupCoordinator:
             not self.tpu_communicator.disabled:
             # TPU handles Dynamo with its own logic.
             return self.tpu_communicator.all_reduce(input_)
-
-        if self.hpu_communicator is not None and \
-            not self.hpu_communicator.disabled:
-            return self.hpu_communicator.all_reduce(input_)
 
         if self.ca_comm is not None and \
             not self.ca_comm.disabled and \
@@ -396,6 +376,9 @@ class GroupCoordinator:
         pynccl_comm = self.pynccl_comm
         if (pynccl_comm is not None and not pynccl_comm.disabled):
             pynccl_comm.all_reduce(input_)
+        elif input_.is_cpu:
+            import intel_extension_for_pytorch as ipex
+            ipex.distributed.all_reduce(input_, group=self.device_group)
         else:
             torch.distributed.all_reduce(input_, group=self.device_group)
 
@@ -421,12 +404,8 @@ class GroupCoordinator:
             # Convert negative dim to positive.
             dim += input_.dim()
         input_size = input_.size()
-        # NOTE: we have to use concat-style all-gather here,
-        # stack-style all-gather has compatibility issues with
-        # torch.compile . see https://github.com/pytorch/pytorch/issues/138795
-        output_size = (input_size[0] * world_size, ) + input_size[1:]
         # Allocate output tensor.
-        output_tensor = torch.empty(output_size,
+        output_tensor = torch.empty((world_size, ) + input_size,
                                     dtype=input_.dtype,
                                     device=input_.device)
         # All-gather.
@@ -434,7 +413,6 @@ class GroupCoordinator:
                                                  input_,
                                                  group=self.device_group)
         # Reshape
-        output_tensor = output_tensor.reshape((world_size, ) + input_size)
         output_tensor = output_tensor.movedim(0, dim)
         output_tensor = output_tensor.reshape(input_size[:dim] +
                                               (world_size *
@@ -460,28 +438,6 @@ class GroupCoordinator:
         if dim < 0:
             # Convert negative dim to positive.
             dim += input_.dim()
-        # For xpu path, gather doesn't work properly together with ray
-        # cluster so we use all_gather instead for now.
-        if current_platform.is_xpu():
-            input_size = input_.size()
-            # Allocate output tensor.
-            output_tensor = torch.empty((world_size, ) + input_size,
-                                        dtype=input_.dtype,
-                                        device=input_.device)
-            # All-gather.
-            torch.distributed.all_gather_into_tensor(output_tensor,
-                                                     input_,
-                                                     group=self.device_group)
-            if self.rank_in_group == dst:
-                # Reshape
-                output_tensor = output_tensor.movedim(0, dim)
-                output_tensor = output_tensor.reshape(input_size[:dim] +
-                                                      (world_size *
-                                                       input_size[dim], ) +
-                                                      input_size[dim + 1:])
-            else:
-                output_tensor = None
-            return output_tensor
         # Allocate output tensor.
         if self.rank_in_group == dst:
             gather_list = [torch.empty_like(input_) for _ in range(world_size)]
@@ -1186,19 +1142,6 @@ def destroy_distributed_environment():
     _WORLD = None
     if torch.distributed.is_initialized():
         torch.distributed.destroy_process_group()
-
-
-def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
-    destroy_model_parallel()
-    destroy_distributed_environment()
-    with contextlib.suppress(AssertionError):
-        torch.distributed.destroy_process_group()
-    if shutdown_ray:
-        import ray  # Lazy import Ray
-        ray.shutdown()
-    gc.collect()
-    if not current_platform.is_cpu():
-        torch.cuda.empty_cache()
 
 
 def in_the_same_node_as(pg: ProcessGroup, source_rank: int = 0) -> List[bool]:

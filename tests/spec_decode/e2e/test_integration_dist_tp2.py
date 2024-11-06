@@ -5,7 +5,7 @@ tensor parallelism.
 import pytest
 import torch
 
-from vllm.platforms import current_platform
+from vllm.utils import is_hip
 
 from .conftest import run_equality_correctness_test_tp
 
@@ -17,6 +17,9 @@ from .conftest import run_equality_correctness_test_tp
     [[
         # Skip cuda graph recording for fast test.
         "--enforce-eager",
+
+        # Required for spec decode.
+        "--use-v2-block-manager",
         "--tensor-parallel-size",
         "2"
     ]])
@@ -51,7 +54,7 @@ def test_target_model_tp_gt_1(common_llm_kwargs, per_test_common_llm_kwargs,
                               batch_size: int, output_len: int, seed: int):
     """Verify greedy equality when tensor parallelism is used.
     """
-    if current_platform.is_rocm():
+    if is_hip():
         pytest.skip("hip is not well-supported yet")
     run_equality_correctness_test_tp("JackFram/llama-68m",
                                      common_llm_kwargs,
@@ -71,6 +74,9 @@ def test_target_model_tp_gt_1(common_llm_kwargs, per_test_common_llm_kwargs,
     [[
         # Skip cuda graph recording for fast test.
         "--enforce-eager",
+
+        # Required for spec decode.
+        "--use_v2_block_manager",
         "--tensor_parallel_size",
         "2",
 

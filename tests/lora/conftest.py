@@ -1,16 +1,20 @@
+import contextlib
+import gc
 import tempfile
 from collections import OrderedDict
 from typing import Dict, List, TypedDict
 from unittest.mock import MagicMock, patch
 
 import pytest
+import ray
 import torch
 import torch.nn as nn
 from huggingface_hub import snapshot_download
 
 import vllm
 from vllm.config import LoRAConfig
-from vllm.distributed import (cleanup_dist_env_and_memory,
+from vllm.distributed import (destroy_distributed_environment,
+                              destroy_model_parallel,
                               init_distributed_environment,
                               initialize_model_parallel)
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -45,6 +49,17 @@ LONG_LORA_INFOS: List[ContextIDInfo] = [{
 }]
 
 
+def cleanup():
+    destroy_model_parallel()
+    destroy_distributed_environment()
+    with contextlib.suppress(AssertionError):
+        torch.distributed.destroy_process_group()
+    gc.collect()
+    if not current_platform.is_hpu():
+        torch.cuda.empty_cache()
+    ray.shutdown()
+
+
 @pytest.fixture()
 def should_do_global_cleanup_after_test(request) -> bool:
     """Allow subdirectories to skip global cleanup by overriding this fixture.
@@ -59,7 +74,7 @@ def should_do_global_cleanup_after_test(request) -> bool:
 def cleanup_fixture(should_do_global_cleanup_after_test: bool):
     yield
     if should_do_global_cleanup_after_test:
-        cleanup_dist_env_and_memory(shutdown_ray=True)
+        cleanup()
 
 
 @pytest.fixture
@@ -75,7 +90,7 @@ def dist_init():
     )
     initialize_model_parallel(1, 1)
     yield
-    cleanup_dist_env_and_memory(shutdown_ray=True)
+    cleanup()
 
 
 @pytest.fixture
@@ -226,7 +241,7 @@ def long_context_lora_files_32k():
 def long_context_infos(long_context_lora_files_16k_1,
                        long_context_lora_files_16k_2,
                        long_context_lora_files_32k):
-    cleanup_dist_env_and_memory(shutdown_ray=True)
+    cleanup()
     infos: Dict[int, ContextInfo] = {}
     for lora_checkpoint_info in LONG_LORA_INFOS:
         lora_id = lora_checkpoint_info["lora_id"]
@@ -247,13 +262,14 @@ def long_context_infos(long_context_lora_files_16k_1,
 
 @pytest.fixture
 def llama_2_7b_engine_extra_embeddings():
-    cleanup_dist_env_and_memory(shutdown_ray=True)
+    cleanup()
     get_model_old = get_model
 
-    def get_model_patched(**kwargs):
-        kwargs["vllm_config"].lora_config = LoRAConfig(max_loras=4,
-                                                       max_lora_rank=8)
-        return get_model_old(**kwargs)
+    def get_model_patched(*, model_config, device_config, **kwargs):
+        kwargs["lora_config"] = LoRAConfig(max_loras=4, max_lora_rank=8)
+        return get_model_old(model_config=model_config,
+                             device_config=device_config,
+                             **kwargs)
 
     if current_platform.is_hpu():
         with patch("vllm.worker.hpu_model_runner.get_model",
@@ -265,7 +281,7 @@ def llama_2_7b_engine_extra_embeddings():
 
     yield engine.llm_engine
     del engine
-    cleanup_dist_env_and_memory(shutdown_ray=True)
+    cleanup()
 
 
 @pytest.fixture

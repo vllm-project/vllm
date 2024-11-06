@@ -45,6 +45,9 @@ PRECISION = "float32"
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
 
+        # Required for spec decode.
+        "use_v2_block_manager": True,
+
         # Print spec metrics.
         "disable_log_stats": False,
 
@@ -89,6 +92,9 @@ def test_medusa_e2e_greedy_correctness(vllm_runner, common_llm_kwargs,
     [{
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
+
+        # Required for spec decode.
+        "use_v2_block_manager": True,
 
         # Print spec metrics.
         "disable_log_stats": False,
@@ -145,6 +151,9 @@ def test_medusa_e2e_greedy_logprobs(vllm_runner, common_llm_kwargs,
     [{
         "enforce_eager": False,
 
+        # Required for spec decode.
+        "use_v2_block_manager": True,
+
         # Print spec metrics.
         "disable_log_stats": False,
 
@@ -195,6 +204,9 @@ def test_medusa_e2e_greedy_correctness_cuda_graph(
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
 
+        # Required for spec decode.
+        "use_v2_block_manager": True,
+
         # Precision
         "dtype": PRECISION,
 
@@ -240,6 +252,9 @@ def test_medusa_e2e_greedy_correctness_with_preemption(
     [{
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
+
+        # Required for spec decode.
+        "use_v2_block_manager": True,
 
         # Precision
         "dtype": PRECISION,
@@ -291,6 +306,9 @@ def test_medusa_different_k(vllm_runner, common_llm_kwargs,
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
 
+        # Required for spec decode.
+        "use_v2_block_manager": True,
+
         # Precision
         "dtype": PRECISION,
 
@@ -337,6 +355,9 @@ def test_medusa_disable_queue(vllm_runner, common_llm_kwargs,
     [{
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
+
+        # Required for spec decode.
+        "use_v2_block_manager": True,
 
         # Precision
         "dtype": PRECISION,

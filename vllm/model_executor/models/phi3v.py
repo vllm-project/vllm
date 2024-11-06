@@ -26,23 +26,17 @@ from PIL import Image
 from transformers import CLIPVisionConfig, PretrainedConfig
 
 from vllm.attention import AttentionMetadata
-from vllm.config import (CacheConfig, ModelConfig, MultiModalConfig,
-                         PoolerConfig)
-from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
-                         InputContext, token_inputs)
+from vllm.config import CacheConfig, ModelConfig, MultiModalConfig
+from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.logger import init_logger
-from vllm.model_executor.layers.pooler import Pooler, PoolingType
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    VocabParallelEmbedding)
 from vllm.model_executor.models.clip import CLIPVisionModel
 from vllm.model_executor.models.llama import LlamaForCausalLM
-from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.utils import cached_get_tokenizer, repeat_and_pad_token
-from vllm.sequence import IntermediateTensors, PoolerOutput
+from vllm.sequence import IntermediateTensors
 from vllm.utils import is_list_of
 
 from .clip import dummy_image_for_clip, dummy_seq_data_for_clip
@@ -71,9 +65,7 @@ CLIP_VIT_LARGE_PATCH14_336_CONFIG = CLIPVisionConfig(dropout=0.0,
                                                      projection_dim=768)
 
 
-def _init_img_processor(hf_config: PretrainedConfig,
-                        quant_config: Optional[QuantizationConfig],
-                        prefix: str = "") -> CLIPVisionModel:
+def _init_img_processor(hf_config: PretrainedConfig):
     clip_config = CLIP_VIT_LARGE_PATCH14_336_CONFIG
     layer_idx = hf_config.img_processor.get('layer_idx', -2)
 
@@ -85,11 +77,7 @@ def _init_img_processor(hf_config: PretrainedConfig,
         num_hidden_layers = layer_idx + 1
 
     img_processor = CLIPVisionModel(
-        clip_config,
-        quant_config,
-        num_hidden_layers_override=num_hidden_layers,
-        prefix=prefix,
-    )
+        clip_config, num_hidden_layers_override=num_hidden_layers)
 
     return img_processor
 
@@ -155,18 +143,14 @@ class Phi3ImageEmbeddingBase(nn.Module):
 class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
     """Phi3 Image embedding with HD transform."""
 
-    def __init__(self,
-                 config: PretrainedConfig,
-                 quant_config: Optional[QuantizationConfig],
-                 prefix: str = "") -> None:
+    def __init__(self, config: PretrainedConfig) -> None:
         super().__init__()
 
         # n_embed or hidden_size
         hidden_size = config.n_embd if hasattr(
             config, 'n_embd') else config.hidden_size
 
-        self.img_processor = _init_img_processor(
-            config, quant_config, prefix=f"{prefix}.img_processor")
+        self.img_processor = _init_img_processor(config)
 
         image_dim_out = config.img_processor['image_dim_out']
         self.num_img_tokens = config.img_processor['num_img_tokens']
@@ -305,6 +289,10 @@ class Phi3HDImageEmbedding(Phi3ImageEmbeddingBase):
             dim=2).reshape(num_images, -1, hid_dim)
         return image_features_hd_newline
 
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+        loader = AutoWeightsLoader(self)
+        loader.load_weights(weights)
+
 
 # Based on https://huggingface.co/microsoft/Phi-3-vision-128k-instruct/blob/main/image_processing_phi3_v.py#L57
 def _calc_padded_size(*, width: int, height: int, padding_unit: int = 336):
@@ -380,7 +368,7 @@ def dummy_data_for_phi3v(ctx: InputContext,
 
     image_feature_size = get_max_phi3v_image_tokens(ctx, num_crops=num_crops)
 
-    seq_data, ranges = dummy_seq_data_for_clip(
+    seq_data = dummy_seq_data_for_clip(
         CLIP_VIT_LARGE_PATCH14_336_CONFIG,
         seq_len,
         num_images,
@@ -394,40 +382,35 @@ def dummy_data_for_phi3v(ctx: InputContext,
         image_height_override=MAX_IMAGE_FEATURE_SIZE_HEIGHT,
     )
 
-    return DummyData(seq_data, mm_data, ranges)
+    return seq_data, mm_data
 
 
+# Reserve this function to also handle placeholders for additional images
+# [ref: PR #5820]
 @lru_cache
-def _get_image_placeholder_token_id_candidates(
-    model_config: ModelConfig,
-    idx: int,
-) -> List[List[int]]:
+def _get_image_placeholder_token_ids(model_config: ModelConfig,
+                                     idx: int) -> List[int]:
     assert idx > 0
 
     tokenizer = cached_get_tokenizer(model_config.tokenizer)
 
-    # This is used when the image token is at the start of the string
-    start_candidate = tokenizer.encode(f"<|image_{idx}|>",
-                                       add_special_tokens=False)
-
-    # This is used when the image token is in the middle of the string
     # We need to get the token for "<", not "▁<"
     # https://huggingface.co/microsoft/Phi-3-vision-128k-instruct/raw/main/tokenizer.json
     a_token_id, = tokenizer.encode("a", add_special_tokens=False)
-    a_token_id_, *middle_candidate = tokenizer.encode(f"a<|image_{idx}|>",
-                                                      add_special_tokens=False)
+    a_token_id_, *image_placeholder_token_ids = tokenizer.encode(
+        f"a<|image_{idx}|>", add_special_tokens=False)
     assert a_token_id == a_token_id_
 
-    return [start_candidate, middle_candidate]
+    return image_placeholder_token_ids
 
 
 def input_processor_for_phi3v(ctx: InputContext,
-                              inputs: DecoderOnlyInputs,
+                              llm_inputs: LLMInputs,
                               *,
                               num_crops: Optional[int] = None):
-    multi_modal_data = inputs.get("multi_modal_data")
+    multi_modal_data = llm_inputs.get("multi_modal_data")
     if multi_modal_data is None or "image" not in multi_modal_data:
-        return inputs
+        return llm_inputs
 
     model_config = ctx.model_config
     hf_config = ctx.get_hf_image_processor_config()
@@ -459,7 +442,7 @@ def input_processor_for_phi3v(ctx: InputContext,
     else:
         raise TypeError(f"Invalid image type: {type(image_data)}")
 
-    prompt = inputs.get("prompt")
+    prompt = llm_inputs.get("prompt")
     if prompt is None:
         # for async server request, we assume prompt and its token_ids is always
         # in correct format. And num_image_tags == len(image_data) always True.
@@ -476,20 +459,18 @@ def input_processor_for_phi3v(ctx: InputContext,
                 image_data), "The count of image_placeholder not match image's"
         new_prompt = prompt
 
-    prompt_token_ids = inputs["prompt_token_ids"].copy()
+    prompt_token_ids = llm_inputs["prompt_token_ids"].copy()
 
-    # masked placeholder with image token id
+    # masked place_holder with image token id
     for idx in image_idx:
-        candidates = _get_image_placeholder_token_id_candidates(model_config,
-                                                                idx=idx)
-
-        for candidate in candidates:
-            for i in range(len(prompt_token_ids) - len(candidate) + 1):
-                if prompt_token_ids[i:i + len(candidate)] == candidate:
-                    prompt_token_ids[i:i +
-                                     len(candidate)] = ([_IMAGE_TOKEN_ID] *
-                                                        len(candidate))
-                    break
+        image_token_ids = _get_image_placeholder_token_ids(model_config,
+                                                           idx=idx)
+        for i in range(len(prompt_token_ids) - len(image_token_ids) + 1):
+            if prompt_token_ids[i:i + len(image_token_ids)] == image_token_ids:
+                prompt_token_ids[i:i + len(image_token_ids)] = [
+                    _IMAGE_TOKEN_ID
+                ] * len(image_token_ids)
+                break
 
     # merge consecutive tag ids
     merged_token_ids: List[int] = []
@@ -516,9 +497,10 @@ def input_processor_for_phi3v(ctx: InputContext,
             new_token_ids.append(token_id)
 
     # NOTE: Create a defensive copy of the original inputs
-    return token_inputs(prompt_token_ids=new_token_ids,
-                        prompt=new_prompt,
-                        multi_modal_data=multi_modal_data)
+    llm_inputs = LLMInputs(prompt_token_ids=new_token_ids,
+                           prompt=new_prompt,
+                           multi_modal_data=multi_modal_data)
+    return llm_inputs
 
 
 @MULTIMODAL_REGISTRY.register_image_input_mapper()
@@ -531,38 +513,19 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                  config: PretrainedConfig,
                  multimodal_config: MultiModalConfig,
                  cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 pooler_config: Optional[PoolerConfig] = None) -> None:
+                 quant_config: Optional[QuantizationConfig] = None) -> None:
         super().__init__()
 
         self.config = config
         self.multimodal_config = multimodal_config
         self.image_token_id = _IMAGE_TOKEN_ID
 
-        self.embed_tokens = VocabParallelEmbedding(
-            config.vocab_size,
-            config.hidden_size,
-            org_num_embeddings=config.vocab_size,
-            quant_config=quant_config,
-            prefix="model.embed_tokens",
-        )
+        # TODO: Optionally initializes this for supporting embeddings.
+        self.vision_embed_tokens = Phi3HDImageEmbedding(config)
 
-        # TODO: Optionally initializes this for supporting input embeddings.
-        self.vision_embed_tokens = Phi3HDImageEmbedding(
-            config, quant_config, prefix="model.vision_embed_tokens")
-
-        # The prefix is empty intentionally because default prefix of
-        # LlamaForCausalLM is "model"
         self.language_model = LlamaForCausalLM(config, cache_config,
                                                quant_config)
 
-        # The same model class supports both language generation and embedding
-        # because the architecture name is the same
-        self._pooler = Pooler.from_config_with_defaults(
-            pooler_config,
-            pooling_type=PoolingType.LAST,
-            normalize=True,
-            softmax=False)
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
 
@@ -679,24 +642,21 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                 intermediate_tensors: Optional[IntermediateTensors] = None,
                 **kwargs: object):
         if intermediate_tensors is not None:
+            input_ids = None
             inputs_embeds = None
         else:
             image_input = self._parse_and_validate_image_input(**kwargs)
 
             if image_input is not None:
                 vision_embeddings = self._process_image_input(image_input)
-                inputs_embeds = self.embed_tokens(input_ids)
+                inputs_embeds = self.language_model.model.get_input_embeddings(
+                    input_ids)
                 inputs_embeds = merge_multimodal_embeddings(
                     input_ids, inputs_embeds, vision_embeddings,
                     self.image_token_id)
+                input_ids = None
             else:
-                inputs_embeds = self.language_model.model.embed_tokens(
-                    input_ids)
-
-        # always pass the input via `inputs_embeds`
-        # to make sure the computation graph is consistent
-        # for `torch.compile` integration
-        input_ids = None
+                inputs_embeds = None
 
         hidden_states = self.language_model.model(input_ids,
                                                   positions,
@@ -722,27 +682,13 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     ) -> Optional[SamplerOutput]:
         return self.language_model.sample(logits, sampling_metadata)
 
-    def pooler(
-        self,
-        hidden_states: torch.Tensor,
-        pooling_metadata: PoolingMetadata,
-    ) -> Optional[PoolerOutput]:
-        return self._pooler(hidden_states, pooling_metadata)
-
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         hf_to_vllm_mapper = WeightsMapper(
             orig_to_new_prefix={
-                "model.vision_embed_tokens.wte": "embed_tokens",
                 "model.vision_embed_tokens.": "vision_embed_tokens.",
                 "lm_head.": "language_model.lm_head.",
                 "model.": "language_model.model.",
             })
 
         loader = AutoWeightsLoader(self)
-        autoloaded_weights = loader.load_weights(weights,
-                                                 mapper=hf_to_vllm_mapper)
-
-        # The HF config doesn't specify whether these are tied,
-        # so we detect it this way
-        if "embed_tokens" not in autoloaded_weights:
-            self.embed_tokens = self.language_model.model.embed_tokens
+        loader.load_weights(weights, mapper=hf_to_vllm_mapper)

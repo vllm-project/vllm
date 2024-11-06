@@ -2,7 +2,10 @@ from typing import List, Optional, Union
 
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.chat_utils import load_chat_template
+from vllm.entrypoints.chat_utils import (apply_hf_chat_template,
+                                         apply_mistral_chat_template,
+                                         load_chat_template,
+                                         parse_chat_messages_futures)
 from vllm.entrypoints.logger import RequestLogger
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -17,6 +20,7 @@ from vllm.entrypoints.openai.serving_engine import (BaseModelPath,
                                                     LoRAModulePath,
                                                     OpenAIServing)
 from vllm.logger import init_logger
+from vllm.transformers_utils.tokenizer import MistralTokenizer
 from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
@@ -58,51 +62,59 @@ class OpenAIServingTokenization(OpenAIServing):
 
         request_id = f"tokn-{random_uuid()}"
 
-        try:
-            (
-                lora_request,
-                prompt_adapter_request,
-            ) = self._maybe_get_adapters(request)
+        (
+            lora_request,
+            prompt_adapter_request,
+        ) = self._maybe_get_adapters(request)
 
-            tokenizer = await self.engine_client.get_tokenizer(lora_request)
+        tokenizer = await self.engine_client.get_tokenizer(lora_request)
 
-            if isinstance(request, TokenizeChatRequest):
-                (
-                    _,
-                    request_prompts,
-                    engine_prompts,
-                ) = await self._preprocess_chat(
-                    request,
+        prompt: Union[str, List[int]]
+        if isinstance(request, TokenizeChatRequest):
+            model_config = self.model_config
+
+            conversation, mm_data_future = parse_chat_messages_futures(
+                request.messages, model_config, tokenizer)
+
+            mm_data = await mm_data_future
+            if mm_data:
+                logger.warning(
+                    "Multi-modal inputs are ignored during tokenization")
+
+            if isinstance(tokenizer, MistralTokenizer):
+                prompt = apply_mistral_chat_template(
                     tokenizer,
-                    request.messages,
+                    messages=request.messages,
                     chat_template=self.chat_template,
                     add_generation_prompt=request.add_generation_prompt,
                     continue_final_message=request.continue_final_message,
-                    add_special_tokens=request.add_special_tokens,
                 )
             else:
-                request_prompts, engine_prompts = self._preprocess_completion(
-                    request,
+                prompt = apply_hf_chat_template(
                     tokenizer,
-                    request.prompt,
-                    add_special_tokens=request.add_special_tokens,
+                    conversation=conversation,
+                    chat_template=self.chat_template,
+                    add_generation_prompt=request.add_generation_prompt,
+                    continue_final_message=request.continue_final_message,
                 )
-        except ValueError as e:
-            logger.exception("Error in preprocessing prompt inputs")
-            return self.create_error_response(str(e))
+        else:
+            prompt = request.prompt
 
-        input_ids: List[int] = []
-        for i, engine_prompt in enumerate(engine_prompts):
-            self._log_inputs(request_id,
-                             request_prompts[i],
-                             params=None,
-                             lora_request=lora_request,
-                             prompt_adapter_request=prompt_adapter_request)
+        self._log_inputs(request_id,
+                         prompt,
+                         params=None,
+                         lora_request=lora_request,
+                         prompt_adapter_request=prompt_adapter_request)
 
-            # Silently ignore prompt adapter since it does not affect
-            # tokenization (Unlike in Embeddings API where an error is raised)
+        # Silently ignore prompt adapter since it does not affect tokenization
 
-            input_ids.extend(engine_prompt["prompt_token_ids"])
+        prompt_input = self._tokenize_prompt_input(
+            request,
+            tokenizer,
+            prompt,
+            add_special_tokens=request.add_special_tokens,
+        )
+        input_ids = prompt_input["prompt_token_ids"]
 
         return TokenizeResponse(tokens=input_ids,
                                 count=len(input_ids),
@@ -131,8 +143,9 @@ class OpenAIServingTokenization(OpenAIServing):
                          lora_request=lora_request,
                          prompt_adapter_request=prompt_adapter_request)
 
-        # Silently ignore prompt adapter since it does not affect tokenization
-        # (Unlike in Embeddings API where an error is raised)
+        if prompt_adapter_request is not None:
+            raise NotImplementedError("Prompt adapter is not supported "
+                                      "for tokenization")
 
         prompt_input = self._tokenize_prompt_input(
             request,

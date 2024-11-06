@@ -26,8 +26,9 @@ from vllm_hpu_extension.profiler import (HabanaHighLevelProfiler,
                                          HabanaMemoryProfiler, format_bytes)
 
 from vllm.attention import AttentionMetadata, get_attn_backend
-from vllm.attention.backends.hpu_attn import HPUAttentionBackend
-from vllm.config import DeviceConfig, VllmConfig
+from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
+                         ModelConfig, ObservabilityConfig, ParallelConfig,
+                         PromptAdapterConfig, SchedulerConfig)
 from vllm.distributed import broadcast_tensor_dict
 from vllm.distributed.parallel_state import get_world_group
 from vllm.logger import init_logger
@@ -557,21 +558,38 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
 
     def __init__(
         self,
-        vllm_config: VllmConfig,
+        model_config: ModelConfig,
+        parallel_config: ParallelConfig,
+        scheduler_config: SchedulerConfig,
+        device_config: DeviceConfig,
+        cache_config: CacheConfig,
+        load_config: LoadConfig,
+        lora_config: Optional[LoRAConfig],
+        kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
+        prompt_adapter_config: Optional[PromptAdapterConfig] = None,
         return_hidden_states: bool = False,
+        observability_config: Optional[ObservabilityConfig] = None,
     ):
-        ModelRunnerBase.__init__(self, vllm_config=vllm_config)
+        self.model_config = model_config
+        self.parallel_config = parallel_config
+        self.scheduler_config = scheduler_config
+        self.device_config = device_config
+        self.cache_config = cache_config
+        self.lora_config = lora_config
+        self.load_config = load_config
         self.is_driver_worker = is_driver_worker
+        self.prompt_adapter_config = prompt_adapter_config
         self.return_hidden_states = return_hidden_states
+        self.observability_config = observability_config
 
-        self.sliding_window = (self.model_config.get_sliding_window()
-                               if self.model_config is not None else None)
-        self.device_config = (self.device_config if self.device_config
-                              is not None else DeviceConfig())
+        self.sliding_window = (model_config.get_sliding_window()
+                               if model_config is not None else None)
+        self.device_config = (device_config
+                              if device_config is not None else DeviceConfig())
         if is_fake_hpu():
-            self.device_config.device = torch.device('cpu')
-            self.device_config.device_type = 'cpu'
+            device_config.device = torch.device('cpu')
+            device_config.device_type = 'cpu'
         self.device = self.device_config.device
         self.enforce_eager = self.model_config.enforce_eager
         self.max_num_seqs = self.scheduler_config.max_num_seqs
@@ -581,19 +599,19 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         self.max_model_len = self.scheduler_config.max_model_len
         self.max_num_batched_tokens = \
             self.scheduler_config.max_num_batched_tokens
-        self.block_size = self.cache_config.block_size
+        self.block_size = cache_config.block_size
 
         self.pin_memory = is_pin_memory_available()
-        self.kv_cache_dtype = self.cache_config.cache_dtype
+        self.kv_cache_dtype = kv_cache_dtype
 
         self.attn_backend = get_attn_backend(
             self.model_config.get_head_size(),
+            self.model_config.get_sliding_window(),
             self.model_config.dtype,
             self.kv_cache_dtype,
             self.block_size,
             self.model_config.is_attention_free,
         )
-        assert self.attn_backend == HPUAttentionBackend
 
         # Lazy initialization
         self.lora_manager: LRUCacheWorkerLoRAManager = None
@@ -646,7 +664,13 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             htcore.hpu_set_env()
         with HabanaMemoryProfiler() as m:
             with HabanaMemoryProfiler() as m_getmodel:
-                self.model = get_model(vllm_config=self.vllm_config)
+                self.model = get_model(model_config=self.model_config,
+                                       device_config=self.device_config,
+                                       load_config=self.load_config,
+                                       lora_config=self.lora_config,
+                                       parallel_config=self.parallel_config,
+                                       scheduler_config=self.scheduler_config,
+                                       cache_config=self.cache_config)
             msg = ("Pre-loading model weights on "
                    f"{next(self.model.parameters()).device} "
                    f"took {m_getmodel.get_summary_string()}")
@@ -971,8 +995,6 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             num_prefill_tokens=sum_query_len,
             num_decode_tokens=0,
             slot_mapping=slot_mapping,
-            multi_modal_placeholder_index_maps=
-            None  # FIXME(kzawora): mutli-modality will not work here
         )
         multi_modal_kwargs = MultiModalInputs.batch(multi_modal_inputs_list)
 
@@ -1181,7 +1203,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             num_prefill_tokens=0,
             num_decode_tokens=num_decode_tokens,
             slot_mapping=slot_mapping,
-            multi_modal_placeholder_index_maps=None)
+        )
         return PrepareDecodeMetadata(input_tokens=input_tokens,
                                      input_positions=input_positions,
                                      attn_metadata=attn_metadata,

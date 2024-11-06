@@ -6,7 +6,7 @@ import pytest
 
 from ...utils import RemoteOpenAIServer
 
-MODEL_NAME = "meta-llama/Llama-3.2-1B"
+MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
 
 
 @pytest.mark.asyncio

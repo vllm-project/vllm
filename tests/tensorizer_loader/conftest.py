@@ -1,18 +1,27 @@
+import contextlib
 import functools
 import gc
 from typing import Callable, TypeVar
 
 import pytest
+import ray
 import torch
 from typing_extensions import ParamSpec
 
-from vllm.distributed import cleanup_dist_env_and_memory
+from vllm.distributed import (destroy_distributed_environment,
+                              destroy_model_parallel)
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 
 
 @pytest.fixture(autouse=True)
 def cleanup():
-    cleanup_dist_env_and_memory(shutdown_ray=True)
+    destroy_model_parallel()
+    destroy_distributed_environment()
+    with contextlib.suppress(AssertionError):
+        torch.distributed.destroy_process_group()
+    ray.shutdown()
+    gc.collect()
+    torch.cuda.empty_cache()
 
 
 _P = ParamSpec("_P")

@@ -11,8 +11,7 @@ from transformers import ChameleonConfig, ChameleonVQVAEConfig
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
-from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
-                         InputContext, token_inputs)
+from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
@@ -30,7 +29,6 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.utils import (cached_get_tokenizer,
-                                   consecutive_placeholder_ranges,
                                    repeat_and_pad_placeholder_tokens)
 from vllm.sequence import IntermediateTensors, SequenceData
 from vllm.utils import print_warning_once
@@ -71,14 +69,10 @@ def dummy_seq_data_for_chameleon(
     else:
         image_feature_size = image_feature_size_override
 
-    return SequenceData.from_prompt_token_counts(
+    return SequenceData.from_token_counts(
         (image_token_id, image_feature_size * num_images),
         (0, seq_len - image_feature_size * num_images),
-    ), {
-        "image":
-        consecutive_placeholder_ranges(num_items=num_images,
-                                       item_size=image_feature_size)
-    }
+    )
 
 
 def dummy_image_for_chameleon(
@@ -102,18 +96,17 @@ def dummy_data_for_chameleon(ctx: InputContext, seq_len: int,
                              mm_counts: Mapping[str, int]):
     num_images = mm_counts["image"]
 
-    seq_data, ranges = dummy_seq_data_for_chameleon(
+    seq_data = dummy_seq_data_for_chameleon(
         seq_len,
         num_images,
         image_token_id=CHAMELEON_IMAGE_TOKEN_ID,
     )
 
     mm_data = dummy_image_for_chameleon(num_images)
-    return DummyData(seq_data, mm_data, ranges)
+    return seq_data, mm_data
 
 
-def input_processor_for_chameleon(ctx: InputContext,
-                                  inputs: DecoderOnlyInputs):
+def input_processor_for_chameleon(ctx: InputContext, llm_inputs: LLMInputs):
 
     """
     Processing input prompt to insert required tokens for image placeholder.
@@ -121,21 +114,16 @@ def input_processor_for_chameleon(ctx: InputContext,
     See https://github.com/huggingface/transformers/blob/0fdea8607d7e01eb0e38a1ebeb7feee30a22f0cf/src/transformers/models/chameleon/processing_chameleon.py#L58
     """ # noqa
 
-    multi_modal_data = inputs.get("multi_modal_data")
+    multi_modal_data = llm_inputs.get("multi_modal_data")
     if multi_modal_data is None or "image" not in multi_modal_data:
-        return inputs
-
-    if "multi_modal_placeholders" in inputs and "image" in inputs[
-            "multi_modal_placeholders"]:
-        # The inputs already have placeholders.
-        return inputs
+        return llm_inputs
 
     model_config = ctx.model_config
     tokenizer = cached_get_tokenizer(model_config.tokenizer)
-    new_prompt, new_token_ids, ranges = repeat_and_pad_placeholder_tokens(
+    new_prompt, new_token_ids = repeat_and_pad_placeholder_tokens(
         tokenizer,
-        inputs.get("prompt"),
-        inputs["prompt_token_ids"],
+        llm_inputs.get("prompt"),
+        llm_inputs["prompt_token_ids"],
         placeholder_token_id=CHAMELEON_IMAGE_TOKEN_ID,
         repeat_count=CHAMELEON_IMAGE_SEQ_LENGTH,
         pad_token_left=CHAMELEON_IMAGE_START_TOKEN_ID,
@@ -149,9 +137,9 @@ def input_processor_for_chameleon(ctx: InputContext,
     new_token_ids += [CHAMELEON_SEP_TOKEN_ID]
 
     # NOTE: Create a defensive copy of the original inputs
-    return token_inputs(prompt_token_ids=new_token_ids,
-                        prompt=new_prompt,
-                        multi_modal_data=multi_modal_data)
+    return LLMInputs(prompt_token_ids=new_token_ids,
+                     prompt=new_prompt,
+                     multi_modal_data=multi_modal_data)
 
 
 class ChameleonLayerNorm(nn.LayerNorm):

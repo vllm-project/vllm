@@ -1,14 +1,7 @@
 import logging
-from typing import TYPE_CHECKING, Callable, Optional, Union
+from typing import Callable, Dict, Optional, Union
 
 import vllm.envs as envs
-
-if TYPE_CHECKING:
-    from vllm.compilation.config import CompilationConfig
-    from vllm.config import VllmConfig
-else:
-    CompilationConfig = None
-    VllmConfig = None
 
 logger = logging.getLogger(__name__)
 
@@ -51,25 +44,13 @@ def get_torch_compile_backend() -> Optional[Union[Callable, str]]:
     return _torch_compile_backend
 
 
-_compilation_config: Optional[CompilationConfig] = None
+_inductor_additional_configs: Dict = {}
 
 
-def set_compilation_config(config: Optional[CompilationConfig]):
-    global _compilation_config
-    _compilation_config = config
+def set_inductor_additional_configs(configs: Dict):
+    global _inductor_additional_configs
+    _inductor_additional_configs = configs
 
 
-def get_compilation_config() -> Optional[CompilationConfig]:
-    return _compilation_config
-
-
-_vllm_config: Optional[VllmConfig] = None
-
-
-def set_vllm_config(config: Optional[VllmConfig]):
-    global _vllm_config
-    _vllm_config = config
-
-
-def get_vllm_config() -> Optional[VllmConfig]:
-    return _vllm_config
+def get_inductor_additional_configs() -> Dict:
+    return _inductor_additional_configs

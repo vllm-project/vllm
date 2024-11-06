@@ -27,7 +27,6 @@ from torch.nn import LayerNorm
 from transformers import FalconConfig as HF_FalconConfig
 
 from vllm.attention import Attention, AttentionMetadata
-from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
@@ -330,7 +329,6 @@ class FalconDecoderLayer(nn.Module):
         return output
 
 
-@support_torch_compile
 class FalconModel(nn.Module):
 
     def __init__(
@@ -401,6 +399,8 @@ class FalconForCausalLM(nn.Module, SupportsPP):
         ".dense_h_to_4h.",
         ".dense_4h_to_h.",
     ]
+    # in TP, these weights are partitioned along the column dimension (dim=-1)
+    column_parallel_weights_modules = [".dense_4h_to_h.", ".dense."]
 
     def __init__(
         self,

@@ -5,8 +5,9 @@ import pytest
 from huggingface_hub import snapshot_download
 
 from vllm import LLM
-from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.lora.request import LoRARequest
+
+from ...conftest import cleanup
 
 MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
 
@@ -38,7 +39,7 @@ def llm():
 
         del llm
 
-    cleanup_dist_env_and_memory()
+    cleanup()
 
 
 @pytest.fixture(scope="module")

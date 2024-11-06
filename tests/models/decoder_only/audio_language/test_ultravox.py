@@ -2,10 +2,8 @@ from typing import List, Optional, Tuple, Type
 
 import numpy as np
 import pytest
-import pytest_asyncio
 from transformers import AutoModel, AutoTokenizer, BatchEncoding
 
-from tests.utils import RemoteOpenAIServer
 from vllm.sequence import SampleLogprobs
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 
@@ -19,13 +17,6 @@ AudioTuple = Tuple[np.ndarray, int]
 VLLM_PLACEHOLDER = "<|reserved_special_token_0|>"
 HF_PLACEHOLDER = "<|audio|>"
 
-CHUNKED_PREFILL_KWARGS = {
-    "enable_chunked_prefill": True,
-    "max_num_seqs": 2,
-    # Use a very small limit to exercise chunked prefill.
-    "max_num_batched_tokens": 16
-}
-
 
 @pytest.fixture(scope="session")
 def audio_assets():
@@ -37,26 +28,6 @@ def audio_assets():
 def audio(request):
     from vllm.assets.audio import AudioAsset
     return AudioAsset(request.param)
-
-
-@pytest.fixture(params=({}, CHUNKED_PREFILL_KWARGS))
-def server(request, audio_assets):
-    args = [
-        "--dtype=bfloat16", "--max-model-len=4096", "--enforce-eager",
-        f"--limit-mm-per-prompt=audio={len(audio_assets)}"
-    ] + [
-        f"--{key.replace('_','-')}={value}"
-        for key, value in request.param.items()
-    ]
-
-    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
-        yield remote_server
-
-
-@pytest_asyncio.fixture
-async def client(server):
-    async with server.get_async_client() as async_client:
-        yield async_client
 
 
 def _get_prompt(audio_count, question, placeholder):
@@ -97,7 +68,8 @@ def run_test(
     dtype: str,
     max_tokens: int,
     num_logprobs: int,
-    **kwargs,
+    tensor_parallel_size: int,
+    distributed_executor_backend: Optional[str] = None,
 ):
     """Inference result should be the same between hf and vllm."""
     torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[dtype]
@@ -107,8 +79,11 @@ def run_test(
     # if we run HF first, the cuda initialization will be done and it
     # will hurt multiprocessing backend with fork method (the default method).
 
-    with vllm_runner(model, dtype=dtype, enforce_eager=True,
-                     **kwargs) as vllm_model:
+    with vllm_runner(model,
+                     dtype=dtype,
+                     tensor_parallel_size=tensor_parallel_size,
+                     distributed_executor_backend=distributed_executor_backend,
+                     enforce_eager=True) as vllm_model:
         vllm_outputs_per_audio = [
             vllm_model.generate_greedy_logprobs([vllm_prompt],
                                                 max_tokens,
@@ -117,7 +92,7 @@ def run_test(
             for vllm_prompt, _, audio in prompts_and_audios
         ]
 
-    def process(hf_inputs: BatchEncoding, **kwargs):
+    def process(hf_inputs: BatchEncoding):
         hf_inputs["audio_values"] = hf_inputs["audio_values"] \
             .to(torch_dtype)  # type: ignore
         return hf_inputs
@@ -160,16 +135,18 @@ def run_multi_audio_test(
     dtype: str,
     max_tokens: int,
     num_logprobs: int,
-    **kwargs,
+    tensor_parallel_size: int,
+    distributed_executor_backend: Optional[str] = None,
 ):
     with vllm_runner(model,
                      dtype=dtype,
+                     tensor_parallel_size=tensor_parallel_size,
+                     distributed_executor_backend=distributed_executor_backend,
                      enforce_eager=True,
                      limit_mm_per_prompt={
                          "audio":
                          max((len(audio) for _, audio in prompts_and_audios))
-                     },
-                     **kwargs) as vllm_model:
+                     }) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(
             [prompt for prompt, _ in prompts_and_audios],
             max_tokens,
@@ -181,13 +158,11 @@ def run_multi_audio_test(
     assert all(tokens for tokens, *_ in vllm_outputs)
 
 
-@pytest.mark.core_model
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [5])
-@pytest.mark.parametrize("vllm_kwargs", [{}, CHUNKED_PREFILL_KWARGS])
 def test_models(hf_runner, vllm_runner, audio, dtype: str, max_tokens: int,
-                num_logprobs: int, vllm_kwargs: dict) -> None:
+                num_logprobs: int) -> None:
 
     vllm_prompt = _get_prompt(1, "Describe the audio above.", VLLM_PLACEHOLDER)
     hf_prompt = _get_prompt(1, "Describe the audio above.", HF_PLACEHOLDER)
@@ -199,18 +174,16 @@ def test_models(hf_runner, vllm_runner, audio, dtype: str, max_tokens: int,
         dtype=dtype,
         max_tokens=max_tokens,
         num_logprobs=num_logprobs,
-        **vllm_kwargs,
+        tensor_parallel_size=1,
     )
 
 
-@pytest.mark.core_model
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [5])
-@pytest.mark.parametrize("vllm_kwargs", [{}, CHUNKED_PREFILL_KWARGS])
 def test_models_with_multiple_audios(vllm_runner, audio_assets, dtype: str,
-                                     max_tokens: int, num_logprobs: int,
-                                     vllm_kwargs: dict) -> None:
+                                     max_tokens: int,
+                                     num_logprobs: int) -> None:
 
     vllm_prompt = _get_prompt(len(audio_assets),
                               "Describe each of the audios above.",
@@ -223,37 +196,5 @@ def test_models_with_multiple_audios(vllm_runner, audio_assets, dtype: str,
         dtype=dtype,
         max_tokens=max_tokens,
         num_logprobs=num_logprobs,
-        **vllm_kwargs,
+        tensor_parallel_size=1,
     )
-
-
-@pytest.mark.asyncio
-async def test_online_inference(client, audio_assets):
-    """Exercises online inference with/without chunked prefill enabled."""
-
-    messages = [{
-        "role":
-        "user",
-        "content": [
-            *[{
-                "type": "audio_url",
-                "audio_url": {
-                    "url": audio.url
-                }
-            } for audio in audio_assets],
-            {
-                "type":
-                "text",
-                "text":
-                f"What's happening in these {len(audio_assets)} audio clips?"
-            },
-        ],
-    }]
-
-    chat_completion = await client.chat.completions.create(model=MODEL_NAME,
-                                                           messages=messages,
-                                                           max_tokens=10)
-
-    assert len(chat_completion.choices) == 1
-    choice = chat_completion.choices[0]
-    assert choice.finish_reason == "length"

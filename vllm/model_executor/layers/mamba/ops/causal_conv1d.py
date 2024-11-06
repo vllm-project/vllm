@@ -6,18 +6,18 @@ from typing import Optional
 import torch
 
 from vllm import _custom_ops as ops
-from vllm.attention.backends.utils import PAD_SLOT_ID
 
 
-def causal_conv1d_fn(x: torch.Tensor,
-                     weight: torch.Tensor,
-                     bias: Optional[torch.Tensor] = None,
-                     query_start_loc: Optional[torch.Tensor] = None,
-                     cache_indices: Optional[torch.Tensor] = None,
-                     has_initial_state: Optional[torch.Tensor] = None,
-                     conv_states: Optional[torch.Tensor] = None,
-                     activation: Optional[str] = "silu",
-                     pad_slot_id: int = PAD_SLOT_ID):
+def causal_conv1d_fn(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+    bias: Optional[torch.Tensor] = None,
+    query_start_loc: Optional[torch.Tensor] = None,
+    cache_indices: Optional[torch.Tensor] = None,
+    has_initial_state: Optional[torch.Tensor] = None,
+    conv_states: Optional[torch.Tensor] = None,
+    activation: Optional[str] = "silu",
+):
     """
     x: (batch, dim, seqlen) or (dim,cu_seq_len) for varlen
         sequences are concatenated from left to right for varlen
@@ -37,13 +37,6 @@ def causal_conv1d_fn(x: torch.Tensor,
     conv_states: (...,dim,width - 1) itype
         updated inplace if provided
     activation: either None or "silu" or "swish"
-    pad_slot_id: int
-            if cache_indices is passed, lets the kernel identify padded 
-            entries that will not be processed, 
-            for example: cache_indices = [pad_slot_id, 1, 20, pad_slot_id] 
-            in this case, the kernel will not process entries at 
-            indices 0 and 3
-
 
     out: (batch, dim, seqlen)
     """
@@ -53,10 +46,10 @@ def causal_conv1d_fn(x: torch.Tensor,
         x = x.contiguous()
     bias = bias.contiguous() if bias is not None else None
 
-    ops.causal_conv1d_fwd(x, weight, bias, conv_states, query_start_loc,
-                          cache_indices, has_initial_state, activation
-                          in ["silu", "swish"], pad_slot_id)
-    return x
+    out = ops.causal_conv1d_fwd(x, weight, bias, conv_states, query_start_loc,
+                                cache_indices, has_initial_state, activation
+                                in ["silu", "swish"])
+    return out
 
 
 def causal_conv1d_update(x: torch.Tensor,
@@ -65,8 +58,7 @@ def causal_conv1d_update(x: torch.Tensor,
                          bias: Optional[torch.Tensor] = None,
                          activation: Optional[str] = None,
                          cache_seqlens: Optional[torch.Tensor] = None,
-                         conv_state_indices: Optional[torch.Tensor] = None,
-                         pad_slot_id: int = PAD_SLOT_ID):
+                         conv_state_indices: Optional[torch.Tensor] = None):
     """
     x: (batch, dim) or (batch, dim, seqlen)
     conv_state: (batch, dim, state_len), where state_len >= width - 1
@@ -81,12 +73,7 @@ def causal_conv1d_update(x: torch.Tensor,
         If not None, the conv_state is a larger tensor along the batch dim, 
         and we are selecting the batch coords specified by conv_state_indices.
         Useful for a continuous batching scenario.
-    pad_slot_id: int
-            if cache_indices is passed, lets the kernel identify padded 
-            entries that will not be processed, 
-            for example: cache_indices = [pad_slot_id, 1 ,20 ,pad_slot_id] 
-            in this case, the kernel will not process entries at 
-            indices 0 and 3
+
     out: (batch, dim) or (batch, dim, seqlen)
     """
     if activation not in [None, "silu", "swish"]:
@@ -95,8 +82,8 @@ def causal_conv1d_update(x: torch.Tensor,
     unsqueeze = x.dim() == 2
     if unsqueeze:
         x = x.unsqueeze(-1)
-    ops.causal_conv1d_update(x, conv_state, weight, bias, activation_val,
-                             cache_seqlens, conv_state_indices, pad_slot_id)
+    out = ops.causal_conv1d_update(x, conv_state, weight, bias, activation_val,
+                                   cache_seqlens, conv_state_indices)
     if unsqueeze:
-        x = x.squeeze(-1)
-    return x
+        out = out.squeeze(-1)
+    return out

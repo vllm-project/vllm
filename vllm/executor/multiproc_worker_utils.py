@@ -3,6 +3,7 @@ import multiprocessing
 import os
 import sys
 import threading
+import traceback
 import uuid
 from dataclasses import dataclass
 from multiprocessing import Queue
@@ -226,9 +227,10 @@ def _run_worker_process(
             except KeyboardInterrupt:
                 break
             except BaseException as e:
-                logger.exception(
-                    "Exception in worker %s while processing method %s.",
-                    process_name, method)
+                tb = traceback.format_exc()
+                logger.error(
+                    "Exception in worker %s while processing method %s: %s, %s",
+                    process_name, method, e, tb)
                 exception = e
             result_queue.put(
                 Result(task_id=task_id, value=output, exception=exception))

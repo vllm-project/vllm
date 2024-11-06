@@ -24,7 +24,6 @@ from torch import nn
 from transformers import GPT2Config
 
 from vllm.attention import Attention, AttentionMetadata
-from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig
 from vllm.distributed.parallel_state import (
     get_pp_group, get_tensor_model_parallel_world_size)
@@ -183,7 +182,6 @@ class GPT2Block(nn.Module):
         return hidden_states
 
 
-@support_torch_compile
 class GPT2Model(nn.Module):
 
     def __init__(

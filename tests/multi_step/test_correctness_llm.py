@@ -76,6 +76,7 @@ def test_multi_step_llm(
             enforce_eager=enforce_eager,
             gpu_memory_utilization=0.7,
             tensor_parallel_size=tp_size,
+            use_v2_block_manager=True,
             enable_chunked_prefill=enable_chunked_prefill,
             num_scheduler_steps=num_scheduler_steps,
     ) as vllm_model:
@@ -168,6 +169,7 @@ def test_multi_step_llm_w_prompt_logprobs(
             enforce_eager=enforce_eager,
             gpu_memory_utilization=0.7,
             tensor_parallel_size=tp_size,
+            use_v2_block_manager=True,
             num_scheduler_steps=num_scheduler_steps,
     ) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy_logprobs(
@@ -303,6 +305,7 @@ def test_multi_step_llm_chunked_prefill_prefix_cache(
             enforce_eager=enforce_eager,
             gpu_memory_utilization=0.7,
             tensor_parallel_size=tp_size,
+            use_v2_block_manager=True,
             num_scheduler_steps=num_scheduler_steps,
             max_model_len=48,
             max_num_batched_tokens=48,
@@ -321,6 +324,7 @@ def test_multi_step_llm_chunked_prefill_prefix_cache(
             enforce_eager=enforce_eager,
             gpu_memory_utilization=0.7,
             tensor_parallel_size=tp_size,
+            use_v2_block_manager=True,
             enable_chunked_prefill=True,
             enable_prefix_caching=True,
             num_scheduler_steps=num_scheduler_steps,

@@ -3,8 +3,8 @@ import time
 import torch
 
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.platforms import current_platform
-from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, FlexibleArgumentParser
+from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, FlexibleArgumentParser,
+                        seed_everything)
 
 
 @torch.inference_mode()
@@ -16,7 +16,7 @@ def main(num_tokens: int,
          do_profile: bool = False,
          num_warmup_iters: int = 5,
          num_iters: int = 100) -> None:
-    current_platform.seed_everything(seed)
+    seed_everything(seed)
     torch.set_default_device("cuda")
 
     layer = RMSNorm(hidden_size).to(dtype=dtype)
