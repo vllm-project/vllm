@@ -315,6 +315,15 @@ def sample_frames_from_video(frames: npt.NDArray,
         return sampled_frames
 
 
+def encode_video_base64(frames: npt.NDArray):
+    base64_frames = []
+    frames_list = [frames[i] for i in range(frames.shape[0])]
+    for frame in frames_list:
+        img_base64 = encode_image_base64(Image.fromarray(frame))
+        base64_frames.append(img_base64)
+    return ",".join(base64_frames)
+
+
 # Utilities for input processors
 _T = TypeVar("_T", str, int)
 
