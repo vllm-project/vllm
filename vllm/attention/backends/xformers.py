@@ -466,7 +466,8 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
         self.profile = os.getenv("PROFILE", "False") == "True"
-        
+        self.profile = True
+         
         if self.profile == True:
             self.step = 0
             self.cache_time = 0.0
@@ -715,6 +716,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 block_tables_arg,
                 ) = _get_seq_len_block_table_args(decode_meta, False, attn_type)
 
+                #print(f"max_seq_len_arg:{max_seq_len_arg}, max_seq_len:{decode_meta.max_decode_seq_len}", file=sys.stderr)
                 output[num_prefill_tokens:] = PagedAttention.forward_decode(
                     decode_query,
                     key_cache,
@@ -733,6 +735,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 assert attn_metadata.use_dattn == True
                 layer_idx = kv_cache.item()
 
+                #print(f"max_seq_len_arg:{decode_meta.max_decode_seq_len}", file=sys.stderr)
                 #print(f"decoding: layer_idx:{layer_idx} after printing\n", file=sys.stderr)
                 #print(f"decoding: layer_idx:{layer_idx}, decode_meta.num_layers:{decode_meta.num_layers}, decode_meta.block_size:{decode_meta.block_size}, decode_meta.cache_row_mapping:{decode_meta.cache_row_mapping.shape}, decode_meta.cache_col_mapping:{decode_meta.cache_col_mapping}")
                 #print(f"decoding: layer_idx:{layer_idx}, decode_meta.num_layers:{decode_meta.num_layers}", file=sys.stderr)

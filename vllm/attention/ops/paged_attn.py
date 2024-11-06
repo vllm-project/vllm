@@ -148,8 +148,8 @@ class PagedAttention:
         use_v1 = (max_seq_len <= 8192
                   and (max_num_partitions == 1 or num_seqs * num_heads > 512))
 
-        #if use_v1 == False:
-        #    print(f"DDDD: use_v1:{use_v1}, max_seq_len:{max_seq_len}, max_num_partitions:{max_num_partitions}, num_seqs:{num_seqs}")
+        #if use_v1 == True and max_num_partitions > 1:
+        #    print(f"DDDD: use_v1:{use_v1}, max_seq_len:{max_seq_len}, max_num_partitions:{max_num_partitions}, num_seqs:{num_seqs} num_seqs * num_heads:{num_seqs * num_heads} ")
 
         if use_v1:
             # Run PagedAttention V1.
@@ -236,7 +236,12 @@ class PagedAttention:
         num_seqs, num_heads, head_size = query.shape
         max_num_partitions = ((max_seq_len + _PARTITION_SIZE - 1) //
                               _PARTITION_SIZE)
-        if max_num_partitions > 1: 
+        
+        no_reduce = ((max_seq_len <= 8192) and (max_num_partitions == 1 or num_seqs * num_heads > 512))
+        #no_reduce = ((max_seq_len <= 8192) and (max_num_partitions == 1))
+        use_reduce = not no_reduce
+        if use_reduce:
+            #print(f"using reduce now!!!", file=sys.stderr) 
             tmp_output = torch.empty(
                 size=(num_seqs, num_heads, max_num_partitions, head_size),
                 dtype=output.dtype,
@@ -260,6 +265,7 @@ class PagedAttention:
             max_logits,
             tmp_output,
             query,
+            use_reduce, 
             layer_idx,
             num_layers,
             block_size,

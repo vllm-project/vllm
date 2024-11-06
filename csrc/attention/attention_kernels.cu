@@ -163,6 +163,10 @@ __device__ void paged_attention_kernel(
       MIN(start_block_idx + num_blocks_per_partition, num_seq_blocks);
   const int num_blocks = end_block_idx - start_block_idx;
 
+  //if(blockIdx.x ==0 && blockIdx.y == 0 && blockIdx.z == 0 && threadIdx.x == 0) {
+  //if(blockIdx.x == 0 && threadIdx.x == 0) {
+  //  printf("[%d, %d, %d, %d]: threadblocks %d num_seq_blocks %d USE_PARTITIONING %d PARTITION_SIZE %d start_block_idx %d end_block_idx %d\n", blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, gridDim.x * gridDim.y * gridDim.z,num_seq_blocks, USE_PARTITIONING, PARTITION_SIZE, start_block_idx, end_block_idx); 
+  //}
   // [start_token_idx, end_token_idx) is the range of tokens to process.
   const int start_token_idx = start_block_idx * BLOCK_SIZE;
   const int end_token_idx =
@@ -356,6 +360,12 @@ __device__ void paged_attention_kernel(
   }
   exp_sum = block_sum<NUM_WARPS>(&red_smem[NUM_WARPS], exp_sum);
 
+  //if(blockIdx.x ==0 && blockIdx.y == 0 && blockIdx.z == 0 && threadIdx.x == 0) {
+    //printf("[%d, %d, %d, %d]: gridDim.x-%d, gridDim.y-%d,gridDim.z-%d, blockDim.x-%d\n", blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, gridDim.x, gridDim.y, gridDim.z, blockDim.x); 
+    //int tbs = gridDim.x * gridDim.y * gridDim.z;
+    //printf("threadsblocks-%d\n", tbs);  
+    //printf(" threadBlocks-%d: gridDim.x-%d, gridDim.y-%d,gridDim.z-%d, blockDim.x-%d\n", blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, gridDim.x, gridDim.y, gridDim.z, blockDim.x); 
+  //}
   // Compute softmax.
   const float inv_sum = __fdividef(1.f, exp_sum + 1e-6f);
   for (int i = thread_idx; i < num_tokens; i += NUM_THREADS) {
@@ -644,6 +654,13 @@ __global__ void paged_attention_v2_reduce_kernel(
     red_smem[warp_idx] = max_logit;
   }
   __syncthreads();
+
+  //if(blockIdx.x ==0 && blockIdx.y == 0 && blockIdx.z == 0 && threadIdx.x == 0) {
+    //printf("[%d, %d, %d, %d]: gridDim.x-%d, gridDim.y-%d,gridDim.z-%d, blockDim.x-%d\n", blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, gridDim.x, gridDim.y, gridDim.z, blockDim.x); 
+  //int tbs = gridDim.x * gridDim.y * gridDim.z;
+  //  printf("reduced threadsblocks-%d\n", tbs);  
+    //printf(" threadBlocks-%d: gridDim.x-%d, gridDim.y-%d,gridDim.z-%d, blockDim.x-%d\n", blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, gridDim.x, gridDim.y, gridDim.z, blockDim.x); 
+  //}
   // Reduce across warps.
   max_logit = lane < NUM_WARPS ? red_smem[lane] : -FLT_MAX;
 #pragma unroll
@@ -718,7 +735,8 @@ __global__ void dattention_kernel(
     // No work to do. Terminate the thread block.
     return;
   }
-  
+
+   
   const int num_seq_blocks = DIVIDE_ROUND_UP(seq_len, BLOCK_SIZE);
   const int num_blocks_per_partition =
       USE_PARTITIONING ? PARTITION_SIZE / BLOCK_SIZE : num_seq_blocks;
@@ -730,6 +748,11 @@ __global__ void dattention_kernel(
       MIN(start_block_idx + num_blocks_per_partition, num_seq_blocks);
   const int num_blocks = end_block_idx - start_block_idx;
 
+  //if(blockIdx.x ==0 && blockIdx.y == 0 && blockIdx.z == 0 && threadIdx.x == 0) {
+  //if(blockIdx.x == 0 && threadIdx.x == 0) {
+  //  printf("[%d, %d, %d, %d]: threadblocks %d num_seq_blocks %d USE_PARTITIONING %d PARTITION_SIZE %d start_block_idx %d end_block_idx %d\n", blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, gridDim.x * gridDim.y * gridDim.z,num_seq_blocks, USE_PARTITIONING, PARTITION_SIZE, start_block_idx, end_block_idx); 
+    //printf("[%d, %d, %d, %d]: threadblocks %d USE_PARTITIONING %d PARTITION_SIZE %d start_block_idx %d end_block_idx %d\n", blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, gridDim.x * gridDim.y * gridDim.z, USE_PARTITIONING, PARTITION_SIZE, start_block_idx, end_block_idx); 
+  //}
    // [start_token_idx, end_token_idx) is the range of tokens to process.
   const int start_token_idx = start_block_idx * BLOCK_SIZE;
   const int end_token_idx =
@@ -772,6 +795,12 @@ __global__ void dattention_kernel(
   const int thread_group_idx = thread_idx / THREAD_GROUP_SIZE;
   const int thread_group_offset = thread_idx % THREAD_GROUP_SIZE;
 
+  //if(blockIdx.x ==0 && blockIdx.y == 0 && blockIdx.z == 0 && threadIdx.x == 0) {
+    //printf("[%d, %d, %d, %d]: gridDim.x-%d, gridDim.y-%d,gridDim.z-%d, blockDim.x-%d\n", blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, gridDim.x, gridDim.y, gridDim.z, blockDim.x); 
+    //int tbs = gridDim.x * gridDim.y * gridDim.z;
+    //printf("threadsblocks-%d\n", tbs);  
+    //printf(" threadBlocks-%d: gridDim.x-%d, gridDim.y-%d,gridDim.z-%d, blockDim.x-%d\n", blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, gridDim.x, gridDim.y, gridDim.z, blockDim.x); 
+  //}
   // Load the query to registers.
   // Each thread in a thread group has a different part of the query.
   // For example, if the the thread group size is 4, then the first thread in
@@ -1142,6 +1171,8 @@ void paged_attention_v1_launcher(
   // Keep that in sync with the logic here!
   int shared_mem_size = std::max(logits_size, outputs_size);
 
+  
+  fprintf(stderr, "thread_blocks %ld num_headds %ld num_seqs %ld max_seq_len %ld\n", num_heads*num_seqs, num_heads, num_seqs, max_seq_len);
   dim3 grid(num_heads, num_seqs, 1);
   dim3 block(NUM_THREADS);
   const at::cuda::OptionalCUDAGuard device_guard(device_of(query));
@@ -1301,9 +1332,11 @@ void paged_attention_v2_launcher(
   int outputs_size = (NUM_WARPS / 2) * head_size * sizeof(float);
 
   // For paged attention v2 kernel.
+  fprintf(stderr, "thread_blocks %ld num_headds %ld num_seqs %ld max_num_partitions %ld max_seq_len %ld\n", num_heads*num_seqs*max_num_partitions , num_heads, num_seqs, max_num_partitions, max_seq_len);
   dim3 grid(num_heads, num_seqs, max_num_partitions);
   int shared_mem_size = std::max(logits_size, outputs_size);
 
+  fprintf(stderr, "reduced thread_blocks %ld \n", num_heads*num_seqs);
   // For paged attention v2 reduce kernel.
   dim3 reduce_grid(num_heads, num_seqs);
   int reduce_shared_mem_size = 2 * max_num_partitions * sizeof(float);
@@ -1409,10 +1442,10 @@ void paged_attention_v2(
 }
 
 #define LAUNCH_DATTENTION(HEAD_SIZE)   \
-  VLLM_DevFuncAttribute_SET_MaxDynamicSharedMemorySize( \
+  if(use_reduce) { \
+    VLLM_DevFuncAttribute_SET_MaxDynamicSharedMemorySize( \
       ((void*)vllm::dattention_kernel<scalar_t, cache_t, KV_DTYPE, BLOCK_SIZE, HEAD_SIZE, NUM_THREADS, PARTITION_SIZE>), \
       shared_mem_size);  \
-  if(max_num_partitions > 1) { \
     vllm::dattention_kernel<scalar_t, cache_t, KV_DTYPE, BLOCK_SIZE, HEAD_SIZE, NUM_THREADS, PARTITION_SIZE> \
         <<<grid, block, shared_mem_size, stream>>>( \
               exp_sums_ptr, max_logits_ptr, tmp_out_ptr,\
@@ -1430,7 +1463,10 @@ void paged_attention_v2(
           out_ptr, exp_sums_ptr, max_logits_ptr, tmp_out_ptr, seq_lens_ptr,    \
           max_num_partitions); \
   } \
-  else  \
+  else { \
+    VLLM_DevFuncAttribute_SET_MaxDynamicSharedMemorySize( \
+      ((void*)vllm::dattention_kernel<scalar_t, cache_t, KV_DTYPE, BLOCK_SIZE, HEAD_SIZE, NUM_THREADS>), \
+      shared_mem_size);  \
     vllm::dattention_kernel<scalar_t, cache_t, KV_DTYPE, BLOCK_SIZE, HEAD_SIZE, NUM_THREADS> \
         <<<grid, block, shared_mem_size, stream>>>( \
               nullptr, nullptr, out_ptr,\
@@ -1441,7 +1477,8 @@ void paged_attention_v2(
               col_ptr, \
               seq_lens_ptr, \
               q_stride, num_kv_heads, scale,  \
-              alibi_slopes_ptr, k_scale, v_scale);  
+              alibi_slopes_ptr, k_scale, v_scale);  \
+   }
           
 template <typename scalar_t, typename cache_t, vllm::Fp8KVCacheDataType KV_DTYPE, 
           int BLOCK_SIZE, int NUM_THREADS = 128, int PARTITION_SIZE = 512>
@@ -1451,6 +1488,7 @@ void dattention_launcher(
   torch::Tensor& max_logits,
   torch::Tensor& tmp_out,
   torch::Tensor& query,     // [num_seqs, num_heads, head_size]
+  bool use_reduce, 
   int64_t layer_idx,
   int64_t num_layers, 
   int64_t max_seq_len, 
@@ -1467,7 +1505,9 @@ void dattention_launcher(
   int64_t num_heads = query.size(1);
   int64_t head_size = query.size(2);
 
-  int max_num_partitions = DIVIDE_ROUND_UP(max_seq_len, PARTITION_SIZE);
+  int max_num_partitions = 1; 
+  if(use_reduce)
+	max_num_partitions = DIVIDE_ROUND_UP(max_seq_len, PARTITION_SIZE);
 
   int64_t key_block_size = (num_heads * head_size) * BLOCK_SIZE;
   int64_t layer_block_size = key_block_size * 2;  
@@ -1484,11 +1524,12 @@ void dattention_launcher(
   float* exp_sums_ptr = nullptr;
   float* max_logits_ptr = nullptr; 
   scalar_t* tmp_out_ptr = nullptr;
-  if(max_num_partitions > 1) {
+  if(use_reduce) {
     exp_sums_ptr = reinterpret_cast<float*>(exp_sums.data_ptr());
     max_logits_ptr = reinterpret_cast<float*>(max_logits.data_ptr());
     tmp_out_ptr = reinterpret_cast<scalar_t*>(tmp_out.data_ptr());
   }
+  
   scalar_t* query_ptr = reinterpret_cast<scalar_t*>(query.data_ptr());
   int* seq_lens_ptr = seq_lens.data_ptr<int>();
   int64_t * row_ptr = reinterpret_cast<int64_t*>(cache_row_mapping.data_ptr());
@@ -1496,14 +1537,31 @@ void dattention_launcher(
 
   int64_t q_stride = query.stride(0);
   constexpr int NUM_WARPS = NUM_THREADS / WARP_SIZE;
-  int logits_size = PARTITION_SIZE * sizeof(float);
+
+  int logits_size;
+  if(use_reduce) {
+    logits_size = PARTITION_SIZE * sizeof(float);
+  }
+  else {
+    int padded_max_seq_len =
+      DIVIDE_ROUND_UP(max_seq_len, BLOCK_SIZE) * BLOCK_SIZE;
+    logits_size = padded_max_seq_len * sizeof(float);
+  }
+
   int outputs_size = (NUM_WARPS / 2) * head_size * sizeof(float);
   int shared_mem_size = std::max(logits_size, outputs_size);
 
   dim3 grid(num_heads, num_seqs, max_num_partitions);
 
+  fprintf(stderr, "thread_blocks %ld num_headds %ld num_seqs %ld max_num_partitions %ld max_seq_len %ld\n", num_heads*num_seqs*max_num_partitions , num_heads, num_seqs, max_num_partitions, max_seq_len);
+
   // each thread block will be 128 threads
   dim3 block(NUM_THREADS);
+
+
+  if(use_reduce)
+    fprintf(stderr, "reduced thread_blocks %ld \n", num_heads*num_seqs);
+
   dim3 reduce_grid(num_heads, num_seqs);
   int reduce_shared_mem_size = 2 * max_num_partitions * sizeof(float);
 
@@ -1547,6 +1605,7 @@ void dattention(
     torch::Tensor& max_logits,  // [num_seqs, num_heads, max_num_partitions]
     torch::Tensor& tmp_out,    // [num_seqs, num_heads, max_num_partitions, head_size]
     torch::Tensor& query,     // [num_seqs, num_heads, head_size]
+    bool use_reduce, 
     int64_t layer_idx,
     int64_t num_layers, 
     int64_t block_size,
@@ -1566,12 +1625,12 @@ void dattention(
   if (kv_cache_dtype == "auto" && block_size == 16) {                                                 
     if (query.dtype() == at::ScalarType::Float) {               
       dattention_launcher<float, float, vllm::Fp8KVCacheDataType::kAuto, 16>( 
-          output, exp_sums, max_logits, tmp_out, query, layer_idx, num_layers, max_seq_len,  
+          output, exp_sums, max_logits, tmp_out, query, use_reduce, layer_idx, num_layers, max_seq_len,  
           seq_lens, cache_row_mapping, cache_col_mapping, 
           num_kv_heads, scale, alibi_slopes, k_scale, v_scale);
     } else if (query.dtype() == at::ScalarType::Half) {
         dattention_launcher<uint16_t, uint16_t, vllm::Fp8KVCacheDataType::kAuto, 16>( 
-          output, exp_sums, max_logits, tmp_out, query, layer_idx, num_layers, max_seq_len,  
+          output, exp_sums, max_logits, tmp_out, query, use_reduce, layer_idx, num_layers, max_seq_len,  
           seq_lens, cache_row_mapping, cache_col_mapping, 
           num_kv_heads, scale, alibi_slopes, k_scale, v_scale); 
     } 
@@ -1579,12 +1638,12 @@ void dattention(
   else if (kv_cache_dtype == "auto" && block_size == 32) {                                                 
     if (query.dtype() == at::ScalarType::Float) {               
       dattention_launcher<float, float, vllm::Fp8KVCacheDataType::kAuto, 32>( 
-          output, exp_sums, max_logits, tmp_out, query, layer_idx, num_layers, max_seq_len,  
+          output, exp_sums, max_logits, tmp_out, query, use_reduce, layer_idx, num_layers, max_seq_len,  
           seq_lens, cache_row_mapping, cache_col_mapping, 
           num_kv_heads, scale, alibi_slopes, k_scale, v_scale);
     } else if (query.dtype() == at::ScalarType::Half) {
         dattention_launcher<uint16_t, uint16_t, vllm::Fp8KVCacheDataType::kAuto, 32>( 
-          output, exp_sums, max_logits, tmp_out, query, layer_idx, num_layers, max_seq_len,  
+          output, exp_sums, max_logits, tmp_out, query, use_reduce, layer_idx, num_layers, max_seq_len,  
           seq_lens, cache_row_mapping, cache_col_mapping, 
           num_kv_heads, scale, alibi_slopes, k_scale, v_scale); 
     } 
