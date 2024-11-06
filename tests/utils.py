@@ -699,7 +699,7 @@ def large_gpu_mark(min_gb: int) -> pytest.MarkDecorator:
 
     return pytest.mark.skipif(
         memory_gb < min_gb,
-        reason=f"Need at least {memory_gb}GB GPU memory to run the test.",
+        reason=f"Need at least {min_gb}GB GPU memory to run the test.",
     )
 
 
