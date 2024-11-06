@@ -6,7 +6,7 @@ requires = [
     "packaging",
     "setuptools>=61",
     "setuptools-scm>=8.0",
-    "torch == 2.5.0",
+    "torch == 2.5.1",
     "wheel",
     "jinja2",
 ]
@@ -34,7 +34,7 @@ select = [
     # Pyflakes
     "F",
     # pyupgrade
-    # "UP",
+    "UP",
     # flake8-bugbear
     "B",
     # flake8-simplify
@@ -55,7 +55,7 @@ ignore = [
 ]
 
 [tool.mypy]
-python_version = "3.8"
+python_version = "3.9"
 
 ignore_missing_imports = true
 check_untyped_defs = true
@@ -97,4 +97,5 @@ markers = [
     "skip_global_cleanup",
     "core_model: run this model test in each PR instead of just daily",
     "distributed_2_gpus: run this test only in distributed tests for 2 GPUs",
+    "skip_v1: do not run this test with v1",
 ]
