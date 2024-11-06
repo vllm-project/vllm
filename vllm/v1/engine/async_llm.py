@@ -250,12 +250,8 @@ class AsyncLLM(EngineClient):
     # TODO: can we eliminate these?
 
     async def abort(self, request_id: str) -> None:
-        """Remove request_ids from EngineCore and Detokenizer."""
         # Note: Who Calls this?
         raise ValueError("Not Supported on V1 yet.")
-
-        await self.engine_core.abort_requests_async([request_id])
-        self.detokenizer.abort_requests([request_id])
 
     def encode(
         self,
@@ -292,7 +288,6 @@ class AsyncLLM(EngineClient):
         logger.debug("Called do_log_stats.")
 
     async def check_health(self) -> None:
-        """Raise if unhealthy"""
         logger.debug("Called do_log_stats.")
 
     async def start_profile(self) -> None:
