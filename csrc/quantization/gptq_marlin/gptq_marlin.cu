@@ -1203,7 +1203,7 @@ __global__ void Marlin(
       }
     }
 
-    if constexpr (has_zp && is_zp_float) {
+    else if constexpr (has_zp && is_zp_float) {
       int pipe = full_pipe % stages;
 
       if constexpr (group_blocks != -1) {
@@ -1284,7 +1284,7 @@ __global__ void Marlin(
         sub_zp<scalar_t>(frag_b0, frag_zp[j], 0);
       }
 
-      if constexpr (has_zp && is_zp_float && group_blocks != -1) {
+      else if constexpr (has_zp && is_zp_float && group_blocks != -1) {
         sub_zpf<scalar_t>(frag_b0, frag_zpf[k % 2][j], 0);
       }
 
@@ -1304,7 +1304,7 @@ __global__ void Marlin(
         sub_zp<scalar_t>(frag_b1, frag_zp[j], 1);
       }
 
-      if constexpr (has_zp && is_zp_float && group_blocks != -1) {
+      else if constexpr (has_zp && is_zp_float && group_blocks != -1) {
         sub_zpf<scalar_t>(frag_b1, frag_zpf[k % 2][j], 1);
       }
 
@@ -2234,10 +2234,6 @@ void marlin_mm(const void* A, const void* B, void* C, void* C_tmp, void* s,
     HQQ_CALL_IF(vllm::kU4, 8, 8, 256)
     HQQ_CALL_IF(vllm::kU4, 8, 4, 128)
     HQQ_CALL_IF(vllm::kU4, 4, 8, 128)
-    HQQ_CALL_IF(vllm::kU8, 16, 4, 256)
-    HQQ_CALL_IF(vllm::kU8, 8, 8, 256)
-    HQQ_CALL_IF(vllm::kU8, 8, 4, 128)
-    HQQ_CALL_IF(vllm::kU8, 4, 8, 128)
     else {
       TORCH_CHECK(false, "Unsupported shapes: MNK = [", prob_m, ", ", prob_n,
                   ", ", prob_k, "]", ", has_act_order = ", has_act_order,

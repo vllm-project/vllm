@@ -24,21 +24,20 @@ logger = init_logger(__name__)
 class HQQMarlinConfig(QuantizationConfig):
     """Config class for HQQ Marlin"""
 
-    # (num_bits, is_sym) -> quant_type
-    TYPE_MAP = {
-        4: scalar_types.uint4,
-        8: scalar_types.uint8,
-    }
-
     def __init__(
         self,
         weight_bits: int,
         group_size: int,
     ) -> None:
+        assert group_size == 64, ("The only supported HQQ group size is "
+                                  "currently 64.")
+        assert weight_bits == 4, ("The only supported HQQ quantization "
+                                  "bitsize is currently 4.")
+
         self.weight_bits = weight_bits
         self.group_size = group_size
         self.pack_factor = 32 // weight_bits  # packed into int32 in GPTQ format
-        self.quant_type = self.TYPE_MAP[(weight_bits)]
+        self.quant_type = scalar_types.uint4
 
     def __repr__(self) -> str:
         return (f"HQQMarlinConfig(quant_type={self.quant_type}, "
@@ -66,12 +65,6 @@ class HQQMarlinConfig(QuantizationConfig):
         weight_bits = cls.get_from_keys(wq_params, ["nbits"])
         group_size = cls.get_from_keys(wq_params, ["group_size"])
         return cls(weight_bits, group_size)
-
-    @classmethod
-    def override_quantization_method(cls, hf_quant_cfg,
-                                     user_quant) -> Optional[str]:
-        #TODO
-        return None
 
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["HQQMarlinMethod"]:
@@ -102,11 +95,13 @@ def error_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
 
 # HQQ packing creates issues with sharding - therefore, prior to loading, we
 # repack to GPTQ. We also reshape the weights to their proper GPTQ shape.
-class HQQQweightParameter(PackedvLLMParameter):
+class HQQweightParameter(PackedvLLMParameter):
 
     # unpack function from https://github.com/mobiusml/hqq
     def unpack_4bit_u8(self,
                        W_q: torch.Tensor) -> torch.Tensor:  # uint8/2 > uint8
+        assert self.weight_bits == 4, "Unsupported quant bitsize (must be 4)"
+
         dtype = torch.uint8
         step = W_q.shape[0]
         tmp = torch.empty([2 * step, W_q.shape[1]],
@@ -116,10 +111,6 @@ class HQQQweightParameter(PackedvLLMParameter):
         tmp[step:] = W_q & 0b00001111
         return tmp
 
-    def unpack_u8(self, W_q: torch.Tensor) -> torch.Tensor:
-        assert self.weight_bits == 4, "Unsupported quant bitsize (must be 4)"
-        return self.unpack_4bit_u8(W_q)
-
     def __init__(self, packed_factor: int, packed_dim: int, weight_bits: int,
                  **kwargs):
         super().__init__(packed_factor, packed_dim, None, **kwargs)
@@ -128,7 +119,7 @@ class HQQQweightParameter(PackedvLLMParameter):
         self.output_shape = self.shape[self.output_dim]
 
     def load_merged_column_weight(self, loaded_weight: torch.Tensor, **kwargs):
-        loaded_weight = self.unpack_u8(loaded_weight)
+        loaded_weight = self.unpack_4bit_u8(loaded_weight)
         loaded_weight = loaded_weight.reshape(-1, self.input_shape).transpose(
             1, 0)
         loaded_weight = gptq_pack(loaded_weight, self.weight_bits,
@@ -137,7 +128,7 @@ class HQQQweightParameter(PackedvLLMParameter):
         super().load_merged_column_weight(loaded_weight, **kwargs)
 
     def load_row_parallel_weight(self, loaded_weight: torch.Tensor):
-        loaded_weight = self.unpack_u8(loaded_weight)
+        loaded_weight = self.unpack_4bit_u8(loaded_weight)
         loaded_weight = loaded_weight.reshape(self.output_shape,
                                               -1).transpose(1, 0)
         loaded_weight = gptq_pack(loaded_weight, self.weight_bits,
@@ -146,7 +137,7 @@ class HQQQweightParameter(PackedvLLMParameter):
         super().load_row_parallel_weight(loaded_weight)
 
     def load_qkv_weight(self, loaded_weight: torch.Tensor, **kwargs):
-        loaded_weight = self.unpack_u8(loaded_weight)
+        loaded_weight = self.unpack_4bit_u8(loaded_weight)
         loaded_weight = loaded_weight.reshape(-1, self.input_shape).transpose(
             1, 0)
         loaded_weight = gptq_pack(loaded_weight, self.weight_bits,
@@ -200,7 +191,7 @@ class HQQMarlinMethod(LinearMethodBase):
         self.scales_and_zp_size = (input_size_per_partition //
                                    self.quant_config.group_size)
 
-        qweight = HQQQweightParameter(
+        qweight = HQQweightParameter(
             data=torch.empty(
                 self.input_size_per_partition // self.quant_config.pack_factor,
                 self.output_size_per_partition,
@@ -310,7 +301,7 @@ class HQQMarlinMethod(LinearMethodBase):
             self.input_size_per_partition,
             True,  # is_k_full
             True,  # has_zp
-            False,  # use 32-bit reduce
+            True,  # use 32-bit reduce
             True,  # use float zp
         )
 
