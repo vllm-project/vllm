@@ -339,7 +339,8 @@ VLM_TEST_SETTINGS = {
             pytest.mark.skipif(
                 transformers.__version__ < "4.46.0",
                 reason="Model introduced in HF >= 4.46.0"
-            )
+            ),
+            large_gpu_mark(min_gb=48),
         ],
     ),
     ### Tensor parallel / multi-gpu broadcast tests
