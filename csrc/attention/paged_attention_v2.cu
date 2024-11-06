@@ -763,7 +763,7 @@ void paged_attention_v2_launcher(
       CALL_V2_LAUNCHER(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, IS_BLOCK_SPARSE, 1024, 1024);   \
       break;                                                                                    \
     default:                                                                                    \
-      TORCH_CHECK(false, "Unsupported block size: ", block_size);                               \
+      TORCH_CHECK(false, "Unsupported num threads: ", num_threads);                             \
       break;                                                                                    \
   }
 
