@@ -1,4 +1,3 @@
-# coding=utf-8
 # Adapted from https://huggingface.co/mosaicml/mpt-7b/tree/main
 import math
 from typing import Iterable, List, Optional, Tuple, Union
@@ -7,6 +6,7 @@ import torch
 import torch.nn as nn
 
 from vllm.attention import Attention, AttentionMetadata
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
@@ -204,6 +204,7 @@ class MPTBlock(nn.Module):
         return hidden_states
 
 
+@support_torch_compile
 class MPTModel(nn.Module):
 
     def __init__(

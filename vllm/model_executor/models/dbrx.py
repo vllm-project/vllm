@@ -1,4 +1,3 @@
-# coding=utf-8
 from typing import Iterable, List, Optional, Tuple, Union
 
 import torch

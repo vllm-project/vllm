@@ -1,4 +1,3 @@
-# coding=utf-8
 # Adapted from
 # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/llama/modeling_llama.py
 # Copyright 2023 The vLLM team.
@@ -29,6 +28,7 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, LoRAConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
@@ -348,6 +348,7 @@ class MiniCPMDecoderLayer(nn.Module):
         return hidden_states, None
 
 
+@support_torch_compile
 class MiniCPMModel(nn.Module):
 
     def __init__(

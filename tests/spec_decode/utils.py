@@ -68,12 +68,14 @@ def create_worker(cls: Callable[..., T],
                   seed: int,
                   is_driver_worker: bool = True,
                   enforce_eager: bool = True,
-                  model_runner_cls: Optional[ModelRunner] = None) -> T:
+                  model_runner_cls: Optional[ModelRunner] = None,
+                  dtype: Optional[str] = "auto") -> T:
     engine_args = EngineArgs(
         model=model_name,
         seed=seed,
         block_size=block_size,
         enforce_eager=enforce_eager,
+        dtype=dtype,
     )
     engine_config = engine_args.create_engine_config()
 
@@ -81,12 +83,7 @@ def create_worker(cls: Callable[..., T],
         get_ip(), get_open_port())
 
     worker = cls(
-        model_config=engine_config.model_config,
-        parallel_config=engine_config.parallel_config,
-        scheduler_config=engine_config.scheduler_config,
-        device_config=engine_config.device_config,
-        cache_config=engine_config.cache_config,
-        load_config=engine_config.load_config,
+        vllm_config=engine_config,
         local_rank=0,
         rank=0,
         distributed_init_method=distributed_init_method,

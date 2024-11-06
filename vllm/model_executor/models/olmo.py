@@ -1,4 +1,3 @@
-# coding=utf-8
 # Adapted from
 # https://github.com/huggingface/transformers/blob/v4.40.1/src/transformers/models/olmo/modeling_olmo.py
 # Copyright 2024 The vLLM team.
@@ -28,6 +27,7 @@ from torch import nn
 from transformers import OlmoConfig
 
 from vllm.attention import Attention, AttentionMetadata
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -221,6 +221,7 @@ class OlmoDecoderLayer(nn.Module):
         return hidden_states
 
 
+@support_torch_compile
 class OlmoModel(nn.Module):
 
     def __init__(self,

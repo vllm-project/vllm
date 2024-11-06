@@ -1,4 +1,3 @@
-# coding=utf-8
 # adapted from https://github.com/huggingface/transformers/blob/v4.39.3/src/transformers/models/persimmon/modeling_persimmon.py
 # Copyright 2023 The vLLM team.
 # Copyright 2023 EleutherAI and the HuggingFace Inc. team. All rights reserved.
@@ -27,6 +26,7 @@ from torch import nn
 from transformers import PersimmonConfig
 
 from vllm.attention import Attention, AttentionMetadata
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
@@ -209,6 +209,7 @@ class PersimmonDecoderLayer(nn.Module):
         return outputs
 
 
+@support_torch_compile
 class PersimmonModel(nn.Module):
 
     def __init__(self,

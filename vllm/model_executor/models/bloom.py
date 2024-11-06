@@ -1,4 +1,3 @@
-# coding=utf-8
 # Adapted from
 # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/bloom/modeling_bloom.py
 # Copyright 2023 The vLLM team.
@@ -24,6 +23,7 @@ from torch import nn
 from transformers import BloomConfig
 
 from vllm.attention import Attention, AttentionMetadata
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
@@ -218,6 +218,7 @@ class BloomBlock(nn.Module):
         return output
 
 
+@support_torch_compile
 class BloomModel(nn.Module):
 
     def __init__(

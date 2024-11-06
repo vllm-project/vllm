@@ -1,3 +1,4 @@
+import ctypes
 from contextlib import contextmanager
 from typing import Any, List, Optional, Union
 
@@ -7,6 +8,7 @@ from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
+from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
 from vllm.distributed.device_communicators.custom_all_reduce_utils import (
     gpu_p2p_access_check)
 from vllm.distributed.parallel_state import in_the_same_node_as
@@ -174,6 +176,35 @@ class CustomAllreduce:
                                        offsets, rank, self.full_nvlink)
         self.register_buffer(self.buffer)
 
+    @staticmethod
+    def create_shared_buffer(
+            size_in_bytes: int,
+            group: Optional[ProcessGroup] = None) -> List[int]:
+        lib = CudaRTLibrary()
+        pointer = lib.cudaMalloc(size_in_bytes)
+        handle = lib.cudaIpcGetMemHandle(pointer)
+        world_size = dist.get_world_size(group=group)
+        rank = dist.get_rank(group=group)
+        handles = [None] * world_size
+        dist.all_gather_object(handles, handle, group=group)
+
+        pointers: List[int] = []
+        for i, h in enumerate(handles):
+            if i == rank:
+                pointers.append(pointer.value)  # type: ignore
+            else:
+                pointers.append(
+                    lib.cudaIpcOpenMemHandle(h).value)  # type: ignore
+
+        return pointers
+
+    @staticmethod
+    def free_shared_buffer(pointers: List[int],
+                           group: Optional[ProcessGroup] = None) -> None:
+        rank = dist.get_rank(group=group)
+        lib = CudaRTLibrary()
+        lib.cudaFree(ctypes.c_void_p(pointers[rank]))
+
     @contextmanager
     def capture(self):
         """
@@ -191,8 +222,20 @@ class CustomAllreduce:
 
     def _get_ipc_meta(self, inp: torch.Tensor):
         data = inp.untyped_storage()._share_cuda_()
+        handle = data[1]
+        # https://github.com/pytorch/pytorch/pull/130890 changes
+        # the binary format of the ipc handle
+        # it starts from pytorch 2.5
+        if len(handle) > 64:
+            assert len(handle) == 66
+            # only support SHAREABLE_HANDLE_VERSION = 1
+            assert int(handle[0]) == 1
+            # only support SHAREABLE_CUDA_MALLOC = 'c'
+            assert handle[1] == ord("c")
+            handle = handle[2:]
+            # TODO: support expandable segment
         shard_data = (
-            data[1],  # ipc handle to base ptr
+            handle,  # ipc handle to base ptr
             data[3],  # offset of base ptr
         )
         return self._gather_ipc_meta(shard_data)

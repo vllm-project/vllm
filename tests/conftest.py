@@ -1,6 +1,5 @@
 import json
 import os
-import sys
 import tempfile
 from collections import UserList
 from enum import Enum
@@ -52,7 +51,7 @@ PromptVideoInput = _PromptMultiModalInput[np.ndarray]
 
 
 def _read_prompts(filename: str) -> List[str]:
-    with open(filename, "r") as f:
+    with open(filename) as f:
         prompts = f.readlines()
         return prompts
 
@@ -62,14 +61,8 @@ class _ImageAssetPrompts(TypedDict):
     cherry_blossom: str
 
 
-if sys.version_info < (3, 9):
-    # UserList cannot be subscripted
-    class _ImageAssetsBase(UserList):
-        pass
-else:
-
-    class _ImageAssetsBase(UserList[ImageAsset]):
-        pass
+class _ImageAssetsBase(UserList[ImageAsset]):
+    pass
 
 
 class _ImageAssets(_ImageAssetsBase):
@@ -94,14 +87,8 @@ class _VideoAssetPrompts(TypedDict):
     sample_demo_1: str
 
 
-if sys.version_info < (3, 9):
-    # UserList cannot be subscripted
-    class _VideoAssetsBase(UserList):
-        pass
-else:
-
-    class _VideoAssetsBase(UserList[VideoAsset]):
-        pass
+class _VideoAssetsBase(UserList[VideoAsset]):
+    pass
 
 
 class _VideoAssets(_VideoAssetsBase):
@@ -232,20 +219,22 @@ def video_assets() -> _VideoAssets:
     return VIDEO_ASSETS
 
 
-_T = TypeVar("_T", nn.Module, torch.Tensor, BatchEncoding, BatchFeature)
+_T = TypeVar("_T", nn.Module, torch.Tensor, BatchEncoding, BatchFeature, dict)
 
 
 class HfRunner:
 
-    def wrap_device(self, input: _T, device: Optional[str] = None) -> _T:
+    def wrap_device(self, x: _T, device: Optional[str] = None) -> _T:
         if device is None:
-            return self.wrap_device(
-                input, "cpu" if current_platform.is_cpu() else "cuda")
+            device = "cpu" if current_platform.is_cpu() else "cuda"
 
-        if hasattr(input, "device") and input.device.type == device:
-            return input
+        if isinstance(x, dict):
+            return {k: self.wrap_device(v, device) for k, v in x.items()}
 
-        return input.to(device)
+        if hasattr(x, "device") and x.device.type == device:
+            return x
+
+        return x.to(device)
 
     def __init__(
         self,
@@ -257,8 +246,7 @@ class HfRunner:
         is_sentence_transformer: bool = False,
         skip_tokenizer_init: bool = False,
         auto_cls: Type[_BaseAutoModelClass] = AutoModelForCausalLM,
-        postprocess_inputs: Callable[[BatchEncoding],
-                                     BatchEncoding] = identity,
+        postprocess_inputs: Callable[..., BatchEncoding] = identity,
     ) -> None:
         torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[dtype]
 
@@ -301,6 +289,7 @@ class HfRunner:
         if skip_tokenizer_init:
             self.tokenizer = self.processor.tokenizer
 
+        self.dtype = dtype
         self.postprocess_inputs = postprocess_inputs
 
     def get_inputs(
@@ -335,11 +324,22 @@ class HfRunner:
                 processor_kwargs["sampling_rate"] = sr
 
             inputs = self.processor(**processor_kwargs)
-            inputs = self.postprocess_inputs(inputs)
+            inputs = self.postprocess_inputs(inputs, dtype=self.dtype)
 
             all_inputs.append(inputs)
 
         return all_inputs
+
+    def classify(self, prompts: List[str]) -> List[str]:
+        # output is final logits
+        all_inputs = self.get_inputs(prompts)
+        outputs = []
+        for inputs in all_inputs:
+            output = self.model(**self.wrap_device(inputs))
+            logits = output.logits.softmax(dim=-1)[0].tolist()
+            outputs.append(logits)
+
+        return outputs
 
     def generate(
         self,
@@ -686,6 +686,14 @@ class VllmRunner:
 
         return inputs
 
+    def classify(self, prompts: List[str]) -> List[str]:
+        req_outputs = self.model.encode(prompts)
+        outputs = []
+        for req_output in req_outputs:
+            embedding = req_output.outputs.embedding
+            outputs.append(embedding)
+        return outputs
+
     def generate(
         self,
         prompts: List[str],
@@ -937,7 +945,7 @@ def dummy_opt_path():
                               "*.msgpack"
                           ])
         assert os.path.exists(json_path)
-        with open(json_path, "r") as f:
+        with open(json_path) as f:
             config = json.load(f)
         config["architectures"] = ["MyOPTForCausalLM"]
         with open(json_path, "w") as f:
@@ -956,7 +964,7 @@ def dummy_llava_path():
                               "*.msgpack"
                           ])
         assert os.path.exists(json_path)
-        with open(json_path, "r") as f:
+        with open(json_path) as f:
             config = json.load(f)
         config["architectures"] = ["MyLlava"]
         with open(json_path, "w") as f:
@@ -975,7 +983,7 @@ def dummy_gemma2_embedding_path():
                               "*.msgpack"
                           ])
         assert os.path.exists(json_path)
-        with open(json_path, "r") as f:
+        with open(json_path) as f:
             config = json.load(f)
         config["architectures"] = ["MyGemma2Embedding"]
         with open(json_path, "w") as f:

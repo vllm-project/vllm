@@ -5,6 +5,7 @@ import torch
 from torch import nn
 
 from vllm.attention import Attention, AttentionMetadata
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
@@ -47,7 +48,7 @@ class ArcticMLP(nn.Module):
                  is_residual_mlp: bool = False,
                  quant_config: Optional[QuantizationConfig] = None,
                  reduce_results: bool = True):
-        super(ArcticMLP, self).__init__()
+        super().__init__()
         self.hidden_size = config.hidden_size
         self.expert_id = expert_id
         self.layer_id = layer_id
@@ -88,7 +89,7 @@ class ArcticMoE(nn.Module):
                  params_dtype: Optional[torch.dtype] = None,
                  quant_config: Optional[QuantizationConfig] = None,
                  reduce_results: bool = True):
-        super(ArcticMoE, self).__init__()
+        super().__init__()
 
         self.tp_size = tp_size or get_tensor_model_parallel_world_size()
         self.hidden_size = config.hidden_size
@@ -360,6 +361,7 @@ class ArcticDecoderLayer(nn.Module):
         return hidden_states
 
 
+@support_torch_compile
 class ArcticModel(nn.Module):
 
     def __init__(
