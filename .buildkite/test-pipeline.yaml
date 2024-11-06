@@ -120,7 +120,7 @@ steps:
   - tests/spec_decode/e2e/test_integration_dist_tp4
   - tests/compile
   commands:
-  - NCCL_DEBUG=TRACE pytest -v -s distributed/test_utils.py
+  - pytest -v -s distributed/test_utils.py
   - pytest -v -s compile/test_basic_correctness.py
   - pytest -v -s distributed/test_pynccl.py
   - pytest -v -s spec_decode/e2e/test_integration_dist_tp4.py
