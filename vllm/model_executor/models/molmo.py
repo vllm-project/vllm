@@ -844,9 +844,10 @@ def get_max_tokens(max_crops: int, crop_patches: int, left_margin: int,
 
 
 def get_max_molmo_image_tokens(ctx: InputContext) -> int:
-    processor = cached_get_processor(ctx.model_config.model,
-                                     trust_remote_code=True,
-                                     revision=ctx.model_config.code_revision)
+    processor = cached_get_processor(
+        ctx.model_config.model,
+        trust_remote_code=ctx.model_config.trust_remote_code,
+        revision=ctx.model_config.code_revision)
     image_processor = processor.image_processor
     max_llm_image_tokens = get_max_tokens(
         image_processor.max_crops,
@@ -870,9 +871,10 @@ def image_input_mapper_for_molmo(
 
 def dummy_data_for_molmo(ctx: InputContext, seq_len: int,
                          mm_counts: Mapping[str, int]):
-    processor = cached_get_processor(ctx.model_config.model,
-                                     trust_remote_code=True,
-                                     revision=ctx.model_config.code_revision)
+    processor = cached_get_processor(
+        ctx.model_config.model,
+        trust_remote_code=ctx.model_config.trust_remote_code,
+        revision=ctx.model_config.code_revision)
     image_processor = processor.image_processor
 
     base_image_input_d = image_processor.image_patch_size
@@ -935,11 +937,11 @@ def input_processor_for_molmo(ctx: InputContext, inputs: DecoderOnlyInputs):
     multi_modal_data = inputs.get("multi_modal_data")
     image = None if multi_modal_data is None else multi_modal_data.get("image")
 
-    processor = cached_get_processor(ctx.model_config.model,
-                                     trust_remote_code=True,
-                                     revision=ctx.model_config.code_revision)
-
     model_config = ctx.model_config
+    processor = cached_get_processor(
+        ctx.model_config.model,
+        trust_remote_code=model_config.trust_remote_code,
+        revision=ctx.model_config.code_revision)
     tokenizer = cached_get_tokenizer(
         model_config.tokenizer,
         trust_remote_code=model_config.trust_remote_code)
