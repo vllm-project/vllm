@@ -254,7 +254,7 @@ class MistralTokenizer:
                skip_special_tokens: bool = True) -> str:
         assert (
             skip_special_tokens
-        ), "Skipping special tokens is not supported for Mistral tokenizers."
+        ), "skip_special_tokens=False is not supported for Mistral tokenizers."
 
         if isinstance(ids, int):
             ids = [ids]
@@ -268,11 +268,15 @@ class MistralTokenizer:
         # TODO(Patrick) - potentially allow special tokens to not be skipped
         assert (
             skip_special_tokens
-        ), "Skipping special tokens is not supported for Mistral tokenizers."
+        ), "skip_special_tokens=False is not supported for Mistral tokenizers."
 
         assert isinstance(self.tokenizer,
                           (Tekkenizer, SentencePieceTokenizer)), type(
                               self.tokenizer)
+
+        if isinstance(self.tokenizer, Tekkenizer):
+            # skip special tokens
+            ids = [i for i in ids if i > self.tokenizer.num_special_tokens]
 
         tokens = [self.tokenizer.id_to_piece(id) for id in ids]
 
