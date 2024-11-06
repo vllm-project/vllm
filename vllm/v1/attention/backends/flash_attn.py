@@ -7,6 +7,7 @@ import torch
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
 from vllm.forward_context import get_forward_context
+from vllm.utils import direct_register_custom_op
 from vllm.vllm_flash_attn import flash_attn_varlen_func
 
 
@@ -82,8 +83,10 @@ class FlashAttentionImpl(AttentionImpl):
         if alibi_slopes is not None:
             alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
         self.alibi_slopes = alibi_slopes
-        self.sliding_window = ((sliding_window, sliding_window)
-                               if sliding_window is not None else (-1, -1))
+        if sliding_window is None:
+            self.sliding_window = (-1, -1)
+        else:
+            self.sliding_window = (sliding_window - 1, 0)
         self.kv_cache_dtype = kv_cache_dtype
         if logits_soft_cap is None:
             # In flash-attn, setting logits_soft_cap as 0 means no soft cap.
@@ -92,12 +95,6 @@ class FlashAttentionImpl(AttentionImpl):
 
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
-
-        if sliding_window is not None:
-            # NOTE(woosuk): flash-attn's sliding window does not work with
-            # paged KV cache.
-            raise ValueError(
-                "Sliding window is not supported in FlashAttention.")
 
         support_head_sizes = FlashAttentionBackend.get_supported_head_sizes()
         if head_size not in support_head_sizes:
@@ -156,8 +153,6 @@ class FlashAttentionImpl(AttentionImpl):
         return output
 
 
-@torch.library.custom_op("vllm::unified_flash_attention",
-                         mutates_args=["kv_cache"])
 def unified_flash_attention(
     query: torch.Tensor,
     key: torch.Tensor,
@@ -221,8 +216,7 @@ def unified_flash_attention(
     return output.view(num_tokens, hidden_size)
 
 
-@unified_flash_attention.register_fake
-def _(
+def unified_flash_attention_fake(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
@@ -239,3 +233,11 @@ def _(
     logits_soft_cap: Optional[float] = None,
 ) -> torch.Tensor:
     return torch.empty_like(query)
+
+
+direct_register_custom_op(
+    op_name="unified_flash_attention",
+    op_func=unified_flash_attention,
+    mutates_args=["kv_cache"],
+    fake_impl=unified_flash_attention_fake,
+)

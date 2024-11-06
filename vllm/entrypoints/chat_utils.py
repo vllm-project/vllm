@@ -121,7 +121,7 @@ class ConversationMessage(TypedDict, total=False):
     role: Required[str]
     """The role of the message's author."""
 
-    content: Optional[str]
+    content: Union[Optional[str], List[Dict[str, str]]]
     """The contents of the message"""
 
     tool_call_id: Optional[str]
@@ -156,6 +156,10 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
 
         self._items: List[_T] = []
 
+    @property
+    def model_config(self) -> ModelConfig:
+        return self._model_config
+
     @staticmethod
     @lru_cache(maxsize=None)
     def _cached_token_str(tokenizer: AnyTokenizer, token_index: int) -> str:
@@ -183,7 +187,8 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
             if model_type.startswith("llava"):
                 return self._cached_token_str(self._tokenizer,
                                               hf_config.image_token_index)
-            if model_type in ("chameleon", "internvl_chat", "NVLM_D"):
+            if model_type in ("chameleon", "internvl_chat", "NVLM_D",
+                              "h2ovl_chat"):
                 return "<image>"
             if model_type == "mllama":
                 return "<|image|>"
@@ -302,7 +307,9 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         self._tracker = tracker
 
     def parse_image(self, image_url: str) -> None:
-        image = get_and_parse_image(image_url)
+        image = get_and_parse_image(image_url,
+                                    allowed_local_media_path=self._tracker.
+                                    _model_config.allowed_local_media_path)
 
         placeholder = self._tracker.add("image", image)
         self._add_placeholder(placeholder)
@@ -322,7 +329,10 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         self._tracker = tracker
 
     def parse_image(self, image_url: str) -> None:
-        image_coro = async_get_and_parse_image(image_url)
+        image_coro = async_get_and_parse_image(
+            image_url,
+            allowed_local_media_path=self._tracker._model_config.
+            allowed_local_media_path)
 
         placeholder = self._tracker.add("image", image_coro)
         self._add_placeholder(placeholder)
@@ -431,7 +441,7 @@ MM_PARSER_MAP: Dict[str, Callable[[ChatCompletionContentPartParam], str]] = {
 def _parse_chat_message_content_mm_part(
         part: ChatCompletionContentPartParam) -> Tuple[str, str]:
     """
-    Parses a given multi modal content part based on its type.
+    Parses a given multi-modal content part based on its type.
 
     Args:
         part: A dict containing the content part, with a potential 'type' field.
@@ -452,7 +462,8 @@ def _parse_chat_message_content_mm_part(
         content = MM_PARSER_MAP[part_type](part)
 
         # Special case for 'image_url.detail'
-        if part_type == "image_url" and part.get("detail") != "auto":
+        # We only support 'auto', which is the default
+        if part_type == "image_url" and part.get("detail", "auto") != "auto":
             logger.warning("'image_url.detail' is currently not supported "
                            "and will be ignored.")
 
@@ -485,21 +496,29 @@ def _parse_chat_message_content_parts(
     role: str,
     parts: Iterable[ChatCompletionContentPartParam],
     mm_tracker: BaseMultiModalItemTracker,
+    chat_template_text_format: str,
 ) -> List[ConversationMessage]:
     content: List[Union[str, Dict[str, str]]] = []
 
     mm_parser = mm_tracker.create_parser()
-    keep_multimodal_content = \
-        mm_tracker._model_config.hf_config.model_type in \
-            MODEL_KEEP_MULTI_MODAL_CONTENT
+    model_config = mm_tracker.model_config
+
+    wrap_dicts = (chat_template_text_format == "openai"
+                  or (model_config.task == "embedding"
+                      and model_config.is_multimodal_model)
+                  or (model_config.hf_config.model_type
+                      in MODEL_KEEP_MULTI_MODAL_CONTENT))
 
     for part in parts:
         parse_res = _parse_chat_message_content_part(
-            part, mm_parser, wrap_dicts=keep_multimodal_content)
+            part,
+            mm_parser,
+            wrap_dicts=wrap_dicts,
+        )
         if parse_res:
             content.append(parse_res)
 
-    if keep_multimodal_content:
+    if wrap_dicts:
         # Parsing wraps images and texts as interleaved dictionaries
         return [ConversationMessage(role=role,
                                     content=content)]  # type: ignore
@@ -560,6 +579,7 @@ _ToolParser = partial(cast, ChatCompletionToolMessageParam)
 def _parse_chat_message_content(
     message: ChatCompletionMessageParam,
     mm_tracker: BaseMultiModalItemTracker,
+    chat_template_text_format: str,
 ) -> List[ConversationMessage]:
     role = message["role"]
     content = message.get("content")
@@ -575,6 +595,7 @@ def _parse_chat_message_content(
         role,
         content,  # type: ignore
         mm_tracker,
+        chat_template_text_format,
     )
 
     for result_msg in result:
@@ -618,7 +639,11 @@ def parse_chat_messages(
     mm_tracker = MultiModalItemTracker(model_config, tokenizer)
 
     for msg in messages:
-        sub_messages = _parse_chat_message_content(msg, mm_tracker)
+        sub_messages = _parse_chat_message_content(
+            msg,
+            mm_tracker,
+            model_config.chat_template_text_format,
+        )
 
         conversation.extend(sub_messages)
 
@@ -636,7 +661,11 @@ def parse_chat_messages_futures(
     mm_tracker = AsyncMultiModalItemTracker(model_config, tokenizer)
 
     for msg in messages:
-        sub_messages = _parse_chat_message_content(msg, mm_tracker)
+        sub_messages = _parse_chat_message_content(
+            msg,
+            mm_tracker,
+            model_config.chat_template_text_format,
+        )
 
         conversation.extend(sub_messages)
 

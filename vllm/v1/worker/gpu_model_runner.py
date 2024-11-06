@@ -7,9 +7,7 @@ import torch
 import torch.distributed
 import torch.nn as nn
 
-from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, ObservabilityConfig, ParallelConfig,
-                         PromptAdapterConfig, SchedulerConfig)
+from vllm.config import VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
@@ -33,26 +31,25 @@ class GPUModelRunner:
 
     def __init__(
         self,
-        model_config: ModelConfig,
-        parallel_config: ParallelConfig,
-        scheduler_config: SchedulerConfig,
-        device_config: DeviceConfig,
-        cache_config: CacheConfig,
-        load_config: LoadConfig,
-        lora_config: Optional[LoRAConfig] = None,
-        prompt_adapter_config: Optional[PromptAdapterConfig] = None,
-        observability_config: Optional[ObservabilityConfig] = None,
+        vllm_config: VllmConfig,
     ):
-        self.model_config = model_config
-        self.parallel_config = parallel_config
-        self.scheduler_config = scheduler_config
-        self.device_config = device_config
-        self.cache_config = cache_config
-        self.lora_config = lora_config
-        self.load_config = load_config
-        self.prompt_adapter_config = prompt_adapter_config
-        self.observability_config = observability_config
+        # TODO: use ModelRunnerBase.__init__(self, vllm_config=vllm_config)
+        self.vllm_config = vllm_config
+        self.model_config = vllm_config.model_config
+        self.cache_config = vllm_config.cache_config
+        self.lora_config = vllm_config.lora_config
+        self.load_config = vllm_config.load_config
+        self.parallel_config = vllm_config.parallel_config
+        self.scheduler_config = vllm_config.scheduler_config
+        self.device_config = vllm_config.device_config
+        self.speculative_config = vllm_config.speculative_config
+        self.prompt_adapter_config = vllm_config.prompt_adapter_config
+        self.observability_config = vllm_config.observability_config
 
+        model_config = self.model_config
+        cache_config = self.cache_config
+        scheduler_config = self.scheduler_config
+        parallel_config = self.parallel_config
         self.device = self.device_config.device
         self.pin_memory = is_pin_memory_available()
         self.dtype = self.model_config.dtype
@@ -131,13 +128,20 @@ class GPUModelRunner:
         # Add new requests to the cached states.
         for req_data in scheduler_output.scheduled_new_reqs:
             req_id = req_data.req_id
+            sampling_params = req_data.sampling_params
+            if sampling_params.seed is not None:
+                generator = torch.Generator(device=self.device)
+                generator.manual_seed(sampling_params.seed)
+            else:
+                generator = None
+
             self.requests[req_id] = CachedRequestState(
                 req_id=req_id,
                 prompt_token_ids=req_data.prompt_token_ids,
                 prompt=req_data.prompt,
                 multi_modal_data=req_data.multi_modal_data,
-                sampling_params=req_data.sampling_params,
-                generator=None,  # TODO
+                sampling_params=sampling_params,
+                generator=generator,
                 block_ids=req_data.block_ids,
                 num_computed_tokens=req_data.num_computed_tokens,
                 output_token_ids=[],
@@ -345,11 +349,9 @@ class GPUModelRunner:
             else:
                 # Ignore the sampled token from the partial request.
                 # Rewind the generator state as if the token was not sampled.
-                generator = self.input_batch.generators[i]
+                generator = self.input_batch.generators.get(i)
                 if generator is not None:
-                    offset = generator.get_offset()
-                    generator = generator.set_offset(offset - 1)
-                    self.input_batch.generators[i] = generator
+                    generator.set_offset(generator.get_offset() - 1)
 
         if sampler_output.logprob_token_ids is None:
             logprob_token_ids = None
@@ -372,13 +374,7 @@ class GPUModelRunner:
         logger.info("Starting to load model %s...", self.model_config.model)
         with DeviceMemoryProfiler() as m:  # noqa: SIM117
             with patch("vllm.model_executor.layers.sampler.Sampler", Sampler):
-                self.model = get_model(model_config=self.model_config,
-                                       device_config=self.device_config,
-                                       load_config=self.load_config,
-                                       lora_config=self.lora_config,
-                                       parallel_config=self.parallel_config,
-                                       scheduler_config=self.scheduler_config,
-                                       cache_config=self.cache_config)
+                self.model = get_model(vllm_config=self.vllm_config)
 
         self.model_memory_usage = m.consumed_memory
         logger.info("Loading model weights took %.4f GB",
@@ -503,8 +499,8 @@ class InputBatch:
         self.top_k_cpu = self.top_k_cpu_tensor.numpy()
         self.top_k_reqs: Set[str] = set()
 
-        self.generators: List[Optional[torch.Generator]] = [None
-                                                            ] * max_num_reqs
+        # req_index -> generator
+        self.generators: Dict[int, torch.Generator] = {}
 
         self.num_logprobs: Dict[str, int] = {}
         self.prompt_logprob_reqs: Set[str] = set()
@@ -518,8 +514,9 @@ class InputBatch:
             req_index = self.num_reqs
         assert req_index < self.max_num_reqs
 
-        self.req_ids[req_index] = request.req_id
-        self.req_id_to_index[request.req_id] = req_index
+        req_id = request.req_id
+        self.req_ids[req_index] = req_id
+        self.req_id_to_index[req_id] = req_index
 
         # Copy the prompt token ids and output token ids.
         num_prompt_tokens = len(request.prompt_token_ids)
@@ -537,27 +534,24 @@ class InputBatch:
         sampling_params = request.sampling_params
         self.temperature_cpu[req_index] = sampling_params.temperature
         if sampling_params.sampling_type == SamplingType.GREEDY:
-            self.greedy_reqs.add(req_index)
-        elif sampling_params.sampling_type == SamplingType.RANDOM:
-            self.random_reqs.add(req_index)
-        elif sampling_params.sampling_type == SamplingType.RANDOM_SEED:
-            # TODO(woosuk): Support per-request random seed.
-            raise NotImplementedError("Per-request seed is not supported yet.")
+            self.greedy_reqs.add(req_id)
+        else:
+            self.random_reqs.add(req_id)
 
         self.top_p_cpu[req_index] = sampling_params.top_p
         if sampling_params.top_p < 1:
-            self.top_p_reqs.add(req_index)
+            self.top_p_reqs.add(req_id)
         self.top_k_cpu[req_index] = sampling_params.top_k
         if sampling_params.top_k > 0:
-            self.top_k_reqs.add(req_index)
+            self.top_k_reqs.add(req_id)
 
         self.generators[req_index] = request.generator
 
         num_logprobs = sampling_params.logprobs
         if num_logprobs is not None and num_logprobs > 0:
-            self.num_logprobs[request.req_id] = num_logprobs
+            self.num_logprobs[req_id] = num_logprobs
         if sampling_params.prompt_logprobs:
-            self.prompt_logprob_reqs.add(req_index)
+            self.prompt_logprob_reqs.add(req_id)
 
     def remove_request(self, req_id: str) -> Optional[int]:
         req_index = self.req_id_to_index.pop(req_id, None)
@@ -569,7 +563,7 @@ class InputBatch:
         self.random_reqs.discard(req_id)
         self.top_p_reqs.discard(req_id)
         self.top_k_reqs.discard(req_id)
-        self.generators[req_index] = None
+        self.generators.pop(req_index, None)
         self.num_logprobs.pop(req_id, None)
         self.prompt_logprob_reqs.discard(req_id)
         return req_index
@@ -621,7 +615,9 @@ class InputBatch:
                 last_req_index]
             self.top_p_cpu[empty_index] = self.top_p_cpu[last_req_index]
             self.top_k_cpu[empty_index] = self.top_k_cpu[last_req_index]
-            self.generators[empty_index] = self.generators[last_req_index]
+            generator = self.generators.pop(last_req_index, None)
+            if generator is not None:
+                self.generators[empty_index] = generator
 
             # Decrement last_req_index since it is now empty.
             last_req_index -= 1
@@ -645,8 +641,7 @@ class InputBatch:
             top_k=self.top_k[:self.num_reqs],
             no_top_p=self.no_top_p,
             no_top_k=self.no_top_k,
-            generators=self.generators[:self.num_reqs],
-            no_generator=self.no_generator,
+            generators=self.generators,
             max_num_logprobs=self.max_num_logprobs,
         )
 
@@ -671,15 +666,8 @@ class InputBatch:
         return len(self.top_k_reqs) == 0
 
     @property
-    def no_generator(self) -> bool:
-        return len(self.generators) == 0
-
-    @property
     def max_num_logprobs(self) -> int:
-        if self.num_logprobs:
-            return max(self.num_logprobs.values())
-        else:
-            return 0
+        return max(self.num_logprobs.values()) if self.num_logprobs else 0
 
     @property
     def no_logprob(self) -> bool:
