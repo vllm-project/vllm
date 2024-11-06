@@ -34,7 +34,7 @@ select = [
     # Pyflakes
     "F",
     # pyupgrade
-    # "UP",
+    "UP",
     # flake8-bugbear
     "B",
     # flake8-simplify
@@ -55,7 +55,7 @@ ignore = [
 ]
 
 [tool.mypy]
-python_version = "3.8"
+python_version = "3.9"
 
 ignore_missing_imports = true
 check_untyped_defs = true

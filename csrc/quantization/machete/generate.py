@@ -468,7 +468,7 @@ def generate():
     impl_configs = []
 
     GPTQ_kernel_type_configs = list(
-        (TypeConfig(
+        TypeConfig(
             element_a=element_a,
             element_b=element_b,
             element_b_scale=element_a,
@@ -476,7 +476,7 @@ def generate():
             element_d=element_a,
             accumulator=DataType.f32,
         ) for element_b in (VLLMDataType.u4b8, VLLMDataType.u8b128)
-         for element_a in (DataType.f16, DataType.bf16)))
+        for element_a in (DataType.f16, DataType.bf16))
 
     GPTQ_kernel_specializations = [
         Specialization(with_C=False, with_zeropoints=False, with_scales=True)
@@ -490,7 +490,7 @@ def generate():
     ]
 
     AWQ_kernel_type_configs = list(
-        (TypeConfig(
+        TypeConfig(
             element_a=element_a,
             element_b=element_b,
             element_b_scale=element_a,
@@ -498,7 +498,7 @@ def generate():
             element_d=element_a,
             accumulator=DataType.f32,
         ) for element_b in (DataType.u4, DataType.u8)
-         for element_a in (DataType.f16, DataType.bf16)))
+        for element_a in (DataType.f16, DataType.bf16))
 
     AWQ_kernel_specializations = [
         Specialization(with_C=False, with_zeropoints=True, with_scales=True)

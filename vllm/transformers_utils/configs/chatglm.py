@@ -1,4 +1,3 @@
-# coding=utf-8
 # Adapted from
 # https://github.com/THUDM/ChatGLM2-6B
 from transformers import PretrainedConfig

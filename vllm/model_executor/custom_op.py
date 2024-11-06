@@ -103,7 +103,7 @@ class CustomOp(nn.Module):
     # On by default if VLLM_TORCH_COMPILE_LEVEL < CompilationLevel.PIECEWISE
     # Specifying 'all' or 'none' in VLLM_CUSTOM_OPS takes precedence.
     @staticmethod
-    @lru_cache()
+    @lru_cache
     def default_on() -> bool:
         count_none = envs.VLLM_CUSTOM_OPS.count("none")
         count_all = envs.VLLM_CUSTOM_OPS.count("all")

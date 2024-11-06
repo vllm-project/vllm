@@ -72,7 +72,7 @@ def main(args):
 
     # collect results
     for test_file in results_folder.glob("*_nightly_results.json"):
-        with open(test_file, "r") as f:
+        with open(test_file) as f:
             results = results + json.loads(f.read())
 
     # generate markdown table
@@ -80,7 +80,7 @@ def main(args):
 
     md_table = tabulate(df, headers='keys', tablefmt='pipe', showindex=False)
 
-    with open(args.description, "r") as f:
+    with open(args.description) as f:
         description = f.read()
 
     description = description.format(

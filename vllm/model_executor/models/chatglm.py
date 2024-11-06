@@ -1,4 +1,3 @@
-# coding=utf-8
 # Adapted from
 # https://github.com/THUDM/GLM-4
 """Inference-only ChatGLM model compatible with THUDM weights."""

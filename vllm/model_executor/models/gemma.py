@@ -1,4 +1,3 @@
-# coding=utf-8
 # Copyright 2023 The vLLM team.
 # Copyright (c) Google Inc.
 #

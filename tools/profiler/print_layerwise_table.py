@@ -46,7 +46,7 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    with open(args.json_trace, "r") as f:
+    with open(args.json_trace) as f:
         profile_data = json.load(f)
 
     if args.table == "summary":

@@ -429,8 +429,8 @@ def benchmark():
     # print in tabular format
     print("batch size\teager mode\tfull cudagraph\tpiecewise cudagraph")
     for b in cudagraph_sizes:
-        print((f"{b}\t{eager_time[b]:.3f}\t{full_cudagraph_time[b]:.3f}"
-               f"\t{piecewise_cudagraph_time[b]:.3f}"))
+        print(f"{b}\t{eager_time[b]:.3f}\t{full_cudagraph_time[b]:.3f}"
+              f"\t{piecewise_cudagraph_time[b]:.3f}")
 
 
 if __name__ == "__main__":

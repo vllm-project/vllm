@@ -1,4 +1,3 @@
-# coding=utf-8
 # Adapted from
 # https://huggingface.co/xverse/XVERSE-7B/blob/main/modeling_xverse.py
 # Copyright 2022 EleutherAI and the HuggingFace Inc. team. All rights reserved.

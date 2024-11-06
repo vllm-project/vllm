@@ -120,7 +120,7 @@ async def read_file(path_or_url: str) -> str:
                    session.get(path_or_url) as resp:
             return await resp.text()
     else:
-        with open(path_or_url, "r", encoding="utf-8") as f:
+        with open(path_or_url, encoding="utf-8") as f:
             return f.read()
 
 

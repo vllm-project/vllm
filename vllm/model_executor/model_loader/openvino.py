@@ -190,7 +190,7 @@ def get_model(
     kv_cache_dtype: ov.Type,
     **kwargs,
 ) -> torch.nn.Module:
-    lora_config = kwargs.get("lora_config", None)
+    lora_config = kwargs.get("lora_config")
     ov_core = kwargs.get("ov_core")
     if lora_config:
         raise ValueError(

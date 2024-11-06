@@ -93,10 +93,10 @@ def test_mistral_edge_case(tokenizer, truth):
 def skip_special_tokens(request, tokenizer_name) -> Generator[bool, Any, None]:
     if "mistral" in tokenizer_name:
         yield (
-            bool(True) if request.param else
+            True if request.param else
             pytest.skip("mistral doesn't support skip_special_tokens=False"))
     else:
-        yield bool(True) if request.param else bool(False)
+        yield bool(request.param)
 
 
 @pytest.mark.parametrize("truth", TRUTH)
