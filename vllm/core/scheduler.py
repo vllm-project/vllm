@@ -151,13 +151,16 @@ class SchedulerOutputs:
                 and not self.blocks_to_swap_out and not self.blocks_to_copy)
 
     def _sort_by_lora_ids(self):
-        # Sort sequence groups so that (1) all prefills come before all decodes
-        # (required by chunked prefill), and (2) all LoRAs are grouped together
-        # for improved performance.
-        self.scheduled_seq_groups = sorted(
-            self.scheduled_seq_groups,
-            key=lambda g: (not g.seq_group.is_prefill(), g.seq_group.
-                           lora_int_id, g.seq_group.request_id))
+
+        def key_fn(group: ScheduledSequenceGroup):
+            key = (group.seq_group.lora_int_id, group.seq_group.request_id)
+            if self.num_prefill_groups != len(self.scheduled_seq_groups):
+                # Sort sequence groups so that all prefills come before all
+                # decodes as required by chunked prefill.
+                key = (not group.seq_group.is_prefill(), *key)
+            return key
+
+        self.scheduled_seq_groups.sort(key=key_fn)
 
     @property
     def lora_requests(self) -> Set[LoRARequest]:

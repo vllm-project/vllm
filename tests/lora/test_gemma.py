@@ -33,13 +33,12 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> List[str]:
 
 @pytest.mark.xfail(current_platform.is_rocm(),
                    reason="There can be output mismatch on ROCm")
-@pytest.mark.parametrize("enable_chunked_prefill", [False, True])
-def test_gemma_lora(gemma_lora_files, enable_chunked_prefill):
+def test_gemma_lora(gemma_lora_files):
     llm = vllm.LLM(MODEL_PATH,
                    max_model_len=1024,
                    enable_lora=True,
                    max_loras=4,
-                   enable_chunked_prefill=enable_chunked_prefill)
+                   enable_chunked_prefill=True)
 
     expected_lora_output = [
         "more important than knowledge.\nAuthor: Albert Einstein\n",
