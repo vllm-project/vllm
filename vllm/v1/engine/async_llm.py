@@ -4,6 +4,7 @@ from typing import AsyncGenerator, Dict, List, Mapping, Optional, Type, Union
 from vllm.config import ModelConfig, VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.metrics_types import StatLoggerBase
+from vllm.engine.protocol import EngineClient
 from vllm.inputs import INPUT_REGISTRY, InputRegistry, PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -23,7 +24,7 @@ from vllm.v1.executor.gpu_executor import GPUExecutor
 logger = init_logger(__name__)
 
 
-class AsyncLLM:
+class AsyncLLM(EngineClient):
 
     def __init__(
         self,
@@ -43,7 +44,6 @@ class AsyncLLM:
         self.log_stats = log_stats
         self.stat_loggers = stat_loggers
         self.model_config = vllm_config.model_config
-        self.errored = False
 
         # Tokenizer (+ ensure liveness if running in another process).
         self.tokenizer = init_tokenizer_from_configs(
@@ -148,10 +148,10 @@ class AsyncLLM:
                 self.request_streams[request_id].finish()
                 self.request_streams.pop(request_id)
 
-    async def abort_request(self, request_ids: List[str]) -> None:
+    async def abort_requests(self, request_ids: List[str]) -> None:
         """Remove request_ids from EngineCore and Detokenizer."""
 
-        if request_ids:
+        if len(request_ids) > 0:
             await self.engine_core.abort_requests_async(request_ids)
             self.detokenizer.abort_requests(request_ids)
 
@@ -241,17 +241,38 @@ class AsyncLLM:
                 self._send_to_streams(request_outputs)
 
                 # Abort any requests that finished due to stop strings.
-                await self.abort_request(reqs_to_abort)
+                await self.abort_requests(reqs_to_abort)
 
         except BaseException as e:
             logger.error(e)
             raise e
 
-    # TODO: can we eliminate these (used by OpenAI server)
+    # TODO: can we eliminate these?
+
+    async def abort(self, request_id: str) -> None:
+        """Remove request_ids from EngineCore and Detokenizer."""
+        # Note: Who Calls this?
+        raise ValueError("Not Supported on V1 yet.")
+
+        await self.engine_core.abort_requests_async([request_id])
+        self.detokenizer.abort_requests([request_id])
+
+    def encode(
+        self,
+        prompt: PromptType,
+        pooling_params: PoolingParams,
+        request_id: str,
+        lora_request: Optional[LoRARequest] = None,
+        trace_headers: Optional[Mapping[str, str]] = None,
+        priority: int = 0,
+    ):
+        raise ValueError("Not Supported on V1 yet.")
 
     async def get_model_config(self) -> ModelConfig:
-        """Gets the model configuration."""
         return self.model_config
+
+    async def get_decoding_config(self):
+        raise ValueError("Not Supported on V1 yet.")
 
     async def get_tokenizer(
         self,
@@ -262,6 +283,39 @@ class AsyncLLM:
 
     async def is_tracing_enabled(self) -> bool:
         return False
+
+    async def do_log_stats(
+        self,
+        scheduler_outputs=None,
+        model_output=None,
+    ) -> None:
+        logger.debug("Called do_log_stats.")
+
+    async def check_health(self) -> None:
+        """Raise if unhealthy"""
+        logger.debug("Called do_log_stats.")
+
+    async def start_profile(self) -> None:
+        raise ValueError("Not supported on V1 yet.")
+
+    async def stop_profile(self) -> None:
+        raise ValueError("Not supported on V1 yet.")
+
+    @property
+    def is_running(self) -> bool:
+        return True
+
+    @property
+    def is_stopped(self) -> bool:
+        return False
+
+    @property
+    def errored(self) -> bool:
+        return False
+
+    @property
+    def dead_error(self) -> BaseException:
+        return Exception
 
 
 # Retain V0 name for backwards compatibility.
