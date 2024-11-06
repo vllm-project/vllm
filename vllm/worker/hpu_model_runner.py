@@ -354,6 +354,14 @@ class HpuModelAdapter:
     def sample(self, *args, **kwargs):
         return self.model.sample(*args, **kwargs)
 
+    def generate_proposals(self, *args, **kwargs):
+        return self.model.generate_proposals(*args, **kwargs)
+
+    # sampler property will be used by spec_decode_worker
+    @property
+    def sampler(self):
+        return self.model.sampler
+
 
 class PreparePromptMetadata(NamedTuple):
     input_tokens: torch.Tensor
@@ -514,6 +522,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
     def __init__(
         self,
         vllm_config: VllmConfig,
+        kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
         return_hidden_states: bool = False,
     ):
@@ -539,13 +548,18 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         self.pin_memory = is_pin_memory_available()
         self.kv_cache_dtype = self.cache_config.cache_dtype
 
+        num_attn_heads = self.model_config.get_num_attention_heads(
+            self.parallel_config)
+        needs_attn_backend = (num_attn_heads != 0
+                              or self.model_config.is_attention_free)
+
         self.attn_backend = get_attn_backend(
             self.model_config.get_head_size(),
             self.model_config.dtype,
             self.kv_cache_dtype,
             self.block_size,
             self.model_config.is_attention_free,
-        )
+        ) if needs_attn_backend else None
 
         # Lazy initialization
         self.lora_manager: LRUCacheWorkerLoRAManager = None
@@ -1879,6 +1893,7 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
         warmup_mode=False,
+        previous_hidden_states: Optional[torch.Tensor] = None,
     ) -> Optional[Union[List[SamplerOutput], IntermediateTensors]]:
         if num_steps > 1:
             raise ValueError(
@@ -1922,6 +1937,9 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
             "lora_mask": lora_mask,
             **(model_input.multi_modal_kwargs or {}),
         }
+        if previous_hidden_states is not None:
+            execute_model_kwargs.update(
+                {"previous_hidden_states": previous_hidden_states})
         if htorch.utils.internal.is_lazy():
             execute_model_kwargs.update({"bypass_hpu_graphs": not use_graphs})
 
@@ -1987,6 +2005,11 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                 real_batch_size=real_batch_size,
                 is_prompt=is_prompt)
             self.profiler.record_counter(self.event_start, counters)
+        if self.return_hidden_states:
+            # we only need to pass hidden states of most recent token
+            if model_input.is_prompt:
+                output.prefill_hidden_states = hidden_states
+            output.hidden_states = hidden_states
         return [output]
 
     def shutdown_inc(self):

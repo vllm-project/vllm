@@ -23,6 +23,10 @@ from vllm.spec_decode.batch_expansion import BatchExpansionTop1Scorer
 
 if current_platform.is_cuda_alike():
     from vllm.spec_decode.draft_model_runner import TP1DraftModelRunner
+elif current_platform.is_hpu():
+    from vllm.spec_decode.hpu_draft_model_runner import (HPUTP1DraftModelRunner
+                                                         as
+                                                         TP1DraftModelRunner)
 
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeScorer, SpeculativeScores)
