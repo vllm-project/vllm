@@ -4,9 +4,10 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
-from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
+from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
+                                               UnquantizedLinearMethod)
 from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+    QuantizationConfig, QuantizeMethodBase)
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     GPTQ_MARLIN_MAX_PARALLEL, GPTQ_MARLIN_MIN_THREAD_N,
     marlin_make_empty_g_idx, marlin_permute_scales)
@@ -28,6 +29,7 @@ class HQQMarlinConfig(QuantizationConfig):
         self,
         weight_bits: int,
         group_size: int,
+        skip_modules: Optional[List[str]] = None,
     ) -> None:
         assert group_size == 64, ("The only supported HQQ group size is "
                                   "currently 64.")
@@ -38,6 +40,7 @@ class HQQMarlinConfig(QuantizationConfig):
         self.group_size = group_size
         self.pack_factor = 32 // weight_bits  # packed into int32 in GPTQ format
         self.quant_type = scalar_types.uint4
+        self.skip_modules = skip_modules
 
     def __repr__(self) -> str:
         return (f"HQQMarlinConfig(quant_type={self.quant_type}, "
@@ -64,11 +67,22 @@ class HQQMarlinConfig(QuantizationConfig):
         wq_params = (config["quant_config"]["weight_quant_params"])
         weight_bits = cls.get_from_keys(wq_params, ["nbits"])
         group_size = cls.get_from_keys(wq_params, ["group_size"])
-        return cls(weight_bits, group_size)
+        skip_modules = config["skip_modules"]
+        return cls(weight_bits, group_size, skip_modules)
+
+    def is_layer_skipped(self, prefix: str) -> bool:
+        # Split the prefix into its dot-separated components
+        components = prefix.split('.')
+
+        # Check if any of the skip modules exactly matches any component
+        return self.skip_modules is not None and any(
+            module_name in components for module_name in self.skip_modules)
 
     def get_quant_method(self, layer: torch.nn.Module,
-                         prefix: str) -> Optional["HQQMarlinMethod"]:
+                         prefix: str) -> Optional["QuantizeMethodBase"]:
         if isinstance(layer, LinearBase):
+            if self.is_layer_skipped(prefix):
+                return UnquantizedLinearMethod()
             return HQQMarlinMethod(self)
         return None
 
