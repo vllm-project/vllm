@@ -1142,7 +1142,13 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[SamplerOutput]:
+        sorted_logits, sorted_indices = torch.sort(logits,
+                                                   dim=1,
+                                                   descending=True)
+        logger.info(f'sorted_logits {sorted_logits}')
+        logger.info(f'sorted_indices {sorted_indices}')
         next_tokens = self.sampler(logits, sampling_metadata)
+        logger.info(f'next_tokens {next_tokens}')
         return next_tokens
 
     def _parse_and_validate_image_input(self, **kwargs: object):
