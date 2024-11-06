@@ -94,8 +94,7 @@ def test_stateless_init_process_group(worker):
     processes = []
     for i in range(WORLD_SIZE):
         rank = i
-        processes.append(
-            ctx.Process(target=gpu_worker, args=(rank, WORLD_SIZE)))
+        processes.append(ctx.Process(target=worker, args=(rank, WORLD_SIZE)))
     for p in processes:
         p.start()
     for p in processes:
