@@ -616,7 +616,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         sampling_params = seq_group_metadata.sampling_params
         if sampling_params and sampling_params.prompt_logprobs is not None:
             inter_data.lora_prompt_mapping.append([lora_id] * query_len)
-        elif not self.chunked_prefill_enabled or seq_group_metadata.do_sample:
+        elif seq_group_metadata.do_sample:
             inter_data.lora_prompt_mapping.append([lora_id])
         else:
             inter_data.lora_prompt_mapping.append([])
