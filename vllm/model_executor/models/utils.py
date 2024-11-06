@@ -572,7 +572,7 @@ def get_inputs_embeds(
 ) -> torch.Tensor:
     """Get the input embeddings from either `input_ids` and `inputs_embeds`."""
     if inputs_embeds is not None:
-        if inputs_embeds_masks is None or inputs_embeds_masks.all().item():
+        if inputs_embeds_masks is None:
             hidden_states = inputs_embeds
         else:
             msg = "inputs_embeds should not be masked out for multimodal models"

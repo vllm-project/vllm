@@ -1710,9 +1710,17 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                                     multi_modal_kwargs, device=self.device),
                                 **seqlen_agnostic_kwargs)
             if self.model_supports_input_embeds:
+                input_embeds = model_input.input_embeds
+
+                input_embeds_masks = model_input.input_embeds_masks
+                if (input_embeds_masks is not None
+                        and input_embeds_masks.all().item()):
+                    input_embeds_masks = None
+
                 model_params.update(
-                    inputs_embeds=model_input.input_embeds,
-                    inputs_embeds_masks=model_input.input_embeds_masks)
+                    inputs_embeds=input_embeds,
+                    inputs_embeds_masks=input_embeds_masks,
+                )
 
             hidden_or_intermediate_states = model_executable(**model_params)
 

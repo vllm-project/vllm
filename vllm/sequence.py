@@ -9,7 +9,7 @@ from functools import cached_property, reduce
 from typing import (TYPE_CHECKING, Any, Callable, DefaultDict, Dict, List,
                     Mapping, Optional)
 from typing import Sequence as GenericSequence
-from typing import Set, Tuple, Union
+from typing import Set, Tuple, Union, overload
 
 import msgspec
 import torch
@@ -1125,11 +1125,24 @@ class IntermediateTensors:
 
     tensors: Dict[str, torch.Tensor]
 
-    def __getitem__(self, key: Union[str, slice]):
+    @overload
+    def __getitem__(self, key: str) -> torch.Tensor:
+        ...
+
+    @overload
+    def __getitem__(self, key: slice) -> "IntermediateTensors":
+        ...
+
+    def __getitem__(
+        self,
+        key: Union[str, slice],
+    ) -> Union[torch.Tensor, "IntermediateTensors"]:
         if isinstance(key, str):
             return self.tensors[key]
-        elif isinstance(key, slice):
+        if isinstance(key, slice):
             return self.__class__({k: v[key] for k, v in self.tensors.items()})
+
+        assert_never(key)
 
     def __setitem__(self, key: str, value):
         self.tensors[key] = value
