@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import List, Optional, Set, Tuple
 
-from vllm.config import EngineConfig
+from vllm.config import VllmConfig
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.prompt_adapter.request import PromptAdapterRequest
@@ -20,7 +20,7 @@ class ExecutorBase(ABC):
 
     def __init__(
         self,
-        vllm_config: EngineConfig,
+        vllm_config: VllmConfig,
     ) -> None:
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config

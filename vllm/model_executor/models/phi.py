@@ -1,4 +1,3 @@
-# coding=utf-8
 # Adapted from
 # https://huggingface.co/microsoft/phi-1_5/blob/main/modeling_phi.py
 # Copyright 2023 The vLLM team.
@@ -274,8 +273,6 @@ class PhiForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     default_bitsandbytes_target_modules = [
         ".q_proj.", ".k_proj.", ".v_proj.", ".fc1.", ".fc2.", ".dense."
     ]
-    # in TP, these weights are partitioned along the column dimension (dim=-1)
-    column_parallel_weights_modules = [".fc2.", ".dense."]
 
     embedding_modules = {}
     embedding_padding_modules = []

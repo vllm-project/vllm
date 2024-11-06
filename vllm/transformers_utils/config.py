@@ -19,6 +19,7 @@ from vllm.logger import init_logger
 # yapf: disable
 from vllm.transformers_utils.configs import (ChatGLMConfig, DbrxConfig,
                                              EAGLEConfig, ExaoneConfig,
+                                             H2OVLChatConfig,
                                              InternVLChatConfig, JAISConfig,
                                              MedusaConfig, MllamaConfig,
                                              MLPSpeculatorConfig, MPTConfig,
@@ -52,6 +53,7 @@ _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     "medusa": MedusaConfig,
     "eagle": EAGLEConfig,
     "exaone": ExaoneConfig,
+    "h2ovl_chat": H2OVLChatConfig,
     "internvl_chat": InternVLChatConfig,
     "nemotron": NemotronConfig,
     "NVLM_D": NVLM_D_Config,
@@ -306,7 +308,7 @@ def load_params_config(model, revision) -> PretrainedConfig:
         config_path = Path(
             hf_hub_download(model, config_file_name, revision=revision))
 
-    with open(config_path, "r") as file:
+    with open(config_path) as file:
         config_dict = json.load(file)
 
     config_mapping = {
