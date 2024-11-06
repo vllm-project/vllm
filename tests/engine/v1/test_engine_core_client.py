@@ -8,10 +8,15 @@ from transformers import AutoTokenizer
 
 from vllm import SamplingParams
 from vllm.engine.arg_utils import EngineArgs
+from vllm.platforms import current_platform
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.core_client import EngineCoreClient
+
+if not current_platform.is_cuda():
+    pytest.skip(reason="V1 currently only supported on CUDA.",
+                allow_module_level=True)
 
 MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
 TOKENIZER = AutoTokenizer.from_pretrained(MODEL_NAME)
