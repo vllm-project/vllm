@@ -25,6 +25,8 @@ byte_value = 2  # the value we write to the buffer for verification
 
 pointers = CustomAllreduce.create_shared_buffer(buffer_size_in_bytes)
 
+print(f"Rank {rank} has pointers {pointers}")
+
 dist.barrier()
 torch.cuda.synchronize()
 
@@ -44,7 +46,12 @@ for p in pointers:
     pointer = ctypes.c_void_p(p)
     lib.cudaMemcpy(host_data, pointer, buffer_size_in_bytes)
     for i in range(buffer_size_in_bytes):
-        assert ord(host_data[i]) == byte_value
+        assert ord(host_data[i]) == byte_value, (
+            f"Rank {rank} failed"
+            f" to verify buffer {p}. Expected {byte_value}, "
+            f"got {ord(host_data[i])}")
+
+print(f"Rank {rank} verified all buffers")
 
 dist.barrier()
 torch.cuda.synchronize()
