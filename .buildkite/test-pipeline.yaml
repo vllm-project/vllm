@@ -314,7 +314,7 @@ steps:
     - pytest -v -s models/test_oot_registration.py # it needs a clean process
     - pytest -v -s models/*.py --ignore=models/test_oot_registration.py
 
-- label: Decoder-only Language Models Test (Standard) # 35min
+- label: Decoder-only Language Models Test (Standard) # 14min
   #mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
@@ -322,15 +322,16 @@ steps:
   commands:
     - pytest -v -s models/decoder_only/language/test_models.py
 
-- label: Decoder-only Language Models Test (Extended) # 1h20min
-  nightly: true
+- label: Decoder-only Language Models Test (Extended %N) # 30min each
+  optional: true
   source_file_dependencies:
   - vllm/
   - tests/models/decoder_only/language
   commands:
-    - pytest -v -s models/decoder_only/language --ignore=models/decoder_only/language/test_models.py
+    - pytest -v -s models/decoder_only/language --ignore=models/decoder_only/language/test_models.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  parallelism: 4
 
-- label: Decoder-only Multi-Modal Models Test (Standard)
+- label: Decoder-only Multi-Modal Models Test (Standard) # 26min
   #mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
@@ -340,18 +341,19 @@ steps:
     - pytest -v -s models/decoder_only/audio_language -m core_model
     - pytest -v -s --ignore models/decoder_only/vision_language/test_phi3v.py models/decoder_only/vision_language -m core_model
 
-- label: Decoder-only Multi-Modal Models Test (Extended)
-  nightly: true
+- label: Decoder-only Multi-Modal Models Test (Extended %N) # 30min each
+  optional: true
   source_file_dependencies:
   - vllm/
   - tests/models/decoder_only/audio_language
   - tests/models/decoder_only/vision_language
   commands:
-    - pytest -v -s models/decoder_only/audio_language -m 'not core_model'
+    - pytest -v -s models/decoder_only/audio_language -m 'not core_model' --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
     # HACK - run phi3v tests separately to sidestep this transformers bug
     # https://github.com/huggingface/transformers/issues/34307
-    - pytest -v -s models/decoder_only/vision_language/test_phi3v.py
-    - pytest -v -s --ignore models/decoder_only/vision_language/test_phi3v.py models/decoder_only/vision_language -m 'not core_model'
+    - pytest -v -s models/decoder_only/vision_language/test_phi3v.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+    - pytest -v -s --ignore models/decoder_only/vision_language/test_phi3v.py models/decoder_only/vision_language -m 'not core_model' --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+  parallelism: 4
 
 - label: Other Models Test # 6min
   #mirror_hardwares: [amd]
