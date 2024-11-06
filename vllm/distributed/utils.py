@@ -123,13 +123,14 @@ def stateless_init_process_group(init_method: str, rank: int, world_size: int,
     # different systems (e.g. RPC) in case the store is multi-tenant.
     prefix_store = PrefixStore(init_method, store)
 
+    pg_options = ProcessGroup.Options(backend=backend, timeout=timeout)
+
     pg: ProcessGroup = ProcessGroup(
         prefix_store,
         group_rank,
         group_size,
+        pg_options,
     )
-
-    pg._set_default_backend(Backend.backend_type_map[backend])
 
     if backend == "gloo":
         from torch.distributed.distributed_c10d import ProcessGroupGloo
