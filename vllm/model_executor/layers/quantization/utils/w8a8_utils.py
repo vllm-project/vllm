@@ -7,7 +7,7 @@ from vllm.platforms import current_platform
 
 # Input scaling factors are no longer optional in _scaled_mm starting
 # from pytorch 2.5. Allocating a dummy tensor to pass as input_scale
-TORCH_DEVICE_IDENTITY = torch.ones(1).cuda()
+TORCH_DEVICE_IDENTITY = torch.ones(1, dtype=torch.float32)
 
 
 def cutlass_fp8_supported() -> bool:
