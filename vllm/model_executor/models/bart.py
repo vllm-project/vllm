@@ -393,8 +393,7 @@ class BartEncoderLayer(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config)
         self.self_attn_layer_norm = nn.LayerNorm(self.embed_dim)
-        self.activation_fn = get_act_fn(config.activation_function,
-                                        quant_config)
+        self.activation_fn = get_act_fn(config.activation_function)
 
         ffn_hidden_size = self.embed_dim
         ffn_intermediate_size = config.encoder_ffn_dim
@@ -405,7 +404,7 @@ class BartEncoderLayer(nn.Module):
             bias=ffn_has_bias,
             quant_config=quant_config,
         )
-        self.act = get_act_fn("gelu", quant_config, ffn_intermediate_size)
+        self.act = get_act_fn("gelu")
         self.fc2 = RowParallelLinear(
             ffn_intermediate_size,
             ffn_hidden_size,
@@ -473,8 +472,7 @@ class BartDecoderLayer(nn.Module):
             config=config,
             cache_config=cache_config,
             quant_config=quant_config)
-        self.activation_fn = get_act_fn(config.activation_function,
-                                        quant_config)
+        self.activation_fn = get_act_fn(config.activation_function)
 
         self.self_attn_layer_norm = nn.LayerNorm(self.embed_dim)
         '''

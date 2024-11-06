@@ -50,9 +50,6 @@ class Int8TpuConfig(QuantizationConfig):
             return TPUInt8LinearMethod(self)
         return None
 
-    def get_scaled_act_names(self) -> List[str]:
-        return []
-
 
 class TPUInt8LinearMethod(LinearMethodBase):
     """Int8 Linear method for TPU Quant. """

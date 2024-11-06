@@ -64,9 +64,6 @@ class FBGEMMFp8Config(QuantizationConfig):
             return FBGEMMFp8LinearMethod(self)
         return None
 
-    def get_scaled_act_names(self) -> List[str]:
-        return []
-
 
 class FBGEMMFp8LinearMethod(LinearMethodBase):
 

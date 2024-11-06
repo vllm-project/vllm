@@ -68,9 +68,6 @@ class ModelOptFp8Config(QuantizationConfig):
             return ModelOptFp8KVCacheMethod(self)
         return None
 
-    def get_scaled_act_names(self) -> List[str]:
-        return []
-
 
 class ModelOptFp8KVCacheMethod(BaseKVCacheMethod):
     """
