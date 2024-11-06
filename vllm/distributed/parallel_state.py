@@ -89,12 +89,11 @@ def _get_unique_name(name: str) -> str:
     return newname
 
 
-_groups: Dict[str, Callable[[], "GroupCoordinator"]] = {}
+_groups: Dict[str, Callable[[], Optional["GroupCoordinator"]]] = {}
 
 
 def _register_group(group: "GroupCoordinator") -> None:
-    # looks like Python 3.8 does not understand `ReferenceType`
-    _groups[group.unique_name] = weakref.ref(group)  # type: ignore
+    _groups[group.unique_name] = weakref.ref(group)
 
 
 if supports_custom_op():
@@ -177,6 +176,7 @@ class GroupCoordinator:
         use_pynccl: bool,
         use_custom_allreduce: bool,
         use_tpu_communicator: bool,
+        use_hpu_communicator: bool,
         use_message_queue_broadcaster: bool = False,
         group_name: Optional[str] = None,
     ):
@@ -213,6 +213,7 @@ class GroupCoordinator:
         self.use_pynccl = use_pynccl
         self.use_custom_allreduce = use_custom_allreduce
         self.use_tpu_communicator = use_tpu_communicator
+        self.use_hpu_communicator = use_hpu_communicator
 
         # lazy import to avoid documentation build error
         from vllm.distributed.device_communicators.custom_all_reduce import (
@@ -240,6 +241,12 @@ class GroupCoordinator:
         self.tpu_communicator: Optional[TpuCommunicator] = None
         if use_tpu_communicator and self.world_size > 1:
             self.tpu_communicator = TpuCommunicator(group=self.cpu_group)
+
+        from vllm.distributed.device_communicators.hpu_communicator import (
+            HpuCommunicator)
+        self.hpu_communicator: Optional[HpuCommunicator]
+        if use_hpu_communicator and self.world_size > 1:
+            self.hpu_communicator = HpuCommunicator(group=self.device_group)
 
         from vllm.distributed.device_communicators.shm_broadcast import (
             MessageQueue)
@@ -362,6 +369,10 @@ class GroupCoordinator:
             # TPU handles Dynamo with its own logic.
             return self.tpu_communicator.all_reduce(input_)
 
+        if self.hpu_communicator is not None and \
+            not self.hpu_communicator.disabled:
+            return self.hpu_communicator.all_reduce(input_)
+
         if self.ca_comm is not None and \
             not self.ca_comm.disabled and \
                 self.ca_comm.should_custom_ar(input_):
@@ -399,6 +410,11 @@ class GroupCoordinator:
         tpu_comm = self.tpu_communicator
         if tpu_comm is not None and not tpu_comm.disabled:
             return tpu_comm.all_gather(input_, dim)
+
+        # For HPUs, use HPU communicator.
+        hpu_comm = self.hpu_communicator
+        if hpu_comm is not None and not hpu_comm.disabled:
+            return hpu_comm.all_gather(input_, dim)
 
         if dim < 0:
             # Convert negative dim to positive.
@@ -879,6 +895,7 @@ def init_world_group(ranks: List[int], local_rank: int,
         use_pynccl=False,
         use_custom_allreduce=False,
         use_tpu_communicator=False,
+        use_hpu_communicator=False,
         group_name="world",
     )
 
@@ -900,6 +917,7 @@ def init_model_parallel_group(
         use_pynccl=True,
         use_custom_allreduce=use_custom_allreduce,
         use_tpu_communicator=True,
+        use_hpu_communicator=True,
         use_message_queue_broadcaster=use_message_queue_broadcaster,
         group_name=group_name,
     )
