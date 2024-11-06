@@ -11,7 +11,7 @@ Requirements
 ------------
 
 * OS: Linux
-* Python: 3.8 -- 3.11
+* Python: 3.9 -- 3.11
 * Accelerator: NeuronCore_v2 (in trn1/inf2 instances)
 * Pytorch 2.0.1/2.1.1
 * AWS Neuron SDK 2.16/2.17 (Verified on python 3.8)
