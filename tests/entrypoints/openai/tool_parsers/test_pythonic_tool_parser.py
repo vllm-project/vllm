@@ -150,8 +150,8 @@ def test_streaming_tool_call_with_large_steps():
         f"{EMPTY_LIST_FUNCTION_OUTPUT}]",
     ]
 
-    reconstructor = run_tool_extraction_streaming(tool_parser,
-                                                  model_output_deltas)
+    reconstructor = run_tool_extraction_streaming(
+        tool_parser, model_output_deltas, assert_one_tool_per_delta=False)
 
     assert reconstructor.other_content == ""
     assert len(reconstructor.tool_calls) == 3

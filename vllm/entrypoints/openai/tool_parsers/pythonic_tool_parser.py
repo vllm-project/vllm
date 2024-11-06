@@ -1,8 +1,7 @@
 import ast
 import json
 import re
-from collections import defaultdict
-from typing import Any, Dict, Sequence, Tuple, Union
+from typing import Any, Sequence, Tuple, Union
 
 from transformers import PreTrainedTokenizerBase
 
@@ -37,9 +36,15 @@ class PythonicToolParser(ToolParser):
 
     def __init__(self, tokenizer: PreTrainedTokenizerBase):
         super().__init__(tokenizer)
-        self._completed_tools: int = 0
-        self._current_tool_id: Union[str, None] = None
-        self._sent_args_by_tool_id: Dict[str, str] = defaultdict(str)
+
+    # Rename for readability. This is NOT a tool id.
+    @property
+    def current_tool_index(self) -> int:
+        return self.current_tool_id
+
+    @current_tool_index.setter
+    def current_tool_index(self, value: int) -> None:
+        self.current_tool_id = value
 
     def extract_tool_calls(
             self, model_output: str,
@@ -108,17 +113,17 @@ class PythonicToolParser(ToolParser):
 
             tool_deltas = []
             for index, new_call in enumerate(tool_calls):
-                if index < self._completed_tools:
+                if index < self.current_tool_index:
                     continue
+
+                self.current_tool_index = index
+                if len(self.streamed_args_for_tool) == index:
+                    self.streamed_args_for_tool.append("")
+
                 new_call_complete = index < len(
                     tool_calls) - 1 or ")]" not in added_text
-                if self._current_tool_id is not None:
-                    new_call.id = self._current_tool_id
                 if new_call_complete:
-                    self._current_tool_id = None
-                    self._completed_tools += 1
-                else:
-                    self._current_tool_id = new_call.id
+                    self.current_tool_index += 1
 
                 withheld_suffix = (added_text[:-2]
                                    if not new_call_complete else "")
@@ -128,16 +133,15 @@ class PythonicToolParser(ToolParser):
                 # Strings get single quotes in the model-produced string.
                 # JSON requires double quotes.
                 withheld_suffix = withheld_suffix.replace("'", '"')
-                delta = _compute_tool_delta(
-                    self._sent_args_by_tool_id[new_call.id], new_call, index,
-                    withheld_suffix)
+                delta = _compute_tool_delta(self.streamed_args_for_tool[index],
+                                            new_call, index, withheld_suffix)
 
                 if delta is not None:
                     tool_deltas.append(delta)
                     if (delta.function is not None
                             and delta.function.arguments is not None):
-                        self._sent_args_by_tool_id[
-                            delta.id] += delta.function.arguments
+                        self.streamed_args_for_tool[
+                            index] += delta.function.arguments
 
             return DeltaMessage(
                 tool_calls=tool_deltas) if tool_deltas else None
@@ -207,14 +211,19 @@ def _make_valid_python(text: str) -> Union[Tuple[str, str], None]:
 
     text = text.rstrip()
 
-    if bracket_stack and bracket_stack[-1] == "(" and not text.endswith("("):
-        return None  # Incomplete parameter name
+    if bracket_stack and bracket_stack[-1] == "(":
+        trailing_params_text = text[:text.rfind("(")]
+        num_full_param_names = trailing_params_text.count("=")
+        num_full_param_values = trailing_params_text.count(",")
+        if num_full_param_names <= num_full_param_values:
+            return None  # Incomplete parameter name
     if bracket_stack and (
         (bracket_stack[-1] == "{" and not text.endswith("{")) or
         (len(bracket_stack) > 1 and bracket_stack[-1] in {"'", '"'}
          and bracket_stack[-2] == "{")):
         return None  # Incomplete property name within parameter value
-    if bracket_stack and bracket_stack[-1] == "[" and not text.endswith("["):
+    if bracket_stack and bracket_stack[-1] == "[" and not text.endswith(
+            "[") and not text.endswith(")"):
         return None  # Incomplete function name
 
     if text.endswith(","):
@@ -256,7 +265,6 @@ def _compute_tool_delta(previously_sent_args: str, new_call: ToolCall,
                              ))
 
     arg_diff = new_call_args[len(previously_sent_args):]
-    return DeltaToolCall(id=new_call.id,
-                         index=index,
-                         function=DeltaFunctionCall(
-                             arguments=arg_diff)) if arg_diff else None
+    return DeltaToolCall(
+        id="", index=index, function=DeltaFunctionCall(
+            arguments=arg_diff)) if arg_diff else None

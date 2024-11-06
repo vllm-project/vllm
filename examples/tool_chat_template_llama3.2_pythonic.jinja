@@ -75,7 +75,8 @@
             {%- endif %}
             {{- tool_call.name + '(' -}}
             {%- for param in tool_call.arguments %}
-                {{- param.name + '=' + param.value -}}
+                {{- param + '=' -}}
+                {{- "%sr" | format(tool_call.arguments[param]) -}}
                 {% if not loop.last %}, {% endif %}
             {%- endfor %}
             {{- ')' -}}

@@ -9,9 +9,10 @@ from vllm.entrypoints.openai.tool_parsers import ToolParser
 
 class StreamingToolReconstructor:
 
-    def __init__(self):
+    def __init__(self, assert_one_tool_per_delta: bool = True):
         self.tool_calls: List[ToolCall] = []
         self.other_content: str = ""
+        self._assert_one_tool_per_delta = assert_one_tool_per_delta
 
     def append_delta(self, delta: DeltaMessage):
         if delta.content is not None:
@@ -20,25 +21,27 @@ class StreamingToolReconstructor:
             assert delta.tool_calls, (
                 "Streaming results should have either content or tool calls "
                 "(or both)")
+        if self._assert_one_tool_per_delta:
+            # Note: This isn't strictly required by the API and may not be
+            # possible to adhere to depending on the token space and number of
+            # tokens per streamed response from the model, but it is required
+            # by tool_use tests, so we enforce it here by default also.
+            assert len(delta.tool_calls) < 2, (
+                "Streaming should include only one tool call per update.")
         for call_delta in delta.tool_calls:
             assert call_delta.type == "function", (
                 "Streaming tool calls should only emit function calls. Got "
                 f"{call_delta.type}")
             current_tool_call = self.tool_calls[
-                -1] if self.tool_calls and call_delta.id in {
-                    None, self.tool_calls[-1].id
-                } else None
+                call_delta.index] if call_delta.index < len(
+                    self.tool_calls) else None
             if current_tool_call:
-                assert (
-                    current_tool_call.function.name == call_delta.function.name
-                    or not call_delta.function.name
-                ), ("Streaming tool calls should not emit partial function "
-                    f"names. Got {call_delta.function.name}")
-                assert (
-                    current_tool_call.id == call_delta.id or not call_delta.id
-                ), ("Streaming tool calls must not change function ids. Got "
-                    f"{call_delta.id}, expected {current_tool_call.id} or None"
-                    )
+                assert (not call_delta.function.name), (
+                    "Streaming tool calls should emit the full function name "
+                    f"exactly once. Got {call_delta.function.name}")
+                assert (not call_delta.id), (
+                    "Streaming tool calls must emit function id only once. Got "
+                    f"{call_delta.id}")
                 assert (call_delta.index == len(self.tool_calls) - 1), (
                     f"Incorrect index for tool delta. Got {call_delta.index}, "
                     f"expected {len(self.tool_calls) - 1}")
@@ -62,13 +65,18 @@ class StreamingToolReconstructor:
 
 
 def run_tool_extraction(
-        tool_parser: ToolParser,
-        model_output: str,
-        request: Union[ChatCompletionRequest, None] = None,
-        streaming: bool = False) -> Tuple[Union[str, None], List[ToolCall]]:
+    tool_parser: ToolParser,
+    model_output: str,
+    request: Union[ChatCompletionRequest, None] = None,
+    streaming: bool = False,
+    assert_one_tool_per_delta: bool = True,
+) -> Tuple[Union[str, None], List[ToolCall]]:
     if streaming:
-        reconstructor = run_tool_extraction_streaming(tool_parser,
-                                                      model_output, request)
+        reconstructor = run_tool_extraction_streaming(
+            tool_parser,
+            model_output,
+            request,
+            assert_one_tool_per_delta=assert_one_tool_per_delta)
         return reconstructor.other_content or None, reconstructor.tool_calls
     else:
         extracted = run_tool_extraction_nonstreaming(tool_parser, model_output,
@@ -89,10 +97,12 @@ def run_tool_extraction_nonstreaming(
 def run_tool_extraction_streaming(
     tool_parser: ToolParser,
     model_deltas: Iterable[str],
-    request: Union[ChatCompletionRequest, None] = None
+    request: Union[ChatCompletionRequest, None] = None,
+    assert_one_tool_per_delta: bool = True,
 ) -> StreamingToolReconstructor:
     request = request or ChatCompletionRequest(messages=[], model="test-model")
-    reconstructor = StreamingToolReconstructor()
+    reconstructor = StreamingToolReconstructor(
+        assert_one_tool_per_delta=assert_one_tool_per_delta)
     previous_text = ""
     previous_tokens: List[int] = []
     for delta in model_deltas:
