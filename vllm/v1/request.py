@@ -50,7 +50,8 @@ class Request:
 
         return cls(
             request_id=request.request_id,
-            inputs=DecoderOnlyInputs(prompt_token_ids=request.prompt_token_ids,
+            inputs=DecoderOnlyInputs(type="token",
+                                     prompt_token_ids=request.prompt_token_ids,
                                      prompt=request.prompt),
             sampling_params=request.sampling_params,
             eos_token_id=request.eos_token_id,

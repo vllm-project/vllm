@@ -123,7 +123,7 @@ class RequestOutput:
         token_ids: List[int],
         finished: bool = False,
     ) -> "RequestOutput":
-        """Initialize a new "empty" RequestOutput object."""
+        """Initialize a new RequestOutput object."""
 
         # TODO: Support `n` > 1.
         completion_output = CompletionOutput(

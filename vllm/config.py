@@ -2038,3 +2038,47 @@ class VllmConfig:
             self.model_config is not None and self.load_config is not None:
             self.quant_config = VllmConfig._get_quantization_config(
                 self.model_config, self.load_config)
+
+    def __str__(self):
+        return ("model=%r, speculative_config=%r, tokenizer=%r, "
+        "skip_tokenizer_init=%s, tokenizer_mode=%s, revision=%s, "
+        "override_neuron_config=%s, "
+        "rope_scaling=%r, rope_theta=%r, tokenizer_revision=%s, "
+        "trust_remote_code=%s, dtype=%s, max_seq_len=%d, "
+        "download_dir=%r, load_format=%s, tensor_parallel_size=%d, "
+        "pipeline_parallel_size=%d, "
+        "disable_custom_all_reduce=%s, quantization=%s, "
+        "enforce_eager=%s, kv_cache_dtype=%s, "
+        "quantization_param_path=%s, device_config=%s, "
+        "decoding_config=%r, observability_config=%r, "
+        "seed=%d, served_model_name=%s, "
+        "num_scheduler_steps=%d, enable_prefix_caching=%s, "
+        "use_async_output_proc=%s, mm_processor_kwargs=%s") % \
+        (self.model_config.model, self.speculative_config,
+        self.model_config.tokenizer,
+        self.model_config.skip_tokenizer_init,
+        self.model_config.tokenizer_mode,
+        self.model_config.revision,
+        self.model_config.override_neuron_config,
+        self.model_config.rope_scaling,
+        self.model_config.rope_theta,
+        self.model_config.tokenizer_revision,
+        self.model_config.trust_remote_code,
+        self.model_config.dtype,
+        self.model_config.max_model_len,
+        self.load_config.download_dir,
+        self.load_config.load_format,
+        self.parallel_config.tensor_parallel_size,
+        self.parallel_config.pipeline_parallel_size,
+        self.parallel_config.disable_custom_all_reduce,
+        self.model_config.quantization,
+        self.model_config.enforce_eager,
+        self.cache_config.cache_dtype,
+        self.model_config.quantization_param_path,
+        self.device_config.device, self.decoding_config,
+        self.observability_config, self.model_config.seed,
+        self.model_config.served_model_name,
+        self.scheduler_config.num_scheduler_steps,
+        self.cache_config.enable_prefix_caching,
+        self.model_config.use_async_output_proc,
+        self.model_config.mm_processor_kwargs)

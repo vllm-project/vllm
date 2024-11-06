@@ -25,7 +25,7 @@ class DetokenizerRequest:
     include_stop_str_in_output: bool
 
 
-class EngineCoreRequest(msgspec.Struct):
+class EngineCoreRequest(msgspec.Struct, omit_defaults=True):
 
     # NOTE: prompt and prompt_token_ids should be DecoderOnlyInput,
     # but this object is currently not playing well with msgspec
@@ -42,7 +42,10 @@ class EngineCoreRequest(msgspec.Struct):
     lora_request: Optional[LoRARequest]
 
 
-class EngineCoreOutput(msgspec.Struct, array_like=True):
+class EngineCoreOutput(msgspec.Struct,
+                       array_like=True,
+                       omit_defaults=True,
+                       gc=False):
 
     request_id: str
     new_token_ids: List[int]
@@ -51,7 +54,10 @@ class EngineCoreOutput(msgspec.Struct, array_like=True):
     stop_reason: Union[int, str, None] = None
 
 
-class EngineCoreOutputs(msgspec.Struct, array_like=True):
+class EngineCoreOutputs(msgspec.Struct,
+                        array_like=True,
+                        omit_defaults=True,
+                        gc=False):
 
     #NOTE(Nick): We could consider ways to make this more compact,
     # e.g. columnwise layout and using an int enum for finish/stop reason
