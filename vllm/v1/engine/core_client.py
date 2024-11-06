@@ -225,4 +225,5 @@ class AsyncMPClient(MPClient):
         await self._send_input(EngineCoreRequestType.ADD, request)
 
     async def abort_requests_async(self, request_ids: List[str]) -> None:
-        await self._send_input(EngineCoreRequestType.ABORT, request_ids)
+        if len(request_ids) > 0:
+            await self._send_input(EngineCoreRequestType.ABORT, request_ids)

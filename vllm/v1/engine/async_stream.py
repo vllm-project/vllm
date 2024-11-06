@@ -1,5 +1,5 @@
 import asyncio
-from typing import Any, AsyncGenerator, Callable, Optional, Type, Union
+from typing import Any, Awaitable, AsyncGenerator, Callable, Optional, Type, Union
 
 from vllm.outputs import EmbeddingRequestOutput, RequestOutput
 
@@ -10,9 +10,10 @@ class AsyncStream:
 
     STOP_ITERATION = Exception()  # Sentinel
 
-    def __init__(self, request_id: str, cancel: Callable[[str], None]) -> None:
+    def __init__(self, request_id: str,
+                 abort_callback: Callable[[str], Awaitable[None]]) -> None:
         self.request_id = request_id
-        self._cancel = cancel
+        self._cancel = abort_callback
         self._queue: asyncio.Queue = asyncio.Queue()
         self._finished = False
 
@@ -46,7 +47,7 @@ class AsyncStream:
                     raise result
                 yield result
         except GeneratorExit:
-            self._cancel(self.request_id)
+            await self._cancel(self.request_id)
             raise asyncio.CancelledError from None
 
     @staticmethod
