@@ -15,12 +15,17 @@ on:
   pull_request:
     branches:
       - main
-    paths:
-      - "**/*.py"
-      - pyproject.toml
-      - requirements-lint.txt
-      - .github/workflows/matchers/ruff.json
-      - .github/workflows/ruff.yml
+    # This workflow is only relevant when one of the following files changes.
+    # However, we have github configured to expect and require this workflow
+    # to run and pass before github with auto-merge a pull request. Until github
+    # allows more flexible auto-merge policy, we can just run this on every PR.
+    # It doesn't take that long to run, anyway.
+    #paths:
+    #  - "**/*.py"
+    #  - pyproject.toml
+    #  - requirements-lint.txt
+    #  - .github/workflows/matchers/ruff.json
+    #  - .github/workflows/ruff.yml
 
 jobs:
   ruff:
