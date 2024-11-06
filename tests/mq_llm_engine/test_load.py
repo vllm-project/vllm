@@ -99,6 +99,6 @@ async def test_chunked_prefill(tmp_socket, min_chunk_size):
             else:
                 assert small_task in done
                 assert len(done) == 1
-            assert task.exception() is not None
+            assert task.exception() is None
         # Shutdown.
         client.close()
