@@ -755,23 +755,23 @@ void paged_attention_v2_launcher(
       blocksparse_head_sliding_step);
 
 #define CALL_V2_LAUNCHER_W_NUM_THREADS(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, IS_BLOCK_SPARSE) \
-  switch (num_threads) {                                                                      \
-    case 128:                                                                                 \
-      CALL_V2_LAUNCHER(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, IS_BLOCK_SPARSE, 128, 512);   \
-      break;                                                                                  \
-    case 1024:                                                                                \
-      CALL_V2_LAUNCHER(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, IS_BLOCK_SPARSE, 1024, 1024); \
-      break;                                                                                  \
+  switch (num_threads) {                                                                        \
+    case 128:                                                                                   \
+      CALL_V2_LAUNCHER(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, IS_BLOCK_SPARSE, 128, 512);     \
+      break;                                                                                    \
+    case 1024:                                                                                  \
+      CALL_V2_LAUNCHER(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, IS_BLOCK_SPARSE, 1024, 1024);   \
+      break;                                                                                    \
+    default:                                                                                    \
+      TORCH_CHECK(false, "Unsupported block size: ", block_size);                               \
+      break;                                                                                    \
   }
 
-#define CALL_V2_LAUNCHER_SPARSITY(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE)            \
-  switch (is_block_sparse) {                                                          \
-    case true:                                                                        \
-      CALL_V2_LAUNCHER_W_NUM_THREADS(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, true);  \
-      break;                                                                          \
-    case false:                                                                       \
-      CALL_V2_LAUNCHER_W_NUM_THREADS(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, false); \
-      break;                                                                          \
+#define CALL_V2_LAUNCHER_SPARSITY(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE)          \
+  if (is_block_sparse) {                                                            \
+    CALL_V2_LAUNCHER_W_NUM_THREADS(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, true);  \
+  } else {                                                                          \
+    CALL_V2_LAUNCHER_W_NUM_THREADS(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, false); \
   }
 
 // NOTE(woosuk): To reduce the compilation time, we omitted block sizes
