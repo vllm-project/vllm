@@ -1,7 +1,5 @@
 from typing import List
 
-import pytest
-
 import vllm
 from vllm.lora.request import LoRARequest
 
