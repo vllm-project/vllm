@@ -5,17 +5,20 @@ from typing import Dict, List, Set, Tuple
 import torch
 
 from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.platforms import current_platform
 from vllm.sequence import (ExecuteModelRequest, HiddenStates, SequenceData,
                            SequenceGroupMetadata)
-from vllm.spec_decode.draft_model_runner import TP1DraftModelRunner
+
+if current_platform.is_cuda_alike():
+    from vllm.spec_decode.draft_model_runner import TP1DraftModelRunner
+
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeProposer)
 from vllm.spec_decode.proposer_worker_base import ProposerWorkerBase
 from vllm.spec_decode.top1_proposer import Top1Proposer
-from vllm.worker.worker import Worker
 
 
-class MultiStepWorker(Worker, ProposerWorkerBase):
+class MultiStepWorker(ProposerWorkerBase):
     """The MultiStepWorker is equivalent to a Worker except that it allows
     multiple forward passes in a single call, assuming the scheduler has
     allocated enough space to store the additional KV. This reduces overhead
@@ -75,7 +78,7 @@ class MultiStepWorker(Worker, ProposerWorkerBase):
 
         # Run model sample_len times.
         model_outputs: List[SamplerOutput] = []
-        if isinstance(
+        if current_platform.is_cuda_alike() and isinstance(
                 self.model_runner, TP1DraftModelRunner
         ) and self.model_runner.supports_gpu_multi_step(expanded_request):
             # Here we run the draft_model_runner with multi-step prepare

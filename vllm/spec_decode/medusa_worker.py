@@ -9,10 +9,9 @@ from vllm.sequence import ExecuteModelRequest, SequenceGroupMetadata
 from vllm.spec_decode.interfaces import SpeculativeProposals
 from vllm.spec_decode.proposer_worker_base import NonLLMProposerWorkerBase
 from vllm.spec_decode.top1_proposer import Top1Proposer
-from vllm.worker.worker import Worker
 
 
-class MedusaWorker(NonLLMProposerWorkerBase, Worker):
+class MedusaWorker(NonLLMProposerWorkerBase):
     """Worker for Medusa.
     """
 

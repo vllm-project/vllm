@@ -2,11 +2,10 @@ from typing import List, Optional
 
 from vllm.config import VllmConfig
 from vllm.sequence import SequenceGroupMetadata
-from vllm.worker.model_runner import (ModelInputForGPUWithSamplingMetadata,
-                                      ModelRunner)
+from vllm.spec_decode.selector import ModelInputCls, ModelRunnerCls
 
 
-class TargetModelRunner(ModelRunner):
+class TargetModelRunner(ModelRunnerCls):
     """Specialized model runner for speculative decoding target model.
     In speculative decoding, the log probabilities selected finally may not
     be the same ones as selected by the target model sampling. This means
@@ -39,11 +38,10 @@ class TargetModelRunner(ModelRunner):
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
         virtual_engine: int = 0,
-        finished_requests_ids: Optional[List[str]] = None
-    ) -> ModelInputForGPUWithSamplingMetadata:
-        model_input: ModelInputForGPUWithSamplingMetadata = super(
-        ).prepare_model_input(seq_group_metadata_list, virtual_engine,
-                              finished_requests_ids)
+        finished_requests_ids: Optional[List[str]] = None,
+    ) -> ModelInputCls:
+        model_input: ModelInputCls = super().prepare_model_input(
+            seq_group_metadata_list, virtual_engine, finished_requests_ids)
         # If token log probabilities is disabled then skip generating sampler
         # CPU output. We directly serialize the GPU sampled_token_id tensors
         # as needed. If log probabilities is enabled then synchronize all the
