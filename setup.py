@@ -382,8 +382,7 @@ def get_gaudi_sw_version():
     output = subprocess.run("hl-smi",
                             shell=True,
                             text=True,
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE,
+                            capture_output=True,
                             env={"ENABLE_CONSOLE": "true"})
     if output.returncode == 0 and output.stdout:
         return output.stdout.split("\n")[2].replace(
