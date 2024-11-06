@@ -65,5 +65,5 @@ class EngineCoreRequestType(enum.Enum):
     Request types defined as hex byte strings, so it can be sent over sockets
     without separate encoding step.
     """
-    AddRequest = b'\x00'
-    AbortRequest = b'\x01'
+    ADD = b'\x00'
+    ABORT = b'\x01'

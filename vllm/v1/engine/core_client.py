@@ -189,10 +189,10 @@ class SyncMPClient(MPClient):
         self.input_socket.send_multipart(msg, copy=False, flags=zmq.NOBLOCK)
 
     def add_request(self, request: EngineCoreRequest) -> None:
-        self._send_input(EngineCoreRequestType.AddRequest, request)
+        self._send_input(EngineCoreRequestType.ADD, request)
 
     def abort_requests(self, request_ids: List[str]) -> None:
-        self._send_input(EngineCoreRequestType.AbortRequest, request_ids)
+        self._send_input(EngineCoreRequestType.ABORT, request_ids)
 
 
 class AsyncMPClient(MPClient):
@@ -222,7 +222,7 @@ class AsyncMPClient(MPClient):
                                                flags=zmq.NOBLOCK)
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
-        await self._send_input(EngineCoreRequestType.AddRequest, request)
+        await self._send_input(EngineCoreRequestType.ADD, request)
 
     async def abort_requests_async(self, request_ids: List[str]) -> None:
-        await self._send_input(EngineCoreRequestType.AbortRequest, request_ids)
+        await self._send_input(EngineCoreRequestType.ABORT, request_ids)

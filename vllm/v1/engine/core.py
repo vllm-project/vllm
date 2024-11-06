@@ -313,7 +313,7 @@ class EngineCoreProc(EngineCore):
 
     def _handle_client_request(
             self, request: Union[EngineCoreRequest, List[str]]) -> None:
-        """Handle EngineCoreRequest or EngineCoreAbortRequest from Client."""
+        """Handle EngineCoreRequest or EngineCoreABORT from Client."""
 
         if isinstance(request, EngineCoreRequest):
             self.add_request(request)
@@ -337,9 +337,9 @@ class EngineCoreProc(EngineCore):
                 request_data = frames[1].buffer
 
                 # Deserialize the request data.
-                if request_type == EngineCoreRequestType.AddRequest.value:
+                if request_type == EngineCoreRequestType.ADD.value:
                     request = decoder_add_req.decode(request_data)
-                elif request_type == EngineCoreRequestType.AbortRequest.value:
+                elif request_type == EngineCoreRequestType.ABORT.value:
                     request = decoder_abort_req.decode(request_data)
                 else:
                     raise ValueError(f"Unknown RequestType: {request_type}")
