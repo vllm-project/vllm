@@ -5,13 +5,7 @@ on:
   # but only for the habana_main branch
   push:
     branches:
-<<<<<<< HEAD
       - habana_main
-  pull_request:
-    branches:
-      - habana_main
-=======
-      - main
     paths:
       - '**/*.py'
       - '.github/workflows/mypy.yaml'
@@ -19,13 +13,12 @@ on:
       - 'pyproject.toml'
   pull_request:
     branches:
-      - main
+      - habana_main
     paths:
       - '**/*.py'
       - '.github/workflows/mypy.yaml'
       - 'tools/mypy.sh'
       - 'pyproject.toml'
->>>>>>> a5fda50a10641e47c0c290907f30ef2add6d4e7a
 
 jobs:
   mypy:
