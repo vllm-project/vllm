@@ -19,10 +19,6 @@ from .levels import CompilationLevel
 logger = init_logger(__name__)
 
 
-def no_op():
-    return
-
-
 def fix_functionalization(graph: fx.Graph):
     """
     Rewrite the graph module to replace the pattern involving
@@ -517,8 +513,9 @@ class PiecewiseBackend:
                     # make the cudagraph capture very slow.
                     # therefore, we only run gc for the first graph,
                     # and disable gc for the rest of the graphs.
-                    stack.enter_context(patch("gc.collect", no_op))
-                    stack.enter_context(patch("torch.cuda.empty_cache", no_op))
+                    stack.enter_context(patch("gc.collect", lambda: None))
+                    stack.enter_context(
+                        patch("torch.cuda.empty_cache", lambda: None))
 
                 # mind-exploding: carefully manage the reference and memory.
                 with torch.cuda.graph(cudagraph, pool=self.graph_pool):
