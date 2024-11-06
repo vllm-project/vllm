@@ -33,7 +33,8 @@ def get_8bit_types():
     types = [torch.int8]
     if current_platform.is_rocm():
         types.append(torch.float8_e4m3fnuz)
-    elif current_platform.is_cuda():
+    elif (current_platform.is_cuda()
+          and current_platform.has_device_capability(89)):
         types.append(torch.float8_e4m3fn)
     return types
 
@@ -46,8 +47,6 @@ def get_8bit_types():
 @pytest.mark.parametrize("use_scalar_scale_a", [True, False])
 @pytest.mark.parametrize("use_scalar_scale_b", [True, False])
 @pytest.mark.parametrize("use_bias", [True, False])
-@pytest.mark.skipif(not current_platform.has_device_capability(89),
-                    reason="FP8 is not supported on this GPU type.")
 def test_scaled_mm(M, N, K, in_dtype, out_dtype, use_scalar_scale_a,
                    use_scalar_scale_b, use_bias):
     is_floating_point_type = lambda t: torch.tensor([1, 1], dtype=t
