@@ -46,7 +46,9 @@ pull_request_rules:
     comment:
       message: |
        This pull request has merge conflicts that must be resolved before it can be
-       merged. @{{author}} please rebase it. https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/working-with-forks/syncing-a-fork
+       merged. Please rebase the PR, @{{author}}.
+
+       https://docs.github.com/en/pull-requests/collaborating-with-pull-requests/working-with-forks/syncing-a-fork
 
 - name: remove 'needs-rebase' label when conflict is resolved
   conditions:
