@@ -540,7 +540,7 @@ Text Generation
     - Qwen2-VL
     - T + I\ :sup:`E+` + V\ :sup:`+`
     - :code:`Qwen/Qwen2-VL-2B-Instruct`, :code:`Qwen/Qwen2-VL-7B-Instruct`, :code:`Qwen/Qwen2-VL-72B-Instruct`, etc.
-    -
+    - ✅︎
     - ✅︎
   * - :code:`UltravoxModel`
     - Ultravox
