@@ -1,7 +1,5 @@
 import asyncio
-from functools import partial
-from typing import (AsyncGenerator, Dict, List, Mapping, Optional, Type,
-                    Union)
+from typing import AsyncGenerator, Dict, List, Mapping, Optional, Type, Union
 
 from vllm.config import ModelConfig, VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -57,6 +55,8 @@ class AsyncLLM(EngineClient):
 
         # Request streams (map of request_id -> AsyncStream).
         self.request_streams: Dict[str, AsyncStream] = {}
+        # List of cancelled request ids to be aborted.
+        self.client_aborted_requests: List[str] = []
 
         # Processor (converts Inputs --> EngineCoreRequests).
         self.processor = Processor(vllm_config.model_config,
@@ -75,28 +75,26 @@ class AsyncLLM(EngineClient):
             asyncio_mode=True,
         )
 
-        self.is_output_handler_running = False
+        self.output_handler = None
 
     @classmethod
     def from_engine_args(
         cls,
         engine_args: AsyncEngineArgs,
-        engine_config: Optional[VllmConfig] = None,
+        vllm_config: Optional[VllmConfig] = None,
         start_engine_loop: bool = True,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
     ) -> "AsyncLLMEngine":
-        """Creates an AsyncLLMEngine from the EngineArgs."""
+        """Creates an AsyncLLM from the EngineArgs."""
 
         # Create the engine configs.
-        if engine_config is None:
+        if vllm_config is None:
             vllm_config = engine_args.create_engine_config()
-        else:
-            vllm_config = engine_config
 
         executor_class = cls._get_executor_cls(vllm_config)
 
-        # Create the AsyncLLMEngine.
+        # Create the AsyncLLM.
         return cls(
             vllm_config=vllm_config,
             executor_class=executor_class,
@@ -110,8 +108,8 @@ class AsyncLLM(EngineClient):
     def shutdown(self):
         self.engine_core.shutdown()
 
-        if hasattr(self, "output_handler"):
-            self.output_handler.cancel()
+        if handler := getattr(self, "output_handler", None):
+            handler.cancel()
 
     @classmethod
     def _get_executor_cls(cls, vllm_config: VllmConfig):
@@ -151,7 +149,11 @@ class AsyncLLM(EngineClient):
         # 5) Return the generator.
         return stream.generator()
 
-
+    # TODO: we should support multiple prompts in one call, as you
+    # can do with LLM.generate. So that for multi-prompt completion
+    # requests we don't need to send multiple messages to core proc,
+    # and so we don't need multiple streams which then get
+    # re-multiplexed in the API server anyhow.
     async def generate(
         self,
         prompt: PromptType,
@@ -166,10 +168,9 @@ class AsyncLLM(EngineClient):
         # We start the output_handler on the first call to generate() so that
         # we can call __init__ before the event loop starts, which enables us
         # to handle startup failure gracefully in the OpenAI server.
-        if not self.is_output_handler_running:
+        if self.output_handler is None:
             self.output_handler = asyncio.create_task(
                 self._run_output_handler())
-            self.is_output_handler_running = True
 
         async for output in await self.add_request(
                 request_id,
@@ -182,37 +183,31 @@ class AsyncLLM(EngineClient):
         ):
             yield output
 
-
-    async def _abort_requests(
-        self,
-        request_ids: Union[str, List[str]],
-        *,
-        exception: Optional[Union[BaseException, Type[BaseException]]] = None,
-        verbose: bool,
-    ) -> None:
+    def _process_cancellations(self) -> List[str]:
         """
-        Abort requests. This function is called in two places:
-            * In output_handler_loop, if stop string is detected
-            * In iterate_with_cancellation (inside AsyncStream) when
-                a request disconnects. This function is as a callback.
+        Process requests cancelled from user side since last iteration.
         """
+        client_aborted_reqs = self.client_aborted_requests
+        if not client_aborted_reqs:
+            return []
 
-        # Convert to a list if we got a single request_id str.
-        if isinstance(request_ids, str):
-            request_ids = [request_ids]
+        reqs_to_abort = client_aborted_reqs.copy()
+        client_aborted_reqs.clear()
 
-        # Abort in EngineCore and Detokenizer.
-        await self.engine_core.abort_requests_async(request_ids)
-        self.detokenizer.abort_requests(request_ids)
+        self.detokenizer.abort_requests(reqs_to_abort)
+        for request_id in reqs_to_abort:
+            self._finish_stream(request_id)
 
-        # Remove from the request streams.
-        for request_id in request_ids:
-            stream = self.request_streams.pop(request_id, None)
-            if stream is not None:
-                stream.finish(exception=exception)
+        return reqs_to_abort
 
-            if verbose:
-                logger.info("Aborted request %s.", request_id)
+    def _finish_stream(self, request_id: str):
+        stream = self.request_streams.pop(request_id)
+        if stream is not None:
+            stream.finish()
+
+    async def _abort_engine_requests(self, request_ids: List[str]):
+        if request_ids:
+            await self.engine_core.abort_requests_async(request_ids)
 
     def _add_request_to_streams(
         self,
@@ -224,8 +219,9 @@ class AsyncLLM(EngineClient):
         if request_id in self.request_streams:
             raise ValueError(f"Request id {request_id} already running.")
 
-        abort_callback = partial(self._abort_requests, verbose=verbose)
-        stream = AsyncStream(request_id, abort_callback)
+        # Avoid streams having circular ref to parent AsyncLLM object.
+        aborted_reqs = self.client_aborted_requests
+        stream = AsyncStream(request_id, aborted_reqs.append)
         self.request_streams[request_id] = stream
 
         if verbose:
@@ -241,12 +237,13 @@ class AsyncLLM(EngineClient):
             assert request_id in self.request_streams
 
             # Each request in the API server pulls from these streams.
-            self.request_streams[request_id].put(request_output)
+            stream = self.request_streams.get(request_id)
+            if stream is not None:
+                stream.put(request_output)
 
-            # If finished, remove from the tracker.
-            if request_output.finished:
-                self.request_streams[request_id].finish()
-                self.request_streams.pop(request_id)
+                # If finished, remove from the tracker.
+                if request_output.finished:
+                    self._finish_stream(request_id)
 
     async def _run_output_handler(self):
         """Background loop: pulls from EngineCore and pushes to AsyncStreams."""
@@ -262,8 +259,12 @@ class AsyncLLM(EngineClient):
                 # 3) Put the RequestOutputs into the per-request AsyncStreams.
                 self._process_request_outputs(request_outputs)
 
+                # 3) Put the RequestOutputs into the per-request AsyncStreams.
+                cancelled_reqs_to_abort = self._process_cancellations()
+                reqs_to_abort.extend(cancelled_reqs_to_abort)
+
                 # Abort any requests that finished due to stop strings.
-                await self._abort_requests(reqs_to_abort, verbose=False)
+                await self._abort_engine_requests(reqs_to_abort)
 
         except BaseException as e:
             logger.error(e)
@@ -310,7 +311,7 @@ class AsyncLLM(EngineClient):
         logger.debug("Called do_log_stats.")
 
     async def check_health(self) -> None:
-        logger.debug("Called do_log_stats.")
+        logger.debug("Called check_health.")
 
     async def start_profile(self) -> None:
         raise ValueError("Not supported on V1 yet.")

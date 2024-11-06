@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.logger import init_logger
@@ -43,7 +43,7 @@ class IncrementalDetokenizer:
     tokenizer: AnyTokenizer
 
     # Accounting for stop string buffering
-    buffer_length: int
+    stop_buffer_length: int
     _last_output_text_offset: int = 0
 
     @property
@@ -67,8 +67,10 @@ class IncrementalDetokenizer:
         stops = request.stop
         # Number of chars to hold back when stop strings are to be excluded
         # from streamed output.
-        buffer_length = 0 if not stops or request.include_stop_str_in_output \
-            else max(len(s) for s in stops) - 1
+        if stops and not request.include_stop_str_in_output:
+            stop_buffer_length = max(len(s) for s in stops) - 1
+        else:
+            stop_buffer_length = 0
 
         return cls(
             output_text="",
@@ -88,7 +90,7 @@ class IncrementalDetokenizer:
             prompt=request.prompt,
             prompt_token_ids=request.prompt_token_ids,
             tokenizer=tokenizer,
-            buffer_length=buffer_length,
+            stop_buffer_length=stop_buffer_length,
         )
 
     def add_tokens(
@@ -128,7 +130,7 @@ class IncrementalDetokenizer:
 
             decoded_text += new_decoded_token_text
 
-        # 2) Evaluate stop criteria
+        # 2) Evaluate stop criteria.
         if self.stop:
             stop = StopChecker.check_stop_strings(
                 output_text=self.output_text,
@@ -176,7 +178,7 @@ class IncrementalDetokenizer:
         this method is returned"""
 
         # We return the full output text if the sequence is finished.
-        buffer_length = 0 if finished else self.buffer_length
+        buffer_length = 0 if finished else self.stop_buffer_length
         if not delta:
             return self.output_text[:-buffer_length] if buffer_length else (
                 self.output_text)
@@ -209,13 +211,12 @@ class Detokenizer:
 
     def abort_requests(
         self,
-        request_ids: List[str],
+        request_ids: Iterable[str],
     ) -> None:
         """Remove the request_ids from the Detokenizer."""
 
         for request_id in request_ids:
-            if request_id in self.request_states:
-                self.request_states.pop(request_id)
+            self.request_states.pop(request_id, None)
 
     def add_request(
         self,

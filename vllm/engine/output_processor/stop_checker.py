@@ -98,7 +98,11 @@ class StopChecker:
         """Check if any stop strings are matched and truncate sequence
         output text accordingly.
 
-        Returns the stop string if matched or else None.
+        Returns tuple (stop_string, offset) if matched or else None.
+
+        Where stop_string is the matched stop string and offset is the
+        length to which output_text should be truncated, or -1 for no
+        truncation.
         """
         if not new_char_count or not stop:
             return None

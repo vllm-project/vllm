@@ -1,5 +1,6 @@
 import asyncio
-from typing import Any, Awaitable, AsyncGenerator, Callable, Optional, Type, Union
+from typing import (Any, AsyncGenerator, Awaitable, Callable, Optional, Type,
+                    Union)
 
 from vllm.outputs import EmbeddingRequestOutput, RequestOutput
 

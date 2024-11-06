@@ -44,50 +44,8 @@ class EngineCore:
 
         assert vllm_config.model_config.task != "embedding"
 
-        logger.info(
-            "Initializing an LLM engine (v%s) with config: "
-            "model=%r, speculative_config=%r, tokenizer=%r, "
-            "skip_tokenizer_init=%s, tokenizer_mode=%s, revision=%s, "
-            "override_neuron_config=%s, "
-            "rope_scaling=%r, rope_theta=%r, tokenizer_revision=%s, "
-            "trust_remote_code=%s, dtype=%s, max_seq_len=%d, "
-            "download_dir=%r, load_format=%s, tensor_parallel_size=%d, "
-            "pipeline_parallel_size=%d, "
-            "disable_custom_all_reduce=%s, quantization=%s, "
-            "enforce_eager=%s, kv_cache_dtype=%s, "
-            "quantization_param_path=%s, device_config=%s, "
-            "decoding_config=%r, observability_config=%r, "
-            "seed=%d, served_model_name=%s, "
-            "num_scheduler_steps=%d, enable_prefix_caching=%s, "
-            "use_async_output_proc=%s, mm_processor_kwargs=%s)", VLLM_VERSION,
-            vllm_config.model_config.model, vllm_config.speculative_config,
-            vllm_config.model_config.tokenizer,
-            vllm_config.model_config.skip_tokenizer_init,
-            vllm_config.model_config.tokenizer_mode,
-            vllm_config.model_config.revision,
-            vllm_config.model_config.override_neuron_config,
-            vllm_config.model_config.rope_scaling,
-            vllm_config.model_config.rope_theta,
-            vllm_config.model_config.tokenizer_revision,
-            vllm_config.model_config.trust_remote_code,
-            vllm_config.model_config.dtype,
-            vllm_config.model_config.max_model_len,
-            vllm_config.load_config.download_dir,
-            vllm_config.load_config.load_format,
-            vllm_config.parallel_config.tensor_parallel_size,
-            vllm_config.parallel_config.pipeline_parallel_size,
-            vllm_config.parallel_config.disable_custom_all_reduce,
-            vllm_config.model_config.quantization,
-            vllm_config.model_config.enforce_eager,
-            vllm_config.cache_config.cache_dtype,
-            vllm_config.model_config.quantization_param_path,
-            vllm_config.device_config.device, vllm_config.decoding_config,
-            vllm_config.observability_config, vllm_config.model_config.seed,
-            vllm_config.model_config.served_model_name,
-            vllm_config.scheduler_config.num_scheduler_steps,
-            vllm_config.cache_config.enable_prefix_caching,
-            vllm_config.model_config.use_async_output_proc,
-            vllm_config.model_config.mm_processor_kwargs)
+        logger.info("Initializing an LLM engine (v%s) with config: %s",
+                    VLLM_VERSION, vllm_config)
 
         # Setup Model.
         self.model_executor = executor_class(vllm_config)
@@ -129,6 +87,9 @@ class EngineCore:
     def abort_requests(self, request_ids: List[str]):
         """Abort requests from the scheduler."""
 
+        # TODO: The scheduler doesn't really need to know the
+        # specific finish reason, TBD whether we propagate that
+        # (i.e. client-aborted vs stop criteria met).
         self.scheduler.finish_requests(request_ids,
                                        RequestStatus.FINISHED_ABORTED)
 
@@ -166,7 +127,9 @@ class EngineCoreProc(EngineCore):
         self.should_shutdown = should_shutdown
 
         # Background Threads and Queues for IO. These enable us to
-        # overlap ZMQ socket IO with GPU since they release the GIL.
+        # overlap ZMQ socket IO with GPU since they release the GIL,
+        # and to overlap some serialization/deserialization with the
+        # model forward pass.
         # Threads handle Socket <-> Queues and core_busy_loop uses Queue.
         self.input_queue = queue.Queue()
         self.output_queue = queue.Queue()
@@ -271,7 +234,6 @@ class EngineCoreProc(EngineCore):
     def run_engine_core(*args, **kwargs):
         """Launch EngineCore busy loop in background process."""
 
-        engine_core = None
         try:
             engine_core = EngineCoreProc(*args, **kwargs)
             engine_core.run_busy_loop()
@@ -352,12 +314,14 @@ class EngineCoreProc(EngineCore):
 
         # Msgpack serialization encoding..
         encoder = msgpack.Encoder()
+        # Reuse send buffer
+        buffer = bytearray()
 
         with self.make_socket(output_path, zmq.constants.PUSH) as socket:
             while True:
                 engine_core_outputs = self.output_queue.get()
                 outputs = EngineCoreOutputs(outputs=engine_core_outputs)
-                outputs_serialized = encoder.encode(outputs)
-                socket.send_multipart((outputs_serialized, ),
+                encoder.encode_into(outputs, buffer)
+                socket.send_multipart((buffer, ),
                                       copy=False,
                                       flags=zmq.NOBLOCK)
