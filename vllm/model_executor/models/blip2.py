@@ -23,7 +23,7 @@ from .blip import (BlipVisionModel, dummy_image_for_blip,
                    get_max_blip_image_tokens)
 from .interfaces import SupportsMultiModal, SupportsPP
 from .utils import (AutoWeightsLoader, init_vllm_registered_model,
-                    merge_multimodal_embeddings_from_map)
+                    merge_multimodal_embeddings)
 
 # We use this internally as placeholders since there is no image token
 # defined on the HuggingFace repo
@@ -615,6 +615,26 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
 
         return self.language_projection(query_output)
 
+    def process_mm_inputs(self, **kwargs: object) -> Optional[torch.Tensor]:
+        image_input = self._parse_and_validate_image_input(**kwargs)
+        if image_input is None:
+            return None
+        vision_embeddings = self._process_image_input(image_input)
+        return vision_embeddings
+
+    def get_inputs_embeds(
+            self, input_ids: torch.Tensor,
+            vision_embeddings: Optional[torch.Tensor]) -> torch.Tensor:
+        inputs_embeds = self.language_model.model.embed_tokens(input_ids)
+        if vision_embeddings is not None:
+            inputs_embeds = merge_multimodal_embeddings(
+                input_ids=input_ids,
+                inputs_embeds=inputs_embeds,
+                multimodal_embeddings=vision_embeddings,
+                placeholder_token_id=BLIP2_IMAGE_TOKEN_ID)
+
+        return inputs_embeds
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -622,6 +642,7 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
     ) -> Union[SamplerOutput, IntermediateTensors]:
         """Run forward pass for BLIP-2.
@@ -654,26 +675,16 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         See also:
             :class:`Blip2ImageInputs`
         """
+
         if intermediate_tensors is not None:
             inputs_embeds = None
-        else:
-            inputs_embeds = self.language_model.model.get_input_embeddings(
-                input_ids)
 
-            image_input = self._parse_and_validate_image_input(**kwargs)
-            if image_input is not None:
-                vision_embeddings = self._process_image_input(image_input)
-                inputs_embeds = self.language_model.model.get_input_embeddings(
-                    input_ids)
+        elif inputs_embeds is None:
+            vision_embeddings = self.process_mm_inputs(**kwargs)
+            inputs_embeds = self.get_inputs_embeds(
+                input_ids=input_ids, vision_embeddings=vision_embeddings)
+            input_ids = None
 
-                merge_multimodal_embeddings_from_map(
-                    inputs_embeds, vision_embeddings,
-                    attn_metadata.multi_modal_placeholder_index_maps["image"])
-
-        # always pass the input via `inputs_embeds`
-        # to make sure the computation graph is consistent
-        # for `torch.compile` integration
-        input_ids = None
         hidden_states = self.language_model.model(
             input_ids,
             positions,
