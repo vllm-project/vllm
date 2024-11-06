@@ -1,4 +1,3 @@
-# coding=utf-8
 # Adapted from
 # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/bloom/modeling_bloom.py
 # Copyright 2023 The vLLM team.
@@ -147,7 +146,7 @@ class BloomMLP(nn.Module):
             4 * hidden_size,
             quant_config=quant_config,
         )
-        self.gelu_impl = get_act_fn("gelu", quant_config, 4 * hidden_size)
+        self.gelu_impl = get_act_fn("gelu")
         self.dense_4h_to_h = RowParallelLinear(
             4 * hidden_size,
             hidden_size,

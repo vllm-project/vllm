@@ -70,10 +70,14 @@ EXPECTED_VALUES = {
     [("_sum", _NUM_REQUESTS * _NUM_GENERATION_TOKENS_PER_REQUEST),
      ("_count", _NUM_REQUESTS)],
     "vllm:request_params_n": [("_count", _NUM_REQUESTS)],
+    "vllm:request_params_max_tokens":
+    [("_sum", _NUM_REQUESTS * _NUM_GENERATION_TOKENS_PER_REQUEST),
+     ("_count", _NUM_REQUESTS)],
     "vllm:prompt_tokens": [("_total",
                             _NUM_REQUESTS * _NUM_PROMPT_TOKENS_PER_REQUEST)],
-    "vllm:generation_tokens":
-    [("_total", _NUM_REQUESTS * _NUM_PROMPT_TOKENS_PER_REQUEST)],
+    "vllm:generation_tokens": [
+        ("_total", _NUM_REQUESTS * _NUM_PROMPT_TOKENS_PER_REQUEST)
+    ],
     "vllm:request_success": [("_total", _NUM_REQUESTS)],
 }
 
@@ -149,6 +153,9 @@ EXPECTED_METRICS = [
     "vllm:request_params_n_sum",
     "vllm:request_params_n_bucket",
     "vllm:request_params_n_count",
+    "vllm:request_params_max_tokens_sum",
+    "vllm:request_params_max_tokens_bucket",
+    "vllm:request_params_max_tokens_count",
     "vllm:num_preemptions_total",
     "vllm:prompt_tokens_total",
     "vllm:generation_tokens_total",
