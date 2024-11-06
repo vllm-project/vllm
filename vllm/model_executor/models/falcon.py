@@ -1,4 +1,3 @@
-# coding=utf-8
 # Adapted from
 # https://github.com/huggingface/transformers/blob/a5cc30d72ae2dc19af534e4b35c986cc28db1275/src/transformers/models/falcon/modeling_falcon.py
 # Copyright 2023 The vLLM team.
@@ -213,7 +212,7 @@ class FalconMLP(nn.Module):
                                                   bias=config.bias,
                                                   skip_bias_add=True,
                                                   quant_config=quant_config)
-        self.act = get_act_fn("gelu", quant_config, 4 * hidden_size)
+        self.act = get_act_fn("gelu")
         self.reduce_row_parallel_results = not (config.new_decoder_architecture
                                                 or config.parallel_attn)
         self.dense_4h_to_h = RowParallelLinear(
@@ -401,8 +400,6 @@ class FalconForCausalLM(nn.Module, SupportsPP):
         ".dense_h_to_4h.",
         ".dense_4h_to_h.",
     ]
-    # in TP, these weights are partitioned along the column dimension (dim=-1)
-    column_parallel_weights_modules = [".dense_4h_to_h.", ".dense."]
 
     def __init__(
         self,

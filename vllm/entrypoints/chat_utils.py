@@ -22,7 +22,6 @@ from openai.types.chat import (ChatCompletionMessageToolCallParam,
                                ChatCompletionToolMessageParam)
 # yapf: enable
 # pydantic needs the TypedDict from typing_extensions
-from pydantic import ConfigDict
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 from typing_extensions import Required, TypeAlias, TypedDict
 
@@ -68,17 +67,10 @@ class ChatCompletionContentPartVideoParam(TypedDict, total=False):
     """The type of the content part."""
 
 
-class CustomChatCompletionContentPartParam(TypedDict, total=False):
-    __pydantic_config__ = ConfigDict(extra="allow")  # type: ignore
-
-    type: Required[str]
-    """The type of the content part."""
-
-
 class CustomChatCompletionContentSimpleImageParam(TypedDict, total=False):
     """A simpler version of the param that only accepts a plain image_url.
     This is supported by OpenAI API, although it is not documented.
-    
+
     Example:
     {
         "image_url": "https://example.com/image.jpg"
@@ -89,7 +81,7 @@ class CustomChatCompletionContentSimpleImageParam(TypedDict, total=False):
 
 class CustomChatCompletionContentSimpleAudioParam(TypedDict, total=False):
     """A simpler version of the param that only accepts a plain audio_url.
-    
+
     Example:
     {
         "audio_url": "https://example.com/audio.mp3"
@@ -112,7 +104,6 @@ class CustomChatCompletionContentSimpleVideoParam(TypedDict, total=False):
 ChatCompletionContentPartParam: TypeAlias = Union[
     OpenAIChatCompletionContentPartParam, ChatCompletionContentPartAudioParam,
     ChatCompletionContentPartVideoParam, ChatCompletionContentPartRefusalParam,
-    CustomChatCompletionContentPartParam,
     CustomChatCompletionContentSimpleImageParam,
     CustomChatCompletionContentSimpleAudioParam,
     CustomChatCompletionContentSimpleVideoParam, str]
@@ -224,6 +215,8 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
                 return "<|vision_start|><|image_pad|><|vision_end|>"
             if model_type == "molmo":
                 return ""
+            if model_type == "idefics3":
+                return "<image>"
 
             raise TypeError(f"Unknown {modality} model type: {model_type}")
         elif modality == "audio":
@@ -342,7 +335,9 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         self._tracker = tracker
 
     def parse_image(self, image_url: str) -> None:
-        image = get_and_parse_image(image_url)
+        image = get_and_parse_image(image_url,
+                                    allowed_local_media_path=self._tracker.
+                                    _model_config.allowed_local_media_path)
 
         placeholder = self._tracker.add("image", image)
         self._add_placeholder(placeholder)
@@ -368,7 +363,10 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         self._tracker = tracker
 
     def parse_image(self, image_url: str) -> None:
-        image_coro = async_get_and_parse_image(image_url)
+        image_coro = async_get_and_parse_image(
+            image_url,
+            allowed_local_media_path=self._tracker._model_config.
+            allowed_local_media_path)
 
         placeholder = self._tracker.add("image", image_coro)
         self._add_placeholder(placeholder)
@@ -413,7 +411,7 @@ def load_chat_template(
     if chat_template is None:
         return None
     try:
-        with open(chat_template, "r") as f:
+        with open(chat_template) as f:
             resolved_chat_template = f.read()
     except OSError as e:
         if isinstance(chat_template, Path):
