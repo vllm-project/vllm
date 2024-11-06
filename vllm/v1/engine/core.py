@@ -244,7 +244,9 @@ class EngineCoreProc(EngineCore):
         should_shutdown: Synchronized,
     ) -> BaseProcess:
         # The current process might have CUDA context,
-        # so we need to spawn a new process
+        # so we need to spawn a new process.
+        # NOTE(rob): this is a problem for using EngineCoreProc w/
+        # LLM, since we need a if __name__ == "__main__" guard.
         context = multiprocessing.get_context("spawn")
 
         process_kwargs = {
@@ -329,9 +331,6 @@ class EngineCoreProc(EngineCore):
 
         with self.make_socket(input_path, zmq.constants.PULL) as socket:
             while True:
-                while socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
-                    logger.debug("EngineCore process input thread waiting.")
-
                 # (RequestType, RequestData)
                 frames = socket.recv_multipart(copy=False)
                 request_type = frames[0].buffer
@@ -356,13 +355,9 @@ class EngineCoreProc(EngineCore):
 
         with self.make_socket(output_path, zmq.constants.PUSH) as socket:
             while True:
-                try:
-                    engine_core_outputs = self.output_queue.get(
-                        timeout=POLLING_TIMEOUT_S)
-                    outputs = EngineCoreOutputs(outputs=engine_core_outputs)
-                    outputs_serialized = encoder.encode(outputs)
-                    socket.send_multipart((outputs_serialized, ),
-                                          copy=False,
-                                          flags=zmq.NOBLOCK)
-                except queue.Empty:
-                    logger.debug("EngineCore process output thread waiting.")
+                engine_core_outputs = self.output_queue.get()
+                outputs = EngineCoreOutputs(outputs=engine_core_outputs)
+                outputs_serialized = encoder.encode(outputs)
+                socket.send_multipart((outputs_serialized, ),
+                                      copy=False,
+                                      flags=zmq.NOBLOCK)
