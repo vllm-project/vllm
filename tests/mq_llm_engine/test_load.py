@@ -10,7 +10,7 @@ from tests.mq_llm_engine.utils import RemoteMQLLMEngine, generate
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 
-MODEL = "facebook/opt-125m"
+MODEL = "google/gemma-1.1-2b-it"
 NUM_EXPECTED_TOKENS = 10
 NUM_REQUESTS = 10000
 
