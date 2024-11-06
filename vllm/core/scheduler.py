@@ -1105,8 +1105,6 @@ class Scheduler:
         )
         curr_loras: Set[int] = set()
 
-        # print("Doing chunked prefill scheduling")
-
         prefills = SchedulerPrefillOutputs.create_empty()
         swapped_in = SchedulerSwappedInOutputs.create_empty()
 
