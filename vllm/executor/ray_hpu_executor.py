@@ -34,7 +34,7 @@ class RayHPUExecutor(DistributedGPUExecutor):
     uses_ray: bool = True
 
     def _init_executor(self) -> None:
-        self.forward_dag: Optional[ray.dag.CompiledDAG] = None
+        self.forward_dag: Optional["ray.dag.CompiledDAG"] = None
         # If the env var is set, it uses the Ray's compiled DAG API
         # which optimizes the control plane overhead.
         # Run vLLM with VLLM_USE_RAY_COMPILED_DAG=1 to enable it.
