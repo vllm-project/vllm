@@ -2,7 +2,7 @@ vLLM Paged Attention
 ====================
 
 -  Currently, vLLM utilizes its own implementation of a multi-head query
-   attention kernel (``csrc/attention/attention_kernels.cu``). 
+   attention kernel (``csrc/attention/paged_attention_v1/2.cu``). 
    This kernel is designed to be compatible with
    vLLM's paged KV caches, where the key and value cache are stored in
    separate blocks (note that this block concept differs from the GPU
