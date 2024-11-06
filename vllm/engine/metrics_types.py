@@ -77,7 +77,7 @@ class StatLoggerBase(ABC):
         self.num_generation_tokens: List[int] = []
         self.last_local_log = time.time()
         self.local_interval = local_interval
-        self.spec_decode_metrics: Optional["SpecDecodeWorkerMetrics"] = None
+        self.spec_decode_metrics: Optional[SpecDecodeWorkerMetrics] = None
 
     @abstractmethod
     def log(self, stats: Stats) -> None:

@@ -1,4 +1,3 @@
-# coding=utf-8
 # Adapted from llama.py
 """Inference-only Phi3 model code inherit from Llama.py"""
 

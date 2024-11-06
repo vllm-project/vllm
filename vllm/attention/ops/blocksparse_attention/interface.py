@@ -192,10 +192,8 @@ class LocalStridedBlockSparseAttn(torch.nn.Module):
         attn_mask = self.dense_attn_mask[None, :, :maxlen, :maxlen]
 
         q2 = self.transpose_and_pad(q, cu_seqlens, maxlen, 1)
-        k2, v2 = [
-            self.transpose_and_pad(x, cu_seqlens, maxlen, q_k_ratio)
-            for x in [k, v]
-        ]
+        k2, v2 = (self.transpose_and_pad(x, cu_seqlens, maxlen, q_k_ratio)
+                  for x in [k, v])
         spda_output = torch.nn.functional.scaled_dot_product_attention(
             q2, k2, v2, attn_mask=attn_mask, scale=sm_scale)
         return self.transpose_and_unpad(spda_output, cu_seqlens)

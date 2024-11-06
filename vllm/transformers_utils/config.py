@@ -308,7 +308,7 @@ def load_params_config(model, revision) -> PretrainedConfig:
         config_path = Path(
             hf_hub_download(model, config_file_name, revision=revision))
 
-    with open(config_path, "r") as file:
+    with open(config_path) as file:
         config_dict = json.load(file)
 
     config_mapping = {

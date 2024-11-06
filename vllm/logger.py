@@ -67,8 +67,7 @@ def _configure_vllm_root_logger() -> None:
             raise RuntimeError(
                 "Could not load logging config. File does not exist: %s",
                 VLLM_LOGGING_CONFIG_PATH)
-        with open(VLLM_LOGGING_CONFIG_PATH, encoding="utf-8",
-                  mode="r") as file:
+        with open(VLLM_LOGGING_CONFIG_PATH, encoding="utf-8") as file:
             custom_config = json.loads(file.read())
 
         if not isinstance(custom_config, dict):

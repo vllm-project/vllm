@@ -269,10 +269,10 @@ def run_square_bench(args):
 
 
 def run_range_bench(args):
-    m_start, k_start, n_start = [int(x) for x in args.dim_start.split(",")]
-    m_end, k_end, n_end = [int(x) for x in args.dim_end.split(",")]
+    m_start, k_start, n_start = (int(x) for x in args.dim_start.split(","))
+    m_end, k_end, n_end = (int(x) for x in args.dim_end.split(","))
     m_increment, k_increment, n_increment = \
-        [int(x) for x in args.dim_increment.split(",")]
+        (int(x) for x in args.dim_increment.split(","))
     Ms = list(range(m_start, m_end + 1, m_increment))
     Ks = list(range(k_start, k_end + 1, k_increment))
     Ns = list(range(n_start, n_end + 1, n_increment))

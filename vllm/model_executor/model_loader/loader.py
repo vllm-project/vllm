@@ -746,7 +746,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
         config_file_path = self._get_config_file(qlora_adapter)
 
-        with open(config_file_path, "r") as f:
+        with open(config_file_path) as f:
             config = json.load(f)
             self.target_modules = config["target_modules"]
 

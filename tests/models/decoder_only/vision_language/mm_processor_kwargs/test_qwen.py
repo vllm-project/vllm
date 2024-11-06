@@ -104,7 +104,7 @@ def test_input_mapper_valid_mm_data(input_mapper_for_qwen,
 # Sad path tests for the multimodal input processor and mapper, respectively
 @pytest.mark.parametrize("mm_data", [
     {
-        "image": torch.rand((5))
+        "image": torch.rand(5)
     },
     {
         "image": torch.rand((5, 5, 5, 5, 5))

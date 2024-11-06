@@ -1,4 +1,3 @@
-# coding=utf-8
 """PyTorch MAMBA model."""
 from typing import Iterable, List, Optional, Tuple
 

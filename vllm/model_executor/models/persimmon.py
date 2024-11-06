@@ -1,4 +1,3 @@
-# coding=utf-8
 # adapted from https://github.com/huggingface/transformers/blob/v4.39.3/src/transformers/models/persimmon/modeling_persimmon.py
 # Copyright 2023 The vLLM team.
 # Copyright 2023 EleutherAI and the HuggingFace Inc. team. All rights reserved.
