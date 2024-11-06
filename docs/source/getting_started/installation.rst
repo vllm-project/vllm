@@ -10,7 +10,7 @@ Requirements
 ============
 
 * OS: Linux
-* Python: 3.8 - 3.12
+* Python: 3.9 -- 3.12
 * GPU: compute capability 7.0 or higher (e.g., V100, T4, RTX20xx, A100, L4, H100, etc.)
 
 Install released versions
@@ -148,7 +148,7 @@ If you want to modify C++ or CUDA code, you'll need to build vLLM from source. T
 .. tip::
 
     Building from source requires a lot of compilation. If you are building from source repeatedly, it's more efficient to cache the compilation results.
-    For example, you can install `ccache <https://github.com/ccache/ccache>`_ using ``conda install ccache`` or ``apt install ccache`` . 
+    For example, you can install `ccache <https://github.com/ccache/ccache>`_ using ``conda install ccache`` or ``apt install ccache`` .
     As long as ``which ccache`` command can find the ``ccache`` binary, it will be used automatically by the build system. After the first build, subsequent builds will be much faster.
 
 
@@ -181,8 +181,8 @@ to be run simultaneously, via the environment variable ``MAX_JOBS``. For example
     $ export MAX_JOBS=6
     $ pip install -e .
 
-This is especially useful when you are building on less powerful machines. For example, when you use WSL it only `assigns 50% of the total memory by default <https://learn.microsoft.com/en-us/windows/wsl/wsl-config#main-wsl-settings>`_, so using ``export MAX_JOBS=1`` can avoid compiling multiple files simultaneously and running out of memory. 
-A side effect is a much slower build process. 
+This is especially useful when you are building on less powerful machines. For example, when you use WSL it only `assigns 50% of the total memory by default <https://learn.microsoft.com/en-us/windows/wsl/wsl-config#main-wsl-settings>`_, so using ``export MAX_JOBS=1`` can avoid compiling multiple files simultaneously and running out of memory.
+A side effect is a much slower build process.
 
 Additionally, if you have trouble building vLLM, we recommend using the NVIDIA PyTorch Docker image.
 
@@ -209,7 +209,7 @@ Here is a sanity check to verify that the CUDA Toolkit is correctly installed:
 Unsupported OS build
 --------------------
 
-vLLM can fully run only on Linux but for development purposes, you can still build it on other systems (for example, macOS), allowing for imports and a more convenient development environment. The binaries will not be compiled and won't work on non-Linux systems. 
+vLLM can fully run only on Linux but for development purposes, you can still build it on other systems (for example, macOS), allowing for imports and a more convenient development environment. The binaries will not be compiled and won't work on non-Linux systems.
 
 Simply disable the ``VLLM_TARGET_DEVICE`` environment variable before installing:
 
