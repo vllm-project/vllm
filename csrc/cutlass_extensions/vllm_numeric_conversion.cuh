@@ -31,11 +31,14 @@ struct InterleavedNumericArrayConverter {
   static result_type convert(source_type const& source) {
     if (cute::elect_one_sync()) {
       if constexpr (std::is_same_v<IlvBlkLayout, void>) {
-        printf(" %s <= %s (N = %d, IlvBlkLayout = void)\n", nameof_v<T>,
-               nameof_v<S>, N);
+        printf(
+            "Convert %s <= %s (N = %d, IlvBlkLayout = void), not implemented\n",
+            nameof_v<T>, nameof_v<S>, N);
       } else {
-        printf(" %s <= %s (N = %d, size(IlvBlkLayout{}) = %d)\n", nameof_v<T>,
-               nameof_v<S>, N, size(IlvBlkLayout{}));
+        printf(
+            "Convert %s <= %s (N = %d, size(IlvBlkLayout{}) = %d), not "
+            "implemented\n",
+            nameof_v<T>, nameof_v<S>, N, size(IlvBlkLayout{}));
       }
       __brkpt();
     }

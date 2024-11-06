@@ -525,40 +525,42 @@ def generate():
 
     impl_configs = []
 
-    GPTQ_kernel_types = list((TypeConfig(
-        a=a,
-        b=b,
-        b_group_scale=a,
-        b_group_zeropoint=DataType.void,
-        b_channel_scale=DataType.void,
-        b_token_scale=DataType.void,
-        out=a,
-        accumulator=DataType.f32,
-    ) for b in (VLLMDataType.u4b8, VLLMDataType.u8b128)
-                              for a in (DataType.f16, DataType.bf16)))
+    GPTQ_kernel_type_configs = list(
+        TypeConfig(
+            a=a,
+            b=b,
+            b_group_scale=a,
+            b_group_zeropoint=DataType.void,
+            b_channel_scale=DataType.void,
+            b_token_scale=DataType.void,
+            out=a,
+            accumulator=DataType.f32,
+        ) for b in (VLLMDataType.u4b8, VLLMDataType.u8b128)
+        for a in (DataType.f16, DataType.bf16))
 
     impl_configs += [
         ImplConfig(x[0], x[1], x[2])
-        for x in zip(GPTQ_kernel_types,
+        for x in zip(GPTQ_kernel_type_configs,
                      itertools.repeat(get_unique_schedules(default_heuristic)),
                      itertools.repeat(default_heuristic))
     ]
 
-    AWQ_kernel_types = list((TypeConfig(
-        a=a,
-        b=b,
-        b_group_scale=a,
-        b_group_zeropoint=a,
-        b_channel_scale=DataType.void,
-        b_token_scale=DataType.void,
-        out=a,
-        accumulator=DataType.f32,
-    ) for b in (DataType.u4, DataType.u8)
-                             for a in (DataType.f16, DataType.bf16)))
+    AWQ_kernel_type_configs = list(
+        TypeConfig(
+            a=a,
+            b=b,
+            b_group_scale=a,
+            b_group_zeropoint=a,
+            b_channel_scale=DataType.void,
+            b_token_scale=DataType.void,
+            out=a,
+            accumulator=DataType.f32,
+        ) for b in (DataType.u4, DataType.u8)
+        for a in (DataType.f16, DataType.bf16))
 
     impl_configs += [
         ImplConfig(x[0], x[1], x[2])
-        for x in zip(AWQ_kernel_types,
+        for x in zip(AWQ_kernel_type_configs,
                      itertools.repeat(get_unique_schedules(default_heuristic)),
                      itertools.repeat(default_heuristic))
     ]
