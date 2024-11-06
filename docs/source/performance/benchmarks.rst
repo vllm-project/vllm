@@ -1,33 +1,23 @@
 .. _benchmarks:
 
-================
-Benchmark Suites
-================
+Benchmark suites of vLLM
+========================
+
+
 
 vLLM contains two sets of benchmarks:
 
-+ :ref:`Performance benchmarks <performance_benchmarks>`
-+ :ref:`Nightly benchmarks <nightly_benchmarks>`
++ **Performance benchmarks**: benchmark vLLM's performance under various workloads at a high frequency (when a pull request (PR for short) of vLLM is being merged). See `vLLM performance dashboard <https://perf.vllm.ai>`_ for the latest performance results.
+
++ **Nightly benchmarks**: compare vLLM's performance against alternatives (tgi, trt-llm, and lmdeploy) when there are major updates of vLLM (e.g., bumping up to a new version). The latest results are available in the `vLLM GitHub README <https://github.com/vllm-project/vllm/blob/main/README.md>`_.
 
 
-.. _performance_benchmarks:
+Trigger a benchmark
+-------------------
 
-Performance Benchmarks
-----------------------
+The performance benchmarks and nightly benchmarks can be triggered by submitting a PR to vLLM, and label the PR with `perf-benchmarks` and `nightly-benchmarks`.
 
-The performance benchmarks are used for development to confirm whether new changes improve performance under various workloads. They are triggered on every commit with both the ``perf-benchmarks`` and ``ready`` labels, and when a PR is merged into vLLM.
 
-The latest performance results are hosted on the public `vLLM Performance Dashboard <https://perf.vllm.ai>`_.
+.. note::
 
-More information on the performance benchmarks and their parameters can be found `here <https://github.com/vllm-project/vllm/blob/main/.buildkite/nightly-benchmarks/performance-benchmarks-descriptions.md>`__.
-
-.. _nightly_benchmarks:
-
-Nightly Benchmarks
-------------------
-
-These compare vLLM's performance against alternatives (``tgi``, ``trt-llm``, and ``lmdeploy``) when there are major updates of vLLM (e.g., bumping up to a new version). They are primarily intended for consumers to evaluate when to choose vLLM over other options and are triggered on every commit with both the ``perf-benchmarks`` and ``nightly-benchmarks`` labels. 
-
-The latest nightly benchmark results are shared in major release blog posts such as `vLLM v0.6.0 <https://blog.vllm.ai/2024/09/05/perf-update.html>`_.
-
-More information on the nightly benchmarks and their parameters can be found `here <https://github.com/vllm-project/vllm/blob/main/.buildkite/nightly-benchmarks/nightly-descriptions.md>`__.
+   Please refer to `vLLM performance benchmark descriptions <https://github.com/vllm-project/vllm/blob/main/.buildkite/nightly-benchmarks/performance-benchmarks-descriptions.md>`_ and `vLLM nightly benchmark descriptions <https://github.com/vllm-project/vllm/blob/main/.buildkite/nightly-benchmarks/nightly-descriptions.md>`_ for detailed descriptions on benchmark environment, workload and metrics.
