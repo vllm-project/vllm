@@ -67,8 +67,7 @@ class Singleton(type):
 
     def __call__(cls, *args, **kwargs):
         if cls not in cls._instances:
-            cls._instances[cls] = super(Singleton,
-                                        cls).__call__(*args, **kwargs)
+            cls._instances[cls] = super().__call__(*args, **kwargs)
         return cls._instances[cls]
 
 
@@ -273,7 +272,7 @@ def precompute_indices_and_offsets(block_size, slot_mapping, is_prompt):
     return indices, offsets
 
 
-class HpuModelAdapter():
+class HpuModelAdapter:
 
     def __init__(self, model, block_size, dtype, enforce_eager):
         self.model = model
@@ -1643,7 +1642,7 @@ def _maybe_wrap_in_hpu_graph(*args, **kwargs):
     ) if htorch.utils.internal.is_lazy() else HpuModelAdapter(*args, **kwargs)
 
 
-class HabanaProfilerCounterHelper():
+class HabanaProfilerCounterHelper:
 
     def __init__(self):
         self.niter = 0
