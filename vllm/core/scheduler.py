@@ -334,7 +334,9 @@ class Scheduler:
             num_gpu_blocks=num_gpu_blocks,
             num_cpu_blocks=num_cpu_blocks,
             sliding_window=self.cache_config.sliding_window,
-            enable_caching=self.cache_config.enable_prefix_caching)
+            enable_caching=self.cache_config.enable_prefix_caching,
+            enable_host_memory_caching=self.cache_config.enable_host_memory_caching
+        )
 
         # Sequence groups in the WAITING state.
         # Contain new prefill or preempted requests.
@@ -1223,6 +1225,12 @@ class Scheduler:
             common_computed_block_nums = []
 
         allow_async_output_proc: bool = self.use_async_output_proc
+
+        if len(scheduler_outputs.scheduled_seq_groups) != 0:
+            blocks_to_swap_out, blocks_to_swap_in = \
+                self.block_manager.get_and_reset_swaps()
+            scheduler_outputs.blocks_to_swap_out.extend(blocks_to_swap_out)
+            scheduler_outputs.blocks_to_swap_in.extend(blocks_to_swap_in)
 
         # Create input data structures.
         seq_group_metadata_list: List[SequenceGroupMetadata] = []

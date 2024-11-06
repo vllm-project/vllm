@@ -329,6 +329,12 @@ class NaiveBlockAllocator(BlockAllocator):
     def get_prefix_cache_hit_rate(self) -> float:
         return -1
 
+    def get_block_ref_count(self, block: Block) -> int:
+        return self._refcounter.get(block.block_id)
+
+    def get_block_last_access_time(self, block: Block) -> float:
+        return -1
+
 
 class NaiveBlock(Block):
     """An implementation of the Block class that does not support prefix

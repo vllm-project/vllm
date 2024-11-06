@@ -189,6 +189,16 @@ class BlockAllocator(ABC):
         """Prefix cache hit rate. -1 means not supported or disabled."""
         pass
 
+    @abstractmethod
+    def get_block_ref_count(self, block: Block) -> int:
+        '''Get reference count of block.'''
+        pass
+
+    @abstractmethod
+    def get_block_last_access_time(self, block: Block) -> float:
+        '''Get last access time of block.'''
+        pass
+
     class NoFreeBlocksError(ValueError):
         pass
 

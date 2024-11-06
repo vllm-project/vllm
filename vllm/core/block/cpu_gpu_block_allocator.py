@@ -26,6 +26,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         num_gpu_blocks: int,
         num_cpu_blocks: int,
         block_size: int,
+        enable_host_memory_caching: bool
     ) -> DeviceAwareBlockAllocator:
         """Creates a CpuGpuBlockAllocator instance with the specified
         configuration.
@@ -61,6 +62,9 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         gpu_block_ids = block_ids[:num_gpu_blocks]
         cpu_block_ids = block_ids[num_gpu_blocks:]
 
+        if enable_host_memory_caching:
+            assert allocator_type == "prefix_caching"
+
         if allocator_type == "naive":
             gpu_allocator: BlockAllocator = NaiveBlockAllocator(
                 create_block=NaiveBlock,  # type: ignore
@@ -93,10 +97,12 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         return CpuGpuBlockAllocator(
             cpu_block_allocator=cpu_allocator,
             gpu_block_allocator=gpu_allocator,
+            enable_host_memory_caching=enable_host_memory_caching
         )
 
     def __init__(self, cpu_block_allocator: BlockAllocator,
-                 gpu_block_allocator: BlockAllocator):
+                 gpu_block_allocator: BlockAllocator,
+                 enable_host_memory_caching: bool):
         assert not (
             cpu_block_allocator.all_block_ids
             & gpu_block_allocator.all_block_ids
@@ -108,6 +114,9 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         }
 
         self._swap_mapping: Dict[int, int] = {}
+        self._enable_host_memory_caching = enable_host_memory_caching
+        self._swap_mapping_cpu_to_gpu: Dict[int, int] = {}
+        self._swap_mapping_gpu_to_cpu: Dict[int, int] = {}
         self._null_block: Optional[Block] = None
 
         self._block_ids_to_allocator: Dict[int, BlockAllocator] = {}
@@ -152,8 +161,15 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
             List[Block]: The newly allocated list of immutable blocks 
                 containing the provided block token IDs.
         """
-        return self._allocators[device].allocate_immutable_blocks(
-            prev_block, block_token_ids)
+        # Swap from CPU to GPU if block hit CPU cache.
+        allow_swap = self._enable_host_memory_caching and device == Device.GPU
+        current_swap_mapping: Dict[int, int] = {}
+        blocks = self._allocators[device].allocate_immutable_blocks(
+            prev_block, block_token_ids,
+            allow_swap, self._allocators[Device.CPU],
+            current_swap_mapping)
+        self._swap_mapping_cpu_to_gpu.update(current_swap_mapping)
+        return blocks
 
     def allocate_immutable_block(self, prev_block: Optional[Block],
                                  token_ids: List[int],
@@ -186,7 +202,28 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
             return
         block_id = block.block_id
         assert block_id is not None
+        # Swap blocks from GPU to CPU evictor.
+        allow_swap = self._enable_host_memory_caching and \
+            block_id in self._allocators[Device.GPU].all_block_ids
         allocator = self._block_ids_to_allocator[block_id]
+        if allow_swap and block.content_hash is not None:
+            dual_allocator = self._allocators[Device.CPU]
+            ref_count = allocator.get_block_ref_count(block)
+            if allocator.is_block_cached(block) and ref_count == 1:
+                # In this case, the GPU block will be added to GPU evictor,
+                # we add it to CPU evictor as well.
+                need_swap = not dual_allocator.is_block_cached(block)
+                last_access_time = allocator.get_block_last_access_time(block)
+                # Allocate and free, to update block state in CPU evictor.
+                dual_block = dual_allocator.allocate_immutable_block(
+                    block.prev_block, block.token_ids)
+                dual_allocator.mark_blocks_as_accessed(
+                    [dual_block.block_id], last_access_time)
+                # If block not exists in CPU allocator, swap is needed.
+                if need_swap:
+                    self._swap_mapping_gpu_to_cpu[block.block_id] = \
+                        dual_block.block_id
+                dual_allocator.free(dual_block)
         allocator.free(block)
 
     def fork(self, last_block: Block) -> List[Block]:
@@ -330,7 +367,8 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         assert device in self._allocators
         return self._allocators[device].get_prefix_cache_hit_rate()
 
-    def get_and_reset_swaps(self) -> List[Tuple[int, int]]:
+    def get_and_reset_swaps(self
+        ) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int]]]:
         """Returns and clears the mapping of source to destination block IDs.
         Will be called after every swapping operations for now, and after every
         schedule when BlockManagerV2 become default. Currently not useful.
@@ -338,10 +376,26 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         Returns:
             List[Tuple[int, int]]: A mapping of source to destination block IDs.
         """
-        mapping = self._swap_mapping.copy()
-        self._swap_mapping.clear()
-        return list(mapping.items())
+        # mapping = self._swap_mapping.copy()
+        # self._swap_mapping.clear()
 
+        self._swap_mapping.clear()
+        mapping_gpu_to_cpu = {
+            self.get_physical_block_id(Device.GPU, gpu_block_id):
+            self.get_physical_block_id(Device.CPU, cpu_block_id)
+            for gpu_block_id, cpu_block_id in \
+                self._swap_mapping_gpu_to_cpu.items()
+        }
+        mapping_cpu_to_gpu = {
+            self.get_physical_block_id(Device.CPU, cpu_block_id):
+            self.get_physical_block_id(Device.GPU, gpu_block_id)
+            for cpu_block_id, gpu_block_id in \
+                self._swap_mapping_cpu_to_gpu.items()
+        }
+        self._swap_mapping_gpu_to_cpu.clear()
+        self._swap_mapping_cpu_to_gpu.clear()
+        return list(mapping_gpu_to_cpu.items()), \
+            list(mapping_cpu_to_gpu.items())
 
 class NullBlock(Block):
     """
