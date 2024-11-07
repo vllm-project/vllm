@@ -1089,7 +1089,7 @@ class SchedulerConfig:
                  multi_step_stream_outputs: bool = False,
                  send_delta_data: bool = False,
                  policy: str = "fcfs",
-                 use_padding_aware_scheduling : bool = False,
+                 use_padding_aware_scheduling: bool = False,
                  max_num_prefill_seqs: Optional[int] = None,
                  padding_method: Optional[str] = None) -> None:
         if max_num_batched_tokens is None:
