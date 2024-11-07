@@ -702,7 +702,10 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             execute_model_req.seq_group_metadata_list, proposals.proposal_lens)
         # With prefill chunking enabled, `non_spec_seqs` contains prefills too:
         # discard decodes that have already been processed by proposer.
-        non_spec_indices = [idx for idx in non_spec_indices if execute_model_req.seq_group_metadata_list[idx].is_prompt]
+        non_spec_indices = [
+            idx for idx in non_spec_indices
+            if execute_model_req.seq_group_metadata_list[idx].is_prompt
+        ]
         if len(non_spec_indices):
             all_hidden_states = proposal_scores.hidden_states
             # TODO fix `return_hidden_states`, same as in `_run_no_spec`
