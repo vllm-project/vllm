@@ -12,7 +12,7 @@ import torch.distributed
 from vllm_hpu_extension.profiler import HabanaMemoryProfiler, format_bytes
 
 import vllm.envs as envs
-from vllm.config import ParallelConfig, VllmConfig
+from vllm.config import ParallelConfig, SpeculativeConfig, VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.logger import init_logger
@@ -45,6 +45,7 @@ class HPUWorker(LocalOrDistributedWorkerBase):
         rank: int,
         distributed_init_method: str,
         is_driver_worker: bool = False,
+        speculative_config: Optional[SpeculativeConfig] = None,
         model_runner_cls: Optional[Type[ModelRunnerBase]] = None,
     ) -> None:
         WorkerBase.__init__(self, vllm_config=vllm_config)

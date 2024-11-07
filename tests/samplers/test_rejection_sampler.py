@@ -84,7 +84,7 @@ def test_correct_output_format(which_tokens_accepted: str, seed: int,
                                     dtype=torch.int64)
 
     rejection_sampler = RejectionSampler(use_flashinfer=use_flashinfer)
-    rejection_sampler.init_gpu_tensors(device=device)
+    rejection_sampler.init_tensors(device=device)
     output_token_ids = rejection_sampler._create_output(  # pylint: disable=protected-access
         accepted,
         recovered_token_ids,
@@ -133,7 +133,7 @@ def test_no_crash_with_varying_dims(k: int, vocab_size: int, batch_size: int,
                                     device: str, use_flashinfer: bool):
     torch.set_default_device(device)
     rejection_sampler = RejectionSampler(use_flashinfer=use_flashinfer)
-    rejection_sampler.init_gpu_tensors(device=device)
+    rejection_sampler.init_tensors(device=device)
 
     draft_probs = torch.rand(batch_size, k, vocab_size, dtype=torch.float32)
     target_probs = torch.rand(batch_size,
@@ -166,7 +166,7 @@ def test_deterministic_when_seeded(k: int, vocab_size: int, batch_size: int,
                                    use_flashinfer: bool):
     torch.set_default_device(device)
     rejection_sampler = RejectionSampler(use_flashinfer=use_flashinfer)
-    rejection_sampler.init_gpu_tensors(device=device)
+    rejection_sampler.init_tensors(device=device)
 
     draft_probs = torch.rand(batch_size, k, vocab_size, dtype=torch.float32)
     target_probs = torch.rand(batch_size,
@@ -239,7 +239,7 @@ def test_compare_nonflashinfer_backend(k: int, vocab_size: int,
 
     for use_flashinfer in [True, False]:
         rejection_sampler = RejectionSampler(use_flashinfer=use_flashinfer)
-        rejection_sampler.init_gpu_tensors(device=device)
+        rejection_sampler.init_tensors(device=device)
         # We use seeded sequences to ensure the same tokens are accepted
         # for both flashinfer and nonflashinfer backends.
         seeded_seqs = get_seeded_seqs()
@@ -270,7 +270,7 @@ def test_raises_when_vocab_oob(above_or_below_vocab_range: str,
 
     rejection_sampler = RejectionSampler(use_flashinfer=use_flashinfer,
                                          strict_mode=True)
-    rejection_sampler.init_gpu_tensors(device=device)
+    rejection_sampler.init_tensors(device=device)
 
     draft_probs = torch.rand(batch_size, k, vocab_size, dtype=torch.float32)
     target_probs = torch.rand(batch_size,
@@ -401,7 +401,7 @@ class _CorrectnessTestHelper:
         self.vocab_size = vocab_size
         self.vocab_range = (0, vocab_size)
 
-        self.rejection_sampler.init_gpu_tensors(device=0)
+        self.rejection_sampler.init_tensors(device=0)
 
         # Keep test simple, use k=1
         self.k = 1

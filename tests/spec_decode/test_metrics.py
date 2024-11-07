@@ -20,7 +20,7 @@ def test_initial_call_returns_none():
     spec_decode_sampler.num_draft_tokens = 0
 
     collector = AsyncMetricsCollector(spec_decode_sampler)
-    collector.init_gpu_tensors(rank=0)
+    collector.init_tensors(rank=0)
     maybe_metrics = collector.maybe_collect_rejsample_metrics(k=5)
     assert maybe_metrics is None
 
@@ -46,7 +46,7 @@ def test_second_call_returns_metrics():
     collector = AsyncMetricsCollector(spec_decode_sampler=spec_decode_sampler,
                                       timer=timer,
                                       collect_interval_s=collect_interval_s)
-    collector.init_gpu_tensors(rank=0)
+    collector.init_tensors(rank=0)
     _ = collector.maybe_collect_rejsample_metrics(k=5)
     metrics = collector.maybe_collect_rejsample_metrics(k=5)
     assert metrics is not None
@@ -66,7 +66,7 @@ def test_nonzero_rank_noop(rank):
     spec_decode_sampler.num_draft_tokens = 0
 
     collector = AsyncMetricsCollector(spec_decode_sampler)
-    collector.init_gpu_tensors(rank=rank)
+    collector.init_tensors(rank=rank)
     _ = collector.maybe_collect_rejsample_metrics(k=5)
     metrics = collector.maybe_collect_rejsample_metrics(k=5)
     assert metrics is None
@@ -94,7 +94,7 @@ def test_noop_until_time():
     collector = AsyncMetricsCollector(spec_decode_sampler=spec_decode_sampler,
                                       timer=timer,
                                       collect_interval_s=collect_interval_s)
-    collector.init_gpu_tensors(rank=0)
+    collector.init_tensors(rank=0)
 
     _ = collector.maybe_collect_rejsample_metrics(k=5)
     metrics = collector.maybe_collect_rejsample_metrics(k=5)
@@ -133,7 +133,7 @@ def test_timer_is_reset():
     collector = AsyncMetricsCollector(spec_decode_sampler=spec_decode_sampler,
                                       timer=timer,
                                       collect_interval_s=collect_interval_s)
-    collector.init_gpu_tensors(rank=0)
+    collector.init_tensors(rank=0)
 
     _ = collector.maybe_collect_rejsample_metrics(k=5)
     metrics = collector.maybe_collect_rejsample_metrics(k=5)
@@ -183,7 +183,7 @@ def test_initial_metrics_has_correct_values(has_data: bool):
     collector = AsyncMetricsCollector(spec_decode_sampler=spec_decode_sampler,
                                       timer=timer,
                                       collect_interval_s=collect_interval_s)
-    collector.init_gpu_tensors(rank=0)
+    collector.init_tensors(rank=0)
     _ = collector.maybe_collect_rejsample_metrics(k)
     metrics = collector.maybe_collect_rejsample_metrics(k)
 

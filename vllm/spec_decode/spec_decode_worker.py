@@ -36,6 +36,7 @@ from vllm.spec_decode.util import (Timer, create_logprobs_output,
                                    get_all_num_logprobs,
                                    get_sampled_token_logprobs, nvtx_range,
                                    split_batch_by_proposal_len)
+from vllm.worker.selector import init_worker
 from vllm.worker.worker import Worker
 from vllm.worker.worker_base import LoraNotSupportedWorkerBase, WorkerBase
 
@@ -53,7 +54,7 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
     draft_worker_kwargs = kwargs.copy()
 
     kwargs["model_runner_cls"] = TargetModelRunner
-    target_worker = Worker(*args, **kwargs)
+    target_worker = init_worker(*args, **kwargs)
     # Set the disable_logprobs variable in the TargetModelRunner instance
     # as per its value specified in the SpeculativeConfig.
     target_worker.model_runner.disable_logprobs =\
@@ -306,8 +307,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         self.scorer_worker.load_model()
         self.proposer_worker.load_model()
 
-        self._metrics.init_gpu_tensors(self.rank)
-        self.spec_decode_sampler.init_gpu_tensors(self.rank)
+        self._metrics.init_tensors(self.rank, device=self.device)
+        self.spec_decode_sampler.init_tensors(device=self.device)
 
         scorer_cls: Type[SpeculativeScorer]
         if self.disable_mqa_scorer:

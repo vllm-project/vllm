@@ -5,6 +5,7 @@ from typing import Dict, List, Set, Tuple
 import torch
 
 from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.platforms import current_platform
 from vllm.sequence import (ExecuteModelRequest, HiddenStates, SequenceData,
                            SequenceGroupMetadata)
 from vllm.spec_decode.draft_model_runner import TP1DraftModelRunner
@@ -12,10 +13,24 @@ from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeProposer)
 from vllm.spec_decode.proposer_worker_base import ProposerWorkerBase
 from vllm.spec_decode.top1_proposer import Top1Proposer
-from vllm.worker.worker import Worker
+
+if current_platform.is_neuron():
+    from vllm.worker.neuron_worker import NeuronWorker as WorkerBaseCls
+elif current_platform.is_hpu():
+    from vllm.worker.hpu_worker import HPUWorker as WorkerBaseCls
+elif current_platform.is_openvino:
+    from vllm.worker.openvino_worker import OpenVINOWorker as WorkerBaseCls
+elif current_platform.is_cpu():
+    from vllm.worker.cpu_worker import CPUWorker as WorkerBaseCls
+elif current_platform.is_tpu():
+    from vllm.worker.tpu_worker import TPUWorker as WorkerBaseCls
+elif current_platform.is_xpu():
+    from vllm.worker.xpu_worker import XPUWorker as WorkerBaseCls
+else:
+    from vllm.worker.worker import Worker as WorkerBaseCls
 
 
-class MultiStepWorker(Worker, ProposerWorkerBase):
+class MultiStepWorker(WorkerBaseCls, ProposerWorkerBase):
     """The MultiStepWorker is equivalent to a Worker except that it allows
     multiple forward passes in a single call, assuming the scheduler has
     allocated enough space to store the additional KV. This reduces overhead
