@@ -27,23 +27,6 @@ def generate_default_output_filename():
     return f"output_trace_{timestamp}.json.gz"
 
 
-def parse_timestamp(timestamp):
-    """Parse a timestamp string in either of the specified formats."""
-    formats = [
-        "%Y-%m-%d %H:%M:%S.%f",  # With microseconds
-        "%Y-%m-%d %H:%M:%S"  # Without microseconds
-    ]
-
-    for fmt in formats:
-        try:
-            # Convert to microseconds
-            return int(datetime.strptime(timestamp, fmt).timestamp() * 1000000)
-        except ValueError:
-            continue  # Try the next format if parsing fails
-
-    raise ValueError(f"Timestamp '{timestamp}' does not match expected format.")
-
-
 def process_trace_file(file_path):
     """Process a single trace file and return a list of events in Chrome Trace
     Event format."""
@@ -67,7 +50,8 @@ def process_trace_file(file_path):
                 try:
                     date_, time_, call_info = line.split(" ", 2)
                     timestamp = f"{date_} {time_}"
-                    ts = parse_timestamp(timestamp)
+                    fmt = "%Y-%m-%d %H:%M:%S.%f"
+                    ts = int(datetime.strptime(timestamp, fmt).timestamp() * 1000000)
 
                     # Create an event entry
                     type, _, func_name, _, pos, _ = call_info.split(" ", 5)

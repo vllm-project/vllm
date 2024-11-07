@@ -1,7 +1,7 @@
 Function Tracing
 =================================
 
-You can enable tracing vLLM python function calls for debugging and performance tuning by setting the environment variable ``VLLM_TRACE_FUNCTION=1``.
+You can enable tracing vLLM python function calls for debugging by setting the environment variable ``VLLM_TRACE_FUNCTION=1``.
 
 After vLLM program exits, you will find the logs in /tmp directory with the name pattern like: ``VLLM_TRACE_FUNCTION_for_process_254159_thread_137882107995648_at_2024-10-19_16_55_44.973810.log``
 
