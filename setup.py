@@ -554,7 +554,8 @@ setup(
     ext_modules=ext_modules,
     extras_require={
         "tensorizer": ["tensorizer>=2.9.0"],
-        "audio": ["librosa", "soundfile"]  # Required for audio processing
+        "audio": ["librosa", "soundfile"],  # Required for audio processing
+        "video": ["decord"]  # Required for video processing
     },
     cmdclass={"build_ext": cmake_build_ext} if len(ext_modules) > 0 else {},
     package_data=package_data,
