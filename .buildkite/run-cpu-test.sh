@@ -25,8 +25,9 @@ docker exec cpu-test-avx2 bash -c "
 # Run basic model test
 docker exec cpu-test bash -c "
   set -e
-  pip install pytest pytest-asyncio matplotlib einops transformers_stream_generator datamodel_code_generator
-  pip install Pillow librosa
+  pip install pytest pytest-asyncio \
+    einops librosa peft Pillow sentence-transformers soundfile \
+    transformers_stream_generator matplotlib datamodel_code_generator
   pip install torchvision --index-url https://download.pytorch.org/whl/cpu
   pytest -v -s tests/models/embedding/language
   pytest -v -s tests/models/encoder_decoder/language
