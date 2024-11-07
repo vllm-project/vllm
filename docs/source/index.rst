@@ -130,12 +130,16 @@ Documentation
 
    performance/benchmarks
 
+.. Community: User community resources
+
 .. toctree::
    :maxdepth: 1
    :caption: Community
 
    community/meetups
    community/sponsors
+
+.. API Documentation: API reference aimed at vllm library usage
 
 .. toctree::
    :maxdepth: 2
@@ -145,8 +149,18 @@ Documentation
    dev/pooling_params
    dev/offline_inference/offline_index
    dev/engine/engine_index
-   dev/input_processing/model_inputs_index
-   dev/multimodal/multimodal_index
+
+.. Design: docs about vLLM internals
+
+.. toctree::
+   :maxdepth: 2
+   :caption: Design
+
+   design/input_processing/model_inputs_index
+   design/kernel/paged_attention
+   design/multimodal/multimodal_index
+
+.. Contributing: contributing to the vLLM project
 
 .. toctree::
    :maxdepth: 2
@@ -155,7 +169,6 @@ Documentation
    contributing/overview
    contributing/profiling/profiling_index
    contributing/dockerfile/dockerfile
-   contributing/kernel/paged_attention
 
 Indices and tables
 ==================
