@@ -12,7 +12,7 @@ check_gpus() {
     echo "Need at least 1 GPU to run benchmarking."
     exit 1
   fi
-  declare -g gpu_type=$(echo $(nvidia-smi --query-gpu=name --format=csv,noheader) | awk '{print $2}')
+  declare -g gpu_type="$(nvidia-smi --query-gpu=name --format=csv,noheader | awk '{print $2}')"
   echo "GPU type is $gpu_type"
 }
 
@@ -102,7 +102,7 @@ kill_gpu_processes() {
   pkill -f text-generation
   pkill -f lmdeploy
 
-  while [ $(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -n 1) -ge 1000 ]; do
+  while [ "$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -n 1)" -ge 1000 ]; do
     sleep 1
   done
 }
@@ -119,8 +119,8 @@ wait_for_server() {
 ensure_installed() {
   # Ensure that the given command is installed by apt-get
   local cmd=$1
-  if ! which $cmd >/dev/null; then
-    apt-get update && apt-get install -y $cmd
+  if ! which "$cmd" >/dev/null; then
+    apt-get update && apt-get install -y "$cmd"
   fi
 }
 
@@ -173,13 +173,11 @@ run_serving_tests() {
       echo "Reuse previous server for test case $test_name"
     else
       kill_gpu_processes
-      bash $VLLM_SOURCE_CODE_LOC/.buildkite/nightly-benchmarks/scripts/launch-server.sh \
+      bash "$VLLM_SOURCE_CODE_LOC/.buildkite/nightly-benchmarks/scripts/launch-server.sh" \
         "$server_params" "$common_params"
     fi
 
-    wait_for_server
-
-    if [ $? -eq 0 ]; then
+    if wait_for_server; then
       echo ""
       echo "$CURRENT_LLM_SERVING_ENGINE server is up and running."
     else
@@ -190,13 +188,13 @@ run_serving_tests() {
 
     # prepare tokenizer
     # this is required for lmdeploy.
-    cd $VLLM_SOURCE_CODE_LOC/benchmarks
+    cd "$VLLM_SOURCE_CODE_LOC/benchmarks"
     rm -rf /tokenizer_cache
     mkdir /tokenizer_cache
     python3 ../.buildkite/nightly-benchmarks/scripts/download-tokenizer.py \
       --model "$model" \
       --cachedir /tokenizer_cache
-    cd $VLLM_SOURCE_CODE_LOC/benchmarks
+    cd "$VLLM_SOURCE_CODE_LOC/benchmarks"
 
 
     # change model name for lmdeploy (it will not follow standard hf name)
@@ -307,11 +305,11 @@ run_serving_tests() {
 prepare_dataset() {
 
   # download sharegpt dataset
-  cd $VLLM_SOURCE_CODE_LOC/benchmarks
+  cd "$VLLM_SOURCE_CODE_LOC/benchmarks"
   wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
 
   # duplicate sonnet by 4x, to allow benchmarking with input length 2048
-  cd $VLLM_SOURCE_CODE_LOC/benchmarks
+  cd "$VLLM_SOURCE_CODE_LOC/benchmarks"
   echo "" > sonnet_4x.txt
   for _ in {1..4}
   do
@@ -339,17 +337,17 @@ main() {
 
   prepare_dataset
 
-  cd $VLLM_SOURCE_CODE_LOC/benchmarks
+  cd "$VLLM_SOURCE_CODE_LOC/benchmarks"
   declare -g RESULTS_FOLDER=results/
   mkdir -p $RESULTS_FOLDER
-  BENCHMARK_ROOT=$VLLM_SOURCE_CODE_LOC/.buildkite/nightly-benchmarks/
+  BENCHMARK_ROOT="$VLLM_SOURCE_CODE_LOC/.buildkite/nightly-benchmarks/"
 
   # run the test
-  run_serving_tests $BENCHMARK_ROOT/tests/nightly-tests.json
+  run_serving_tests "$BENCHMARK_ROOT/tests/nightly-tests.json"
 
   # upload benchmark results to buildkite
   python3 -m pip install tabulate pandas
-  python3 $BENCHMARK_ROOT/scripts/summary-nightly-results.py
+  python3 "$BENCHMARK_ROOT/scripts/summary-nightly-results.py"
   upload_to_buildkite
 
 }
