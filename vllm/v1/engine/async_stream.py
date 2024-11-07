@@ -11,8 +11,7 @@ class AsyncStream:
 
     STOP_ITERATION = Exception()  # Sentinel
 
-    def __init__(self, request_id: str,
-                 cancel: Callable[[str], Awaitable[None]]) -> None:
+    def __init__(self, request_id: str, cancel: Callable[[str], None]) -> None:
         self.request_id = request_id
         self._cancel = cancel
         self._queue: asyncio.Queue = asyncio.Queue()
@@ -32,24 +31,23 @@ class AsyncStream:
             self._queue.put_nowait(exception if self._is_raisable(exception)
                                    else AsyncStream.STOP_ITERATION)
 
-    @property
-    def finished(self) -> bool:
-        return self._finished
-
     async def generator(
         self
     ) -> AsyncGenerator[Union[RequestOutput, EmbeddingRequestOutput], None]:
+        finished = False
         try:
             while True:
                 result = await self._queue.get()
                 if self._is_raisable(result):
+                    finished = True
                     if result == AsyncStream.STOP_ITERATION:
                         return
                     raise result
                 yield result
-        except GeneratorExit:
-            self._cancel(self.request_id)
-            raise asyncio.CancelledError from None
+        finally:
+            self._finished = True
+            if not finished:
+                self._cancel(self.request_id)
 
     @staticmethod
     def _is_raisable(value: Any):
