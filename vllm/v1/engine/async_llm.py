@@ -139,8 +139,7 @@ class AsyncLLM(EngineClient):
             raise KeyError(f"Request {request_id} already exists.")
 
         # 1) Create a new AsyncStream for the request.
-        stream = self._add_request_to_streams(request_id,
-                                              verbose=self.log_requests)
+        stream = self._add_request_to_streams(request_id)
 
         # 2) Convert input --> DetokenizerRequest / EngineCoreRequest.
         detokenizer_req, engine_core_req = self.processor.process_inputs(
@@ -212,7 +211,6 @@ class AsyncLLM(EngineClient):
     def _add_request_to_streams(
         self,
         request_id: str,
-        verbose: bool = False,
     ) -> AsyncStream:
 
         if request_id in self.request_streams:
@@ -223,26 +221,26 @@ class AsyncLLM(EngineClient):
         stream = AsyncStream(request_id, aborted_reqs.append)
         self.request_streams[request_id] = stream
 
-        if verbose:
+        if self.log_requests:
             logger.info("Added request %s.", request_id)
 
         return stream
 
     async def _process_cancellations(self) -> None:
         """
-        Process requests cancelled from user user disconnecting.
+        Process requests cancelled from user disconnecting.
 
         When a client disconnects, AsyncStream._cancel() is called.
         We passed a callback to AsyncStream(), which appends to 
         self.client_aborted_requests.
 
-        As a result, if any requests are cancels from the user side
+        As a result, if any requests are canceled from the user side
         the request_id will show up in self.client_aborted_requests.
         """
 
         # Avoid streams having circular ref to parent AsyncLLM object.
         if not self.client_aborted_requests:
-            return []
+            return
         reqs_to_abort = self.client_aborted_requests.copy()
         self.client_aborted_requests.clear()
 
@@ -251,10 +249,11 @@ class AsyncLLM(EngineClient):
 
         # Remove from RequestStreams.
         for request_id in reqs_to_abort:
+            if self.log_requests:
+                logger.info("User-cancelled request %s.", request_id)
             self._finish_stream(request_id)
 
         # Remove from EngineCore.
-        print(f"{reqs_to_abort=}")
         await self.engine_core.abort_requests_async(reqs_to_abort)
 
     def _process_request_outputs(self, request_outputs: List[RequestOutput]):
@@ -271,6 +270,8 @@ class AsyncLLM(EngineClient):
 
                 # If finished, remove from the tracker.
                 if request_output.finished:
+                    if self.log_requests:
+                        logger.info("Finished request %s.", request_id)
                     self._finish_stream(request_id)
 
     async def _run_output_handler(self):
