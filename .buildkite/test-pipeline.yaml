@@ -120,6 +120,7 @@ steps:
   - tests/spec_decode/e2e/test_integration_dist_tp4
   - tests/compile
   commands:
+  - pytest -v -s distributed/test_utils.py
   - pytest -v -s compile/test_basic_correctness.py
   - pytest -v -s distributed/test_pynccl.py
   - pytest -v -s spec_decode/e2e/test_integration_dist_tp4.py
@@ -431,7 +432,6 @@ steps:
   - pip install -e ./plugins/vllm_add_dummy_model
   - pytest -v -s distributed/test_distributed_oot.py
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s test_sharded_state_loader.py
-  - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s distributed/test_utils.py
 
 - label: Multi-step Tests (4 GPUs) # 36min
   working_dir: "/vllm-workspace/tests"
