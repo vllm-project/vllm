@@ -1,4 +1,3 @@
-# coding=utf-8
 # adapted from https://github.com/huggingface/transformers/blob/v4.39.3/src/transformers/models/persimmon/modeling_persimmon.py
 # Copyright 2023 The vLLM team.
 # Copyright 2023 EleutherAI and the HuggingFace Inc. team. All rights reserved.
@@ -27,6 +26,7 @@ from torch import nn
 from transformers import PersimmonConfig
 
 from vllm.attention import Attention, AttentionMetadata
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
@@ -36,7 +36,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -60,7 +60,7 @@ class PersimmonMLP(nn.Module):
         self.dense_4h_to_h = RowParallelLinear(config.intermediate_size,
                                                config.hidden_size,
                                                quant_config=quant_config)
-        self.act = get_act_fn(config.hidden_act, quant_config)
+        self.act = get_act_fn(config.hidden_act)
 
     def forward(self, hidden_states) -> torch.Tensor:
         hidden_states, _ = self.dense_h_to_4h(hidden_states)
@@ -209,6 +209,7 @@ class PersimmonDecoderLayer(nn.Module):
         return outputs
 
 
+@support_torch_compile
 class PersimmonModel(nn.Module):
 
     def __init__(self,
@@ -278,7 +279,7 @@ class PersimmonForCausalLM(nn.Module, SupportsPP):
                                       config.hidden_size,
                                       bias=False)
         self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.sampler = Sampler()
+        self.sampler = get_sampler()
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 

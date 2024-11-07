@@ -24,6 +24,7 @@ def test_clip_image_processor(image_assets, mm_registry, dtype, size_factor):
 
     model_config = ModelConfig(
         model=MODEL_NAME,
+        task="auto",
         tokenizer=MODEL_NAME,
         tokenizer_mode="auto",
         trust_remote_code=False,
@@ -67,6 +68,7 @@ def test_llava_next_image_processor(image_assets, mm_registry, dtype,
 
     model_config = ModelConfig(
         model=MODEL_NAME,
+        task="auto",
         tokenizer=MODEL_NAME,
         tokenizer_mode="auto",
         trust_remote_code=False,
@@ -109,6 +111,7 @@ def test_mm_limits(image_assets, mm_registry, num_images, limit, is_valid):
 
     model_config = ModelConfig(
         model=MODEL_NAME,
+        task="auto",
         tokenizer=MODEL_NAME,
         tokenizer_mode="auto",
         trust_remote_code=False,
@@ -139,6 +142,7 @@ def test_image_mapper_multi(image_assets, mm_registry, num_images):
 
     model_config = ModelConfig(
         model=MODEL_NAME,
+        task="auto",
         tokenizer=MODEL_NAME,
         tokenizer_mode="auto",
         trust_remote_code=False,

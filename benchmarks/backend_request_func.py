@@ -79,7 +79,7 @@ async def async_request_tgi(
                         # any data, we should skip it.
                         if chunk_bytes.startswith(":"):
                             continue
-                        chunk = remove_prefix(chunk_bytes, "data:")
+                        chunk = chunk_bytes.removeprefix("data:")
 
                         data = json.loads(chunk)
                         timestamp = time.perf_counter()
@@ -144,8 +144,8 @@ async def async_request_trt_llm(
                         if not chunk_bytes:
                             continue
 
-                        chunk = remove_prefix(chunk_bytes.decode("utf-8"),
-                                              "data:")
+                        chunk = chunk_bytes.decode("utf-8").removeprefix(
+                            "data:")
 
                         data = json.loads(chunk)
                         output.generated_text += data["text_output"]
@@ -261,8 +261,8 @@ async def async_request_openai_completions(
                         if not chunk_bytes:
                             continue
 
-                        chunk = remove_prefix(chunk_bytes.decode("utf-8"),
-                                              "data: ")
+                        chunk = chunk_bytes.decode("utf-8").removeprefix(
+                            "data: ")
                         if chunk == "[DONE]":
                             latency = time.perf_counter() - st
                         else:
@@ -324,7 +324,7 @@ async def async_request_openai_chat_completions(
                 },
             ],
             "temperature": 0.0,
-            "max_tokens": request_func_input.output_len,
+            "max_completion_tokens": request_func_input.output_len,
             "stream": True,
             "ignore_eos": request_func_input.ignore_eos,
         }
@@ -349,8 +349,8 @@ async def async_request_openai_chat_completions(
                         if not chunk_bytes:
                             continue
 
-                        chunk = remove_prefix(chunk_bytes.decode("utf-8"),
-                                              "data: ")
+                        chunk = chunk_bytes.decode("utf-8").removeprefix(
+                            "data: ")
                         if chunk == "[DONE]":
                             latency = time.perf_counter() - st
                         else:
@@ -387,14 +387,6 @@ async def async_request_openai_chat_completions(
     if pbar:
         pbar.update(1)
     return output
-
-
-# Since vllm must support Python 3.8, we can't use str.removeprefix(prefix)
-# introduced in Python 3.9
-def remove_prefix(text: str, prefix: str) -> str:
-    if text.startswith(prefix):
-        return text[len(prefix):]
-    return text
 
 
 def get_model(pretrained_model_name_or_path: str) -> str:

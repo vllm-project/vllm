@@ -34,7 +34,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -393,8 +393,7 @@ class BartEncoderLayer(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config)
         self.self_attn_layer_norm = nn.LayerNorm(self.embed_dim)
-        self.activation_fn = get_act_fn(config.activation_function,
-                                        quant_config)
+        self.activation_fn = get_act_fn(config.activation_function)
 
         ffn_hidden_size = self.embed_dim
         ffn_intermediate_size = config.encoder_ffn_dim
@@ -405,7 +404,7 @@ class BartEncoderLayer(nn.Module):
             bias=ffn_has_bias,
             quant_config=quant_config,
         )
-        self.act = get_act_fn("gelu", quant_config, ffn_intermediate_size)
+        self.act = get_act_fn("gelu")
         self.fc2 = RowParallelLinear(
             ffn_intermediate_size,
             ffn_hidden_size,
@@ -473,8 +472,7 @@ class BartDecoderLayer(nn.Module):
             config=config,
             cache_config=cache_config,
             quant_config=quant_config)
-        self.activation_fn = get_act_fn(config.activation_function,
-                                        quant_config)
+        self.activation_fn = get_act_fn(config.activation_function)
 
         self.self_attn_layer_norm = nn.LayerNorm(self.embed_dim)
         '''
@@ -624,8 +622,6 @@ class BartEncoder(nn.Module):
             Decoder output torch.Tensor
         """
         # retrieve input_ids and inputs_embeds
-
-        input_ids = input_ids.view(-1, input_ids.shape[-1])
         inputs_embeds = self.embed_tokens(input_ids)
 
         embed_pos = self.embed_positions(
@@ -842,7 +838,7 @@ class BartForConditionalGeneration(nn.Module):
 
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)
-        self.sampler = Sampler()
+        self.sampler = get_sampler()
 
     def forward(
         self,

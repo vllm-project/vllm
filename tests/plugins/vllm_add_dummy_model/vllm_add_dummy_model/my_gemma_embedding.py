@@ -3,7 +3,7 @@ from typing import List, Optional, Union
 import torch
 
 from vllm.attention import AttentionMetadata
-from vllm.model_executor.models.gemma2_embedding import Gemma2EmbeddingModel
+from vllm.model_executor.models.gemma2 import Gemma2EmbeddingModel
 from vllm.sequence import IntermediateTensors
 
 

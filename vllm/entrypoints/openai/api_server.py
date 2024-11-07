@@ -11,7 +11,7 @@ from argparse import Namespace
 from contextlib import asynccontextmanager
 from functools import partial
 from http import HTTPStatus
-from typing import AsyncIterator, Set
+from typing import AsyncIterator, Optional, Set
 
 import uvloop
 from fastapi import APIRouter, FastAPI, Request
@@ -51,7 +51,7 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
-from vllm.entrypoints.openai.serving_engine import BaseModelPath
+from vllm.entrypoints.openai.serving_engine import BaseModelPath, OpenAIServing
 from vllm.entrypoints.openai.serving_tokenization import (
     OpenAIServingTokenization)
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
@@ -171,36 +171,44 @@ async def build_async_engine_client_from_engine_args(
         # so we need to spawn a new process
         context = multiprocessing.get_context("spawn")
 
+        # The Process can raise an exception during startup, which may
+        # not actually result in an exitcode being reported. As a result
+        # we use a shared variable to communicate the information.
+        engine_alive = multiprocessing.Value('b', True, lock=False)
         engine_process = context.Process(target=run_mp_engine,
                                          args=(engine_args,
                                                UsageContext.OPENAI_API_SERVER,
-                                               ipc_path))
+                                               ipc_path, engine_alive))
         engine_process.start()
-        logger.info("Started engine process with PID %d", engine_process.pid)
+        engine_pid = engine_process.pid
+        assert engine_pid is not None, "Engine process failed to start."
+        logger.info("Started engine process with PID %d", engine_pid)
 
         # Build RPCClient, which conforms to EngineClient Protocol.
-        # NOTE: Actually, this is not true yet. We still need to support
-        # embedding models via RPC (see TODO above)
         engine_config = engine_args.create_engine_config()
-        mp_engine_client = MQLLMEngineClient(ipc_path, engine_config)
-
+        build_client = partial(MQLLMEngineClient, ipc_path, engine_config,
+                               engine_pid)
+        mq_engine_client = await asyncio.get_running_loop().run_in_executor(
+            None, build_client)
         try:
             while True:
                 try:
-                    await mp_engine_client.setup()
+                    await mq_engine_client.setup()
                     break
                 except TimeoutError:
-                    if not engine_process.is_alive():
+                    if (not engine_process.is_alive()
+                            or not engine_alive.value):
                         raise RuntimeError(
-                            "Engine process failed to start") from None
+                            "Engine process failed to start. See stack "
+                            "trace for the root cause.") from None
 
-            yield mp_engine_client  # type: ignore[misc]
+            yield mq_engine_client  # type: ignore[misc]
         finally:
             # Ensure rpc server process was terminated
             engine_process.terminate()
 
             # Close all open connections to the backend
-            mp_engine_client.close()
+            mq_engine_client.close()
 
             # Wait for engine process to join
             engine_process.join(4)
@@ -245,20 +253,25 @@ def mount_metrics(app: FastAPI):
     app.routes.append(metrics_route)
 
 
-def chat(request: Request) -> OpenAIServingChat:
+def base(request: Request) -> OpenAIServing:
+    # Reuse the existing instance
+    return tokenization(request)
+
+
+def chat(request: Request) -> Optional[OpenAIServingChat]:
     return request.app.state.openai_serving_chat
 
 
-def completion(request: Request) -> OpenAIServingCompletion:
+def completion(request: Request) -> Optional[OpenAIServingCompletion]:
     return request.app.state.openai_serving_completion
+
+
+def embedding(request: Request) -> Optional[OpenAIServingEmbedding]:
+    return request.app.state.openai_serving_embedding
 
 
 def tokenization(request: Request) -> OpenAIServingTokenization:
     return request.app.state.openai_serving_tokenization
-
-
-def embedding(request: Request) -> OpenAIServingEmbedding:
-    return request.app.state.openai_serving_embedding
 
 
 def engine_client(request: Request) -> EngineClient:
@@ -274,7 +287,9 @@ async def health(raw_request: Request) -> Response:
 
 @router.post("/tokenize")
 async def tokenize(request: TokenizeRequest, raw_request: Request):
-    generator = await tokenization(raw_request).create_tokenize(request)
+    handler = tokenization(raw_request)
+
+    generator = await handler.create_tokenize(request)
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.code)
@@ -286,7 +301,9 @@ async def tokenize(request: TokenizeRequest, raw_request: Request):
 
 @router.post("/detokenize")
 async def detokenize(request: DetokenizeRequest, raw_request: Request):
-    generator = await tokenization(raw_request).create_detokenize(request)
+    handler = tokenization(raw_request)
+
+    generator = await handler.create_detokenize(request)
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.code)
@@ -298,7 +315,9 @@ async def detokenize(request: DetokenizeRequest, raw_request: Request):
 
 @router.get("/v1/models")
 async def show_available_models(raw_request: Request):
-    models = await completion(raw_request).show_available_models()
+    handler = base(raw_request)
+
+    models = await handler.show_available_models()
     return JSONResponse(content=models.model_dump())
 
 
@@ -311,9 +330,12 @@ async def show_version():
 @router.post("/v1/chat/completions")
 async def create_chat_completion(request: ChatCompletionRequest,
                                  raw_request: Request):
+    handler = chat(raw_request)
+    if handler is None:
+        return base(raw_request).create_error_response(
+            message="The model does not support Chat Completions API")
 
-    generator = await chat(raw_request).create_chat_completion(
-        request, raw_request)
+    generator = await handler.create_chat_completion(request, raw_request)
 
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
@@ -327,8 +349,12 @@ async def create_chat_completion(request: ChatCompletionRequest,
 
 @router.post("/v1/completions")
 async def create_completion(request: CompletionRequest, raw_request: Request):
-    generator = await completion(raw_request).create_completion(
-        request, raw_request)
+    handler = completion(raw_request)
+    if handler is None:
+        return base(raw_request).create_error_response(
+            message="The model does not support Completions API")
+
+    generator = await handler.create_completion(request, raw_request)
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.code)
@@ -340,8 +366,12 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
 
 @router.post("/v1/embeddings")
 async def create_embedding(request: EmbeddingRequest, raw_request: Request):
-    generator = await embedding(raw_request).create_embedding(
-        request, raw_request)
+    handler = embedding(raw_request)
+    if handler is None:
+        return base(raw_request).create_error_response(
+            message="The model does not support Embeddings API")
+
+    generator = await handler.create_embedding(request, raw_request)
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.code)
@@ -379,30 +409,26 @@ if envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
     @router.post("/v1/load_lora_adapter")
     async def load_lora_adapter(request: LoadLoraAdapterRequest,
                                 raw_request: Request):
-        response = await chat(raw_request).load_lora_adapter(request)
-        if isinstance(response, ErrorResponse):
-            return JSONResponse(content=response.model_dump(),
-                                status_code=response.code)
-
-        response = await completion(raw_request).load_lora_adapter(request)
-        if isinstance(response, ErrorResponse):
-            return JSONResponse(content=response.model_dump(),
-                                status_code=response.code)
+        for route in [chat, completion, embedding]:
+            handler = route(raw_request)
+            if handler is not None:
+                response = await handler.load_lora_adapter(request)
+                if isinstance(response, ErrorResponse):
+                    return JSONResponse(content=response.model_dump(),
+                                        status_code=response.code)
 
         return Response(status_code=200, content=response)
 
     @router.post("/v1/unload_lora_adapter")
     async def unload_lora_adapter(request: UnloadLoraAdapterRequest,
                                   raw_request: Request):
-        response = await chat(raw_request).unload_lora_adapter(request)
-        if isinstance(response, ErrorResponse):
-            return JSONResponse(content=response.model_dump(),
-                                status_code=response.code)
-
-        response = await completion(raw_request).unload_lora_adapter(request)
-        if isinstance(response, ErrorResponse):
-            return JSONResponse(content=response.model_dump(),
-                                status_code=response.code)
+        for route in [chat, completion, embedding]:
+            handler = route(raw_request)
+            if handler is not None:
+                response = await handler.unload_lora_adapter(request)
+                if isinstance(response, ErrorResponse):
+                    return JSONResponse(content=response.model_dump(),
+                                        status_code=response.code)
 
         return Response(status_code=200, content=response)
 
@@ -498,7 +524,8 @@ def init_app_state(
         chat_template=args.chat_template,
         return_tokens_as_token_ids=args.return_tokens_as_token_ids,
         enable_auto_tools=args.enable_auto_tool_choice,
-        tool_parser=args.tool_call_parser)
+        tool_parser=args.tool_call_parser,
+    ) if model_config.task == "generate" else None
     state.openai_serving_completion = OpenAIServingCompletion(
         engine_client,
         model_config,
@@ -507,13 +534,14 @@ def init_app_state(
         prompt_adapters=args.prompt_adapters,
         request_logger=request_logger,
         return_tokens_as_token_ids=args.return_tokens_as_token_ids,
-    )
+    ) if model_config.task == "generate" else None
     state.openai_serving_embedding = OpenAIServingEmbedding(
         engine_client,
         model_config,
         base_model_paths,
         request_logger=request_logger,
-    )
+        chat_template=args.chat_template,
+    ) if model_config.task == "embedding" else None
     state.openai_serving_tokenization = OpenAIServingTokenization(
         engine_client,
         model_config,
@@ -541,7 +569,8 @@ async def run_server(args, **uvicorn_kwargs) -> None:
     # This avoids race conditions with ray.
     # see https://github.com/vllm-project/vllm/issues/8204
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.bind(("", args.port))
+    sock.bind((args.host or "", args.port))
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
     def signal_handler(*_) -> None:
         # Interrupt server on sigterm while initializing
@@ -565,12 +594,13 @@ async def run_server(args, **uvicorn_kwargs) -> None:
             ssl_certfile=args.ssl_certfile,
             ssl_ca_certs=args.ssl_ca_certs,
             ssl_cert_reqs=args.ssl_cert_reqs,
-            fd=sock.fileno(),
             **uvicorn_kwargs,
         )
 
     # NB: Await server shutdown only after the backend context is exited
     await shutdown_task
+
+    sock.close()
 
 
 if __name__ == "__main__":
