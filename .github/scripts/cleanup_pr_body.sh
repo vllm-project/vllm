@@ -1,5 +1,7 @@
 #!/bin/bash
 
+set -eu
+
 # ensure 1 argument is passed
 if [ "$#" -ne 1 ]; then
     echo "Usage: $0 <pr_number>"
