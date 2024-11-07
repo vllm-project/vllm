@@ -151,7 +151,7 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
             self.local_omp_cpuid = omp_cpuids.split("|")[rank]
 
         ModelRunnerClass: Type[CPUModelRunner] = CPUModelRunner
-        if self.model_config.is_encoder_decoder_model:
+        if self.model_config.is_encoder_decoder:
             ModelRunnerClass = CPUEncoderDecoderModelRunner
         self.model_runner: CPUModelRunner = ModelRunnerClass(
             vllm_config=vllm_config,
