@@ -77,6 +77,9 @@ class AsyncLLM(EngineClient):
 
         self.output_handler = None
 
+    def __del__(self):
+        self.shutdown()
+
     @classmethod
     def from_engine_args(
         cls,

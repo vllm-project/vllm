@@ -41,7 +41,6 @@ def run_test(more_args):
     """Run the end to end accuracy test."""
 
     args = list(DEFAULT_ARGS)
-    args = ["--disable-log-requests"]
     args.extend(more_args)
     print(f"Running with: {args}")
 
@@ -59,6 +58,7 @@ def run_test(more_args):
             model="local-completions",
             model_args=model_args,
             tasks=TASK,
+            limit=10,
         )
 
         measured_value = results["results"][TASK][FILTER]

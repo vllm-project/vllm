@@ -147,6 +147,8 @@ async def build_async_engine_client_from_engine_args(
                 None, build_engine)
 
         yield engine_client
+        if hasattr(engine_client, "shutdown"):
+            engine_client.shutdown()
         return
 
     # Otherwise, use the multiprocessing AsyncLLMEngine.

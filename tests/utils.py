@@ -121,11 +121,14 @@ class RemoteOpenAIServer:
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
+        print("Calling terminate")
         self.proc.terminate()
         try:
+            print("Calling wait")
             self.proc.wait(8)
         except subprocess.TimeoutExpired:
             # force kill if needed
+            print("Calling kill")
             self.proc.kill()
 
     def _wait_for_server(self, *, url: str, timeout: float):
