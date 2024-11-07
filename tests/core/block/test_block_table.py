@@ -105,8 +105,7 @@ def test_allocate_prefix_caching(block_size: int, sequence_len: int):
                 block_size=block_size,
                 block_allocator=allocator,
                 enable_prefix_caching=True,
-            )
-        )
+            ))
         seq = make_sequence(alloc_i, token_ids, block_size)
         block_tables[-1].allocate(seq=seq, device=Device.GPU)
 
@@ -148,7 +147,8 @@ def test_allocate_free(block_size: int, sequence_len: int, allocator_type: str,
     block_table = BlockTable(
         block_size=block_size,
         block_allocator=allocator,
-        enable_prefix_caching=True if allocator_type == "prefix_caching" else False,
+        enable_prefix_caching=True
+        if allocator_type == "prefix_caching" else False,
     )
 
     for i in range(5):
@@ -193,7 +193,8 @@ def test_append_token_ids_allocation(block_size: int, sequence_len: int,
     block_table = BlockTable(
         block_size=block_size,
         block_allocator=allocator,
-        enable_prefix_caching=True if allocator_type == "prefix_caching" else False,
+        enable_prefix_caching=True
+        if allocator_type == "prefix_caching" else False,
     )
 
     num_expected_blocks_before_append = len(
@@ -250,7 +251,8 @@ def test_ensure_num_empty_slots_allocation(block_size: int, sequence_len: int,
     block_table = BlockTable(
         block_size=block_size,
         block_allocator=allocator,
-        enable_prefix_caching=True if allocator_type == "prefix_caching" else False,
+        enable_prefix_caching=True
+        if allocator_type == "prefix_caching" else False,
     )
 
     num_expected_blocks_before_append = len(
@@ -308,7 +310,8 @@ def test_append_token_ids_correct_content(block_size: int, sequence_len: int,
     block_table = BlockTable(
         block_size=block_size,
         block_allocator=allocator,
-        enable_prefix_caching=True if allocator_type == "prefix_caching" else False,
+        enable_prefix_caching=True
+        if allocator_type == "prefix_caching" else False,
     )
     seq = make_sequence(0, token_ids, block_size)
     block_table.allocate(seq=seq, device=Device.GPU)
@@ -353,7 +356,8 @@ def test_fork(seq_len: int, block_size: int, allocator_type: str):
     block_table = BlockTable(
         block_size=block_size,
         block_allocator=allocator,
-        enable_prefix_caching=True if allocator_type == "prefix_caching" else False,
+        enable_prefix_caching=True
+        if allocator_type == "prefix_caching" else False,
     )
 
     seq = make_sequence(0, token_ids, block_size)
@@ -414,7 +418,8 @@ def test_cow(block_size: int, sequence_len: int, append_len: int,
     original_block_table = BlockTable(
         block_size=block_size,
         block_allocator=allocator,
-        enable_prefix_caching=True if allocator_type == "prefix_caching" else False,
+        enable_prefix_caching=True
+        if allocator_type == "prefix_caching" else False,
     )
 
     num_expected_non_cow_blocks = cdiv(sequence_len, block_size)
@@ -504,7 +509,8 @@ def test_cow_lookahead_simple(block_size: int, sequence_len: int,
     original_block_table = BlockTable(
         block_size=block_size,
         block_allocator=allocator,
-        enable_prefix_caching=True if allocator_type == "prefix_caching" else False,
+        enable_prefix_caching=True
+        if allocator_type == "prefix_caching" else False,
     )
 
     seq = make_sequence(0, token_ids, block_size)
@@ -590,7 +596,8 @@ def test_num_blocks_touched_by_append_slots(block_size: int, sequence_len: int,
     block_table = BlockTable(
         block_size=block_size,
         block_allocator=allocator,
-        enable_prefix_caching=True if allocator_type == "prefix_caching" else False,
+        enable_prefix_caching=True
+        if allocator_type == "prefix_caching" else False,
     )
     seq = make_sequence(0, token_ids, block_size)
     block_table.allocate(seq=seq, device=Device.GPU)

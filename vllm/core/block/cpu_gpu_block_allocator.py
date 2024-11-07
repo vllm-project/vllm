@@ -139,7 +139,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         prev_block: Optional[Block],
         block_token_ids: List[List[int]],
         device: Device,
-        block_hashes: Optional[List[Optional[int]]] = None,
+        block_hashes: List[Optional[int]],
     ) -> List[Block]:
         """Allocates a new group of immutable blocks with the provided block 
         token IDs on the specified device.
@@ -156,15 +156,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
                 containing the provided block token IDs.
         """
         return self._allocators[device].allocate_immutable_blocks(
-            prev_block, block_token_ids, block_hashes
-        )
-
-    def get_allocated_cached_blocks(
-        self,
-        block_hashes: List[int],
-        device: Device,
-    ) -> List[int]:
-        return self._allocators[device].get_allocated_cached_blocks(block_hashes)
+            prev_block, block_token_ids, block_hashes)
 
     def allocate_immutable_block(self, prev_block: Optional[Block],
                                  token_ids: List[int],
@@ -353,14 +345,12 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         self._swap_mapping.clear()
         return list(mapping.items())
 
-    def find_cached_blocks_prefix(
-        self, block_hashes: List[int], allocated: bool
-    ) -> List[int]:
+    def find_cached_blocks_prefix(self, block_hashes: List[int],
+                                  allocated: bool) -> List[int]:
         # Prefix caching only supported on GPU.
         device = Device.GPU
         return self._allocators[device].find_cached_blocks_prefix(
-            block_hashes, allocated
-        )
+            block_hashes, allocated)
 
 
 class NullBlock(Block):
@@ -376,7 +366,9 @@ class NullBlock(Block):
         super().__init__()
         self._proxy = proxy
 
-    def append_token_ids(self, token_ids: List[BlockId]):
+    def append_token_ids(self,
+                         token_ids: List[BlockId],
+                         block_hash: Optional[int] = None) -> None:
         raise ValueError("null block should not be modified")
 
     @property
@@ -429,4 +421,5 @@ class NullBlock(Block):
         return self._proxy.content_hash
 
     def set_content_hash(self, content_hash: Optional[int]) -> None:
-        raise NotImplementedError("NullBlock does not support set_content_hash")
+        raise NotImplementedError(
+            "NullBlock does not support set_content_hash")

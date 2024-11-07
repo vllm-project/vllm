@@ -5,6 +5,7 @@ from typing import Tuple
 
 from vllm.core.block.block_table import BlockTable
 from vllm.core.block.cpu_gpu_block_allocator import CpuGpuBlockAllocator
+from vllm.core.block.interfaces import Block
 from vllm.core.block.prefix_caching_block import (ComputedBlocksTracker,
                                                   LastAccessBlocksTracker)
 from vllm.core.block.utils import check_no_caching_or_swa_for_blockmgr_encdec
@@ -100,14 +101,13 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         self.cross_block_tables: Dict[EncoderSeqId, BlockTable] = {}
 
         self._computed_blocks_tracker = ComputedBlocksTracker(
-            self.block_allocator, self.block_size, enable_caching
-        )
+            self.block_allocator, self.block_size, enable_caching)
         self._last_access_blocks_tracker = LastAccessBlocksTracker(
             self.block_allocator)
 
-    def _get_num_blocks_to_allocate(
-        self, seq: Sequence, num_lookahead_slots: int = 0
-    ) -> int:
+    def _get_num_blocks_to_allocate(self,
+                                    seq: Sequence,
+                                    num_lookahead_slots: int = 0) -> int:
         """
         Get the number of new blocks to allocate for a sequence.
 
@@ -127,7 +127,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         # allocated, and so we should not count them towards the number of
         # blocks we need to allocate.
         #
-        # consider a scenario with a seqeuence of 3 token blocks, and a block
+        # consider a scenario with a sequence of 3 token blocks, and a block
         # pool of only 2 blocks: [b0, b1, b2], where b0 and b1 are computed
         # but evicted, b2 is not computed. So b0, b1 are the 2 free blocks,
         # in evictor. When deciding how many more blocks need to be allocated for
@@ -135,15 +135,13 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         # just 1 block (b2).
         num_cached_tokens = (
             self._computed_blocks_tracker.get_num_tokens_computed(
-                seq, allocated=True
-            )
-        )
+                seq, allocated=True))
 
-        assert (
-            num_cached_tokens % self.block_size == 0
-        ), "Cached tokens must be a multiple of block size"
+        assert (num_cached_tokens % self.block_size == 0
+                ), "Cached tokens must be a multiple of block size"
         num_cached_blocks = cdiv(num_cached_tokens, self.block_size)
-        num_required_blocks = cdiv(seq.get_len() + num_lookahead_slots, self.block_size)
+        num_required_blocks = cdiv(seq.get_len() + num_lookahead_slots,
+                                   self.block_size)
 
         return num_required_blocks - num_cached_blocks
 
@@ -162,8 +160,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         """
 
         return self._computed_blocks_tracker.get_num_tokens_computed(
-            seq, allocated
-        )
+            seq, allocated)
 
     def can_allocate(self,
                      seq_group: SequenceGroup,
@@ -177,25 +174,21 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         self._computed_blocks_tracker.update_seq(seq)
 
         num_blocks_to_allocate = self._get_num_blocks_to_allocate(
-            seq, num_lookahead_slots
-        )
+            seq, num_lookahead_slots)
 
         if seq_group.is_encoder_decoder():
             encoder_seq = seq_group.get_encoder_seq()
             assert encoder_seq is not None
             self._computed_blocks_tracker.update_seq(encoder_seq)
             num_blocks_to_allocate += self._get_num_blocks_to_allocate(
-                encoder_seq, num_lookahead_slots=0
-            )
+                encoder_seq, num_lookahead_slots=0)
 
         if self.max_block_sliding_window is not None:
-            num_blocks_to_allocate = min(
-                num_blocks_to_allocate, self.max_block_sliding_window
-            )
+            num_blocks_to_allocate = min(num_blocks_to_allocate,
+                                         self.max_block_sliding_window)
 
         num_free_gpu_blocks = self.block_allocator.get_num_free_blocks(
-            device=Device.GPU
-        )
+            device=Device.GPU)
         if self.num_total_gpu_blocks - num_blocks_to_allocate < self.watermark_blocks:
             return AllocStatus.NEVER
         if num_free_gpu_blocks - num_blocks_to_allocate >= self.watermark_blocks:
@@ -217,8 +210,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
             block_table.allocate(
                 token_ids=seq.get_token_ids(),
                 block_hashes=self._computed_blocks_tracker.get_block_hashes(
-                    seq
-                ),
+                    seq),
             )
 
         return block_table
@@ -285,14 +277,15 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
             self._computed_blocks_tracker.update_seq(seq)
             block_table = self.block_tables[seq.seq_id]
-            num_touched_blocks += block_table.get_num_blocks_touched_by_append_slots(
-                token_ids=block_table.get_unseen_token_ids(seq.get_token_ids()),
-                num_lookahead_slots=num_lookahead_slots,
-            )
+            num_touched_blocks += (
+                block_table.get_num_blocks_touched_by_append_slots(
+                    token_ids=block_table.get_unseen_token_ids(
+                        seq.get_token_ids()),
+                    num_lookahead_slots=num_lookahead_slots,
+                ))
 
         num_free_gpu_blocks = self.block_allocator.get_num_free_blocks(
-            device=Device.GPU
-        )
+            device=Device.GPU)
         return num_touched_blocks <= num_free_gpu_blocks
 
     def append_slots(
@@ -305,7 +298,8 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
 
         # Extend the block table for any new decoded tokens, as well as reserve
         # space for lookahead slots.
-        unseen_token_ids = block_table.get_unseen_token_ids(seq.get_token_ids())
+        unseen_token_ids = block_table.get_unseen_token_ids(
+            seq.get_token_ids())
         if len(unseen_token_ids) == 0:
             block_hashes = []
         else:
@@ -396,9 +390,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
             all_blocks = self.block_tables[seq.seq_id].physical_block_ids
             num_cached_tokens = (
                 self._computed_blocks_tracker.get_num_tokens_computed(
-                    seq, allocated=True
-                )
-            )
+                    seq, allocated=True))
             assert num_cached_tokens % self.block_size == 0
             num_cached_blocks = num_cached_tokens // self.block_size
             computed_block_ids = all_blocks[:num_cached_blocks]
@@ -581,10 +573,8 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         if self.block_allocator.get_num_total_blocks(
                 device) < num_blocks_touched:
             return AllocStatus.NEVER
-        elif (
-            self.block_allocator.get_num_free_blocks(device=device) - num_blocks_touched
-            >= watermark_blocks
-        ):
+        elif (self.block_allocator.get_num_free_blocks(device=device) -
+              num_blocks_touched >= watermark_blocks):
             return AllocStatus.OK
         else:
             return AllocStatus.LATER

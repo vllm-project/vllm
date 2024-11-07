@@ -85,10 +85,10 @@ class NaiveBlockAllocator(BlockAllocator):
         return block
 
     def allocate_immutable_blocks(
-        self,
-        prev_block: Optional[Block],
-        block_token_ids: List[List[int]],
-        block_hashes: Optional[List[Optional[int]]] = None,
+            self,
+            prev_block: Optional[Block],
+            block_token_ids: List[List[int]],
+            block_hashes: List[Optional[int]],  # Not used
     ) -> List[Block]:
         num_blocks = len(block_token_ids)
 
@@ -335,12 +335,9 @@ class NaiveBlockAllocator(BlockAllocator):
     def get_prefix_cache_hit_rate(self) -> float:
         return -1
 
-    def get_allocated_cached_blocks(self, block_hashes: List[int]) -> List[int]:
-        return []
-
-    def find_cached_blocks_prefix(
-        self, block_hashes: List[int], allocated: bool = False
-    ) -> List[int]:
+    def find_cached_blocks_prefix(self,
+                                  block_hashes: List[int],
+                                  allocated: bool = False) -> List[int]:
         return []
 
 
@@ -382,9 +379,9 @@ class NaiveBlock(Block):
 
         self._append_token_ids_no_cow(token_ids)
 
-    def append_token_ids(
-        self, token_ids: List[int], block_hash: Optional[int] = None
-    ) -> None:
+    def append_token_ids(self,
+                         token_ids: List[int],
+                         block_hash: Optional[int] = None) -> None:
         """Appends the given token IDs to the block and performs a
         copy-on-write if necessary.
 
@@ -465,7 +462,6 @@ class NaiveBlock(Block):
     def content_hash(self) -> Optional[int]:
         return None
 
-    def set_content_hash(self, content_hash: int) -> None:
+    def set_content_hash(self, content_hash: Optional[int]) -> None:
         raise NotImplementedError(
-            "Setting content hash is not supported for naive block"
-        )
+            "Setting content hash is not supported for naive block")

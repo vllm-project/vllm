@@ -10,9 +10,9 @@ BlockId = int
 class Block(ABC):
 
     @abstractmethod
-    def append_token_ids(
-        self, token_ids: List[int], block_hash: Optional[int] = None
-    ) -> None:
+    def append_token_ids(self,
+                         token_ids: List[int],
+                         block_hash: Optional[int] = None) -> None:
         pass
 
     @property
@@ -204,9 +204,8 @@ class BlockAllocator(ABC):
         pass
 
     @abstractmethod
-    def find_cached_blocks_prefix(
-        self, block_hashes: List[int], allocated: bool
-    ) -> List[int]:
+    def find_cached_blocks_prefix(self, block_hashes: List[int],
+                                  allocated: bool) -> List[int]:
         pass
 
     class NoFreeBlocksError(ValueError):
@@ -227,9 +226,13 @@ class DeviceAwareBlockAllocator(ABC):
         pass
 
     @abstractmethod
-    def allocate_immutable_blocks(self, prev_block: Optional[Block],
-                                  block_token_ids: List[List[int]],
-                                  device: Device) -> List[Block]:
+    def allocate_immutable_blocks(
+        self,
+        prev_block: Optional[Block],
+        block_token_ids: List[List[int]],
+        device: Device,
+        block_hashes: List[Optional[int]],
+    ) -> List[Block]:
         pass
 
     @abstractmethod
@@ -306,13 +309,6 @@ class DeviceAwareBlockAllocator(ABC):
         pass
 
     @abstractmethod
-    def get_allocated_cached_blocks(
-        self, block_hashes: List[int], device: Device
-    ) -> List[int]:
-        pass
-
-    @abstractmethod
-    def find_cached_blocks_prefix(
-        self, block_hashes: List[int], allocated: bool, device: Device
-    ) -> List[int]:
+    def find_cached_blocks_prefix(self, block_hashes: List[int],
+                                  allocated: bool) -> List[int]:
         pass

@@ -256,10 +256,9 @@ def test_can_allocate_with_prefix_cache(
     # Allocate the seq 1
     block_manager.allocate(seq_group_1)
 
-    # Mark the seq 1 as computed (This shoudl be done by the scheduler in reality)
-    block_manager.mark_blocks_as_computed(
-        seq_group=seq_group_1, token_chunk_size=len(tokens_1)
-    )
+    # Mark the seq 1 as computed (This should be done by the scheduler in reality)
+    block_manager.mark_blocks_as_computed(seq_group=seq_group_1,
+                                          token_chunk_size=len(tokens_1))
 
     # Test if allocatable of seq 2.
     seq_group_2 = create_seq_group(
@@ -399,7 +398,9 @@ def test_can_swap(block_size, num_gpu_blocks, num_lookahead_slots,
                                               watermark=0,
                                               enable_caching=enable_caching)
     prompt, seq_group = create_dummy_prompt(
-        "1", prompt_length=(num_gpu_blocks - 1) * block_size - 1, block_size=block_size
+        "1",
+        prompt_length=(num_gpu_blocks - 1) * block_size - 1,
+        block_size=block_size,
     )
     prompt.status = SequenceStatus.WAITING
     block_manager.allocate(seq_group)

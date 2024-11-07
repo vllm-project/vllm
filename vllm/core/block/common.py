@@ -254,9 +254,8 @@ class BlockList:
         for block in self._blocks:
             self._add_block_id(block.block_id)
 
-    def append_token_ids(
-        self, block_index: int, token_ids: List[int], block_hash: Optional[int]
-    ) -> None:
+    def append_token_ids(self, block_index: int, token_ids: List[int],
+                         block_hash: Optional[int]) -> None:
         block = self._blocks[block_index]
         prev_block_id = block.block_id
 

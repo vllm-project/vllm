@@ -55,30 +55,6 @@ class BlockTable:
         self._max_block_sliding_window = max_block_sliding_window
         self._num_full_slots = self._get_num_token_ids()
 
-    # @staticmethod
-    # def get_num_required_blocks(token_ids: List[int],
-    #                            block_size: int,
-    #                            num_lookahead_slots: int = 0) -> int:
-    #    """Calculates the minimum number of blocks required to store a given
-    #    sequence of token IDs along with any look-ahead slots that may be
-    #    required (like in multi-step + chunked-prefill).
-
-    #    This assumes worst-case scenario, where every block requires a new
-    #    allocation (e.g. ignoring prefix caching).
-
-    #    Args:
-    #        token_ids (List[int]): The sequence of token IDs to be stored.
-    #        block_size (int): The maximum number of tokens that can be stored in
-    #            a single block.
-    #        num_lookahead_slots (int): look-ahead slots that the sequence may
-    #            require.
-
-    #    Returns:
-    #        int: The minimum number of blocks required to store the given
-    #            sequence of token IDs along with any required look-ahead slots.
-    #    """
-    #    return cdiv(len(token_ids) + num_lookahead_slots, block_size)
-
     def allocate(
         self,
         token_ids: List[int],
@@ -100,14 +76,13 @@ class BlockTable:
         if not token_ids:
             return
 
-        blocks = self._allocate_blocks_for_token_ids(
-            token_ids, block_hashes, device
-        )
+        blocks = self._allocate_blocks_for_token_ids(token_ids, block_hashes,
+                                                     device)
         self.update(blocks)
         self._num_full_slots = len(token_ids)
 
     def update(self, blocks: List[Block]) -> None:
-        """Resets the table to the newly provided blocks 
+        """Resets the table to the newly provided blocks
         (with their corresponding block ids)
         """
         self._blocks.update(blocks)
@@ -164,17 +139,14 @@ class BlockTable:
         # Update the blocks with the new tokens
         first_block_idx = self._num_full_slots // self._block_size
         token_blocks = self._chunk_token_blocks_for_append(token_ids)
-
-        if len(token_blocks) != len(block_hashes):
-            breakpoint()
-
         assert len(token_blocks) == len(
             block_hashes
         ), "chunked token_ids and block_hashes must have the same length"
 
         for i, token_block in enumerate(token_blocks):
             block_hash = block_hashes[i]
-            self._blocks.append_token_ids(first_block_idx + i, token_block, block_hash)
+            self._blocks.append_token_ids(first_block_idx + i, token_block,
+                                          block_hash)
 
         self._num_full_slots += len(token_ids)
 
@@ -304,10 +276,9 @@ class BlockTable:
                 self._allocator.allocate_immutable_blocks(
                     prev_block,
                     block_token_ids=block_token_ids,
-                    block_hashes=block_hashes[: len(block_token_ids)],
+                    block_hashes=block_hashes[:len(block_token_ids)],
                     device=device,
-                )
-            )
+                ))
             prev_block = blocks[-1]
 
         if tail_token_ids:
@@ -315,8 +286,7 @@ class BlockTable:
             assert block_hashes[-1] is None
             cur_token_ids = tail_token_ids[0]
             block = self._allocator.allocate_mutable_block(
-                prev_block=prev_block, device=device
-            )
+                prev_block=prev_block, device=device)
             block.append_token_ids(cur_token_ids, block_hash=None)
 
             blocks.append(block)

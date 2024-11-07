@@ -116,7 +116,7 @@ def create_dummy_prompt_encoder_decoder(
 
 def create_seq_group(
     seq_prompt_len: int = 1024,
-    seq_output_lens: GenericSequence[int] = (128,),
+    seq_output_lens: GenericSequence[int] = (128, ),
     request_id: str = "0",
     seq_id_start: int = 0,
     sampling_params: Optional[SamplingParams] = None,

@@ -795,9 +795,8 @@ class TestPrefixCachingBlockAllocator:
 
         block_size = 16
         num_blocks = 5
-        allocator = PrefixCachingBlockAllocator(
-            block_size=block_size, num_blocks=num_blocks
-        )
+        allocator = PrefixCachingBlockAllocator(block_size=block_size,
+                                                num_blocks=num_blocks)
 
         # 1. Allocate a list of blocks
         block_hashes = [random.randint(1, 1000000) for _ in range(num_blocks)]
@@ -825,12 +824,11 @@ class TestPrefixCachingBlockAllocator:
             result = allocator.get_cached_blocks(cached_hashes)
             assert (
                 result == expected_cached_blocks
-            ), f"Expected {expected_cached_blocks}, but got {result}, with test case {cached_hashes}. blcok hashes = {block_hashes}"
+            ), f"Expected {expected_cached_blocks}, but got {result}, with test case {cached_hashes}. block hashes = {block_hashes}"
 
         # Test with some non-existent hashes
         non_existent_hash = max(block_hashes) + 1
         test_hashes = block_hashes[:3] + [non_existent_hash] + block_hashes[3:]
         result = allocator.get_cached_blocks(test_hashes)
-        assert (
-            result == block_hashes[0:3]
-        ), f"Expected {block_hashes[0:3]}, but got {result}"
+        assert (result == block_hashes[0:3]
+                ), f"Expected {block_hashes[0:3]}, but got {result}"

@@ -43,10 +43,10 @@ def test_mixed_requests(
 
     cached_prompt = example_prompts[cached_position]
     with vllm_runner(
-        model,
-        dtype=dtype,
-        enable_prefix_caching=True,
-        enable_chunked_prefill=enable_chunked_prefill,
+            model,
+            dtype=dtype,
+            enable_prefix_caching=True,
+            enable_chunked_prefill=enable_chunked_prefill,
     ) as vllm_model:
         # Run the first prompt so the cache is populated
         vllm_outputs = vllm_model.generate_greedy([cached_prompt], max_tokens)

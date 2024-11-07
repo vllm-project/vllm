@@ -591,22 +591,21 @@ class Sequence:
         token_ids = self.get_token_ids()  # All token ids in the sequence
         num_full_blocks = len(token_ids) // self.block_size
         cur_num_full_blocks = len(self._computed_block_hashes)
-        prev_block_hash = (
-            None if cur_num_full_blocks == 0 else self._computed_block_hashes[-1]
-        )
+        prev_block_hash = (None if cur_num_full_blocks == 0 else
+                           self._computed_block_hashes[-1])
         for i in range(cur_num_full_blocks, num_full_blocks):
-            block_token_ids = token_ids[i * self.block_size : (i + 1) * self.block_size]
+            block_token_ids = token_ids[i * self.block_size:(i + 1) *
+                                        self.block_size]
             assert len(block_token_ids) == self.block_size
-            block_hash = hash(
-                (
-                    prev_block_hash,  # Previous block hash
-                    self.from_decoder_prompt,  # Whether the sequence is decoder-only
-                    # LoRA int id since the attention output will depend on
-                    # LoRA with same token ids.
-                    self.lora_int_id,
-                    *block_token_ids,  # The block token ids
-                )
-            )
+            block_hash = hash((
+                prev_block_hash,  # Previous block hash
+                self.
+                from_decoder_prompt,  # Whether the sequence is decoder-only
+                # LoRA int id since the attention output will depend on
+                # LoRA with same token ids.
+                self.lora_int_id,
+                *block_token_ids,  # The block token ids
+            ))
             self._computed_block_hashes.append(block_hash)
             prev_block_hash = block_hash
 
@@ -619,15 +618,13 @@ class Sequence:
         """
         num_full_prompt_blocks = self.get_prompt_len() // self.block_size
         self._computed_block_hashes = self._computed_block_hashes[
-            num_full_prompt_blocks:
-        ]
+            num_full_prompt_blocks:]
 
     def set_num_prefix_cached_tokens(self, num_prefix_cached_tokens: int):
         self.data.set_num_prefix_cached_tokens(num_prefix_cached_tokens)
 
-    def hash_of_block(
-        self, prev_block_hash: Optional[int], cur_block_idx: int
-    ) -> int:
+    def hash_of_block(self, prev_block_hash: Optional[int],
+                      cur_block_idx: int) -> int:
         """
         Get the hash of a given block of the sequence.
 
@@ -642,19 +639,15 @@ class Sequence:
         token_ids = self.get_token_ids()
         assert (cur_block_idx + 1) * self.block_size <= len(token_ids), (
             f"Invalid block index: {cur_block_idx}. The sequence only has "
-            f"{len(token_ids) // self.block_size} blocks."
-        )
-        block_token_ids = token_ids[
-            cur_block_idx * self.block_size : (cur_block_idx + 1)
-            * self.block_size
-        ]
-        return hash(
-            (
-                prev_block_hash,
-                self.lora_int_id,
-                *block_token_ids,
-            )
-        )
+            f"{len(token_ids) // self.block_size} blocks.")
+        block_token_ids = token_ids[cur_block_idx *
+                                    self.block_size:(cur_block_idx + 1) *
+                                    self.block_size]
+        return hash((
+            prev_block_hash,
+            self.lora_int_id,
+            *block_token_ids,
+        ))
 
     def reset_state_for_recompute(self):
         """Reset the sequence states for recomputation."""
