@@ -384,7 +384,8 @@ class GPUModelRunner:
                 # Rewind the generator state as if the token was not sampled.
                 generator = self.input_batch.generators.get(i)
                 if generator is not None:
-                    generator.set_offset(generator.get_offset() - 1)
+                    # Temp Hack: https://vllm-dev.slack.com/archives/C07QTE01QFQ/p1730930361705439 # noqa: E501
+                    generator.set_offset(generator.get_offset() - 4)
 
         if sampler_output.logprob_token_ids is None:
             logprob_token_ids = None
