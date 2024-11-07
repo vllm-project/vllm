@@ -361,9 +361,14 @@ class ModelConfig:
 
     def _parse_quant_hf_config(self):
         quant_cfg = getattr(self.hf_config, "quantization_config", None)
+        text_config = getattr(self.hf_config, "text_config", None)
+        if quant_cfg is None and text_config is not None:
+            quant_cfg = getattr(text_config, "quantization_config", None)
+
         if quant_cfg is None:
             # compressed-tensors uses a "compression_config" key
             quant_cfg = getattr(self.hf_config, "compression_config", None)
+
         return quant_cfg
 
     def _verify_quantization(self) -> None:
