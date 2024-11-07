@@ -33,7 +33,7 @@ from transformers.models.mllama.processing_mllama import (
 import vllm.distributed.parallel_state as ps
 from vllm.attention import Attention, AttentionMetadata, AttentionType
 from vllm.attention.ops.paged_attn import PagedAttention
-from vllm.config import CacheConfig, MultiModalConfig
+from vllm.config import CacheConfig, LoRAConfig, MultiModalConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs import (INPUT_REGISTRY, DummyData, EncoderDecoderInputs,
                          InputContext, TokenInputs, token_inputs)
@@ -48,13 +48,14 @@ from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import SequenceData
 from vllm.utils import is_list_of
 
 from .clip import CLIPMLP
-from .interfaces import SupportsMultiModal
+from .interfaces import SupportsLoRA, SupportsMultiModal
 from .llama import LlamaDecoderLayer, LlamaMLP
 
 logger = init_logger(__name__)
@@ -1083,7 +1084,29 @@ class MllamaForCausalLM(nn.Module):
 @INPUT_REGISTRY.register_dummy_data(dummy_decoder_data_for_mllama)
 @INPUT_REGISTRY.register_dummy_encoder_data(dummy_encoder_data_for_mllama)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_mllama)
-class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
+class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal,
+                                     SupportsLoRA):
+    packed_modules_mapping = {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"]
+    }
+
+    # LoRA specific attributes
+    supported_lora_modules = [
+        # vision encoder
+        "fc1",
+        "fc2",
+        # language model
+        "qkv_proj",  # same name with vision encoder
+        "gate_up_proj",
+        "o_proj",  # same name with vision encoder
+        "down_proj",
+        # projector
+        "multi_modal_projector",
+    ]
+    embedding_modules = {}
+    embedding_padding_modules = []
+
     # BitandBytes specific attributes
     default_bitsandbytes_target_modules = [
         ".gate_proj.",
@@ -1112,8 +1135,11 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
                  config: config_mllama.MllamaConfig,
                  multimodal_config: MultiModalConfig,
                  cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None):
+                 quant_config: Optional[QuantizationConfig] = None,
+                 lora_config: Optional[LoRAConfig] = None):
         super().__init__()
+        # LRUCacheWorkerLoRAManager instantiation requires self.config.
+        self.config = config
         self.vocab_size = config.text_config.vocab_size
         self.hidden_size = config.text_config.hidden_size
         self.max_num_tiles = config.vision_config.max_num_tiles
@@ -1441,6 +1467,15 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
+
+    def get_mm_mapping(self) -> MultiModelKeys:
+        """
+        Get the module prefix in multimodal models
+        """
+        return MultiModelKeys.from_string_field(
+            language_model="language_model",
+            connector="multi_modal_projector",
+            tower_model="vision_model")
 
 
 def skip_attention_mask(sparse_mask: List[List[int]]) -> bool:

@@ -15,6 +15,7 @@ from vllm.config import ModelConfig, VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.logger import init_logger
+from vllm.lora.request import LoRARequest
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader.utils import get_architecture_class_name
@@ -34,7 +35,7 @@ from vllm.worker.model_runner_base import (
 from vllm.worker.utils import assert_enc_dec_mr_supported_scenario
 
 logger = init_logger(__name__)
-
+LORA_WARMUP_RANK = 8
 # The Mllama model has PagedAttention specific logic because of which it
 # can only be run with the XFORMERS backend
 # TODO Make Mllama model work with Flash Attention backend.
@@ -180,7 +181,11 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         if num_steps > 1:
             raise ValueError("num_steps > 1 is not supported in "
                              "EncoderDecoderModelRunner")
-
+        if self.lora_config:
+            assert model_input.lora_requests is not None
+            assert model_input.lora_mapping is not None
+            self.set_active_loras(model_input.lora_requests,
+                                  model_input.lora_mapping)
         if (model_input.attn_metadata is not None
                 and model_input.attn_metadata.prefill_metadata is None
                 and model_input.attn_metadata.decode_metadata.use_cuda_graph):
@@ -288,7 +293,25 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         sampling_params = SamplingParams(top_p=0.99, top_k=self.vocab_size - 1)
         max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
         max_num_seqs = self.scheduler_config.max_num_seqs
-
+        dummy_lora_requests: List[LoRARequest] = []
+        dummy_lora_requests_per_seq: List[LoRARequest] = []
+        if self.lora_config:
+            assert self.lora_manager is not None
+            with self.lora_manager.dummy_lora_cache():
+                for idx in range(self.lora_config.max_loras):
+                    lora_id = idx + 1
+                    dummy_lora_request = LoRARequest(
+                        lora_name=f"warmup_{lora_id}",
+                        lora_int_id=lora_id,
+                        lora_path="/not/a/real/path",
+                    )
+                    self.lora_manager.add_dummy_lora(dummy_lora_request,
+                                                     rank=LORA_WARMUP_RANK)
+                    dummy_lora_requests.append(dummy_lora_request)
+                dummy_lora_requests_per_seq = [
+                    dummy_lora_requests[idx % len(dummy_lora_requests)]
+                    for idx in range(max_num_seqs)
+                ]
         # Profile memory usage with max_num_sequences sequences and the total
         # number of tokens equal to max_num_batched_tokens.
         seqs: List[SequenceGroupMetadata] = []
@@ -337,6 +360,8 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                 block_tables=None,
                 encoder_seq_data=encoder_dummy_data.seq_data,
                 cross_block_table=None,
+                lora_request=dummy_lora_requests_per_seq[group_id]
+                if dummy_lora_requests_per_seq else None,
                 multi_modal_data=decoder_dummy_data.multi_modal_data
                 or encoder_dummy_data.multi_modal_data,
                 multi_modal_placeholders=decoder_dummy_data.
