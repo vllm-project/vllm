@@ -15,7 +15,7 @@ from vllm.lora.request import LoRARequest
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
                            SequenceGroupMetadata, SequenceGroupMetadataDelta,
-                           SequenceStage, SequenceStatus)
+                           SequenceStatus)
 from vllm.utils import Device, PyObjectCache
 
 logger = init_logger(__name__)
@@ -311,7 +311,7 @@ class Scheduler:
         # simple and NOT fair. It can lead to starvation of some
         # LoRAs. This should be improved in the future.
         self.lora_config = lora_config
-
+        self.num_prefill_groups = 0
         version = "selfattn"
         if (self.scheduler_config.task == "embedding"
                 or self.cache_config.is_attention_free):
@@ -1216,6 +1216,8 @@ class Scheduler:
         scheduler_start_time = time.perf_counter()
 
         scheduler_outputs: SchedulerOutputs = self._schedule()
+        self.num_prefill_groups = scheduler_outputs.num_prefill_groups
+
         now = time.time()
 
         if not self.cache_config.enable_prefix_caching:
@@ -1599,12 +1601,7 @@ class Scheduler:
             return remaining_token_budget
 
         # First get the number of sequences that require prefill
-        prefilling_seqs = 0
-        for i in range(len(self.running)):
-            for seq in self.running[i].seqs:
-                if seq.data.stage == SequenceStage.PREFILL:
-                    prefilling_seqs += 1
-        # Queued requests will also need to prefill
+        prefilling_seqs = self.num_prefill_groups
         prefilling_seqs += len(self.waiting)
 
         # Get the current remaining token budget
