@@ -300,6 +300,9 @@ def load_idefics3(question, image_urls: List[str]) -> ModelRequestData:
         max_num_seqs=16,
         enforce_eager=True,
         limit_mm_per_prompt={"image": len(image_urls)},
+        mm_processor_kwargs={
+            "size": {"longest_edge": 2*364}
+        },
     )
 
     placeholders = "\n".join(f"Image-{i}: <image>\n"

@@ -385,7 +385,10 @@ def run_idefics3(question: str, modality: str):
     llm = LLM(model=model_name,
               max_model_len=8192,
               max_num_seqs=2,
-              enforce_eager=True)
+              enforce_eager=True,
+              mm_processor_kwargs={
+                  "size": {"longest_edge": 3*364}
+              })
     prompt = (
         f"<|begin_of_text|>User:<image>{question}<end_of_utterance>\nAssistant:"
     )
