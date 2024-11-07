@@ -15,7 +15,7 @@ def server_config(request):
 
     if current_platform.is_rocm() and not config.get("supports_rocm", True):
         pytest.skip("The {} model can't be tested on the ROCm platform".format(
-            server_config["model"]))
+            config["model"]))
 
     # download model and tokenizer using transformers
     snapshot_download(config["model"])
