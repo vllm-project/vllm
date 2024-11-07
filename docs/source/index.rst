@@ -153,7 +153,7 @@ Documentation
    :maxdepth: 2
    :caption: Contributing
 
-   contributing/overview.md
+   contributing/overview
    contributing/profiling/profiling_index
    contributing/dockerfile/dockerfile
 
