@@ -145,7 +145,6 @@ Documentation
    dev/pooling_params
    dev/offline_inference/offline_index
    dev/engine/engine_index
-   dev/kernel/paged_attention
    dev/input_processing/model_inputs_index
    dev/multimodal/multimodal_index
 
@@ -156,6 +155,7 @@ Documentation
    contributing/overview
    contributing/profiling/profiling_index
    contributing/dockerfile/dockerfile
+   contributing/kernel/paged_attention
 
 Indices and tables
 ==================
