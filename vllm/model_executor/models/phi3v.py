@@ -1,4 +1,3 @@
-# coding=utf-8
 # Copyright 2024 The vLLM team.
 # Copyright 2024 Microsoft and the HuggingFace Inc. team. All rights reserved.
 #
@@ -33,7 +32,7 @@ from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
 from vllm.logger import init_logger
 from vllm.model_executor.layers.pooler import Pooler, PoolingType
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.models.clip import CLIPVisionModel
@@ -571,7 +570,7 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         if hasattr(self.language_model, "sampler"):
             return self.language_model.sampler
 
-        return Sampler()
+        return get_sampler()
 
     def _validate_image_sizes(self, data: torch.Tensor) -> torch.Tensor:
         expected_dims = (2, )

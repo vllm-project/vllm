@@ -1,4 +1,3 @@
-# coding=utf-8
 # Copyright 2023 The vLLM team.
 # Copyright (c) Google Inc.
 #
@@ -34,7 +33,7 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -350,7 +349,6 @@ class GemmaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         "gate_up_proj",
         "down_proj",
     ]
-
     # BitandBytes specific attributes
     default_bitsandbytes_target_modules = [
         ".gate_proj.",
@@ -361,8 +359,6 @@ class GemmaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         ".v_proj.",
         ".o_proj.",
     ]
-    # in TP, these weights are partitioned along the column dimension (dim=-1)
-    column_parallel_weights_modules = [".down_proj.", ".o_proj."]
     bitsandbytes_stacked_params_mapping = {
         # shard_name, weight_name, index
         "q_proj": ("qkv_proj", 0),
@@ -397,7 +393,7 @@ class GemmaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                                 quant_config,
                                 prefix=maybe_prefix(prefix, "model"))
         self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.sampler = Sampler()
+        self.sampler = get_sampler()
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 

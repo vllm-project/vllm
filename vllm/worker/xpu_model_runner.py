@@ -405,15 +405,7 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
 
     def load_model(self) -> None:
         with DeviceMemoryProfiler() as m:
-            self.model = get_model(
-                model_config=self.model_config,
-                device_config=self.device_config,
-                load_config=self.load_config,
-                lora_config=self.lora_config,
-                parallel_config=self.parallel_config,
-                scheduler_config=self.scheduler_config,
-                cache_config=self.cache_config,
-            )
+            self.model = get_model(vllm_config=self.vllm_config)
 
         self.model_memory_usage = m.consumed_memory
         logger.info("Loading model weights took %.4f GB",

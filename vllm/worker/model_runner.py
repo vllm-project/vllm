@@ -48,9 +48,10 @@ from vllm.prompt_adapter.worker_manager import (
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
 from vllm.transformers_utils.config import uses_mrope
-from vllm.utils import (DeviceMemoryProfiler, PyObjectCache, async_tensor_h2d,
-                        flatten_2d_lists, is_pin_memory_available,
-                        supports_dynamo, weak_ref_tensor)
+from vllm.utils import (DeviceMemoryProfiler, GiB_bytes, PyObjectCache,
+                        async_tensor_h2d, flatten_2d_lists,
+                        is_pin_memory_available, supports_dynamo,
+                        weak_ref_tensor)
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase, ModelRunnerInputBuilderBase,
     _add_attn_metadata_broadcastable_dict,
@@ -134,6 +135,18 @@ class ModelInputForGPU(ModelRunnerInputBase):
             tensor_dict = _init_attn_metadata_from_tensor_dict(
                 attn_backend, tensor_dict)
         return cls(**tensor_dict)
+
+    # Exclude `async_callback` to be able to pickle this object
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        del state["async_callback"]
+        return state
+
+    # TODO: What happens when we depickle this object?
+    # How can we update this callback to properly pass it to the engine?
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self.__dict__.update({'async_callback': None})
 
 
 @dataclass(frozen=True)
@@ -1051,13 +1064,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
     def load_model(self) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)
         with DeviceMemoryProfiler() as m:
-            self.model = get_model(model_config=self.model_config,
-                                   device_config=self.device_config,
-                                   load_config=self.load_config,
-                                   lora_config=self.lora_config,
-                                   parallel_config=self.parallel_config,
-                                   scheduler_config=self.scheduler_config,
-                                   cache_config=self.cache_config)
+            self.model = get_model(vllm_config=self.vllm_config)
 
         self.model_memory_usage = m.consumed_memory
         logger.info("Loading model weights took %.4f GB",
@@ -1389,16 +1396,16 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         per sequence in the batch.
         """
         assert not self.model_config.enforce_eager
-        logger.info("Capturing the model for CUDA graphs. This may lead to "
+        logger.info("Capturing cudagraphs for decoding. This may lead to "
                     "unexpected consequences if the model is not static. To "
                     "run the model in eager mode, set 'enforce_eager=True' or "
                     "use '--enforce-eager' in the CLI.")
-        logger.info("CUDA graphs can take additional 1~3 GiB memory per GPU. "
-                    "If you are running out of memory, consider decreasing "
-                    "`gpu_memory_utilization` or enforcing eager mode. "
-                    "You can also reduce the `max_num_seqs` as needed "
-                    "to decrease memory usage.")
+        logger.info("If out-of-memory error occurs during cudagraph capture,"
+                    " consider decreasing `gpu_memory_utilization` or "
+                    "switching to eager mode. You can also reduce the "
+                    "`max_num_seqs` as needed to decrease memory usage.")
         start_time = time.perf_counter()
+        start_free_gpu_memory = torch.cuda.mem_get_info()[0]
 
         # Prepare dummy inputs. These will be reused for all batch sizes.
         max_batch_size = self.max_batchsize_to_capture
@@ -1503,9 +1510,12 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         graph_runner)
 
         end_time = time.perf_counter()
+        end_free_gpu_memory = torch.cuda.mem_get_info()[0]
         elapsed_time = end_time - start_time
+        cuda_graph_size = start_free_gpu_memory - end_free_gpu_memory
         # This usually takes < 10 seconds.
-        logger.info("Graph capturing finished in %.0f secs.", elapsed_time)
+        logger.info("Graph capturing finished in %.0f secs, took %.2f GiB",
+                    elapsed_time, cuda_graph_size / GiB_bytes)
 
     def _update_inputs_to_capture_for_enc_dec_model(self,
                                                     capture_inputs: Dict[str,

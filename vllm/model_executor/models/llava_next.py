@@ -16,7 +16,7 @@ from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
                          InputContext)
 from vllm.model_executor.layers.pooler import Pooler, PoolingType
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -327,7 +327,7 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
         if hasattr(self.language_model, "sampler"):
             return self.language_model.sampler
 
-        return Sampler()
+        return get_sampler()
 
     def _validate_image_sizes(self, data: torch.Tensor) -> torch.Tensor:
         expected_dims = (2, )
@@ -606,7 +606,6 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
             :class:`LlavaNextImageInputs`
         """
         if intermediate_tensors is not None:
-            input_ids = None
             inputs_embeds = None
         else:
             image_input = self._parse_and_validate_image_input(**kwargs)
@@ -618,9 +617,14 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
                     self.language_model.model.get_input_embeddings,
                     lambda _: self._process_image_input(image_input),
                 )
-                input_ids = None
             else:
-                inputs_embeds = None
+                inputs_embeds = self.language_model.model.get_input_embeddings(
+                    input_ids)
+
+        # always pass the input via `inputs_embeds`
+        # to make sure the computation graph is consistent
+        # for `torch.compile` integration
+        input_ids = None
 
         hidden_states = self.language_model.model(input_ids,
                                                   positions,
