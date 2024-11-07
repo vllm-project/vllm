@@ -48,8 +48,6 @@ COPY requirements-common.txt requirements-common.txt
 COPY requirements-cuda.txt requirements-cuda.txt
 RUN --mount=type=cache,target=/root/.cache/pip \
     python3 -m pip install -r requirements-cuda.txt
-RUN --mount=type=cache,target=/root/.cache/pip \
-    python3 -m pip install hf_transfer
 
 
 # cuda arch list used by torch
@@ -192,6 +190,11 @@ ADD . /vllm-workspace/
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/pip \
     python3 -m pip install -r requirements-dev.txt
+
+# enable fast downloads from hf (for testing)
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python3 -m pip install hf_transfer
+ENV HF_HUB_ENABLE_HF_TRANSFER 1
 
 # doc requires source code
 # we hide them inside `test_docs/` , so that this source code
