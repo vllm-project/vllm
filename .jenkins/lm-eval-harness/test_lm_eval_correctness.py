@@ -54,6 +54,9 @@ def launch_lm_eval(eval_config):
         model_args += ",quantization=inc," \
             "kv_cache_dtype=fp8_inc," \
             "weights_load_device=cpu"
+    if eval_config.get("num_scheduler_steps"):
+        model_args += \
+            f",num_scheduler_steps={eval_config.get('num_scheduler_steps')}"
     kwargs = {}
     if 'fewshot_as_multiturn' in eval_config:
         kwargs['fewshot_as_multiturn'] = eval_config['fewshot_as_multiturn']

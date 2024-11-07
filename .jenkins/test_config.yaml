@@ -27,3 +27,17 @@ stages:
       - name: gsm8k_small_g3_tp1_fp8
         flavor: g3
         command: cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-fp8.txt -t 1
+  - name: test_gsm8k_mss
+    steps:
+      - name: gsm8k_small_g3_tp1_mss
+        flavor: g3
+        command: cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-mss.txt -t 1
+      - name: gsm8k_small_g2_tp1_mss
+        flavor: g2
+        command: cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-mss.txt -t 1
+      - name: gsm8k_small_g3_tp2_mss
+        flavor: g3.s
+        command: cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-mss.txt -t 2
+      - name: gsm8k_small_g2_tp2_mss
+        flavor: g2.s
+        command: cd .jenkins/lm-eval-harness && bash run-tests.sh -c configs/models-mss.txt -t 2
