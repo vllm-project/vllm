@@ -13,6 +13,7 @@ class ServerConfig(TypedDict, total=False):
     arguments: List[str]
     system_prompt: Optional[str]
     supports_parallel: Optional[bool]
+    supports_rocm: Optional[bool]
 
 
 def patch_system_prompt(messages: List[Dict[str, Any]],
@@ -98,6 +99,8 @@ CONFIGS: Dict[str, ServerConfig] = {
             "--max_num_seqs", "1", "--enforce-eager", "--cpu-offload-gb", "20"
         ],
         "supports_parallel":
+        False,
+        "supports_rocm":
         False,
     },
     "granite8b": {
