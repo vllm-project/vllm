@@ -63,7 +63,7 @@ from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalDataDict,
 from vllm.multimodal.base import MultiModalData
 from vllm.multimodal.image import cached_get_image_processor
 from vllm.multimodal.utils import cached_get_tokenizer
-from vllm.sequence import IntermediateTensors, SequenceData, PoolerOutput
+from vllm.sequence import IntermediateTensors, PoolerOutput, SequenceData
 from vllm.transformers_utils.config import uses_mrope
 from vllm.transformers_utils.processor import cached_get_processor
 
