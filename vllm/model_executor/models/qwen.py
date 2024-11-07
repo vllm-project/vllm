@@ -1,4 +1,3 @@
-# coding=utf-8
 # Adapted from
 # https://huggingface.co/Qwen/Qwen-7B/blob/main/modeling_qwen.py
 # Copyright (c) Alibaba Cloud.
@@ -23,8 +22,8 @@ from vllm.attention import Attention, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, LoRAConfig, MultiModalConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
-from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, InputContext,
-                         token_inputs)
+from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
+                         InputContext, token_inputs)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul, get_act_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -37,7 +36,7 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.resampler import Resampler2, get_abs_pos
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -204,7 +203,7 @@ class QwenVMLP(nn.Module):
                                          intermediate_size,
                                          bias=True,
                                          quant_config=quant_config)
-        self.act_fn = get_act_fn("gelu", quant_config, intermediate_size)
+        self.act_fn = get_act_fn("gelu")
         self.c_proj = RowParallelLinear(
             intermediate_size,
             hidden_size,
@@ -810,7 +809,7 @@ def dummy_data_for_qwen(
     ctx: InputContext,
     seq_len: int,
     mm_counts: Mapping[str, int],
-) -> Tuple[SequenceData, Optional[Dict]]:
+) -> DummyData:
     """Build dummy data for warming up Qwen models; this will only contain text
     matching the defaults for VLLM unless the model has a visual config.
 
@@ -829,7 +828,7 @@ def dummy_data_for_qwen(
     if not hasattr(hf_config, "visual"):
         seq_data = SequenceData.from_prompt_token_counts((0, seq_len))
         mm_data = None
-        return seq_data, mm_data
+        return DummyData(seq_data, mm_data)
 
     # We have a visual component - use images to warm up
     num_images = mm_counts["image"]
@@ -861,7 +860,7 @@ def dummy_data_for_qwen(
     # the data will get resized and the # of tokens per image is constant
     image = Image.new("RGB", (224, 224), color=0)
     mm_data = {"image": image if num_images == 1 else [image] * num_images}
-    return seq_data, mm_data
+    return DummyData(seq_data, mm_data)
 
 
 class QWenBaseModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
@@ -885,7 +884,7 @@ class QWenBaseModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         if self.config.tie_word_embeddings:
             self.lm_head.weight = self.transformer.wte.weight
         self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.sampler = Sampler()
+        self.sampler = get_sampler()
         self.make_empty_intermediate_tensors = (
             self.transformer.make_empty_intermediate_tensors)
 

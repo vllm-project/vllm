@@ -94,32 +94,22 @@ _TEXT_GENERATION_MODELS = {
 _EMBEDDING_MODELS = {
     # [Text-only]
     "BertModel": ("bert", "BertEmbeddingModel"),
+    "DeciLMForCausalLM": ("decilm", "DeciLMForCausalLM"),
     "Gemma2Model": ("gemma2", "Gemma2EmbeddingModel"),
     "LlamaModel": ("llama", "LlamaEmbeddingModel"),
+    **{
+        # Multiple models share the same architecture, so we include them all
+        k: (mod, arch) for k, (mod, arch) in _TEXT_GENERATION_MODELS.items()
+        if arch == "LlamaForCausalLM"
+    },
     "MistralModel": ("llama", "LlamaEmbeddingModel"),
-    "Qwen2ForRewardModel": ("qwen2_rm", "Qwen2ForRewardModel"),
-    "Qwen2ForSequenceClassification": (
-        "qwen2_cls", "Qwen2ForSequenceClassification"),
-    "LlamaForCausalLM": ("llama", "LlamaForCausalLM"),
     "Phi3ForCausalLM": ("phi3", "Phi3ForCausalLM"),
-    "DeciLMForCausalLM": ("decilm", "DeciLMForCausalLM"),
+    "Qwen2ForRewardModel": ("qwen2_rm", "Qwen2ForRewardModel"),
+    "Qwen2ForSequenceClassification": ("qwen2_cls", "Qwen2ForSequenceClassification"),  # noqa: E501
     # [Multimodal]
     "LlavaNextForConditionalGeneration": ("llava_next", "LlavaNextForConditionalGeneration"),  # noqa: E501
     "Phi3VForCausalLM": ("phi3v", "Phi3VForCausalLM"),
     "Qwen2VLForConditionalGeneration": ("qwen2_vl", "Qwen2VLForConditionalGeneration") # noqa: E501,
-}
-
-def add_embedding_models(base_models, embedding_models):
-    with_pooler_method_models = {}
-    embedding_models_name = embedding_models.keys()
-    for name, (path, arch) in base_models.items():
-        if arch in embedding_models_name:
-            with_pooler_method_models[name] = (path, arch)
-    return with_pooler_method_models
-
-_EMBEDDING_MODELS = {
-    **add_embedding_models(_TEXT_GENERATION_MODELS, _EMBEDDING_MODELS),
-    **_EMBEDDING_MODELS,
 }
 
 _MULTIMODAL_MODELS = {
@@ -129,7 +119,9 @@ _MULTIMODAL_MODELS = {
     "ChatGLMModel": ("chatglm", "ChatGLMForCausalLM"),
     "ChatGLMForConditionalGeneration": ("chatglm", "ChatGLMForCausalLM"),
     "FuyuForCausalLM": ("fuyu", "FuyuForCausalLM"),
+    "H2OVLChatModel": ("h2ovl", "H2OVLChatModel"),
     "InternVLChatModel": ("internvl", "InternVLChatModel"),
+    "Idefics3ForConditionalGeneration":("idefics3","Idefics3ForConditionalGeneration"),
     "LlavaForConditionalGeneration": ("llava", "LlavaForConditionalGeneration"),
     "LlavaNextForConditionalGeneration": ("llava_next", "LlavaNextForConditionalGeneration"),  # noqa: E501
     "LlavaNextVideoForConditionalGeneration": ("llava_next_video", "LlavaNextVideoForConditionalGeneration"),  # noqa: E501
@@ -342,6 +334,11 @@ class _ModelRegistry:
 
     def _raise_for_unsupported(self, architectures: List[str]):
         all_supported_archs = self.get_supported_archs()
+
+        if any(arch in all_supported_archs for arch in architectures):
+            raise ValueError(
+                f"Model architectures {architectures} failed "
+                "to be inspected. Please check the logs for more details.")
 
         raise ValueError(
             f"Model architectures {architectures} are not supported for now. "
