@@ -285,12 +285,27 @@ class CustomAllreduce {
   int world_size_;
   bool full_nvlink_;
 
-  // below are device pointers
   RankSignals sg_;
+  // Stores an map from a pointer to its peer pointters from all ranks.
   std::unordered_map<void*, RankData*> buffers_;
   Signal* self_sg_;
 
-  // stores the registered device pointers from all ranks
+  // Stores rank data from all ranks. This is mainly for cuda graph purposes.
+  // For cuda graph to work, all kernel arguments must be fixed during graph
+  // capture time. However, the peer pointers are not known during graph capture
+  // time. Therefore, during capture, we increment the rank data pointer and use
+  // that as the argument to the kernel. The kernel arguments are stored in
+  // graph_unreg_buffers_. The actual peer pointers will be filled in at the
+  // memory pointed to by the pointers in graph_unreg_buffers_ when
+  // the IPC handles are exchanged between ranks.
+  //
+  // The overall process looks like this:
+  // 1. Graph capture.
+  // 2. Each rank obtains the IPC handles for each addresses used during cuda
+  // graph capture using get_graph_buffer_ipc_meta.
+  // 3. (In Python) all gather the IPC handles.
+  // 4. Obtain the peer pointers by opening the IPC handles, and store them in
+  // the rank data array at corresponding positions.
   RankData *d_rank_data_base_, *d_rank_data_end_;
   std::vector<void*> graph_unreg_buffers_;
   // a map from IPC handles to opened IPC pointers
@@ -332,11 +347,10 @@ class CustomAllreduce {
     return it->second;
   }
 
-  std::pair<std::vector<uint8_t>, std::vector<int64_t>>
-  get_graph_buffer_ipc_meta() {
+  std::pair<std::string, std::vector<int64_t>> get_graph_buffer_ipc_meta() {
     auto num_buffers = graph_unreg_buffers_.size();
     auto handle_sz = sizeof(cudaIpcMemHandle_t);
-    std::vector<uint8_t> handles(handle_sz * num_buffers, 0);
+    std::string handles(handle_sz * num_buffers, static_cast<char>(0));
     std::vector<int64_t> offsets(num_buffers);
     for (int i = 0; i < num_buffers; i++) {
       auto ptr = graph_unreg_buffers_[i];

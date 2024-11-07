@@ -918,13 +918,10 @@ def init_custom_ar(ipc_tensors: List[torch.Tensor], rank_data: torch.Tensor,
                                                  full_nvlink)
 
 
-def all_reduce_reg(fa: int, inp: torch.Tensor, out: torch.Tensor) -> None:
-    torch.ops._C_custom_ar.all_reduce_reg(fa, inp, out)
-
-
-def all_reduce_unreg(fa: int, inp: torch.Tensor, reg_buffer: torch.Tensor,
-                     out: torch.Tensor) -> None:
-    torch.ops._C_custom_ar.all_reduce_unreg(fa, inp, reg_buffer, out)
+def all_reduce(fa: int, inp: torch.Tensor, out: torch.Tensor, reg_buffer: int,
+               reg_buffer_sz_bytes: int) -> None:
+    torch.ops._C_custom_ar.all_reduce(fa, inp, out, reg_buffer,
+                                      reg_buffer_sz_bytes)
 
 
 def dispose(fa: int) -> None:
@@ -935,15 +932,15 @@ def meta_size() -> int:
     return torch.ops._C_custom_ar.meta_size()
 
 
-def register_buffer(fa: int, ipc_tensors: List[torch.Tensor]) -> None:
+def register_buffer(fa: int, ipc_tensors: List[int]) -> None:
     return torch.ops._C_custom_ar.register_buffer(fa, ipc_tensors)
 
 
-def get_graph_buffer_ipc_meta(fa: int) -> Tuple[List[str], List[int]]:
+def get_graph_buffer_ipc_meta(fa: int) -> Tuple[List[int], List[int]]:
     return torch.ops._C_custom_ar.get_graph_buffer_ipc_meta(fa)
 
 
-def register_graph_buffers(fa: int, handles: List[str],
+def register_graph_buffers(fa: int, handles: List[List[int]],
                            offsets: List[List[int]]) -> None:
     torch.ops._C_custom_ar.register_graph_buffers(fa, handles, offsets)
 
