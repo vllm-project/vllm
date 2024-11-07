@@ -683,7 +683,9 @@ def get_max_qwen2_vl_mm_tokens(ctx: InputContext,
                                *,
                                min_pixels=None,
                                max_pixels=None) -> int:
-    image_processor = cached_get_image_processor(ctx.model_config.model)
+    mm_processor_kwargs = ctx.model_config.mm_processor_kwargs or {}
+    image_processor = cached_get_image_processor(ctx.model_config.model,
+                                                 **mm_processor_kwargs)
     max_resized_height, max_resized_width, max_llm_image_tokens = \
         _get_max_image_info(image_processor, data_type_key=data_type_key,
                             mm_count=1, min_pixels=min_pixels,
@@ -705,7 +707,9 @@ def dummy_data_for_qwen2_vl(
     min_pixels: Optional[int] = None,
     max_pixels: Optional[int] = None
 ) -> Tuple[SequenceData, Optional[MultiModalDataDict]]:
-    image_processor = cached_get_image_processor(ctx.model_config.model)
+    mm_processor_kwargs = ctx.model_config.mm_processor_kwargs or {}
+    image_processor = cached_get_image_processor(ctx.model_config.model,
+                                                 **mm_processor_kwargs)
 
     num_images = mm_counts["image"]
     max_resized_height, max_resized_width, max_llm_image_tokens = \
