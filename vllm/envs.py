@@ -49,7 +49,8 @@ if TYPE_CHECKING:
     VLLM_WORKER_MULTIPROC_METHOD: str = "fork"
     VLLM_ASSETS_CACHE: str = os.path.join(VLLM_CACHE_ROOT, "assets")
     VLLM_IMAGE_FETCH_TIMEOUT: int = 5
-    VLLM_AUDIO_FETCH_TIMEOUT: int = 5
+    VLLM_VIDEO_FETCH_TIMEOUT: int = 15
+    VLLM_AUDIO_FETCH_TIMEOUT: int = 10
     VLLM_TARGET_DEVICE: str = "cuda"
     MAX_JOBS: Optional[str] = None
     NVCC_THREADS: Optional[str] = None
@@ -376,10 +377,15 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_IMAGE_FETCH_TIMEOUT":
     lambda: int(os.getenv("VLLM_IMAGE_FETCH_TIMEOUT", "5")),
 
+    # Timeout for fetching videos when serving multimodal models
+    # Default is 15 seconds
+    "VLLM_VIDEO_FETCH_TIMEOUT":
+    lambda: int(os.getenv("VLLM_VIDEO_FETCH_TIMEOUT", "15")),
+
     # Timeout for fetching audio when serving multimodal models
-    # Default is 5 seconds
+    # Default is 10 seconds
     "VLLM_AUDIO_FETCH_TIMEOUT":
-    lambda: int(os.getenv("VLLM_AUDIO_FETCH_TIMEOUT", "5")),
+    lambda: int(os.getenv("VLLM_AUDIO_FETCH_TIMEOUT", "10")),
 
     # Path to the XLA persistent cache directory.
     # Only used for XLA devices such as TPUs.

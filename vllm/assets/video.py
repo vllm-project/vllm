@@ -35,7 +35,7 @@ def download_video_asset(filename: str) -> str:
 
 
 def video_to_ndarrays(path: str, num_frames: int = -1) -> npt.NDArray:
-    cv2 = try_import_video_packages()
+    cv2, _ = try_import_video_packages()
 
     cap = cv2.VideoCapture(path)
     if not cap.isOpened():
@@ -59,7 +59,7 @@ def video_to_ndarrays(path: str, num_frames: int = -1) -> npt.NDArray:
 
 def video_to_pil_images_list(path: str,
                              num_frames: int = -1) -> List[Image.Image]:
-    cv2 = try_import_video_packages()
+    cv2, _ = try_import_video_packages()
     frames = video_to_ndarrays(path, num_frames)
     return [
         Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
