@@ -8,8 +8,8 @@ import numpy as np
 import numpy.typing as npt
 from PIL import Image
 
+import vllm.envs as envs
 from vllm.connections import global_http_connection
-from vllm.envs import VLLM_AUDIO_FETCH_TIMEOUT, VLLM_IMAGE_FETCH_TIMEOUT
 from vllm.logger import init_logger
 from vllm.multimodal.base import MultiModalDataDict, PlaceholderRange
 from vllm.transformers_utils.tokenizer import AnyTokenizer, get_tokenizer
@@ -80,7 +80,9 @@ def fetch_image(image_url: str,
     """
     if image_url.startswith('http'):
         image_raw = global_http_connection.get_bytes(
-            image_url, timeout=VLLM_IMAGE_FETCH_TIMEOUT)
+            image_url,
+            timeout=envs.VLLM_IMAGE_FETCH_TIMEOUT,
+        )
         image = _load_image_from_bytes(image_raw)
 
     elif image_url.startswith('data:image'):
@@ -105,7 +107,9 @@ async def async_fetch_image(image_url: str,
     """
     if image_url.startswith('http'):
         image_raw = await global_http_connection.async_get_bytes(
-            image_url, timeout=VLLM_IMAGE_FETCH_TIMEOUT)
+            image_url,
+            timeout=envs.VLLM_IMAGE_FETCH_TIMEOUT,
+        )
         image = _load_image_from_bytes(image_raw)
 
     elif image_url.startswith('data:image'):
@@ -164,7 +168,9 @@ def fetch_video(video_url: str, *, num_frames: int = 32) -> npt.NDArray:
     """
     if video_url.startswith('http') or video_url.startswith('https'):
         video_raw = global_http_connection.get_bytes(
-            video_url, timeout=VLLM_IMAGE_FETCH_TIMEOUT)
+            video_url,
+            timeout=envs.VLLM_VIDEO_FETCH_TIMEOUT,
+        )
         video = _load_video_from_bytes(video_raw, num_frames)
     elif video_url.startswith('data:video'):
         video = _load_video_from_data_url(video_url)
@@ -184,7 +190,9 @@ async def async_fetch_video(video_url: str,
     """
     if video_url.startswith('http') or video_url.startswith('https'):
         video_raw = await global_http_connection.async_get_bytes(
-            video_url, timeout=VLLM_IMAGE_FETCH_TIMEOUT)
+            video_url,
+            timeout=envs.VLLM_VIDEO_FETCH_TIMEOUT,
+        )
         video = _load_video_from_bytes(video_raw, num_frames)
     elif video_url.startswith('data:video'):
         video = _load_video_from_data_url(video_url)
@@ -212,7 +220,9 @@ def fetch_audio(audio_url: str) -> Tuple[np.ndarray, Union[int, float]]:
 
     if audio_url.startswith("http"):
         audio_bytes = global_http_connection.get_bytes(
-            audio_url, timeout=VLLM_AUDIO_FETCH_TIMEOUT)
+            audio_url,
+            timeout=envs.VLLM_AUDIO_FETCH_TIMEOUT,
+        )
     elif audio_url.startswith("data:audio"):
         _, audio_base64 = audio_url.split(",", 1)
         audio_bytes = base64.b64decode(audio_base64)
@@ -232,7 +242,9 @@ async def async_fetch_audio(
 
     if audio_url.startswith("http"):
         audio_bytes = await global_http_connection.async_get_bytes(
-            audio_url, timeout=VLLM_AUDIO_FETCH_TIMEOUT)
+            audio_url,
+            timeout=envs.VLLM_AUDIO_FETCH_TIMEOUT,
+        )
     elif audio_url.startswith("data:audio"):
         _, audio_base64 = audio_url.split(",", 1)
         audio_bytes = base64.b64decode(audio_base64)
