@@ -5,7 +5,6 @@ import pytest
 import pytest_asyncio
 from transformers import AutoModel, AutoTokenizer, BatchEncoding
 
-from vllm.platforms import current_platform
 from vllm.sequence import SampleLogprobs
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 
@@ -182,12 +181,8 @@ def run_multi_audio_test(
     assert all(tokens for tokens, *_ in vllm_outputs)
 
 
-# TODO: remove this after CPU float16 support ready
-target_dtype = "bfloat16" if current_platform.is_cpu() else "half"
-
-
 @pytest.mark.core_model
-@pytest.mark.parametrize("dtype", [target_dtype])
+@pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [5])
 @pytest.mark.parametrize("vllm_kwargs", [{}, CHUNKED_PREFILL_KWARGS])

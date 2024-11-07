@@ -94,8 +94,7 @@ VLM_TEST_SETTINGS = {
             ),
             limit_mm_per_prompt={"image": 4},
         )],
-        # TODO: remove this after CPU float16 support ready
-        dtype="bfloat16" if current_platform.is_cpu() else "half",
+        dtype="half",
         marks=[pytest.mark.core_model],
     ),
     "paligemma": VLMTestInfo(
@@ -133,8 +132,7 @@ VLM_TEST_SETTINGS = {
         max_num_seqs=2,
         auto_cls=AutoModelForVision2Seq,
         vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
-        # TODO: remove this after CPU float16 support ready
-        dtype="bfloat16" if current_platform.is_cpu() else "half",
+        dtype="half",
         marks=[pytest.mark.core_model],
         image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
     ),
