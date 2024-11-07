@@ -338,6 +338,10 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     ):
         if intermediate_tensors is not None:
             inputs_embeds = None
+
+        # TODO (ywang96): This is currently needed since embedding generation
+        # takes place in the model forward pass. Clean this up after V0 is
+        # fully deprecated.
         elif inputs_embeds is None:
             vision_embeddings = self.process_mm_inputs(**kwargs)
             inputs_embeds = self.get_inputs_embeds(
