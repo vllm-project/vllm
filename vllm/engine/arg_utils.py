@@ -9,13 +9,16 @@ import torch
 
 import vllm.envs as envs
 from vllm.config import (CacheConfig, ConfigFormat, DecodingConfig,
-                         DeviceConfig, EngineConfig, LoadConfig, LoadFormat,
-                         LoRAConfig, ModelConfig, ObservabilityConfig,
-                         ParallelConfig, PromptAdapterConfig, SchedulerConfig,
-                         SpeculativeConfig, TaskOption, TokenizerPoolConfig)
+                         DeviceConfig, LoadConfig, LoadFormat, LoRAConfig,
+                         ModelConfig, ObservabilityConfig, ParallelConfig,
+                         PromptAdapterConfig, SchedulerConfig,
+                         SpeculativeConfig, TaskOption, TokenizerPoolConfig,
+                         VllmConfig)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
+from vllm.model_executor.layers.pooler import PoolingType
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
+from vllm.platforms import current_platform
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.transformers_utils.utils import check_gguf_file
@@ -36,6 +39,7 @@ DEVICE_OPTIONS = [
     "openvino",
     "tpu",
     "xpu",
+    "hpu",
 ]
 
 
@@ -91,6 +95,7 @@ class EngineArgs:
     tokenizer_mode: str = 'auto'
     chat_template_text_format: str = 'string'
     trust_remote_code: bool = False
+    allowed_local_media_path: str = ""
     download_dir: Optional[str] = None
     load_format: str = 'auto'
     config_format: ConfigFormat = ConfigFormat.AUTO
@@ -108,7 +113,9 @@ class EngineArgs:
     pipeline_parallel_size: int = 1
     tensor_parallel_size: int = 1
     max_parallel_loading_workers: Optional[int] = None
-    block_size: int = 16
+    # NOTE(kzawora): default block size for Gaudi should be 128
+    # smaller sizes still work, but very inefficiently
+    block_size: int = 16 if not current_platform.is_hpu() else 128
     enable_prefix_caching: bool = False
     disable_sliding_window: bool = False
     use_v2_block_manager: bool = True
@@ -126,7 +133,6 @@ class EngineArgs:
     tokenizer_revision: Optional[str] = None
     quantization: Optional[str] = None
     enforce_eager: Optional[bool] = None
-    max_context_len_to_capture: Optional[int] = None
     max_seq_len_to_capture: int = 8192
     disable_custom_all_reduce: bool = False
     tokenizer_pool_size: int = 0
@@ -269,6 +275,13 @@ class EngineArgs:
         parser.add_argument('--trust-remote-code',
                             action='store_true',
                             help='Trust remote code from huggingface.')
+        parser.add_argument(
+            '--allowed-local-media-path',
+            type=str,
+            help="Allowing API requests to read local images or videos"
+            "from directories specified by the server file system."
+            "This is a security risk."
+            "Should only be enabled in trusted environments")
         parser.add_argument('--download-dir',
                             type=nullable_str,
                             default=EngineArgs.download_dir,
@@ -389,7 +402,7 @@ class EngineArgs:
         parser.add_argument('--block-size',
                             type=int,
                             default=EngineArgs.block_size,
-                            choices=[8, 16, 32],
+                            choices=[8, 16, 32, 64, 128],
                             help='Token block size for contiguous chunks of '
                             'tokens. This is ignored on neuron devices and '
                             'set to max-model-len')
@@ -504,14 +517,6 @@ class EngineArgs:
                             help='Always use eager-mode PyTorch. If False, '
                             'will use eager mode and CUDA graph in hybrid '
                             'for maximal performance and flexibility.')
-        parser.add_argument('--max-context-len-to-capture',
-                            type=int,
-                            default=EngineArgs.max_context_len_to_capture,
-                            help='Maximum context length covered by CUDA '
-                            'graphs. When a sequence has context length '
-                            'larger than this, we fall back to eager mode. '
-                            '(DEPRECATED. Use --max-seq-len-to-capture instead'
-                            ')')
         parser.add_argument('--max-seq-len-to-capture',
                             type=int,
                             default=EngineArgs.max_seq_len_to_capture,
@@ -859,7 +864,7 @@ class EngineArgs:
 
         parser.add_argument(
             '--pooling-type',
-            choices=['LAST', 'ALL', 'CLS', 'STEP'],
+            choices=[pt.name for pt in PoolingType],
             default=None,
             help='Used to configure the pooling method in the embedding model.'
         )
@@ -928,6 +933,7 @@ class EngineArgs:
             tokenizer_mode=self.tokenizer_mode,
             chat_template_text_format=self.chat_template_text_format,
             trust_remote_code=self.trust_remote_code,
+            allowed_local_media_path=self.allowed_local_media_path,
             dtype=self.dtype,
             seed=self.seed,
             revision=self.revision,
@@ -939,7 +945,6 @@ class EngineArgs:
             quantization=self.quantization,
             quantization_param_path=self.quantization_param_path,
             enforce_eager=self.enforce_eager,
-            max_context_len_to_capture=self.max_context_len_to_capture,
             max_seq_len_to_capture=self.max_seq_len_to_capture,
             max_logprobs=self.max_logprobs,
             disable_sliding_window=self.disable_sliding_window,
@@ -965,7 +970,7 @@ class EngineArgs:
             ignore_patterns=self.ignore_patterns,
         )
 
-    def create_engine_config(self) -> EngineConfig:
+    def create_engine_config(self) -> VllmConfig:
         # gguf file needs a specific model loader and doesn't use hf_repo
         if check_gguf_file(self.model):
             self.quantization = self.load_format = "gguf"
@@ -1132,8 +1137,7 @@ class EngineArgs:
             multi_step_stream_outputs=self.multi_step_stream_outputs,
             send_delta_data=(envs.VLLM_USE_RAY_SPMD_WORKER
                              and parallel_config.use_ray),
-            policy=self.scheduling_policy,
-        )
+            policy=self.scheduling_policy)
         lora_config = LoRAConfig(
             max_lora_rank=self.max_lora_rank,
             max_loras=self.max_loras,
@@ -1177,7 +1181,7 @@ class EngineArgs:
             or "all" in detailed_trace_modules,
         )
 
-        return EngineConfig(
+        return VllmConfig(
             model_config=model_config,
             cache_config=cache_config,
             parallel_config=parallel_config,

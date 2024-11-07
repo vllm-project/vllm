@@ -343,7 +343,7 @@ class LoRAModelManager(AdapterModelManager):
             # text modules (e.g. ChatGLM)
             and hasattr(self.model, "get_mm_mapping"))
         self.packed_modules: Dict[str, List[str]] = {}
-        self.modules: Dict[str, "BaseLayerWithLoRA"] = {}
+        self.modules: Dict[str, BaseLayerWithLoRA] = {}
         # Dict instead of a Set for compatibility with LRUCache.
         self._last_mapping: Optional[LoRAMapping] = None
         self._create_lora_modules()
@@ -548,7 +548,7 @@ class LoRAModelManager(AdapterModelManager):
             else:
                 parts = module_name.split(".")
                 replacements = self.packed_modules_mapping[parts[-1]]
-                subloras: List[Optional["LoRALayerWeights"]] = []
+                subloras: List[Optional[LoRALayerWeights]] = []
                 for i, r in enumerate(replacements):
                     lora = LoRALayerWeights.create_dummy_lora_weights(
                         module_name + "." + r,

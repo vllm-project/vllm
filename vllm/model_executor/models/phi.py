@@ -1,4 +1,3 @@
-# coding=utf-8
 # Adapted from
 # https://huggingface.co/microsoft/phi-1_5/blob/main/modeling_phi.py
 # Copyright 2023 The vLLM team.
@@ -42,6 +41,7 @@ from torch import nn
 from transformers import PhiConfig
 
 from vllm.attention import Attention, AttentionMetadata
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, LoRAConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
@@ -51,7 +51,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -152,7 +152,7 @@ class PhiMLP(nn.Module):
             config.hidden_size,
             quant_config=quant_config,
         )
-        self.act = get_act_fn(config.hidden_act, quant_config, n_inner)
+        self.act = get_act_fn(config.hidden_act)
 
     def forward(self, hidden_states):
         hidden_states, _ = self.fc1(hidden_states)
@@ -193,6 +193,7 @@ class PhiLayer(nn.Module):
         return hidden_states
 
 
+@support_torch_compile
 class PhiModel(nn.Module):
 
     def __init__(self,
@@ -272,8 +273,6 @@ class PhiForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     default_bitsandbytes_target_modules = [
         ".q_proj.", ".k_proj.", ".v_proj.", ".fc1.", ".fc2.", ".dense."
     ]
-    # in TP, these weights are partitioned along the column dimension (dim=-1)
-    column_parallel_weights_modules = [".fc2.", ".dense."]
 
     embedding_modules = {}
     embedding_padding_modules = []
@@ -301,7 +300,7 @@ class PhiForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                                       bias=True,
                                       quant_config=quant_config)
         self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.sampler = Sampler()
+        self.sampler = get_sampler()
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 

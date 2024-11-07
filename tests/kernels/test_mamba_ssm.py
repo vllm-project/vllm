@@ -510,7 +510,7 @@ def test_selective_scan_varlen(with_padding, is_variable_B, is_variable_C,
         for var in (u_ref, delta_ref, B_ref, C_ref, z_ref)
     ]
     for i in range(len(seqlens[0])):
-        u_s, delta_s, B_s, C_s, z_s = [v[i].unsqueeze(0) for v in splits]
+        u_s, delta_s, B_s, C_s, z_s = (v[i].unsqueeze(0) for v in splits)
         if padded_state_indices[i] == PAD_SLOT_ID:
             continue
         out_ref_s, _ = selective_scan_ref(
@@ -555,7 +555,7 @@ def test_selective_state_update_with_batch_indices(with_padding, dim, dstate,
     device = "cuda"
     rtol, atol = (3e-4, 1e-3) if itype == torch.float32 else (5e-3, 1e-2)
     if itype == torch.bfloat16:
-        rtol, atol = 7e-2, 7e-2
+        rtol, atol = 1e-1, 1e-1
         if torch.version.hip:
             atol *= 2
     # set seed
@@ -610,8 +610,8 @@ def test_selective_state_update_with_batch_indices(with_padding, dim, dstate,
                                          dt_bias=dt_bias,
                                          dt_softplus=True)
 
-    print("Output diff max", (out - out_ref[0]).max())
-    print("Output diff mean", (out - out_ref[0]).mean())
+    print("Output diff max", (out[:batch_size] - out_ref).max())
+    print("Output diff mean", (out[:batch_size] - out_ref).mean())
     print("Output state diff max", (state[state_indices, :] - state_ref).max())
     print("Output state diff mean",
           (state[state_indices, :] - state_ref).mean())

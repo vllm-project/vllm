@@ -26,13 +26,26 @@ print(completion.choices[0].message)
 ```
 
 ## API Reference
-Please see the [OpenAI API Reference](https://platform.openai.com/docs/api-reference) for more information on the API. We support all parameters except:
-- Chat: `tools`, and `tool_choice`.
-- Completions: `suffix`.
 
-vLLM also provides experimental support for OpenAI Vision API compatible inference. See more details in [Using VLMs](../models/vlm.rst).
+We currently support the following OpenAI APIs:
+
+- [Completions API](https://platform.openai.com/docs/api-reference/completions)
+  - *Note: `suffix` parameter is not supported.*
+- [Chat Completions API](https://platform.openai.com/docs/api-reference/chat)
+  - [Vision](https://platform.openai.com/docs/guides/vision)-related parameters are supported; see [Using VLMs](../models/vlm.rst).
+    - *Note: `image_url.detail` parameter is not supported.*
+  - We also support `audio_url` content type for audio files.
+    - Refer to [vllm.entrypoints.chat_utils](https://github.com/vllm-project/vllm/tree/main/vllm/entrypoints/chat_utils.py) for the exact schema.
+    - *TODO: Support `input_audio` content type as defined [here](https://github.com/openai/openai-python/blob/v1.52.2/src/openai/types/chat/chat_completion_content_part_input_audio_param.py).*
+  - *Note: `parallel_tool_calls` and `user` parameters are ignored.*
+- [Embeddings API](https://platform.openai.com/docs/api-reference/embeddings)
+  - Instead of `inputs`, you can pass in a list of `messages` (same schema as Chat Completions API),
+    which will be treated as a single prompt to the model according to its chat template.
+    - This enables multi-modal inputs to be passed to embedding models, see [Using VLMs](../models/vlm.rst).
+  - *Note: You should run `vllm serve` with `--task embedding` to ensure that the model is being run in embedding mode.*
 
 ## Extra Parameters
+
 vLLM supports a set of parameters that are not part of the OpenAI API.
 In order to use them, you can pass them as extra parameters in the OpenAI client.
 Or directly merge them into the JSON payload if you are using HTTP call directly.
@@ -49,7 +62,26 @@ completion = client.chat.completions.create(
 )
 ```
 
-### Extra Parameters for Chat API
+### Extra Parameters for Completions API
+
+The following [sampling parameters (click through to see documentation)](../dev/sampling_params.rst) are supported.
+
+```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
+:language: python
+:start-after: begin-completion-sampling-params
+:end-before: end-completion-sampling-params
+```
+
+The following extra parameters are supported:
+
+```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
+:language: python
+:start-after: begin-completion-extra-params
+:end-before: end-completion-extra-params
+```
+
+### Extra Parameters for Chat Completions API
+
 The following [sampling parameters (click through to see documentation)](../dev/sampling_params.rst) are supported.
 
 ```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
@@ -66,21 +98,22 @@ The following extra parameters are supported:
 :end-before: end-chat-completion-extra-params
 ```
 
-### Extra Parameters for Completions API
-The following [sampling parameters (click through to see documentation)](../dev/sampling_params.rst) are supported.
+### Extra Parameters for Embeddings API
+
+The following [pooling parameters (click through to see documentation)](../dev/pooling_params.rst) are supported.
 
 ```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
 :language: python
-:start-after: begin-completion-sampling-params
-:end-before: end-completion-sampling-params
+:start-after: begin-embedding-pooling-params
+:end-before: end-embedding-pooling-params
 ```
 
 The following extra parameters are supported:
 
 ```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
 :language: python
-:start-after: begin-completion-extra-params
-:end-before: end-completion-extra-params
+:start-after: begin-embedding-extra-params
+:end-before: end-embedding-extra-params
 ```
 
 ## Chat Template
@@ -127,14 +160,7 @@ this, unless explicitly specified.
 :func: create_parser_for_docs
 :prog: vllm serve
 ```
-## Tool Calling in the Chat Completion API
-### Named Function Calling
-vLLM supports only named function calling in the chat completion API by default. It does so using Outlines, so this is
-enabled by default, and will work with any supported model. You are guaranteed a validly-parsable function call - not a
-high-quality one.
 
-To use a named function, you need to define the functions in the `tools` parameter of the chat completion request, and
-specify the `name` of one of the tools in the `tool_choice` parameter of the chat completion request.
 
 ### Config file
 
@@ -163,11 +189,21 @@ The order of priorities is `command line > config file values > defaults`.
 ---
 
 ## Tool calling in the chat completion API
-vLLM supports only named function calling in the chat completion API. The `tool_choice` options `auto` and `required` are **not yet supported** but on the roadmap.
+
+vLLM supports named function calling and `auto` tool choice  in the chat completion API. The `tool_choice` options `required` is **not yet supported** but on the roadmap.
 
 It is the callers responsibility to prompt the model with the tool information, vLLM will not automatically manipulate the prompt.
 
+
+### Named Function Calling
+vLLM supports named function calling in the chat completion API by default. It does so using Outlines, so this is
+enabled by default, and will work with any supported model. You are guaranteed a validly-parsable function call - not a
+high-quality one.
+
 vLLM will use guided decoding to ensure the response matches the tool parameter object defined by the JSON schema in the `tools` parameter.
+
+To use a named function, you need to define the functions in the `tools` parameter of the chat completion request, and
+specify the `name` of one of the tools in the `tool_choice` parameter of the chat completion request.
 
 
 ### Automatic Function Calling
@@ -242,6 +278,21 @@ it works better with vLLM.
 
 Recommended flags: `--tool-call-parser llama3_json --chat-template examples/tool_chat_template_llama3_json.jinja`
 
+#### IBM Granite
+
+Supported models:
+* `ibm-granite/granite-3.0-8b-instruct`
+
+Recommended flags: `--tool-call-parser granite --chat-template examples/tool_chat_template_granite.jinja`
+
+`examples/tool_chat_template_granite.jinja`: this is a modified chat template from the original on Huggingface. Parallel function calls are supported.
+
+* `ibm-granite/granite-20b-functioncalling`
+
+Recommended flags: `--tool-call-parser granite-20b-fc --chat-template examples/tool_chat_template_granite_20b_fc.jinja`
+
+`examples/tool_chat_template_granite_20b_fc.jinja`: this is a modified chat template from the original on Huggingface, which is not vLLM compatible. It blends function description elements from the Hermes template and follows the same system prompt as "Response Generation" mode from [the paper](https://arxiv.org/abs/2407.00121). Parallel function calls are supported.
+
 
 #### InternLM Models (`internlm`)
 
@@ -262,16 +313,6 @@ AI21's Jamba-1.5 models are supported.
 
 
 Flags: `--tool-call-parser jamba`
-
-
-#### IBM Granite (`granite-20b-fc`)
-
-Supported models:
-* `ibm-granite/granite-20b-functioncalling`
-
-Flags: `--tool-call-parser granite-20b-fc --chat-template examples/tool_chat_template_granite_20b_fc.jinja`
-
-The example chat template deviates slightly from the original on Huggingface, which is not vLLM compatible. It blends function description elements from the Hermes template and follows the same system prompt as "Response Generation" mode from [the paper](https://arxiv.org/abs/2407.00121). Parallel function calls are supported.
 
 
 #### Models with Pythonic Tool Calls (`pythonic`)
