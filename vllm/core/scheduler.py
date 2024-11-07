@@ -1591,6 +1591,13 @@ class Scheduler:
         remaining token budget, allowing other sequences to prefill and decode
         concurrently."""
 
+        # Get the current remaining token budget
+        remaining_token_budget = budget.remaining_token_budget()
+        if remaining_token_budget < self.scheduler_config.min_chunk_size:
+            # Skip all calculations if there's no way to reduce the budget any
+            # further anyway
+            return remaining_token_budget
+
         # First get the number of sequences that require prefill
         prefilling_seqs = 0
         for i in range(len(self.running)):
