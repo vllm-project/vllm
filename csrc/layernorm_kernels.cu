@@ -27,6 +27,11 @@ using __nv_bfloat162 = __hip_bfloat162;
   #include "quantization/fp8/nvidia/quant_utils.cuh"
 #endif
 
+#if defined(__HIPCC__) && (defined(__gfx90a__) || defined(__gfx940__) || \
+                           defined(__gfx941__) || defined(__gfx942__))
+  #define __HIP__MI300_MI250__
+#endif
+
 namespace vllm {
 
 template <typename scalar_t>
@@ -66,6 +71,8 @@ struct __align__(16) vec8_t {
 
   __device__ scalar_t sum() const { return x + y + z + w + u + v + s + t; }
 };
+
+#ifdef __HIP__MI300_MI250__
 
 // TODO(woosuk): Further optimize this kernel.
 template <typename scalar_t>
@@ -110,6 +117,41 @@ __global__ void rms_norm_kernel(
   }
 }
 
+#else
+
+// TODO(maleksan): Investigate why vectorization doesn't work for Navi.
+template <typename scalar_t>
+__global__ void rms_norm_kernel(
+    scalar_t* __restrict__ out,           // [..., hidden_size]
+    const scalar_t* __restrict__ input,   // [..., hidden_size]
+    const scalar_t* __restrict__ weight,  // [hidden_size]
+    const float epsilon, const int num_tokens, const int hidden_size) {
+  __shared__ float s_variance;
+  float variance = 0.0f;
+
+  for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
+    const float x = (float)input[blockIdx.x * hidden_size + idx];
+    variance += x * x;
+  }
+
+  using BlockReduce = cub::BlockReduce<float, 1024>;
+  __shared__ typename BlockReduce::TempStorage reduceStore;
+  variance = BlockReduce(reduceStore).Reduce(variance, cub::Sum{}, blockDim.x);
+
+  if (threadIdx.x == 0) {
+    s_variance = rsqrtf(variance / hidden_size + epsilon);
+  }
+  __syncthreads();
+
+  for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
+    float x = (float)input[blockIdx.x * hidden_size + idx];
+    out[blockIdx.x * hidden_size + idx] =
+        ((scalar_t)(x * s_variance)) * weight[idx];
+  }
+}
+
+#endif
+
 template <typename scalar_t>
 __global__ void scaled_rms_norm_kernel(
     c10::Float8_e4m3fnuz* __restrict__ out,  // [..., hidden_size]
@@ -144,7 +186,7 @@ __global__ void scaled_rms_norm_kernel(
 
 /* Converter structs for the conversion from torch types to HIP/CUDA types,
    and the associated type conversions within HIP/CUDA. These helpers need
-   to be implemented for now because the relevant type conversion
+   to be implemented for now because/error the relevant type conversion
    operators/constructors are not consistently implemented by HIP/CUDA, so
    a generic conversion via type casts cannot be implemented.
 

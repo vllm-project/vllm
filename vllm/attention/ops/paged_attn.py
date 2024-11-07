@@ -6,12 +6,13 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
+from vllm.utils import is_navi
 
 if HAS_TRITON:
     from vllm.attention.ops.prefix_prefill import context_attention_fwd
 
 # Should be the same as PARTITION_SIZE in `paged_attention_v2_launcher`.
-_PARTITION_SIZE = 512 if not current_platform.is_rocm() else 1024
+_PARTITION_SIZE = 512 if not current_platform.is_rocm() or is_navi() else 1024
 
 
 @dataclass
