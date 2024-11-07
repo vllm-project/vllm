@@ -313,14 +313,17 @@ Since the request schema is not defined by OpenAI client, we post a request to t
 Here is an example for serving the ``MrLight/dse-qwen2-2b-mrl-v1`` model.
 
 .. code-block:: bash
+
     vllm serve MrLight/dse-qwen2-2b-mrl-v1 --task embedding \
       --trust-remote-code --max-model-len 8192 --chat-template examples/template_dse_qwen2_vl.jinja
 
 .. important::
+
     Like with VLM2Vec, we have to explicitly pass ``--task embedding``. Additionally, ``MrLight/dse-qwen2-2b-mrl-v1`` requires an EOS token for embeddings, 
     which is handled by the jinja template.
 
 .. important::
+
     Also important, ``MrLight/dse-qwen2-2b-mrl-v1`` requires a placeholder image of the minimum image size for text query embeddings. See the full code 
     example below for details.
 
