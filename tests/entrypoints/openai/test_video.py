@@ -8,7 +8,7 @@ from vllm.multimodal.utils import encode_video_base64, fetch_video
 
 from ...utils import RemoteOpenAIServer
 
-MODEL_NAME = "llava-hf/llava-onevision-qwen2-7b-ov-hf"
+MODEL_NAME = "llava-hf/llava-onevision-qwen2-0.5b-ov-hf"
 MAXIMUM_VIDEOS = 4
 
 TEST_VIDEO_URLS = [
@@ -29,7 +29,7 @@ def server():
         "--max-model-len",
         "32768",
         "--max-num-seqs",
-        "5",
+        "2",
         "--enforce-eager",
         "--trust-remote-code",
         "--limit-mm-per-prompt",
