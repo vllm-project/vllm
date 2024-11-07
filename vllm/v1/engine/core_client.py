@@ -8,9 +8,8 @@ import zmq.asyncio
 
 from vllm.logger import init_logger
 from vllm.utils import get_open_zmq_ipc_path
-from vllm.v1.engine import (EngineCoreOutput,
-                            EngineCoreOutputs, EngineCoreRequest,
-                            EngineCoreRequestType)
+from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
+                            EngineCoreRequest, EngineCoreRequestType)
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
 
 logger = init_logger(__name__)
