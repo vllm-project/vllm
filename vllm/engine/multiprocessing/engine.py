@@ -69,7 +69,10 @@ class MQLLMEngine:
         # the python object to be reused again.
         kwargs['use_cached_outputs'] = True
 
-        self.engine = LLMEngine(*args, **kwargs)
+        # FIXME: This is a hack to allow the engine to be swapped out for
+        # the v1 engine. This is a temporary solution until the v1 engine
+        # is fully integrated.
+        self.engine = kwargs.pop("engine_class", LLMEngine)(*args, **kwargs)
         self.log_requests = log_requests
 
         self.use_async_sockets = use_async_sockets
@@ -131,7 +134,8 @@ class MQLLMEngine:
                    executor_class=executor_class,
                    log_requests=not engine_args.disable_log_requests,
                    log_stats=not engine_args.disable_log_stats,
-                   usage_context=usage_context)
+                   usage_context=usage_context,
+                   engine_class=engine_class)
 
     def start(self):
         try:
