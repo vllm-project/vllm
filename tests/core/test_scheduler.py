@@ -1,6 +1,6 @@
 import time
 from collections import deque
-from typing import List, Set, Tuple
+from typing import List, Optional, Set, Tuple
 from unittest.mock import MagicMock
 
 import pytest  # noqa
@@ -8,7 +8,8 @@ from torch import Use  # noqa
 
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.core.interfaces import AllocStatus
-from vllm.core.scheduler import Scheduler, SchedulingBudget
+from vllm.core.scheduler import (PaddingAwareSchedulingBudget, Scheduler,
+                                 SchedulingBudget)
 from vllm.lora.request import LoRARequest
 from vllm.sequence import SequenceGroup
 
@@ -305,6 +306,7 @@ def initialize_scheduler(
     block_size=4,
     num_cpu_blocks=8,
     num_gpu_blocks=8,
+    use_padding_aware_scheduling=False,
 ):
     block_size = block_size
     scheduler_config = SchedulerConfig(
@@ -312,7 +314,7 @@ def initialize_scheduler(
         max_num_batched_tokens=max_token_budget,
         max_num_seqs=max_num_seqs,
         max_model_len=max_model_len,
-    )
+        use_padding_aware_scheduling=use_padding_aware_scheduling)
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = num_cpu_blocks
     cache_config.num_gpu_blocks = num_gpu_blocks
@@ -417,6 +419,196 @@ def test_prefill_schedule_token_budget():
     assert budget.num_batched_tokens == 90
     assert budget.num_curr_seqs == 1
     assert len(remaining_waiting) == 0
+
+
+def create_padding_aware_token_budget(
+        token_budget: int = 10000,
+        max_num_seqs: int = 10000,
+        max_num_prefill_seqs: Optional[int] = None,
+        padding_fn='generic') -> SchedulingBudget:
+    return PaddingAwareSchedulingBudget(
+        token_budget=token_budget,
+        max_num_seqs=max_num_seqs,
+        max_num_prefill_seqs=max_num_prefill_seqs,
+        padding_method=padding_fn)
+
+
+def test_prefill_schedule_padding_aware_token_budget():
+    """
+    Test padding-aware token budget respected.
+    """
+    block_size = 4
+    scheduler = initialize_scheduler(block_size=block_size,
+                                     num_cpu_blocks=64,
+                                     num_gpu_blocks=64,
+                                     use_padding_aware_scheduling=True)
+    budget = create_padding_aware_token_budget(token_budget=0,
+                                               padding_fn='generic')
+    for i in range(2):
+        _, seq_group = create_dummy_prompt(str(i),
+                                           prompt_length=60,
+                                           block_size=block_size)
+        scheduler.add_seq_group(seq_group)
+
+    # 0 token budget == nothing is scheduled.
+    output = scheduler._schedule_prefills(budget, None)
+    remaining_waiting = scheduler.waiting
+    assert len(output.ignored_seq_groups) == 0
+    assert len(output.seq_groups) == 0
+    assert budget.num_batched_tokens == 0
+    assert budget.num_curr_seqs == 0
+    assert len(remaining_waiting) == 2
+
+    # 60 token budget == 1 request scheduled.
+    budget = create_padding_aware_token_budget(token_budget=60)
+    output = scheduler._schedule_prefills(budget, None)
+    remaining_waiting = scheduler.waiting
+    assert len(output.ignored_seq_groups) == 0
+    assert len(output.seq_groups) == 1
+    assert budget.num_batched_tokens == 60
+    assert budget.num_curr_seqs == 1
+    assert len(remaining_waiting) == 1
+
+    # Test when current_batched_tokens respected.
+    scheduler = initialize_scheduler(block_size=block_size,
+                                     num_cpu_blocks=16,
+                                     num_gpu_blocks=16,
+                                     use_padding_aware_scheduling=True)
+    budget = create_padding_aware_token_budget(token_budget=60,
+                                               padding_fn='generic')
+    add_token_budget(budget, 30, 0)
+    _, seq_group = create_dummy_prompt(str(i),
+                                       prompt_length=60,
+                                       block_size=block_size)
+    # Cannot schedule a prompt that doesn't fit the budget.
+    scheduler.add_seq_group(seq_group)
+    output = scheduler._schedule_prefills(budget, None)
+    remaining_waiting = scheduler.waiting
+    assert len(output.ignored_seq_groups) == 0
+    assert len(output.seq_groups) == 0
+    assert budget.num_batched_tokens == 30
+    assert budget.num_curr_seqs == 0
+    assert len(remaining_waiting) == 1
+    budget = create_padding_aware_token_budget(token_budget=90)
+    add_token_budget(budget, 30, 0)
+    output = scheduler._schedule_prefills(budget, None)
+    remaining_waiting = scheduler.waiting
+    assert len(output.seq_groups) == 1
+    assert budget.num_batched_tokens == 90
+    assert budget.num_curr_seqs == 1
+    assert len(remaining_waiting) == 0
+
+    # Cannot schedule a prompt that doesn't fit the budget after padding.
+    scheduler = initialize_scheduler(block_size=block_size,
+                                     num_cpu_blocks=16,
+                                     num_gpu_blocks=16,
+                                     use_padding_aware_scheduling=True)
+    budget = create_padding_aware_token_budget(token_budget=60,
+                                               padding_fn='generic')
+
+    # Try to schedule 10 tokens, then 2, then 31. Sum is within token budget,
+    # but padded prefill shape would be over token budget ([3, 31] = 93 tokens),
+    # so only the first two sequences can be scheduled ([2, 10] = 20 tokens),
+    # with 12 "real" tokens, and 8 tokens of padding.
+    _, seq_group = create_dummy_prompt(str(0),
+                                       prompt_length=10,
+                                       block_size=block_size)
+    scheduler.add_seq_group(seq_group)
+    _, seq_group = create_dummy_prompt(str(1),
+                                       prompt_length=2,
+                                       block_size=block_size)
+    scheduler.add_seq_group(seq_group)
+    _, seq_group = create_dummy_prompt(str(2),
+                                       prompt_length=31,
+                                       block_size=block_size)
+    scheduler.add_seq_group(seq_group)
+    output = scheduler._schedule_prefills(budget, None)
+    remaining_waiting = scheduler.waiting
+    assert isinstance(budget, PaddingAwareSchedulingBudget)
+    assert len(output.ignored_seq_groups) == 0
+    assert len(output.seq_groups) == 2
+    assert budget.num_batched_tokens == 12
+    assert budget.num_padded_batched_tokens == 20
+    assert budget.num_curr_seqs == 2
+    assert budget.max_seq_len == 10
+    assert len(remaining_waiting) == 1
+
+    # Can schedule multiple prompts that fit the budget after padding.
+    scheduler = initialize_scheduler(block_size=block_size,
+                                     num_cpu_blocks=16,
+                                     num_gpu_blocks=16,
+                                     use_padding_aware_scheduling=True)
+    budget = create_padding_aware_token_budget(token_budget=60,
+                                               padding_fn='generic')
+
+    # Try to schedule 10 tokens, then 2, then 15, then 5.
+    # Sum is within token budget (32 < 60), and padded shape
+    # just fits into token budget ([4,15] = 60 tokens)
+    _, seq_group = create_dummy_prompt(str(0),
+                                       prompt_length=10,
+                                       block_size=block_size)
+    scheduler.add_seq_group(seq_group)
+    _, seq_group = create_dummy_prompt(str(1),
+                                       prompt_length=2,
+                                       block_size=block_size)
+    scheduler.add_seq_group(seq_group)
+    _, seq_group = create_dummy_prompt(str(2),
+                                       prompt_length=15,
+                                       block_size=block_size)
+    scheduler.add_seq_group(seq_group)
+    _, seq_group = create_dummy_prompt(str(4),
+                                       prompt_length=5,
+                                       block_size=block_size)
+    scheduler.add_seq_group(seq_group)
+    output = scheduler._schedule_prefills(budget, None)
+    remaining_waiting = scheduler.waiting
+    assert isinstance(budget, PaddingAwareSchedulingBudget)
+    assert len(output.ignored_seq_groups) == 0
+    assert len(output.seq_groups) == 4
+    assert budget.num_batched_tokens == 32
+    assert budget.num_padded_batched_tokens == 60
+    assert budget.num_curr_seqs == 4
+    assert budget.max_seq_len == 15
+    assert len(remaining_waiting) == 0
+
+    # Cannot schedule prompts that exceed max_num_prefill_seqs
+    scheduler = initialize_scheduler(block_size=block_size,
+                                     num_cpu_blocks=16,
+                                     num_gpu_blocks=16,
+                                     use_padding_aware_scheduling=True)
+    budget = create_padding_aware_token_budget(token_budget=60,
+                                               max_num_prefill_seqs=2,
+                                               padding_fn='generic')
+    # Try to schedule 10 tokens, then 2, then 15, then 5.
+    # Sum is within token budget (32 < 60), and padded shape
+    # just fits into token budget ([4,15] = 60 tokens), but
+    # queue size is limited by max_num_prefill_seqs == 2
+    _, seq_group = create_dummy_prompt(str(0),
+                                       prompt_length=10,
+                                       block_size=block_size)
+    scheduler.add_seq_group(seq_group)
+    _, seq_group = create_dummy_prompt(str(1),
+                                       prompt_length=2,
+                                       block_size=block_size)
+    scheduler.add_seq_group(seq_group)
+    _, seq_group = create_dummy_prompt(str(2),
+                                       prompt_length=15,
+                                       block_size=block_size)
+    scheduler.add_seq_group(seq_group)
+    _, seq_group = create_dummy_prompt(str(4),
+                                       prompt_length=5,
+                                       block_size=block_size)
+    scheduler.add_seq_group(seq_group)
+    output = scheduler._schedule_prefills(budget, None)
+    remaining_waiting = scheduler.waiting
+    assert isinstance(budget, PaddingAwareSchedulingBudget)
+    assert len(output.ignored_seq_groups) == 0
+    assert len(output.seq_groups) == 2
+    assert budget.num_batched_tokens == 12
+    assert budget.num_padded_batched_tokens == 20
+    assert budget.num_curr_seqs == 2
+    assert budget.max_seq_len == 10
+    assert len(remaining_waiting) == 2
 
 
 def test_prefill_schedule_max_seqs():
