@@ -206,15 +206,10 @@ class LLM:
         # to avoid import order issues
         self.engine_class = self.get_engine_class()
 
-        if envs.VLLM_USE_V1:
-            # TODO(rob): enable mp by default (issue with fork vs spawn)
-            self.llm_engine = self.engine_class.from_engine_args(
-                engine_args,
-                usage_context=UsageContext.LLM_CLASS,
-                enable_multiprocessing=False)  # call-arg: ignore
-        else:
-            self.llm_engine = self.engine_class.from_engine_args(
-                engine_args, usage_context=UsageContext.LLM_CLASS)
+        # TODO(rob): enable mp by default (issue with fork vs spawn)
+        self.llm_engine = self.engine_class.from_engine_args(
+            engine_args, usage_context=UsageContext.LLM_CLASS)
+
         self.request_counter = Counter()
 
     @staticmethod
