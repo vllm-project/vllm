@@ -146,7 +146,7 @@ class GPUModelRunner:
         for req_data in scheduler_output.scheduled_new_reqs:
             req_id = req_data.req_id
             sampling_params = req_data.sampling_params
-            if sampling_params.seed is not None:
+            if sampling_params.sampling_type == SamplingType.RANDOM_SEED:
                 generator = torch.Generator(device=self.device)
                 generator.manual_seed(sampling_params.seed)
             else:
@@ -382,7 +382,7 @@ class GPUModelRunner:
                 # Rewind the generator state as if the token was not sampled.
                 generator = self.input_batch.generators.get(i)
                 if generator is not None:
-                    # Temp Hack: https://vllm-dev.slack.com/archives/C07QTE01QFQ/p1730930361705439 # noqa: E501
+                    # This relies on cuda-specific torch-internal impl details
                     generator.set_offset(generator.get_offset() - 4)
 
         if sampler_output.logprob_token_ids is None:
