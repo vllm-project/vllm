@@ -1,5 +1,6 @@
-Profiling vLLM 
-=================================
+==============
+Profiling vLLM
+==============
 
 We support tracing vLLM workers using the ``torch.profiler`` module. You can enable tracing by setting the ``VLLM_TORCH_PROFILER_DIR`` environment variable to the directory where you want to save the traces: ``VLLM_TORCH_PROFILER_DIR=/mnt/traces/``
 
