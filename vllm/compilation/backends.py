@@ -186,6 +186,7 @@ def wrap_inductor(graph,
 
     if additional_inductor_config is not None:
         current_config.update(additional_inductor_config)
+    print(current_config)
 
     # inductor can inplace modify the graph, so we need to copy it
     # see https://github.com/pytorch/pytorch/issues/138980
@@ -333,7 +334,7 @@ class VllmBackend:
 
     def __init__(self, ):
         global global_graph_pool
-        if global_graph_pool is None:
+        if torch.cuda.is_available() and global_graph_pool is None:
             global_graph_pool = torch.cuda.graph_pool_handle()
 
         # TODO: in the future, if we want to use multiple
@@ -401,7 +402,7 @@ class ConcreteSizeEntry:
     input_addresses: Optional[List[int]] = None
 
 
-class PiecewiseBackend:
+class PiecewiseBackend(torch.nn.Module):
 
     def __init__(self, graph: fx.GraphModule,
                  compilation_configs: CompilationConfig, graph_pool: Any,
@@ -421,6 +422,7 @@ class PiecewiseBackend:
         If a shape needs both compilation and cudagraph, we will
         compile it first, and then capture cudagraph.
         """
+        super().__init__()
         self.graph = graph
         self.compilation_configs = compilation_configs
         self.graph_pool = graph_pool

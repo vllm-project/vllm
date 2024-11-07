@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type, Union
 import torch
 from torch import nn
 
+from vllm import envs
+from vllm.compilation.levels import CompilationLevel
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -19,7 +21,10 @@ from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
 from vllm.sequence import (IntermediateTensors, SequenceData,
                            SequenceGroupMetadata)
 from vllm.transformers_utils.config import uses_mrope
-from vllm.utils import make_tensor_with_pad
+from vllm.utils import make_tensor_with_pad, supports_dynamo
+from vllm.forward_context import set_forward_context
+from vllm.compilation.config import CompilationConfig
+from vllm.plugins import set_compilation_config
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase, ModelRunnerInputBuilderBase,
     _add_attn_metadata_broadcastable_dict,
@@ -445,6 +450,12 @@ class CPUModelRunner(ModelRunnerBase[ModelInputForCPU]):
 
         # Lazy initialization.
         self.model: nn.Module  # Set after init_Model
+        set_compilation_config(CompilationConfig(inductor_compile_config={
+            "dce": True,
+            "size_asserts": False,
+            "nan_asserts": False,
+            "memory_planning": True,
+        }))
 
     @property
     def model_is_mrope(self) -> bool:
@@ -454,6 +465,16 @@ class CPUModelRunner(ModelRunnerBase[ModelInputForCPU]):
 
     def load_model(self) -> None:
         self.model = get_model(vllm_config=self.vllm_config)
+        if envs.VLLM_TORCH_COMPILE_LEVEL == CompilationLevel.DYNAMO_AS_IS \
+            and supports_dynamo():
+            from vllm.plugins import get_torch_compile_backend
+            backend = get_torch_compile_backend() or "eager"
+            # Note: only used for test
+            self.model = torch.compile(
+                self.model,
+                fullgraph=envs.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
+                dynamic=True,
+                backend=backend)
 
     def make_model_input_from_broadcasted_tensor_dict(
         self,
@@ -533,7 +554,12 @@ class CPUModelRunner(ModelRunnerBase[ModelInputForCPU]):
             intermediate_tensors,
         }
 
-        hidden_states = model_executable(**execute_model_kwargs)
+        with set_forward_context(model_input.attn_metadata): 
+            hidden_states = model_executable(**execute_model_kwargs)
+
+        # import depyf
+        # with set_forward_context(model_input.attn_metadata), depyf.prepare_debug("compile_debug_dir"):
+        #     hidden_states = model_executable(**execute_model_kwargs)
 
         # Compute the logits.
         logits = self.model.compute_logits(hidden_states,

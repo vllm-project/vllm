@@ -10,6 +10,7 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
 from vllm.attention.backends.utils import CommonAttentionState
 from vllm.attention.ops.paged_attn import PagedAttentionMetadata
+from vllm.forward_context import get_forward_context
 from vllm.platforms import current_platform
 
 if current_platform.is_cpu():
@@ -338,165 +339,223 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
-        assert k_scale == 1.0 and v_scale == 1.0
-        if (attn_type == AttentionType.ENCODER
-                and (not attn_metadata.is_all_encoder_attn_metadata_set)):
-            raise AttributeError("Encoder attention requires setting "
-                                 "encoder metadata attributes.")
-        elif (attn_type == AttentionType.ENCODER_DECODER
-              and (not attn_metadata.is_all_cross_attn_metadata_set)):
-            raise AttributeError("Encoder/decoder cross-attention "
-                                 "requires setting cross-attention "
-                                 "metadata attributes.")
-
-        # Reshape the query, key, and value tensors.
-        query = query.view(-1, self.num_heads, self.head_size)
-        if key is not None:
-            assert value is not None
-            key = key.view(-1, self.num_kv_heads, self.head_size)
-            value = value.view(-1, self.num_kv_heads, self.head_size)
-        else:
-            assert value is None
-
-        if (attn_type != AttentionType.ENCODER and kv_cache.numel() > 0):
-            # KV-cache during decoder-self- or
-            # encoder-decoder-cross-attention, but not
-            # during encoder attention.
-            #
-            # Even if there are no new key/value pairs to cache,
-            # we still need to break out key_cache and value_cache
-            # i.e. for later use by paged attention
-            key_cache, value_cache = PagedAttention.split_kv_cache(
-                kv_cache, self.num_kv_heads, self.head_size)
-
-            if (key is not None) and (value is not None):
-                if attn_type == AttentionType.ENCODER_DECODER:
-                    # Update cross-attention KV cache (prefill-only)
-                    # During cross-attention decode, key & value will be None,
-                    # preventing this IF-statement branch from running
-                    updated_slot_mapping = attn_metadata.cross_slot_mapping
-                else:
-                    # Update self-attention KV cache (prefill/decode)
-                    updated_slot_mapping = attn_metadata.slot_mapping
-
-                PagedAttention.write_to_paged_cache(key, value, key_cache,
-                                                    value_cache,
-                                                    updated_slot_mapping,
-                                                    self.kv_cache_dtype,
-                                                    k_scale, v_scale)
-
-        if attn_type != AttentionType.ENCODER:
-            # Decoder self-attention supports chunked prefill.
-            # Encoder/decoder cross-attention requires no chunked
-            # prefill (100% prefill or 100% decode tokens, no mix)
-            num_prefill_tokens = attn_metadata.num_prefill_tokens
-            num_decode_tokens = attn_metadata.num_decode_tokens
-        else:
-            # Encoder attention - chunked prefill is not applicable;
-            # derive token-count from query shape & and treat them
-            # as 100% prefill tokens
-            assert attn_metadata.num_encoder_tokens is not None
-            num_prefill_tokens = attn_metadata.num_encoder_tokens
-            num_decode_tokens = 0
-
-        if attn_type == AttentionType.DECODER:
-            # Only enforce this shape-constraint for decoder
-            # self-attention
-            assert key.shape[0] == num_prefill_tokens + num_decode_tokens
-            assert value.shape[0] == num_prefill_tokens + num_decode_tokens
-
-        if prefill_meta := attn_metadata.prefill_metadata:
-            assert attn_metadata.seq_lens is not None
-            if (kv_cache.numel() == 0
-                    or prefill_meta.block_tables.numel() == 0):
-                output = self._run_sdpa_forward(query,
-                                                key,
-                                                value,
-                                                prefill_meta,
-                                                attn_type=attn_type)
-            else:
-                # prefix-enabled attention
-                raise RuntimeError(
-                    "Torch SDPA backend doesn't support prefix decoding.")
-
-        if decode_meta := attn_metadata.decode_metadata:
-            # Decoding run.
-            (
-                seq_lens_arg,
-                max_seq_len_arg,
-                block_tables_arg,
-            ) = decode_meta.get_seq_len_block_table_args(attn_type)
-
-            output = PagedAttention.forward_decode(
-                query,
-                key_cache,
-                value_cache,
-                block_tables_arg,
-                seq_lens_arg,
-                max_seq_len_arg,
-                self.kv_cache_dtype,
-                self.num_kv_heads,
-                self.scale,
-                self.alibi_slopes,
-                k_scale,
-                v_scale,
-            )
-
-        # Reshape the output tensor.
-        return output.view(-1, self.num_heads * self.head_size)
-
-    def _run_sdpa_forward(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor,
-        value: torch.Tensor,
-        attn_metadata: TorchSDPAMetadata,
-        attn_type: AttentionType = AttentionType.DECODER,
-    ):
-        if self.num_kv_heads != self.num_heads:
-            key = key.repeat_interleave(self.num_queries_per_kv, dim=1)
-            value = value.repeat_interleave(self.num_queries_per_kv, dim=1)
-
-        attn_masks = attn_metadata.get_attn_bias(attn_type)
-        if attn_masks is None:
-            if self.alibi_slopes is not None:
-                attn_masks = _make_alibi_bias(
-                    self.alibi_slopes, query.dtype,
-                    attn_metadata.seq_lens)  # type: ignore
-            elif self.sliding_window is not None:
-                assert attn_metadata.seq_lens is not None
-                attn_masks = _make_sliding_window_bias(
-                    attn_metadata.seq_lens, self.sliding_window,
-                    query.dtype)  # type: ignore
-            else:
-                seq_lens, _ = attn_metadata.get_seq_lens(attn_type)
-                attn_masks = [None] * len(seq_lens)
-            attn_metadata.set_attn_bias(attn_masks, attn_type)
-
         output = torch.empty_like(query)
-        query = query.movedim(0, query.dim() - 2)
-        key = key.movedim(0, key.dim() - 2)
-        value = value.movedim(0, value.dim() - 2)
+        torch.ops.vllm.unified_sdpa_attention(
+            output,
+            query,
+            key,
+            value,
+            kv_cache,
+            self.num_heads,
+            self.head_size,
+            self.num_kv_heads,
+            self.num_queries_per_kv,
+            self.scale,
+            self.need_mask,
+            self.sliding_window,
+            self.alibi_slopes,
+            self.kv_cache_dtype,
+            k_scale,
+            v_scale,
+        ) 
 
-        causal_attn = (attn_type == AttentionType.DECODER)
-
-        seq_lens_q, seq_lens_kv = attn_metadata.get_seq_lens(attn_type)
-        start_q, start_kv = 0, 0
-        for seq_len_q, seq_len_kv, mask in zip(seq_lens_q, seq_lens_kv,
-                                               attn_masks):
-            end_q = start_q + seq_len_q
-            end_kv = start_kv + seq_len_kv
-            sub_out = scaled_dot_product_attention(
-                query[None, :, start_q:end_q, :],
-                key[None, :, start_kv:end_kv, :],
-                value[None, :, start_kv:end_kv, :],
-                attn_mask=mask,
-                dropout_p=0.0,
-                is_causal=causal_attn and not self.need_mask,
-                scale=self.scale).squeeze(0).movedim(query.dim() - 2, 0)
-            output[start_q:end_q, :, :] = sub_out
-            start_q, start_kv = end_q, end_kv
         return output
+
+def _run_sdpa_forward(
+    output: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    num_heads: int,
+    num_kv_heads: int,
+    num_queries_per_kv: int,
+    scale: float,
+    need_mask: bool,
+    sliding_window: Optional[int],
+    alibi_slopes: Optional[torch.Tensor],
+    attn_metadata: TorchSDPAMetadata,
+    attn_type: AttentionType = AttentionType.DECODER,
+):
+    if num_kv_heads != num_heads:
+        key = key.repeat_interleave(num_queries_per_kv, dim=1)
+        value = value.repeat_interleave(num_queries_per_kv, dim=1)
+
+    attn_masks = attn_metadata.get_attn_bias(attn_type)
+    if attn_masks is None:
+        if alibi_slopes is not None:
+            attn_masks = _make_alibi_bias(
+                alibi_slopes, query.dtype,
+                attn_metadata.seq_lens)  # type: ignore
+        elif sliding_window is not None:
+            assert attn_metadata.seq_lens is not None
+            attn_masks = _make_sliding_window_bias(
+                attn_metadata.seq_lens, sliding_window,
+                query.dtype)  # type: ignore
+        else:
+            seq_lens, _ = attn_metadata.get_seq_lens(attn_type)
+            attn_masks = [None] * len(seq_lens)
+        attn_metadata.set_attn_bias(attn_masks, attn_type)
+
+    query = query.movedim(0, query.dim() - 2)
+    key = key.movedim(0, key.dim() - 2)
+    value = value.movedim(0, value.dim() - 2)
+
+    causal_attn = (attn_type == AttentionType.DECODER)
+
+    seq_lens_q, seq_lens_kv = attn_metadata.get_seq_lens(attn_type)
+    start_q, start_kv = 0, 0
+    for seq_len_q, seq_len_kv, mask in zip(seq_lens_q, seq_lens_kv,
+                                            attn_masks):
+        end_q = start_q + seq_len_q
+        end_kv = start_kv + seq_len_kv
+        sub_out = scaled_dot_product_attention(
+            query[None, :, start_q:end_q, :],
+            key[None, :, start_kv:end_kv, :],
+            value[None, :, start_kv:end_kv, :],
+            attn_mask=mask,
+            dropout_p=0.0,
+            is_causal=causal_attn and not need_mask,
+            scale=scale).squeeze(0).movedim(query.dim() - 2, 0)
+        output[start_q:end_q, :, :] = sub_out
+        start_q, start_kv = end_q, end_kv
+
+@torch.library.custom_op("vllm::unified_sdpa_attention",
+                         mutates_args=["output", "kv_cache"])
+def unified_sdpa_attention(
+    output: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    kv_cache: torch.Tensor,
+    num_heads: int,
+    head_size: int,
+    num_kv_heads: int,
+    num_queries_per_kv: int,
+    scale: float,
+    need_mask: bool,
+    sliding_window: Optional[int],
+    alibi_slopes: Optional[torch.Tensor],
+    kv_cache_dtype: str,
+    k_scale: float = 1.0,
+    v_scale: float = 1.0,
+) -> None:
+    attn_type: AttentionType = AttentionType.DECODER
+    attn_metadata: TorchSDPAMetadata = get_forward_context()
+
+    assert k_scale == 1.0 and v_scale == 1.0
+    if (attn_type == AttentionType.ENCODER
+            and (not attn_metadata.is_all_encoder_attn_metadata_set)):
+        raise AttributeError("Encoder attention requires setting "
+                                "encoder metadata attributes.")
+    elif (attn_type == AttentionType.ENCODER_DECODER
+            and (not attn_metadata.is_all_cross_attn_metadata_set)):
+        raise AttributeError("Encoder/decoder cross-attention "
+                                "requires setting cross-attention "
+                                "metadata attributes.")
+
+    # Reshape the output, query, key, and value tensors.
+    query = query.view(-1, num_heads, head_size)
+    output = output.view(-1, num_heads, head_size)
+    if key is not None:
+        assert value is not None
+        key = key.view(-1, num_kv_heads, head_size)
+        value = value.view(-1, num_kv_heads, head_size)
+    else:
+        assert value is None
+
+    if (attn_type != AttentionType.ENCODER and kv_cache.numel() > 0):
+        # KV-cache during decoder-self- or
+        # encoder-decoder-cross-attention, but not
+        # during encoder attention.
+        #
+        # Even if there are no new key/value pairs to cache,
+        # we still need to break out key_cache and value_cache
+        # i.e. for later use by paged attention
+        key_cache, value_cache = PagedAttention.split_kv_cache(
+            kv_cache, num_kv_heads, head_size)
+
+        if (key is not None) and (value is not None):
+            if attn_type == AttentionType.ENCODER_DECODER:
+                # Update cross-attention KV cache (prefill-only)
+                # During cross-attention decode, key & value will be None,
+                # preventing this IF-statement branch from running
+                updated_slot_mapping = attn_metadata.cross_slot_mapping
+            else:
+                # Update self-attention KV cache (prefill/decode)
+                updated_slot_mapping = attn_metadata.slot_mapping
+
+            PagedAttention.write_to_paged_cache(key, value, key_cache,
+                                                value_cache,
+                                                updated_slot_mapping,
+                                                kv_cache_dtype,
+                                                k_scale, v_scale)
+
+    if attn_type != AttentionType.ENCODER:
+        # Decoder self-attention supports chunked prefill.
+        # Encoder/decoder cross-attention requires no chunked
+        # prefill (100% prefill or 100% decode tokens, no mix)
+        num_prefill_tokens = attn_metadata.num_prefill_tokens
+        num_decode_tokens = attn_metadata.num_decode_tokens
+    else:
+        # Encoder attention - chunked prefill is not applicable;
+        # derive token-count from query shape & and treat them
+        # as 100% prefill tokens
+        assert attn_metadata.num_encoder_tokens is not None
+        num_prefill_tokens = attn_metadata.num_encoder_tokens
+        num_decode_tokens = 0
+
+    if attn_type == AttentionType.DECODER:
+        # Only enforce this shape-constraint for decoder
+        # self-attention
+        assert key.shape[0] == num_prefill_tokens + num_decode_tokens
+        assert value.shape[0] == num_prefill_tokens + num_decode_tokens
+
+    if prefill_meta := attn_metadata.prefill_metadata:
+        assert attn_metadata.seq_lens is not None
+        if (kv_cache.numel() == 0
+                or prefill_meta.block_tables.numel() == 0):
+            _run_sdpa_forward(
+                output,
+                query,
+                key,
+                value,
+                num_heads,
+                num_kv_heads,
+                num_queries_per_kv,
+                scale,
+                need_mask,
+                sliding_window,
+                alibi_slopes,
+                prefill_meta,
+                attn_type=attn_type)
+        else:
+            # prefix-enabled attention
+            raise RuntimeError(
+                "Torch SDPA backend doesn't support prefix decoding.")
+
+    if decode_meta := attn_metadata.decode_metadata:
+        # Decoding run.
+        (
+            seq_lens_arg,
+            max_seq_len_arg,
+            block_tables_arg,
+        ) = decode_meta.get_seq_len_block_table_args(attn_type)
+
+        PagedAttention.forward_decode(
+            output,
+            query,
+            key_cache,
+            value_cache,
+            block_tables_arg,
+            seq_lens_arg,
+            max_seq_len_arg,
+            kv_cache_dtype,
+            num_kv_heads,
+            scale,
+            alibi_slopes,
+            k_scale,
+            v_scale,
+        )
 
 
 def _make_alibi_bias(

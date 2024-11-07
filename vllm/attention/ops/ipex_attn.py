@@ -55,6 +55,7 @@ class PagedAttention:
 
     @staticmethod
     def forward_decode(
+        output: torch.Tensor,
         query: torch.Tensor,
         key_cache: torch.Tensor,
         value_cache: torch.Tensor,
@@ -69,7 +70,6 @@ class PagedAttention:
         v_scale: float,
         *args,
     ) -> torch.Tensor:
-        output = torch.empty_like(query)
         block_size = value_cache.shape[2]
         head_mapping = torch.arange(
             0,
