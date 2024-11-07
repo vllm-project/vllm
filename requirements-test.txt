@@ -263,6 +263,7 @@ numpy==1.26.4
     #   mistral-common
     #   numba
     #   numexpr
+    #   opencv-python
     #   opencv-python-headless
     #   pandas
     #   peft
@@ -306,6 +307,8 @@ nvidia-nvjitlink-cu12==12.4.127
     #   torch
 nvidia-nvtx-cu12==12.4.127
     # via torch
+opencv-python==4.10.0.84
+    # via -r requirements-test.in
 opencv-python-headless==4.10.0.84
     # via mistral-common
 packaging==24.1
