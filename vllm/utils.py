@@ -728,6 +728,9 @@ def is_pin_memory_available() -> bool:
     elif current_platform.is_neuron():
         print_warning_once("Pin memory is not supported on Neuron.")
         return False
+    elif current_platform.is_hpu():
+        print_warning_once("Pin memory is not supported on HPU.")
+        return False
     elif current_platform.is_cpu() or current_platform.is_openvino():
         return False
     return True
@@ -1148,8 +1151,22 @@ class StoreBoolean(argparse.Action):
                              "Expected 'true' or 'false'.")
 
 
+class SortedHelpFormatter(argparse.HelpFormatter):
+    """SortedHelpFormatter that sorts arguments by their option strings."""
+
+    def add_arguments(self, actions):
+        actions = sorted(actions, key=lambda x: x.option_strings)
+        super().add_arguments(actions)
+
+
 class FlexibleArgumentParser(argparse.ArgumentParser):
     """ArgumentParser that allows both underscore and dash in names."""
+
+    def __init__(self, *args, **kwargs):
+        # Set the default 'formatter_class' to SortedHelpFormatter
+        if 'formatter_class' not in kwargs:
+            kwargs['formatter_class'] = SortedHelpFormatter
+        super().__init__(*args, **kwargs)
 
     def parse_args(self, args=None, namespace=None):
         if args is None:
@@ -1265,7 +1282,7 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
 
         config: Dict[str, Union[int, str]] = {}
         try:
-            with open(file_path, 'r') as config_file:
+            with open(file_path) as config_file:
                 config = yaml.safe_load(config_file)
         except Exception as ex:
             logger.error(

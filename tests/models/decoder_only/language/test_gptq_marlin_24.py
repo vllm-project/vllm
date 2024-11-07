@@ -25,16 +25,16 @@ model_pairs = [
     # 4-bit, group_size == 128
     ModelPair(model_marlin="alexm-nm/tinyllama-24-marlin24-4bit-g128",
               model_gptq="alexm-nm/tinyllama-24-gptq-4bit-g128"),
-    # 4-bit, group_size == channelwise
-    ModelPair(model_marlin="alexm-nm/tinyllama-24-marlin24-4bit-channelwise",
-              model_gptq="alexm-nm/tinyllama-24-gptq-4bit-channelwise"),
+    # # 4-bit, group_size == channelwise
+    # ModelPair(model_marlin="alexm-nm/tinyllama-24-marlin24-4bit-channelwise",
+    #           model_gptq="alexm-nm/tinyllama-24-gptq-4bit-channelwise"),
 
     # 8-bit, group_size == 128
     ModelPair(model_marlin="alexm-nm/tinyllama-24-marlin24-8bit-g128",
               model_gptq="alexm-nm/tinyllama-24-gptq-8bit-g128"),
-    # 8-bit, group_size == channelwise
-    ModelPair(model_marlin="alexm-nm/tinyllama-24-marlin24-8bit-channelwise",
-              model_gptq="alexm-nm/tinyllama-24-gptq-8bit-channelwise"),
+    # # 8-bit, group_size == channelwise
+    # ModelPair(model_marlin="alexm-nm/tinyllama-24-marlin24-8bit-channelwise",
+    #           model_gptq="alexm-nm/tinyllama-24-gptq-8bit-channelwise"),
 ]
 
 

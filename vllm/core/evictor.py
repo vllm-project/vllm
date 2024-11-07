@@ -52,7 +52,7 @@ class Evictor(ABC):
         pass
 
 
-class BlockMetaData():
+class BlockMetaData:
     """Data structure for storing key data describe cached block, so that
     evitor could use to make its decision which one to choose for eviction
 

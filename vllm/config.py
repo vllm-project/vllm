@@ -464,9 +464,10 @@ class ModelConfig:
 
         # Reminder: Please update docs/source/serving/compatibility_matrix.rst
         # If the feature combo become valid
-        if device_config.device_type not in ("cuda", "tpu", "xpu"):
+        if device_config.device_type not in ("cuda", "tpu", "xpu", "hpu"):
             logger.warning(
-                "Async output processing is only supported for CUDA, TPU, XPU. "
+                "Async output processing is only supported for CUDA, TPU, XPU "
+                "and HPU."
                 "Disabling it for other platforms.")
             self.use_async_output_proc = False
             return
@@ -666,9 +667,10 @@ class ModelConfig:
     @property
     def is_encoder_decoder_model(self) -> bool:
         """Extract the HF encoder/decoder model flag."""
-        return getattr(self.hf_config, "is_encoder_decoder", False) or (
-            (hasattr(self.hf_config, "text_config") and getattr(
-                self.hf_config.text_config, "is_encoder_decoder", False)))
+        return getattr(
+            self.hf_config, "is_encoder_decoder",
+            False) or (hasattr(self.hf_config, "text_config") and getattr(
+                self.hf_config.text_config, "is_encoder_decoder", False))
 
     @property
     def is_multimodal_model(self) -> bool:
@@ -857,7 +859,6 @@ class LoadConfig:
         ignore_patterns: The list of patterns to ignore when loading the model.
             Default to "original/**/*" to avoid repeated loading of llama's
             checkpoints.
-
     """
 
     load_format: Union[str, LoadFormat, "BaseModelLoader"] = LoadFormat.AUTO
@@ -960,6 +961,13 @@ class ParallelConfig:
             if self.distributed_executor_backend != "ray":
                 raise ValueError(
                     "TPU backend only supports Ray for distributed inference.")
+
+        if current_platform.is_hpu() and self.world_size > 1:
+            if self.distributed_executor_backend is None:
+                self.distributed_executor_backend = "ray"
+            if self.distributed_executor_backend != "ray":
+                raise ValueError(
+                    "HPU backend only supports Ray for distributed inference.")
 
         if self.distributed_executor_backend is None and self.world_size > 1:
             # We use multiprocessing by default if world_size fits on the
@@ -1163,6 +1171,8 @@ class DeviceConfig:
                 self.device_type = "cuda"
             elif current_platform.is_neuron():
                 self.device_type = "neuron"
+            elif current_platform.is_hpu():
+                self.device_type = "hpu"
             elif current_platform.is_openvino():
                 self.device_type = "openvino"
             elif current_platform.is_tpu():
@@ -1742,6 +1752,13 @@ def _get_and_verify_dtype(
                     torch_dtype = torch.float16
             else:
                 torch_dtype = config_dtype
+
+            if current_platform.is_hpu() and config_dtype == torch.float16:
+                logger.info(
+                    "For HPU, we cast models to bfloat16 instead of"
+                    "using float16 by default. Please specify `dtype` if you "
+                    "want to use float16.")
+                torch_dtype = torch.bfloat16
         else:
             if dtype not in _STR_DTYPE_TO_TORCH_DTYPE:
                 raise ValueError(f"Unknown dtype: {dtype}")

@@ -1,4 +1,3 @@
-# coding=utf-8
 # Adapted from
 # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/gpt_neox/modeling_gpt_neox.py
 # Copyright 2023 The vLLM team.
@@ -33,7 +32,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -129,8 +128,7 @@ class GPTNeoXMLP(nn.Module):
             config.hidden_size,
             quant_config=quant_config,
         )
-        self.act = get_act_fn(config.hidden_act, quant_config,
-                              config.intermediate_size)
+        self.act = get_act_fn(config.hidden_act)
 
     def forward(self, hidden_states):
         hidden_states, _ = self.dense_h_to_4h(hidden_states)
@@ -262,7 +260,7 @@ class GPTNeoXForCausalLM(nn.Module, SupportsPP):
         if self.config.tie_word_embeddings:
             self.embed_out.weight = self.gpt_neox.embed_in.weight
         self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.sampler = Sampler()
+        self.sampler = get_sampler()
         self.make_empty_intermediate_tensors = (
             self.gpt_neox.make_empty_intermediate_tensors)
 
