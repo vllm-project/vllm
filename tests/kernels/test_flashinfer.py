@@ -447,7 +447,7 @@ def test_flashinfer_decode_with_paged_fp8_kv(
                           head_size,
                           block_size,
                           "NONE",
-                          data_type=dtype,
+                          kv_data_type=dtype,
                           q_data_type=dtype)
     output = wrapper.forward(query,
                              kv_cache_fp8,
