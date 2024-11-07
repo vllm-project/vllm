@@ -8,7 +8,8 @@ from torch.nn import Parameter
 from vllm.model_executor.layers.sparsity.utils.cusparse_2_4_utils import (
     compress_to_torch_sparse_semi_structured_mat,
     semi_structured_dense_sparse_T_gemm,
-    semi_structured_sparse_dense_gemm_scaled
+    semi_structured_sparse_dense_gemm_scaled,
+    semi_structured_dense_sparse_T_gemm_scaled,
     )
 from torch.sparse import to_sparse_semi_structured
 from vllm.model_executor.layers.quantization.utils.marlin_utils_test_24 import sparse_semi_structured_to_dense_cutlass, sparse_semi_structured_from_dense_cutlass
@@ -235,14 +236,14 @@ class CompressedTensors24(CompressedTensorsScheme):
 
 
         assert not q_input.is_contiguous(), "Input is contiguous, the Kernel expects non-contiguous input"
-        output =  semi_structured_sparse_dense_gemm_scaled(
-            a_packed=weight,
-            b_dense=q_input,
-            scale_a=weight_scale,
-            scale_b=input_scale,
+        output =  semi_structured_dense_sparse_T_gemm_scaled(
+            a_dense=q_input,
+            b_T_packed=weight,
+            scale_a=input_scale,
+            scale_b=weight_scale,
             bias=bias
         )
-        output = output.t().to(x.dtype)
+        output = output.to(x.dtype)
         print()
         print(f"{self.layer_name} executed")
         print("\t", "Input shape:", x.shape, "weight shape:", weight.shape, "output shape:", output.shape)
