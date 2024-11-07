@@ -211,7 +211,6 @@ class CompressedTensors24(CompressedTensorsScheme):
         result = torch.mm(a_sparse, x.t().contiguous())
         return result.t().contiguous()
         """
-
         if not self.quantized:
             return semi_structured_dense_sparse_T_gemm(
                 a_dense=x, 
@@ -229,13 +228,7 @@ class CompressedTensors24(CompressedTensorsScheme):
         input_scale = input_scale.max()
         q_input, input_scale = ops.scaled_fp8_quant(x, input_scale)
         
-        if q_input.is_contiguous():
-            # Make q_input non-contiguous
-            # as expected by the kernel
-            q_input = q_input.t().contiguous().t()
 
-
-        assert not q_input.is_contiguous(), "Input is contiguous, the Kernel expects non-contiguous input"
         output =  semi_structured_dense_sparse_T_gemm_scaled(
             a_dense=q_input,
             b_T_packed=weight,
