@@ -39,11 +39,7 @@ class IPEXConfig(QuantizationConfig):
             raise ValueError(f"IPEX quantization supports weight bits [4], "
                              f"but got {self.weight_bits}.")
 
-        if self.method == "awq":
-            self.quant_method = IPEXAWQLinearMethod
-        elif self.method == "gptq":
-            self.quant_method = IPEXGPTQLinearMethod
-        else:
+        if self.method not in ["awq", "gptq"]:
             raise ValueError(f"IPEX quantization supports [awq, gptq], "
                              f"but got {self.method}.")
 
@@ -91,8 +87,8 @@ class IPEXConfig(QuantizationConfig):
                 desc_act = cls.get_from_keys(config, ["desc_act"])
             except Exception:
                 desc_act = False
-        return cls(method, weight_bits, group_size, desc_act,
-                   lm_head_quantized)
+            return cls(method, weight_bits, group_size, desc_act,
+                       lm_head_quantized)
 
     @classmethod
     def override_quantization_method(cls, hf_quant_cfg,
@@ -110,8 +106,17 @@ class IPEXConfig(QuantizationConfig):
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["LinearMethodBase"]:
         if isinstance(layer, LinearBase):
-            return self.quant_method(self)
+            if self.method == "awq":
+                return IPEXAWQLinearMethod(self)
+            if self.method == "gptq":
+                return IPEXGPTQLinearMethod(self)
         return None
+
+    def get_scaled_act_names(self) -> List[str]:
+        if self.method == "awq":
+            return ["gelu", "gelu_fast", "gelu_new", "gelu_pytorch_tanh"]
+        else:
+            return []
 
 
 class IPEXGPTQLinearMethod(GPTQLinearMethod):
@@ -136,7 +141,6 @@ class IPEXGPTQLinearMethod(GPTQLinearMethod):
                 "intel_extension_for_pytorch>=2.5.0 via "
                 "`pip install intel_extension_for_pytorch>=2.5.0`"
                 " to use IPEX-AWQ linear method.") from err
-        # TODO: remove qconfig as it's not actually used
         # Using the compute dtype (lowp_mode) as INT8 to leverage instructions
         # with better performance.
         lowp_mode = ipex.quantization.WoqLowpMode.INT8
@@ -153,7 +157,7 @@ class IPEXGPTQLinearMethod(GPTQLinearMethod):
         )
         layer.ipex_output_size = layer.qweight.shape[-1]
         g_idx = layer.g_idx if self.quant_config.desc_act else None
-        layer.ipex_qlinear = ipex.llm.quantization.woq_linear.\
+        layer.ipex_qlinear = ipex.llm.quantization.woq_linear. \
             IPEXWeightOnlyQuantizedLinear.from_weight(
             layer.qweight,
             layer.scales,
@@ -221,7 +225,7 @@ class IPEXAWQLinearMethod(AWQLinearMethod):
 
         layer.ipex_output_size = layer.qweight.size(
             1) * self.quant_config.pack_factor
-        layer.ipex_qlinear = ipex.llm.quantization.woq_linear.\
+        layer.ipex_qlinear = ipex.llm.quantization.woq_linear. \
             IPEXWeightOnlyQuantizedLinear.from_weight(
             layer.qweight,
             layer.scales,
