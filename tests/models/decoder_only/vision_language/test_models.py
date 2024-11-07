@@ -256,7 +256,6 @@ VLM_TEST_SETTINGS = {
             runner_mm_key="videos",
         )],
     ),
-    # FIXME
     "llava_next_video": VLMTestInfo(
         models=["llava-hf/LLaVA-NeXT-Video-7B-hf"],
         test_type=VLMTestType.VIDEO,
