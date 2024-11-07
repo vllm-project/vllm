@@ -151,7 +151,7 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
             self.local_omp_cpuid = omp_cpuids.split("|")[rank]
 
         ModelRunnerClass: Type[CPUModelRunner] = CPUModelRunner
-        if self._is_encoder_decoder_model():
+        if self.model_config.is_encoder_decoder:
             ModelRunnerClass = CPUEncoderDecoderModelRunner
         self.model_runner: CPUModelRunner = ModelRunnerClass(
             vllm_config=vllm_config,
@@ -187,9 +187,6 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         if self.profiler is None:
             raise RuntimeError("Profiler is not enabled.")
         self.profiler.stop()
-
-    def _is_encoder_decoder_model(self):
-        return self.model_config.is_encoder_decoder_model
 
     def init_device(self) -> None:
         if self.local_omp_cpuid != "all":

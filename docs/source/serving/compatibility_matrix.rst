@@ -359,7 +359,7 @@ Feature x Hardware
      - ✅
      - ✅
      - ✅
-     - `✗ <https://github.com/vllm-project/vllm/blob/a84e598e2125960d3b4f716b78863f24ac562947/vllm/worker/cpu_model_runner.py#L125>`__ 
+     - ✅
      - ✗
    * - :abbr:`logP (Logprobs)`
      - ✅
