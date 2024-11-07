@@ -1,4 +1,4 @@
-name: mypy
+name: codespell
 
 on:
   # Trigger the workflow on push or pull request,
@@ -7,25 +7,29 @@ on:
     branches:
       - main
     paths:
-      - '**/*.py'
-      - '.github/workflows/mypy.yaml'
-      - 'tools/mypy.sh'
-      - 'pyproject.toml'
+      - "**/*.py"
+      - "**/*.md"
+      - "**/*.rst"
+      - pyproject.toml
+      - requirements-lint.txt
+      - .github/workflows/codespell.yml
   pull_request:
     branches:
       - main
     paths:
-      - '**/*.py'
-      - '.github/workflows/mypy.yaml'
-      - 'tools/mypy.sh'
-      - 'pyproject.toml'
+      - "**/*.py"
+      - "**/*.md"
+      - "**/*.rst"
+      - pyproject.toml
+      - requirements-lint.txt
+      - .github/workflows/codespell.yml
 
 jobs:
-  mypy:
+  codespell:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.9", "3.10", "3.11", "3.12"]
+        python-version: ["3.12"]
     steps:
     - uses: actions/checkout@eef61447b9ff4aafe5dcd4e0bbf5d482be7e7871 # v4.2.1
     - name: Set up Python ${{ matrix.python-version }}
@@ -35,12 +39,7 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install mypy==1.11.1
-        pip install types-setuptools
-        pip install types-PyYAML
-        pip install types-requests
-        pip install types-setuptools
-    - name: Mypy
+        pip install -r requirements-lint.txt
+    - name: Spelling check with codespell
       run: |
-        echo "::add-matcher::.github/workflows/matchers/mypy.json"
-        tools/mypy.sh 1 ${{ matrix.python-version }}
+        codespell --toml pyproject.toml
