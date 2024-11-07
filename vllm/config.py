@@ -13,10 +13,10 @@ from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.model_executor.models import ModelRegistry
 from vllm.platforms import current_platform
 from vllm.tracing import is_otel_available, otel_import_error_traceback
-from vllm.transformers_utils.config import (ConfigFormat, get_config,
-                                            get_hf_image_processor_config,
-                                            get_hf_text_config,
-                                            is_encoder_decoder, uses_mrope)
+from vllm.transformers_utils.config import (
+    ConfigFormat, get_config, get_hf_image_processor_config,
+    get_hf_text_config, get_pooling_config,
+    get_sentence_transformer_tokenizer_config, is_encoder_decoder, uses_mrope)
 from vllm.utils import (GiB_bytes, cuda_device_count_stateless, get_cpu_memory,
                         print_warning_once)
 
@@ -197,6 +197,7 @@ class ModelConfig:
                                     code_revision, rope_scaling, rope_theta,
                                     config_format)
         self.hf_text_config = get_hf_text_config(self.hf_config)
+        self.encoder_config = self._get_encoder_config()
         self.hf_image_processor_config = get_hf_image_processor_config(
             self.model, revision)
         self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
@@ -229,7 +230,8 @@ class ModelConfig:
             max_model_len=max_model_len,
             disable_sliding_window=self.disable_sliding_window,
             sliding_window_len=self.get_hf_config_sliding_window(),
-            spec_target_max_model_len=spec_target_max_model_len)
+            spec_target_max_model_len=spec_target_max_model_len,
+            encoder_config=self.encoder_config)
         self.served_model_name = get_served_model_name(model,
                                                        served_model_name)
         self.multimodal_config = self._init_multimodal_config(
@@ -273,6 +275,10 @@ class ModelConfig:
 
         return None
 
+    def _get_encoder_config(self):
+        return get_sentence_transformer_tokenizer_config(
+            self.model, self.revision)
+
     def _init_pooler_config(
         self,
         pooling_type: Optional[str] = None,
@@ -282,6 +288,14 @@ class ModelConfig:
         pooling_returned_token_ids: Optional[List[int]] = None
     ) -> Optional["PoolerConfig"]:
         if self.task == "embedding":
+            pooling_config = get_pooling_config(self.model, self.revision)
+            if pooling_config is not None:
+                # override if user does not
+                # specifies pooling_type and/or pooling_norm
+                if pooling_type is None:
+                    pooling_type = pooling_config["pooling_type"]
+                if pooling_norm is None:
+                    pooling_norm = pooling_config["normalize"]
             return PoolerConfig(
                 pooling_type=pooling_type,
                 pooling_norm=pooling_norm,
@@ -1796,6 +1810,7 @@ def _get_and_verify_max_len(
     disable_sliding_window: bool,
     sliding_window_len: Optional[Union[int, List[Optional[int]]]],
     spec_target_max_model_len: Optional[int] = None,
+    encoder_config: Optional[Any] = None,
 ) -> int:
     """Get and verify the model's maximum length."""
     derived_max_model_len = float("inf")
@@ -1877,6 +1892,9 @@ def _get_and_verify_max_len(
                 derived_max_model_len = rope_scaling[
                     "original_max_position_embeddings"]
             derived_max_model_len *= scaling_factor
+
+    if encoder_config and "max_seq_length" in encoder_config:
+        derived_max_model_len = encoder_config["max_seq_length"]
 
     # If the user specified a max length, make sure it is smaller than the
     # derived length from the HF model config.
