@@ -432,6 +432,16 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
   explicit FP32Vec16(const FP32Vec8 &data)
       : reg_low(data.reg), reg_high(data.reg) {}
 
+  explicit FP32Vec16(const FP16Vec16 &v) {
+    __m128i low = _mm256_extractf128_si256(v.reg, 0);
+    __m128i high = _mm256_extractf128_si256(v.reg, 1);
+
+    reg_low = _mm256_cvtph_ps(low);
+    reg_high = _mm256_cvtph_ps(high);
+  }
+
+  explicit FP32Vec16(const FP16Vec8 &v) : FP32Vec16(FP32Vec8(v)) {}
+
   explicit FP32Vec16(const BF16Vec16 &v) {
     __m128i low = _mm256_extractf128_si256(v.reg, 0);
     __m128i high = _mm256_extractf128_si256(v.reg, 1);
