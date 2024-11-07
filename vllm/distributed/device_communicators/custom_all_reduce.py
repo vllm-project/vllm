@@ -147,10 +147,9 @@ class CustomAllreduce:
             return
 
         self.disabled = False
-        # Buffers memory are owned by this Python class and passed to C++
-        # meta data composes of two parts: meta data for synchronization
-        # (256 bytes) and a temporary buffer for storing intermediate
-        # allreduce results.
+        # Buffers memory are owned by this Python class and passed to C++.
+        # Meta data composes of two parts: meta data for synchronization and a
+        # temporary buffer for storing intermediate allreduce results.
         self.meta_ptrs = self.create_shared_buffer(ops.meta_size() + max_size,
                                                    group=group)
         # This is a pre-registered IPC buffer. In eager mode, input tensors
@@ -177,7 +176,7 @@ class CustomAllreduce:
             size_in_bytes: int,
             group: Optional[ProcessGroup] = None) -> List[int]:
         """
-        Creates shared buffer and returns a list of pointers
+        Creates a shared buffer and returns a list of pointers
         representing the buffer on all processes in the group.
         """
         lib = CudaRTLibrary()
@@ -266,21 +265,21 @@ class CustomAllreduce:
         return out
 
     def custom_all_reduce(self, input: torch.Tensor) -> Optional[torch.Tensor]:
-        # when custom allreduce is disabled, this will be None
+        """The main allreduce API that provides support for cuda graph."""
+        # When custom allreduce is disabled, this will be None.
         if self.disabled or not self.should_custom_ar(input):
             return None
         if self._IS_CAPTURING:
             if torch.cuda.is_current_stream_capturing():
                 return self.all_reduce(input, registered=True)
             else:
-                # if warm up, mimic the allocation pattern
-                # since custom allreduce is out-of-place
+                # If warm up, mimic the allocation pattern since custom
+                # allreduce is out-of-place.
                 return torch.empty_like(input)
         else:
-            # note: outside of cuda graph context,
-            # custom allreduce incurs a cost of cudaMemcpy, which should
-            # be small(<=1% of overall latency) compared to the performance
-            # gains of using custom kernels
+            # Note: outside of cuda graph context, custom allreduce incurs a
+            # cost of cudaMemcpy, which should be small (<=1% of overall 
+            # latency) compared to the performance gain of using custom kernels
             return self.all_reduce(input, registered=False)
 
     def close(self):

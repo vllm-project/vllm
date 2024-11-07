@@ -120,7 +120,7 @@ void register_buffer(fptr_t _fa, const std::vector<fptr_t>& fake_ipc_ptrs) {
   fa->register_buffer(ipc_ptrs);
 }
 
-// Use vector<int64_t> to represents byte data for python binding compatibility.
+// Use vector<int64_t> to represent byte data for python binding compatibility.
 std::tuple<std::vector<int64_t>, std::vector<int64_t>>
 get_graph_buffer_ipc_meta(fptr_t _fa) {
   auto fa = reinterpret_cast<vllm::CustomAllreduce*>(_fa);
@@ -129,7 +129,7 @@ get_graph_buffer_ipc_meta(fptr_t _fa) {
   return std::make_tuple(bytes, offsets);
 }
 
-// Use vector<int64_t> to represents byte data for python binding compatibility.
+// Use vector<int64_t> to represent byte data for python binding compatibility.
 void register_graph_buffers(fptr_t _fa,
                             const std::vector<std::vector<int64_t>>& handles,
                             const std::vector<std::vector<int64_t>>& offsets) {
