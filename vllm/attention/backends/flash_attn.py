@@ -276,7 +276,11 @@ class FlashAttentionMetadata(AttentionMetadata):
             max_query_len=self.max_query_len,
             max_prefill_seq_len=0,
             max_decode_seq_len=self.max_decode_seq_len,
-            query_start_loc=self.query_start_loc[self.num_prefills:]
+            # Batch may be composed of prefill|decodes, adjust query start
+            # indices to refer to the start of decodes. E.g.
+            # in tokens:[3 prefills|6 decodes], query_start_loc=[3,9] => [0,6].
+            query_start_loc=(self.query_start_loc[self.num_prefills:] -
+                             self.query_start_loc[self.num_prefills])
             if self.query_start_loc is not None else None,
             seq_start_loc=self.seq_start_loc[self.num_prefills:]
             if self.seq_start_loc is not None else None,
@@ -903,7 +907,9 @@ def unified_flash_attention(
         # Decoding run.
         # Use flash_attn_varlen_func kernel for speculative decoding
         # because different queries might have different lengths.
+
         assert decode_meta.max_decode_query_len is not None
+        # use only for actual varlen decoding
         if decode_meta.max_decode_query_len > 1:
             assert attn_type == AttentionType.DECODER, (
                 "Only decoder-only models support max_decode_query_len > 1")
@@ -949,8 +955,6 @@ def unified_flash_attention(
         assert prefill_output is not None
         return prefill_output.view(num_prefill_query_tokens, hidden_size)
 
-    # Chunked prefill does not work with speculative decoding.
-    # Therefore, the query length for decode should be 1 in chunked prefill.
     assert decode_meta is not None
     decode_output = decode_output.squeeze(1)
     output = torch.cat([prefill_output, decode_output], dim=0)
