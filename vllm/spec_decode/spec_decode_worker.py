@@ -344,7 +344,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                 "[Speculative Decoding] Use MQA scorer for scoring proposals.")
 
         self.scorer = scorer_cls(scorer_worker=self.scorer_worker,
-                                 device=self.device,
+                                 device=self.device.type,
                                  vocab_size=self._vocab_size)
 
         self._configure_model_sampler_for_spec_decode()

@@ -81,7 +81,10 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         assert len(target_sampler_output) == 1, "expected single-step output"
         target_sampler_output = target_sampler_output[0]
 
-        if not non_spec_indices:
+        force_contract_batch = False
+        if self._device == "hpu":
+            force_contract_batch = True
+        if not force_contract_batch and not non_spec_indices:
             # All sequence groups in batch have spec decoding enabled
             contracted = self._contract_batch_all_spec(
                 target_sampler_output=target_sampler_output,
