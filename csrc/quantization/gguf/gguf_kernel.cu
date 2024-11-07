@@ -4,13 +4,13 @@
 #include <torch/all.h>
 #include <c10/cuda/CUDAGuard.h>
 
+#include "cuda_compat.h"
+
 #include "ggml-common.h"
 #include "vecdotq.cuh"
 #include "dequantize.cuh"
 #include "mmvq.cuh"
 #include "mmq.cuh"
-
-#include "cuda_compat.h"
 
 // Q8 gemv
 static __global__ void quantize_q8_1(const half* __restrict__ x,
