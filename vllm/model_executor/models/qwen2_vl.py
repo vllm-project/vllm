@@ -40,7 +40,7 @@ from transformers.models.qwen2_vl.image_processing_qwen2_vl import (
 
 from vllm.attention import AttentionMetadata
 from vllm.attention.selector import _Backend
-from vllm.config import CacheConfig, MultiModalConfig
+from vllm.config import CacheConfig, LoRAConfig, MultiModalConfig
 from vllm.distributed import get_pp_group, parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
@@ -52,7 +52,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.qwen2 import Qwen2Model
@@ -65,7 +65,7 @@ from vllm.sequence import IntermediateTensors, SequenceData
 from vllm.transformers_utils.config import uses_mrope
 from vllm.transformers_utils.processor import cached_get_processor
 
-from .interfaces import SupportsMultiModal, SupportsPP
+from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsPP
 from .utils import (PPMissingLayer, get_vit_attn_backend,
                     is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory)
@@ -927,13 +927,37 @@ def input_processor_for_qwen2_vl(
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_qwen2_vl)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_qwen2_vl)
 class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
-                                      SupportsPP):
+                                      SupportsLoRA, SupportsPP):
+    packed_modules_mapping = {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+    }
+
+    # LoRA specific attributes
+    # TODO Support LoRA for the visual encoder in the future.
+    supported_lora_modules = [
+        "qkv_proj",
+        "o_proj",
+        "gate_up_proj",
+        "down_proj",
+    ]
+    embedding_modules = {}
+    embedding_padding_modules = []
 
     def __init__(self,
                  config: Qwen2VLConfig,
                  multimodal_config: MultiModalConfig,
                  cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None) -> None:
+                 quant_config: Optional[QuantizationConfig] = None,
+                 lora_config: Optional[LoRAConfig] = None) -> None:
+
         super().__init__()
 
         assert not cache_config.enable_prefix_caching, \
@@ -966,7 +990,7 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             self.lm_head = PPMissingLayer()
 
         self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.sampler = Sampler()
+        self.sampler = get_sampler()
         self.make_empty_intermediate_tensors = (
             make_empty_intermediate_tensors_factory(
                 ["hidden_states", "residual"], config.hidden_size))

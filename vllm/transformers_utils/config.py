@@ -132,6 +132,15 @@ def uses_mrope(config: PretrainedConfig) -> bool:
     return "mrope_section" in rope_scaling
 
 
+def is_encoder_decoder(config: PretrainedConfig) -> bool:
+    """Detect if the model with this config is used as an encoder/decoder."""
+    text_config = getattr(config, "text_config", None)
+    if text_config is not None:
+        return is_encoder_decoder(text_config)
+
+    return getattr(config, "is_encoder_decoder", False)
+
+
 def get_config(
     model: Union[str, Path],
     trust_remote_code: bool,
