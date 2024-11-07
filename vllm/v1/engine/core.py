@@ -1,6 +1,7 @@
 import multiprocessing
 import queue
 import threading
+import time
 from contextlib import contextmanager
 from multiprocessing.process import BaseProcess
 from multiprocessing.sharedctypes import Synchronized
@@ -22,6 +23,8 @@ from vllm.v1.request import Request, RequestStatus
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
+
+LOGGING_TIME_S = 1
 
 
 class EngineCore:
@@ -60,6 +63,8 @@ class EngineCore:
         self.scheduler = Scheduler(vllm_config.scheduler_config,
                                    vllm_config.cache_config,
                                    vllm_config.lora_config)
+
+        self._last_logging_time = time.time()
 
     def _initialize_kv_caches(self,
                               cache_config: CacheConfig) -> Tuple[int, int]:
@@ -258,6 +263,7 @@ class EngineCoreProc(EngineCore):
                         self._handle_client_request(req)
                         break
                     except queue.Empty:
+                        self._log_stats()
                         logger.debug("EngineCore busy loop waiting.")
                         if self.should_shutdown:
                             return
@@ -272,6 +278,22 @@ class EngineCoreProc(EngineCore):
 
             # 4) Put EngineCoreOutputs into the output queue.
             self.output_queue.put_nowait(outputs)
+
+            self._log_stats()
+
+    def _log_stats(self):
+        """Log basic stats every LOGGING_TIME_S"""
+
+        now = time.time()
+
+        if now - self._last_logging_time > LOGGING_TIME_S:
+            logger.info(
+                "RUNNING: %s | WAITING: %s",
+                len(self.scheduler.running),
+                len(self.scheduler.waiting),
+            )
+
+            self._last_logging_time = now
 
     def _handle_client_request(
             self, request: Union[EngineCoreRequest, List[str]]) -> None:
