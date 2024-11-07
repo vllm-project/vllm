@@ -220,7 +220,7 @@ class MistralTokenizer:
 
         tokens = [self.tokenizer.id_to_piece(id) for id in ids]
 
-        if any(t.strip() == "�" for t in tokens):
+        if any(t.strip() == "�" for t in tokens) and isinstance(self.tokenizer, Tekkenizer):
             # if any stripped decoded token is undefined
             # because it's invalid unicode then pass bytes
             # See: https://github.com/vllm-project/vllm/pull/8640
