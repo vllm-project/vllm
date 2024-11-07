@@ -17,6 +17,7 @@ docker run -itd --entrypoint /bin/bash -v ~/.cache/huggingface:/root/.cache/hugg
 
 # Run basic model test
 docker exec cpu-test bash -c "
+  set -e
   pip install pytest pytest-asyncio matplotlib einops transformers_stream_generator datamodel_code_generator
   pip install Pillow librosa
   pip install torchvision --index-url https://download.pytorch.org/whl/cpu
@@ -28,6 +29,7 @@ docker exec cpu-test bash -c "
 
 # online inference
 docker exec cpu-test bash -c "
+  set -e
   python3 -m vllm.entrypoints.openai.api_server --model facebook/opt-125m & 
   timeout 600 bash -c 'until curl localhost:8000/v1/models; do sleep 1; done' || exit 1
   python3 benchmarks/benchmark_serving.py \

@@ -18,10 +18,13 @@ docker run -itd --entrypoint /bin/bash -v ~/.cache/huggingface:/root/.cache/hugg
  --cpuset-mems=1 --privileged=true --network host -e HF_TOKEN --env VLLM_CPU_KVCACHE_SPACE=4 --shm-size=4g --name cpu-test-avx2 cpu-test-avx2
 
 # offline inference
-docker exec cpu-test-avx2 bash -c "python3 examples/offline_inference.py"
+docker exec cpu-test-avx2 bash -c "
+  set -e
+  python3 examples/offline_inference.py"
 
 # Run basic model test
 docker exec cpu-test bash -c "
+  set -e
   pip install pytest pytest-asyncio matplotlib einops transformers_stream_generator datamodel_code_generator
   pip install Pillow librosa
   pip install torchvision --index-url https://download.pytorch.org/whl/cpu
@@ -33,17 +36,20 @@ docker exec cpu-test bash -c "
 
 # Run compressed-tensor test
 docker exec cpu-test bash -c "
+  set -e
   pytest -s -v \
   tests/quantization/test_compressed_tensors.py::test_compressed_tensors_w8a8_static_setup \
   tests/quantization/test_compressed_tensors.py::test_compressed_tensors_w8a8_dynamic_per_token"
 
 # Run AWQ test
 docker exec cpu-test bash -c "
+  set -e
   pytest -s -v \
   tests/quantization/test_ipex_quant.py"
 
 # online inference
 docker exec cpu-test bash -c "
+  set -e
   export VLLM_CPU_KVCACHE_SPACE=10 
   export VLLM_CPU_OMP_THREADS_BIND=48-92 
   python3 -m vllm.entrypoints.openai.api_server --model facebook/opt-125m --dtype half & 
