@@ -11,7 +11,7 @@ awscli
 einops # required for MPT, qwen-vl and Mamba
 httpx
 librosa # required for audio tests
-opencv-python # required for video tests
+decord # required for video tests
 peft
 requests
 ray[adag]==2.35
@@ -21,6 +21,7 @@ timm # required for internvl test
 torch==2.5.1
 transformers_stream_generator # required for qwen-vl test
 matplotlib # required for qwen-vl test
+mistral_common[opencv] >= 1.4.4 # required for pixtral test
 datamodel_code_generator # required for minicpm3 test
 lm-eval[api]==0.4.4 # required for model evaluation test
 
