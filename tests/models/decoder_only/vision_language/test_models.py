@@ -6,7 +6,6 @@ from pathlib import PosixPath
 from typing import Type
 
 import pytest
-import transformers
 from transformers import AutoModelForVision2Seq
 
 from vllm.platforms import current_platform
@@ -155,12 +154,6 @@ VLM_TEST_SETTINGS = {
         comparator=check_outputs_equal,
         max_tokens=8,
         dtype="bfloat16",
-        marks=[
-            pytest.mark.skipif(
-                transformers.__version__.startswith("4.46"),
-                reason="Model broken in HF, see huggingface/transformers#34379"
-            )
-        ]
     ),
     "fuyu": VLMTestInfo(
         models=["adept/fuyu-8b"],
@@ -273,12 +266,6 @@ VLM_TEST_SETTINGS = {
         auto_cls=AutoModelForVision2Seq,
         vllm_output_post_proc=model_utils.llava_video_vllm_to_hf_output,
         image_sizes=[((1669, 2560), (2560, 1669), (183, 488), (488, 183))],
-        marks=[
-            pytest.mark.skipif(
-                transformers.__version__.startswith("4.46"),
-                reason="Model broken with changes in transformers 4.46"
-            )
-        ],
     ),
     "minicpmv": VLMTestInfo(
         models=["openbmb/MiniCPM-Llama3-V-2_5"],
@@ -336,10 +323,6 @@ VLM_TEST_SETTINGS = {
         max_num_seqs=2,
         auto_cls=AutoModelForVision2Seq,
         marks=[
-            pytest.mark.skipif(
-                transformers.__version__ < "4.46.0",
-                reason="Model introduced in HF >= 4.46.0"
-            ),
             large_gpu_mark(min_gb=48),
         ],
     ),
@@ -361,10 +344,6 @@ VLM_TEST_SETTINGS = {
                 cuda_device_count_stateless() < 2,
                 reason="Need at least 2 GPUs to run the test.",
             ),
-            pytest.mark.skipif(
-                transformers.__version__.startswith("4.46"),
-                reason="Model broken in HF, see huggingface/transformers#34379"
-            )
         ],
         **COMMON_BROADCAST_SETTINGS # type: ignore
     ),
