@@ -15,8 +15,7 @@ from vllm.config import CacheConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.core.scheduler import Scheduler
-from vllm.v1.engine import (POLLING_TIMEOUT_MS, POLLING_TIMEOUT_S,
-                            EngineCoreOutput, EngineCoreOutputs,
+from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
                             EngineCoreRequest, EngineCoreRequestType)
 from vllm.v1.executor.gpu_executor import GPUExecutor
 from vllm.v1.request import Request, RequestStatus
@@ -24,8 +23,9 @@ from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
 
+POLLING_TIMEOUT_MS = 5000
+POLLING_TIMEOUT_S = POLLING_TIMEOUT_MS // 1000
 LOGGING_TIME_S = 1
-
 
 class EngineCore:
     """Inner loop of vLLM's Engine."""

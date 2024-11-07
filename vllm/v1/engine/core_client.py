@@ -8,7 +8,7 @@ import zmq.asyncio
 
 from vllm.logger import init_logger
 from vllm.utils import get_open_zmq_ipc_path
-from vllm.v1.engine import (POLLING_TIMEOUT_MS, EngineCoreOutput,
+from vllm.v1.engine import (EngineCoreOutput,
                             EngineCoreOutputs, EngineCoreRequest,
                             EngineCoreRequestType)
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
@@ -173,10 +173,6 @@ class SyncMPClient(MPClient):
 
     def get_output(self) -> List[EngineCoreOutput]:
 
-        while self.output_socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
-            logger.debug(
-                "EngineCoreClient waiting for output from EngineCore.")
-
         frames = self.output_socket.recv_multipart(copy=False)
         engine_core_outputs = self.decoder.decode(frames[0].buffer).outputs
         return engine_core_outputs
@@ -202,10 +198,6 @@ class AsyncMPClient(MPClient):
         super().__init__(*args, asyncio_mode=True, **kwargs)
 
     async def get_output_async(self) -> List[EngineCoreOutput]:
-
-        while await self.output_socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
-            logger.debug(
-                "EngineCoreClient waiting for output from EngineCore.")
 
         frames = await self.output_socket.recv_multipart(copy=False)
         engine_core_outputs = self.decoder.decode(frames[0].buffer).outputs

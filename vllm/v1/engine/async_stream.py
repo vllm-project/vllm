@@ -12,9 +12,9 @@ class AsyncStream:
     STOP_ITERATION = Exception()  # Sentinel
 
     def __init__(self, request_id: str,
-                 abort_callback: Callable[[str], Awaitable[None]]) -> None:
+                 cancel: Callable[[str], Awaitable[None]]) -> None:
         self.request_id = request_id
-        self._cancel = abort_callback
+        self._cancel = cancel
         self._queue: asyncio.Queue = asyncio.Queue()
         self._finished = False
 
@@ -48,7 +48,7 @@ class AsyncStream:
                     raise result
                 yield result
         except GeneratorExit:
-            await self._cancel(self.request_id)
+            self._cancel(self.request_id)
             raise asyncio.CancelledError from None
 
     @staticmethod
