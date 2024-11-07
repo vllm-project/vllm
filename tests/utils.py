@@ -15,6 +15,7 @@ import openai
 import pytest
 import requests
 import torch
+import torch.nn.functional as F
 from openai.types.completion import Completion
 from typing_extensions import ParamSpec
 
@@ -515,13 +516,14 @@ def compare_all_settings(model: str,
                     ref_result = copy.deepcopy(ref_result)
                     compare_result = copy.deepcopy(compare_result)
                     if "embedding" in ref_result and method == "encode":
-                        ref_embedding = torch.tensor(ref_result["embedding"])
-                        compare_embedding = torch.tensor(
-                            compare_result["embedding"])
-                        mse = ((ref_embedding - compare_embedding)**2).mean()
-                        assert mse < 1e-6, (
+                        sim = F.cosine_similarity(
+                            torch.tensor(ref_result["embedding"]),
+                            torch.tensor(compare_result["embedding"]),
+                            dim=0,
+                        )
+                        assert sim >= 0.999, (
                             f"Embedding for {model=} are not the same.\n"
-                            f"mse={mse}\n")
+                            f"cosine_similarity={sim}\n")
                         del ref_result["embedding"]
                         del compare_result["embedding"]
                     assert ref_result == compare_result, (
