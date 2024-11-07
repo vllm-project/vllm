@@ -96,43 +96,24 @@ def _register_group(group: "GroupCoordinator") -> None:
     _groups[group.unique_name] = weakref.ref(group)
 
 
-if supports_custom_op():
+def all_reduce(tensor: torch.Tensor, group_name: str) -> torch.Tensor:
+    assert group_name in _groups, f"Group {group_name} is not found."
+    group = _groups[group_name]()
+    if group is None:
+        raise ValueError(f"Group {group_name} is destroyed.")
+    return group._all_reduce_out_place(tensor)
 
-    def inplace_all_reduce(tensor: torch.Tensor, group_name: str) -> None:
-        assert group_name in _groups, f"Group {group_name} is not found."
-        group = _groups[group_name]()
-        if group is None:
-            raise ValueError(f"Group {group_name} is destroyed.")
-        group._all_reduce_in_place(tensor)
 
-    def inplace_all_reduce_fake(tensor: torch.Tensor, group_name: str) -> None:
-        return
+def all_reduce_fake(tensor: torch.Tensor, group_name: str) -> torch.Tensor:
+    return torch.empty_like(tensor)
 
-    direct_register_custom_op(
-        op_name="inplace_all_reduce",
-        op_func=inplace_all_reduce,
-        mutates_args=["tensor"],
-        fake_impl=inplace_all_reduce_fake,
-    )
 
-    def outplace_all_reduce(tensor: torch.Tensor,
-                            group_name: str) -> torch.Tensor:
-        assert group_name in _groups, f"Group {group_name} is not found."
-        group = _groups[group_name]()
-        if group is None:
-            raise ValueError(f"Group {group_name} is destroyed.")
-        return group._all_reduce_out_place(tensor)
-
-    def outplace_all_reduce_fake(tensor: torch.Tensor,
-                                 group_name: str) -> torch.Tensor:
-        return torch.empty_like(tensor)
-
-    direct_register_custom_op(
-        op_name="outplace_all_reduce",
-        op_func=outplace_all_reduce,
-        mutates_args=[],
-        fake_impl=outplace_all_reduce_fake,
-    )
+direct_register_custom_op(
+    op_name="all_reduce",
+    op_func=all_reduce,
+    mutates_args=[],
+    fake_impl=all_reduce_fake,
+)
 
 
 class GroupCoordinator:
@@ -361,8 +342,8 @@ class GroupCoordinator:
             return input_
 
         if not supports_custom_op():
-            self._all_reduce_in_place(input_)
-            return input_
+            return torch.ops.vllm.all_reduce(input_,
+                                             group_name=self.unique_name)
 
         if self.tpu_communicator is not None and \
             not self.tpu_communicator.disabled:
@@ -373,30 +354,20 @@ class GroupCoordinator:
             not self.hpu_communicator.disabled:
             return self.hpu_communicator.all_reduce(input_)
 
-        if self.ca_comm is not None and \
-            not self.ca_comm.disabled and \
-                self.ca_comm.should_custom_ar(input_):
-            return torch.ops.vllm.outplace_all_reduce(
-                input_, group_name=self.unique_name)
-        else:
-            torch.ops.vllm.inplace_all_reduce(input_,
-                                              group_name=self.unique_name)
-            return input_
+        return torch.ops.vllm.all_reduce(input_, group_name=self.unique_name)
 
     def _all_reduce_out_place(self, input_: torch.Tensor) -> torch.Tensor:
-        ca_comm = self.ca_comm
-        assert ca_comm is not None
-        assert not ca_comm.disabled
-        out = ca_comm.custom_all_reduce(input_)
+        if supports_custom_op():
+            ca_comm = self.ca_comm
+            if ca_comm is not None and not ca_comm.disabled:
+                out = ca_comm.custom_all_reduce(input_)
+                assert out is not None
+                return out
+        pynccl_comm = self.pynccl_comm
+        assert pynccl_comm is not None and not pynccl_comm.disabled
+        out = pynccl_comm.all_reduce(input_)
         assert out is not None
         return out
-
-    def _all_reduce_in_place(self, input_: torch.Tensor) -> None:
-        pynccl_comm = self.pynccl_comm
-        if (pynccl_comm is not None and not pynccl_comm.disabled):
-            pynccl_comm.all_reduce(input_)
-        else:
-            torch.distributed.all_reduce(input_, group=self.device_group)
 
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
         world_size = self.world_size
@@ -436,8 +407,7 @@ class GroupCoordinator:
         output_tensor = output_tensor.reshape((world_size, ) + input_size)
         output_tensor = output_tensor.movedim(0, dim)
         output_tensor = output_tensor.reshape(input_size[:dim] +
-                                              (world_size *
-                                               input_size[dim], ) +
+                                              (world_size * input_size[dim], ) +
                                               input_size[dim + 1:])
         return output_tensor
 
@@ -591,8 +561,7 @@ class GroupCoordinator:
         assert src < self.world_size, f"Invalid src rank ({src})"
 
         assert src != self.rank_in_group, (
-            "Invalid source rank. Source rank is the same as the current rank."
-        )
+            "Invalid source rank. Source rank is the same as the current rank.")
 
         size_tensor = torch.empty(1, dtype=torch.long, device="cpu")
 
@@ -754,9 +723,7 @@ class GroupCoordinator:
                                        group=metadata_group)
             else:
                 # use group for GPU tensors
-                torch.distributed.send(tensor,
-                                       dst=self.ranks[dst],
-                                       group=group)
+                torch.distributed.send(tensor, dst=self.ranks[dst], group=group)
         return None
 
     def recv_tensor_dict(
@@ -938,8 +905,7 @@ _PP: Optional[GroupCoordinator] = None
 
 
 def get_pp_group() -> GroupCoordinator:
-    assert _PP is not None, (
-        "pipeline model parallel group is not initialized")
+    assert _PP is not None, ("pipeline model parallel group is not initialized")
     return _PP
 
 
@@ -1050,8 +1016,8 @@ def initialize_model_parallel(
     backend = backend or torch.distributed.get_backend(
         get_world_group().device_group)
 
-    if (world_size !=
-            tensor_model_parallel_size * pipeline_model_parallel_size):
+    if (world_size
+            != tensor_model_parallel_size * pipeline_model_parallel_size):
         raise RuntimeError(
             f"world_size ({world_size}) is not equal to "
             f"tensor_model_parallel_size ({tensor_model_parallel_size}) x "
@@ -1080,8 +1046,7 @@ def initialize_model_parallel(
     num_pipeline_model_parallel_groups: int = (world_size //
                                                pipeline_model_parallel_size)
     global _PP
-    assert _PP is None, (
-        "pipeline model parallel group is already initialized")
+    assert _PP is None, ("pipeline model parallel group is already initialized")
     group_ranks = []
     for i in range(num_pipeline_model_parallel_groups):
         ranks = list(range(i, world_size, num_pipeline_model_parallel_groups))
