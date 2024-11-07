@@ -39,10 +39,8 @@ def run_test():
             ), f"Expected: {EXPECTED_VALUE} |  Measured: {measured_value}"
 
 
-pytest.mark.skipif(not current_platform.is_cuda(),
-                   "V1 is currently only supported on CUDA.")
-
-
+@pytest.mark.skipif(not current_platform.is_cuda(),
+                    "V1 is currently only supported on CUDA.")
 def test_lm_eval_accuracy_v1_engine(monkeypatch):
     """Run with the V1 Engine."""
 
