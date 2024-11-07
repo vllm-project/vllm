@@ -211,7 +211,7 @@ class LLM:
             self.llm_engine = self.engine_class.from_engine_args(
                 engine_args,
                 usage_context=UsageContext.LLM_CLASS,
-                enable_multiprocessing=False)
+                enable_multiprocessing=False)  # call-arg: ignore
         else:
             self.llm_engine = self.engine_class.from_engine_args(
                 engine_args, usage_context=UsageContext.LLM_CLASS)
