@@ -13,8 +13,6 @@ Requirements
 * GPU: MI200s (gfx90a), MI300 (gfx942), Radeon RX 7900 series (gfx1100)
 * ROCm 6.2
 
-Note: PyTorch 2.5+/ROCm6.2 dropped the support for python 3.8.
-
 Installation options:
 
 #. :ref:`Build from source with docker <build_from_source_docker_rocm>`

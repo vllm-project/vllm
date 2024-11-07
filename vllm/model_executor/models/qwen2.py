@@ -1,4 +1,3 @@
-# coding=utf-8
 # Adapted from
 # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/qwen2/modeling_qwen2.py
 # Copyright 2024 The Qwen team.
@@ -40,7 +39,7 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
@@ -395,9 +394,6 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         ".v_proj.",
         ".o_proj.",
     ]
-
-    # in TP, these weights are partitioned along the column dimension (dim=-1)
-    column_parallel_weights_modules = [".down_proj.", ".o_proj."]
     bitsandbytes_stacked_params_mapping = {
         # shard_name, weight_name, index
         "q_proj": ("qkv_proj", 0),
@@ -420,9 +416,9 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 and hasattr(config, "max_window_layers")):
             raise ValueError("Sliding window for some but all layers is not "
                              "supported. This model uses sliding window "
-                             "but `max_window_layers` = %s is less than "
-                             "`num_hidden_layers` = %s. Please open an issue "
-                             "to discuss this feature." % (
+                             "but `max_window_layers` = {} is less than "
+                             "`num_hidden_layers` = {}. Please open an issue "
+                             "to discuss this feature.".format(
                                  config.max_window_layers,
                                  config.num_hidden_layers,
                              ))
@@ -448,7 +444,7 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                                               prefix, "lm_head"))
 
         self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.sampler = Sampler()
+        self.sampler = get_sampler()
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 

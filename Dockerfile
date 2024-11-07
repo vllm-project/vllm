@@ -191,6 +191,9 @@ ADD . /vllm-workspace/
 RUN --mount=type=cache,target=/root/.cache/pip \
     python3 -m pip install -r requirements-dev.txt
 
+# Copy in the v1 package for testing (it isn't distributed yet)
+COPY vllm/v1 /usr/local/lib/python3.12/dist-packages/vllm/v1
+
 # doc requires source code
 # we hide them inside `test_docs/` , so that this source code
 # will not be imported by other tests
