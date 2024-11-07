@@ -6,12 +6,10 @@ from typing import Iterator, List, Optional, Union
 import cloudpickle
 import zmq
 
-import vllm.envs
 from vllm import AsyncEngineArgs, SamplingParams
 from vllm.engine.llm_engine import LLMEngine
 # yapf conflicts with isort for this block
 # yapf: disable
-from vllm.engine.llm_engine import LLMEngine
 from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          IPC_HEALTH_EXT, IPC_INPUT_EXT,
                                          IPC_OUTPUT_EXT, REQUEST_OUTPUTS_T,
@@ -114,14 +112,7 @@ class MQLLMEngine:
         load_general_plugins()
 
         engine_config = engine_args.create_engine_config()
-        if vllm.envs.VLLM_USE_V1:
-            # Lazy import: the v1 package isn't distributed
-            from vllm.v1.engine.llm_engine import LLMEngine as V1LLMEngine
-            engine_class = V1LLMEngine
-        else:
-            engine_class = LLMEngine
-
-        executor_class = engine_class._get_executor_cls(engine_config)
+        executor_class = LLMEngine._get_executor_cls(engine_config)
 
         use_async_sockets = engine_config.model_config.use_async_output_proc
 

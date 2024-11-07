@@ -206,9 +206,6 @@ class LLM:
         # to avoid import order issues
         self.engine_class = self.get_engine_class()
 
-        if 
-        
-
         if envs.VLLM_USE_V1:
             # TODO(rob): enable mp by default (issue with fork vs spawn)
             self.llm_engine = self.engine_class.from_engine_args(
