@@ -320,7 +320,8 @@ async def get_request(
     input_requests = iter(input_requests)
 
     # Calculate scale parameter theta to maintain the desired request_rate.
-    assert burstiness > 0, f"A positive burstiness factor is expected, but given {burstiness}."
+    assert burstiness > 0, (
+        f"A positive burstiness factor is expected, but given {burstiness}.")
     theta = 1.0 / (request_rate * burstiness)
 
     for request in input_requests:
