@@ -43,10 +43,17 @@ pytest.mark.skipif(not current_platform.is_cuda(),
                    "V1 is currently only supported on CUDA.")
 
 
-@pytest.mark.parametrize("use_v1", ["0", "1"])
-def test_lm_eval_accuracy_v1_engine(monkeypatch, use_v1):
+def test_lm_eval_accuracy_v1_engine(monkeypatch):
     """Run with the V1 Engine."""
 
     with monkeypatch.context() as m:
-        m.setenv("VLLM_USE_V1", use_v1)
+        m.setenv("VLLM_USE_V1", "1")
+        run_test()
+
+
+def test_lm_eval_accuracy_v0_engine(monkeypatch):
+    """Run with the V0 Engine."""
+
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_USE_V1", "0")
         run_test()

@@ -80,7 +80,9 @@ def test_lm_eval_accuracy_v1_engine(monkeypatch):
 
 
 @pytest.mark.parametrize("more_args", MORE_ARGS_LIST)
-def test_lm_eval_accuracy(more_args):
+def test_lm_eval_accuracy_v0_engine(monkeypatch, more_args):
     """Run with the V0 Engine."""
 
-    run_test(more_args)
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_USE_V1", "0")
+        run_test(more_args)
