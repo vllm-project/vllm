@@ -1,3 +1,5 @@
+#!/bin/bash
+
 # This script build the CPU docker image and run the offline inference inside the container.
 # It serves a sanity check for compilation and basic model usage.
 set -ex
@@ -13,7 +15,7 @@ docker build -t cpu-test -f Dockerfile.ppc64le .
 # Run the image, setting --shm-size=4g for tensor parallel.
 source /etc/environment
 #docker run -itd --entrypoint /bin/bash -v ~/.cache/huggingface:/root/.cache/huggingface --privileged=true --network host -e HF_TOKEN --env VLLM_CPU_KVCACHE_SPACE=4 --shm-size=4g --name cpu-test cpu-test
-docker run -itd --entrypoint /bin/bash -v ~/.cache/huggingface:/root/.cache/huggingface --privileged=true --network host -e HF_TOKEN=$HF_TOKEN --name cpu-test cpu-test
+docker run -itd --entrypoint /bin/bash -v ~/.cache/huggingface:/root/.cache/huggingface --privileged=true --network host -e HF_TOKEN="$HF_TOKEN" --name cpu-test cpu-test
 
 # Run basic model test
 docker exec cpu-test bash -c "
