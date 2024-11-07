@@ -58,7 +58,6 @@ def run_test(more_args):
             model="local-completions",
             model_args=model_args,
             tasks=TASK,
-            limit=10,
         )
 
         measured_value = results["results"][TASK][FILTER]
