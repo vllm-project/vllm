@@ -443,29 +443,28 @@ class OpenAIServing:
             tokenizer,
         )
 
+        _chat_template_kwargs: Dict[str, Any] = dict(
+            chat_template=chat_template,
+            add_generation_prompt=add_generation_prompt,
+            continue_final_message=continue_final_message,
+            tools=tool_dicts,
+            documents=documents,
+        )
+        _chat_template_kwargs.update(chat_template_kwargs or {})
+
         request_prompt: Union[str, List[int]]
         is_mistral_tokenizer = isinstance(tokenizer, MistralTokenizer)
         if is_mistral_tokenizer:
             request_prompt = apply_mistral_chat_template(
                 tokenizer,
                 messages=messages,
-                chat_template=chat_template,
-                add_generation_prompt=add_generation_prompt,
-                continue_final_message=continue_final_message,
-                tools=tool_dicts,
-                documents=documents,
-                **(chat_template_kwargs or {}),
+                **_chat_template_kwargs,
             )
         else:
             request_prompt = apply_hf_chat_template(
                 tokenizer,
                 conversation=conversation,
-                chat_template=chat_template,
-                add_generation_prompt=add_generation_prompt,
-                continue_final_message=continue_final_message,
-                tools=tool_dicts,
-                documents=documents,
-                **(chat_template_kwargs or {}),
+                **_chat_template_kwargs,
             )
 
         mm_data = await mm_data_future
