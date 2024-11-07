@@ -285,11 +285,16 @@ def get_neuron_speculation_model(
 ) -> None:
     from transformers_neuronx.fused_speculation import FusedSpeculativeDecoder
 
+    # For Eagle SD, we need to pass in additional parameters in neuron config.
+    is_eagle = getattr(speculation_config.draft_model_config.hf_config, "is_eagle", False)
+
     # Create target model instance.
     target_model = NeuronCausalLM(model_config.hf_config)
 
     default_neuron_config_args = _get_default_neuron_config_for_speculation(
         model_config, parallel_config, scheduler_config)
+    if is_eagle:
+        default_neuron_config_args['is_eagle_target'] = True
 
     neuron_config = _get_neuron_config_after_override(
         default_neuron_config_args, model_config.override_neuron_config)
@@ -315,6 +320,9 @@ def get_neuron_speculation_model(
 
     default_draft_neuron_config_args = _get_default_neuron_config_for_speculation(
         speculation_config.draft_model_config, parallel_config, scheduler_config)
+    if is_eagle:
+        default_draft_neuron_config_args['is_eagle_draft'] = True
+        default_draft_neuron_config_args['has_pre_attention_norm'] = False
 
     draft_neuron_config = _get_neuron_config_after_override(
         default_draft_neuron_config_args, speculation_config.draft_model_config.override_neuron_config)
