@@ -33,4 +33,6 @@ class InductorPass(ABC):
             logger.info("Printing graph to %s", filepath)
             with open(filepath, "w") as f:
                 src = graph.python_code(root_module="self", verbose=True).src
+                # Add imports so it's not full of errors
+                print("import torch; from torch import device", file=f)
                 print(src, file=f)
