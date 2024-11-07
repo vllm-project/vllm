@@ -278,7 +278,7 @@ class CustomAllreduce:
                 return torch.empty_like(input)
         else:
             # Note: outside of cuda graph context, custom allreduce incurs a
-            # cost of cudaMemcpy, which should be small (<=1% of overall 
+            # cost of cudaMemcpy, which should be small (<=1% of overall
             # latency) compared to the performance gain of using custom kernels
             return self.all_reduce(input, registered=False)
 
