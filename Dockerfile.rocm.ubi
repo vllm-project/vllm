@@ -51,8 +51,9 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     export version="$(awk -F. '{print $1"."$2}' <<< $ROCM_VERSION)" && \
     uv pip install --pre \
         --index-url "https://download.pytorch.org/whl/nightly/rocm${version}" \
-        torch==2.6.0.dev20240918+rocm${version}\
-        torchvision==0.20.0.dev20240918+rocm${version}
+        torch==2.6.0.dev20241107+rocm${version}\
+        torchvision==0.20.0.dev20241107+rocm${version} && \
+    microdnf clean all
 
 
 ENV LD_LIBRARY_PATH="$VIRTUAL_ENV/lib/python3.12/site-packages/numpy.libs:$LD_LIBRARY_PATH"
