@@ -94,7 +94,6 @@ VLM_TEST_SETTINGS = {
             ),
             limit_mm_per_prompt={"image": 4},
         )],
-        dtype="half",
         marks=[pytest.mark.core_model],
     ),
     "paligemma": VLMTestInfo(
@@ -132,7 +131,6 @@ VLM_TEST_SETTINGS = {
         max_num_seqs=2,
         auto_cls=AutoModelForVision2Seq,
         vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
-        dtype="half",
         marks=[pytest.mark.core_model],
         image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
     ),
@@ -177,7 +175,6 @@ VLM_TEST_SETTINGS = {
         use_tokenizer_eos=True,
         vllm_output_post_proc=model_utils.fuyu_vllm_to_hf_output,
         num_logprobs=10,
-        dtype="half",
         image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
     ),
     "glm4": VLMTestInfo(
@@ -250,7 +247,6 @@ VLM_TEST_SETTINGS = {
         models=["llava-hf/llava-onevision-qwen2-0.5b-ov-hf"],
         test_type=VLMTestType.CUSTOM_INPUTS,
         prompt_formatter=lambda vid_prompt: f"<|im_start|>user\n{vid_prompt}<|im_end|>\n<|im_start|>assistant\n",   # noqa: E501
-        dtype="half",
         num_video_frames=16,
         max_model_len=16384,
         postprocess_inputs=model_utils.get_key_type_post_processor(
@@ -409,7 +405,6 @@ VLM_TEST_SETTINGS = {
         prompt_formatter=lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>Assistant\n", # noqa: E501
         test_type=VLMTestType.CUSTOM_INPUTS,
         max_model_len=4096,
-        dtype="half",
         use_tokenizer_eos=True,
         patch_hf_runner=model_utils.internvl_patch_hf_runner,
         custom_test_opts=[
@@ -424,7 +419,6 @@ VLM_TEST_SETTINGS = {
         test_type=VLMTestType.CUSTOM_INPUTS,
         max_model_len=16384,
         max_num_seqs=2,
-        dtype="half",
         postprocess_inputs=model_utils.get_key_type_post_processor(
             "pixel_values"
         ),
