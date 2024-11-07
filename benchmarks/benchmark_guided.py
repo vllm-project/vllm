@@ -1,11 +1,12 @@
 """Benchmark guided decoding throughput."""
-import argparse, json, random, time
-import torch, uvloop
-
+import argparse
+import json
+import random
+import time
 from typing import List, Optional, Tuple
-from tqdm import tqdm
-from transformers import (AutoModelForCausalLM, AutoTokenizer,
-                          PreTrainedTokenizerBase)
+
+import uvloop
+from transformers import AutoTokenizer
 
 from vllm.engine.arg_utils import DEVICE_OPTIONS, AsyncEngineArgs, EngineArgs
 from vllm.entrypoints.openai.api_server import (
@@ -14,110 +15,119 @@ from vllm.sampling_params import GuidedDecodingParams
 from vllm.utils import FlexibleArgumentParser, merge_async_iterators
 
 SCHEMA = {
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "title": "User Profile",
-  "type": "object",
-  "properties": {
-    "userId": {
-      "type": "string",
-      "description": "Unique identifier for the user."
-    },
-    "personalInfo": {
-      "type": "object",
-      "properties": {
-        "firstName": {
-          "type": "string",
-          "description": "The user's first name."
+    "$schema":
+    "https://json-schema.org/draft/2020-12/schema",
+    "title":
+    "User Profile",
+    "type":
+    "object",
+    "properties": {
+        "userId": {
+            "type": "string",
+            "description": "Unique identifier for the user."
         },
-        "lastName": {
-          "type": "string",
-          "description": "The user's last name."
-        },
-        "age": {
-          "type": "integer",
-          "minimum": 0,
-          "description": "The user's age."
-        },
-        "phoneNumbers": {
-          "type": "array",
-          "items": {
+        "personalInfo": {
             "type": "object",
             "properties": {
-              "type": {
-                "type": "string",
-                "enum": ["home", "work", "mobile"],
-                "description": "Type of phone number."
-              },
-              "number": {
-                "type": "string",
-                "pattern": "^\\+?[1-9]\\d{1,14}$",
-                "description": "Phone number in E.164 format."
-              }
+                "firstName": {
+                    "type": "string",
+                    "description": "The user's first name."
+                },
+                "lastName": {
+                    "type": "string",
+                    "description": "The user's last name."
+                },
+                "age": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "The user's age."
+                },
+                "phoneNumbers": {
+                    "type":
+                    "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "type": {
+                                "type": "string",
+                                "enum": ["home", "work", "mobile"],
+                                "description": "Type of phone number."
+                            },
+                            "number": {
+                                "type": "string",
+                                "pattern": "^\\+?[1-9]\\d{1,14}$",
+                                "description": "Phone number in E.164 format."
+                            }
+                        },
+                        "required": ["type", "number"]
+                    },
+                    "description":
+                    "List of phone numbers associated with the user."
+                }
             },
-            "required": ["type", "number"]
-          },
-          "description": "List of phone numbers associated with the user."
+            "required": ["firstName", "lastName"]
+        },
+        "address": {
+            "type": "object",
+            "properties": {
+                "street": {
+                    "type": "string",
+                    "description": "Street address."
+                },
+                "city": {
+                    "type": "string",
+                    "description": "City name."
+                },
+                "state": {
+                    "type": "string",
+                    "description": "State or province."
+                },
+                "postalCode": {
+                    "type": "string",
+                    "pattern": "^\\d{5}(-\\d{4})?$",
+                    "description": "Postal code."
+                },
+                "country": {
+                    "type": "string",
+                    "description": "Country name."
+                }
+            },
+            "required": ["street", "city", "state", "postalCode", "country"]
+        },
+        "preferences": {
+            "type": "object",
+            "properties": {
+                "newsletterSubscribed": {
+                    "type":
+                    "boolean",
+                    "description":
+                    "Indicates if the user is subscribed to the newsletter."
+                },
+                "favoriteCategories": {
+                    "type": "array",
+                    "items": {
+                        "type": "string"
+                    },
+                    "description": "List of user's favorite categories."
+                }
+            },
+            "required": ["newsletterSubscribed"]
+        },
+        "accountStatus": {
+            "type": "string",
+            "enum": ["active", "inactive", "suspended"],
+            "description": "Current status of the user's account."
+        },
+        "registrationDate": {
+            "type": "string",
+            "format": "date-time",
+            "description": "ISO 8601 formatted date-time of user registration."
         }
-      },
-      "required": ["firstName", "lastName"]
     },
-    "address": {
-      "type": "object",
-      "properties": {
-        "street": {
-          "type": "string",
-          "description": "Street address."
-        },
-        "city": {
-          "type": "string",
-          "description": "City name."
-        },
-        "state": {
-          "type": "string",
-          "description": "State or province."
-        },
-        "postalCode": {
-          "type": "string",
-          "pattern": "^\\d{5}(-\\d{4})?$",
-          "description": "Postal code."
-        },
-        "country": {
-          "type": "string",
-          "description": "Country name."
-        }
-      },
-      "required": ["street", "city", "state", "postalCode", "country"]
-    },
-    "preferences": {
-      "type": "object",
-      "properties": {
-        "newsletterSubscribed": {
-          "type": "boolean",
-          "description": "Indicates if the user is subscribed to the newsletter."
-        },
-        "favoriteCategories": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          },
-          "description": "List of user's favorite categories."
-        }
-      },
-      "required": ["newsletterSubscribed"]
-    },
-    "accountStatus": {
-      "type": "string",
-      "enum": ["active", "inactive", "suspended"],
-      "description": "Current status of the user's account."
-    },
-    "registrationDate": {
-      "type": "string",
-      "format": "date-time",
-      "description": "ISO 8601 formatted date-time of user registration."
-    }
-  },
-  "required": ["userId", "personalInfo", "address", "accountStatus", "registrationDate"]
+    "required":
+    ["userId", "personalInfo", "address", "accountStatus", "registrationDate"]
 }
+
 
 def run_vllm(
     requests: List[Tuple[str, int, int]],
@@ -177,7 +187,8 @@ def run_vllm(
                 top_p=1.0,
                 ignore_eos=True,
                 max_tokens=output_len,
-                guided_decoding=GuidedDecodingParams(json=SCHEMA) if guided_decoding else None,
+                guided_decoding=GuidedDecodingParams(
+                    json=SCHEMA) if guided_decoding else None,
             ))
 
     start = time.perf_counter()
@@ -255,7 +266,8 @@ async def run_vllm_async(
                         top_p=1.0,
                         ignore_eos=True,
                         max_tokens=output_len,
-                        guided_decoding=GuidedDecodingParams(json=SCHEMA) if guided_decoding else None,
+                        guided_decoding=GuidedDecodingParams(
+                            json=SCHEMA) if guided_decoding else None,
                     ))
             generators = []
             for i, (prompt, sp) in enumerate(zip(prompts, sampling_params)):
@@ -263,7 +275,8 @@ async def run_vllm_async(
                 generators.append(generator)
             all_gens = merge_async_iterators(*generators)
             all_gens = merge_async_iterators(*generators)
-            async for i, res in all_gens: pass
+            async for i, res in all_gens:
+                pass
 
         prompts = []
         sampling_params = []
@@ -276,7 +289,8 @@ async def run_vllm_async(
                     top_p=1.0,
                     ignore_eos=True,
                     max_tokens=output_len,
-                    guided_decoding=GuidedDecodingParams(json=SCHEMA) if guided_decoding else None,
+                    guided_decoding=GuidedDecodingParams(
+                        json=SCHEMA) if guided_decoding else None,
                 ))
 
         generators = []
@@ -285,7 +299,8 @@ async def run_vllm_async(
             generator = llm.generate(prompt, sp, request_id=f"test{i}")
             generators.append(generator)
         all_gens = merge_async_iterators(*generators)
-        async for i, res in all_gens: pass
+        async for i, res in all_gens:
+            pass
         end = time.perf_counter()
         return end - start
 
@@ -297,20 +312,33 @@ def main(args: argparse.Namespace):
     # Synthesize a prompt with the given input length.
     tokenizer = AutoTokenizer.from_pretrained(
         args.tokenizer, trust_remote_code=args.trust_remote_code)
-    prompt = f"Generate an example of a user profile given the following schema: {json.dumps(SCHEMA)}"
+    prompt = f"Generate an example of a user profile given the following schema: {json.dumps(SCHEMA)}"  # noqa: E501
     input_len = len(tokenizer(prompt).input_ids)
     requests = [(prompt, input_len, args.output_len)
                 for _ in range(args.num_prompts)]
 
     run_args = [
-        requests, args.model, args.tokenizer,
-        args.tensor_parallel_size, args.seed, args.n,
-        args.trust_remote_code, args.dtype, args.max_model_len,
-        args.enforce_eager, args.kv_cache_dtype, args.device,
-        args.enable_prefix_caching, args.enable_chunked_prefill,
-        args.max_num_batched_tokens, args.distributed_executor_backend,
-        args.gpu_memory_utilization, args.num_scheduler_steps,
-        args.disable_async_output_proc, args.guided_decoding, args.warmup,
+        requests,
+        args.model,
+        args.tokenizer,
+        args.tensor_parallel_size,
+        args.seed,
+        args.n,
+        args.trust_remote_code,
+        args.dtype,
+        args.max_model_len,
+        args.enforce_eager,
+        args.kv_cache_dtype,
+        args.device,
+        args.enable_prefix_caching,
+        args.enable_chunked_prefill,
+        args.max_num_batched_tokens,
+        args.distributed_executor_backend,
+        args.gpu_memory_utilization,
+        args.num_scheduler_steps,
+        args.disable_async_output_proc,
+        args.guided_decoding,
+        args.warmup,
     ]
 
     if args.async_engine:
