@@ -499,7 +499,7 @@ class EngineArgs:
                   'Defaults to max_num_seqs if padding-aware '
                   'scheduling is enabled, is None otherwise.'))
         parser.add_argument(
-            '--scheduler-padding-fn',
+            '--scheduler-padding-method',
             type=int,
             default=EngineArgs.scheduler_padding_method,
             help=("Padding function for determining effective "
