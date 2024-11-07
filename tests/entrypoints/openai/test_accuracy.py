@@ -34,7 +34,7 @@ if current_platform.is_tpu():
         [],  # Default
         # ["--num-scheduler-steps", "8"], # Multi-step << currently fails
     ]
-    MAX_WAIT_SECONDS = 60
+    MAX_WAIT_SECONDS = 600
 
 
 def run_test(more_args):
