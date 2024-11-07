@@ -143,8 +143,22 @@ class PythonicToolParser(ToolParser):
                         self.streamed_args_for_tool[
                             index] += delta.function.arguments
 
-            return DeltaMessage(
-                tool_calls=tool_deltas) if tool_deltas else None
+            # HACK: serving_chat.py inspects the internal state of tool parsers
+            # when determining it's final streaming delta, automatically
+            # adding autocompleted JSON.
+            # These two lines avoid that nonsense while ensuring finish_reason
+            # is set to tool_calls when at least one tool is called.
+            if tool_deltas and not self.prev_tool_call_arr:
+                self.prev_tool_call_arr = [{"arguments": {}}]
+
+            if tool_deltas:
+                return DeltaMessage(tool_calls=tool_deltas)
+            elif not added_text and self.current_tool_id > 0:
+                # Return an empty DeltaMessage once the tool calls are all done
+                # so that finish_reason gets set.
+                return DeltaMessage(content='')
+            else:
+                return None
         except Exception:
             logger.exception("Error trying to handle streaming tool call.")
             logger.debug(
@@ -210,28 +224,27 @@ def _make_valid_python(text: str) -> Union[Tuple[str, str], None]:
                 bracket_stack.append(char)
 
     text = text.rstrip()
-
+    if text.endswith("=") or text.endswith(":"):
+        # Since we have no type information for this property/parameter value,
+        # we can't fill in a valid value.
+        return None
+    if bracket_stack and bracket_stack[-1] == "{":
+        trailing_dict_text = text[:text.rfind("{")]
+        num_keys = trailing_dict_text.count(":")
+        num_values = trailing_dict_text.count(",")
+        if num_keys <= num_values:
+            return None  # Incomplete property name within parameter value
     if bracket_stack and bracket_stack[-1] == "(":
         trailing_params_text = text[:text.rfind("(")]
         num_full_param_names = trailing_params_text.count("=")
         num_full_param_values = trailing_params_text.count(",")
         if num_full_param_names <= num_full_param_values:
             return None  # Incomplete parameter name
-    if bracket_stack and (
-        (bracket_stack[-1] == "{" and not text.endswith("{")) or
-        (len(bracket_stack) > 1 and bracket_stack[-1] in {"'", '"'}
-         and bracket_stack[-2] == "{")):
-        return None  # Incomplete property name within parameter value
+    if text.endswith(","):
+        text = text[:-1]
     if bracket_stack and bracket_stack[-1] == "[" and not text.endswith(
             "[") and not text.endswith(")"):
         return None  # Incomplete function name
-
-    if text.endswith(","):
-        text = text[:-1]
-    elif text.endswith("="):
-        # Since we have no type information for this property/parameter value,
-        # we can't fill in a valid value.
-        return None
 
     added_text = ""
     for char in reversed(bracket_stack):
