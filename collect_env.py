@@ -518,12 +518,18 @@ def is_xnnpack_available():
 def get_env_vars():
     env_vars = ''
     secret_terms=('secret', 'token', 'api', 'access', 'password')
+    report_prefix = ("TORCH", "NCCL", "PYTORCH",
+                     "CUDA", "CUBLAS", "CUDNN",
+                     "OMP_", "MKL_",
+                     "NVIDIA")
     for k, v in os.environ.items():
         if any(term in k.lower() for term in secret_terms):
-            v = '***'
-        if k not in environment_variables:
-            v = '***'
-        env_vars = env_vars + "{}={}".format(k, v) + "\n"
+            continue
+        if k in environment_variables:
+            env_vars = env_vars + "{}={}".format(k, v) + "\n"
+        if k.startswith(report_prefix):
+            env_vars = env_vars + "{}={}".format(k, v) + "\n"
+
     return env_vars
 
 def get_env_info():
