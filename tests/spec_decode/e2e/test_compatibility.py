@@ -6,40 +6,6 @@ from .conftest import get_output_from_llm_generator
 
 
 @pytest.mark.parametrize("common_llm_kwargs", [{
-    "model": "JackFram/llama-68m",
-    "speculative_model": "JackFram/llama-68m",
-    "num_speculative_tokens": 5,
-}])
-@pytest.mark.parametrize("per_test_common_llm_kwargs", [
-    {
-        "enable_chunked_prefill": True,
-    },
-])
-@pytest.mark.parametrize("test_llm_kwargs", [{}])
-@pytest.mark.parametrize("seed", [1])
-def test_spec_decode_xfail_chunked_prefill(test_llm_generator):
-    """Verify that speculative decoding with chunked prefill fails.
-    """
-    output_len = 128
-    temperature = 0.0
-
-    prompts = [
-        "Hello, my name is",
-    ]
-
-    sampling_params = SamplingParams(
-        max_tokens=output_len,
-        ignore_eos=True,
-        temperature=temperature,
-    )
-
-    with pytest.raises(ValueError,
-                       match="Speculative decoding and chunked prefill"):
-        get_output_from_llm_generator(test_llm_generator, prompts,
-                                      sampling_params)
-
-
-@pytest.mark.parametrize("common_llm_kwargs", [{
     "model": "meta-llama/Llama-2-7b-chat-hf",
     "speculative_model": "JackFram/llama-68m",
     "num_speculative_tokens": 5,
