@@ -6,7 +6,7 @@ TIMEOUT_SECONDS=10
 
 retries=0
 while [ $retries -lt 1000 ]; do
-    if [ $(curl -s --max-time $TIMEOUT_SECONDS -L -H "Authorization: Bearer $TOKEN" -o /dev/null -w "%{http_code}" $URL) -eq 200 ]; then
+    if [ "$(curl -s --max-time "$TIMEOUT_SECONDS" -L -H "Authorization: Bearer $TOKEN" -o /dev/null -w "%{http_code}" "$URL")" -eq 200 ]; then
         exit 0
     fi
 
