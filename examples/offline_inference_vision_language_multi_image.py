@@ -300,6 +300,13 @@ def load_idefics3(question, image_urls: List[str]) -> ModelRequestData:
         max_num_seqs=16,
         enforce_eager=True,
         limit_mm_per_prompt={"image": len(image_urls)},
+        # if you are running out of memory, you can reduce the "longest_edge".
+        # see: https://huggingface.co/HuggingFaceM4/Idefics3-8B-Llama3#model-optimizations
+        mm_processor_kwargs={
+            "size": {
+                "longest_edge": 2 * 364
+            },
+        },
     )
 
     placeholders = "\n".join(f"Image-{i}: <image>\n"
