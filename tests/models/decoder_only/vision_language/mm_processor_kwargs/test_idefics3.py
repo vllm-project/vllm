@@ -1,4 +1,4 @@
-"""Tests for phi3v's multimodal preprocessing kwargs."""
+"""Tests for Idefics3's multimodal preprocessing kwargs."""
 from typing import Optional
 
 import pytest
