@@ -5,7 +5,7 @@ import time
 from contextlib import contextmanager
 from multiprocessing.process import BaseProcess
 from multiprocessing.sharedctypes import Synchronized
-from typing import Any, List, Tuple, Type, Union
+from typing import Any, List, Tuple, Type, Union, Iterator
 
 import zmq
 import zmq.asyncio
@@ -151,7 +151,7 @@ class EngineCoreProc(EngineCore):
             ready_socket.send_string(EngineCoreProc.READY_STR)
 
     @contextmanager
-    def make_socket(self, path: str, type: Any):
+    def make_socket(self, path: str, type: Any) -> Iterator[zmq.Socket]:
         """Context manager for use """
 
         ctx = zmq.Context()
@@ -335,9 +335,9 @@ class EngineCoreProc(EngineCore):
     def process_output_socket(self, output_path: str):
         """Output socket IO thread."""
 
-        # Msgpack serialization encoding..
+        # Msgpack serialization encoding.
         encoder = msgpack.Encoder()
-        # Reuse send buffer
+        # Reuse send buffer.
         buffer = bytearray()
 
         with self.make_socket(output_path, zmq.constants.PUSH) as socket:
@@ -345,6 +345,4 @@ class EngineCoreProc(EngineCore):
                 engine_core_outputs = self.output_queue.get()
                 outputs = EngineCoreOutputs(outputs=engine_core_outputs)
                 encoder.encode_into(outputs, buffer)
-                socket.send_multipart((buffer, ),
-                                      copy=False,
-                                      flags=zmq.NOBLOCK)
+                socket.send_multipart((buffer, ), copy=False)
