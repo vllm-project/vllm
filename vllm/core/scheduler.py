@@ -403,6 +403,7 @@ class Scheduler:
         # Requests with more than (4% max context length) tokens to prefill
         # are "big"
         self.big_prefill_threshold = scheduler_config.max_model_len // 25
+        self.max_big_requests = 1  # TODO: something
 
         # Dict cache with the chunk sizes to hand out to each sequence depending
         # on how many prefill slots are used.
@@ -1125,6 +1126,12 @@ class Scheduler:
         prefills = SchedulerPrefillOutputs.create_empty()
         swapped_in = SchedulerSwappedInOutputs.create_empty()
 
+        # Before any scheduling, decide if we have prefill slots available
+        # to pull new requests from the waiting queue
+        if self.prefill_slots_running < self.num_prefill_slots and len(
+                self.waiting) > 0:
+            self._reserve_prefill_slots_from_waiting_queue()
+
         # Decoding should be always scheduled first by fcfs.
         running_scheduled = self._schedule_running(budget,
                                                    curr_loras,
@@ -1209,6 +1216,22 @@ class Scheduler:
                                   seq_group: ScheduledSequenceGroup) -> bool:
         return seq_group.token_chunk_size != seq_group.seq_group.seqs[
             0].get_num_new_tokens()
+
+    def _reserve_prefill_slots_from_waiting_queue(self):
+        # Increment self.num_slots_filled for each request in the waiting queue
+        # that we can fit into a slot
+        for seq_group in self.waiting:
+            # Don't fill more slots than we have
+            if self.prefill_slots_running >= self.num_prefill_slots:
+                break
+
+            # Disallow multiple big requests
+            if self._is_big_seq_group(seq_group):
+                if self.big_prefill_requests >= self.max_big_requests:
+                    continue
+                self.big_prefill_requests += 1
+
+            self.prefill_slots_running += 1
 
     def _schedule(self) -> SchedulerOutputs:
         """Schedule queued requests."""
