@@ -1,4 +1,4 @@
-from typing import List, overload, Generic, TypeVar
+from typing import Generic, List, TypeVar, overload
 
 T = TypeVar("T")
 
@@ -42,10 +42,13 @@ class ConstantList(Generic[T]):
 
     @overload
     def __setitem__(self, item, value):
-        raise Exception("Cannot set item in a constant list")
+        ...
 
     @overload
     def __setitem__(self, s: slice, value, /):
+        ...
+
+    def __setitem__(self, item, value):
         raise Exception("Cannot set item in a constant list")
 
     def __delitem__(self, item):
