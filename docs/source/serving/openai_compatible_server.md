@@ -329,11 +329,12 @@ Limitations:
 * Llama's smaller models struggle to use tools effectively.
 
 Example supported models:
-* `meta-llama/Llama-3.2-1B-Instruct`
-* `meta-llama/Llama-3.2-3B-Instruct`
-* `Team-ACE/ToolACE-8B`
+* `meta-llama/Llama-3.2-1B-Instruct` (use with `examples/tool_chat_template_llama3.2_pythonic.jinja`)
+* `meta-llama/Llama-3.2-3B-Instruct` (use with `examples/tool_chat_template_llama3.2_pythonic.jinja`)
+* `Team-ACE/ToolACE-8B` (use with `examples/tool_chat_template_toolace.jinja`)
+* `fixie-ai/ultravox-v0_4-ToolACE-8B` (use with `examples/tool_chat_template_toolace.jinja`)
 
-Flags: `--tool-call-parser pythonic`
+Flags: `--tool-call-parser pythonic --chat-template {see_above}`
 
 
 ### How to write a tool parser plugin
