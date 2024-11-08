@@ -824,17 +824,17 @@ class Scheduler:
                                                       SequenceStatus.WAITING,
                                                       False, budget)
 
-            #Only preempt if priority inversion exists
+            # Only preempt if priority inversion exists
             while running_queue and self._get_priority(
                     running_queue[-1]) > self._get_priority(seq_group):
-                #Only preempt if waiting sequence cannot be allocated
+                # Only preempt if waiting sequence cannot be allocated
                 can_allocate = self.block_manager.can_allocate(seq_group)
                 if (num_new_tokens and can_allocate == AllocStatus.OK
                         and budget.can_schedule(num_new_tokens=num_new_tokens,
                                                 num_new_seqs=num_new_seqs)):
                     break
 
-                #Adjust budget to remove the victim sequence group
+                # Adjust budget to remove the victim sequence group
                 vseq_group = running_queue.pop()
                 num_running_tokens = self._get_num_new_tokens(
                     vseq_group, SequenceStatus.RUNNING, False, budget)
@@ -844,11 +844,11 @@ class Scheduler:
                 budget.subtract_num_seqs(vseq_group.request_id,
                                          num_running_seqs)
 
-                #Preempt out the victim sequence group
+                # Preempt out the victim sequence group
                 self._preempt(vseq_group, blocks_to_swap_out)
                 waiting_queue.appendleft(vseq_group)
                 force_preemption_count += 1
-            #Put the sequence back into the waiting queue
+            # Put the sequence back into the waiting queue
             waiting_queue.appendleft(seq_group)
 
         waiting_queue = deque(sorted(waiting_queue, key=self._get_priority))
@@ -1141,6 +1141,16 @@ class Scheduler:
                                            curr_loras,
                                            enable_chunking=True)
 
+        prefilling = running_scheduled.prefill_seq_groups + prefills.seq_groups
+
+        prefilling = [
+            p for p in prefilling if self._will_still_be_prefilling(p)
+        ]
+
+        # Set slot counts for next iteration
+        self.prefill_slots_running = len(prefilling)
+        self.big_prefill_requests = self._count_big(prefilling)
+
         assert (budget.num_batched_tokens <=
                 self.scheduler_config.max_num_batched_tokens)
         assert budget.num_curr_seqs <= self.scheduler_config.max_num_seqs
@@ -1186,6 +1196,19 @@ class Scheduler:
             preempted=(len(running_scheduled.preempted) +
                        len(running_scheduled.swapped_out)),
         )
+
+    def _count_big(self,
+                   scheduled_seq_groups: List[ScheduledSequenceGroup]) -> int:
+        return len([
+            scheduled_seq_group for scheduled_seq_group in scheduled_seq_groups
+            if scheduled_seq_group.seq_group.seqs[0].get_num_new_tokens() >=
+            self.big_prefill_threshold
+        ])
+
+    def _will_still_be_prefilling(self,
+                                  seq_group: ScheduledSequenceGroup) -> bool:
+        return seq_group.token_chunk_size != seq_group.seq_group.seqs[
+            0].get_num_new_tokens()
 
     def _schedule(self) -> SchedulerOutputs:
         """Schedule queued requests."""
@@ -1645,7 +1668,8 @@ class Scheduler:
         elif enable_chunking and len(seqs) == 1:
             remaining_token_budget = budget.remaining_token_budget()
             # Get the number of tokens to allocate to this prefill slot
-            prefill_slot_budget = self.prefill_chunk_sizes[self.prefill_slots_running]
+            prefill_slot_budget = self.prefill_chunk_sizes[
+                self.prefill_slots_running]
 
             if self.cache_config.enable_prefix_caching:
                 # When prefix caching is enabled, we always allocate
@@ -1654,10 +1678,12 @@ class Scheduler:
                 block_size = self.cache_config.block_size
                 # Set chunk size to the next lowest multiple of block size
                 # so we don't exceed our budget
-                prefill_slot_budget = (prefill_slot_budget // block_size) * block_size
+                prefill_slot_budget = (prefill_slot_budget //
+                                       block_size) * block_size
                 # NB: In the case where num_new_tokens < chunk_size, this does
                 # not allocate a multiple of `block_size` tokens.
 
-            num_new_tokens = min(num_new_tokens, remaining_token_budget, prefill_slot_budget)
+            num_new_tokens = min(num_new_tokens, remaining_token_budget,
+                                 prefill_slot_budget)
 
         return num_new_tokens
