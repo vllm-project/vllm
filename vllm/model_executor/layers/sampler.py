@@ -1,6 +1,7 @@
 """A layer that samples the next tokens from the model's outputs."""
 import itertools
 import math
+import os
 import warnings
 from dataclasses import dataclass
 from importlib.util import find_spec
@@ -195,19 +196,16 @@ class Sampler(nn.Module):
         self._sampling_tensors = None
 
         # Initialize new sampling tensors
-        (sampling_tensors, do_penalties, do_top_p_top_k,
-         do_min_p) = SamplingTensors.from_sampling_metadata(
+        (sampling_tensors, do_penalties, do_top_p_top_k, do_min_p,
+         top_k_scalar, top_p_scalar) = SamplingTensors.from_sampling_metadata(
              sampling_metadata, vocab_size, logits.device, logits.dtype)
 
         self._sampling_tensors = sampling_tensors
         self._do_penalties = do_penalties
         self._do_top_p_top_k = do_top_p_top_k
         self._do_min_p = do_min_p
-        self._top_p_scalar = sampling_tensors.top_ps[0]
-        self._top_k_scalar = sampling_tensors.top_ks[0]
-        scalar_p = torch.all(sampling_tensors.top_ps == self._top_p_scalar)
-        scalar_k = torch.all(sampling_tensors.top_ks == self._top_k_scalar)
-        self._scalar_p_and_k = torch.logical_and(scalar_p, scalar_k)
+        self._top_k_scalar = top_k_scalar
+        self._top_p_scalar = top_p_scalar
 
         self._apply_top_k_top_p_opt = ApplyToppTopkScalar(5)
 
@@ -270,10 +268,10 @@ class Sampler(nn.Module):
 
         if do_top_p_top_k and flashinfer_top_k_top_p_sampling is None:
             # If we have a scalar p and k, we can use the optimized version.
-            if self._scalar_p_and_k.any():
+            if self._top_k_scalar and self._top_p_scalar:
                 logits = self._apply_top_k_top_p_opt(logits,
-                                                     self._top_p_scalar.item(),
-                                                     self._top_k_scalar.item())
+                                                     self._top_p_scalar,
+                                                     self._top_k_scalar)
             else:
                 logits = _apply_top_k_top_p(logits, sampling_tensors.top_ps,
                                             sampling_tensors.top_ks)
@@ -386,8 +384,13 @@ class ApplyToppTopkScalar:
     The main logic of this is in __call__
     This is a class instead of a function, just to keep track of
     the monotonic non-decreasing state _padded_k
+
+    To enable the duplicates that are outside of kth border,
+    set VLLM_HANDLE_TOPK_DUPLICATES to 1 or true.
     """
     _padded_k = 0
+    _handle_duplicates = os.getenv('VLLM_HANDLE_TOPK_DUPLICATES',
+                                   '0').lower() in ['1', 'true']
 
     def __init__(self, increment: int):
         self._increment = increment
@@ -397,12 +400,15 @@ class ApplyToppTopkScalar:
             ApplyToppTopkScalar._padded_k = min(k + self._increment,
                                                 logits.shape[1])
 
-        vals, idx = torch.topk(logits, k=ApplyToppTopkScalar._padded_k, \
-                    dim=1, sorted=True)
+        vals, idx = torch.topk(logits,
+                               k=ApplyToppTopkScalar._padded_k,
+                               dim=1,
+                               sorted=True)
 
         # this "if" checks if we have bucketed so much that
         # we have padded k upto shape of logits
-        if ApplyToppTopkScalar._padded_k != logits.shape[1]:
+        if self._handle_duplicates and \
+            ApplyToppTopkScalar._padded_k != logits.shape[1]:
             smallest_of_top_k = vals[:, k - 1]
             num_duplicates_of_smallest_of_topk = torch.sum(
                 logits == smallest_of_top_k.unsqueeze(1), 1)
@@ -427,9 +433,10 @@ class ApplyToppTopkScalar:
                     ApplyToppTopkScalar._padded_k + incr, logits.shape[1])
 
                 # recompute topk with expanded padded_k
-                vals, idx = torch.topk(logits, \
-                            k=ApplyToppTopkScalar._padded_k, \
-                            dim=1, sorted=True)
+                vals, idx = torch.topk(logits,
+                                       k=ApplyToppTopkScalar._padded_k,
+                                       dim=1,
+                                       sorted=True)
 
         idx = torch.fliplr(idx)
         vals = torch.fliplr(vals)

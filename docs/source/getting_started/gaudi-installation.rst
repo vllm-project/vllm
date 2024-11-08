@@ -378,7 +378,7 @@ Environment variables
          - sequence length min (``VLLM_DECODE_BLOCK_BUCKET_MIN``): ``block_size``
          - sequence length step (``VLLM_DECODE_BLOCK_BUCKET_STEP``): ``block_size``
          - sequence length max (``VLLM_DECODE_BLOCK_BUCKET_MAX``): ``max(128, (max_num_seqs*max_model_len)/block_size)``
-
+-  ``VLLM_HANDLE_TOPK_DUPLICATES``: if ``true``, will handle duplicates that are outside of top-k, ``false`` by default
 
 Additionally, there are HPU PyTorch Bridge environment variables impacting vLLM execution:  
 
