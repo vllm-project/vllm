@@ -502,7 +502,6 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
-        prefix = ""
         pooler_config = vllm_config.model_config.pooler_config
         self.config = config
         self.lora_config = lora_config

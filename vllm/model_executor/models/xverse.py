@@ -233,7 +233,6 @@ class XverseModel(nn.Module):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
-        prefix = ""
         self.config = config
         self.padding_idx = config.pad_token_id
         lora_vocab = (lora_config.lora_extra_vocab_size *

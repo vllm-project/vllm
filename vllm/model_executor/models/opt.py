@@ -351,7 +351,6 @@ class OPTForCausalLM(nn.Module, SupportsPP):
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        prefix = ""
         super().__init__()
         self.config = config
         self.quant_config = quant_config

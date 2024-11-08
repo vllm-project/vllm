@@ -413,7 +413,6 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
-        prefix = ""
         # TODO (@robertgshaw2): see if this can be moved out
         if (cache_config.sliding_window is not None
                 and hasattr(config, "max_window_layers")):
