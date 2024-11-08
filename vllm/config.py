@@ -1490,9 +1490,9 @@ class SpeculativeConfig:
         """
         Verifies and adjusts the tensor parallel size for a draft model
         specified using speculative_draft_tensor_parallel_size.
-        If speculative_draft_tensor_parallel_size is unset then set it 
-        appropriately else verify that it is set correctly.
         """
+        # If speculative_draft_tensor_parallel_size is unset then set it
+        # appropriately else verify that it is set correctly.
         if speculative_draft_tensor_parallel_size is None:
             if draft_hf_config.model_type == "mlp_speculator":
                 speculative_draft_tensor_parallel_size = 1
