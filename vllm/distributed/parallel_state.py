@@ -364,10 +364,12 @@ class GroupCoordinator:
                 assert out is not None
                 return out
         pynccl_comm = self.pynccl_comm
-        assert pynccl_comm is not None and not pynccl_comm.disabled
-        out = pynccl_comm.all_reduce(input_)
-        assert out is not None
-        return out
+        assert pynccl_comm is not None
+        with pynccl_comm.change_state(enable=True,
+                                      stream=torch.cuda.current_stream()):
+            out = pynccl_comm.all_reduce(input_)
+            assert out is not None
+            return out
 
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
         world_size = self.world_size
@@ -1016,8 +1018,8 @@ def initialize_model_parallel(
     backend = backend or torch.distributed.get_backend(
         get_world_group().device_group)
 
-    if (world_size
-            != tensor_model_parallel_size * pipeline_model_parallel_size):
+    if (world_size !=
+            tensor_model_parallel_size * pipeline_model_parallel_size):
         raise RuntimeError(
             f"world_size ({world_size}) is not equal to "
             f"tensor_model_parallel_size ({tensor_model_parallel_size}) x "
