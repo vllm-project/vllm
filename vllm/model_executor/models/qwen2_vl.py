@@ -974,7 +974,6 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
-        lora_config = vllm_config.lora_config
         assert not cache_config.enable_prefix_caching, \
             "Qwen2-VL currently does not support prefix caching"
 
