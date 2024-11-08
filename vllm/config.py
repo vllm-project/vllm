@@ -1390,6 +1390,9 @@ class SpeculativeConfig:
 
             if (enable_chunked_prefill and \
                  speculative_draft_tensor_parallel_size != 1):
+                # TODO - Investigate why the error reported in
+                # https://github.com/vllm-project/vllm/pull/9291#issuecomment-2463266258
+                # is happening and re-enable it.
                 raise ValueError(
                     "Chunked prefill and speculative decoding can be enabled "
                     "simultaneously only for draft models with tensor "
