@@ -13,7 +13,7 @@ if not current_platform.is_cuda():
                 allow_module_level=True)
 
 ENGINE_ARGS = AsyncEngineArgs(model="meta-llama/Llama-3.2-1B",
-                              disable_log_requests=False)
+                              disable_log_requests=True)
 
 
 async def generate(engine: AsyncLLM, request_id: str,
