@@ -204,12 +204,6 @@ class Metrics:
                 labelnames=labelnames,
                 buckets=build_1_2_5_buckets(max_model_len),
             )
-        self.histogram_best_of_request = self._histogram_cls(
-            name="vllm:request_params_best_of",
-            documentation="Histogram of the best_of request parameter.",
-            labelnames=labelnames,
-            buckets=[1, 2, 5, 10, 20],
-        )
         self.histogram_max_num_generation_tokens_request = self._histogram_cls(
             name="vllm:request_max_num_generation_tokens",
             documentation=
