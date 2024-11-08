@@ -1,4 +1,4 @@
-from vllm.logging.formatter import NewLineFormatter
+from vllm.logging_utils.formatter import NewLineFormatter
 
 __all__ = [
     "NewLineFormatter",
