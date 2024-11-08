@@ -134,9 +134,9 @@ def input_mapper_for_ultravox(ctx: InputContext, data: object):
         if sr != feature_extractor.sampling_rate:
             try:
                 import librosa
-            except ImportError:
+            except ImportError as exc:
                 raise ImportError(
-                    "Please install vllm[audio] for audio support.") from None
+                    "Please install vllm[audio] for audio support.") from exc
             audio = librosa.resample(audio,
                                      orig_sr=sr,
                                      target_sr=feature_extractor.sampling_rate)
