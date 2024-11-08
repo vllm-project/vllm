@@ -65,7 +65,10 @@ class LLMEngine:
         elif usage_context == UsageContext.OPENAI_API_SERVER:
             scheduler_config.max_num_seqs = 1024
             scheduler_config.max_num_batched_tokens = 2048
-        cache_config.enable_prefix_caching = True
+
+        # TODO (ywang96): Enable APC by default when VLM supports it.
+        if not model_config.is_multimodal_model:
+            cache_config.enable_prefix_caching = True
 
         logger.info(
             "Initializing an LLM engine (v%s) with config: "
