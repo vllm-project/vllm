@@ -70,22 +70,23 @@ RUN rpm -ivh https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.
         git \
         # packages required to build vllm
         amd-smi \
-        rocm-device-libs \
-        rocrand-devel \
-        hiprand-devel \
-        rocblas-devel \
         hipblas-devel \
         hipblaslt-devel \
-        miopen-hip-devel \
-        hipfft-devel \
-        hipsparse-devel \
-        rocprim-devel \
-        hipcub-devel \
-        rocthrust-devel \
-        hipsolver-devel \
-        rccl-devel \
-        # end packages required to build vllm
         hipcc \
+        hipcub-devel \
+        hipfft-devel \
+        hiprand-devel \
+        hipsolver-devel \
+        hipsparse-devel \
+        hsa-rocr-devel \
+        miopen-hip-devel \
+        rccl-devel \
+        rocblas-devel \
+        rocm-device-libs \
+        rocprim-devel \
+        rocrand-devel \
+        rocthrust-devel \
+        # end packages required to build vllm
         wget \
         which && \
     microdnf clean all
