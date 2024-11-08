@@ -6,6 +6,9 @@ from typing import Any, Dict, Optional, Type, Union
 import huggingface_hub
 from huggingface_hub import (file_exists, hf_hub_download,
                              try_to_load_from_cache)
+from huggingface_hub.utils import (EntryNotFoundError, LocalEntryNotFoundError,
+                                   RepositoryNotFoundError,
+                                   RevisionNotFoundError)
 from transformers import GenerationConfig, PretrainedConfig
 from transformers.models.auto.image_processing_auto import (
     get_image_processor_config)
@@ -19,6 +22,7 @@ from vllm.logger import init_logger
 # yapf: disable
 from vllm.transformers_utils.configs import (ChatGLMConfig, DbrxConfig,
                                              EAGLEConfig, ExaoneConfig,
+                                             H2OVLChatConfig,
                                              InternVLChatConfig, JAISConfig,
                                              MedusaConfig, MllamaConfig,
                                              MLPSpeculatorConfig, MPTConfig,
@@ -52,6 +56,7 @@ _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     "medusa": MedusaConfig,
     "eagle": EAGLEConfig,
     "exaone": ExaoneConfig,
+    "h2ovl_chat": H2OVLChatConfig,
     "internvl_chat": InternVLChatConfig,
     "nemotron": NemotronConfig,
     "NVLM_D": NVLM_D_Config,
@@ -125,6 +130,15 @@ def uses_mrope(config: PretrainedConfig) -> bool:
         return False
 
     return "mrope_section" in rope_scaling
+
+
+def is_encoder_decoder(config: PretrainedConfig) -> bool:
+    """Detect if the model with this config is used as an encoder/decoder."""
+    text_config = getattr(config, "text_config", None)
+    if text_config is not None:
+        return is_encoder_decoder(text_config)
+
+    return getattr(config, "is_encoder_decoder", False)
 
 
 def get_config(
@@ -202,7 +216,7 @@ def get_config(
                     raise e
 
     elif config_format == ConfigFormat.MISTRAL:
-        config = load_params_config(model, revision)
+        config = load_params_config(model, revision, token=kwargs.get("token"))
     else:
         raise ValueError(f"Unsupported config format: {config_format}")
 
@@ -230,6 +244,158 @@ def get_config(
     patch_rope_scaling(config)
 
     return config
+
+
+def get_hf_file_to_dict(file_name: str,
+                        model: Union[str, Path],
+                        revision: Optional[str] = 'main',
+                        token: Optional[str] = None):
+    """
+    Downloads a file from the Hugging Face Hub and returns 
+    its contents as a dictionary.
+
+    Parameters:
+    - file_name (str): The name of the file to download.
+    - model (str): The name of the model on the Hugging Face Hub.
+    - revision (str): The specific version of the model. 
+    - token (str): The Hugging Face authentication token.
+
+    Returns:
+    - config_dict (dict): A dictionary containing 
+    the contents of the downloaded file.
+    """
+    file_path = Path(model) / file_name
+
+    if file_or_path_exists(model=model,
+                           config_name=file_name,
+                           revision=revision,
+                           token=token):
+
+        if not file_path.is_file():
+            try:
+                hf_hub_file = hf_hub_download(model,
+                                              file_name,
+                                              revision=revision)
+            except (RepositoryNotFoundError, RevisionNotFoundError,
+                    EntryNotFoundError, LocalEntryNotFoundError) as e:
+                logger.debug("File or repository not found in hf_hub_download",
+                             e)
+                return None
+            file_path = Path(hf_hub_file)
+
+        with open(file_path) as file:
+            return json.load(file)
+    return None
+
+
+def get_pooling_config(model: str,
+                       revision: Optional[str] = 'main',
+                       token: Optional[str] = None):
+    """
+    This function gets the pooling and normalize 
+    config from the model - only applies to 
+    sentence-transformers models. 
+
+    Args:
+        model (str): The name of the Hugging Face model.
+        revision (str, optional): The specific version 
+        of the model to use. Defaults to 'main'.
+
+    Returns:
+        dict: A dictionary containing the pooling 
+        type and whether normalization is used.
+    """
+
+    modules_file_name = "modules.json"
+    modules_dict = get_hf_file_to_dict(modules_file_name, model, revision,
+                                       token)
+
+    if modules_dict is None:
+        return None
+
+    pooling = next((item for item in modules_dict
+                    if item["type"] == "sentence_transformers.models.Pooling"),
+                   None)
+    normalize = bool(
+        next((item for item in modules_dict
+              if item["type"] == "sentence_transformers.models.Normalize"),
+             False))
+
+    if pooling:
+
+        pooling_file_name = "{}/config.json".format(pooling["path"])
+        pooling_dict = get_hf_file_to_dict(pooling_file_name, model, revision,
+                                           token)
+        pooling_type_name = next(
+            (item for item, val in pooling_dict.items() if val is True), None)
+
+        if pooling_type_name is not None:
+            pooling_type_name = get_pooling_config_name(pooling_type_name)
+
+        return {"pooling_type": pooling_type_name, "normalize": normalize}
+
+    return None
+
+
+def get_pooling_config_name(pooling_name: str) -> Union[str, None]:
+    if "pooling_mode_" in pooling_name:
+        pooling_name = pooling_name.replace("pooling_mode_", "")
+
+    if "_" in pooling_name:
+        pooling_name = pooling_name.split("_")[0]
+
+    if "lasttoken" in pooling_name:
+        pooling_name = "last"
+
+    supported_pooling_types = ['LAST', 'ALL', 'CLS', 'STEP', 'MEAN']
+    pooling_type_name = pooling_name.upper()
+
+    try:
+        if pooling_type_name in supported_pooling_types:
+            return pooling_type_name
+    except NotImplementedError as e:
+        logger.debug("Pooling type not supported", e)
+        return None
+    return None
+
+
+def get_sentence_transformer_tokenizer_config(model: str,
+                                              revision: Optional[str] = 'main',
+                                              token: Optional[str] = None):
+    """
+    Returns the tokenization configuration dictionary for a 
+    given Sentence Transformer BERT model.
+
+    Parameters:
+    - model (str): The name of the Sentence Transformer 
+    BERT model.
+    - revision (str, optional): The revision of the m
+    odel to use. Defaults to 'main'.
+    - token (str): A Hugging Face access token.
+
+    Returns:
+    - dict: A dictionary containing the configuration parameters 
+    for the Sentence Transformer BERT model.
+    """
+    for config_name in [
+            "sentence_bert_config.json",
+            "sentence_roberta_config.json",
+            "sentence_distilbert_config.json",
+            "sentence_camembert_config.json",
+            "sentence_albert_config.json",
+            "sentence_xlm-roberta_config.json",
+            "sentence_xlnet_config.json",
+    ]:
+        encoder_dict = get_hf_file_to_dict(config_name, model, revision, token)
+        if encoder_dict:
+            break
+
+    if not encoder_dict:
+        return None
+
+    if all(k in encoder_dict for k in ("max_seq_length", "do_lower_case")):
+        return encoder_dict
+    return None
 
 
 def maybe_register_config_serialize_by_value(trust_remote_code: bool) -> None:
@@ -294,20 +460,15 @@ def maybe_register_config_serialize_by_value(trust_remote_code: bool) -> None:
             exc_info=e)
 
 
-def load_params_config(model, revision) -> PretrainedConfig:
+def load_params_config(model: Union[str, Path],
+                       revision: Optional[str],
+                       token: Optional[str] = None) -> PretrainedConfig:
     # This function loads a params.json config which
     # should be used when loading models in mistral format
 
     config_file_name = "params.json"
 
-    config_path = Path(model) / config_file_name
-
-    if not config_path.is_file():
-        config_path = Path(
-            hf_hub_download(model, config_file_name, revision=revision))
-
-    with open(config_path, "r") as file:
-        config_dict = json.load(file)
+    config_dict = get_hf_file_to_dict(config_file_name, model, revision, token)
 
     config_mapping = {
         "dim": "hidden_size",

@@ -4,6 +4,7 @@ import pytest
 from transformers import PreTrainedTokenizer
 
 from vllm.engine.output_processor.stop_checker import StopChecker
+from vllm.inputs import token_inputs
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import Logprob, Sequence, SequenceStatus
 
@@ -15,7 +16,7 @@ def sequence_with_eos(text: str, eos_token: str,
     """
     seq = Sequence(
         seq_id=0,
-        inputs={"prompt_token_ids": []},
+        inputs=token_inputs([]),
         block_size=16,
         eos_token_id=eos_token_id,
     )

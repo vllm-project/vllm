@@ -116,6 +116,7 @@ autodoc_mock_imports = [
     "soundfile",
     "gguf",
     "lark",
+    "decord",
 ]
 
 for mock_target in autodoc_mock_imports:

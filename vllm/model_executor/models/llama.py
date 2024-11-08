@@ -1,4 +1,3 @@
-# coding=utf-8
 # Adapted from
 # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/llama/modeling_llama.py
 # Copyright 2023 The vLLM team.
@@ -43,7 +42,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     get_compressed_tensors_cache_scale)
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
@@ -464,8 +463,6 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         ".v_proj.",
         ".o_proj.",
     ]
-    # in TP, these weights are partitioned along the column dimension (dim=-1)
-    column_parallel_weights_modules = [".down_proj.", ".o_proj."]
     bitsandbytes_stacked_params_mapping = {
         # shard_name, weight_name, index
         "q_proj": ("qkv_proj", 0),
@@ -539,7 +536,7 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                     config.vocab_size,
                                                     logit_scale)
-            self.sampler = Sampler()
+            self.sampler = get_sampler()
         else:
             self.lm_head = PPMissingLayer()
         self.make_empty_intermediate_tensors = (
@@ -630,7 +627,7 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         return name, loaded_weight
 
 
-class LlamaEmbeddingModel(nn.Module, SupportsPP):
+class LlamaEmbeddingModel(nn.Module, SupportsLoRA, SupportsPP):
     """
     A model that uses Llama with additional embedding functionalities.
 
@@ -641,6 +638,19 @@ class LlamaEmbeddingModel(nn.Module, SupportsPP):
         model: An instance of LlamaModel used for forward operations.
         _pooler: An instance of Pooler used for pooling operations.
     """
+    packed_modules_mapping = {
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"]
+    }
+
+    # LoRA specific attributes
+    supported_lora_modules = [
+        "qkv_proj", "o_proj", "gate_up_proj", "down_proj", "embed_tokens"
+    ]
+    embedding_modules = {
+        "embed_tokens": "input_embeddings",
+    }
+    embedding_padding_modules = []
 
     def __init__(
         self,
@@ -682,3 +692,8 @@ class LlamaEmbeddingModel(nn.Module, SupportsPP):
 
     def load_kv_cache_scales(self, quantization_param_path: str) -> None:
         self.model.load_kv_cache_scales(quantization_param_path)
+
+    # LRUCacheWorkerLoRAManager instantiation requires model config.
+    @property
+    def config(self):
+        return self.model.config

@@ -333,7 +333,7 @@ Text Embedding
   * - :code:`MistralModel`
     - Mistral-based
     - :code:`intfloat/e5-mistral-7b-instruct`, etc.
-    - 
+    - ✅︎
     - ✅︎
 
 .. important::
@@ -440,6 +440,18 @@ Text Generation
     - :code:`THUDM/glm-4v-9b` etc.
     - 
     - ✅︎
+  * - :code:`H2OVLChatModel`
+    - H2OVL
+    - T + I\ :sup:`E+`
+    - :code:`h2oai/h2ovl-mississippi-800m`, :code:`h2oai/h2ovl-mississippi-2b`, etc.
+    - 
+    - ✅︎
+  * - :code:`Idefics3ForConditionalGeneration`
+    - Idefics3
+    - T + I
+    - :code:`HuggingFaceM4/Idefics3-8B-Llama3` etc.
+    - 
+    - 
   * - :code:`InternVLChatModel`
     - InternVL2
     - T + I\ :sup:`E+`
@@ -528,7 +540,7 @@ Text Generation
     - Qwen2-VL
     - T + I\ :sup:`E+` + V\ :sup:`+`
     - :code:`Qwen/Qwen2-VL-2B-Instruct`, :code:`Qwen/Qwen2-VL-7B-Instruct`, :code:`Qwen/Qwen2-VL-72B-Instruct`, etc.
-    -
+    - ✅︎
     - ✅︎
   * - :code:`UltravoxModel`
     - Ultravox
