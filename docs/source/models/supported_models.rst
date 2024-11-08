@@ -585,7 +585,7 @@ Multimodal Embedding
     - 🚧
     - ✅︎
   * - :code:`Qwen2VLForConditionalGeneration`
-    - Qwen2-VL
+    - Qwen2-VL-based
     - T + I
     - :code:`MrLight/dse-qwen2-2b-mrl-v1`
     - 
