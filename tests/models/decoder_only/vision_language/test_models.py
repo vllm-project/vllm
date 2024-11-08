@@ -34,6 +34,7 @@ COMMON_BROADCAST_SETTINGS = {
     "dtype": "half",
     "max_tokens": 5,
     "tensor_parallel_size": 2,
+    "model_kwargs": {"device_map": "auto"},
     "image_size_factors": [(.25, 0.5, 1.0)],
     "distributed_executor_backend": (
         "ray",
