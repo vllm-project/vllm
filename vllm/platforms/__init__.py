@@ -42,9 +42,19 @@ try:
 except Exception:
     pass
 
+is_hpu = False
+try:
+    from importlib import util
+    is_hpu = util.find_spec('habana_frameworks') is not None
+except Exception:
+    pass
+
 is_xpu = False
 
 try:
+    # installed IPEX if the machine has XPUs.
+    import intel_extension_for_pytorch  # noqa: F401
+    import oneccl_bindings_for_pytorch  # noqa: F401
     import torch
     if hasattr(torch, 'xpu') and torch.xpu.is_available():
         is_xpu = True
@@ -65,6 +75,13 @@ try:
 except ImportError:
     pass
 
+is_openvino = False
+try:
+    from importlib.metadata import version
+    is_openvino = "openvino" in version("vllm")
+except Exception:
+    pass
+
 if is_tpu:
     # people might install pytorch built with cuda but run on tpu
     # so we need to check tpu first
@@ -76,6 +93,9 @@ elif is_cuda:
 elif is_rocm:
     from .rocm import RocmPlatform
     current_platform = RocmPlatform()
+elif is_hpu:
+    from .hpu import HpuPlatform
+    current_platform = HpuPlatform()
 elif is_xpu:
     from .xpu import XPUPlatform
     current_platform = XPUPlatform()
@@ -85,6 +105,9 @@ elif is_cpu:
 elif is_neuron:
     from .neuron import NeuronPlatform
     current_platform = NeuronPlatform()
+elif is_openvino:
+    from .openvino import OpenVinoPlatform
+    current_platform = OpenVinoPlatform()
 else:
     current_platform = UnspecifiedPlatform()
 

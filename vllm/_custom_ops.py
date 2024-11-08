@@ -12,7 +12,7 @@ from vllm.scalar_type import ScalarType
 
 logger = init_logger(__name__)
 
-if not current_platform.is_tpu():
+if not current_platform.is_tpu() and not current_platform.is_hpu():
     try:
         import vllm._C
     except ImportError as e:
@@ -659,11 +659,11 @@ def scaled_fp8_quant(
     Args:
         input: The input tensor to be quantized to FP8
         scale: Optional scaling factor for the FP8 quantization
-        scale_ub: Optional upper bound for scaling factor in dynamic 
+        scale_ub: Optional upper bound for scaling factor in dynamic
             per token case
         num_token_padding: If specified, pad the first dimension
             of the output to at least this value.
-        use_per_token_if_dynamic: Whether to do per_tensor or per_token 
+        use_per_token_if_dynamic: Whether to do per_tensor or per_token
             in the dynamic quantization case.
 
     Returns:
@@ -674,8 +674,8 @@ def scaled_fp8_quant(
     assert (input.ndim == 2)
     shape: Union[Tuple[int, int], torch.Size] = input.shape
     # For rocm, the output fp8 dtype is torch.float_e3m3fnuz
-    out_dtype: torch.dtype = torch.float8_e4m3fnuz if vllm.utils.is_hip() \
-        else torch.float8_e4m3fn
+    out_dtype: torch.dtype = torch.float8_e4m3fnuz \
+            if current_platform.is_rocm() else torch.float8_e4m3fn
     if num_token_padding:
         shape = (max(num_token_padding, input.shape[0]), shape[1])
     output = torch.empty(shape, device=input.device, dtype=out_dtype)
@@ -813,13 +813,17 @@ def selective_scan_fwd(u: torch.Tensor, delta: torch.Tensor, A: torch.Tensor,
 
 
 # moe
+def moe_sum(input: torch.Tensor, output: torch.Tensor):
+    torch.ops._moe_C.moe_sum(input, output)
+
+
 def moe_align_block_size(topk_ids: torch.Tensor, num_experts: int,
                          block_size: int, sorted_token_ids: torch.Tensor,
                          experts_ids: torch.Tensor,
                          num_tokens_post_pad: torch.Tensor) -> None:
-    torch.ops._C.moe_align_block_size(topk_ids, num_experts, block_size,
-                                      sorted_token_ids, experts_ids,
-                                      num_tokens_post_pad)
+    torch.ops._moe_C.moe_align_block_size(topk_ids, num_experts, block_size,
+                                          sorted_token_ids, experts_ids,
+                                          num_tokens_post_pad)
 
 
 def topk_softmax(topk_weights: torch.Tensor, topk_ids: torch.Tensor,
@@ -908,20 +912,16 @@ def get_max_shared_memory_per_block_device_attribute(device: int) -> int:
 
 
 # custom ar
-def init_custom_ar(meta: torch.Tensor, rank_data: torch.Tensor,
-                   handles: List[str], offsets: List[int], rank: int,
-                   full_nvlink: bool) -> int:
-    return torch.ops._C_custom_ar.init_custom_ar(meta, rank_data, handles,
-                                                 offsets, rank, full_nvlink)
+def init_custom_ar(ipc_tensors: List[torch.Tensor], rank_data: torch.Tensor,
+                   rank: int, full_nvlink: bool) -> int:
+    return torch.ops._C_custom_ar.init_custom_ar(ipc_tensors, rank_data, rank,
+                                                 full_nvlink)
 
 
-def all_reduce_reg(fa: int, inp: torch.Tensor, out: torch.Tensor) -> None:
-    torch.ops._C_custom_ar.all_reduce_reg(fa, inp, out)
-
-
-def all_reduce_unreg(fa: int, inp: torch.Tensor, reg_buffer: torch.Tensor,
-                     out: torch.Tensor) -> None:
-    torch.ops._C_custom_ar.all_reduce_unreg(fa, inp, reg_buffer, out)
+def all_reduce(fa: int, inp: torch.Tensor, out: torch.Tensor, reg_buffer: int,
+               reg_buffer_sz_bytes: int) -> None:
+    torch.ops._C_custom_ar.all_reduce(fa, inp, out, reg_buffer,
+                                      reg_buffer_sz_bytes)
 
 
 def dispose(fa: int) -> None:
@@ -932,16 +932,15 @@ def meta_size() -> int:
     return torch.ops._C_custom_ar.meta_size()
 
 
-def register_buffer(fa: int, t: torch.Tensor, handles: List[str],
-                    offsets: List[int]) -> None:
-    return torch.ops._C_custom_ar.register_buffer(fa, t, handles, offsets)
+def register_buffer(fa: int, ipc_tensors: List[int]) -> None:
+    return torch.ops._C_custom_ar.register_buffer(fa, ipc_tensors)
 
 
-def get_graph_buffer_ipc_meta(fa: int) -> Tuple[List[str], List[int]]:
+def get_graph_buffer_ipc_meta(fa: int) -> Tuple[List[int], List[int]]:
     return torch.ops._C_custom_ar.get_graph_buffer_ipc_meta(fa)
 
 
-def register_graph_buffers(fa: int, handles: List[str],
+def register_graph_buffers(fa: int, handles: List[List[int]],
                            offsets: List[List[int]]) -> None:
     torch.ops._C_custom_ar.register_graph_buffers(fa, handles, offsets)
 

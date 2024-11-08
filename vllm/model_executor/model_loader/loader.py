@@ -21,13 +21,15 @@ from torch import nn
 from transformers import AutoModelForCausalLM, PretrainedConfig
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
-from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoadFormat,
-                         LoRAConfig, ModelConfig, MultiModalConfig,
-                         ParallelConfig, SchedulerConfig)
+from vllm.config import (CacheConfig, LoadConfig, LoadFormat, LoRAConfig,
+                         ModelConfig, MultiModalConfig, ParallelConfig,
+                         PoolerConfig, SchedulerConfig, VllmConfig)
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
+from vllm.model_executor.layers.linear import (ReplicatedLinear,
+                                               RowParallelLinear)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.model_loader.tensorizer import (
@@ -38,7 +40,7 @@ from vllm.model_executor.model_loader.utils import (get_model_architecture,
 from vllm.model_executor.model_loader.weight_utils import (
     download_safetensors_index_file_from_hf, download_weights_from_hf,
     filter_duplicate_safetensors_files, filter_files_not_needed_for_inference,
-    get_gguf_extra_tensor_names, get_quant_config, gguf_quant_weights_iterator,
+    get_gguf_extra_tensor_names, gguf_quant_weights_iterator,
     initialize_dummy_weights, np_cache_weights_iterator, pt_weights_iterator,
     safetensors_weights_iterator)
 from vllm.model_executor.models import (has_inner_state, supports_lora,
@@ -92,37 +94,12 @@ def device_loading_context(module: torch.nn.Module,
 logger = init_logger(__name__)
 
 
-def _get_quantization_config(
-        model_config: ModelConfig,
-        load_config: LoadConfig) -> Optional[QuantizationConfig]:
-    """Get the quantization config."""
-    if model_config.quantization is not None:
-        quant_config = get_quant_config(model_config, load_config)
-        capability_tuple = current_platform.get_device_capability()
-
-        if capability_tuple is not None:
-            capability = capability_tuple.to_int()
-            if capability < quant_config.get_min_capability():
-                raise ValueError(
-                    f"The quantization method {model_config.quantization} "
-                    "is not supported for the current GPU. "
-                    f"Minimum capability: {quant_config.get_min_capability()}. "
-                    f"Current capability: {capability}.")
-        supported_dtypes = quant_config.get_supported_act_dtypes()
-        if model_config.dtype not in supported_dtypes:
-            raise ValueError(
-                f"{model_config.dtype} is not supported for quantization "
-                f"method {model_config.quantization}. Supported dtypes: "
-                f"{supported_dtypes}")
-        return quant_config
-    return None
-
-
 def _get_model_initialization_kwargs(
         model_class: Type[nn.Module],
         lora_config: Optional[LoRAConfig],
         multimodal_config: Optional[MultiModalConfig],
-        scheduler_config: Optional[SchedulerConfig] = None) -> Dict[str, Any]:
+        scheduler_config: Optional[SchedulerConfig] = None,
+        pooler_config: Optional[PoolerConfig] = None) -> Dict[str, Any]:
     """Get extra kwargs for model initialization."""
     extra_kwargs: Dict[str, Any] = {}
 
@@ -143,19 +120,33 @@ def _get_model_initialization_kwargs(
 
     if has_inner_state(model_class) and scheduler_config:
         extra_kwargs["scheduler_config"] = scheduler_config
-
+    if pooler_config:
+        extra_kwargs["pooler_config"] = pooler_config
     return extra_kwargs
 
 
-def build_model(model_class: Type[nn.Module], hf_config: PretrainedConfig,
+def build_model(model_class: Type[nn.Module],
+                vllm_config: Optional[VllmConfig],
+                hf_config: PretrainedConfig,
                 cache_config: Optional[CacheConfig],
-                quant_config: Optional[QuantizationConfig], *,
+                quant_config: Optional[QuantizationConfig],
+                *,
                 lora_config: Optional[LoRAConfig],
                 multimodal_config: Optional[MultiModalConfig],
-                scheduler_config: Optional[SchedulerConfig]) -> nn.Module:
+                scheduler_config: Optional[SchedulerConfig],
+                prefix: Optional[str] = None,
+                pooler_config: Optional[PoolerConfig] = None) -> nn.Module:
     extra_kwargs = _get_model_initialization_kwargs(model_class, lora_config,
                                                     multimodal_config,
-                                                    scheduler_config)
+                                                    scheduler_config,
+                                                    pooler_config)
+    if prefix:
+        extra_kwargs["prefix"] = prefix
+
+    # TODO: unify all the module initialization code
+    # to only take the `VllmConfig` object as input
+    from vllm.plugins import set_vllm_config
+    set_vllm_config(vllm_config)
 
     return model_class(config=hf_config,
                        cache_config=cache_config,
@@ -163,23 +154,24 @@ def build_model(model_class: Type[nn.Module], hf_config: PretrainedConfig,
                        **extra_kwargs)
 
 
-def _initialize_model(
-        model_config: ModelConfig,
-        load_config: LoadConfig,
-        lora_config: Optional[LoRAConfig],
-        cache_config: CacheConfig,
-        scheduler_config: Optional[SchedulerConfig] = None) -> nn.Module:
+def _initialize_model(vllm_config: VllmConfig) -> nn.Module:
     """Initialize a model with the given configurations."""
+    model_config = vllm_config.model_config
+    lora_config = vllm_config.lora_config
+    scheduler_config = vllm_config.scheduler_config
+    cache_config = vllm_config.cache_config
     model_class, _ = get_model_architecture(model_config)
 
     return build_model(
         model_class,
+        vllm_config,
         model_config.hf_config,
         cache_config=cache_config,
-        quant_config=_get_quantization_config(model_config, load_config),
+        quant_config=vllm_config.quant_config,
         lora_config=lora_config,
         multimodal_config=model_config.multimodal_config,
         scheduler_config=scheduler_config,
+        pooler_config=model_config.pooler_config,
     )
 
 
@@ -195,12 +187,7 @@ class BaseModelLoader(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def load_model(self, *, model_config: ModelConfig,
-                   device_config: DeviceConfig,
-                   lora_config: Optional[LoRAConfig],
-                   parallel_config: ParallelConfig,
-                   scheduler_config: SchedulerConfig,
-                   cache_config: CacheConfig) -> nn.Module:
+    def load_model(self, *, vllm_config: VllmConfig) -> nn.Module:
         """Load a model with the given configurations."""
         raise NotImplementedError
 
@@ -386,18 +373,14 @@ class DefaultModelLoader(BaseModelLoader):
                               model_config.revision,
                               fall_back_to_pt=True)
 
-    def load_model(self, *, model_config: ModelConfig,
-                   device_config: DeviceConfig,
-                   lora_config: Optional[LoRAConfig],
-                   parallel_config: ParallelConfig,
-                   scheduler_config: SchedulerConfig,
-                   cache_config: CacheConfig) -> nn.Module:
+    def load_model(self, vllm_config: VllmConfig) -> nn.Module:
+        device_config = vllm_config.device_config
+        model_config = vllm_config.model_config
+
         target_device = torch.device(device_config.device)
         with set_default_torch_dtype(model_config.dtype):
             with target_device:
-                model = _initialize_model(model_config, self.load_config,
-                                          lora_config, cache_config,
-                                          scheduler_config)
+                model = _initialize_model(vllm_config=vllm_config)
 
             model.load_weights(self._get_all_weights(model_config, model))
 
@@ -426,17 +409,12 @@ class DummyModelLoader(BaseModelLoader):
     def download_model(self, model_config: ModelConfig) -> None:
         pass  # Nothing to download
 
-    def load_model(self, *, model_config: ModelConfig,
-                   device_config: DeviceConfig,
-                   lora_config: Optional[LoRAConfig],
-                   parallel_config: ParallelConfig,
-                   scheduler_config: SchedulerConfig,
-                   cache_config: CacheConfig) -> nn.Module:
+    def load_model(self, vllm_config: VllmConfig) -> nn.Module:
+        device_config = vllm_config.device_config
+        model_config = vllm_config.model_config
         with set_default_torch_dtype(model_config.dtype):
             with torch.device(device_config.device):
-                model = _initialize_model(model_config, self.load_config,
-                                          lora_config, cache_config,
-                                          scheduler_config)
+                model = _initialize_model(vllm_config=vllm_config)
             # NOTE(woosuk): For accurate performance evaluation, we assign
             # random values to the weights.
             initialize_dummy_weights(model)
@@ -478,10 +456,7 @@ class TensorizerLoader(BaseModelLoader):
 
     def _load_model_serialized_cpu(
         self,
-        model_config: ModelConfig,
-        device_config: DeviceConfig,
-        lora_config: Optional[LoRAConfig],
-        cache_config: CacheConfig,
+        vllm_config: VllmConfig,
     ) -> nn.Module:
         """Load a serialized model with tensorizer to the CPU.
 
@@ -490,31 +465,34 @@ class TensorizerLoader(BaseModelLoader):
         default HuggingFace loading, but will be slower than loading a
         vLLM-tensorized model.
         """
+        device_config = vllm_config.device_config
+        model_config = vllm_config.model_config
         with set_default_torch_dtype(model_config.dtype):
             with torch.device(device_config.device):
-                model = _initialize_model(model_config, self.load_config,
-                                          lora_config, cache_config)
+                model = _initialize_model(vllm_config=vllm_config)
 
             model.load_weights(self._get_weights_iterator())
         return model.eval()
 
     def _load_model_serialized(
         self,
-        model_config: ModelConfig,
-        device_config: DeviceConfig,
-        lora_config: Optional[LoRAConfig],
-        cache_config: CacheConfig,
+        vllm_config: VllmConfig,
     ) -> nn.Module:
         """Load a serialized model with tensorizer.
 
         Expects a vLLM-tensorized model. See the
         examples/tensorize_vllm_model.py example script
         for serializing vLLM models."""
+
+        device_config = vllm_config.device_config
+        model_config = vllm_config.model_config
+        lora_config = vllm_config.lora_config
+        cache_config = vllm_config.cache_config
+
         with set_default_torch_dtype(model_config.dtype):
             with torch.device(device_config.device):
                 model_class = get_model_architecture(model_config)[0]
-                quant_config = _get_quantization_config(
-                    model_config, self.load_config)
+                quant_config = vllm_config.quant_config
                 extra_kwargs = _get_model_initialization_kwargs(
                     model_class, lora_config, model_config.multimodal_config)
                 extra_kwargs["quant_config"] = quant_config
@@ -534,12 +512,9 @@ class TensorizerLoader(BaseModelLoader):
         with self.tensorizer_config.open_stream():
             pass
 
-    def load_model(self, *, model_config: ModelConfig,
-                   device_config: DeviceConfig,
-                   lora_config: Optional[LoRAConfig],
-                   parallel_config: ParallelConfig,
-                   scheduler_config: SchedulerConfig,
-                   cache_config: CacheConfig) -> nn.Module:
+    def load_model(self, vllm_config: VllmConfig) -> nn.Module:
+        model_config = vllm_config.model_config
+        parallel_config = vllm_config.parallel_config
         self._verify_config(model_config, parallel_config)
 
         if parallel_config.tensor_parallel_size > 1:
@@ -549,10 +524,8 @@ class TensorizerLoader(BaseModelLoader):
                     % get_tensor_model_parallel_rank()
 
         if is_vllm_tensorized(self.tensorizer_config):
-            return self._load_model_serialized(model_config, device_config,
-                                               lora_config, cache_config)
-        return self._load_model_serialized_cpu(model_config, device_config,
-                                               lora_config, cache_config)
+            return self._load_model_serialized(vllm_config=vllm_config)
+        return self._load_model_serialized_cpu(vllm_config=vllm_config)
 
     @staticmethod
     def save_model(
@@ -638,12 +611,9 @@ class ShardedStateLoader(BaseModelLoader):
     def download_model(self, model_config: ModelConfig) -> None:
         self._prepare_weights(model_config.model, model_config.revision)
 
-    def load_model(self, *, model_config: ModelConfig,
-                   device_config: DeviceConfig,
-                   lora_config: Optional[LoRAConfig],
-                   parallel_config: ParallelConfig,
-                   scheduler_config: SchedulerConfig,
-                   cache_config: CacheConfig) -> nn.Module:
+    def load_model(self, vllm_config: VllmConfig) -> nn.Module:
+        device_config = vllm_config.device_config
+        model_config = vllm_config.model_config
         from safetensors.torch import safe_open
 
         from vllm.distributed import get_tensor_model_parallel_rank
@@ -653,8 +623,7 @@ class ShardedStateLoader(BaseModelLoader):
 
         with set_default_torch_dtype(model_config.dtype):
             with torch.device(device_config.device):
-                model = _initialize_model(model_config, self.load_config,
-                                          lora_config, cache_config)
+                model = _initialize_model(vllm_config=vllm_config)
                 for _, module in model.named_modules():
                     quant_method = getattr(module, "quant_method", None)
                     if quant_method is not None:
@@ -759,6 +728,10 @@ class BitsAndBytesModelLoader(BaseModelLoader):
     def __init__(self, load_config: LoadConfig):
         super().__init__(load_config)
 
+        # Save the module names without sharding.
+        self.unsharded_weights_modules: List[str] = []
+        # Save the module names that are sharded by column.
+        self.column_sharded_weights_modules: List[str] = []
         # we don't need to quantize the whole model, only the target modules
         # that are specified in the adapter config file. If the adapter config
         # file is not provided, we will quantize the default modules.
@@ -773,7 +746,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
         config_file_path = self._get_config_file(qlora_adapter)
 
-        with open(config_file_path, "r") as f:
+        with open(config_file_path) as f:
             config = json.load(f)
             self.target_modules = config["target_modules"]
 
@@ -899,6 +872,19 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         return self._unquantized_generator(hf_weights_files, use_safetensors,
                                            quant_state_dict), quant_state_dict
 
+    def _is_8bit_weight_name(self, weight_name: str):
+        quantized_suffix = {".scb", ".weight_format"}
+        return any(weight_name.lower().endswith(suffix)
+                   for suffix in quantized_suffix)
+
+    def _is_4bit_weight_name(self, weight_name: str):
+        quantized_suffix = {
+            "absmax", "quant_map", "nested_absmax", "nested_quant_map",
+            "bitsandbytes"
+        }
+        suffix = weight_name.split(".")[-1]
+        return any(q_suffix in suffix for q_suffix in quantized_suffix)
+
     def _quantized_8bit_generator(self, hf_weights_files, use_safetensors,
                                   quant_state_dict) -> Generator:
         for weight_name, weight_tensor in self._hf_weight_iter(
@@ -906,20 +892,18 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             if not weight_name.lower().endswith(".scb"):
                 continue
 
-            weight_key = weight_name.lower().replace(".scb", ".qweight")
+            weight_key = weight_name.lower().replace(".scb", ".weight")
             quant_state_dict[weight_key] = weight_tensor
 
         for weight_name, weight_tensor in self._hf_weight_iter(
                 hf_weights_files, use_safetensors):
 
-            if not weight_name.endswith((".weight", ".bias")):
+            if self._is_8bit_weight_name(weight_name):
                 continue
 
-            qweight_name = weight_name.replace(".weight", ".qweight")
-
-            if qweight_name in quant_state_dict:
+            if weight_name in quant_state_dict:
                 set_weight_attrs(weight_tensor, {"load_in_8bit": True})
-                yield qweight_name, weight_tensor
+                yield weight_name, weight_tensor
             else:
                 yield weight_name, weight_tensor
 
@@ -932,7 +916,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                                                use_safetensors)
         temp_state_dict = {}
         for weight_name, weight_tensor in weight_iterator:
-            if weight_name.endswith((".weight", ".bias")):
+            if not self._is_4bit_weight_name(weight_name):
                 continue
             # bitsandbytes library requires
             # weight.quant_state.bitsandbytes__* in CPU
@@ -956,7 +940,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         for weight_name, weight_tensor in self._hf_weight_iter(
                 hf_weights_files, use_safetensors):
 
-            if not weight_name.endswith((".weight", ".bias")):
+            if self._is_4bit_weight_name(weight_name):
                 continue
 
             if (f"{weight_name}.quant_state.bitsandbytes__nf4" \
@@ -964,9 +948,8 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             (f"{weight_name}.quant_state.bitsandbytes__fp4" \
                     in temp_state_dict):
                 quant_state = _parse_quant_state(weight_name, temp_state_dict)
-                weight_name = weight_name.replace(".weight", ".qweight")
                 quant_state_dict[weight_name] = quant_state
-                yield weight_name.replace(".weight", ".qweight"), weight_tensor
+                yield weight_name, weight_tensor
             else:
                 yield weight_name, weight_tensor
 
@@ -981,17 +964,21 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
             if any(target_module in weight_name for target_module in
                    self.target_modules) and weight_name.endswith(".weight"):
-                weight_name = weight_name.replace(".weight", ".qweight")
-
-                if any(module in weight_name
-                       for module in self.column_parallel_weights_modules):
-
+                # Without sharding
+                if any(
+                        weight_name.startswith(module)
+                        for module in self.unsharded_weights_modules):
+                    weight_sub_tensor = weight_tensor
+                # Shard by column
+                elif any(
+                        weight_name.startswith(module)
+                        for module in self.column_sharded_weights_modules):
                     total_size = weight_tensor.size(-1)
                     start_index = total_size // tp_size * tp_rank
                     end_index = total_size // tp_size * (tp_rank + 1)
                     weight_sub_tensor = weight_tensor[...,
                                                       start_index:end_index]
-
+                # Shard by row
                 else:
                     total_size = weight_tensor.size(0)
                     start_index = total_size // tp_size * tp_rank
@@ -1040,11 +1027,16 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             else:
                 self.target_modules = self.default_target_modules
 
-        if hasattr(model, 'column_parallel_weights_modules'):
-            self.column_parallel_weights_modules = \
-                model.column_parallel_weights_modules
-        else:
-            self.column_parallel_weights_modules = []
+        for name, module in model.named_modules():
+            # Some modules like `ReplicatedLinear` should not have their weights
+            # sharded. The reason for implementing it this way is to avoid new
+            # static variable in the model implementation.
+            if isinstance(module, (ReplicatedLinear, )):
+                self.unsharded_weights_modules.append(name)
+            # In TP, these weights are partitioned along the column
+            # dimension (dim=-1)
+            elif isinstance(module, (RowParallelLinear, )):
+                self.column_sharded_weights_modules.append(name)
 
         self.model_type = type(model).__name__
 
@@ -1092,7 +1084,13 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             for shard_name, (
                     weight_name, index
             ) in model.bitsandbytes_stacked_params_mapping.items():
-                if shard_name in quant_param_name:
+
+                shard_pos = quant_param_name.find(shard_name)
+                # Some models, such as MiniCPM V2.5/2.6, contain both
+                # module names 'kv_proj' and 'qkv_proj'. To prevent 'kv_proj'
+                # from being incorrectly identified as being present in
+                # 'vpm.encoder.layers.0.self_attn.qkv_proj.weight
+                if shard_pos > 0 and quant_param_name[shard_pos - 1] == ".":
                     shard_index = index
                     quant_param_name = quant_param_name.replace(
                         shard_name, weight_name)
@@ -1134,16 +1132,12 @@ class BitsAndBytesModelLoader(BaseModelLoader):
     def download_model(self, model_config: ModelConfig) -> None:
         self._prepare_weights(model_config.model, model_config.revision)
 
-    def load_model(self, *, model_config: ModelConfig,
-                   device_config: DeviceConfig,
-                   lora_config: Optional[LoRAConfig],
-                   parallel_config: ParallelConfig,
-                   scheduler_config: SchedulerConfig,
-                   cache_config: CacheConfig) -> nn.Module:
+    def load_model(self, vllm_config: VllmConfig) -> nn.Module:
+        device_config = vllm_config.device_config
+        model_config = vllm_config.model_config
         with set_default_torch_dtype(model_config.dtype):
             with torch.device(device_config.device):
-                model = _initialize_model(model_config, self.load_config,
-                                          lora_config, cache_config)
+                model = _initialize_model(vllm_config=vllm_config)
 
                 self._load_weights(model_config, model)
 
@@ -1212,13 +1206,9 @@ class GGUFModelLoader(BaseModelLoader):
     def download_model(self, model_config: ModelConfig) -> None:
         self._prepare_weights(model_config.model)
 
-    def load_model(self, *, model_config: ModelConfig,
-                   device_config: DeviceConfig,
-                   lora_config: Optional[LoRAConfig],
-                   parallel_config: ParallelConfig,
-                   scheduler_config: SchedulerConfig,
-                   cache_config: CacheConfig) -> nn.Module:
-
+    def load_model(self, vllm_config: VllmConfig) -> nn.Module:
+        device_config = vllm_config.device_config
+        model_config = vllm_config.model_config
         local_model_path = self._prepare_weights(model_config.model)
         gguf_weights_map = self._get_gguf_weights_map(model_config)
         # we can only know if tie word embeddings after mapping weights
@@ -1228,8 +1218,7 @@ class GGUFModelLoader(BaseModelLoader):
 
         with set_default_torch_dtype(model_config.dtype):
             with torch.device(device_config.device):
-                model = _initialize_model(model_config, self.load_config,
-                                          lora_config, cache_config)
+                model = _initialize_model(vllm_config=vllm_config)
             model.load_weights(
                 self._get_weights_iterator(local_model_path, gguf_weights_map))
         return model

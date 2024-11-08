@@ -8,7 +8,7 @@ import pytest
 import vllm
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.lora.request import LoRARequest
-from vllm.utils import is_hip
+from vllm.platforms import current_platform
 
 
 @dataclass
@@ -19,7 +19,7 @@ class ModelWithQuantization:
 
 MODELS: List[ModelWithQuantization]
 #AWQ quantization is currently not supported in ROCm.
-if is_hip():
+if current_platform.is_rocm():
     MODELS = [
         ModelWithQuantization(
             model_path="TheBloke/TinyLlama-1.1B-Chat-v0.3-GPTQ",

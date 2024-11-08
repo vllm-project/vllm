@@ -1,4 +1,3 @@
-# coding=utf-8
 # Adapted from
 # https://github.com/THUDM/GLM-4
 """Inference-only ChatGLM model compatible with THUDM weights."""
@@ -14,8 +13,8 @@ from torch.nn import LayerNorm
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig, MultiModalConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
-from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, InputContext,
-                         token_inputs)
+from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
+                         InputContext, token_inputs)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -25,14 +24,13 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.glm4_vision_encoder import EVA2CLIPModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalDataDict,
-                             MultiModalInputs)
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalInputs
 from vllm.multimodal.base import MultiModalData
 from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
@@ -55,8 +53,9 @@ def mm_input_mapper_for_glmv(
     data: MultiModalData[object],
 ) -> Dict:
     model_config = ctx.model_config
-    tokenizer = cached_get_tokenizer(model_config.tokenizer,
-                                     trust_remote_code=True)
+    tokenizer = cached_get_tokenizer(
+        model_config.tokenizer,
+        trust_remote_code=model_config.trust_remote_code)
     if tokenizer is None:
         raise RuntimeError("No HuggingFace processor is available "
                            "to process the image object")
@@ -117,16 +116,15 @@ def get_max_glmv_image_tokens(ctx: InputContext):
     raise NotImplementedError(msg)
 
 
-def dummy_data_for_glmv(
-    ctx: InputContext, seq_len: int, mm_counts: Mapping[str, int]
-) -> Tuple[SequenceData, Optional[MultiModalDataDict]]:
+def dummy_data_for_glmv(ctx: InputContext, seq_len: int,
+                        mm_counts: Mapping[str, int]) -> DummyData:
     hf_config = ctx.get_hf_config(ChatGLMConfig)
     vision_config = getattr(hf_config, 'vision_config', None)
 
     if vision_config is None:
         token_ids = array(VLLM_TOKEN_ID_ARRAY_TYPE, [0] * seq_len)
         seq_data = SequenceData(token_ids)
-        return seq_data, None
+        return DummyData(seq_data, None)
     elif isinstance(vision_config, dict):
         image_size = vision_config["image_size"]
         image_placeholder_length = calculate_image_placeholder(vision_config)
@@ -141,7 +139,7 @@ def dummy_data_for_glmv(
             "image": Image.new("RGB", (image_size, image_size), color=0)
         }
 
-        return seq_data, mm_data
+        return DummyData(seq_data, mm_data)
 
     msg = f"Unsupported vision config: {type(vision_config)}"
     raise NotImplementedError(msg)
@@ -527,7 +525,7 @@ class ChatGLMModel(nn.Module):
             elif isinstance(pixel_values, list):
                 return torch.concat(pixel_values)
             else:
-                raise TypeError("""pixel_values must be a torch.Tensor 
+                raise TypeError("""pixel_values must be a torch.Tensor
                     or a list of torch.Tensor
                     """)
         return GLMImagePixelInputs(pixel_values=pixel_values)
@@ -618,7 +616,7 @@ class ChatGLMForCausalLM(nn.Module, SupportsLoRA, SupportsPP,
                 self.transformer.embedding.weight)
         self.lm_head = self.transformer.output_layer
         self.logits_processor = LogitsProcessor(config.padded_vocab_size)
-        self.sampler = Sampler()
+        self.sampler = get_sampler()
 
     def forward(self,
                 input_ids: torch.Tensor,

@@ -18,6 +18,9 @@
 TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // vLLM custom ops
 
+  ops.def("weak_ref_tensor(Tensor input) -> Tensor");
+  ops.impl("weak_ref_tensor", torch::kCUDA, &weak_ref_tensor);
+
   // Attention ops
   // Compute the attention between an input query and the cached
   // keys/values using PagedAttention.
@@ -336,15 +339,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("dynamic_per_token_scaled_fp8_quant", torch::kCUDA,
            &dynamic_per_token_scaled_fp8_quant);
 
-  // Aligning the number of tokens to be processed by each expert such
-  // that it is divisible by the block size.
-  ops.def(
-      "moe_align_block_size(Tensor topk_ids, int num_experts,"
-      "                     int block_size, Tensor! sorted_token_ids,"
-      "                     Tensor! experts_ids,"
-      "                     Tensor! num_tokens_post_pad) -> ()");
-  ops.impl("moe_align_block_size", torch::kCUDA, &moe_align_block_size);
-
   // Compute int8 quantized tensor for given scaling factor.
   ops.def(
       "static_scaled_int8_quant(Tensor! out, Tensor input, Tensor scale,"
@@ -417,27 +411,18 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cuda_utils), cuda_utils) {
 TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _custom_ar), custom_ar) {
   // Custom all-reduce kernels
   custom_ar.def(
-      "init_custom_ar(Tensor meta, Tensor rank_data, "
-      "str[] handles, int[] offsets, int rank, "
-      "bool full_nvlink) -> int");
+      "init_custom_ar(int[] ipc_tensors, Tensor rank_data, "
+      "int rank, bool full_nvlink) -> int");
   custom_ar.impl("init_custom_ar", torch::kCUDA, &init_custom_ar);
-
-  custom_ar.def("all_reduce_reg(int fa, Tensor inp, Tensor! out) -> ()");
-  custom_ar.impl("all_reduce_reg", torch::kCUDA, &all_reduce_reg);
-
   custom_ar.def(
-      "all_reduce_unreg(int fa, Tensor inp, Tensor reg_buffer, Tensor! out) -> "
-      "()");
-  custom_ar.impl("all_reduce_unreg", torch::kCUDA, &all_reduce_unreg);
+      "all_reduce(int fa, Tensor inp, Tensor! out, int reg_buffer, "
+      "int reg_buffer_sz_bytes) -> ()");
+  custom_ar.impl("all_reduce", torch::kCUDA, &all_reduce);
 
   custom_ar.def("dispose", &dispose);
   custom_ar.def("meta_size", &meta_size);
 
-  custom_ar.def(
-      "register_buffer(int fa, Tensor t, str[] handles, "
-      "int[] offsets) -> ()");
-  custom_ar.impl("register_buffer", torch::kCUDA, &register_buffer);
-
+  custom_ar.def("register_buffer", &register_buffer);
   custom_ar.def("get_graph_buffer_ipc_meta", &get_graph_buffer_ipc_meta);
   custom_ar.def("register_graph_buffers", &register_graph_buffers);
 }

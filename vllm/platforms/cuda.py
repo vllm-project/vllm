@@ -7,6 +7,7 @@ from functools import lru_cache, wraps
 from typing import Callable, List, Tuple, TypeVar
 
 import pynvml
+import torch
 from typing_extensions import ParamSpec
 
 from vllm.logger import init_logger
@@ -25,6 +26,10 @@ if pynvml.__file__.endswith("__init__.py"):
         " When both of them are installed, `pynvml` will take precedence"
         " and cause errors. See https://pypi.org/project/pynvml "
         "for more information.")
+
+# pytorch 2.5 uses cudnn sdpa by default, which will cause crash on some models
+# see https://github.com/huggingface/diffusers/issues/9704 for details
+torch.backends.cuda.enable_cudnn_sdp(False)
 
 # NVML utils
 # Note that NVML is not affected by `CUDA_VISIBLE_DEVICES`,
