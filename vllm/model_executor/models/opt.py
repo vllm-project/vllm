@@ -1,4 +1,3 @@
-# coding=utf-8
 # Adapted from
 # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/opt/modeling_opt.py
 # Copyright 2023 The vLLM team.
@@ -34,7 +33,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -148,8 +147,7 @@ class OPTDecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.fc1",
         )
-        self.activation_fn = get_act_fn(config.activation_function,
-                                        quant_config, config.ffn_dim)
+        self.activation_fn = get_act_fn(config.activation_function)
         self.fc2 = RowParallelLinear(
             config.ffn_dim,
             self.embed_dim,
@@ -343,8 +341,6 @@ class OPTForCausalLM(nn.Module, SupportsPP):
     default_bitsandbytes_target_modules = [
         ".q_proj.", ".k_proj.", ".v_proj.", ".out_proj.", ".fc1.", ".fc2."
     ]
-    # in TP, these weights are partitioned along the column dimension (dim=-1)
-    column_parallel_weights_modules = [".out_proj.", ".fc2."]
 
     def __init__(
         self,
@@ -366,7 +362,7 @@ class OPTForCausalLM(nn.Module, SupportsPP):
             self.lm_head = ParallelLMHead(config.vocab_size,
                                           config.word_embed_proj_dim)
         self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.sampler = Sampler()
+        self.sampler = get_sampler()
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 

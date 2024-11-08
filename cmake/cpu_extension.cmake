@@ -18,6 +18,7 @@ include_directories("${CMAKE_SOURCE_DIR}/csrc")
 #
 list(APPEND CXX_COMPILE_FLAGS
     "-fopenmp"
+    "-mf16c"
     "-DVLLM_CPU_EXTENSION")
 
 execute_process(COMMAND cat /proc/cpuinfo
@@ -92,7 +93,7 @@ if (AVX512_FOUND AND NOT AVX512_DISABLED)
     FetchContent_Declare(
         oneDNN
         GIT_REPOSITORY https://github.com/oneapi-src/oneDNN.git
-        GIT_TAG  v3.5.3
+        GIT_TAG  v3.6
         GIT_PROGRESS TRUE
         GIT_SHALLOW TRUE
     )

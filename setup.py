@@ -1,5 +1,4 @@
 import importlib.util
-import io
 import logging
 import os
 import re
@@ -54,12 +53,6 @@ def is_ccache_available() -> bool:
 
 def is_ninja_available() -> bool:
     return which("ninja") is not None
-
-
-def remove_prefix(text, prefix):
-    if text.startswith(prefix):
-        return text[len(prefix):]
-    return text
 
 
 class CMakeExtension(Extension):
@@ -198,8 +191,10 @@ class cmake_build_ext(build_ext):
             os.makedirs(self.build_temp)
 
         targets = []
-        target_name = lambda s: remove_prefix(remove_prefix(s, "vllm."),
-                                              "vllm_flash_attn.")
+
+        def target_name(s: str) -> str:
+            return s.removeprefix("vllm.").removeprefix("vllm_flash_attn.")
+
         # Build all the extensions
         for ext in self.extensions:
             self.configure(ext)
@@ -254,6 +249,24 @@ class cmake_build_ext(build_ext):
             self.copy_file(file, dst_file)
 
 
+def _is_hpu() -> bool:
+    is_hpu_available = True
+    try:
+        subprocess.run(["hl-smi"], capture_output=True, check=True)
+    except (FileNotFoundError, PermissionError, subprocess.CalledProcessError):
+        if not os.path.exists('/dev/accel/accel0') and not os.path.exists(
+                '/dev/accel/accel_controlD0'):
+            # last resort...
+            try:
+                output = subprocess.check_output(
+                    'lsmod | grep habanalabs | wc -l', shell=True)
+                is_hpu_available = int(output) > 0
+            except (ValueError, FileNotFoundError, PermissionError,
+                    subprocess.CalledProcessError):
+                is_hpu_available = False
+    return is_hpu_available or VLLM_TARGET_DEVICE == "hpu"
+
+
 def _no_device() -> bool:
     return VLLM_TARGET_DEVICE == "empty"
 
@@ -261,7 +274,7 @@ def _no_device() -> bool:
 def _is_cuda() -> bool:
     has_cuda = torch.version.cuda is not None
     return (VLLM_TARGET_DEVICE == "cuda" and has_cuda
-            and not (_is_neuron() or _is_tpu()))
+            and not (_is_neuron() or _is_tpu() or _is_hpu()))
 
 
 def _is_hip() -> bool:
@@ -327,7 +340,7 @@ def get_neuronxcc_version():
                                 "__init__.py")
 
     # Check if the command was executed successfully
-    with open(version_file, "rt") as fp:
+    with open(version_file) as fp:
         content = fp.read()
 
     # Extract the version using a regular expression
@@ -355,6 +368,22 @@ def get_nvcc_cuda_version() -> Version:
 
 def get_path(*filepath) -> str:
     return os.path.join(ROOT_DIR, *filepath)
+
+
+def get_gaudi_sw_version():
+    """
+    Returns the driver version.
+    """
+    # Enable console printing for `hl-smi` check
+    output = subprocess.run("hl-smi",
+                            shell=True,
+                            text=True,
+                            capture_output=True,
+                            env={"ENABLE_CONSOLE": "true"})
+    if output.returncode == 0 and output.stdout:
+        return output.stdout.split("\n")[2].replace(
+            " ", "").split(":")[1][:-1].split("-")[0]
+    return "0.0.0"  # when hl-smi is not available
 
 
 def get_vllm_version() -> str:
@@ -386,6 +415,12 @@ def get_vllm_version() -> str:
         if neuron_version != MAIN_CUDA_VERSION:
             neuron_version_str = neuron_version.replace(".", "")[:3]
             version += f"{sep}neuron{neuron_version_str}"
+    elif _is_hpu():
+        # Get the Intel Gaudi Software Suite version
+        gaudi_sw_version = str(get_gaudi_sw_version())
+        if gaudi_sw_version != MAIN_CUDA_VERSION:
+            gaudi_sw_version = gaudi_sw_version.replace(".", "")[:3]
+            version += f"{sep}gaudi{gaudi_sw_version}"
     elif _is_openvino():
         version += f"{sep}openvino"
     elif _is_tpu():
@@ -404,7 +439,8 @@ def read_readme() -> str:
     """Read the README file if present."""
     p = get_path("README.md")
     if os.path.isfile(p):
-        return io.open(get_path("README.md"), "r", encoding="utf-8").read()
+        with open(get_path("README.md"), encoding="utf-8") as f:
+            return f.read()
     else:
         return ""
 
@@ -443,6 +479,8 @@ def get_requirements() -> List[str]:
         requirements = _read_requirements("requirements-rocm.txt")
     elif _is_neuron():
         requirements = _read_requirements("requirements-neuron.txt")
+    elif _is_hpu():
+        requirements = _read_requirements("requirements-hpu.txt")
     elif _is_openvino():
         requirements = _read_requirements("requirements-openvino.txt")
     elif _is_tpu():
@@ -453,7 +491,7 @@ def get_requirements() -> List[str]:
         requirements = _read_requirements("requirements-xpu.txt")
     else:
         raise ValueError(
-            "Unsupported platform, please use CUDA, ROCm, Neuron, "
+            "Unsupported platform, please use CUDA, ROCm, Neuron, HPU, "
             "OpenVINO, or CPU.")
     return requirements
 
@@ -498,7 +536,6 @@ setup(
         "Documentation": "https://vllm.readthedocs.io/en/latest/",
     },
     classifiers=[
-        "Programming Language :: Python :: 3.8",
         "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
@@ -512,12 +549,13 @@ setup(
     ],
     packages=find_packages(exclude=("benchmarks", "csrc", "docs", "examples",
                                     "tests*")),
-    python_requires=">=3.8",
+    python_requires=">=3.9",
     install_requires=get_requirements(),
     ext_modules=ext_modules,
     extras_require={
         "tensorizer": ["tensorizer>=2.9.0"],
-        "audio": ["librosa", "soundfile"]  # Required for audio processing
+        "audio": ["librosa", "soundfile"],  # Required for audio processing
+        "video": ["decord"]  # Required for video processing
     },
     cmdclass={"build_ext": cmake_build_ext} if len(ext_modules) > 0 else {},
     package_data=package_data,

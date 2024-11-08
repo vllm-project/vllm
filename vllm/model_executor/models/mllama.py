@@ -1,4 +1,3 @@
-# coding=utf-8
 # Copyright 2024 the HuggingFace Inc. team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -36,8 +35,8 @@ from vllm.attention import Attention, AttentionMetadata, AttentionType
 from vllm.attention.ops.paged_attn import PagedAttention
 from vllm.config import CacheConfig, MultiModalConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs,
-                         EncoderDecoderInputs, InputContext)
+from vllm.inputs import (INPUT_REGISTRY, DummyData, EncoderDecoderInputs,
+                         InputContext, TokenInputs, token_inputs)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -45,13 +44,14 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import SequenceData
+from vllm.utils import is_list_of
 
 from .clip import CLIPMLP
 from .interfaces import SupportsMultiModal
@@ -86,41 +86,58 @@ def _get_num_image_in_last_group(prompt_token_ids: List[int]) -> int:
     return num_images
 
 
-def input_processor_for_mllama(ctx: InputContext,
-                               inputs: Union[DecoderOnlyInputs,
-                                             EncoderDecoderInputs]):
-    # move encoder_prompt to prompt
-    if inputs.get("prompt") is None:
-        inputs["prompt"] = inputs["encoder_prompt"]
-        inputs["prompt_token_ids"] = inputs["encoder_prompt_token_ids"]
+def input_processor_for_mllama(
+    ctx: InputContext,
+    inputs: EncoderDecoderInputs,
+) -> EncoderDecoderInputs:
+    # Example input to processor:
+    # {
+    #     'encoder': {
+    #         'type': 'token',
+    #         'prompt_token_ids': [128000, 128256, 128000, 3923, 374, 279, 2262, 315, 420, 2217, 30],  # noqa: E501
+    #         'prompt': '<|image|><|begin_of_text|>What is the content of this image?',  # noqa: E501
+    #         'multi_modal_data': {'image': <PIL.Image.Image image mode=RGB size=1770x1180 at 0x7FDE2C624880>},  # noqa: E501
+    #     },
+    #     'decoder': {
+    #         'type': 'token',
+    #         'prompt_token_ids': [128000],
+    #     },
+    # }
 
-    # process multi-modal data
-    multi_modal_data = inputs.get("encoder_multi_modal_data")
+    # move encoder prompt to decoder
+    dec_inputs = TokenInputs(**inputs["encoder"])
 
-    if multi_modal_data is None or "image" not in multi_modal_data \
-        or multi_modal_data["image"] is None:
+    multi_modal_data = dec_inputs.get("multi_modal_data")
+    if multi_modal_data is None or "image" not in multi_modal_data:
         # text-only
-        inputs["encoder_prompt"] = ""
-        inputs["encoder_prompt_token_ids"] = []
-        inputs["encoder_multi_modal_data"] = {}
-        return inputs
+        return EncoderDecoderInputs(
+            encoder=token_inputs([]),
+            decoder=dec_inputs,
+        )
 
-    if isinstance(multi_modal_data['image'], Image.Image):
-        multi_modal_data['image'] = [multi_modal_data['image']]
+    image_data = multi_modal_data["image"]
+    if isinstance(image_data, Image.Image):
+        image_data = [image_data]
+
+    assert is_list_of(image_data, Image.Image)
+
     # Since only the last group of consecutive images
     # are attended by the decoded tokens, we only need to
     # get the number of tiles for those images.
     num_decode_images = _get_num_image_in_last_group(
-        inputs["prompt_token_ids"])
+        dec_inputs["prompt_token_ids"])
+
     hf_config = ctx.model_config.hf_config
+    vision_config = hf_config.vision_config
+
     num_tiles = 0
-    for image in multi_modal_data["image"][::-1]:
+    for image in image_data[::-1]:
         width, height = image.size
-        tile_size = hf_config.vision_config.image_size
+        tile_size = vision_config.image_size
         canvas_height, canvas_width = get_optimal_tiled_canvas(
             image_height=height,
             image_width=width,
-            max_image_tiles=hf_config.vision_config.max_num_tiles,
+            max_image_tiles=vision_config.max_num_tiles,
             tile_size=tile_size,
         )
         num_tiles_height = canvas_height // tile_size
@@ -133,14 +150,34 @@ def input_processor_for_mllama(ctx: InputContext,
     # Set encoder prompt length based on the number of tiles.
     # This tells the block manager to allocate correct number
     # of slots for encoder tokens.
-    assert hf_config.vision_config.image_size % 14 == 0, \
+    assert vision_config.image_size % 14 == 0, \
         "chunk size should be multiple of 14"
-    token_per_chunk = (hf_config.vision_config.image_size // 14)**2 + 1
+    token_per_chunk = (vision_config.image_size // 14)**2 + 1
     num_tokens = num_tiles * token_per_chunk
-    inputs["encoder_prompt"] = MLLAMA_IMAGE_TOKEN * num_tokens
-    inputs["encoder_prompt_token_ids"] = [MLLAMA_IMAGE_TOKEN_ID] * num_tokens
 
-    return inputs
+    # Example output from processor:
+    # {
+    #     'encoder': {
+    #         'type': 'token',
+    #         'prompt_token_ids': [128256, 128256, ..., 128256],
+    #         'prompt': '<|image|><|image|>...<|image|>',
+    #         'multi_modal_data': {'image': <PIL.Image.Image image mode=RGB size=1770x1180 at 0x7FDE2C624880>},  # noqa: E501
+    #     },
+    #     'decoder': {
+    #         'type': 'token',
+    #         'prompt_token_ids': [128000, 128256, 128000, 3923, 374, 279, 2262, 315, 420, 2217, 30],  # noqa: E501
+    #         'prompt': '<|image|><|begin_of_text|>What is the content of this image?',  # noqa: E501
+    #         'multi_modal_data': {'image': <PIL.Image.Image image mode=RGB size=1770x1180 at 0x7FDE2C624880>},  # noqa: E501
+    #     },
+    # }
+    return EncoderDecoderInputs(
+        encoder=token_inputs(
+            prompt_token_ids=[MLLAMA_IMAGE_TOKEN_ID] * num_tokens,
+            prompt=MLLAMA_IMAGE_TOKEN * num_tokens,
+            multi_modal_data=multi_modal_data,
+        ),
+        decoder=dec_inputs,
+    )
 
 
 def get_max_mllama_image_tokens(ctx: InputContext) -> int:
@@ -176,13 +213,14 @@ def dummy_image(num_images: int, ):
 def dummy_decoder_data_for_mllama(ctx: InputContext, seq_len: int,
                                   mm_counts: Mapping[str, int]):
     num_images = mm_counts["image"]
-    return dummy_decoder_seq_data(seq_len, num_images), None
+    return DummyData(dummy_decoder_seq_data(seq_len, num_images))
 
 
 def dummy_encoder_data_for_mllama(ctx: InputContext, seq_len: int,
                                   mm_counts: Mapping[str, int]):
     num_images = mm_counts["image"]
-    return dummy_encoder_seq_data(ctx, num_images), dummy_image(num_images)
+    return DummyData(dummy_encoder_seq_data(ctx, num_images),
+                     dummy_image(num_images))
 
 
 def _prepare_aspect_ratio_attention_mask(
@@ -1055,9 +1093,12 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
         ".k_proj.",
         ".v_proj.",
         ".o_proj.",
+        ".fc1.",
+        ".fc2.",
+        # The `multi_modal_projector` is at the top level of the model,
+        # so we can't add a dot in front of it.
+        "multi_modal_projector."
     ]
-    # in TP, these weights are partitioned along the column dimension (dim=-1)
-    column_parallel_weights_modules = [".down_proj.", ".o_proj."]
     bitsandbytes_stacked_params_mapping = {
         # shard_name, weight_name, index
         "q_proj": ("qkv_proj", 0),
@@ -1100,7 +1141,7 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
         )
         self.logits_processor = LogitsProcessor(config.output_hidden_states,
                                                 config.text_config.vocab_size)
-        self.sampler = Sampler()
+        self.sampler = get_sampler()
 
     def compute_logits(
         self,

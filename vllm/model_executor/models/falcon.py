@@ -1,4 +1,3 @@
-# coding=utf-8
 # Adapted from
 # https://github.com/huggingface/transformers/blob/a5cc30d72ae2dc19af534e4b35c986cc28db1275/src/transformers/models/falcon/modeling_falcon.py
 # Copyright 2023 The vLLM team.
@@ -27,6 +26,7 @@ from torch.nn import LayerNorm
 from transformers import FalconConfig as HF_FalconConfig
 
 from vllm.attention import Attention, AttentionMetadata
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
@@ -38,7 +38,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -212,7 +212,7 @@ class FalconMLP(nn.Module):
                                                   bias=config.bias,
                                                   skip_bias_add=True,
                                                   quant_config=quant_config)
-        self.act = get_act_fn("gelu", quant_config, 4 * hidden_size)
+        self.act = get_act_fn("gelu")
         self.reduce_row_parallel_results = not (config.new_decoder_architecture
                                                 or config.parallel_attn)
         self.dense_4h_to_h = RowParallelLinear(
@@ -329,6 +329,7 @@ class FalconDecoderLayer(nn.Module):
         return output
 
 
+@support_torch_compile
 class FalconModel(nn.Module):
 
     def __init__(
@@ -399,8 +400,6 @@ class FalconForCausalLM(nn.Module, SupportsPP):
         ".dense_h_to_4h.",
         ".dense_4h_to_h.",
     ]
-    # in TP, these weights are partitioned along the column dimension (dim=-1)
-    column_parallel_weights_modules = [".dense_4h_to_h.", ".dense."]
 
     def __init__(
         self,
@@ -427,7 +426,7 @@ class FalconForCausalLM(nn.Module, SupportsPP):
                 quant_config=quant_config,
             )
         self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.sampler = Sampler()
+        self.sampler = get_sampler()
         self.make_empty_intermediate_tensors = (
             self.transformer.make_empty_intermediate_tensors)
 

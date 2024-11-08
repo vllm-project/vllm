@@ -11,10 +11,10 @@ static_assert(false, "AVX2 must be supported for the current implementation.");
 
 namespace vec_op {
 
-// FIXME: FP16 is not fully supported in Torch-CPU
 #define VLLM_DISPATCH_CASE_FLOATING_TYPES(...)                                 \
   AT_DISPATCH_CASE(at::ScalarType::Float, __VA_ARGS__)                         \
-  AT_DISPATCH_CASE(at::ScalarType::BFloat16, __VA_ARGS__)
+  AT_DISPATCH_CASE(at::ScalarType::BFloat16, __VA_ARGS__)                      \
+  AT_DISPATCH_CASE(at::ScalarType::Half, __VA_ARGS__)
 
 #define VLLM_DISPATCH_FLOATING_TYPES(TYPE, NAME, ...)                          \
   AT_DISPATCH_SWITCH(TYPE, NAME, VLLM_DISPATCH_CASE_FLOATING_TYPES(__VA_ARGS__))
@@ -50,37 +50,37 @@ template <typename T> struct Vec {
 struct FP32Vec8;
 struct FP32Vec16;
 
-#ifdef __AVX512FP16__
 struct FP16Vec8 : public Vec<FP16Vec8> {
   constexpr static int VEC_ELEM_NUM = 8;
 
-  __m128h reg;
+  __m128i reg;
 
-  explicit FP16Vec8(_Float16 v) : reg(_mm_set1_ph(v)) {}
+  explicit FP16Vec8(const void *ptr)
+      : reg((__m128i)_mm_loadu_si128((__m128i *)ptr)) {}
 
-  explicit FP16Vec8(const void *ptr) : reg(_mm_loadu_ph(ptr)) {}
+  explicit FP16Vec8(const FP32Vec8 &);
 
-  explicit FP16Vec8(__m128h data) : reg(data) {}
-
-  FP16Vec8 operator*(const FP16Vec8 &b) const {
-    return FP16Vec8(_mm_mul_ph(reg, b.reg));
-  }
-
-  FP16Vec8 operator+(const FP16Vec8 &b) const {
-    return FP16Vec8(_mm_add_ph(reg, b.reg));
-  }
-
-  FP16Vec8 operator-(const FP16Vec8 &b) const {
-    return FP16Vec8(_mm_sub_ph(reg, b.reg));
-  }
-
-  FP16Vec8 operator/(const FP16Vec8 &b) const {
-    return FP16Vec8(_mm_div_ph(reg, b.reg));
-  }
-
-  void save(void *ptr) const { _mm_storeu_ph(ptr, reg); }
+  void save(void *ptr) const { *reinterpret_cast<__m128i *>(ptr) = reg; }
 };
-#endif
+
+struct FP16Vec16 : public Vec<FP16Vec16> {
+  constexpr static int VEC_ELEM_NUM = 16;
+
+  __m256i reg;
+
+  explicit FP16Vec16(const void *ptr)
+      : reg((__m256i)_mm256_loadu_si256((__m256i *)ptr)) {}
+
+  explicit FP16Vec16(const FP32Vec16 &);
+
+  void save(void *ptr) const { *reinterpret_cast<__m256i *>(ptr) = reg; }
+
+  void save(void* ptr, const int elem_num) const {
+    constexpr uint32_t M = 0xFFFFFFFF;
+    __mmask16 mask = _cvtu32_mask16(M >> (32 - elem_num));
+    _mm256_mask_storeu_epi16(ptr, mask, reg);
+  }
+};
 
 struct BF16Vec8 : public Vec<BF16Vec8> {
   constexpr static int VEC_ELEM_NUM = 8;
@@ -202,9 +202,7 @@ struct FP32Vec8 : public Vec<FP32Vec8> {
 
   explicit FP32Vec8(const FP32Vec8 &data) : reg(data.reg) {}
 
-#ifdef __AVX512FP16__
-  explicit FP32Vec8(__m128h v) : reg(_mm256_cvtph_ps(_mm_castph_si128(v))) {}
-#endif
+  explicit FP32Vec8(const FP16Vec8 &v) : reg(_mm256_cvtph_ps(v.reg)) {}
 
   explicit FP32Vec8(const BF16Vec8 &v)
       : reg(_mm256_castsi256_ps(
@@ -323,6 +321,10 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
       : reg(_mm512_castsi512_ps(
             _mm512_bslli_epi128(_mm512_cvtepu16_epi32(v.reg), 2))) {}
 
+  explicit FP32Vec16(const FP16Vec16 &v) : reg(_mm512_cvtph_ps(v.reg)) {}
+
+  explicit FP32Vec16(const FP16Vec8 &v) : FP32Vec16(FP32Vec8(v)) {}
+
   explicit FP32Vec16(const BF16Vec8 &v) : FP32Vec16(FP32Vec8(v)) {}
 
   explicit FP32Vec16(const INT32Vec16 &v)
@@ -430,6 +432,16 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
   explicit FP32Vec16(const FP32Vec8 &data)
       : reg_low(data.reg), reg_high(data.reg) {}
 
+  explicit FP32Vec16(const FP16Vec16 &v) {
+    __m128i low = _mm256_extractf128_si256(v.reg, 0);
+    __m128i high = _mm256_extractf128_si256(v.reg, 1);
+
+    reg_low = _mm256_cvtph_ps(low);
+    reg_high = _mm256_cvtph_ps(high);
+  }
+
+  explicit FP32Vec16(const FP16Vec8 &v) : FP32Vec16(FP32Vec8(v)) {}
+
   explicit FP32Vec16(const BF16Vec16 &v) {
     __m128i low = _mm256_extractf128_si256(v.reg, 0);
     __m128i high = _mm256_extractf128_si256(v.reg, 1);
@@ -534,23 +546,33 @@ template <typename T> using vec_t = typename VecType<T>::vec_type;
 
 template <> struct VecType<float> { using vec_type = FP32Vec8; };
 
-#ifdef __AVX512FP16__
-template <> struct VecType<c10::Half> { using vec_type = FP16Vec16; };
-#endif
+template <> struct VecType<c10::Half> { using vec_type = FP16Vec8; };
 
 template <> struct VecType<c10::BFloat16> { using vec_type = BF16Vec8; };
 
 template <typename T> void storeFP32(float v, T *ptr) { *ptr = v; }
 
-#ifdef __AVX512FP16__
-template <> inline void storeFP32<c10::Half>(float v, c10::Half *ptr) {
-  *reinterpret_cast<_Float16 *>(ptr) = v;
-}
-#endif
-
 inline void fma(FP32Vec16 &acc, FP32Vec16 &a, FP32Vec16 &b) {
   acc = acc + a * b;
 }
+
+template <> inline void storeFP32<c10::Half>(float v, c10::Half *ptr) {
+  *reinterpret_cast<unsigned short *>(ptr) =
+      _cvtss_sh(v, _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+}
+
+inline FP16Vec8::FP16Vec8(const FP32Vec8 &v)
+    : reg(_mm256_cvtps_ph(v.reg,
+                          _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC)) {}
+
+#ifdef __AVX512F__
+inline FP16Vec16::FP16Vec16(const FP32Vec16 &v)
+    : reg(_mm512_cvtps_ph(v.reg,
+                          _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC)) {}
+#else
+inline FP16Vec16::FP16Vec16(const FP32Vec16 &v)
+    : reg(_mm256_insertf128_si256(_mm256_castsi128_si256(FP16Vec8(FP32Vec8(v.reg_low)).reg), FP16Vec8(FP32Vec8(v.reg_low)).reg, 1)) {}
+#endif
 
 #ifdef __AVX512BF16__
 template <> inline void storeFP32<c10::BFloat16>(float v, c10::BFloat16 *ptr) {

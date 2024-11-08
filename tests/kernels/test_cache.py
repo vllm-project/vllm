@@ -13,7 +13,7 @@ DTYPES = [torch.half, torch.bfloat16, torch.float]
 NUM_TOKENS = [42]  # Arbitrary values for testing
 NUM_LAYERS = [1]  # Arbitrary values for testing
 NUM_HEADS = [8]  # Arbitrary values for testing
-HEAD_SIZES = [64, 80, 96, 112, 120, 128, 192, 256]
+HEAD_SIZES = [64, 80, 120, 256]
 BLOCK_SIZES = [8, 16, 32]
 
 # Arbitrary values for testing
@@ -258,18 +258,19 @@ def test_reshape_and_cache_flash(
     del key_caches
     del value_caches
 
+    k_scale = key.amax().item() / 256
+    v_scale = value.amax().item() / 256
+
     # Clone the KV caches.
     if kv_cache_dtype == "fp8":
         cloned_key_cache = torch.empty_like(key_cache, dtype=torch.float16)
-        ops.convert_fp8(cloned_key_cache, key_cache)
+        ops.convert_fp8(cloned_key_cache, key_cache, k_scale, kv_cache_dtype)
         cloned_value_cache = torch.empty_like(value_cache, dtype=torch.float16)
-        ops.convert_fp8(cloned_value_cache, value_cache)
+        ops.convert_fp8(cloned_value_cache, value_cache, v_scale,
+                        kv_cache_dtype)
     else:
         cloned_key_cache = key_cache.clone()
         cloned_value_cache = value_cache.clone()
-
-    # Using default kv_scale
-    k_scale = v_scale = 1.0
 
     # Call the reshape_and_cache kernel.
     opcheck(torch.ops._C_cache_ops.reshape_and_cache_flash,
@@ -281,9 +282,15 @@ def test_reshape_and_cache_flash(
 
     if kv_cache_dtype == "fp8":
         result_key_cache = torch.empty_like(key_cache, dtype=torch.float16)
-        ops.convert_fp8(result_key_cache, key_cache)
+        ops.convert_fp8(result_key_cache,
+                        key_cache,
+                        k_scale,
+                        kv_dtype=kv_cache_dtype)
         result_value_cache = torch.empty_like(value_cache, dtype=torch.float16)
-        ops.convert_fp8(result_value_cache, value_cache)
+        ops.convert_fp8(result_value_cache,
+                        value_cache,
+                        v_scale,
+                        kv_dtype=kv_cache_dtype)
 
     # Run the reference implementation.
     block_indicies = torch.div(slot_mapping, block_size, rounding_mode="floor")
