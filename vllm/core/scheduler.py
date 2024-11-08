@@ -397,7 +397,7 @@ class Scheduler:
 
         # For chunked prefill, we allocate a set of "prefill slots" that
         # each represent a sequence group that can be concurrently prefilled
-        self.num_prefill_slots = self.num_prefill_slots
+        self.num_prefill_slots = scheduler_config.num_prefill_slots
         self.prefill_slots_running = 0
         self.big_prefill_requests = 0
         # Requests with more than (4% max context length) tokens to prefill
@@ -1156,10 +1156,10 @@ class Scheduler:
 
         # Set slot counts for next iteration
         self.prefill_slots_running = len(prefilling)
-        self.big_prefill_requests = [
+        self.big_prefill_requests = len([
             seq_group for seq_group in prefilling
-            if self._is_big_seq_group(seq_group)
-        ]
+            if self._is_big_seq_group(seq_group.seq_group)
+        ])
 
         assert (budget.num_batched_tokens <=
                 self.scheduler_config.max_num_batched_tokens)
@@ -1207,10 +1207,9 @@ class Scheduler:
                        len(running_scheduled.swapped_out)),
         )
 
-    def _is_big_seq_group(self,
-                          scheduled_seq_group: ScheduledSequenceGroup) -> bool:
-        return scheduled_seq_group.seq_group.seqs[0].get_num_new_tokens(
-        ) >= self.big_prefill_threshold
+    def _is_big_seq_group(self, seq_group: SequenceGroup) -> bool:
+        return (seq_group.seqs[0].get_num_new_tokens() >=
+                self.big_prefill_threshold)
 
     def _will_still_be_prefilling(self,
                                   seq_group: ScheduledSequenceGroup) -> bool:
