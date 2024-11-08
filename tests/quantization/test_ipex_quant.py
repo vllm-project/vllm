@@ -11,9 +11,8 @@ import pytest
 from vllm.platforms import current_platform
 
 MODELS = [
-    "casperhansen/llama-3-8b-instruct-awq",
-    "TechxGenus/Meta-Llama-3-8B-GPTQ",  # with g_idx
-    "TheBloke/Llama-2-7B-GPTQ",  # w/o g_idx
+    "AMead10/Llama-3.2-1B-Instruct-AWQ",
+    "shuyuej/Llama-3.2-1B-Instruct-GPTQ",  # with g_idx
 ]
 DTYPE = ["bfloat16"]
 

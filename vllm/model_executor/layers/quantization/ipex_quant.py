@@ -2,8 +2,10 @@ from typing import Any, Dict, List, Optional
 
 import torch
 
-from vllm.model_executor.layers.linear import LinearBase, LinearMethodBase
-from vllm.model_executor.layers.quantization.awq import AWQLinearMethod
+from vllm.model_executor.layers.linear import (LinearBase, LinearMethodBase,
+                                               UnquantizedLinearMethod)
+from vllm.model_executor.layers.quantization.awq import (AWQLinearMethod,
+                                                         is_layer_skipped_awq)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.quantization.gptq import GPTQLinearMethod
@@ -25,12 +27,14 @@ class IPEXConfig(QuantizationConfig):
         method: str,
         weight_bits: int,
         group_size: int,
+        modules_to_not_convert: Optional[List[str]] = None,
         desc_act: Optional[bool] = None,
         lm_head_quantized: Optional[bool] = None,
     ) -> None:
         self.method = method
         self.weight_bits = weight_bits
         self.group_size = group_size
+        self.modules_to_not_convert = modules_to_not_convert or []
         self.desc_act = desc_act
         self.lm_head_quantized = lm_head_quantized
         self.pack_factor = 32 // self.weight_bits
@@ -44,12 +48,9 @@ class IPEXConfig(QuantizationConfig):
                              f"but got {self.method}.")
 
     def __repr__(self) -> str:
-        return (f"IPEXConfig(method={self.method}"
+        return (f"IPEXConfig(method={self.method},"
                 f"weight_bits={self.weight_bits}, "
-                f"group_size={self.group_size}")
-
-    def get_ipex_quant_method_id(self) -> int:
-        return IPEXConfig.IPEX_QUANT_METHOD_MAP[self.method]
+                f"group_size={self.group_size})")
 
     @classmethod
     def get_name(cls) -> str:
@@ -77,18 +78,18 @@ class IPEXConfig(QuantizationConfig):
             weight_bits = cls.get_from_keys(config, ["w_bit", "bits"])
             group_size = cls.get_from_keys(config,
                                            ["q_group_size", "group_size"])
-            return cls(method, weight_bits, group_size, False, False)
-        if method == "gptq":
-            weight_bits = cls.get_from_keys(config, ["bits"])
-            group_size = cls.get_from_keys(config, ["group_size"])
-            lm_head_quantized = cls.get_from_keys_or(config, ["lm_head"],
-                                                     default=False)
-            try:
-                desc_act = cls.get_from_keys(config, ["desc_act"])
-            except Exception:
-                desc_act = False
-            return cls(method, weight_bits, group_size, desc_act,
-                       lm_head_quantized)
+            modules_to_not_convert = cls.get_from_keys_or(
+                config, ["modules_to_not_convert"], None)
+            return cls(method, weight_bits, group_size, modules_to_not_convert,
+                       False, False)
+        # otherwise for gptq
+        weight_bits = cls.get_from_keys(config, ["bits"])
+        group_size = cls.get_from_keys(config, ["group_size"])
+        lm_head_quantized = cls.get_from_keys_or(config, ["lm_head"],
+                                                 default=False)
+        desc_act = cls.get_from_keys_or(config, ["desc_act"], default=False)
+        return cls(method, weight_bits, group_size, [], desc_act,
+                   lm_head_quantized)
 
     @classmethod
     def override_quantization_method(cls, hf_quant_cfg,
@@ -107,16 +108,12 @@ class IPEXConfig(QuantizationConfig):
                          prefix: str) -> Optional["LinearMethodBase"]:
         if isinstance(layer, LinearBase):
             if self.method == "awq":
+                if is_layer_skipped_awq(prefix, self.modules_to_not_convert):
+                    return UnquantizedLinearMethod()
                 return IPEXAWQLinearMethod(self)
             if self.method == "gptq":
                 return IPEXGPTQLinearMethod(self)
         return None
-
-    def get_scaled_act_names(self) -> List[str]:
-        if self.method == "awq":
-            return ["gelu", "gelu_fast", "gelu_new", "gelu_pytorch_tanh"]
-        else:
-            return []
 
 
 class IPEXGPTQLinearMethod(GPTQLinearMethod):
@@ -168,8 +165,7 @@ class IPEXGPTQLinearMethod(GPTQLinearMethod):
             g_idx=g_idx,
             bias=bias,
             group_size=self.quant_config.group_size,
-            quant_method=self.quant_config.get_ipex_quant_method_id(
-            )  # type: ignore
+            quant_method=IPEXConfig.IPEX_QUANT_METHOD_MAP["gptq"]
         )
 
     def apply(self,
@@ -235,8 +231,7 @@ class IPEXAWQLinearMethod(AWQLinearMethod):
             qconfig=qconfig,
             bias=bias,
             group_size=self.quant_config.group_size,
-            quant_method=self.quant_config.get_ipex_quant_method_id(
-            )  # type: ignore
+            quant_method=IPEXConfig.IPEX_QUANT_METHOD_MAP["awq"]  # type: ignore
         )
 
     def apply(self,
