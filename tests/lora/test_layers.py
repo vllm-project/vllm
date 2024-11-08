@@ -39,6 +39,7 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding, get_masked_input_and_mask)
 from vllm.model_executor.utils import set_random_seed
+from vllm.platforms import current_platform
 
 from .utils import DummyLoRAManager
 
@@ -922,9 +923,7 @@ def test_rotary_embedding_long_context(dist_init, num_loras, device,
                                        seq_len) -> None:
     dtype = torch.float16
     seed = 0
-    torch.random.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
+    current_platform.seed_everything(seed)
     torch.set_default_device(device)
     punica_wrapper = PunicaWrapper(8192, 256, device)
     max_loras = 8
@@ -952,7 +951,7 @@ def test_rotary_embedding_long_context(dist_init, num_loras, device,
     lora_rope.create_lora_weights(max_loras, lora_config)
     linear_rope = get_rope(head_size, rotary_dim, max_position, base,
                            is_neox_style, {
-                               "type": "linear",
+                               "rope_type": "linear",
                                "factor": scaling_factors
                            })
     linear_rope = linear_rope.to(dtype=dtype)

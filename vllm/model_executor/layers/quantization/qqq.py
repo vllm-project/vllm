@@ -112,9 +112,6 @@ class QQQConfig(QuantizationConfig):
             return QQQLinearMethod(self)
         return None
 
-    def get_scaled_act_names(self) -> List[str]:
-        return []
-
 
 class QQQLinearMethod(LinearMethodBase):
     """Linear method for QQQ.
@@ -260,7 +257,7 @@ class QQQLinearMethod(LinearMethodBase):
         size_k = x_2d.shape[1]
         size_n = s_ch.shape[1]
 
-        x_int8, s_tok = ops.scaled_int8_quant(x_2d)
+        x_int8, s_tok, _ = ops.scaled_int8_quant(x_2d)
 
         output_2d = ops.marlin_qqq_gemm(x_int8, qweight, s_tok, s_ch, s_group,
                                         workspace, size_m, size_n, size_k)

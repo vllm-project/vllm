@@ -5,6 +5,7 @@ from typing import List, Optional
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.platforms import current_platform
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, FlexibleArgumentParser,
                         create_kv_caches_with_random)
 
@@ -28,10 +29,7 @@ def main(
     device: str = "cuda",
     kv_cache_dtype: Optional[str] = None,
 ) -> None:
-    random.seed(seed)
-    torch.random.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
+    current_platform.seed_everything(seed)
 
     scale = float(1.0 / (head_size**0.5))
     query = torch.empty(num_seqs,

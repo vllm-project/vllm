@@ -4,6 +4,7 @@ from vllm.core.block.interfaces import (Block, BlockAllocator, BlockId,
                                         DeviceAwareBlockAllocator)
 from vllm.core.block.naive_block import NaiveBlock, NaiveBlockAllocator
 from vllm.core.block.prefix_caching_block import PrefixCachingBlockAllocator
+from vllm.platforms import current_platform
 from vllm.utils import Device
 
 
@@ -52,7 +53,11 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
             - The block IDs are assigned contiguously, with GPU block IDs coming
                 before CPU block IDs.
         """
-        block_ids = list(range(num_gpu_blocks + num_cpu_blocks))
+        # For HPU, block id 0 is used only for padding
+        reserved_blocks = 1 if current_platform.is_hpu() else 0
+        block_ids = list(
+            range(reserved_blocks, num_gpu_blocks + num_cpu_blocks))
+        num_gpu_blocks -= reserved_blocks
         gpu_block_ids = block_ids[:num_gpu_blocks]
         cpu_block_ids = block_ids[num_gpu_blocks:]
 
@@ -259,25 +264,22 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
                 current_swap_mapping[src_block_id] = dst_block_id
         return current_swap_mapping
 
-    def get_num_blocks_touched(self,
-                               blocks: List[Block],
-                               device: Device,
-                               num_lookahead_slots: int = 0) -> int:
-        """Returns the number of blocks that will be touched by
+    def get_num_full_blocks_touched(self, blocks: List[Block],
+                                    device: Device) -> int:
+        """Returns the number of full blocks that will be touched by
         swapping in/out the given blocks on to the 'device'.
 
         Args:
             blocks: List of blocks to be swapped.
             device (Device): Device to swap the 'blocks' on.
-            num_lookahead_slots (int): Number of lookahead slots used in 
-                speculative decoding, default to 0.
 
         Returns:
-            int: the number of blocks that will be touched by
+            int: the number of full blocks that will be touched by
                 swapping in/out the given blocks on to the 'device'.
+                Non full blocks are ignored when deciding the number
+                of blocks to touch.
         """
-        return self._allocators[device].get_num_blocks_touched(
-            blocks, num_lookahead_slots)
+        return self._allocators[device].get_num_full_blocks_touched(blocks)
 
     def clear_copy_on_writes(self) -> List[Tuple[int, int]]:
         """Clears the copy-on-write (CoW) state and returns the mapping of

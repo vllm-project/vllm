@@ -9,6 +9,7 @@ from typing import Optional, Tuple
 import pytest
 import torch
 
+from tests.kernels.utils import opcheck
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     pack_rows, quantize_weights)
@@ -23,13 +24,16 @@ MNK_SHAPES = [
     (1, 128, 128),
     (1, 512, 1024),
     (1, 4096, 4096),
+    (1, 8192, 28672),
     (13, 8192, 4096),
     (26, 4096, 8192),
-    (1, 4096, 4096),
+    (64, 4096, 4096),
+    (64, 8192, 28672),
     (257, 128, 4096),
     (257, 4224, 4160),
     (257, 4096, 4096),
-    (64, 4096, 4096),
+    (1024, 4096, 8192),
+    (1024, 8192, 4096),
 ]
 
 ACT_TYPES = [torch.float16, torch.bfloat16]
@@ -47,7 +51,7 @@ WTYPE_ZEROPOINTS = [
 #  `is_quant_method_supported` conflates kernels with quantization methods
 #  an assumption which is breaking down as quantizations methods can have
 #  have kernels and some kernels support multiple quantization methods.
-IS_SUPPORTED_BY_GPU = current_platform.get_device_capability()[0] >= 9
+IS_SUPPORTED_BY_GPU = current_platform.has_device_capability(90)
 
 
 def rand_data(shape, dtype=torch.float16):
@@ -75,6 +79,8 @@ def machete_quantize_and_pack(w: torch.Tensor,
     w_q = pack_rows(w_q, wtype.size_bits, *w_q.shape)
     w_q = w_q.t().contiguous().t()  # convert to col major
     w_q_machete = ops.machete_prepack_B(w_q, wtype)
+
+    opcheck(torch.ops._C.machete_prepack_B, (w_q, wtype.id))
 
     return w_ref, w_q_machete, w_s, w_zp
 
@@ -136,6 +142,7 @@ def test_machete_all_schedules(shape, atype: torch.dtype,
     output_ref = torch.matmul(a, w_ref)
 
     for schedule in ops.machete_supported_schedules(wtype):
+        print(f"Testing schedule {schedule}")
         output = ops.machete_gemm(
             a,
             b_q=w_q_machete,
@@ -145,6 +152,11 @@ def test_machete_all_schedules(shape, atype: torch.dtype,
             b_group_size=group_size,
             schedule=schedule,
         )
+
+        opcheck(
+            torch.ops._C.machete_gemm,
+            (a, w_q_machete, wtype.id, w_s, maybe_convert_zeropoints(
+                w_zp, w_s), group_size, None, None, None, schedule))
 
         # Relax atol as our reduction dim becomes larger (more rounding error)
         # Relax atol when we have zeropoints since the way machete applies

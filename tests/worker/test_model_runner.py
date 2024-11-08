@@ -1,4 +1,3 @@
-from array import array
 from typing import List
 
 import pytest
@@ -8,8 +7,7 @@ from vllm.distributed.parallel_state import (ensure_model_parallel_initialized,
                                              init_distributed_environment)
 from vllm.engine.arg_utils import EngineArgs
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, SamplingParams,
-                           SequenceData, SequenceGroupMetadata)
+from vllm.sequence import SamplingParams, SequenceData, SequenceGroupMetadata
 from vllm.utils import get_open_port
 from vllm.worker.model_runner import ModelRunner, _get_graph_batch_size
 
@@ -18,15 +16,7 @@ def _create_model_runner(model: str, *args, **kwargs) -> ModelRunner:
     engine_args = EngineArgs(model, *args, **kwargs)
     engine_config = engine_args.create_engine_config()
     model_runner = ModelRunner(
-        model_config=engine_config.model_config,
-        parallel_config=engine_config.parallel_config,
-        scheduler_config=engine_config.scheduler_config,
-        device_config=engine_config.device_config,
-        cache_config=engine_config.cache_config,
-        load_config=engine_config.load_config,
-        lora_config=engine_config.lora_config,
-        prompt_adapter_config=engine_config.prompt_adapter_config,
-        observability_config=engine_config.observability_config,
+        vllm_config=engine_config,
         is_driver_worker=True,
     )
     return model_runner
@@ -48,8 +38,7 @@ def test_prepare_prompt(batch_size):
         # make sure all tokens fit into one block
         seq_len = i % (model_runner.block_size - 1) + 1
         seq_lens.append(seq_len)
-        seq_data = SequenceData(array(VLLM_TOKEN_ID_ARRAY_TYPE,
-                                      range(seq_len)))
+        seq_data = SequenceData.from_seqs(range(seq_len))
         seq_group_metadata = SequenceGroupMetadata(
             request_id=f"test_{i}",
             is_prompt=True,
@@ -166,8 +155,7 @@ def test_prepare_decode_cuda_graph(batch_size):
         # make sure all tokens fit into one block
         context_len = i % (model_runner.block_size - 1) + 1
         context_lens.append(context_len)
-        seq_data = SequenceData(
-            array(VLLM_TOKEN_ID_ARRAY_TYPE, range(context_len)))
+        seq_data = SequenceData.from_seqs(range(context_len))
         seq_data.update_num_computed_tokens(context_len)
         # Append one token ID since prefill is finished.
         seq_data.append_token_id(1, 0)
@@ -241,10 +229,8 @@ def test_prepare_decode_cuda_graph(batch_size):
 
     # Verify Sampling
     expected_selected_token_indices = []
-    selected_token_start_idx = 0
-    for _ in context_lens:
+    for selected_token_start_idx, _ in enumerate(context_lens):
         expected_selected_token_indices.append(selected_token_start_idx)
-        selected_token_start_idx += 1
     sampling_metadata = SamplingMetadata.prepare(
         seq_group_metadata_list,
         seq_lens,
@@ -328,8 +314,7 @@ def test_hybrid_batches(batch_size, enforce_eager, distributed_init):
         # make sure all tokens fit into one block
         seq_len = i % (model_runner.block_size - 1) + 1
         seq_lens.append(seq_len)
-        seq_data = SequenceData(array(VLLM_TOKEN_ID_ARRAY_TYPE,
-                                      range(seq_len)))
+        seq_data = SequenceData.from_seqs(range(seq_len))
         seq_group_metadata = SequenceGroupMetadata(
             request_id=f"test_{i}",
             is_prompt=True,
@@ -345,8 +330,7 @@ def test_hybrid_batches(batch_size, enforce_eager, distributed_init):
     for i in range(prefill_batch_size, batch_size):
         # make sure all tokens fit into one block
         context_len = i % (model_runner.block_size - 1) + 1
-        prompt_toks = array(VLLM_TOKEN_ID_ARRAY_TYPE, range(context_len))
-        seq_data = SequenceData(prompt_toks)
+        seq_data = SequenceData.from_seqs(range(context_len))
         seq_data.append_token_id(1, 0)
         seq_data.update_num_computed_tokens(context_len)
         seq_group_metadata = SequenceGroupMetadata(

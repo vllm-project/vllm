@@ -17,6 +17,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.connections import global_http_connection
+from vllm.platforms import current_platform
 from vllm.version import __version__ as VLLM_VERSION
 
 _config_home = envs.VLLM_CONFIG_ROOT
@@ -151,7 +152,7 @@ class UsageMessage:
                            usage_context: UsageContext,
                            extra_kvs: Dict[str, Any]) -> None:
         # Platform information
-        if torch.cuda.is_available():
+        if current_platform.is_cuda_alike():
             device_property = torch.cuda.get_device_properties(0)
             self.gpu_count = torch.cuda.device_count()
             self.gpu_type = device_property.name
@@ -203,7 +204,7 @@ class UsageMessage:
             self._write_to_file(data)
             self._send_to_server(data)
 
-    def _send_to_server(self, data):
+    def _send_to_server(self, data: Dict[str, Any]) -> None:
         try:
             global_http_client = global_http_connection.get_sync_client()
             global_http_client.post(_USAGE_STATS_SERVER, json=data)
@@ -211,7 +212,7 @@ class UsageMessage:
             # silently ignore unless we are using debug log
             logging.debug("Failed to send usage data to server")
 
-    def _write_to_file(self, data):
+    def _write_to_file(self, data: Dict[str, Any]) -> None:
         os.makedirs(os.path.dirname(_USAGE_STATS_JSON_PATH), exist_ok=True)
         Path(_USAGE_STATS_JSON_PATH).touch(exist_ok=True)
         with open(_USAGE_STATS_JSON_PATH, "a") as f:

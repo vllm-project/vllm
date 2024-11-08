@@ -280,7 +280,7 @@ class TensorizerAgent:
         self.tensorizer_args = (
             self.tensorizer_config._construct_tensorizer_args())
         self.extra_kwargs = extra_kwargs
-        if extra_kwargs.get("quant_config", None) is not None:
+        if extra_kwargs.get("quant_config") is not None:
             self.quant_config = extra_kwargs["quant_config"]
         else:
             self.quant_config = quant_config
@@ -380,8 +380,7 @@ def tensorizer_weights_iterator(
     stream = open_stream(tensorizer_args.tensorizer_uri, **stream_params)
     with TensorDeserializer(stream, **deserializer_args,
                             device="cpu") as state:
-        for name, param in state.items():
-            yield name, param
+        yield from state.items()
     del state
 
 
@@ -408,9 +407,7 @@ def is_vllm_tensorized(tensorizer_config: "TensorizerConfig") -> bool:
             "inferred as vLLM models, so setting vllm_tensorized=True is "
             "only necessary for models serialized prior to this change.")
         return True
-    if (".vllm_tensorized_marker" in deserializer):
-        return True
-    return False
+    return ".vllm_tensorized_marker" in deserializer
 
 
 def serialize_vllm_model(

@@ -1,5 +1,5 @@
-# Default ROCm 6.1 base image
-ARG BASE_IMAGE="rocm/pytorch:rocm6.1.2_ubuntu20.04_py3.9_pytorch_staging"
+# Default ROCm 6.2 base image
+ARG BASE_IMAGE="rocm/pytorch:rocm6.2_ubuntu20.04_py3.9_pytorch_release_2.3.0"
 
 # Default ROCm ARCHes to build vLLM for.
 ARG PYTORCH_ROCM_ARCH="gfx908;gfx90a;gfx942;gfx1100"
@@ -7,18 +7,12 @@ ARG PYTORCH_ROCM_ARCH="gfx908;gfx90a;gfx942;gfx1100"
 # Whether to install CK-based flash-attention
 # If 0, will not install flash-attention
 ARG BUILD_FA="1"
-# If `TRY_FA_WHEEL=1`, we will try installing flash-attention from `FA_WHEEL_URL`
-# If this succeeds, we use the downloaded wheel and skip building flash-attention.
-# Otherwise, ROCm flash-attention from `FA_BRANCH` will be built for the
-# architectures specified in `FA_GFX_ARCHS`
-ARG TRY_FA_WHEEL="1"
-ARG FA_WHEEL_URL="https://github.com/ROCm/flash-attention/releases/download/v2.5.9post1-cktile-vllm/flash_attn-2.5.9.post1-cp39-cp39-linux_x86_64.whl"
 ARG FA_GFX_ARCHS="gfx90a;gfx942"
-ARG FA_BRANCH="23a2b1c2"
+ARG FA_BRANCH="3cea2fb"
 
 # Whether to build triton on rocm
 ARG BUILD_TRITON="1"
-ARG TRITON_BRANCH="e0fc12c"
+ARG TRITON_BRANCH="e192dba"
 
 ### Base image build stage
 FROM $BASE_IMAGE AS base
@@ -50,14 +44,17 @@ RUN python3 -m pip install --upgrade pip
 # Remove sccache so it doesn't interfere with ccache
 # TODO: implement sccache support across components
 RUN apt-get purge -y sccache; python3 -m pip uninstall -y sccache; rm -f "$(which sccache)"
-# Install torch == 2.5.0 on ROCm
-RUN case "$(ls /opt | grep -Po 'rocm-[0-9]\.[0-9]')" in \
-        *"rocm-6.1"*) \
+
+# Install torch == 2.6.0 on ROCm
+RUN --mount=type=cache,target=/root/.cache/pip \
+    case "$(ls /opt | grep -Po 'rocm-[0-9]\.[0-9]')" in \
+        *"rocm-6.2"*) \
             python3 -m pip uninstall -y torch torchvision \
-            && python3 -m pip install --no-cache-dir --pre \
-                torch==2.5.0.dev20240726 \
-                torchvision==0.20.0.dev20240726 \
-               --index-url https://download.pytorch.org/whl/nightly/rocm6.1;; \
+            && python3 -m pip install --pre \
+                torch==2.6.0.dev20240918 \
+                'setuptools-scm>=8' \
+                torchvision==0.20.0.dev20240918 \
+                --extra-index-url https://download.pytorch.org/whl/nightly/rocm6.2;; \
         *) ;; esac
 
 ENV LLVM_SYMBOLIZER_PATH=/opt/rocm/llvm/bin/llvm-symbolizer
@@ -79,25 +76,18 @@ RUN cd /opt/rocm/share/amd_smi \
 ### Flash-Attention wheel build stage
 FROM base AS build_fa
 ARG BUILD_FA
-ARG TRY_FA_WHEEL
-ARG FA_WHEEL_URL
 ARG FA_GFX_ARCHS
 ARG FA_BRANCH
 # Build ROCm flash-attention wheel if `BUILD_FA = 1`
 RUN --mount=type=cache,target=${CCACHE_DIR} \
     if [ "$BUILD_FA" = "1" ]; then \
-        if [ "${TRY_FA_WHEEL}" = "1" ] && python3 -m pip install "${FA_WHEEL_URL}"; then \
-            # If a suitable wheel exists, we download it instead of building FA
-            mkdir -p /install && wget -N "${FA_WHEEL_URL}" -P /install; \
-        else \
-            mkdir -p libs \
-            && cd libs \
-            && git clone https://github.com/ROCm/flash-attention.git \
-            && cd flash-attention \
-            && git checkout "${FA_BRANCH}" \
-            && git submodule update --init \
-            && GPU_ARCHS="${FA_GFX_ARCHS}" python3 setup.py bdist_wheel --dist-dir=/install; \
-        fi; \
+        mkdir -p libs \
+        && cd libs \
+        && git clone https://github.com/ROCm/flash-attention.git \
+        && cd flash-attention \
+        && git checkout "${FA_BRANCH}" \
+        && git submodule update --init \
+        && GPU_ARCHS="${FA_GFX_ARCHS}" python3 setup.py bdist_wheel --dist-dir=/install; \
     # Create an empty directory otherwise as later build stages expect one
     else mkdir -p /install; \
     fi
@@ -112,6 +102,7 @@ RUN --mount=type=cache,target=${CCACHE_DIR} \
     if [ "$BUILD_TRITON" = "1" ]; then \
     mkdir -p libs \
     && cd libs \
+    && python3 -m pip install ninja cmake wheel pybind11 \
     && git clone https://github.com/OpenAI/triton.git \
     && cd triton \
     && git checkout "${TRITON_BRANCH}" \
@@ -126,10 +117,15 @@ RUN --mount=type=cache,target=${CCACHE_DIR} \
 FROM base AS final
 # Import the vLLM development directory from the build context
 COPY . .
+ARG GIT_REPO_CHECK=0
+RUN --mount=type=bind,source=.git,target=.git \
+    if [ "$GIT_REPO_CHECK" != 0 ]; then bash tools/check_repo.sh ; fi
+
+RUN python3 -m pip install --upgrade pip
 
 # Package upgrades for useful functionality or to avoid dependency issues
 RUN --mount=type=cache,target=/root/.cache/pip \
-    python3 -m pip install --upgrade numba scipy huggingface-hub[cli]
+    python3 -m pip install --upgrade numba scipy huggingface-hub[cli] pytest-shard
 
 
 # Workaround for ray >= 2.10.0
@@ -138,15 +134,9 @@ ENV RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES=1
 ENV TOKENIZERS_PARALLELISM=false
 
 RUN --mount=type=cache,target=${CCACHE_DIR} \
+    --mount=type=bind,source=.git,target=.git \
     --mount=type=cache,target=/root/.cache/pip \
     python3 -m pip install -Ur requirements-rocm.txt \
-    && case "$(ls /opt | grep -Po 'rocm-[0-9]\.[0-9]')" in \
-        *"rocm-6.1"*) \
-            # Bring in upgrades to HIP graph earlier than ROCm 6.2 for vLLM
-            wget -N https://github.com/ROCm/vllm/raw/fa78403/rocm_patch/libamdhip64.so.6 -P /opt/rocm/lib \
-            # Prevent interference if torch bundles its own HIP runtime
-            && rm -f "$(python3 -c 'import torch; print(torch.__path__[0])')"/lib/libamdhip64.so* || true;; \
-        *) ;; esac \
     && python3 setup.py clean --all \
     && python3 setup.py develop
 

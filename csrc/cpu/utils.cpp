@@ -5,7 +5,7 @@
 
 #include "cpu_types.hpp"
 
-void init_cpu_threads_env(const std::string& cpu_ids) {
+std::string init_cpu_threads_env(const std::string& cpu_ids) {
   bitmask* omp_cpu_mask = numa_parse_cpustring(cpu_ids.c_str());
   TORCH_CHECK(omp_cpu_mask->size > 0);
   std::vector<int> omp_cpu_ids;
@@ -51,15 +51,40 @@ void init_cpu_threads_env(const std::string& cpu_ids) {
   torch::set_num_threads((int)omp_cpu_ids.size());
   TORCH_CHECK_EQ(omp_cpu_ids.size(), torch::get_num_threads());
   TORCH_CHECK_EQ(omp_cpu_ids.size(), omp_get_max_threads());
+
+  std::vector<std::pair<int, int>> thread_core_mapping;
+  thread_core_mapping.reserve(omp_cpu_ids.size());
+  omp_lock_t writelock;
+  omp_init_lock(&writelock);
+
 #pragma omp parallel for schedule(static, 1)
   for (size_t i = 0; i < omp_cpu_ids.size(); ++i) {
-    cpu_set_t* mask = CPU_ALLOC(omp_cpu_mask->size);
-    size_t size = CPU_ALLOC_SIZE(omp_cpu_mask->size);
-    CPU_ZERO_S(size, mask);
-    CPU_SET_S(omp_cpu_ids[i], size, mask);
-    sched_setaffinity(0, sizeof(cpu_set_t), mask);
-    CPU_FREE(mask);
+    cpu_set_t mask;
+    CPU_ZERO(&mask);
+    CPU_SET(omp_cpu_ids[i], &mask);
+    int ret = sched_setaffinity(0, sizeof(cpu_set_t), &mask);
+    if (ret == -1) {
+      TORCH_CHECK(false,
+                  "sched_setaffinity failed. errno: " + std::to_string(errno));
+    }
+
+    omp_set_lock(&writelock);
+    thread_core_mapping.emplace_back(gettid(), omp_cpu_ids[i]);
+    omp_unset_lock(&writelock);
   }
 
+  omp_destroy_lock(&writelock);
+
   numa_free_nodemask(omp_cpu_mask);
+
+  std::stringstream ss;
+  ss << "OMP threads binding of Process " << getpid() << ":\n";
+  std::sort(thread_core_mapping.begin(), thread_core_mapping.end(),
+            [](auto&& a, auto&& b) { return a.second < b.second; });
+  for (auto&& item : thread_core_mapping) {
+    ss << "\t"
+       << "OMP tid: " << item.first << ", core " << item.second << "\n";
+  }
+
+  return ss.str();
 }

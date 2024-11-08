@@ -1,8 +1,5 @@
 import asyncio
 import os
-import signal
-import threading
-import weakref
 from functools import partial
 from typing import Any, List, Optional
 
@@ -18,8 +15,8 @@ from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.sequence import ExecuteModelRequest
 from vllm.triton_utils import maybe_set_triton_cache_manager
 from vllm.utils import (_run_task_with_lock, cuda_device_count_stateless,
-                        get_distributed_init_method, get_open_port,
-                        get_vllm_instance_id, make_async,
+                        cuda_is_initialized, get_distributed_init_method,
+                        get_open_port, get_vllm_instance_id, make_async,
                         update_environment_variables)
 
 logger = init_logger(__name__)
@@ -108,17 +105,6 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
         # Set up signal handlers to shutdown the executor cleanly
         # sometimes gc does not work well
 
-        # Use weakref to avoid holding a reference to self
-        ref = weakref.ref(self)
-
-        def shutdown(signum, frame):
-            if executor := ref():
-                executor.shutdown()
-
-        if threading.current_thread() is threading.main_thread():
-            signal.signal(signal.SIGINT, shutdown)
-            signal.signal(signal.SIGTERM, shutdown)
-
         self.driver_worker = self._create_worker(
             distributed_init_method=distributed_init_method)
         self._run_workers("init_device")
@@ -135,6 +121,13 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
             update_environment_variables({
                 "CUDA_VISIBLE_DEVICES": (",".join(map(str, range(world_size))))
             })
+
+        if (cuda_is_initialized()
+                and os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") != "spawn"):
+            logger.warning("CUDA was previously initialized. We must use "
+                           "the `spawn` multiprocessing start method. Setting "
+                           "VLLM_WORKER_MULTIPROC_METHOD to 'spawn'.")
+            os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
         cuda_device_count = cuda_device_count_stateless()
         # Use confusing message for more common TP-only case.
