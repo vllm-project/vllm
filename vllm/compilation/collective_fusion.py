@@ -8,6 +8,7 @@ from torch._inductor.pattern_matcher import (Match, PatternMatcherPass,
 
 import vllm._custom_ops as ops
 import vllm.envs as envs
+from vllm.compilation.config import CompilationConfig
 from vllm.compilation.inductor_pass import InductorPass
 from vllm.compilation.utils import (find_auto_fn, find_fn, find_getitem,
                                     last_node_in_match)
@@ -318,7 +319,26 @@ direct_register_custom_op("gemm_ag_final",
 
 class CollectiveFusionPass(InductorPass):
 
-    def __init__(self):
+    _instance: 'Optional[CollectiveFusionPass]' = None
+
+    @classmethod
+    def instance(cls, config: CompilationConfig):
+        """
+        Get the singleton instance of the CollectiveFusionPass.
+        If the instance exists, the config is updated but
+        initialization is not repeated.
+        """
+        if cls._instance is None:
+            cls._instance = CollectiveFusionPass(config)
+        else:
+            cls._instance.config = config
+        return cls._instance
+
+    def __init__(self, config):
+        assert self.__class__._instance is None, \
+            "FusionPass singleton instance already exists"
+        super().__init__(config)
+
         self.gemm_rs_ag_gemm_pattern = PatternMatcherPass()
         self.final_pattern = PatternMatcherPass()
         self.matches: List[Match] = []
