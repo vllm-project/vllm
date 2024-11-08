@@ -14,8 +14,8 @@
 """Inference-only Idefics3 model compatible with HuggingFace weights."""
 
 import math
-from typing import (Iterable, List, Literal, Mapping, Optional, Tuple,
-                    TypedDict, Union)
+from typing import (Dict, Iterable, List, Literal, Mapping, NamedTuple,
+                    Optional, Tuple, TypedDict, Union)
 
 import torch
 import torch.utils.checkpoint
@@ -23,6 +23,7 @@ from PIL import Image
 from torch import nn
 # Temporary solution for transformers below 4.46.0.
 from transformers import PretrainedConfig as Idefics3Config
+from transformers import ProcessorMixin as Idefics3ImageProcessor
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
@@ -72,16 +73,41 @@ class Idefics3ImageEmbeddingInputs(TypedDict):
     """
 
 
+class Idefics3ProcessorSize(NamedTuple):
+    """Hashable wrapper for unhashable `size` dict of Idefics3Processor."""
+    # NOTE: cached_get_processor/cached_get_image_processor uses lru_cache,
+    # we need to use NamedTuple instead of TypedDict to avoid hashing issues.
+    longest_edge: int
+
+    def __contains__(self, key: str) -> bool:
+        return key in self._asdict() and getattr(self, key) is not None
+
+    def __getitem__(self, key: str) -> int:
+        return getattr(self, key)
+
+
 ImageInputs = Union[Idefics3ImagePixelInputs, Idefics3ImageEmbeddingInputs]
+
+
+def get_mm_processor_kwargs(size: Optional[Dict[str, int]] = None) -> Dict:
+    mm_processor_kwargs = {}
+    if size:
+        mm_processor_kwargs["size"] = Idefics3ProcessorSize(**size)
+    return mm_processor_kwargs
 
 
 def input_mapper_for_idefics3(
     ctx: InputContext,
     data: object,
+    *,
+    size: Optional[Dict[str, int]] = None,
 ):
     model_config = ctx.model_config
+    mm_processor_kwargs = get_mm_processor_kwargs(size)
     image_processor = cached_get_image_processor(
-        model_config.model, trust_remote_code=model_config.trust_remote_code)
+        model_config.model,
+        trust_remote_code=model_config.trust_remote_code,
+        **mm_processor_kwargs)
     if image_processor is None:
         raise RuntimeError("No HuggingFace processor is available "
                            "to process the image object")
@@ -201,13 +227,17 @@ def _get_image_prompt_string(image_rows: int, image_cols: int,
                                global_img_token)
 
 
-def input_processor_for_idefics3(ctx: InputContext, inputs: DecoderOnlyInputs):
+def input_processor_for_idefics3(ctx: InputContext,
+                                 inputs: DecoderOnlyInputs,
+                                 *,
+                                 size: Optional[Dict[str, int]] = None):
     multi_modal_data = inputs.get("multi_modal_data")
     if multi_modal_data is None or "image" not in multi_modal_data:
         return inputs
 
     model_config = ctx.model_config
-    processor = cached_get_processor(model_config.model)
+    mm_processor_kwargs = get_mm_processor_kwargs(size)
+    processor = cached_get_processor(model_config.model, **mm_processor_kwargs)
     image_processor = processor.image_processor
     tokenizer = processor.tokenizer
     size = image_processor.size['longest_edge']
@@ -286,32 +316,46 @@ def input_processor_for_idefics3(ctx: InputContext, inputs: DecoderOnlyInputs):
         )
 
 
-def get_max_idefics3_image_tokens(ctx: InputContext,
-                                  *,
-                                  num_crops: Optional[int] = None):
-    model_config = ctx.model_config
-    processor = cached_get_processor(model_config.model)
-    image_seq_len = processor.image_seq_len
-    image_processor = processor.image_processor
-
+def _get_max_num_image_patch(image_processor: Idefics3ImageProcessor) -> int:
     size = image_processor.size['longest_edge']
     max_image_size = image_processor.max_image_size['longest_edge']
     resized_height, resized_width = size, size
 
     grid_h = resized_height // max_image_size
     grid_w = resized_width // max_image_size
+    return (grid_h * grid_w + 1)
 
-    return (grid_h * grid_w + 1) * image_seq_len
+
+def get_max_idefics3_image_tokens(ctx: InputContext,
+                                  *,
+                                  size: Optional[Dict[str,
+                                                      int]] = None) -> int:
+    model_config = ctx.model_config
+    mm_processor_kwargs = get_mm_processor_kwargs(size)
+    processor = cached_get_processor(model_config.model, **mm_processor_kwargs)
+    image_seq_len = processor.image_seq_len
+    image_processor = processor.image_processor
+
+    max_num_image_patches = _get_max_num_image_patch(image_processor)
+
+    return max_num_image_patches * image_seq_len
 
 
-def dummy_data_for_idefics3(ctx: InputContext, seq_len: int,
-                            mm_counts: Mapping[str, int]) -> DummyData:
+def dummy_data_for_idefics3(
+        ctx: InputContext,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+        *,
+        size: Optional[Dict[str, int]] = None) -> DummyData:
     hf_config = ctx.get_hf_config()
     num_images = mm_counts["image"]
 
-    processor = cached_get_processor(ctx.model_config.model)
+    mm_processor_kwargs = get_mm_processor_kwargs(size)
+    processor = cached_get_processor(ctx.model_config.model,
+                                     **mm_processor_kwargs)
+    max_num_image_patches = _get_max_num_image_patch(processor.image_processor)
     image_seq_len = processor.image_seq_len
-    max_llm_image_tokens = 17 * image_seq_len * num_images
+    max_llm_image_tokens = max_num_image_patches * image_seq_len * num_images
 
     seq_data = SequenceData.from_prompt_token_counts(
         (hf_config.image_token_id, max_llm_image_tokens), (0, seq_len))
