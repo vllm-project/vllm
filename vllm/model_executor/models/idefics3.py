@@ -74,6 +74,9 @@ class Idefics3ImageEmbeddingInputs(TypedDict):
 
 
 class Idefics3ProcessorSize(NamedTuple):
+    """Hashable wrapper for unhashable `size` dict of Idefics3Processor."""
+    # NOTE: cached_get_processor/cached_get_image_processor uses lru_cache,
+    # we need to use NamedTuple instead of TypedDict to avoid hashing issues.
     longest_edge: int
 
     def __contains__(self, key: str) -> bool:
