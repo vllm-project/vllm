@@ -69,6 +69,7 @@ if TYPE_CHECKING:
     VLLM_SKIP_P2P_CHECK: bool = False
     VLLM_DISABLED_KERNELS: List[str] = []
     VLLM_USE_V1: bool = False
+    VLLM_V1_FORCE_DISABLE_PREFIX_CACHING: bool = False
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = False
 
 
@@ -453,6 +454,10 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # If set, use the V1 code path.
     "VLLM_USE_V1":
     lambda: bool(int(os.getenv("VLLM_USE_V1", "0"))),
+
+    # If set, disable prefix caching irrespective of the engine args setting.
+    "VLLM_V1_FORCE_DISABLE_PREFIX_CACHING":
+    lambda: bool(int(os.getenv("VLLM_V1_FORCE_DISABLE_PREFIX_CACHING", "0"))),
 
     # If set, enable multiprocessing in LLM for the V1 code path.
     "VLLM_ENABLE_V1_MULTIPROCESSING":

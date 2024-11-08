@@ -201,6 +201,10 @@ class EngineArgs:
         if not self.tokenizer:
             self.tokenizer = self.model
 
+        # Force prefix caching disable.
+        if envs.VLLM_USE_V1 and envs.VLLM_V1_FORCE_DISABLE_PREFIX_CACHING:
+            self.enable_prefix_caching = False
+
         # Override the default value of enable_prefix_caching if it's not set
         # by user.
         if self.enable_prefix_caching is None:

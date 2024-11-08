@@ -44,7 +44,7 @@ class Processor:
         self.mm_input_mapper = MMInputMapper(model_config)
 
     # TODO: run in an ThreadpoolExecutor or BackgroundProcess.
-    # This ideally should releases the GIL, so we should not block the
+    # This ideally should release the GIL, so we should not block the
     # asyncio loop while this is running.
     def process_inputs(
         self,
@@ -108,15 +108,11 @@ class Processor:
 
         # Make Request for Detokenizer.
         detokenizer_request = DetokenizerRequest(
-            request_id,
-            decoder_inputs.prompt,
-            decoder_inputs.prompt_token_ids,
+            request_id, decoder_inputs.prompt, decoder_inputs.prompt_token_ids,
             sampling_params.skip_special_tokens,
             sampling_params.spaces_between_special_tokens,
-            sampling_params.output_kind,
-            sampling_params.stop,
-            sampling_params.include_stop_str_in_output,
-        )
+            sampling_params.output_kind, sampling_params.stop,
+            sampling_params.include_stop_str_in_output, lora_request)
 
         # Make Request for EngineCore.
         engine_core_request = EngineCoreRequest(

@@ -1,5 +1,6 @@
 from typing import List
 
+import pytest
 import ray
 
 import vllm
@@ -48,10 +49,9 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> List[str]:
     # Print the outputs.
     generated_texts: List[str] = []
     for output in outputs:
-        prompt = output.prompt
         generated_text = output.outputs[0].text
         generated_texts.append(generated_text)
-        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+
     return generated_texts
 
 
@@ -71,9 +71,16 @@ def generate_and_test(llm, sql_lora_files):
     print("removing lora")
 
 
+@pytest.fixture(autouse=True)
+def v1(run_with_both_engines_lora):
+    # Simple autouse wrapper to run both engines for each test
+    # This can be promoted up to conftest.py to run for every
+    # test in a package
+    pass
+
+
 @fork_new_process_for_each_test
 def test_llama_lora(sql_lora_files):
-
     llm = vllm.LLM(MODEL_PATH,
                    enable_lora=True,
                    max_num_seqs=16,
@@ -110,6 +117,7 @@ def test_llama_lora_warmup(sql_lora_files):
         "less when using lora than when not using lora")
 
 
+@pytest.mark.skip_v1
 @multi_gpu_test(num_gpus=4)
 @fork_new_process_for_each_test
 def test_llama_lora_tp4(sql_lora_files):
@@ -124,6 +132,7 @@ def test_llama_lora_tp4(sql_lora_files):
     generate_and_test(llm, sql_lora_files)
 
 
+@pytest.mark.skip_v1
 @multi_gpu_test(num_gpus=4)
 @fork_new_process_for_each_test
 def test_llama_lora_tp4_fully_sharded_loras(sql_lora_files):
@@ -139,6 +148,7 @@ def test_llama_lora_tp4_fully_sharded_loras(sql_lora_files):
     generate_and_test(llm, sql_lora_files)
 
 
+@pytest.mark.skip_v1
 @multi_gpu_test(num_gpus=4)
 @fork_new_process_for_each_test
 def test_llama_lora_tp4_fully_sharded_enable_bias(sql_lora_files):
