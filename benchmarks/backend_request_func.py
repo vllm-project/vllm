@@ -256,7 +256,7 @@ async def async_request_openai_completions(
             async with session.post(url=api_url, json=payload,
                                     headers=headers) as response:
                 if response.status == 200:
-                    first_valid_chunk_received = False
+                    first_chunk_received = False
                     async for chunk_bytes in response.content:
                         chunk_bytes = chunk_bytes.strip()
                         if not chunk_bytes:
@@ -275,7 +275,7 @@ async def async_request_openai_completions(
                             if data["choices"][0]["text"]:
                                 timestamp = time.perf_counter()
                                 # First token
-                                if not first_valid_chunk_received:
+                                if not first_chunk_received:
                                     first_chunk_received = True
                                     ttft = time.perf_counter() - st
                                     output.ttft = ttft
