@@ -1,8 +1,11 @@
 name: Cleanup PR Body
 
 on:
-  pull_request:
-    types: [opened, edited, synchronize]
+  pull_request_target:
+    types: [opened, reopened, edited]
+
+permissions:
+  pull-requests: write
 
 jobs:
   update-description:
