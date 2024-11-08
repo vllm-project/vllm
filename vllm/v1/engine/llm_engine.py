@@ -67,9 +67,7 @@ class LLMEngine:
             scheduler_config.max_num_batched_tokens = 2048
         
         # TODO (ywang96): Enable APC by default when VLM supports it.
-        if model_config.is_multimodal_model: 
-            cache_config.enable_prefix_caching = False
-        else:
+        if not model_config.is_multimodal_model:
             cache_config.enable_prefix_caching = True
 
         logger.info(
