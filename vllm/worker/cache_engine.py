@@ -52,15 +52,11 @@ class CacheEngine:
             self.dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
 
         # Get attention backend.
-        self.attn_backend = get_attn_backend(
-            model_config.get_num_attention_heads(parallel_config),
-            self.head_size,
-            self.num_kv_heads,
-            model_config.get_sliding_window(),
-            model_config.dtype,
-            cache_config.cache_dtype,
-            self.block_size,
-        )
+        self.attn_backend = get_attn_backend(self.head_size,
+                                             model_config.dtype,
+                                             cache_config.cache_dtype,
+                                             self.block_size,
+                                             model_config.is_attention_free)
 
         # Initialize the cache.
         self.gpu_cache = self._allocate_kv_cache(

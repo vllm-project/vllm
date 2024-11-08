@@ -42,10 +42,12 @@ class Attention(nn.Module):
             kv_cache_dtype = cache_config.cache_dtype
             block_size = cache_config.block_size
             sliding_window = cache_config.sliding_window
+            is_attention_free = cache_config.is_attention_free
         else:
             kv_cache_dtype = "auto"
             block_size = 16
             sliding_window = None
+            is_attention_free = False
         if num_kv_heads is None:
             num_kv_heads = num_heads
 
@@ -76,10 +78,9 @@ class Attention(nn.Module):
         # During model initialization, the default dtype is set as the model
         # weight and activation dtype.
         dtype = torch.get_default_dtype()
-        attn_backend = get_attn_backend(num_heads, head_size, num_kv_heads,
-                                        sliding_window, dtype, kv_cache_dtype,
-                                        block_size, blocksparse_params
-                                        is not None)
+        attn_backend = get_attn_backend(head_size, dtype, kv_cache_dtype,
+                                        block_size, is_attention_free,
+                                        blocksparse_params is not None)
         impl_cls = attn_backend.get_impl_cls()
         self.impl = impl_cls(num_heads, head_size, scale, num_kv_heads,
                              alibi_slopes, sliding_window, kv_cache_dtype,
@@ -90,7 +91,7 @@ class Attention(nn.Module):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        kv_cache: Optional[torch.Tensor],
+        kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
         attn_type: AttentionType = AttentionType.DECODER,
     ) -> torch.Tensor:

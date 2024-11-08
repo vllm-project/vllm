@@ -1,3 +1,5 @@
+#!/bin/bash
+
 # This script build the CPU docker image and run the offline inference inside the container.
 # It serves a sanity check for compilation and basic model usage.
 set -ex
@@ -27,14 +29,15 @@ docker exec cpu-test bash -c "
   pytest -v -s tests/models/decoder_only/language \
     --ignore=tests/models/test_fp8.py \
     --ignore=tests/models/decoder_only/language/test_jamba.py \
+    --ignore=tests/models/decoder_only/language/test_mamba.py \
     --ignore=tests/models/decoder_only/language/test_granitemoe.py \
     --ignore=tests/models/decoder_only/language/test_danube3_4b.py" # Mamba and Danube3-4B on CPU is not supported
 
 # Run compressed-tensor test
-# docker exec cpu-test bash -c "
-#   pytest -s -v \
-#   tests/quantization/test_compressed_tensors.py::test_compressed_tensors_w8a8_static_setup \
-#   tests/quantization/test_compressed_tensors.py::test_compressed_tensors_w8a8_dynanmic_per_token"
+docker exec cpu-test bash -c "
+  pytest -s -v \
+  tests/quantization/test_compressed_tensors.py::test_compressed_tensors_w8a8_static_setup \
+  tests/quantization/test_compressed_tensors.py::test_compressed_tensors_w8a8_dynamic_per_token"
 
 # Run AWQ test
 docker exec cpu-test bash -c "
@@ -45,7 +48,7 @@ docker exec cpu-test bash -c "
 docker exec cpu-test bash -c "
   export VLLM_CPU_KVCACHE_SPACE=10 
   export VLLM_CPU_OMP_THREADS_BIND=48-92 
-  python3 -m vllm.entrypoints.openai.api_server --model facebook/opt-125m & 
+  python3 -m vllm.entrypoints.openai.api_server --model facebook/opt-125m --dtype half & 
   timeout 600 bash -c 'until curl localhost:8000/v1/models; do sleep 1; done' || exit 1
   python3 benchmarks/benchmark_serving.py \
     --backend vllm \

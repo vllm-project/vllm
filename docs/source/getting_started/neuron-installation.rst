@@ -11,7 +11,7 @@ Requirements
 ------------
 
 * OS: Linux
-* Python: 3.8 -- 3.11
+* Python: 3.9 -- 3.11
 * Accelerator: NeuronCore_v2 (in trn1/inf2 instances)
 * Pytorch 2.0.1/2.1.1
 * AWS Neuron SDK 2.16/2.17 (Verified on python 3.8)
@@ -26,6 +26,10 @@ Installation steps:
   - :ref:`Step 3. Install vLLM from source <install_vllm>`
 
 .. _build_from_source_neuron:
+
+.. note::
+
+    The currently supported version of Pytorch for Neuron installs `triton` version `2.1.0`. This is incompatible with vLLM >= 0.5.3. You may see an error `cannot import name 'default_dump_dir...`. To work around this, run a `pip install --upgrade triton==3.0.0` after installing the vLLM wheel.
 
 Build from source
 -----------------
