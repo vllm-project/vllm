@@ -61,6 +61,10 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
 
     draft_worker_config = copy.deepcopy(vllm_config)
     draft_worker_config.model_config = speculative_config.draft_model_config
+    draft_worker_config.quant_config = VllmConfig._get_quantization_config(
+        draft_worker_config.model_config,
+        vllm_config.load_config,
+    )
     draft_worker_config.parallel_config = speculative_config.draft_parallel_config  # noqa
     # TODO allow draft-model specific load config.
 
@@ -414,7 +418,10 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         #    none of the requests in the batch have spec decoding enabled.
         # In any of these cases, the proposer and scorer workers
         # are called normally.
-        no_spec = num_lookahead_slots == 0 or disable_all_speculation or all(
+        # We expect `num_speculative_tokens` to be None for prefills.
+        no_spec = all(
+            sgm.is_prompt for sgm in execute_model_req.seq_group_metadata_list
+        ) or num_lookahead_slots == 0 or disable_all_speculation or all(
             sgm.num_speculative_tokens == 0
             for sgm in execute_model_req.seq_group_metadata_list)
 
@@ -480,7 +487,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
     def _serialize_sampler_output_no_logprobs(
             self, execute_model_req: ExecuteModelRequest,
-            sampler_output: SamplerOutput) -> SamplerOutput:
+            sampler_output: SamplerOutput) -> List[SamplerOutput]:
         """
         Creates and returns a `SamplerOutput` with only the token IDs being
         serialized to CPU and populated in `CompletionSequenceGroupOutput`.
@@ -510,41 +517,56 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             if any(seq_output_prompt_logprobs) else \
                 sampler_output.sampled_token_ids).tolist()
 
-        seq_data_entries = (
+        seq_data_entries = [
             (seq_id, seq_data) for sg in \
             execute_model_req.seq_group_metadata_list \
             for seq_id, seq_data in sg.seq_data.items()
-        )
+            if sg.do_sample # ignore empty token sequences
+        ]
         completion_seq_group_output_list: List[
             CompletionSequenceGroupOutput] = []
-        for index, ((seq_id, seq_data), needs_prompt_logprobs) in \
-            enumerate(zip(seq_data_entries, seq_output_prompt_logprobs)):
-            if needs_prompt_logprobs:
-                prompt_token_ids = seq_data.get_prompt_token_ids()
-                prompt_logprobs = [
-                    create_logprobs_output(
-                        token_id=p_token_id,
+        output_index = 0
+        # Make sure the non-terminal prefill chunks are still aligned with
+        # their own empty output.
+        for seq_group_meta in execute_model_req.seq_group_metadata_list:
+            # Since we can get chunks here, we dont always have a sampled token
+            # (only on last chunk) but we still have to provide an output.
+            if not seq_group_meta.do_sample:
+                completion_seq_group_output_list.append(
+                    CompletionSequenceGroupOutput(samples=[],
+                                                  prompt_logprobs=None))
+            else:
+                # Sequence with output.
+                seq_id, seq_data = seq_data_entries[output_index]
+                needs_prompt_logprobs = seq_output_prompt_logprobs[
+                    output_index]
+                if needs_prompt_logprobs:
+                    prompt_token_ids = seq_data.get_prompt_token_ids()
+                    prompt_logprobs = [
+                        create_logprobs_output(
+                            token_id=p_token_id,
+                            token_id_logprob_rank=-1,
+                            token_id_logprob=0.0,
+                            topk_token_ids=[],
+                            topk_logprobs=[],
+                        )
+                        # no prompt logprobs for the first token
+                        for p_token_id in prompt_token_ids[1:]
+                    ]
+                else:
+                    prompt_logprobs = None
+                completion_seq_group_output_list.append(
+                    create_sequence_group_output(
+                        token_id=sampled_token_ids_list[output_index][0],
                         token_id_logprob_rank=-1,
                         token_id_logprob=0.0,
+                        seq_id=seq_id,
                         topk_token_ids=[],
                         topk_logprobs=[],
-                    )
-                    # no prompt logprobs for the first token
-                    for p_token_id in prompt_token_ids[1:]
-                ]
-            else:
-                prompt_logprobs = None
+                        prompt_logprobs=prompt_logprobs))
+                output_index += 1
 
-            completion_seq_group_output_list.append(
-                create_sequence_group_output(
-                    token_id=sampled_token_ids_list[index][0],
-                    token_id_logprob_rank=-1,
-                    token_id_logprob=0.0,
-                    seq_id=seq_id,
-                    topk_token_ids=[],
-                    topk_logprobs=[],
-                    prompt_logprobs=prompt_logprobs))
-        return SamplerOutput(outputs=completion_seq_group_output_list)
+        return [SamplerOutput(outputs=completion_seq_group_output_list)]
 
     @nvtx_range("spec_decode_worker._run_no_spec")
     def _run_no_spec(self, execute_model_req: ExecuteModelRequest,
@@ -564,6 +586,9 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         hidden_states = sampler_output.hidden_states
         if hidden_states is not None:
             # remove hidden_states for prompt tokens
+            # TODO Enable `return_hidden_states`: prefill chunks hidden states
+            # are pruned by the logits processor. Also, they should be arranged
+            # back into full-prefill latent. Address it to enable MLPSpeculator.
             if any(seq.is_prompt
                    for seq in execute_model_req.seq_group_metadata_list):
                 hidden_states = hidden_states[
@@ -589,14 +614,14 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         sampler_output_to_return = (self._serialize_sampler_output_no_logprobs(
             execute_model_req=execute_model_req, sampler_output=sampler_output)
                                     if self._disable_logprobs else
-                                    sampler_output)
+                                    [sampler_output])
 
         # Clear device tensors from sampler output. This reduces communication
         # overhead when the engine runs in a different process than the workers.
         sampler_output.sampled_token_probs = None
         sampler_output.sampled_token_ids = None
         sampler_output.logprobs = None
-        return [sampler_output_to_return]
+        return sampler_output_to_return
 
     def _run_non_driver_rank(self) -> bool:
         """Run proposer and verifier model in non-driver workers. This is used
@@ -640,9 +665,15 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         This invokes the proposer worker to get k speculative tokens for each
         sequence, then scores each speculative token using the scoring worker.
 
+        When `enable_chunked_prefill` is set, scorer will batch decodes and 
+        prefills, while proposer will sync its KV-cache by running an extra
+        forward on prefills.
+
         Returns a list of SamplerOutput, each containing a single token per
         sequence.
         """
+        # With prefill chunking, expect requests to have prompts first
+        # so that backend gets prefill|decode.
         assert num_lookahead_slots == execute_model_req.num_lookahead_slots
 
         # Pass last hidden states from target model to proposer
@@ -666,6 +697,25 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                 execute_model_req,
                 proposals,
             )
+
+        _, (non_spec_seqs, non_spec_indices) = split_batch_by_proposal_len(
+            execute_model_req.seq_group_metadata_list, proposals.proposal_lens)
+        # With prefill chunking enabled, `non_spec_seqs` contains prefills too:
+        # discard decodes that have already been processed by proposer.
+        non_spec_indices = [
+            idx for idx in non_spec_indices
+            if execute_model_req.seq_group_metadata_list[idx].is_prompt
+        ]
+        if len(non_spec_indices):
+            all_hidden_states = proposal_scores.hidden_states
+            # TODO fix `return_hidden_states`, same as in `_run_no_spec`
+            if all_hidden_states is not None:
+                prefill_hidden_states = all_hidden_states[non_spec_indices]
+                execute_model_req.previous_hidden_states = \
+                    prepare_prefill_hidden_states(prefill_hidden_states)
+            # Sync proposer KV cache for prefills.
+            prefill_req = execute_model_req.clone(non_spec_seqs)
+            self.proposer_worker.execute_model(prefill_req)
 
         with Timer() as verification_timer:
             accepted_token_ids, target_logprobs = self._verify_tokens(
@@ -765,7 +815,6 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             self.previous_hidden_states = HiddenStates(
                 hidden_states, seq_group_metadata_list,
                 second_last_token_hidden_states)
-
         return accepted_token_ids, logprobs
 
     def _create_output_sampler_list(
@@ -815,6 +864,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         accepted_token_ids_by_step = accepted_token_ids_by_step.tolist()
 
         # Construct the output on a per-step, per-sequence basis.
+        # Non-terminal prefill chunks will end up here as rows with just -1s
+        # i.e mixed-batch [[-1, 1576], [-1, 29884], [-1, -1], [-1, -1]]
         sampler_output_list: List[SamplerOutput] = []
         for step_index in range(num_steps):
             if all(token_id == -1
@@ -857,7 +908,6 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             # This is periodic because the rejection sampler emits metrics
             # periodically.
             self._maybe_log_stage_times(*stage_times)
-
         return sampler_output_list
 
     def _maybe_log_stage_times(self, average_time_per_proposal_tok_ms: float,

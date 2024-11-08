@@ -1,4 +1,3 @@
-# coding=utf-8
 # Adapted from
 # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/llama/modeling_llama.py
 # Copyright 2023 The vLLM team.
@@ -42,7 +41,7 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.resampler import (BaseResampler, Resampler2,
                                                   get_2d_sincos_pos_embed)
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.utils import set_default_torch_dtype
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -421,7 +420,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
                                       quant_config=quant_config,
                                       prefix="llm.lm_head")
         self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.sampler = Sampler()
+        self.sampler = get_sampler()
 
         self.make_empty_intermediate_tensors = (
             self.llm.make_empty_intermediate_tensors)
@@ -854,10 +853,6 @@ class MiniCPMV2_5(MiniCPMVBaseModel, SupportsLoRA):
         # resampler
         ".kv_proj.",
     ]
-    # in TP, these weights are partitioned along the column dimension (dim=-1)
-    column_parallel_weights_modules = [
-        ".down_proj.", ".o_proj.", ".self_attn.out_proj.", ".fc2."
-    ]
     bitsandbytes_stacked_params_mapping = {
         # shard_name, weight_name, index
         "q_proj": ("qkv_proj", 0),
@@ -1007,10 +1002,6 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
         ".self_attn.out_proj.",
         # resampler
         ".kv_proj.",
-    ]
-    # in TP, these weights are partitioned along the column dimension (dim=-1)
-    column_parallel_weights_modules = [
-        ".down_proj.", ".o_proj.", ".self_attn.out_proj.", ".fc2."
     ]
     bitsandbytes_stacked_params_mapping = {
         # shard_name, weight_name, index
