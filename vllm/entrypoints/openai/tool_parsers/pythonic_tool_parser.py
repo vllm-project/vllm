@@ -29,6 +29,12 @@ class PythonicToolParser(ToolParser):
 
     Used when --enable-auto-tool-choice --tool-call-parser pythonic are all set
     """
+    # TODO(mdepinet): Possible future improvements:
+    #   1. Support text + tools separated by either <|python_tag|> or \n\n
+    #   2. Support tools outside of a list (or separated by a semicolon).
+    #      This depends on item 1 for consistent streaming.
+    # Neither of these are necessary for e.g. ToolACE, but both would help make
+    # Llama3.2 models more reliable.
 
     TOOL_CALL_REGEX = re.compile(
         r"\[([a-zA-Z]+\w*\(([a-zA-Z]+\w*=.*,\s*)*([a-zA-Z]+\w*=.*\s)?\),\s*)*([a-zA-Z]+\w*\(([a-zA-Z]+\w*=.*,\s*)*([a-zA-Z]+\w*=.*\s*)?\)\s*)+\]",

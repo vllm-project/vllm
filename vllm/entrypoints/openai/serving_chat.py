@@ -75,6 +75,11 @@ class OpenAIServingChat(OpenAIServing):
             try:
                 self.tool_parser = ToolParserManager.get_tool_parser(
                     tool_parser)
+                if (self.tool_parser.__name__ == "PythonicToolParser" and
+                        model_config.model.startswith("meta-llama/Llama-3.2")):
+                    logger.warning(
+                        "Llama3.2 models may struggle to emit valid pythonic"
+                        " tool calls")
             except Exception as e:
                 raise TypeError("Error: --enable-auto-tool-choice requires "
                                 f"tool_parser:'{tool_parser}' which has not "

@@ -123,17 +123,6 @@ CONFIGS: Dict[str, ServerConfig] = {
         "supports_parallel":
         False,
     },
-    "llama3.2_pythonic": {
-        "model":
-        "meta-llama/Llama-3.2-3B-Instruct",
-        "arguments": [
-            "--tool-call-parser", "pythonic", "--chat-template",
-            str(VLLM_PATH /
-                "examples/tool_chat_template_llama3.2_pythonic.jinja")
-        ],
-        "supports_parallel":
-        True,
-    },
     "toolACE": {
         "model":
         "Team-ACE/ToolACE-8B",
