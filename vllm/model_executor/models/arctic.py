@@ -415,13 +415,16 @@ class ArcticModel(nn.Module):
 
 class ArcticForCausalLM(nn.Module, SupportsPP):
 
-    def __init__(self, vllm_config: VllmConfig, **kwargs) -> None:
+    def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         self.config = config
-        self.model = ArcticModel(config, cache_config, quant_config)
+        self.model = ArcticModel(config,
+                                 cache_config,
+                                 quant_config,
+                                 prefix=prefix)
         self.vocab_size = config.vocab_size
         self.lm_head = ParallelLMHead(
             self.vocab_size,
