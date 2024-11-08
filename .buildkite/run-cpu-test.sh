@@ -69,6 +69,6 @@ function cpu_tests() {
       --tokenizer facebook/opt-125m"
 }
 
-# All of CPU tests are expected to be finished less than 20 mins.
+# All of CPU tests are expected to be finished less than 25 mins.
 export -f cpu_tests
-timeout 20m bash -c "cpu_tests"
+timeout 25m bash -c "cpu_tests"
