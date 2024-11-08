@@ -68,7 +68,7 @@ files = [
     "vllm/entrypoints",
     "vllm/core",
     "vllm/inputs",
-    "vllm/logging",
+    "vllm/logging_utils",
     "vllm/multimodal",
     "vllm/platforms",
     "vllm/transformers_utils",
