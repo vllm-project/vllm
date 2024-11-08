@@ -1968,6 +1968,48 @@ class ObservabilityConfig:
                 "OpenTelemetry is not available. Unable to configure "
                 "'otlp_traces_endpoint'. Ensure OpenTelemetry packages are "
                 f"installed. Original error:\n{otel_import_error_traceback}")
+            
+            
+@dataclass
+class KVTransferConfig:
+    """Configuration for KV cache transfer between vLLM instances
+    
+    To distinguish between other configs, all the configs here are prefixed 
+    with "kv"
+    """
+    
+    # the connector to use for kv cache transfer
+    # vLLM natively supports TorchDistributedConnector and also include 
+    # third-party connector, but does not provide official support, please 
+    # reach out to the code owner for those connectors for support.
+    kv_connector: Optional[str] = None
+    
+    # the buffer size parameter, used to configure the buffer size of receiving
+    # KV cache
+    kv_buffer_size: Optional[float] = None
+    kv_transfer_role: Optional[str] = None
+    kv_init_method: Optional[str] = None
+    kv_xpyd: Optional[str] = None
+    kv_rank: Optional[int] = None
+    
+    def __post_init__(self):
+        if self.kv_connector is None and not all([
+            self.kv_buffer_size is None,
+            self.kv_transfer_role is None,
+            self.kv_init_method is None,
+            self.kv_xpyd is None,
+            self.kv_xypd_rank is None,
+        ]):
+            raise ValueError("Please specify kv_connector before configuring "
+                             "variables with prefix `kv_`")
+            
+        assert self.kv_connector in [
+            None,
+            'TorchDistributedConnector',
+            'LMCacheConnector'
+        ],  f"Existing kv connectors are `TorchDistributedConnector` and "\
+            f"`LMCacheConnector`. Got {self.kv_connector}"
+    
 
 
 @dataclass
@@ -1988,6 +2030,7 @@ class VllmConfig:
     observability_config: Optional[ObservabilityConfig] = None
     prompt_adapter_config: Optional[PromptAdapterConfig] = None
     quant_config: Optional[QuantizationConfig] = None
+    kv_transfer_config: Optional[KVTransferConfig] = None
 
     @staticmethod
     def _get_quantization_config(
