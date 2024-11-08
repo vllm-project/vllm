@@ -16,7 +16,6 @@ logger = init_logger(__name__)
 
 if current_platform.is_hpu():
     import habana_frameworks.torch.core as htcore
-    convert_from_uint4 = torch.ops.hpu.convert_from_uint4
 
 if not current_platform.is_tpu() and not current_platform.is_hpu():
     try:
@@ -234,15 +233,6 @@ def awq_gemm(input: torch.Tensor, qweight: torch.Tensor, qzeros: torch.Tensor,
             awq_gemm_triton)
         return awq_gemm_triton(input, qweight, qzeros, scales, split_k_iters)
     return torch.ops._C.awq_gemm(input, qweight, qzeros, scales, split_k_iters)
-
-
-def gptq_hpu_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
-              b_gptq_qzeros: torch.Tensor, b_gptq_scales: torch.Tensor,
-              b_g_idx: torch.Tensor, use_exllama: bool,
-              bit: int) -> torch.Tensor:
-    
-    weight = convert_from_uint4(b_q_weight, b_gptq_scales, b_gptq_qzeros, a.dtype)
-    return torch.matmul(a, weight)
 
 def gptq_gemm(a: torch.Tensor, b_q_weight: torch.Tensor,
               b_gptq_qzeros: torch.Tensor, b_gptq_scales: torch.Tensor,
