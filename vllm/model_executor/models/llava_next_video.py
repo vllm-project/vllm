@@ -14,7 +14,7 @@ from vllm.config import VllmConfig
 from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
                          InputContext, token_inputs)
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.models.clip import CLIPVisionModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -286,7 +286,7 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal,
         if hasattr(self.language_model, "sampler"):
             return self.language_model.sampler
 
-        return Sampler()
+        return get_sampler()
 
     def _validate_video_pixel_values(
         self, data: Union[torch.Tensor, List[torch.Tensor]]

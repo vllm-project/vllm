@@ -18,7 +18,7 @@ from vllm.config import VllmConfig
 from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
                          InputContext, token_inputs)
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.utils import (cached_get_tokenizer,
@@ -340,7 +340,7 @@ def input_processor_when_multimodal_input_video(ctx: InputContext,
                 get_llava_onevision_video_tokens(ctx, num_frames))
 
         tokenizer = cached_get_tokenizer(model_config.tokenizer)
-        new_prompt, new_token_ids = repeat_and_pad_placeholder_tokens(
+        new_prompt, new_token_ids, ranges = repeat_and_pad_placeholder_tokens(
             tokenizer,
             inputs.get("prompt"),
             inputs["prompt_token_ids"],
@@ -349,7 +349,8 @@ def input_processor_when_multimodal_input_video(ctx: InputContext,
         )
         return token_inputs(prompt_token_ids=new_token_ids,
                             prompt=new_prompt,
-                            multi_modal_data=multi_modal_data)
+                            multi_modal_data=multi_modal_data,
+                            multi_modal_placeholders={"video": ranges})
     else:
         raise TypeError(f"Invalid video type: {type(video_data)}")
 
@@ -434,7 +435,7 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
         if hasattr(self.language_model, "sampler"):
             return self.language_model.sampler
 
-        return Sampler()
+        return get_sampler()
 
     def _validate_image_sizes(self, data: torch.Tensor) -> torch.Tensor:
         expected_dims = (2, )

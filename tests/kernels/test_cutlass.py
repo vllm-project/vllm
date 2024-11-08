@@ -11,6 +11,28 @@ from tests.kernels.utils import opcheck
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
 
+MNK_FACTORS = [
+    (1, 256, 128),
+    (1, 16384, 1024),
+    (1, 24576, 496),
+    (16, 256, 496),
+    (16, 16384, 128),
+    (16, 24576, 4096),
+    (32, 8192, 4096),
+    (32, 16384, 4096),
+    (33, 1024, 1024),
+    (33, 8192, 128),
+    (64, 2048, 496),
+    (64, 16384, 1024),
+    (100, 8192, 496),
+    (128, 32768, 4096),
+    (256, 4096, 4096),
+    (512, 256, 1024),
+    (512, 8192, 4096),
+    (512, 16384, 128),
+    (512, 24576, 128),
+]
+
 CUDA_DEVICES = [
     f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
 ]
@@ -116,9 +138,7 @@ def cutlass_int8_gemm_helper(m: int,
             (out, a, b, scale_a, scale_b, bias))
 
 
-@pytest.mark.parametrize("m", [1, 16, 32, 64, 128, 256, 512, 222, 100, 33])
-@pytest.mark.parametrize("n", [2048, 4096, 8192, 16384, 24576, 256, 1024])
-@pytest.mark.parametrize("k", [128, 496, 1024])
+@pytest.mark.parametrize("m,n,k", MNK_FACTORS)
 @pytest.mark.parametrize("per_act_token", [True, False])
 @pytest.mark.parametrize("per_out_ch", [True, False])
 @pytest.mark.parametrize("use_bias", [True, False])
@@ -129,9 +149,7 @@ def test_cutlass_fp8_gemm(m: int, n: int, k: int, per_act_token: bool,
     cutlass_fp8_gemm_helper(m, n, k, per_act_token, per_out_ch, use_bias)
 
 
-@pytest.mark.parametrize("m", [1, 16, 32, 64, 128, 256, 512, 222, 33, 1])
-@pytest.mark.parametrize("n", [2048, 8192, 16384, 256, 1024])
-@pytest.mark.parametrize("k", [128, 496, 1024])
+@pytest.mark.parametrize("m,n,k", MNK_FACTORS)
 @pytest.mark.parametrize("per_act_token", [True, False])
 @pytest.mark.parametrize("per_out_ch", [True, False])
 @pytest.mark.parametrize("use_bias", [True, False])

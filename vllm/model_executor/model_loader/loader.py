@@ -641,6 +641,10 @@ class BitsAndBytesModelLoader(BaseModelLoader):
     def __init__(self, load_config: LoadConfig):
         super().__init__(load_config)
 
+        # Save the module names without sharding.
+        self.unsharded_weights_modules: List[str] = []
+        # Save the module names that are sharded by column.
+        self.column_sharded_weights_modules: List[str] = []
         # we don't need to quantize the whole model, only the target modules
         # that are specified in the adapter config file. If the adapter config
         # file is not provided, we will quantize the default modules.
@@ -655,11 +659,9 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
         config_file_path = self._get_config_file(qlora_adapter)
 
-        with open(config_file_path, "r") as f:
+        with open(config_file_path) as f:
             config = json.load(f)
             self.target_modules = config["target_modules"]
-        # Save the module names without sharding.
-        self.unsharded_weights_modules: List[str] = []
 
     def _get_config_file(self, qlora_adapter: str) -> str:
         is_local = os.path.isdir(qlora_adapter)
@@ -803,7 +805,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             if not weight_name.lower().endswith(".scb"):
                 continue
 
-            weight_key = weight_name.lower().replace(".scb", ".qweight")
+            weight_key = weight_name.lower().replace(".scb", ".weight")
             quant_state_dict[weight_key] = weight_tensor
 
         for weight_name, weight_tensor in self._hf_weight_iter(
@@ -812,11 +814,9 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             if self._is_8bit_weight_name(weight_name):
                 continue
 
-            qweight_name = weight_name.replace(".weight", ".qweight")
-
-            if qweight_name in quant_state_dict:
+            if weight_name in quant_state_dict:
                 set_weight_attrs(weight_tensor, {"load_in_8bit": True})
-                yield qweight_name, weight_tensor
+                yield weight_name, weight_tensor
             else:
                 yield weight_name, weight_tensor
 
@@ -861,9 +861,8 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             (f"{weight_name}.quant_state.bitsandbytes__fp4" \
                     in temp_state_dict):
                 quant_state = _parse_quant_state(weight_name, temp_state_dict)
-                weight_name = weight_name.replace(".weight", ".qweight")
                 quant_state_dict[weight_name] = quant_state
-                yield weight_name.replace(".weight", ".qweight"), weight_tensor
+                yield weight_name, weight_tensor
             else:
                 yield weight_name, weight_tensor
 
@@ -878,16 +877,15 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
             if any(target_module in weight_name for target_module in
                    self.target_modules) and weight_name.endswith(".weight"):
-                weight_name = weight_name.replace(".weight", ".qweight")
                 # Without sharding
                 if any(
                         weight_name.startswith(module)
                         for module in self.unsharded_weights_modules):
                     weight_sub_tensor = weight_tensor
                 # Shard by column
-                elif any(module in weight_name
-                         for module in self.column_parallel_weights_modules):
-
+                elif any(
+                        weight_name.startswith(module)
+                        for module in self.column_sharded_weights_modules):
                     total_size = weight_tensor.size(-1)
                     start_index = total_size // tp_size * tp_rank
                     end_index = total_size // tp_size * (tp_rank + 1)
@@ -942,20 +940,17 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             else:
                 self.target_modules = self.default_target_modules
 
-        if hasattr(model, 'column_parallel_weights_modules'):
-            self.column_parallel_weights_modules = \
-                model.column_parallel_weights_modules
-        else:
-            self.column_parallel_weights_modules = []
-        # Some modules like `ReplicatedLinear` should not have their weights
-        # sharded. The reason for implementing it this way is to avoid new
-        # static variable in the model implementation.
-        # TODO: Can we reduce the static variables needed for BNB based on
-        #  model information?
-        self.unsharded_weights_modules = [
-            name for name, module in model.named_modules()
-            if isinstance(module, (ReplicatedLinear, ))
-        ]
+        for name, module in model.named_modules():
+            # Some modules like `ReplicatedLinear` should not have their weights
+            # sharded. The reason for implementing it this way is to avoid new
+            # static variable in the model implementation.
+            if isinstance(module, (ReplicatedLinear, )):
+                self.unsharded_weights_modules.append(name)
+            # In TP, these weights are partitioned along the column
+            # dimension (dim=-1)
+            elif isinstance(module, (RowParallelLinear, )):
+                self.column_sharded_weights_modules.append(name)
+
         self.model_type = type(model).__name__
 
         logger.info("Loading weights with BitsAndBytes quantization. "
@@ -1007,7 +1002,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 # Some models, such as MiniCPM V2.5/2.6, contain both
                 # module names 'kv_proj' and 'qkv_proj'. To prevent 'kv_proj'
                 # from being incorrectly identified as being present in
-                # 'vpm.encoder.layers.0.self_attn.qkv_proj.qweight
+                # 'vpm.encoder.layers.0.self_attn.qkv_proj.weight
                 if shard_pos > 0 and quant_param_name[shard_pos - 1] == ".":
                     shard_index = index
                     quant_param_name = quant_param_name.replace(

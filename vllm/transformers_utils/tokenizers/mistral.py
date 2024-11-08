@@ -72,11 +72,12 @@ class MistralTokenizer:
         self.instruct = tokenizer.instruct_tokenizer
 
         tokenizer_ = tokenizer.instruct_tokenizer.tokenizer
-        if isinstance(tokenizer_, Tekkenizer):
+        self.is_tekken = isinstance(tokenizer_, Tekkenizer)
+        self.is_spm = isinstance(tokenizer_, SentencePieceTokenizer)
+        if self.is_tekken:
             # Make sure special tokens will not raise
             tokenizer_.special_token_policy = SpecialTokenPolicy.IGNORE
-
-        elif isinstance(tokenizer_, SentencePieceTokenizer):
+        elif self.is_spm:
             pass
         else:
             raise TypeError(f"Unsupported tokenizer: {type(tokenizer_)}")
@@ -218,7 +219,7 @@ class MistralTokenizer:
         return encoded.tokens
 
     def convert_tokens_to_string(self, tokens: List[str]) -> str:
-        if isinstance(self.tokenizer, Tekkenizer):
+        if self.is_tekken:
             tokens = [
                 t for t in tokens
                 if t not in self.tokenizer._all_special_tokens
@@ -254,7 +255,7 @@ class MistralTokenizer:
                skip_special_tokens: bool = True) -> str:
         assert (
             skip_special_tokens
-        ), "Skipping special tokens is not supported for Mistral tokenizers."
+        ), "skip_special_tokens=False is not supported for Mistral tokenizers."
 
         if isinstance(ids, int):
             ids = [ids]
@@ -268,19 +269,22 @@ class MistralTokenizer:
         # TODO(Patrick) - potentially allow special tokens to not be skipped
         assert (
             skip_special_tokens
-        ), "Skipping special tokens is not supported for Mistral tokenizers."
+        ), "skip_special_tokens=False is not supported for Mistral tokenizers."
 
-        assert isinstance(self.tokenizer,
-                          (Tekkenizer, SentencePieceTokenizer)), type(
-                              self.tokenizer)
+        assert self.is_tekken or self.is_spm, type(self.tokenizer)
+
+        if self.is_tekken:
+            # skip special tokens
+            ids = [i for i in ids if i > self.tokenizer.num_special_tokens]
 
         tokens = [self.tokenizer.id_to_piece(id) for id in ids]
 
-        if any("�" in t for t in tokens):
+        if any("�" in t for t in tokens) and self.is_tekken:
             # if a decoded token contains the replacement character, then the
             # token has an incomplete UTF-8 character so we must use bytes
             # See: https://github.com/vllm-project/vllm/pull/8640
             #      https://github.com/vllm-project/vllm/pull/9625
+            # if underlying tokenizeir is sentencepiece, we just add "�"
             tokens = [self.tokenizer.id_to_byte_piece(id) for id in ids]
 
         return tokens

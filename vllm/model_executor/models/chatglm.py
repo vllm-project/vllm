@@ -1,4 +1,3 @@
-# coding=utf-8
 # Adapted from
 # https://github.com/THUDM/GLM-4
 """Inference-only ChatGLM model compatible with THUDM weights."""
@@ -25,7 +24,7 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -54,8 +53,9 @@ def mm_input_mapper_for_glmv(
     data: MultiModalData[object],
 ) -> Dict:
     model_config = ctx.model_config
-    tokenizer = cached_get_tokenizer(model_config.tokenizer,
-                                     trust_remote_code=True)
+    tokenizer = cached_get_tokenizer(
+        model_config.tokenizer,
+        trust_remote_code=model_config.trust_remote_code)
     if tokenizer is None:
         raise RuntimeError("No HuggingFace processor is available "
                            "to process the image object")
@@ -525,7 +525,7 @@ class ChatGLMModel(nn.Module):
             elif isinstance(pixel_values, list):
                 return torch.concat(pixel_values)
             else:
-                raise TypeError("""pixel_values must be a torch.Tensor 
+                raise TypeError("""pixel_values must be a torch.Tensor
                     or a list of torch.Tensor
                     """)
         return GLMImagePixelInputs(pixel_values=pixel_values)
@@ -617,7 +617,7 @@ class ChatGLMForCausalLM(nn.Module, SupportsLoRA, SupportsPP,
                 self.transformer.embedding.weight)
         self.lm_head = self.transformer.output_layer
         self.logits_processor = LogitsProcessor(config.padded_vocab_size)
-        self.sampler = Sampler()
+        self.sampler = get_sampler()
 
     def forward(self,
                 input_ids: torch.Tensor,

@@ -120,6 +120,7 @@ steps:
   - tests/spec_decode/e2e/test_integration_dist_tp4
   - tests/compile
   commands:
+  - pytest -v -s distributed/test_utils.py
   - pytest -v -s compile/test_basic_correctness.py
   - pytest -v -s distributed/test_pynccl.py
   - pytest -v -s spec_decode/e2e/test_integration_dist_tp4.py
@@ -268,7 +269,6 @@ steps:
   source_file_dependencies:
   - benchmarks/
   commands:
-  - pip install aiohttp
   - bash run-benchmarks.sh
 
 - label: Quantization Test # 33min
@@ -321,7 +321,6 @@ steps:
   - tests/models/decoder_only/language
   commands:
     - pytest -v -s models/decoder_only/language/test_models.py
-    - pytest -v -s models/decoder_only/language/test_big_models.py
 
 - label: Decoder-only Language Models Test (Extended) # 1h20min
   nightly: true
@@ -329,9 +328,9 @@ steps:
   - vllm/
   - tests/models/decoder_only/language
   commands:
-    - pytest -v -s models/decoder_only/language --ignore=models/decoder_only/language/test_models.py --ignore=models/decoder_only/language/test_big_models.py
+    - pytest -v -s models/decoder_only/language --ignore=models/decoder_only/language/test_models.py
 
-- label: Decoder-only Multi-Modal Models Test (Standard)
+- label: Decoder-only Multi-Modal Models Test (Standard) # 26min
   #mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
@@ -432,7 +431,6 @@ steps:
   - pip install -e ./plugins/vllm_add_dummy_model
   - pytest -v -s distributed/test_distributed_oot.py
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s test_sharded_state_loader.py
-  - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s distributed/test_utils.py
 
 - label: Multi-step Tests (4 GPUs) # 36min
   working_dir: "/vllm-workspace/tests"
@@ -511,6 +509,7 @@ steps:
   # NOTE: don't test llama model here, it seems hf implementation is buggy
   # see https://github.com/vllm-project/vllm/pull/5689 for details
   - pytest -v -s distributed/test_custom_all_reduce.py
+  - torchrun --nproc_per_node=2 distributed/test_ca_buffer_sharing.py
   - TARGET_TEST_SUITE=A100 pytest basic_correctness/ -v -s -m distributed_2_gpus
   - pytest -v -s -x lora/test_mixtral.py
 
