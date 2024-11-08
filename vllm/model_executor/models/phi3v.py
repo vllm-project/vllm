@@ -554,7 +554,7 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         # The prefix is empty intentionally because default prefix of
         # LlamaForCausalLM is "model"
         self.language_model = LlamaForCausalLM(vllm_config=vllm_config,
-                                               prefix="language_model")
+                                               prefix="")
 
         # The same model class supports both language generation and embedding
         # because the architecture name is the same
