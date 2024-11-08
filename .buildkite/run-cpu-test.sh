@@ -31,11 +31,12 @@ docker exec cpu-test bash -c "
     einops librosa peft Pillow sentence-transformers soundfile \
     transformers_stream_generator matplotlib datamodel_code_generator
   pip install torchvision --index-url https://download.pytorch.org/whl/cpu
-  # Embedding models are not supported on CPU yet
+  # Embedding models are not supported for CPU yet
   # pytest -v -s tests/models/embedding/language
   pytest -v -s tests/models/encoder_decoder/language
   pytest -v -s tests/models/decoder_only/language/test_models.py
-  pytest -v -s tests/models/decoder_only/audio_language -m core_model
+  # Chunked prefill not supported for CPU yet
+  # pytest -v -s tests/models/decoder_only/audio_language -m core_model
   pytest -v -s tests/models/decoder_only/vision_language -m core_model"
 
 # Run compressed-tensor test
