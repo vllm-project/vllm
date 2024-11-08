@@ -656,15 +656,22 @@ class LlamaEmbeddingModel(nn.Module, SupportsLoRA, SupportsPP):
         self,
         vllm_config: VllmConfig,
         prefix: str = "",
-        **kwargs,
     ) -> None:
         super().__init__()
 
-        self.model = LlamaModel(vllm_config.model_config.hf_config,
-                                **kwargs,
-                                prefix=prefix)
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+        lora_config = vllm_config.lora_config
+        pooler_config = vllm_config.model_config.pooler_config
+
+        self.model = LlamaModel(config,
+                                cache_config,
+                                quant_config,
+                                lora_config,
+                                prefix=maybe_prefix(prefix, "model"))
         self._pooler = Pooler.from_config_with_defaults(
-            vllm_config.model_config.pooler_config,
+            pooler_config,
             pooling_type=PoolingType.LAST,
             normalize=True,
             softmax=False)

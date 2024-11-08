@@ -410,7 +410,7 @@ input_pipeline = InternVLInputPipeline(IMG_START, IMG_END, IMG_CONTEXT)
 @INPUT_REGISTRY.register_input_processor(input_pipeline.input_processor)
 class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
 
-    def __init__(self, vllm_config: VllmConfig) -> None:
+    def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
 
         config = vllm_config.model_config.hf_config
