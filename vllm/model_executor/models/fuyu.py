@@ -226,7 +226,7 @@ def input_mapper_for_fuyu(ctx: InputContext, data: object):
 @INPUT_REGISTRY.register_input_processor(input_processor_for_fuyu)
 class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
-    def __init__(self, vllm_config: VllmConfig) -> None:
+    def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config

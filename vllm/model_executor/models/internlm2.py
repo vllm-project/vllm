@@ -326,7 +326,6 @@ class InternLM2ForCausalLM(nn.Module, SupportsPP):
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        prefix = ""
         self.config = config
         self.quant_config = quant_config
         self.model = InternLM2Model(config,
