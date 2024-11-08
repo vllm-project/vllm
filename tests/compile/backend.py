@@ -4,7 +4,7 @@ from typing import Callable
 import torch
 
 
-class TestBackend():
+class TestBackend:
     """
     This class provides a simple Inductor backend that can be used for testing.
     It takes a list of custom passes and runs them after Inductor's passes.
