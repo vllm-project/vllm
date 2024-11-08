@@ -1875,14 +1875,14 @@ class LLMEngine:
             time_inference_requests=time_inference_requests,
             time_prefill_requests=time_prefill_requests,
             time_decode_requests=time_decode_requests,
+            time_in_queue_requests=time_in_queue_requests,
+            model_forward_time_requests=model_forward_time_requests,
+            model_execute_time_requests=model_execute_time_requests,
             #   Metadata
             num_prompt_tokens_requests=num_prompt_tokens_requests,
             num_generation_tokens_requests=num_generation_tokens_requests,
             max_num_generation_tokens_requests=
             max_num_generation_tokens_requests,
-            time_in_queue_requests=time_in_queue_requests,
-            model_forward_time_requests=model_forward_time_requests,
-            model_execute_time_requests=model_execute_time_requests,
             n_requests=n_requests,
             max_tokens_requests=max_tokens_requests,
             finished_reason_requests=finished_reason_requests,
