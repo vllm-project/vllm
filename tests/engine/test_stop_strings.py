@@ -4,7 +4,7 @@ import pytest
 
 from vllm import CompletionOutput, LLMEngine, SamplingParams
 
-MODEL = "/llama_eval_storage/LLaMa/models/hf/7B"
+MODEL = "meta-llama/llama-2-7b-hf"
 MAX_TOKENS = 200
 
 IS_ASYNC = False
@@ -12,7 +12,7 @@ IS_ASYNC = False
 
 @pytest.fixture(scope="session")
 def vllm_model(vllm_runner):
-    with vllm_runner(MODEL, use_async_output_proc=True) as vllm_model:
+    with vllm_runner(MODEL) as vllm_model:
         yield vllm_model
 
 

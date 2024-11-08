@@ -312,7 +312,7 @@ async def test_output_kinds(async_engine, stop):
 
 @pytest.mark.asyncio(scope="module")
 @pytest.mark.parametrize("stop", [None, ["a stop string"]])
-async def test_abort(async_engine, stop):
+async def test_cancellation(async_engine, stop):
     scheduler_config = await async_engine.get_scheduler_config()
     num_scheduler_steps = scheduler_config.num_scheduler_steps
 
