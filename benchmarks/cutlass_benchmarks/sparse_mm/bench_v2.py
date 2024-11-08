@@ -1,9 +1,10 @@
 import dataclasses
 import random
-from typing import Any, Callable, Iterable, Optional, Tuple, Dict
+from typing import Any, Callable, Iterable, Optional, Tuple, Dict, List
 
 import multiprocessing as mp
 from multiprocessing import Process, Queue
+from queue import Empty
 
 import torch
 import torch.utils.benchmark as TBenchmark
@@ -243,7 +244,7 @@ def get_autogen_functions():
     return name_fn
 
 
-def _run(kernel_config, queue):
+def run_benchmark_process(kernel_config, queue):
     try:
         # Initialize CUDA tensors
         arg_pool_size = kernel_config.get('arg_pool_size', 1)
@@ -339,30 +340,77 @@ def _run(kernel_config, queue):
         queue.put((False, None))
 
 
-def run_kernel_in_process(kernel_config: Dict) -> Tuple[bool, Optional[TMeasurement]]:
-    """
-    Run a single kernel benchmark in a separate process.
-    kernel_config contains everything needed to construct the test case:
-    {
-        'kernel_type': str,  # e.g. 'pytorch_mm', 'pytorch_scaled_mm', 'autogen_kernel', etc.
-        'kernel_name': str,  # For autogen kernels, the actual kernel name
-        'm': int,
-        'k': int, 
-        'n': int,
-        'dtype': torch.dtype,
-        'cuda_graph_ops': Optional[int],
-        'arg_pool_size': int,
-        'label': str,
-        'sub_label': str
-    }
-    """
+def gpu_worker(gpu_id: int, task_queue: Queue, result_queue: Queue):
+    try:
+        torch.cuda.set_device(gpu_id)
+        while True:
+            try:
+                kernel_config = task_queue.get_nowait()
+                if kernel_config is None:  # Poison pill
+                    break
+                
+                process_queue = Queue()
+                run_benchmark_process(kernel_config, process_queue)
+                success, result = process_queue.get()
+                
+                result_queue.put((success, result, kernel_config))
+                
+            except Empty:
+                break
+            except Exception as e:
+                print(f"Error in GPU {gpu_id} worker: {str(e)}")
+                print(traceback.format_exc())
+                result_queue.put((False, None, kernel_config))
+                
+    except Exception as e:
+        print(f"Fatal error in GPU {gpu_id} worker: {str(e)}")
+        print(traceback.format_exc())
+    finally:
+        print(f"GPU {gpu_id} worker finished")
 
-    queue = Queue()
-    p = Process(target=_run, args=(kernel_config, queue,))
-    p.start()
-    success, result = queue.get()
-    p.join()
-    return success, result
+def run_kernels_on_gpus(configs: List[Dict]) -> List[Tuple[bool, Optional[TMeasurement], Dict]]:
+    # num_gpus = torch.cuda.device_count()
+    gpus_list = [5]
+    task_queue = Queue()
+    result_queue = Queue()
+    
+    # Fill task queue
+    for config in configs:
+        task_queue.put(config)
+    for _ in gpus_list:  # Add poison pills
+        task_queue.put(None)
+    
+    # Start GPU workers
+    workers = []
+    for gpu_id in gpus_list:
+        p = Process(target=gpu_worker, args=(gpu_id, task_queue, result_queue))
+        p.start()
+        workers.append(p)
+    
+    # Collect results
+    results = []
+    completed = 0
+    total_tasks = len(configs)
+    
+    while completed < total_tasks:
+        result = result_queue.get()
+        results.append(result)
+        completed += 1
+        
+        success, _, config = result
+        if config['kernel_type'] == 'autogen_kernel':
+            kernel_num = config['kernel_num']
+            kernel_name = get_autogen_functions()[kernel_num][0]
+            status = "Success" if success else "Failed"
+            print(f"{status}: autogen {kernel_num + 1}/{total_tasks} {kernel_name}")
+        else:
+            status = "Success" if success else "Failed"
+            print(f"{status}: {config['kernel_type']}")
+    
+    for worker in workers:
+        worker.join()
+    
+    return results
 
 
 def bench_fp8(dtype: torch.dtype, with_cuda_graph: Optional[int],
@@ -389,7 +437,7 @@ def bench_fp8(dtype: torch.dtype, with_cuda_graph: Optional[int],
         'sub_label': sub_label
     }
     
-    # Run standard kernels
+    # Prepare configs for all kernels
     standard_kernels = [
         {'kernel_type': 'pytorch_mm'},
         {'kernel_type': 'pytorch_scaled_mm'},
@@ -398,30 +446,33 @@ def bench_fp8(dtype: torch.dtype, with_cuda_graph: Optional[int],
         {'kernel_type': 'cutlass_sparse_mm'}
     ]
     
-    for kernel in standard_kernels:
-        print(f"Bench {kernel['kernel_type']}")
-        config = {**base_config, **kernel}
-        success, result = run_kernel_in_process(config)
-        if success and result is not None:
-            timers.append(result)
+    # Create configs for standard kernels
+    standard_configs = [{**base_config, **kernel} for kernel in standard_kernels]
     
-    # Run autogen kernels
+    # Create configs for autogen kernels
     autogen_name_fn = get_autogen_functions()
     # autogen_name_fn = autogen_name_fn[284:288]
     # i_range = [284, 285, 286, 287]
     i_range = range(len(autogen_name_fn))
+    autogen_configs = []
     
     for i in i_range:
-        autogen_name, _ = autogen_name_fn[i]
-        print(f"Bench autogen {i+1}/{len(autogen_name_fn)} {autogen_name}")
-        
         config = {
             **base_config,
             'kernel_type': 'autogen_kernel',
             'kernel_num': i
         }
-        
-        success, result = run_kernel_in_process(config)
+        autogen_configs.append(config)
+    
+    # Combine all configs
+    all_configs = standard_configs + autogen_configs
+    
+    # Run all kernels distributed across GPUs
+    print(f"Running {len(all_configs)} benchmarks across {torch.cuda.device_count()} GPUs...")
+    results = run_kernels_on_gpus(all_configs)
+    
+    # Process results
+    for success, result, _ in results:
         if success and result is not None:
             timers.append(result)
     
