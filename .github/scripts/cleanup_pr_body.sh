@@ -22,7 +22,7 @@ sed -i '/FIX #xxxx.*$/d' "${NEW}"
 sed -i '/FILL IN THE PR DESCRIPTION HERE/d' "${NEW}"
 
 # Remove all lines after and including "**BEFORE SUBMITTING, PLEASE READ THE CHECKLIST BELOW AND FILL IN THE DESCRIPTION ABOVE**"
-sed -i '/\*\*BEFORE SUBMITTING, PLEASE READ THE CHECKLIST BELOW AND FILL IN THE DESCRIPTION ABOVE\*\*/,$d' "${NEW}"
+sed -i '/\*\*BEFORE SUBMITTING, PLEASE READ.*\*\*/,$d' "${NEW}"
 
 # Remove HTML <details> section that includes <summary> text of "PR Checklist (Click to Expand)"
 python3 - <<EOF
