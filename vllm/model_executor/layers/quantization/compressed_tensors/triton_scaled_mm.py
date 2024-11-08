@@ -120,7 +120,7 @@ def scaled_mm_kernel(a_ptr, b_ptr, scale_a_ptr, scale_b_ptr, c_ptr, bias_ptr,
 
 # input   - [M, K]
 # weight - [K, N]
-def scaled_mm_triton(input: torch.Tensor,
+def triton_scaled_mm(input: torch.Tensor,
                      weight: torch.Tensor,
                      scale_a: torch.Tensor,
                      scale_b: torch.Tensor,

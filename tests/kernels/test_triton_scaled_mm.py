@@ -1,6 +1,6 @@
-"""Tests for the scaled_mm_triton kernel
+"""Tests for the triton_scaled_mm kernel
 
-Run `pytest tests/kernels/test_scaled_mm_triton.py`.
+Run `pytest tests/kernels/test_triton_scaled_mm.py`.
 """
 import importlib
 from typing import Optional, Type
@@ -86,12 +86,12 @@ def test_scaled_mm(M, N, K, in_dtype, out_dtype, use_scalar_scale_a,
     if use_bias:
         bias = torch.rand((N, ), device=device, dtype=out_dtype)
 
-    scaled_mm_triton_module = importlib.import_module(
+    triton_scaled_mm_module = importlib.import_module(
         "vllm.model_executor.layers.quantization.compressed_tensors."
-        "scaled_mm_triton")
-    scaled_mm_triton = scaled_mm_triton_module.scaled_mm_triton
+        "triton_scaled_mm")
+    triton_scaled_mm = triton_scaled_mm_module.triton_scaled_mm
 
-    c_check = scaled_mm_triton(a, b, scale_a, scale_b, out_dtype, bias)
+    c_check = triton_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias)
 
     a_cpu = a.cpu()
     b_cpu = b.cpu()

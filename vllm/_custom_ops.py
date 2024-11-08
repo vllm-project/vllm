@@ -489,11 +489,11 @@ def cutlass_scaled_mm(a: torch.Tensor,
     n = b.shape[1]
 
     if current_platform.is_rocm():
-        scaled_mm_triton_module = importlib.import_module(
+        triton_scaled_mm_module = importlib.import_module(
             "vllm.model_executor.layers.quantization.compressed_tensors."
-            "scaled_mm_triton")
-        scaled_mm_triton = scaled_mm_triton_module.scaled_mm_triton
-        return scaled_mm_triton(a, b, scale_a, scale_b, out_dtype, bias)
+            "triton_scaled_mm")
+        triton_scaled_mm = triton_scaled_mm_module.triton_scaled_mm
+        return triton_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias)
 
     out = torch.empty((m, n), dtype=out_dtype, device=a.device)
 
