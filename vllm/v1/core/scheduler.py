@@ -246,7 +246,7 @@ class Scheduler:
                 # NOTE(woosuk): Currently, we assume that each request
                 # generates at most one token at each step.
                 token_id = sampled_token_ids[req_index]
-                request.output_token_ids.append(token_id)
+                request.append_output_token_ids(token_id)
                 sampled.append((request, 1))
                 # TODO: Update the KV cache manager for prefix caching.
 
