@@ -472,7 +472,8 @@ class EngineArgs:
             "--num-prefill-slots",
             type=int,
             default=EngineArgs.num_prefill_slots,
-            help="For chunked prefill, the number of prefill slots to use. Defaults to 1",
+            help='For chunked prefill, the number of prefill slots to use. '
+            'Defaults to 1',
         )
         parser.add_argument('--max-num-seqs',
                             type=int,
