@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, List, Optional, Union
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import RequestMetrics
+from vllm.v1.utils import ConstantList
 
 if TYPE_CHECKING:
     from vllm.inputs import DecoderOnlyInputs
@@ -40,17 +41,39 @@ class Request:
         self.prompt = inputs.get("prompt")
         self.prompt_token_ids = inputs["prompt_token_ids"]
         self.num_prompt_tokens = len(self.prompt_token_ids)
-        self.output_token_ids: List[int] = []
+        self._output_token_ids: List[int] = []
+        self._all_token_ids: List[int] = self.prompt_token_ids.copy()
         self.output_text = ""
         self.num_computed_tokens = 0
 
     @property
+    def output_token_ids(self) -> ConstantList[int]:
+        # Prevent directly appending to the output_token_ids since
+        # all_token_ids should also be updated simultaneously.
+        return ConstantList(self._output_token_ids)
+
+    @property
+    def all_token_ids(self) -> ConstantList[int]:
+        # Prevent directly appending to the all_token_ids since
+        # output_token_ids should also be updated simultaneously
+        return ConstantList(self._all_token_ids)
+
+    def append_output_token_ids(
+        self,
+        token_ids: Union[int, List[int]],
+    ) -> None:
+        if isinstance(token_ids, int):
+            token_ids = [token_ids]
+        self._output_token_ids.extend(token_ids)
+        self._all_token_ids.extend(token_ids)
+
+    @property
     def num_tokens(self) -> int:
-        return self.num_prompt_tokens + len(self.output_token_ids)
+        return len(self._all_token_ids)
 
     @property
     def num_output_tokens(self) -> int:
-        return len(self.output_token_ids)
+        return len(self._output_token_ids)
 
     def is_finished(self) -> bool:
         return RequestStatus.is_finished(self.status)

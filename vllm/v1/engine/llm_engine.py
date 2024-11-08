@@ -324,7 +324,7 @@ class LLMEngine:
         )
         for req, num_tokens in sampled:
             inputs.req_ids.append(req.request_id)
-            if len(req.output_token_ids) == num_tokens:
+            if req.num_output_tokens == num_tokens:
                 # The request is first detokenized.
                 inputs.prompt_token_ids.append(req.prompt_token_ids)
             else:
