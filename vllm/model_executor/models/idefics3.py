@@ -74,6 +74,12 @@ class Idefics3ImageEmbeddingInputs(TypedDict):
 class Idefics3ProcessorSize(NamedTuple):
     longest_edge: int
 
+    def __contains__(self, key: str) -> bool:
+        return key in self._asdict()
+
+    def __getitem__(self, key: str) -> int:
+        return getattr(self, key)
+
 
 ImageInputs = Union[Idefics3ImagePixelInputs, Idefics3ImageEmbeddingInputs]
 

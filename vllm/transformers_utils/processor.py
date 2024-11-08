@@ -14,13 +14,6 @@ def get_processor(
     from transformers import AutoProcessor
     from transformers.processing_utils import ProcessorMixin
 
-    # we wrap dict as NamedTuples for cacheability
-    # convert them back to dict for processor initialization
-    kwargs = {
-        k: v._asdict() if hasattr(v, "_asdict") else v
-        for k, v in kwargs.items()
-    }
-
     try:
         processor = AutoProcessor.from_pretrained(
             processor_name,
@@ -59,13 +52,6 @@ def get_image_processor(
     # it will call torch.cuda.device_count()
     from transformers import AutoImageProcessor
     from transformers.image_processing_utils import BaseImageProcessor
-
-    # we wrap dict as NamedTuples for cacheability
-    # convert them back to dict for processor initialization
-    kwargs = {
-        k: v._asdict() if hasattr(v, "_asdict") else v
-        for k, v in kwargs.items()
-    }
 
     try:
         processor = AutoImageProcessor.from_pretrained(
