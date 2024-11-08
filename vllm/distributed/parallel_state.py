@@ -359,7 +359,8 @@ class GroupCoordinator:
     def _all_reduce_out_place(self, input_: torch.Tensor) -> torch.Tensor:
         if supports_custom_op():
             ca_comm = self.ca_comm
-            if ca_comm is not None and not ca_comm.disabled:
+            if ca_comm is not None and not ca_comm.disabled and ca_comm.should_custom_ar(
+                    input_):
                 out = ca_comm.custom_all_reduce(input_)
                 assert out is not None
                 return out
