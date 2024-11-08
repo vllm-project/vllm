@@ -335,7 +335,7 @@ class VllmBackend:
         passes = passes + [RedundantReshapesPass(config)]
 
         if config.enable_fusion:
-            passes = passes + [FusionPass(config)]
+            passes = passes + [FusionPass.instance(config)]
 
         inductor_config = config.inductor_compile_config
         if "post_grad_custom_post_pass" in inductor_config:

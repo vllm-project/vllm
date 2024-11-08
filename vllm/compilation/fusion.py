@@ -128,27 +128,40 @@ def find_getitem(node: torch.fx.Node, idx: int) -> torch.fx.Node:
 
 
 class FusionPass(InductorPass):
-    # Patterns can only be registered once, so we store them as a class variable
-    _patterns: PatternMatcherPass = None
+    """
+    This pass fuses a pre-defined set of custom ops into fused ops.
+    It uses the torch pattern matcher to find the patterns and replace them.
+    It also manually processes multi-output matches, as those are broken in
+    the torch pattern matcher.
+
+    Because patterns can only be registered once, the pass is a singleton.
+    This will be addressed in a future version of PyTorch:
+    https://github.com/pytorch/pytorch/pull/139321#issuecomment-2452354980
+    """
+
+    _instance: 'Optional[FusionPass]' = None
+
+    @classmethod
+    def instance(cls, config: CompilationConfig):
+        """
+        Get the singleton instance of the FusionPass.
+        If the instance exists, the config is updated but
+        initialization is not repeated.
+        """
+        if cls._instance is None:
+            cls._instance = FusionPass(config)
+        else:
+            cls._instance.config = config
+        return cls._instance
 
     def __init__(self, config: CompilationConfig):
+        assert self.__class__._instance is None, \
+            "FusionPass singleton instance already exists"
         super().__init__(config)
 
         self.matches: List[Match] = []
-        self.register_patterns()
-
-    @property
-    def patterns(self) -> PatternMatcherPass:
-        assert self.__class__._patterns is not None, \
-            "Accessing patterns before they were registered"
-        return self.__class__._patterns
-
-    def register_patterns(self):
-        # Only register patterns once
-        if self.__class__._patterns is not None:
-            return
-
-        self.__class__._patterns = PatternMatcherPass(pass_name="fusion_pass")
+        self.patterns: PatternMatcherPass = PatternMatcherPass(
+            pass_name="fusion_pass")
 
         # Fuse rms_norm + static_scaled_fp8_quant into
         # rms_norm_static_fp8_quant

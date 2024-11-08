@@ -41,7 +41,7 @@ class TestModel(torch.nn.Module):
 # Init does pattern registration, which can only happen once
 config = CompilationConfig(enable_fusion=True)
 reshape_pass = RedundantReshapesPass(config)
-fusion_pass = FusionPass(config)
+fusion_pass = FusionPass.instance(config)
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
