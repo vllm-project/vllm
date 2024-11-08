@@ -151,16 +151,19 @@ def group_trace_by_operations(trace_df: pd.DataFrame) -> pd.DataFrame:
            "scaled_int8_quant" in op_name:
             return True
 
+    def is_cutlass_gemm_op(op_name: str):
+        return "void cutlass::Kernel" in op_name or \
+           "void cutlass::device_kernel" in op_name
+
     def is_gemm_op(op_name: str):
         if is_quant(op_name):
             return False
-        if "xmma_gemm" in op_name  or \
+        return "xmma_gemm" in op_name  or \
            "gemv2T_kernel" in op_name or \
            "splitKreduce" in op_name or \
            "void cutlass::Kernel" in op_name or \
            "void cutlass::device_kernel" in op_name or \
-           "s16816gemm" in op_name:
-            return True
+           "s16816gemm" in op_name
 
     def is_elementwise_op(op_name: str):
         return "elementwise_kernel" in op_name
@@ -211,6 +214,9 @@ def group_trace_by_operations(trace_df: pd.DataFrame) -> pd.DataFrame:
     quant_ops = list(filter(lambda x: is_quant(x), ops))
     ops = list(filter(lambda x: x not in quant_ops, ops))
 
+    cutlass_gemm_ops = list(filter(lambda x: is_cutlass_gemm_op(x), ops))
+    ops = list(filter(lambda x: x not in cutlass_gemm_ops, ops))
+
     gemm_ops = list(filter(lambda x: is_gemm_op(x), ops))
     ops = list(filter(lambda x: x not in gemm_ops, ops))
 
@@ -257,6 +263,8 @@ def group_trace_by_operations(trace_df: pd.DataFrame) -> pd.DataFrame:
         trace_df['attention'] = trace_df[attention_ops].agg("sum", axis=1)
     if len(quant_ops):
         trace_df['quant_ops'] = trace_df[quant_ops].agg("sum", axis=1)
+    if len(cutlass_gemm_ops):
+        trace_df['cutlass_gemm_ops'] = trace_df[cutlass_gemm_ops].agg("sum", axis=1)
     if len(gemm_ops):
         trace_df['gemm_ops'] = trace_df[gemm_ops].agg("sum", axis=1)
     if len(rms_norm_ops):
@@ -296,7 +304,7 @@ def group_trace_by_operations(trace_df: pd.DataFrame) -> pd.DataFrame:
         trace_df['reduce_kernel_ops'] = trace_df[reduce_kernel_ops].agg("sum",
                                                                         axis=1)
 
-    trace_df.drop(attention_ops + quant_ops + gemm_ops + rms_norm_ops +
+    trace_df.drop(attention_ops + quant_ops + cutlass_gemm_ops + gemm_ops + rms_norm_ops +
                   vocab_embed_ops + mem_ops + elementwise_ops +
                   nccl_all_reduce_ops + nccl_gather_ops + nccl_broadcast_ops +
                   nccl_other_ops + cross_device_reduce_1stage_ops +
@@ -426,11 +434,11 @@ def main(
     def make_plot_title_suffix(profile_json: dict) -> str:
         context = profile_json["context"]
         sparsity = context.get('sparsity', None)
-        return (f"{context['model']}\n"
+        return (f"{context['engine_args']['model']}\n"
                 f"Batch={context['batch_size']}, "
                 f"PromptLen={context['prompt_len']}, "
                 f"OutputLen={context['output_len']},"
-                f"NumGpus={context['tensor_parallel_size']}"
+                f"NumGpus={context['engine_args']['tensor_parallel_size']}"
                 f"{', Sparsity ' + sparsity if sparsity else ''}")
 
     profile_json = None
