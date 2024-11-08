@@ -36,8 +36,7 @@ function cpu_tests() {
     # pytest -v -s tests/models/embedding/language
     pytest -v -s tests/models/encoder_decoder/language
     pytest -v -s tests/models/decoder_only/language/test_models.py
-    # Chunked prefill not supported for CPU yet
-    # pytest -v -s tests/models/decoder_only/audio_language -m cpu_model
+    pytest -v -s tests/models/decoder_only/audio_language -m cpu_model
     pytest -v -s tests/models/decoder_only/vision_language -m cpu_model"
 
   # Run compressed-tensor test
