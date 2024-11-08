@@ -8,8 +8,6 @@ from typing import Tuple, Union, cast
 from fastapi import Request
 
 from vllm.config import ModelConfig
-from vllm.engine.async_llm_engine import AsyncLLMEngine
-from vllm.engine.multiprocessing.client import MQLLMEngineClient
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.logger import RequestLogger
 # yapf conflicts with isort for this block
@@ -151,11 +149,6 @@ class OpenAIServingCompletion(OpenAIServing):
                     log_tracing_disabled_warning()
 
                 if isinstance(sampling_params, BeamSearchParams):
-                    assert isinstance(self.engine_client,
-                                    (AsyncLLMEngine,
-                                    MQLLMEngineClient)), \
-                    "Beam search is only supported with" \
-                    "AsyncLLMEngine and MQLLMEngineClient."
                     generator = self.engine_client.beam_search(
                         prompt_inputs["prompt_token_ids"],
                         request_id_item,
@@ -281,8 +274,6 @@ class OpenAIServingCompletion(OpenAIServing):
 
                 for output in res.outputs:
                     i = output.index + prompt_idx * num_choices
-                    # TODO(simon): optimize the performance by avoiding full
-                    # text O(n^2) sending.
 
                     assert request.max_tokens is not None
                     if request.echo and request.max_tokens == 0:
@@ -313,6 +304,11 @@ class OpenAIServingCompletion(OpenAIServing):
                         delta_text = output.text
                         delta_token_ids = output.token_ids
                         out_logprobs = output.logprobs
+
+                        if not delta_text and not delta_token_ids \
+                            and not previous_num_tokens[i]:
+                            # Chunked prefill case, don't return empty chunks
+                            continue
 
                     if request.logprobs is not None:
                         assert out_logprobs is not None, (

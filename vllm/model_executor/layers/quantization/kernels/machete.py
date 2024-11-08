@@ -8,7 +8,7 @@ from vllm.model_executor.layers.quantization.utils.machete_utils import (
     MACHETE_SUPPORTED_GROUP_SIZES, check_machete_supports_shape,
     query_machete_supported_quant_types)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    pack_weights_into_int32, unpack_weights_into_int32)
+    pack_quantized_values_into_int32, unpack_quantized_values_into_int32)
 from vllm.model_executor.parameter import (BasevLLMParameter,
                                            permute_param_layout_)
 
@@ -71,13 +71,13 @@ class MacheteLinearKernel(MPLinearKernel):
             assert isinstance(x, BasevLLMParameter)
             permute_param_layout_(x, input_dim=0, output_dim=1, packed_dim=0)
             if c.has_g_idx:
-                x_unpacked = unpack_weights_into_int32(x.data,
-                                                       c.weight_type,
-                                                       packed_dim=0)
+                x_unpacked = unpack_quantized_values_into_int32(x.data,
+                                                                c.weight_type,
+                                                                packed_dim=0)
                 x_perm = x_unpacked[perm, :]
-                x.data = pack_weights_into_int32(x_perm,
-                                                 c.weight_type,
-                                                 packed_dim=0)
+                x.data = pack_quantized_values_into_int32(x_perm,
+                                                          c.weight_type,
+                                                          packed_dim=0)
             x.data = ops.machete_prepack_B(x.data.t().contiguous().t(),
                                            self.config.weight_type)
             return x

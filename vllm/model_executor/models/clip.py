@@ -11,7 +11,7 @@ from transformers.models.clip.modeling_clip import CLIPSdpaAttention
 
 from vllm.config import ModelConfig
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
-from vllm.inputs import LLMInputs
+from vllm.inputs import DecoderOnlyInputs, token_inputs
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
@@ -62,7 +62,7 @@ def dummy_seq_data_for_clip(
     else:
         image_feature_size = image_feature_size_override
 
-    return SequenceData.from_token_counts(
+    return SequenceData.from_prompt_token_counts(
         (image_token_id, image_feature_size * num_images),
         (0, seq_len - image_feature_size * num_images),
     )
@@ -106,14 +106,14 @@ def dummy_video_for_clip(
 def input_processor_for_clip(
     model_config: ModelConfig,
     hf_config: CLIPVisionConfig,
-    llm_inputs: LLMInputs,
+    inputs: DecoderOnlyInputs,
     *,
     image_token_id: int,
     image_feature_size_override: Optional[Union[int, List[int]]] = None,
 ):
-    multi_modal_data = llm_inputs.get("multi_modal_data")
+    multi_modal_data = inputs.get("multi_modal_data")
     if multi_modal_data is None or "image" not in multi_modal_data:
-        return llm_inputs
+        return inputs
 
     tokenizer = cached_get_tokenizer(model_config.tokenizer)
 
@@ -130,16 +130,16 @@ def input_processor_for_clip(
 
     new_prompt, new_token_ids = repeat_and_pad_placeholder_tokens(
         tokenizer,
-        llm_inputs.get("prompt"),
-        llm_inputs["prompt_token_ids"],
+        inputs.get("prompt"),
+        inputs["prompt_token_ids"],
         placeholder_token_id=image_token_id,
         repeat_count=image_feature_size,
     )
 
     # NOTE: Create a defensive copy of the original inputs
-    return LLMInputs(prompt_token_ids=new_token_ids,
-                     prompt=new_prompt,
-                     multi_modal_data=multi_modal_data)
+    return token_inputs(prompt_token_ids=new_token_ids,
+                        prompt=new_prompt,
+                        multi_modal_data=multi_modal_data)
 
 
 # Adapted from https://github.com/huggingface/transformers/blob/v4.39.0/src/transformers/models/clip/modeling_clip.py#L164 # noqa

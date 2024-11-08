@@ -92,7 +92,7 @@ class Attention(nn.Module):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        kv_cache: Optional[torch.Tensor],
+        kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
         attn_type: AttentionType = AttentionType.DECODER,
     ) -> torch.Tensor:

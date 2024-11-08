@@ -3,14 +3,14 @@ from enum import Enum
 from typing import Callable, List, Optional
 
 import torch
+from compressed_tensors import CompressionFormat
+from compressed_tensors.quantization import QuantizationStrategy
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
                                                   FusedMoeWeightScaleSupported)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     WNA16_SUPPORTED_BITS)
-from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
-    CompressionFormat, QuantizationStrategy)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     all_close_1d, normalize_e4m3fn_to_e4m3fnuz, per_tensor_dequantize)
 from vllm.model_executor.utils import set_weight_attrs

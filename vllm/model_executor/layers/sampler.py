@@ -4,7 +4,7 @@ import warnings
 from dataclasses import dataclass
 from importlib.util import find_spec
 from math import inf
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, Iterator, List, Optional, Tuple, Union
 
 import msgspec
 import torch
@@ -117,11 +117,14 @@ class SamplerOutput(
     # block/sync across workers, cpu-gpu sync time and sampling time.
     model_execute_time: Optional[float] = None
 
-    def __getitem__(self, idx: int):
+    def __getitem__(self, idx: int) -> CompletionSequenceGroupOutput:
         return self.outputs[idx]
 
     def __setitem__(self, idx: int, value):
         self.outputs[idx] = value
+
+    def __iter__(self) -> Iterator[CompletionSequenceGroupOutput]:
+        return iter(self.outputs)
 
     def __len__(self):
         return len(self.outputs)
