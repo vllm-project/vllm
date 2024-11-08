@@ -1,8 +1,8 @@
 """Compare the with and without prefix caching."""
 from vllm.inputs import DecoderOnlyInputs
 from vllm.sampling_params import SamplingParams
-from vllm.v1.core.kv_cache_manager import (KVCacheManager, Request,
-                                           hash_block_tokens)
+from vllm.v1.core.kv_cache_manager import KVCacheManager, Request
+from vllm.v1.core.kv_cache_utils import hash_block_tokens
 
 
 def make_request(request_id, prompt_token_ids):
@@ -46,7 +46,7 @@ def test_prefill():
         assert manager.block_pool[block_id].ref_cnt == 1
         assert manager.block_pool[block_id].num_hashed_tokens == 16 * (
             block_id + 1)
-        assert manager.block_pool[block_id].token_ids == [block_id] * 16
+        assert manager.block_pool[block_id].token_ids == tuple([block_id] * 16)
         parent_block_hash = block_hash
 
     # Check partial/preallocated block metadata
@@ -144,7 +144,8 @@ def test_decode():
 
     # Append slots without allocating a new block.
     req0.num_computed_tokens = 55
-    req0.output_token_ids = [8] * 4
+    for _ in range(4):
+        req0.append_output_token_ids(8)
     new_blocks = manager.append_slots(req0, 4)
     assert new_blocks is not None and len(new_blocks) == 0
     assert len(manager.block_pool[3].token_ids) == 11
@@ -154,7 +155,8 @@ def test_decode():
     req0.num_computed_tokens = 59
     # 6 tokens to fill the previous block, and 10 tokens to fill
     # the preallocated block.
-    req0.output_token_ids += [7] * (5 + 10)
+    for _ in range(5 + 10):
+        req0.append_output_token_ids(7)
     new_blocks = manager.append_slots(req0, 15)
     assert new_blocks is not None and len(new_blocks) == 0
     assert len(manager.block_pool[3].token_ids) == 16
@@ -164,7 +166,8 @@ def test_decode():
     req0.num_computed_tokens = 74
     # 6 tokens to fill the previous block, and 10 tokens to fill
     # the preallocated block.
-    req0.output_token_ids += [12] * (6 + 11)
+    for _ in range(6 + 11):
+        req0.append_output_token_ids(12)
     new_blocks = manager.append_slots(req0, 17)
     # Plus one preallocated block.
     assert new_blocks is not None and len(new_blocks) == 2
