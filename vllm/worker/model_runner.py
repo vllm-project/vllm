@@ -47,7 +47,6 @@ from vllm.prompt_adapter.worker_manager import (
     LRUCacheWorkerPromptAdapterManager)
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
-from vllm.transformers_utils.config import uses_mrope
 from vllm.utils import (DeviceMemoryProfiler, GiB_bytes, PyObjectCache,
                         async_tensor_h2d, flatten_2d_lists,
                         is_pin_memory_available, supports_dynamo,
@@ -493,7 +492,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             context_len = seq_data.get_num_computed_tokens()
             seq_len = min(seq_len, context_len + token_chunk_size)
         elif self.runner.scheduler_config.is_multi_step or \
-            self.runner.model_config.is_encoder_decoder_model:
+            self.runner.model_config.is_encoder_decoder:
             context_len = seq_len - 1
         else:
             context_len = seq_data.get_num_computed_tokens()
@@ -666,7 +665,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         inter_data.multi_modal_placeholder_maps = placeholder_maps
 
         # special processing for mrope position deltas.
-        if self.runner.model_is_mrope:
+        if self.runner.model_config.uses_mrope:
             image_grid_thw = mm_kwargs.get("image_grid_thw", None)
             video_grid_thw = mm_kwargs.get("video_grid_thw", None)
             assert image_grid_thw is not None or video_grid_thw is not None, (
@@ -711,7 +710,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
 
         encoder_seq_len = 0
 
-        if self.runner.model_config.is_encoder_decoder_model:
+        if self.runner.model_config.is_encoder_decoder:
             encoder_seq_len = seq_group_metadata.encoder_seq_data.get_len()
 
         inter_data = self.init_cached_inter_data(
@@ -837,7 +836,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             if not inter_data.is_prompt:
                 max_decode_seq_len = max(max_decode_seq_len,
                                          max(inter_data.seq_lens))
-                if self.runner.model_config.is_encoder_decoder_model:
+                if self.runner.model_config.is_encoder_decoder:
                     max_encoder_seq_len = max(max_encoder_seq_len,
                                               inter_data.encoder_seq_len)
 
@@ -1375,12 +1374,6 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             raise RuntimeError("PromptAdapter is not enabled.")
         return self.prompt_adapter_manager.list_adapters()
 
-    @property
-    def model_is_mrope(self) -> bool:
-        """Detect if the model has "mrope" rope_scaling type.
-        mrope requires keep "rope_deltas" between prompt and decoding phases."""
-        return uses_mrope(self.model_config.hf_config)
-
     @torch.inference_mode()
     def capture_model(self, kv_caches: List[List[torch.Tensor]]) -> None:
         """Cuda graph capture a model.
@@ -1411,7 +1404,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         max_batch_size = self.max_batchsize_to_capture
         input_tokens = torch.zeros(max_batch_size, dtype=torch.long).cuda()
         input_positions = torch.zeros(max_batch_size, dtype=torch.long).cuda()
-        if self.model_is_mrope:
+        if self.model_config.uses_mrope:
             input_positions = torch.tile(input_positions, (3, 1))
         # Prepare dummy previous_hidden_states only if needed by the model.
         # This is used by draft models such as EAGLE.
@@ -1447,7 +1440,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         self.attn_state.graph_capture_get_metadata_for_batch(
                             batch_size,
                             is_encoder_decoder_model=self.model_config.
-                            is_encoder_decoder_model))
+                            is_encoder_decoder))
 
                     if self.lora_config:
                         lora_mapping = LoRAMapping(
@@ -1466,7 +1459,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     graph_runner = CUDAGraphRunner(
                         self.model, self.attn_backend.get_name(),
                         self.attn_state.graph_clone(batch_size),
-                        self.model_config.is_encoder_decoder_model)
+                        self.model_config.is_encoder_decoder)
 
                     capture_inputs = {
                         "input_ids":
@@ -1497,7 +1490,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                             self.model.get_seqlen_agnostic_capture_inputs(
                                 batch_size)
                         })
-                    if self.model_config.is_encoder_decoder_model:
+                    if self.model_config.is_encoder_decoder:
                         # add the additional inputs to capture for
                         # encoder-decoder models.
                         self._update_inputs_to_capture_for_enc_dec_model(
