@@ -94,7 +94,7 @@ VLM_TEST_SETTINGS = {
             ),
             limit_mm_per_prompt={"image": 4},
         )],
-        marks=[pytest.mark.core_model],
+        marks=[pytest.mark.core_model, pytest.mark.cpu_model],
     ),
     "paligemma": VLMTestInfo(
         models=["google/paligemma-3b-mix-224"],
@@ -129,7 +129,7 @@ VLM_TEST_SETTINGS = {
         max_num_seqs=2,
         auto_cls=AutoModelForVision2Seq,
         vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
-        marks=[pytest.mark.core_model],
+        marks=[pytest.mark.core_model, pytest.mark.cpu_model],
         image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
     ),
     #### Extended model tests
