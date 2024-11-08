@@ -75,7 +75,7 @@ class Idefics3ProcessorSize(NamedTuple):
     longest_edge: int
 
     def __contains__(self, key: str) -> bool:
-        return key in self._asdict()
+        return key in self._asdict() and getattr(self, key) is not None
 
     def __getitem__(self, key: str) -> int:
         return getattr(self, key)
@@ -86,7 +86,7 @@ ImageInputs = Union[Idefics3ImagePixelInputs, Idefics3ImageEmbeddingInputs]
 
 def get_mm_processor_kwargs(size: Optional[Dict[str, int]] = None) -> Dict:
     mm_processor_kwargs = {}
-    if size is not None:
+    if size:
         mm_processor_kwargs["size"] = Idefics3ProcessorSize(**size)
     return mm_processor_kwargs
 
