@@ -18,8 +18,8 @@ from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest, ChatCompletionResponse,
     ChatCompletionResponseChoice, ChatCompletionResponseStreamChoice,
     ChatCompletionStreamResponse, ChatMessage, DeltaFunctionCall, DeltaMessage,
-    DeltaToolCall, ErrorResponse, FunctionCall, RequestResponseMetadata,
-    ToolCall, UsageInfo)
+    DeltaToolCall, ErrorResponse, FunctionCall, PromptTokenUsageInfo,
+    RequestResponseMetadata, ToolCall, UsageInfo)
 from vllm.entrypoints.openai.serving_engine import (BaseModelPath,
                                                     LoRAModulePath,
                                                     OpenAIServing,
@@ -252,6 +252,7 @@ class OpenAIServingChat(OpenAIServing):
         previous_num_tokens = [0] * num_choices
         finish_reason_sent = [False] * num_choices
         num_prompt_tokens = 0
+        num_cached_tokens = None
 
         if isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam):
             tool_choice_function_name = request.tool_choice.function.name
@@ -305,6 +306,7 @@ class OpenAIServingChat(OpenAIServing):
                 # the result_generator, it needs to be sent as the FIRST
                 # response (by the try...catch).
                 if first_iteration:
+                    num_cached_tokens = res.num_cached_tokens
                     # Send first response for each request.n (index) with
                     # the role
                     role = self.get_chat_request_role(request)
@@ -534,6 +536,8 @@ class OpenAIServingChat(OpenAIServing):
                     prompt_tokens=num_prompt_tokens,
                     completion_tokens=completion_tokens,
                     total_tokens=num_prompt_tokens + completion_tokens,
+                    prompt_tokens_details=PromptTokenUsageInfo(
+                        cached_tokens=num_cached_tokens),
                 )
 
                 final_usage_chunk = ChatCompletionStreamResponse(
@@ -706,6 +710,8 @@ class OpenAIServingChat(OpenAIServing):
             prompt_tokens=num_prompt_tokens,
             completion_tokens=num_generated_tokens,
             total_tokens=num_prompt_tokens + num_generated_tokens,
+            prompt_tokens_details=PromptTokenUsageInfo(
+                cached_tokens=final_res.num_cached_tokens),
         )
 
         request_metadata.final_usage_info = usage

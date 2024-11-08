@@ -83,10 +83,10 @@ class RequestOutput:
         finished: Whether the whole request is finished.
         metrics: Metrics associated with the request.
         lora_request: The LoRA request that was used to generate the output.
-        encoder_prompt: The encoder prompt string of the request;
-                        None if decoder-only
-        encoder_prompt_token_ids: The token IDs of the encoder prompt;
-                                  None if decoder-only
+        encoder_prompt: The encoder prompt string of the request.
+                        None if decoder-only.
+        encoder_prompt_token_ids: The token IDs of the encoder prompt.
+                                  None if decoder-only.
         num_cached_tokens: The number of tokens with prefix cache hit.
     """
 
