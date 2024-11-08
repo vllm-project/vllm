@@ -159,19 +159,18 @@ class FreeKVCacheBlockQueue:
         return ret
 
 
-def hash_block_tokens(parent_block_hash: Optional[int],
+def hash_block_tokens(parent_hash: Optional[int],
                       curr_block_token_ids: Sequence[int]) -> BlockHashType:
-    """Computes a hash value corresponding to the contents of a block and
-    the contents of the preceding block(s). The hash value is used for
-    prefix caching. We use LRU cache for this function to avoid recomputing
-    hash values for the same block contents.
-
-    TODO: Support arbitrary metadata so that we could support more
-    features such as LoRA adapter.
+    """Computes a hash value corresponding to the contents of a block, in
+    the context of the contents of the preceding block(s) and maybe also
+    some metadata. The hash value is used for prefix caching. We use LRU
+    cache for this function to avoid recomputing hash values for the same
+    block contents.
 
     Args:
-        parent_block_hash: The hash of the parent block. None
-            if this is the first block.
+        parent_hash: The hash of the parent block if this is not the
+            first block. If it is the first block, parent hash could
+            be None or be the hash of some relevant metadata.
         curr_block_token_ids: A list of token ids in the current
             block. The current block is assumed to be full.
 
@@ -179,32 +178,34 @@ def hash_block_tokens(parent_block_hash: Optional[int],
         The hash value of the block and the token ids in the block.
         The entire tuple is used as the hash key of the block.
     """
-    return BlockHashType(hash((parent_block_hash, *curr_block_token_ids)),
+    return BlockHashType(hash((parent_hash, *curr_block_token_ids)),
                          tuple(curr_block_token_ids))
 
 
-def hash_request_tokens(block_size: int,
-                        token_ids: Sequence[int]) -> List[BlockHashType]:
+def hash_request_tokens(
+        block_size: int,
+        token_ids: Sequence[int],
+        parent_hash: Optional[int] = None) -> List[BlockHashType]:
     """Computes hash values of a chain of blocks given a sequence of
     token IDs. The hash value is used for prefix caching.
 
     Args:
         block_size: The size of each block.
         token_ids: A sequence of token ids in the request.
+        parent_hash: Seed hash value. For example, when using LoRA this is
+         the hash value of the LoRA ID.
 
     Returns:
         The list of computed hash values.
     """
     ret = []
-    parent_block_hash_value = None
     for start in range(0, len(token_ids), block_size):
         end = start + block_size
         block_token_ids = token_ids[start:end]
         # Do not hash the block if it is not full.
         if len(block_token_ids) < block_size:
             break
-        block_hash = hash_block_tokens(parent_block_hash_value,
-                                       block_token_ids)
+        block_hash = hash_block_tokens(parent_hash, block_token_ids)
         ret.append(block_hash)
-        parent_block_hash_value = block_hash.hash_value
+        parent_hash = block_hash.hash_value
     return ret

@@ -345,8 +345,7 @@ class AsyncLLM(EngineClient):
         self,
         lora_request: Optional[LoRARequest] = None,
     ) -> AnyTokenizer:
-        assert lora_request is None
-        return self.detokenizer.tokenizer
+        return self.detokenizer.get_tokenizer(lora_request)
 
     async def is_tracing_enabled(self) -> bool:
         return False

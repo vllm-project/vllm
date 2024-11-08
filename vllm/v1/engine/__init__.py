@@ -22,6 +22,8 @@ class DetokenizerRequest:
     stop: List[str]
     include_stop_str_in_output: bool
 
+    lora_request: Optional[LoRARequest]
+
 
 @dataclass
 class EngineCoreRequest:
