@@ -1,6 +1,6 @@
 """Fused MoE utilities for GPTQ."""
 import functools
-from typing import Any, Dict, Optional
+from typing import Optional
 
 import torch
 
@@ -8,6 +8,7 @@ from vllm import _custom_ops as ops
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     fused_topk, moe_align_block_size, try_get_optimal_moe_config)
 from vllm.scalar_type import scalar_types
+from vllm.utils import direct_register_custom_op
 
 
 def get_scalar_type(num_bits: int, has_zp: bool):
@@ -28,7 +29,6 @@ def single_marlin_moe(
     g_idx: Optional[torch.Tensor] = None,
     sort_indices: Optional[torch.Tensor] = None,
     w_zeros: Optional[torch.Tensor] = None,
-    override_config: Optional[Dict[str, Any]] = None,
     num_bits: int = 8,
     is_k_full: bool = True,
 ) -> torch.Tensor:
@@ -49,8 +49,6 @@ def single_marlin_moe(
     - topk (int): The number of top-k experts to select.
     - renormalize (bool): If True, renormalize the top-k weights to sum to 1.
     - w_zeros (Optional[torch.Tensor]): Optional zero points to be used for w.
-    - override_config (Optional[Dict[str, Any]]): Optional override
-        for the kernel configuration.
     - num_bits (bool): The number of bits in expert weights quantization.
 
     Returns:
@@ -79,7 +77,6 @@ def single_marlin_moe(
                                         w.shape,
                                         topk_ids.shape[1],
                                         None,
-                                        override_config=override_config,
                                         is_marlin=True)
     config = get_config_func(M)
 
@@ -122,6 +119,30 @@ def single_marlin_moe(
     return torch.sum(intermediate_cache.view(*intermediate_cache.shape), dim=1)
 
 
+def single_marlin_moe_fake(
+    hidden_states: torch.Tensor,
+    w: torch.Tensor,
+    scales: torch.Tensor,
+    gating_output: torch.Tensor,
+    topk: int,
+    renormalize: bool,
+    g_idx: Optional[torch.Tensor] = None,
+    sort_indices: Optional[torch.Tensor] = None,
+    w_zeros: Optional[torch.Tensor] = None,
+    num_bits: int = 8,
+    is_k_full: bool = True,
+) -> torch.Tensor:
+    return torch.empty_like(hidden_states)
+
+
+direct_register_custom_op(
+    op_name="single_marlin_moe",
+    op_func=single_marlin_moe,
+    mutates_args=[],
+    fake_impl=single_marlin_moe_fake,
+)
+
+
 def fused_marlin_moe(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
@@ -137,7 +158,6 @@ def fused_marlin_moe(
     sort_indices2: Optional[torch.Tensor] = None,
     w1_zeros: Optional[torch.Tensor] = None,
     w2_zeros: Optional[torch.Tensor] = None,
-    override_config: Optional[Dict[str, Any]] = None,
     num_bits: int = 8,
     is_k_full: bool = True,
 ) -> torch.Tensor:
@@ -161,8 +181,6 @@ def fused_marlin_moe(
         permutation.
     - topk_weights (torch.Tensor): Top-k weights.
     - topk_ids (torch.Tensor): Indices of topk-k elements.
-    - override_config (Optional[Dict[str, Any]]): Optional override
-        for the kernel configuration.
     - w1_zeros (Optional[torch.Tensor]): Optional zero points to be used for w1.
     - w2_zeros (Optional[torch.Tensor]): Optional zero points to be used for w2.
     - num_bits (bool): The number of bits in expert weights quantization.
@@ -209,7 +227,6 @@ def fused_marlin_moe(
         w2.shape,
         topk_ids.shape[1],
         None,
-        override_config=override_config,
         is_marlin=True,
     )
     config = get_config_func(M)
@@ -311,3 +328,32 @@ def fused_marlin_moe(
 
     return torch.sum(intermediate_cache3.view(*intermediate_cache3.shape),
                      dim=1)
+
+
+def fused_marlin_moe_fake(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    w1_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    gating_output: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    g_idx1: Optional[torch.Tensor] = None,
+    g_idx2: Optional[torch.Tensor] = None,
+    sort_indices1: Optional[torch.Tensor] = None,
+    sort_indices2: Optional[torch.Tensor] = None,
+    w1_zeros: Optional[torch.Tensor] = None,
+    w2_zeros: Optional[torch.Tensor] = None,
+    num_bits: int = 8,
+    is_k_full: bool = True,
+) -> torch.Tensor:
+    return torch.empty_like(hidden_states)
+
+
+direct_register_custom_op(
+    op_name="fused_marlin_moe",
+    op_func=fused_marlin_moe,
+    mutates_args=[],
+    fake_impl=fused_marlin_moe_fake,
+)

@@ -5,8 +5,8 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from vllm.inputs import DecoderOnlyInputs, InputContext, token_inputs
-from vllm.inputs.registry import InputRegistry
+from vllm.inputs import (DecoderOnlyInputs, DummyData, InputContext,
+                         InputRegistry, token_inputs)
 from vllm.multimodal import MultiModalRegistry
 from vllm.sequence import VLLM_TOKEN_ID_ARRAY_TYPE, SequenceData
 
@@ -56,7 +56,7 @@ def use_dummy_data_mock():
                                   num_crops=DEFAULT_NUM_CROPS):
         seq_data = SequenceData(
             array(VLLM_TOKEN_ID_ARRAY_TYPE, [0] * num_crops))
-        return seq_data, None
+        return DummyData(seq_data, None)
 
     with patch(
             "vllm.inputs.registry.InputRegistry._default_dummy_data_factory",
@@ -177,9 +177,9 @@ def test_dummy_data_kwarg_overrides(use_dummy_data_mock, num_crops):
     # NOTE: seq_len is thrown away here since this will leverage the
     # default dummy data factory that we have patched in, whose seq
     # len is solely dependent on the value of the mm_processor_kwargs.
-    seq_data, _ = dummy_registry.dummy_data_for_profiling(
+    dummy_data = dummy_registry.dummy_data_for_profiling(
         ctx.model_config, seq_len=-1, mm_registry=mm_registry)
-    assert len(seq_data.prompt_token_ids) == expected_seq_count
+    assert len(dummy_data.seq_data.prompt_token_ids) == expected_seq_count
 
 
 @pytest.mark.parametrize(
@@ -206,9 +206,9 @@ def test_dummy_data_with_sad_kwarg_overrides(use_dummy_data_mock,
     # NOTE: seq_len is thrown away here since this will leverage the
     # default dummy data factory that we have patched in, whose seq
     # len is solely dependent on the value of the mm_processor_kwargs.
-    seq_data, _ = dummy_registry.dummy_data_for_profiling(
+    dummy_data = dummy_registry.dummy_data_for_profiling(
         ctx.model_config, seq_len=-1, mm_registry=mm_registry)
-    assert len(seq_data.prompt_token_ids) == DEFAULT_NUM_CROPS
+    assert len(dummy_data.seq_data.prompt_token_ids) == DEFAULT_NUM_CROPS
 
 
 ### Test overrides for the max token count per multimodal instance
@@ -221,6 +221,7 @@ def test_max_tokens_kwarg_overrides(num_crops):
     expected_seq_count = DEFAULT_NUM_CROPS if num_crops is None else num_crops
 
     ctx = build_model_context(MULTIMODAL_MODEL_ID,
+                              task="generate",
                               trust_remote_code=True,
                               mm_processor_kwargs=mm_processor_kwargs,
                               limit_mm_per_prompt={"image": 1})
@@ -256,6 +257,7 @@ def test_max_tokens_kwarg_overrides(num_crops):
 def test_max_tokens_with_sad_kwarg_overrides(mm_processor_kwargs):
     """Ensure that max token calcs filters out invalid mm_processor_kwargs"""
     ctx = build_model_context(MULTIMODAL_MODEL_ID,
+                              task="generate",
                               trust_remote_code=True,
                               mm_processor_kwargs=mm_processor_kwargs,
                               limit_mm_per_prompt={"image": 1})
@@ -278,12 +280,13 @@ def test_max_tokens_with_sad_kwarg_overrides(mm_processor_kwargs):
 
 ### Test overrides for the mapper
 @pytest.mark.parametrize("num_crops", [DEFAULT_NUM_CROPS, NUM_CROPS_OVERRIDE])
-def test_default_mapper_with_processer_kwargs(image_assets, num_crops):
+def test_default_mapper_with_processor_kwargs(image_assets, num_crops):
     """Ensure that the mapper processor kwargs can fall back to HF models."""
     # NOTE - we don't validate bad inputs for the default mapper, because it's
     # through the automodel interface in transformers, so we can't easily
     # inspect what kwargs are or are not allowed.
     ctx = build_model_context(MULTIMODAL_MODEL_ID,
+                              task="generate",
                               trust_remote_code=True,
                               mm_processor_kwargs={"num_crops": num_crops},
                               limit_mm_per_prompt={"image": 1})
@@ -311,6 +314,7 @@ def test_custom_mapper_kwarg_overrides(image_assets, init_num_crops,
         init_num_crops, inference_num_crops)
 
     ctx = build_model_context(MULTIMODAL_MODEL_ID,
+                              task="generate",
                               trust_remote_code=True,
                               mm_processor_kwargs=init_kwargs,
                               limit_mm_per_prompt={"image": 1})
@@ -348,6 +352,7 @@ def test_custom_mapper_with_sad_kwarg_overrides(image_assets,
     """Ensure that custom mappers filters out invalid mm_processor_kwargs"""
     # Should filter out the init time kwargs
     ctx = build_model_context(MULTIMODAL_MODEL_ID,
+                              task="generate",
                               trust_remote_code=True,
                               mm_processor_kwargs=mm_processor_kwargs,
                               limit_mm_per_prompt={"image": 1})

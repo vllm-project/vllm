@@ -7,7 +7,7 @@ import vllm.envs as envs
 from vllm.compilation.levels import CompilationLevel
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import is_cpu, is_hip, is_xpu, print_warning_once
+from vllm.utils import print_warning_once
 
 logger = init_logger(__name__)
 
@@ -55,10 +55,9 @@ class CustomOp(nn.Module):
         # NOTE(woosuk): This is a placeholder for future extensions.
         return self.forward_native(*args, **kwargs)
 
-    def forward_gaudi(self, *args, **kwargs):
+    def forward_hpu(self, *args, **kwargs):
         # By default, we assume that Gaudi ops are compatible with the
         # PyTorch-native implementation.
-        # NOTE(woosuk): This is a placeholder for future extensions.
         return self.forward_native(*args, **kwargs)
 
     def dispatch_forward(self):
@@ -72,13 +71,15 @@ class CustomOp(nn.Module):
         if not enabled:
             return self.forward_native
 
-        if is_hip():
+        if current_platform.is_rocm():
             return self.forward_hip
-        elif is_cpu():
+        elif current_platform.is_cpu():
             return self.forward_cpu
+        elif current_platform.is_hpu():
+            return self.forward_hpu
         elif current_platform.is_tpu():
             return self.forward_tpu
-        elif is_xpu():
+        elif current_platform.is_xpu():
             return self.forward_xpu
         else:
             return self.forward_cuda
@@ -100,15 +101,15 @@ class CustomOp(nn.Module):
 
         return (CustomOp.default_on() or enabled) and not disabled
 
-    # On by default if VLLM_TORCH_COMPILE_LEVEL < CompilationLevel.INDUCTOR
+    # On by default if VLLM_TORCH_COMPILE_LEVEL < CompilationLevel.PIECEWISE
     # Specifying 'all' or 'none' in VLLM_CUSTOM_OPS takes precedence.
     @staticmethod
-    @lru_cache()
+    @lru_cache
     def default_on() -> bool:
         count_none = envs.VLLM_CUSTOM_OPS.count("none")
         count_all = envs.VLLM_CUSTOM_OPS.count("all")
         assert count_none + count_all <= 1, "Can only specify 'none' or 'all'"
-        return envs.VLLM_TORCH_COMPILE_LEVEL < CompilationLevel.INDUCTOR and \
+        return envs.VLLM_TORCH_COMPILE_LEVEL < CompilationLevel.PIECEWISE and \
             not count_none > 0 or count_all > 0
 
     # Dictionary of all custom ops (classes, indexed by registered name).

@@ -6,7 +6,7 @@ import torch.nn as nn
 from huggingface_hub import snapshot_download
 from transformers import AutoConfig, AutoModel, CLIPImageProcessor
 
-from ....conftest import _ImageAssets, cleanup
+from ....conftest import _ImageAssets
 
 # we use snapshot_download to prevent conflicts between
 # dynamic_module and trust_remote_code for hf_runner
@@ -45,12 +45,13 @@ def run_intern_vit_test(
         for pixel_value in pixel_values
     ]
 
+    from vllm.distributed import cleanup_dist_env_and_memory
     from vllm.model_executor.models.intern_vit import InternVisionModel
     vllm_model = InternVisionModel(config)
     vllm_model.load_weights(hf_model.state_dict().items())
 
     del hf_model
-    cleanup()
+    cleanup_dist_env_and_memory()
 
     vllm_model = vllm_model.to("cuda", dtype)
     vllm_outputs_per_image = [
@@ -58,7 +59,7 @@ def run_intern_vit_test(
         for pixel_value in pixel_values
     ]
     del vllm_model
-    cleanup()
+    cleanup_dist_env_and_memory()
 
     cos_similar = nn.CosineSimilarity(dim=-1)
     for vllm_output, hf_output in zip(vllm_outputs_per_image,

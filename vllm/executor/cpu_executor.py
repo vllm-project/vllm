@@ -2,8 +2,6 @@ import os
 from functools import partial
 from typing import Any, Awaitable, List, Optional, Set, Tuple, Union
 
-import torch
-
 import vllm.envs as envs
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig)
@@ -138,18 +136,11 @@ class CPUExecutor(ExecutorBase):
         assert self.distributed_init_method is not None
 
         kwargs = dict(
-            model_config=self.model_config,
-            parallel_config=self.parallel_config,
-            scheduler_config=self.scheduler_config,
-            device_config=self.device_config,
-            cache_config=self.cache_config,
-            load_config=self.load_config,
+            vllm_config=self.vllm_config,
             local_rank=local_rank,
             rank=rank,
             distributed_init_method=self.distributed_init_method,
-            lora_config=self.lora_config,
             kv_cache_dtype=self.cache_config.cache_dtype,
-            prompt_adapter_config=self.prompt_adapter_config,
             is_driver_worker=rank == 0,
         )
         wrapper.init_worker(**kwargs)
@@ -323,9 +314,6 @@ class CPUExecutorAsync(CPUExecutor, ExecutorAsyncBase):
 
 
 def _verify_and_get_model_config(config: ModelConfig) -> ModelConfig:
-    if config.dtype == torch.float16:
-        logger.warning("float16 is not supported on CPU, casting to bfloat16.")
-        config.dtype = torch.bfloat16
     # Reminder: Please update docs/source/serving/compatibility_matrix.rst
     # If the feature combo become valid
     if not config.enforce_eager:

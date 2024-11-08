@@ -1,6 +1,5 @@
-# coding=utf-8
 # Adapted from
-# https://huggingface.co/core42/jais-30b-chat-v3/blob/main/modeling_jais.py
+# https://huggingface.co/inceptionai/jais-30b-chat-v3/blob/main/modeling_jais.py
 # Copyright 2023 The vLLM team.
 # Copyright 2023 the Jais authors and HuggingFace Inc. team.  All rights
 # reserved.
@@ -26,6 +25,7 @@ import torch
 from torch import nn
 
 from vllm.attention import Attention, AttentionMetadata
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
@@ -34,7 +34,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -212,6 +212,7 @@ class JAISBlock(nn.Module):
         return hidden_states
 
 
+@support_torch_compile
 class JAISModel(nn.Module):
 
     def __init__(
@@ -307,7 +308,7 @@ class JAISLMHeadModel(nn.Module, SupportsPP):
                                         config.mup_width_scale)
         self.logits_processor = LogitsProcessor(vocab_size=config.vocab_size,
                                                 scale=self.output_logits_scale)
-        self.sampler = Sampler()
+        self.sampler = get_sampler()
         self.make_empty_intermediate_tensors = (
             self.transformer.make_empty_intermediate_tensors)
 
