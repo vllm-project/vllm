@@ -20,6 +20,7 @@ docker run -itd --entrypoint /bin/bash -v ~/.cache/huggingface:/root/.cache/hugg
 # Run basic model test
 docker exec cpu-test bash -c "
 <<<<<<< HEAD
+<<<<<<< HEAD
   pip install pytest matplotlib einops transformers_stream_generator datamodel_code_generator
   pytest -v -s tests/models/decoder_only/language \
     --ignore=tests/models/test_fp8.py \
@@ -41,9 +42,24 @@ docker exec cpu-test bash -c "
     --ignore=tests/models/test_mamba.py \
     --ignore=tests/models/test_danube3_4b.py" # Mamba kernels and Danube3-4B on CPU is not supported
 >>>>>>> 7342a7d7... [Model] Support Mamba (#6484)
+=======
+  set -e
+  pip install pytest pytest-asyncio \
+    decord einops librosa peft Pillow sentence-transformers soundfile \
+    transformers_stream_generator matplotlib datamodel_code_generator
+  pip install torchvision --index-url https://download.pytorch.org/whl/cpu
+  # Embedding models are not supported for CPU yet
+  # pytest -v -s tests/models/embedding/language
+  pytest -v -s tests/models/encoder_decoder/language
+  pytest -v -s tests/models/decoder_only/language/test_models.py
+  # Chunked prefill not supported for CPU yet
+  # pytest -v -s tests/models/decoder_only/audio_language -m cpu_model
+  pytest -v -s tests/models/decoder_only/vision_language -m cpu_model"
+>>>>>>> b489fc3c... [CI/Build] Update CPU tests to include all "standard" tests (#5481)
 
 # online inference
 docker exec cpu-test bash -c "
+  set -e
   python3 -m vllm.entrypoints.openai.api_server --model facebook/opt-125m & 
   timeout 600 bash -c 'until curl localhost:8000/v1/models; do sleep 1; done' || exit 1
   python3 benchmarks/benchmark_serving.py \
