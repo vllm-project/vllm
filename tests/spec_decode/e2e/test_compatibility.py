@@ -52,28 +52,31 @@ def test_spec_decode_xfail_spec_max_model_len(test_llm_generator):
                                       sampling_params)
 
 
-@pytest.mark.parametrize("common_llm_kwargs", [{
-    "model": "meta-llama/Llama-2-7b-chat-hf",
-    "speculative_model": "JackFram/llama-68m",
-    "num_speculative_tokens": 5,
-}])
-@pytest.mark.parametrize(
-    "per_test_common_llm_kwargs",
-    [
-        {
-            "speculative_draft_tensor_parallel_size": 2,
-        },
-        {
-            "speculative_draft_tensor_parallel_size": 4,
-        },
-        {
-            "speculative_draft_tensor_parallel_size": 8,
-        },
-
-    ])
+@pytest.mark.parametrize("common_llm_kwargs",
+                         [{
+                             "model": "meta-llama/Llama-2-7b-chat-hf",
+                             "speculative_model": "JackFram/llama-68m",
+                             "num_speculative_tokens": 5,
+                             "enable_chunked_prefill": "True",
+                         }])
+@pytest.mark.parametrize("per_test_common_llm_kwargs", [
+    {
+        "tensor_parallel_size": 2,
+        "speculative_draft_tensor_parallel_size": 2,
+    },
+    {
+        "tensor_parallel_size": 4,
+        "speculative_draft_tensor_parallel_size": 4,
+    },
+    {
+        "tensor_parallel_size": 8,
+        "speculative_draft_tensor_parallel_size": 8,
+    },
+])
 @pytest.mark.parametrize("test_llm_kwargs", [{}])
 @pytest.mark.parametrize("seed", [1])
-def test_spec_decode_xfail_chunked_prefill_draft_model_tp_not_one(test_llm_generator):
+def test_spec_decode_xfail_chunked_prefill_draft_model_tp_not_one(
+        test_llm_generator):
     """Verify that speculative decoding fails if chunked prefill is enabled for 
     draft model with tensor parallelism of more than 1.
     """
@@ -93,4 +96,3 @@ def test_spec_decode_xfail_chunked_prefill_draft_model_tp_not_one(test_llm_gener
     with pytest.raises(ValueError, match="with tensor parallel size 1"):
         get_output_from_llm_generator(test_llm_generator, prompts,
                                       sampling_params)
-

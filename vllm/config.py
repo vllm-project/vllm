@@ -1388,11 +1388,12 @@ class SpeculativeConfig:
                     "Chunked prefill and hidden-state based draft models are "
                     "not compatible.")
 
-            if enable_chunked_prefill and speculative_draft_tensor_parallel_size != 1:
+            if (enable_chunked_prefill and \
+                 speculative_draft_tensor_parallel_size != 1):
                 raise ValueError(
-                    "Chunked prefill and speculative decoding can be enabled simultaneously only "
-                    "for draft models with tensor parallel size 1.")
-
+                    "Chunked prefill and speculative decoding can be enabled "
+                    "simultaneously only for draft models with tensor "
+                    "parallel size 1.")
 
             draft_model_config.max_model_len = (
                 SpeculativeConfig._maybe_override_draft_max_model_len(
