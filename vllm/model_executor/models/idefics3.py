@@ -21,7 +21,9 @@ import torch
 import torch.utils.checkpoint
 from PIL import Image
 from torch import nn
-from transformers import Idefics3Config, Idefics3ImageProcessor
+# Temporary solution for transformers below 4.46.0.
+from transformers import PretrainedConfig as Idefics3Config
+from transformers import ProcessorMixin as Idefics3ImageProcessor
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
