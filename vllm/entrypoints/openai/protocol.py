@@ -5,9 +5,8 @@ from argparse import Namespace
 from typing import Any, Dict, List, Literal, Optional, Union
 
 import torch
-from openai.types.chat import ChatCompletionContentPartParam
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-from typing_extensions import Annotated, Required, TypedDict
+from typing_extensions import Annotated
 
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.pooling_params import PoolingParams
@@ -33,26 +32,6 @@ except ModuleNotFoundError:
 
 assert _LONG_INFO.min == _MOCK_LONG_INFO.min
 assert _LONG_INFO.max == _MOCK_LONG_INFO.max
-
-
-class CustomChatCompletionMessageParam(TypedDict, total=False):
-    """Enables custom roles in the Chat Completion API."""
-    role: Required[str]
-    """The role of the message's author."""
-
-    content: Union[str, List[ChatCompletionContentPartParam]]
-    """The contents of the message."""
-
-    name: str
-    """An optional name for the participant.
-
-    Provides the model information to differentiate between participants of the
-    same role.
-    """
-
-    tool_call_id: Optional[str]
-
-    tool_calls: Optional[List[dict]]
 
 
 class OpenAIBaseModel(BaseModel):
