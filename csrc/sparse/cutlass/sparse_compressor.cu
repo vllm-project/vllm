@@ -42,7 +42,7 @@
 
 #include "util/helper.h"
 
-#include "util/common_gemm.cuh"
+#include "sparse_scaled_mm_c3x.cuh"
 
 /// Make A structured sparse by replacing elements with 0 and compress it
 template<typename ElementA_>
@@ -158,11 +158,11 @@ bool sparsify_and_compress(torch::Tensor& a_compressed, torch::Tensor& e, torch:
   stride_A_compressed = cutlass::make_cute_packed_stride(StrideA{}, cute::make_shape(M, KC, L));
   stride_E = cutlass::make_cute_packed_stride(StrideE{}, cute::make_shape(ME, KE, L));
 
-  // Random sparsification is performed on host
-  std::vector<ElementA> block_A_host(m * k);
-  cutlass::device_memory::copy_to_host(block_A_host.data(), a_ptr, m * k);
-  compressor_utility.structure_sparse_zero_mask_fill(block_A_host.data(), 2024);
-  cutlass::device_memory::copy_to_device(a_ptr, block_A_host.data(), m * k);
+  // // Random sparsification is performed on host
+  // std::vector<ElementA> block_A_host(m * k);
+  // cutlass::device_memory::copy_to_host(block_A_host.data(), a_ptr, m * k);
+  // compressor_utility.structure_sparse_zero_mask_fill(block_A_host.data(), 2024);
+  // cutlass::device_memory::copy_to_device(a_ptr, block_A_host.data(), m * k);
 
   cutlass::KernelHardwareInfo hw_info;
   hw_info.device_id = 0;

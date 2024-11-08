@@ -1,0 +1,87 @@
+#include <stddef.h>
+#include <torch/all.h>
+#include "cutlass/cutlass.h"
+#include "quantization/cutlass_w8a8/scaled_mm_c3x.cuh"
+
+void {{ _name }}(torch::Tensor &out, torch::Tensor const &a,
+                torch::Tensor const &b,
+                std::string reduction_mode_,
+                std::string decomposition_mode_,
+                torch::Tensor const &a_scales,
+                torch::Tensor const &b_scales) {
+
+  assert (reduction_mode_ == "Deterministic" ||
+          reduction_mode_ == "Nondeterministic");
+  assert (decomposition_mode_ == "Heuristic" ||
+          decomposition_mode_ == "SplitK" ||
+          decomposition_mode_ == "DataParallel" ||
+          decomposition_mode_ == "StreamK");
+
+  using TileShape =  {{ _tile_shape }};
+  using ClusterShape = {{ _cluster_shape }};
+  using KernelSchedule = typename {{ _kernel_schedule }};
+  using EpilogueSchedule = typename {{ _epilogue_schedule }};
+  using TileSchedule = typename {{ _tile_schedule }};
+  using AccType = {{ _acc_type }};
+  static constexpr cutlass::gemm::GemmUniversalMode Mode = {{ _gemm_mode }};
+
+  ReductionMode reduction_mode{ReductionMode::Deterministic};
+  if (reduction_mode_ == "Deterministic") {
+    reduction_mode = ReductionMode::Deterministic;
+  }
+  else if (reduction_mode_ == "Nondeterministic") {
+    reduction_mode = ReductionMode::Nondeterministic;
+  }
+
+  DecompositionMode decomposition_mode{DecompositionMode::Heuristic};
+  if (decomposition_mode_ == "Heuristic") {
+    decomposition_mode = DecompositionMode::Heuristic;
+  }
+  else if (decomposition_mode_ == "SplitK") {
+    decomposition_mode = DecompositionMode::SplitK;
+  }
+  else if (decomposition_mode_ == "DataParallel") {
+    decomposition_mode = DecompositionMode::DataParallel;
+  }
+  else if (decomposition_mode_ == "StreamK") {
+    decomposition_mode = DecompositionMode::StreamK;
+  }
+
+  TORCH_CHECK(a.dtype() == {{ _torch_input_dtype }});
+  TORCH_CHECK(b.dtype() == {{ _torch_input_dtype}});
+  TORCH_CHECK(a_scales.dtype() == torch::kFloat32);
+  TORCH_CHECK(b_scales.dtype() == torch::kFloat32);
+
+  if (out.dtype() == torch::kBFloat16) {
+    using Cutlass3xGemm =
+      cutlass_3x_gemm<cutlass::float_e4m3_t,
+                      cutlass::bfloat16_t,
+                      ScaledEpilogue,
+                      TileShape,
+                      ClusterShape,
+                      KernelSchedule,
+                      EpilogueSchedule,
+                      AccType,
+                      TileSchedule,
+                      Mode>;
+
+    return cutlass_gemm_caller_streamk<Cutlass3xGemm>(
+        out, a, b, reduction_mode, decomposition_mode, a_scales, b_scales);
+  } else {
+    TORCH_CHECK(out.dtype() == torch::kFloat16);
+    using Cutlass3xGemm =
+      cutlass_3x_gemm<cutlass::float_e4m3_t,
+                      cutlass::half_t,
+                      ScaledEpilogue,
+                      TileShape,
+                      ClusterShape,
+                      KernelSchedule,
+                      EpilogueSchedule,
+                      AccType,
+                      TileSchedule,
+                      Mode>;
+
+    return cutlass_gemm_caller_streamk<Cutlass3xGemm>(
+        out, a, b, reduction_mode, decomposition_mode, a_scales, b_scales);
+  }
+}

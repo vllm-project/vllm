@@ -227,7 +227,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     "csrc/custom_all_reduce.cu"
     "csrc/permute_cols.cu"
     "csrc/quantization/cutlass_w8a8/scaled_mm_entry.cu"
-    "csrc/sparse/cutlass/sparse_mm_entry.cu"
+    "csrc/sparse/cutlass/sparse_scaled_mm_entry.cu"
     "csrc/sparse/cutlass/sparse_compressor.cu")
 
   set_gencode_flags_for_srcs(
@@ -318,7 +318,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # CUDA 12.0 or later (and only work on Hopper, 9.0/9.0a for now).
   cuda_archs_loose_intersection(SCALED_MM_3X_ARCHS "9.0;9.0a" "${CUDA_ARCHS}")
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0 AND SCALED_MM_3X_ARCHS)
-    set(SRCS "csrc/sparse/cutlass/sparse_mm_c3x.cu")
+    set(SRCS "csrc/sparse/cutlass/sparse_scaled_mm_c3x.cu")
     set_gencode_flags_for_srcs(
       SRCS "${SRCS}"
       CUDA_ARCHS "${SCALED_MM_3X_ARCHS}")
@@ -457,6 +457,9 @@ define_gpu_extension_target(
 # driver API. This causes problems when linking with earlier versions of CUDA.
 # Setting this variable sidesteps the issue by calling the driver directly.
 target_compile_definitions(_C PRIVATE CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
+
+include(nm_cutlass_c.cmake)
+build_nm_cutlass_c()
 
 #
 # _moe_C extension

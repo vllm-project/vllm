@@ -462,6 +462,16 @@ if _is_cuda():
     ext_modules.append(
         CMakeExtension(name="vllm.vllm_flash_attn.vllm_flash_attn_c"))
 
+if _is_cuda():
+    sparse_mm_generated_dir = './csrc/sparse/cutlass/generator/generated/'
+    sparse_mm_generated_dirs = \
+        [x for x in Path(sparse_mm_generated_dir).iterdir() if x.is_dir()]
+    sparse_mm_generated_dir_names = [x.name for x in sparse_mm_generated_dirs]
+    nm_cutlass_extensions = \
+        [f"vllm._nm_cutlass_{x}_C" for x in sparse_mm_generated_dir_names]
+    for x in nm_cutlass_extensions:
+        ext_modules.append(CMakeExtension(name=x))
+
 if _build_custom_ops():
     ext_modules.append(CMakeExtension(name="vllm._C"))
 

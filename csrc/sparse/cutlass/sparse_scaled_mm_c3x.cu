@@ -27,7 +27,7 @@
 #include "util/common.hpp"
 // clang-format on
 
-#include "util/common_gemm.cuh"
+#include "sparse_scaled_mm_c3x.cuh"
 
 template <typename InType, typename OutType,
           template <typename, typename, typename> typename Epilogue,
@@ -55,15 +55,15 @@ void cutlass_gemm_sm90_fp8_dispatch(torch::Tensor& out, torch::Tensor const& a,
 
   if (mp2 <= 64) {
     // m in [1, 64]
-    return cutlass_test_gemm_caller<Cutlass3xGemmM64>(
+    return cutlass_sparse_gemm_caller<Cutlass3xGemmM64>(
         out, a, e, b, std::forward<EpilogueArgs>(args)...);
   } else if (mp2 <= 128) {
     // m in (64, 128]
-    return cutlass_test_gemm_caller<Cutlass3xGemmM128>(
+    return cutlass_sparse_gemm_caller<Cutlass3xGemmM128>(
         out, a, e, b, std::forward<EpilogueArgs>(args)...);
   } else {
     // m in (128, inf)
-    return cutlass_test_gemm_caller<Cutlass3xGemmDefault>(
+    return cutlass_sparse_gemm_caller<Cutlass3xGemmDefault>(
         out, a, e, b, std::forward<EpilogueArgs>(args)...);
   }
 }
@@ -85,7 +85,7 @@ void cutlass_gemm_sm90_fp16_dispatch(torch::Tensor& out, torch::Tensor const& a,
                                        Epilogue>::Cutlass3xGemm;
 
     // m in (128, inf)
-    return cutlass_test_gemm_caller<Cutlass3xGemmDefault>(
+    return cutlass_sparse_gemm_caller<Cutlass3xGemmDefault>(
         out, a, e, b, std::forward<EpilogueArgs>(args)...);
 }
 
@@ -106,7 +106,7 @@ void cutlass_gemm_sm90_bf16_dispatch(torch::Tensor& out, torch::Tensor const& a,
                                        Epilogue>::Cutlass3xGemm;
 
     // m in (128, inf)
-    return cutlass_test_gemm_caller<Cutlass3xGemmDefault>(
+    return cutlass_sparse_gemm_caller<Cutlass3xGemmDefault>(
         out, a, e, b, std::forward<EpilogueArgs>(args)...);
 }
 
@@ -146,23 +146,23 @@ void cutlass_gemm_sm90_int8_dispatch(torch::Tensor& out, torch::Tensor const& a,
   if (mp2 <= 32) {
     // m in [1, 32]
     if (is_small_n) {
-      return cutlass_test_gemm_caller<Cutlass3xGemmM32NSmall>(
+      return cutlass_sparse_gemm_caller<Cutlass3xGemmM32NSmall>(
           out, a, e, b, std::forward<EpilogueArgs>(args)...);
     } else {
-      return cutlass_test_gemm_caller<Cutlass3xGemmM32NBig>(
+      return cutlass_sparse_gemm_caller<Cutlass3xGemmM32NBig>(
           out, a, e, b, std::forward<EpilogueArgs>(args)...);
     }
   } else if (mp2 <= 64) {
     // m in (32, 64]
-    return cutlass_test_gemm_caller<Cutlass3xGemmM64>(
+    return cutlass_sparse_gemm_caller<Cutlass3xGemmM64>(
         out, a, e, b, std::forward<EpilogueArgs>(args)...);
   } else if (mp2 <= 128) {
     // m in (64, 128]
-    return cutlass_test_gemm_caller<Cutlass3xGemmM128>(
+    return cutlass_sparse_gemm_caller<Cutlass3xGemmM128>(
         out, a, e, b, std::forward<EpilogueArgs>(args)...);
   } else {
     // m in (128, inf)
-    return cutlass_test_gemm_caller<Cutlass3xGemmDefault>(
+    return cutlass_sparse_gemm_caller<Cutlass3xGemmDefault>(
         out, a, e, b, std::forward<EpilogueArgs>(args)...);
   }
 }

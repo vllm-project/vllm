@@ -66,7 +66,7 @@ WEIGHT_SHAPES = {
     # Ns : [2560, 4096, 5120, 6144, 8192, 12288, 14336, 15360,
     #         22016, 27648, 28672]
     "llama-representative-set": [
-        ([4096, 4096], None),  # small K, small N
+        # ([4096, 4096], None),  # small K, small N
         ([4096, 8192], None),  # small K, medium N
         ([4096, 22016], None),  # small K, large N
         ([14336, 4096], None),  # large K, small N
