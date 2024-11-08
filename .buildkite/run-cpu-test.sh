@@ -1,3 +1,5 @@
+#!/bin/bash
+
 # This script build the CPU docker image and run the offline inference inside the container.
 # It serves a sanity check for compilation and basic model usage.
 set -ex
@@ -46,7 +48,7 @@ docker exec cpu-test bash -c "
 docker exec cpu-test bash -c "
   export VLLM_CPU_KVCACHE_SPACE=10 
   export VLLM_CPU_OMP_THREADS_BIND=48-92 
-  python3 -m vllm.entrypoints.openai.api_server --model facebook/opt-125m & 
+  python3 -m vllm.entrypoints.openai.api_server --model facebook/opt-125m --dtype half & 
   timeout 600 bash -c 'until curl localhost:8000/v1/models; do sleep 1; done' || exit 1
   python3 benchmarks/benchmark_serving.py \
     --backend vllm \
