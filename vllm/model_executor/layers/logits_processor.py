@@ -48,14 +48,15 @@ class LogitsProcessor(nn.Module):
         self,
         lm_head: VocabParallelEmbedding,
         hidden_states: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
+        sampling_metadata: Optional[SamplingMetadata] = None,
         embedding_bias: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+    ) -> Optional[torch.Tensor]:
         if self.logits_as_input:
             logits = hidden_states
         else:
-            hidden_states = _prune_hidden_states(hidden_states,
-                                                 sampling_metadata)
+            if sampling_metadata is not None:
+                hidden_states = _prune_hidden_states(hidden_states,
+                                                     sampling_metadata)
 
             # Get the logits for the next tokens.
             logits = self._get_logits(hidden_states, lm_head, embedding_bias)
@@ -69,18 +70,23 @@ class LogitsProcessor(nn.Module):
                 logits *= self.scale
 
             # Apply logits processors (if any).
-            logits = _apply_logits_processors(logits, sampling_metadata)
+            if sampling_metadata is not None:
+                logits = _apply_logits_processors(logits, sampling_metadata)
 
         return logits
 
-    def _get_logits(self, hidden_states: torch.Tensor,
-                    lm_head: VocabParallelEmbedding,
-                    embedding_bias: Optional[torch.Tensor]) -> torch.Tensor:
+    def _get_logits(
+        self,
+        hidden_states: torch.Tensor,
+        lm_head: VocabParallelEmbedding,
+        embedding_bias: Optional[torch.Tensor],
+    ) -> Optional[torch.Tensor]:
         # Get the logits for the next tokens.
         logits = lm_head.linear_method.apply(lm_head,
                                              hidden_states,
                                              bias=embedding_bias)
         if self.use_gather:
+            # None may be returned for rank > 0
             logits = tensor_model_parallel_gather(logits)
         else:
             # Gather is not supported for some devices such as TPUs.
@@ -91,7 +97,7 @@ class LogitsProcessor(nn.Module):
             logits = tensor_model_parallel_all_gather(logits)
         # Remove paddings in vocab (if any).
         if logits is not None:
-            logits = logits[:, :self.org_vocab_size]
+            logits = logits[..., :self.org_vocab_size]
         return logits
 
     def extra_repr(self) -> str:
@@ -105,8 +111,14 @@ def _prune_hidden_states(
     hidden_states: torch.Tensor,
     sampling_metadata: SamplingMetadata,
 ) -> torch.Tensor:
-    return hidden_states.index_select(0,
-                                      sampling_metadata.selected_token_indices)
+    # NOTE(kzawora): The if guard is needed for Gaudi - in some scenarios
+    # (warmup, profile_run) we might not have selected_token_indices,
+    # so we skip pruning.
+    if sampling_metadata.selected_token_indices is not None:
+        return hidden_states.index_select(
+            0, sampling_metadata.selected_token_indices)
+    else:
+        return hidden_states
 
 
 def _apply_logits_processors(

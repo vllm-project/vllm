@@ -6,7 +6,8 @@ from vllm.executor.executor_base import ExecutorAsyncBase
 from vllm.executor.gpu_executor import GPUExecutor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.sequence import ExecuteModelRequest, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.sequence import ExecuteModelRequest
 
 logger = init_logger(__name__)
 
@@ -55,6 +56,10 @@ class DistributedGPUExecutor(GPUExecutor):
         # have GPUs.
         logger.info("# GPU blocks: %d, # CPU blocks: %d", num_gpu_blocks,
                     num_cpu_blocks)
+        max_concurrency = (num_gpu_blocks * self.cache_config.block_size /
+                           self.model_config.max_model_len)
+        logger.info("Maximum concurrency for %s tokens per request: %.2fx",
+                    self.model_config.max_model_len, max_concurrency)
 
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
@@ -64,8 +69,9 @@ class DistributedGPUExecutor(GPUExecutor):
                           num_cpu_blocks=num_cpu_blocks)
 
     def execute_model(
-            self,
-            execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
+        self,
+        execute_model_req: ExecuteModelRequest,
+    ) -> List[SamplerOutput]:
         if self.parallel_worker_tasks is None:
             self.parallel_worker_tasks = self._run_workers(
                 "start_worker_execution_loop",
@@ -188,7 +194,7 @@ class DistributedGPUExecutorAsync(DistributedGPUExecutor, ExecutorAsyncBase):
     @abstractmethod
     async def _driver_execute_model_async(
         self,
-        execute_model_req: Optional[ExecuteModelRequest] = None
+        execute_model_req: Optional[ExecuteModelRequest] = None,
     ) -> List[SamplerOutput]:
         """Execute the model asynchronously in the driver worker.
 

@@ -96,14 +96,14 @@ def setup(app):
 
 # Mock out external dependencies here, otherwise the autodoc pages may be blank.
 autodoc_mock_imports = [
-    "aiohttp",
+    "compressed_tensors",
     "cpuinfo",
+    "cv2",
     "torch",
     "transformers",
     "psutil",
     "prometheus_client",
     "sentencepiece",
-    "vllm.cuda_utils",
     "vllm._C",
     "PIL",
     "numpy",
@@ -111,6 +111,12 @@ autodoc_mock_imports = [
     "tqdm",
     "tensorizer",
     "pynvml",
+    "outlines",
+    "librosa",
+    "soundfile",
+    "gguf",
+    "lark",
+    "decord",
 ]
 
 for mock_target in autodoc_mock_imports:
@@ -137,6 +143,7 @@ intersphinx_mapping = {
     "python": ("https://docs.python.org/3", None),
     "typing_extensions":
     ("https://typing-extensions.readthedocs.io/en/latest", None),
+    "aiohttp": ("https://docs.aiohttp.org/en/stable", None),
     "pillow": ("https://pillow.readthedocs.io/en/stable", None),
     "numpy": ("https://numpy.org/doc/stable", None),
     "torch": ("https://pytorch.org/docs/stable", None),

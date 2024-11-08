@@ -1,3 +1,5 @@
+#!/bin/bash
+
 # This script build the Neuron docker image and run the API server inside the container.
 # It serves a sanity check for compilation and basic model usage.
 set -e
@@ -12,10 +14,10 @@ if [ -f /tmp/neuron-docker-build-timestamp ]; then
     current_time=$(date +%s)
     if [ $((current_time - last_build)) -gt 86400 ]; then
         docker system prune -f
-        echo $current_time > /tmp/neuron-docker-build-timestamp
+        echo "$current_time" > /tmp/neuron-docker-build-timestamp
     fi
 else
-    echo $(date +%s) > /tmp/neuron-docker-build-timestamp
+    date "+%s" > /tmp/neuron-docker-build-timestamp
 fi
 
 docker build -t neuron -f Dockerfile.neuron .
@@ -34,7 +36,7 @@ wait_for_server_to_start() {
     timeout=300
     counter=0
 
-    while [ "$(curl -s -o /dev/null -w ''%{http_code}'' localhost:8000/health)" != "200" ]; do
+    while [ "$(curl -s -o /dev/null -w '%{http_code}' localhost:8000/health)" != "200" ]; do
         sleep 1
         counter=$((counter + 1))
         if [ $counter -ge $timeout ]; then

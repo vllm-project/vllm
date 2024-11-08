@@ -2,7 +2,7 @@
     {
         "test_name": "latency_llama8B_tp1",
         "parameters": {
-            "model": "meta-llama/Meta-Llama-3-8B",
+            "model": "meta-llama/Meta-Llama-3.1-8B-Instruct",
             "tensor_parallel_size": 1,
             "load_format": "dummy",
             "num_iters_warmup": 5,
@@ -12,7 +12,7 @@
     {
         "test_name": "latency_llama70B_tp4",
         "parameters": {
-            "model": "meta-llama/Meta-Llama-3-70B-Instruct",
+            "model": "meta-llama/Meta-Llama-3.1-70B-Instruct",
             "tensor_parallel_size": 4,
             "load_format": "dummy",
             "num-iters-warmup": 5,

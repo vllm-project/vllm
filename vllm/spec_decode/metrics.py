@@ -1,7 +1,7 @@
 import time
-from dataclasses import dataclass
 from typing import Callable, Optional
 
+import msgspec
 import torch
 
 from vllm.model_executor.layers.spec_decode_base_sampler import (
@@ -9,8 +9,10 @@ from vllm.model_executor.layers.spec_decode_base_sampler import (
 from vllm.utils import is_pin_memory_available
 
 
-@dataclass
-class SpecDecodeWorkerMetrics:
+class SpecDecodeWorkerMetrics(
+        msgspec.Struct,
+        omit_defaults=True,  # type: ignore[call-arg]
+        array_like=True):  # type: ignore[call-arg]
     """Dataclass holding metrics emitted from the spec decode worker.
     """
 
@@ -102,13 +104,10 @@ class AsyncMetricsCollector:
         if self._rank != 0:
             return False
 
-        if (now - self._last_metrics_collect_time <
-                self._rejsample_metrics_collect_interval_s):
-            return False
-        return True
+        return now - self._last_metrics_collect_time >= self._rejsample_metrics_collect_interval_s  # noqa: E501
 
     def _copy_rejsample_metrics_async(self) -> torch.cuda.Event:
-        """Copy rejection/typical-acceptance sampling metrics 
+        """Copy rejection/typical-acceptance sampling metrics
         (number of accepted tokens, etc) to CPU asynchronously.
 
         Returns a CUDA event recording when the copy is complete.

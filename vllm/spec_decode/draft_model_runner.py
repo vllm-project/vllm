@@ -2,21 +2,24 @@ from typing import List, Optional
 
 import torch
 
-from vllm import _custom_ops as ops
+from vllm.forward_context import set_forward_context
+from vllm.model_executor.layers.sampler import SamplerOutput
 
 try:
-    from vllm.attention.backends.flash_attn import FlashAttentionMetadata
-except ModuleNotFoundError:
-    # vllm_flash_attn is not installed, use the identical ROCm FA metadata
-    from vllm.attention.backends.rocm_flash_attn import (
-        ROCmFlashAttentionMetadata as FlashAttentionMetadata)
+    try:
+        from vllm.attention.backends.flash_attn import FlashAttentionMetadata
+    except (ModuleNotFoundError, ImportError):
+        # vllm_flash_attn is not installed, try the ROCm FA metadata
+        from vllm.attention.backends.rocm_flash_attn import (
+            ROCmFlashAttentionMetadata as FlashAttentionMetadata)
+except (ModuleNotFoundError, ImportError) as err:
+    raise RuntimeError(
+        "Draft model speculative decoding currently only supports"
+        "CUDA and ROCm flash attention backend.") from err
 
-from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, MultiModalConfig, ParallelConfig,
-                         PromptAdapterConfig, SchedulerConfig)
 from vllm.logger import init_logger
-from vllm.sequence import (ExecuteModelRequest, IntermediateTensors,
-                           SamplerOutput)
+from vllm.multimodal import MultiModalInputs
+from vllm.sequence import ExecuteModelRequest, IntermediateTensors
 from vllm.worker.model_runner import (ModelInputForGPUWithSamplingMetadata,
                                       ModelRunner)
 
@@ -43,72 +46,15 @@ class TP1DraftModelRunner(ModelRunner):
        any broadcasting inside execute_model).
     """
 
-    def __init__(
-        self,
-        model_config: ModelConfig,
-        parallel_config: ParallelConfig,
-        scheduler_config: SchedulerConfig,
-        device_config: DeviceConfig,
-        cache_config: CacheConfig,
-        load_config: LoadConfig,
-        lora_config: Optional[LoRAConfig],
-        kv_cache_dtype: Optional[str] = "auto",
-        is_driver_worker: bool = False,
-        multimodal_config: Optional[MultiModalConfig] = None,
-        prompt_adapter_config: Optional[PromptAdapterConfig] = None,
-        return_hidden_states: bool = False,
-    ):
-        if return_hidden_states:
+    def __init__(self, *args, **kwargs):
+        if kwargs.get("return_hidden_states"):
             raise ValueError(
                 "return_hidden_states is not supported for TP1DraftModelRunner."
             )
 
-        super().__init__(
-            model_config=model_config,
-            parallel_config=parallel_config,
-            scheduler_config=scheduler_config,
-            device_config=device_config,
-            cache_config=cache_config,
-            load_config=load_config,
-            lora_config=lora_config,
-            kv_cache_dtype=kv_cache_dtype,
-            is_driver_worker=is_driver_worker,
-            multimodal_config=multimodal_config,
-            prompt_adapter_config=prompt_adapter_config,
-            return_hidden_states=return_hidden_states,
-        )
+        super().__init__(*args, **kwargs)
 
-    def _update_flash_attn_metadata(self, attn_metadata, num_seqs,
-                                    num_queries):
-        assert isinstance(attn_metadata, FlashAttentionMetadata)
-
-        if num_seqs != num_queries:
-            assert num_seqs > num_queries
-            assert attn_metadata.use_cuda_graph
-
-        assert attn_metadata.num_prefills == 0
-        assert attn_metadata.num_prefill_tokens == 0
-        assert attn_metadata.num_decode_tokens == num_seqs
-        assert attn_metadata.slot_mapping.shape == (num_seqs, )
-
-        assert len(attn_metadata.seq_lens) == num_seqs
-        assert attn_metadata.seq_lens_tensor.shape == (num_seqs, )
-        assert attn_metadata.max_query_len == 1
-        assert attn_metadata.max_prefill_seq_len == 0
-        assert attn_metadata.max_decode_seq_len == max(attn_metadata.seq_lens)
-
-        assert attn_metadata.query_start_loc.shape == (num_queries + 1, )
-        assert attn_metadata.seq_start_loc.shape == (num_seqs + 1, )
-
-        assert attn_metadata.context_lens_tensor.shape == (num_queries, )
-
-        assert attn_metadata.block_tables.shape[0] == num_seqs
-
-        # Update query lengths. Note that we update only queries and not seqs,
-        # since tensors may be padded due to captured cuda graph batch size
-        for i in range(num_queries):
-            attn_metadata.seq_lens[i] += 1
-        attn_metadata.max_decode_seq_len = max(attn_metadata.seq_lens)
+        self.indices_of_seq_with_bonus_tokens = None
 
     def _update_sampling_metadata(self, sampling_metadata, num_seqs,
                                   num_queries):
@@ -126,8 +72,6 @@ class TP1DraftModelRunner(ModelRunner):
             assert seq_group.is_prompt is False  # No prompt
             assert seq_group.prompt_logprob_indices == []  # No prompt
             assert seq_group.sample_indices == [i]  # Simple
-            assert seq_group.seq_len is None  # Decode
-            assert seq_group.query_len is None  # Decode
 
     def _gpu_advance_step(
             self, model_input: ModelInputForGPUWithSamplingMetadata,
@@ -147,18 +91,9 @@ class TP1DraftModelRunner(ModelRunner):
         # Update attn_metadata
         attn_metadata = model_input.attn_metadata
         assert isinstance(attn_metadata, FlashAttentionMetadata)
-        self._update_flash_attn_metadata(attn_metadata, num_seqs, num_queries)
 
-        # Update GPU tensors
-        ops.advance_step(num_seqs=num_seqs,
-                         num_queries=num_queries,
-                         block_size=self.block_size,
-                         input_tokens=model_input.input_tokens,
-                         sampled_token_ids=sampled_token_ids,
-                         input_positions=model_input.input_positions,
-                         seq_lens=attn_metadata.seq_lens_tensor,
-                         slot_mapping=attn_metadata.slot_mapping,
-                         block_tables=attn_metadata.block_tables)
+        attn_metadata.advance_step(model_input, sampled_token_ids,
+                                   self.block_size, num_seqs, num_queries)
 
         # Update sampling_metadata
         sampling_metadata = model_input.sampling_metadata
@@ -216,7 +151,7 @@ class TP1DraftModelRunner(ModelRunner):
                 return False
 
         # TODO: Add support for other attn backends
-        if self.attn_backend.get_name() != "flash-attn":
+        if self.attn_backend.get_name() != "FLASH_ATTN":
             return False
 
         # TODO: Add support for LORA
@@ -224,16 +159,18 @@ class TP1DraftModelRunner(ModelRunner):
             return False
 
         # TODO: Add soft-tuning prompt adapter support
-        if self.prompt_adapter_config:
-            return False
+        return not self.prompt_adapter_config
 
-        return True
+    def set_indices_of_seq_with_bonus_tokens(self,
+                                             indices_of_seq_with_bonus_tokens):
+        self.indices_of_seq_with_bonus_tokens = indices_of_seq_with_bonus_tokens
 
     @torch.inference_mode()
     def execute_model(
         self,
         model_input: ModelInputForGPUWithSamplingMetadata,
         kv_caches: List[torch.Tensor],
+        previous_hidden_states: Optional[torch.Tensor] = None,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
     ) -> Optional[List[SamplerOutput]]:
@@ -285,6 +222,8 @@ class TP1DraftModelRunner(ModelRunner):
                     model_input.prompt_adapter_requests,
                     model_input.prompt_adapter_mapping)
 
+            self.attn_state.begin_forward(model_input)
+
         # Detect exec mode
         assert model_input.attn_metadata is not None
         use_cuda_graph = False
@@ -309,33 +248,72 @@ class TP1DraftModelRunner(ModelRunner):
             graph_batch_size = model_input.input_tokens.shape[0]
             model_executable = (self.graph_runners[model_input.virtual_engine]
                                 [graph_batch_size])
+
+            if previous_hidden_states is not None:
+                hidden_states = torch.cat([
+                    previous_hidden_states,
+                    torch.empty([
+                        graph_batch_size - previous_hidden_states.shape[0],
+                        *previous_hidden_states.shape[1:]
+                    ],
+                                dtype=previous_hidden_states.dtype,
+                                device=previous_hidden_states.device)
+                ])
+            else:
+                hidden_states = None
         else:
             model_executable = self.model
+            hidden_states = previous_hidden_states
 
         outputs: List[SamplerOutput] = []
         for step in range(num_steps):
             multi_modal_kwargs = model_input.multi_modal_kwargs or {}
 
+            kwargs = {"previous_hidden_states": hidden_states} \
+                if previous_hidden_states is not None else {}
+
             # Run model
-            hidden_states = model_executable(
-                input_ids=model_input.input_tokens,
-                positions=model_input.input_positions,
-                kv_caches=kv_caches,
-                attn_metadata=model_input.attn_metadata,
-                intermediate_tensors=intermediate_tensors,
-                **multi_modal_kwargs,
-            )
+            with set_forward_context(model_input.attn_metadata):
+                hidden_states = model_executable(
+                    input_ids=model_input.input_tokens,
+                    positions=model_input.input_positions,
+                    kv_caches=kv_caches,
+                    attn_metadata=model_input.attn_metadata,
+                    intermediate_tensors=intermediate_tensors,
+                    **MultiModalInputs.as_kwargs(multi_modal_kwargs,
+                                                 device=self.device),
+                    **kwargs,
+                )
 
             # Compute the logits.
             logits = self.model.compute_logits(hidden_states,
                                                model_input.sampling_metadata)
 
             # Sample the next token.
-            outputs.append(
-                self.model.sample(
-                    logits=logits,
-                    sampling_metadata=model_input.sampling_metadata,
-                ))
+            output = self.model.sample(
+                logits=logits,
+                sampling_metadata=model_input.sampling_metadata,
+            )
+            outputs.append(output)
+
+            if model_input.attn_metadata.num_prefills == 0 \
+                and self.indices_of_seq_with_bonus_tokens is not None:
+                assert output.sampled_token_ids is not None
+                # output.sampled_token_ids should be of shape (num_seqs, 1)
+                nums_seqs, num_tokens_per_seq = output.sampled_token_ids.shape
+                assert num_tokens_per_seq == 1
+                count = 0
+                for i in range(nums_seqs):
+                    bonus_seq_idx = self.indices_of_seq_with_bonus_tokens[
+                        count]
+                    if i != bonus_seq_idx:
+                        # The following might cause a cpu->gpu sync
+                        # However, the performance impact is negligible as we
+                        # benchmarked on H100.
+                        output.sampled_token_ids[
+                            i, :] = model_input.input_tokens[bonus_seq_idx]
+                    else:
+                        count += 1
 
             # Prepare inputs for the next step
             if step != num_steps - 1:
