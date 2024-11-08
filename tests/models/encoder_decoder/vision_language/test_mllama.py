@@ -230,7 +230,6 @@ def clear_cache():
     """Fixture to clear backend cache before each test."""
     get_attn_backend.cache_clear()  # Clear the cache
     yield  # This allows the test to run
-    # Optionally, you could also do some cleanup here after the test runs
 
 
 @large_gpu_test(min_gb=48)

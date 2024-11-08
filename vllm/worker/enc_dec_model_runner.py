@@ -116,11 +116,18 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         maybe_global_forced_backend = get_global_forced_attn_backend()
         is_forced_by_global = maybe_global_forced_backend is not None
         is_forced_by_env_var = maybe_env_var_forced_backend is not None
-        if (is_forced_by_global and maybe_global_forced_backend \
-            not in [_Backend.XFORMERS, _Backend.FLASH_ATTN]) or \
-            (is_forced_by_env_var and maybe_env_var_forced_backend \
-                not in [_Backend.XFORMERS, _Backend.FLASH_ATTN]):
-            raise_backend_err()
+        if is_forced_by_global:  # noqa: SIM102
+            # Backend override enforced by global variable takes
+            # precedence over vLLM backend environment variable.
+            if maybe_global_forced_backend not in\
+                 [_Backend.XFORMERS, _Backend.FLASH_ATTN]:
+                raise_backend_err()
+        elif is_forced_by_env_var:  # noqa: SIM102
+            # Backend override enforced by vLLM backend
+            # environment variable
+            if maybe_env_var_forced_backend not in\
+                 [_Backend.XFORMERS, _Backend.FLASH_ATTN]:
+                raise_backend_err()
 
     def _list_to_int32_tensor(
         self,
