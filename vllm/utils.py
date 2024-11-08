@@ -557,12 +557,6 @@ def update_environment_variables(envs: Dict[str, str]):
         os.environ[k] = v
 
 
-def chunk_list(lst: List[T], chunk_size: int):
-    """Yield successive chunk_size chunks from lst."""
-    for i in range(0, len(lst), chunk_size):
-        yield lst[i:i + chunk_size]
-
-
 def cdiv(a: int, b: int) -> int:
     """Ceiling division."""
     return -(a // -b)

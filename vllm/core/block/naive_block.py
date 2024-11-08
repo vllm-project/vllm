@@ -4,6 +4,7 @@ from typing import Deque, FrozenSet, Iterable, List, Optional, Tuple
 from vllm.core.block.common import (BlockPool, CopyOnWriteTracker, RefCounter,
                                     get_all_blocks_recursively)
 from vllm.core.block.interfaces import Block, BlockAllocator, BlockId, Device
+from vllm.core.block.token_ids import TokenIds
 
 Refcount = int
 
@@ -62,7 +63,7 @@ class NaiveBlockAllocator(BlockAllocator):
 
     def allocate_immutable_block(self,
                                  prev_block: Optional[Block],
-                                 token_ids: List[int],
+                                 token_ids: TokenIds,
                                  device: Optional[Device] = None) -> Block:
         """Allocates a new immutable block with the given token IDs, linked to
         the previous block.
@@ -71,7 +72,8 @@ class NaiveBlockAllocator(BlockAllocator):
             prev_block (Optional[Block]): The previous block in the sequence. If
                 None, then the block to be allocated is the first block in the
                 sequence.
-            token_ids (List[int]): The token IDs to be stored in the new block.
+            token_ids (TokenIds): The token IDs to be stored in the
+                new block.
 
         Returns:
             Block: The newly allocated immutable block.
@@ -84,7 +86,7 @@ class NaiveBlockAllocator(BlockAllocator):
     def allocate_immutable_blocks(
             self,
             prev_block: Optional[Block],
-            block_token_ids: List[List[int]],
+            block_token_ids: List[TokenIds],
             device: Optional[Device] = None) -> List[Block]:
         assert device is None
         num_blocks = len(block_token_ids)
@@ -120,7 +122,7 @@ class NaiveBlockAllocator(BlockAllocator):
         assert device is None
         block_id = self._allocate_block_id()
         block = self._block_pool.init_block(prev_block=prev_block,
-                                            token_ids=[],
+                                            token_ids=TokenIds(),
                                             block_size=self._block_size,
                                             physical_block_id=block_id)
         return block
@@ -340,7 +342,8 @@ class NaiveBlock(Block):
 
     Args:
         prev_block (Block): The previous block in the sequence.
-        token_ids (List[int]): The initial token IDs to be stored in the block.
+        token_ids (TokenIds): The initial token IDs to be stored in
+            the block.
         block_size (int): The maximum number of token IDs that can be stored in
             the block.
         allocator (BlockAllocator): The block allocator associated with this
@@ -354,12 +357,12 @@ class NaiveBlock(Block):
 
     def __init__(self,
                  prev_block: Optional[Block],
-                 token_ids: List[int],
+                 token_ids: TokenIds,
                  block_size: int,
                  allocator: BlockAllocator,
                  block_id: Optional[int] = None,
                  _cow_target: Optional[Block] = None):
-        self._token_ids: List[int] = []
+        self._token_ids = TokenIds()
         self._block_size = block_size
         self._prev_block = prev_block
         self._block_id = block_id
@@ -368,12 +371,12 @@ class NaiveBlock(Block):
 
         self._append_token_ids_no_cow(token_ids)
 
-    def append_token_ids(self, token_ids: List[int]) -> None:
+    def append_token_ids(self, token_ids: TokenIds) -> None:
         """Appends the given token IDs to the block and performs a 
         copy-on-write if necessary.
 
         Args:
-            token_ids (Optional[List[int]]): The token IDs to be appended 
+            token_ids (TokenIds): The token IDs to be appended 
                 to the block.
         """
         self._append_token_ids_no_cow(token_ids)
@@ -382,18 +385,18 @@ class NaiveBlock(Block):
             self._block_id = (self._allocator.cow_block_if_not_appendable(
                 self._cow_target))
 
-    def _append_token_ids_no_cow(self, token_ids: List[int]) -> None:
+    def _append_token_ids_no_cow(self, token_ids: TokenIds) -> None:
         """Appends the given token IDs to the block
 
         Args:
-            token_ids (List[int]): The token IDs to be appended to the block.
+            token_ids (TokenIds): The token IDs to be appended to the
+                block.
         """
         if len(token_ids) == 0:
             return
 
         assert len(token_ids) <= self.num_empty_slots
-
-        self._token_ids.extend(token_ids)
+        self._token_ids += token_ids
 
     @property
     def computed(self) -> bool:
@@ -428,7 +431,7 @@ class NaiveBlock(Block):
         return self._block_size - len(self.token_ids)
 
     @property
-    def token_ids(self) -> List[int]:
+    def token_ids(self) -> TokenIds:
         return self._token_ids
 
     @property

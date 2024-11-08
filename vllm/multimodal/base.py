@@ -236,6 +236,14 @@ class MultiModalPlugin(ABC):
         """
         raise NotImplementedError
 
+    @abstractmethod
+    def hash_content(self, data: object) -> int:
+        """
+        Calculates a content-based hash of the multi-modal item that can be
+        used to represent the content for prefix caching.
+        """
+        raise NotImplementedError
+
     def register_input_mapper(
         self,
         mapper: Optional[MultiModalInputMapper] = None,

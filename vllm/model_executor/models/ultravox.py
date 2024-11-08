@@ -339,6 +339,8 @@ class ModifiedWhisperEncoder(WhisperEncoder):
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_ultravox)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_ultravox)
 class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP):
+    supports_chunked_prefill = True
+    supports_prefix_caching = True
 
     def __init__(self,
                  config: UltravoxConfig,

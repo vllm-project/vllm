@@ -1,11 +1,11 @@
 import pytest
 
+from vllm.core.block.token_ids import TokenIds
 from vllm.core.block.utils import (STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE,
                                    STR_NOT_IMPL_ENC_DEC_SWA)
 from vllm.core.block_manager import SelfAttnBlockSpaceManager
 from vllm.core.interfaces import AllocStatus
 from vllm.sequence import Logprob, SequenceStatus
-from vllm.utils import chunk_list
 
 from ..utils import (create_dummy_prompt, create_seq_group,
                      create_seq_group_encoder_decoder)
@@ -248,14 +248,11 @@ def test_append_slots(block_size, prompt_len, num_slots_to_append,
                            block_manager.get_num_free_gpu_blocks())
 
     # Expect consumed blocks to be new blocks required to support the new slots.
-    expected_consumed_blocks = len(
-        list(
-            chunk_list(
-                list(
-                    range(prompt_len + num_slots_to_append +
-                          num_lookahead_slots)),
-                block_size))) - len(
-                    list(chunk_list(list(range(prompt_len)), block_size)))
+    required_blocks = list(
+        TokenIds(range(prompt_len + num_slots_to_append + num_lookahead_slots),
+                 ()).to_chunks(block_size))
+    existing_blocks = list(TokenIds(range(prompt_len)).to_chunks(block_size))
+    expected_consumed_blocks = len(required_blocks) - len(existing_blocks)
     assert num_consumed_blocks == expected_consumed_blocks
 
 

@@ -115,7 +115,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
 
         seq = seq_group.get_seqs(status=SequenceStatus.WAITING)[0]
         num_required_blocks = BlockTable.get_num_required_blocks(
-            seq.get_token_ids(),
+            seq.get_len(),
             block_size=self.block_size,
             num_lookahead_slots=num_lookahead_slots,
         )
@@ -124,7 +124,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
             encoder_seq = seq_group.get_encoder_seq()
             assert encoder_seq is not None
             num_required_blocks += BlockTable.get_num_required_blocks(
-                encoder_seq.get_token_ids(),
+                encoder_seq.get_len(),
                 block_size=self.block_size,
             )
 
@@ -150,7 +150,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
             block_allocator=self.block_allocator,
             max_block_sliding_window=self.max_block_sliding_window,
         )
-        if seq.get_token_ids():
+        if seq.get_len():
             # Add blocks to the block table only if the sequence is non empty.
             block_table.allocate(seq.get_token_ids())
 
@@ -219,8 +219,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
 
             num_touched_blocks += (
                 block_table.get_num_blocks_touched_by_append_slots(
-                    token_ids=block_table.get_unseen_token_ids(
-                        seq.get_token_ids()),
+                    num_token_ids=block_table.get_unseen_token_id_count(seq),
                     num_lookahead_slots=num_lookahead_slots,
                 ))
 
@@ -237,7 +236,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         block_table = self.block_tables[seq.seq_id]
 
         block_table.append_token_ids(
-            token_ids=block_table.get_unseen_token_ids(seq.get_token_ids()),
+            token_ids=block_table.get_unseen_token_ids(seq),
             num_lookahead_slots=num_lookahead_slots,
             num_computed_slots=seq.data.get_num_computed_tokens(),
         )
@@ -483,7 +482,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
                 # to be touched for the swap.
                 num_blocks_touched += \
                     block_table.get_num_blocks_touched_by_append_slots(
-                        block_table.get_unseen_token_ids(seq.get_token_ids()),
+                        block_table.get_unseen_token_id_count(seq),
                         num_lookahead_slots=num_lookahead_slots)
                 blocks.extend(block_table.blocks)
         # Compute the number of full blocks to touch and add it to the

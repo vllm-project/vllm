@@ -240,6 +240,8 @@ class ModelConfig:
 
         self.is_attention_free = self._init_attention_free()
         self.has_inner_state = self._init_has_inner_state()
+        self.supports_chunked_prefill = self._init_supports_chunked_prefill()
+        self.suports_prefix_caching = self._init_supports_prefix_caching()
 
         if current_platform.is_neuron():
             self.override_neuron_config = override_neuron_config
@@ -310,6 +312,14 @@ class ModelConfig:
     def _init_has_inner_state(self) -> bool:
         architectures = getattr(self.hf_config, "architectures", [])
         return ModelRegistry.model_has_inner_state(architectures)
+
+    def _init_supports_chunked_prefill(self) -> bool:
+        architectures = getattr(self.hf_config, "architectures", [])
+        return ModelRegistry.model_supports_chunked_prefill(architectures)
+
+    def _init_supports_prefix_caching(self) -> bool:
+        architectures = getattr(self.hf_config, "architectures", [])
+        return ModelRegistry.model_supports_prefix_caching(architectures)
 
     def _verify_tokenizer_mode(self) -> None:
         tokenizer_mode = self.tokenizer_mode.lower()

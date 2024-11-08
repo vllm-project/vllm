@@ -15,8 +15,10 @@ import msgspec
 import torch
 from typing_extensions import assert_never
 
+from vllm.core.block.token_ids import TokenIds, TokenRangeAnnotation
 from vllm.lora.request import LoRARequest
-from vllm.multimodal import MultiModalDataDict, MultiModalPlaceholderDict
+from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalDataDict,
+                             MultiModalPlaceholderDict)
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import RequestOutputKind, SamplingParams
@@ -476,7 +478,7 @@ class Sequence:
 
         assert_never(inputs)
 
-    @property
+    @cached_property
     def multi_modal_placeholders(self) -> MultiModalPlaceholderDict:
         inputs = self.inputs
 
@@ -484,6 +486,29 @@ class Sequence:
             return inputs.get("multi_modal_placeholders", {})
 
         assert_never(inputs)
+
+    @cached_property
+    def token_range_annotations(self):
+        annotations: List[TokenRangeAnnotation] = []
+        for modality, ranges in self.multi_modal_placeholders.items():
+            mm_items = self.multi_modal_data.get(modality)
+            if not isinstance(mm_items, list):
+                mm_items = [mm_items]
+
+            for range, mm_item in zip(ranges, mm_items):
+                content_hash = MULTIMODAL_REGISTRY.hash_mm_item_content(
+                    modality, mm_item)
+                annotations.append(
+                    TokenRangeAnnotation(
+                        content_hash=content_hash,
+                        content_offset=0,
+                        token_start_index=range["offset"],
+                        token_end_index=range["offset"] + range["length"],
+                    ))
+
+        sorted_annotations = sorted(annotations,
+                                    key=lambda a: a.token_start_index)
+        return sorted_annotations
 
     @property
     def lora_int_id(self) -> int:
@@ -569,8 +594,9 @@ class Sequence:
     def get_output_len(self) -> int:
         return self.data.get_output_len()
 
-    def get_token_ids(self) -> List[int]:
-        return self.data.get_token_ids()
+    def get_token_ids(self) -> TokenIds:
+        return TokenIds(self.data.get_token_ids(),
+                        self.token_range_annotations)
 
     def get_prompt_token_ids(self) -> Tuple[int, ...]:
         return self.data.get_prompt_token_ids()

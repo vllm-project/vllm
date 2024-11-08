@@ -998,11 +998,10 @@ class EngineArgs:
         device_config = DeviceConfig(device=self.device)
         model_config = self.create_model_config()
 
-        if model_config.is_multimodal_model:
-            if self.enable_prefix_caching:
-                logger.warning(
-                    "--enable-prefix-caching is currently not "
-                    "supported for multimodal models and has been disabled.")
+        if (not model_config.suports_prefix_caching
+                and self.enable_prefix_caching):
+            logger.warning("--enable-prefix-caching is currently not "
+                           "supported by this model and has been disabled.")
             self.enable_prefix_caching = False
 
         maybe_register_config_serialize_by_value(self.trust_remote_code)
@@ -1040,10 +1039,7 @@ class EngineArgs:
             # If not explicitly set, enable chunked prefill by default for
             # long context (> 32K) models. This is to avoid OOM errors in the
             # initial memory profiling phase.
-
-            # Chunked prefill is currently disabled for multimodal models by
-            # default.
-            if use_long_context and not model_config.is_multimodal_model:
+            if use_long_context and model_config.supports_chunked_prefill:
                 is_gpu = device_config.device_type == "cuda"
                 use_sliding_window = (model_config.get_sliding_window()
                                       is not None)

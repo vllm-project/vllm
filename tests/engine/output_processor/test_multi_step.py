@@ -4,6 +4,7 @@ from unittest.mock import MagicMock
 import pytest
 from transformers import PreTrainedTokenizer
 
+from vllm.core.block.token_ids import TokenIds
 from vllm.core.scheduler import Scheduler
 from vllm.engine.output_processor.multi_step import MultiStepOutputProcessor
 from vllm.engine.output_processor.stop_checker import StopChecker
@@ -49,7 +50,7 @@ def test_appends_token_ids(num_new_tokens: int, seq_output_len: int):
     seq = seq_group.get_seqs()[0]
     seq.status = SequenceStatus.RUNNING
 
-    new_token_ids = list(range(num_new_tokens))
+    new_token_ids = TokenIds(range(num_new_tokens))
 
     outputs = [
         CompletionSequenceGroupOutput(
@@ -101,7 +102,7 @@ def test_respects_max_tokens(num_new_tokens: int, seq_prompt_len: int,
     seq = seq_group.get_seqs()[0]
     seq.status = SequenceStatus.RUNNING
 
-    new_token_ids = list(range(num_new_tokens))
+    new_token_ids = TokenIds(range(num_new_tokens))
 
     outputs = [
         CompletionSequenceGroupOutput(
@@ -165,10 +166,11 @@ def test_respects_eos_token_id(num_new_tokens: int, seq_prompt_len: int,
     seq = seq_group.get_seqs()[0]
     seq.status = SequenceStatus.RUNNING
 
-    new_token_ids = list(range(num_new_tokens))
+    new_token_ids = TokenIds(range(num_new_tokens))
     assert eos_token_id not in new_token_ids
     eos_index = random.randint(0, len(new_token_ids) - 1)
-    new_token_ids[eos_index] = eos_token_id
+    new_token_ids = (new_token_ids[:eos_index] + TokenIds(
+        (eos_token_id, )) + new_token_ids[eos_index + 1:])
 
     outputs = [
         CompletionSequenceGroupOutput(
@@ -234,10 +236,11 @@ def test_ignores_eos_token_id(num_new_tokens: int, seq_prompt_len: int,
     seq = seq_group.get_seqs()[0]
     seq.status = SequenceStatus.RUNNING
 
-    new_token_ids = list(range(num_new_tokens))
+    new_token_ids = TokenIds(range(num_new_tokens))
     assert eos_token_id not in new_token_ids
     eos_index = random.randint(0, len(new_token_ids) - 1)
-    new_token_ids[eos_index] = eos_token_id
+    new_token_ids = (new_token_ids[:eos_index] + TokenIds(
+        (eos_token_id, )) + new_token_ids[eos_index + 1:])
 
     outputs = [
         CompletionSequenceGroupOutput(

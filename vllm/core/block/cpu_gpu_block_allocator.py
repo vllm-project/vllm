@@ -4,6 +4,7 @@ from vllm.core.block.interfaces import (Block, BlockAllocator, BlockId,
                                         DeviceAwareBlockAllocator)
 from vllm.core.block.naive_block import NaiveBlock, NaiveBlockAllocator
 from vllm.core.block.prefix_caching_block import PrefixCachingBlockAllocator
+from vllm.core.block.token_ids import TokenIds
 from vllm.platforms import current_platform
 from vllm.utils import Device
 
@@ -136,7 +137,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         return self._allocators[device].allocate_mutable_block(prev_block)
 
     def allocate_immutable_blocks(self, prev_block: Optional[Block],
-                                  block_token_ids: List[List[int]],
+                                  block_token_ids: List[TokenIds],
                                   device: Device) -> List[Block]:
         """Allocates a new group of immutable blocks with the provided block 
         token IDs on the specified device.
@@ -144,7 +145,7 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
         Args:
             prev_block (Optional[Block]): The previous block in the sequence.
                 Used for prefix hashing.
-            block_token_ids (List[int]): The list of block token IDs to be 
+            block_token_ids (TokenIds): The block token IDs to be 
                 stored in the new blocks.
             device (Device): The device on which to allocate the new block.
 
@@ -156,16 +157,15 @@ class CpuGpuBlockAllocator(DeviceAwareBlockAllocator):
             prev_block, block_token_ids)
 
     def allocate_immutable_block(self, prev_block: Optional[Block],
-                                 token_ids: List[int],
-                                 device: Device) -> Block:
+                                 token_ids: TokenIds, device: Device) -> Block:
         """Allocates a new immutable block with the provided token IDs on the
         specified device.
 
         Args:
             prev_block (Optional[Block]): The previous block in the sequence.
                 Used for prefix hashing.
-            token_ids (List[int]): The list of token IDs to be stored in the new
-                block.
+            token_ids (TokenIds): The token IDs to be stored in the
+                new block.
             device (Device): The device on which to allocate the new block.
 
         Returns:
@@ -356,7 +356,7 @@ class NullBlock(Block):
         super().__init__()
         self._proxy = proxy
 
-    def append_token_ids(self, token_ids: List[BlockId]):
+    def append_token_ids(self, token_ids: TokenIds):
         raise ValueError("null block should not be modified")
 
     @property
@@ -368,7 +368,7 @@ class NullBlock(Block):
         raise ValueError("null block should not be modified")
 
     @property
-    def token_ids(self) -> List[BlockId]:
+    def token_ids(self) -> TokenIds:
         return self._proxy.token_ids
 
     @property

@@ -187,6 +187,8 @@ class _ModelInfo:
     supports_pp: bool
     has_inner_state: bool
     is_attention_free: bool
+    supports_chunked_prefill: bool
+    supports_prefix_caching: bool
 
     @staticmethod
     def from_model_cls(model: Type[nn.Module]) -> "_ModelInfo":
@@ -197,6 +199,10 @@ class _ModelInfo:
             supports_pp=supports_pp(model),
             has_inner_state=has_inner_state(model),
             is_attention_free=is_attention_free(model),
+            supports_chunked_prefill=model.supports_chunked_prefill
+            if supports_multimodal(model) else True,
+            supports_prefix_caching=model.supports_prefix_caching
+            if supports_multimodal(model) else True,
         )
 
 
@@ -424,6 +430,14 @@ class _ModelRegistry:
     def is_attention_free_model(self, architectures: Union[str,
                                                            List[str]]) -> bool:
         return self.inspect_model_cls(architectures).is_attention_free
+
+    def model_supports_chunked_prefill(
+            self, architectures: Union[str, List[str]]) -> bool:
+        return self.inspect_model_cls(architectures).supports_chunked_prefill
+
+    def model_supports_prefix_caching(
+            self, architectures: Union[str, List[str]]) -> bool:
+        return self.inspect_model_cls(architectures).supports_prefix_caching
 
 
 ModelRegistry = _ModelRegistry({

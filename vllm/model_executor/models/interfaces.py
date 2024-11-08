@@ -27,6 +27,16 @@ class SupportsMultiModal(Protocol):
         MRO of your model class.
     """
 
+    supports_chunked_prefill: ClassVar[bool] = False
+    """
+    A flag that indicates this model supports chunked prefill.
+    """
+
+    supports_prefix_caching: ClassVar[bool] = False
+    """
+    A flag that indicates this model supports prefix caching.
+    """
+
     def __init__(self, *, multimodal_config: "MultiModalConfig") -> None:
         ...
 
@@ -36,6 +46,8 @@ class SupportsMultiModal(Protocol):
 @runtime_checkable
 class _SupportsMultiModalType(Protocol):
     supports_multimodal: Literal[True]
+    supports_chunked_prefill: bool
+    supports_prefix_caching: bool
 
     def __call__(self, *, multimodal_config: "MultiModalConfig") -> None:
         ...

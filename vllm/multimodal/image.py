@@ -26,6 +26,9 @@ class ImagePlugin(MultiModalPlugin):
     def get_data_key(self) -> str:
         return "image"
 
+    def hash_content(self, data: object) -> int:
+        raise NotImplementedError("Image hashing is not yet implemented")
+
     def _get_hf_image_processor(
         self,
         model_config: "ModelConfig",
