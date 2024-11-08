@@ -18,4 +18,4 @@ if ! [ -x "$(command -v shellcheck)" ]; then
 fi
 
 # TODO - fix warnings in .buildkite/run-amd-test.sh
-find . -name "*.sh" -not -path "./.deps/*" -not -path "./.buildkite/run-amd-test.sh" -exec shellcheck {} +
+find . -name "*.sh" -not -path "./.buildkite/run-amd-test.sh" -exec sh -c 'git check-ignore -q $1 || shellcheck $1' _ {} \;
