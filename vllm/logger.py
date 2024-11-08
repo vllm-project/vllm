@@ -24,7 +24,7 @@ _DATE_FORMAT = "%m-%d %H:%M:%S"
 DEFAULT_LOGGING_CONFIG = {
     "formatters": {
         "vllm": {
-            "class": "vllm.logging.NewLineFormatter",
+            "class": "vllm.logging_utils.NewLineFormatter",
             "datefmt": _DATE_FORMAT,
             "format": _FORMAT,
         },
