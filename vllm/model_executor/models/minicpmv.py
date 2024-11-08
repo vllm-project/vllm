@@ -1136,7 +1136,7 @@ class MiniCPMV(MiniCPMVBaseModel, SupportsLoRA):
     embedding_modules = {}
     embedding_padding_modules = []
 
-    def __new__(cls, vllm_config: VllmConfig):
+    def __new__(cls, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_config
         if not hasattr(config, "version"):
             if config.hidden_size == 2304 and config.query_num == 64:
@@ -1151,4 +1151,4 @@ class MiniCPMV(MiniCPMVBaseModel, SupportsLoRA):
         if instance_class is None:
             raise ValueError(
                 "Currently, MiniCPMV only supports versions 2.0, 2.5, and 2.6")
-        return instance_class(vllm_config)
+        return instance_class(vllm_config, prefix=prefix)
