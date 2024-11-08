@@ -54,7 +54,7 @@ class IPEXConfig(QuantizationConfig):
 
     @classmethod
     def get_supported_act_dtypes(cls) -> List[torch.dtype]:
-        return [torch.bfloat16]
+        return [torch.bfloat16, torch.float16]
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -92,12 +92,6 @@ class IPEXConfig(QuantizationConfig):
         if isinstance(layer, LinearBase):
             return self.quant_method(self)
         return None
-
-    def get_scaled_act_names(self) -> List[str]:
-        if self.method == "awq":
-            return ["gelu", "gelu_fast", "gelu_new", "gelu_pytorch_tanh"]
-        else:
-            return []
 
 
 class IPEXAWQLinearMethod(AWQLinearMethod):

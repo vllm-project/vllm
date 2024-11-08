@@ -1,4 +1,3 @@
-# coding=utf-8
 # Copyright 2024 The Qwen team.
 # Copyright 2023 The vLLM team.
 # Copyright 2022 EleutherAI and the HuggingFace Inc. team. All rights reserved.
@@ -31,19 +30,20 @@ from transformers import Qwen2AudioConfig, Qwen2AudioEncoder
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, MultiModalConfig
-from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, InputContext,
-                         token_inputs)
+from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
+                         InputContext, token_inputs)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.models.qwen2 import Qwen2Model
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalInputs
+from vllm.multimodal.utils import consecutive_placeholder_ranges
 from vllm.sequence import IntermediateTensors, SequenceData
 
 from .interfaces import SupportsMultiModal, SupportsPP
@@ -85,7 +85,8 @@ class Qwen2AudioMultiModalProjector(nn.Module):
 def dummy_data_for_qwen2_audio(ctx: InputContext, seq_len: int,
                                mm_counts: Mapping[str, int]):
     num_audios = mm_counts["audio"]
-    max_llm_audio_tokens = get_max_qwen2_audio_audio_tokens(ctx) * num_audios
+    max_tokens_per_audio = get_max_qwen2_audio_audio_tokens(ctx)
+    max_llm_audio_tokens = max_tokens_per_audio * num_audios
     if seq_len - max_llm_audio_tokens - 2 < 0:
         raise RuntimeError(
             f"Qwen2-Audio cannot process {num_audios} audios in a prompt, "
@@ -99,7 +100,12 @@ def dummy_data_for_qwen2_audio(ctx: InputContext, seq_len: int,
         (0, seq_len - max_llm_audio_tokens),
     )
     dummy_audio = np.full((max_llm_audio_tokens * 2 * 2 * 160, ), 0.)
-    return dummy_seqdata, {"audio": [(dummy_audio, 16000)] * num_audios}
+    return DummyData(
+        dummy_seqdata, {"audio": [(dummy_audio, 16000)] * num_audios}, {
+            "audio":
+            consecutive_placeholder_ranges(num_items=num_audios,
+                                           item_size=max_tokens_per_audio)
+        })
 
 
 def get_processor(
@@ -289,7 +295,7 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.text_config.vocab_size,
                                                 logit_scale)
-        self.sampler = Sampler()
+        self.sampler = get_sampler()
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)

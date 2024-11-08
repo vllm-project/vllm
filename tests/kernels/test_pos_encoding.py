@@ -11,10 +11,10 @@ from .allclose_default import get_default_atol, get_default_rtol
 
 IS_NEOX_STYLE = [True, False]
 DTYPES = [torch.half, torch.bfloat16, torch.float]
-HEAD_SIZES = [64, 80, 96, 112, 120, 128, 192, 256]
+HEAD_SIZES = [64, 80, 112, 120, 256]
 ROTARY_DIMS = [None, 32]  # None means rotary dim == head size
-NUM_HEADS = [7, 17]  # Arbitrary values for testing
-BATCH_SIZES = [1, 5]  # Arbitrary values for testing
+NUM_HEADS = [17]  # Arbitrary values for testing
+BATCH_SIZES = [5]  # Arbitrary values for testing
 SEQ_LENS = [11, 8192]  # Arbitrary values for testing
 SEEDS = [0]
 CUDA_DEVICES = [

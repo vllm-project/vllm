@@ -22,7 +22,7 @@ ENV LD_PRELOAD="/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4:/usr/local/li
 
 RUN echo 'ulimit -c 0' >> ~/.bashrc
 
-RUN pip install intel_extension_for_pytorch==2.4.0
+RUN pip install intel_extension_for_pytorch==2.5.0
 
 WORKDIR /workspace
 
