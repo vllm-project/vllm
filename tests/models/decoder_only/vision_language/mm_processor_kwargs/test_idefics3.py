@@ -17,7 +17,8 @@ models = ["HuggingFaceM4/Idefics3-8B-Llama3"]
 # Wrap lazy imports to avoid initializing CUDA during test collection
 @pytest.fixture()
 def input_processor_for_idefics3():
-    from vllm.model_executor.models.idefics3 import input_processor_for_idefics3
+    from vllm.model_executor.models.idefics3 import (
+        input_processor_for_idefics3)
     return input_processor_for_idefics3
 
 
