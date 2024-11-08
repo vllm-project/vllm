@@ -30,7 +30,7 @@ Quick start using Dockerfile
 
 
 .. tip::
-   If you're observing the following error: ``docker: Error response from daemon: Unknown runtime specified habana.``, please refer to "Install Using Containers" section of `Intel Gaudi Software Stack and Driver Installation <https://docs.habana.ai/en/v1.18.0/Installation_Guide/Bare_Metal_Fresh_OS.html>`__. Make sure you have ``habana-container-runtime`` package installed and that ``habana`` container runtime is registered.
+   If you're observing the following error: ``docker: Error response from daemon: Unknown runtime specified habana.``, please refer to "Install optional packages" section of `Install Driver and Software <https://docs.habana.ai/en/latest/Installation_Guide/Driver_Installation.html#install-driver-and-software>`__ and "Configure Container Runtime" section of `Docker Installation <https://docs.habana.ai/en/latest/Installation_Guide/Installation_Methods/Docker_Installation.html#configure-container-runtime>`__. Make sure you have ``habanalabs-container-runtime`` package installed and that ``habana`` container runtime is registered.
 
 
 Build from source
@@ -48,8 +48,7 @@ To verify that the Intel Gaudi software was correctly installed, run:
    $ pip list | grep habana # verify that habana-torch-plugin, habana-torch-dataloader, habana-pyhlml and habana-media-loader are installed
    $ pip list | grep neural # verify that neural_compressor is installed
 
-Refer to `Intel Gaudi Software Stack
-Verification <https://docs.habana.ai/en/latest/Installation_Guide/SW_Verification.html#platform-upgrade>`__
+Refer to `System Verification and Final Tests <https://docs.habana.ai/en/latest/Installation_Guide/System_Verification_and_Final_Tests.html>`__
 for more details.
 
 Run Docker Image
@@ -57,7 +56,7 @@ Run Docker Image
 
 It is highly recommended to use the latest Docker image from Intel Gaudi
 vault. Refer to the `Intel Gaudi
-documentation <https://docs.habana.ai/en/latest/Installation_Guide/Bare_Metal_Fresh_OS.html#pull-prebuilt-containers>`__
+documentation <https://docs.habana.ai/en/latest/Installation_Guide/Installation_Methods/Docker_Installation.html#use-intel-gaudi-containers>`__
 for more details.
 
 Use the following commands to run a Docker image:
