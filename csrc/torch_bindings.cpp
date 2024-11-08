@@ -278,7 +278,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor? query_start_loc,"
       "Tensor? cache_indices,"
       "Tensor? has_initial_state,"
-      "Tensor! ssm_states) -> ()");
+      "Tensor! ssm_states,"
+      "int pad_slot_id) -> ()");
   ops.impl("selective_scan_fwd", torch::kCUDA, &selective_scan_fwd);
 
   ops.def(
@@ -288,7 +289,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor? bias_,"
       "bool silu_activation,"
       "Tensor? cache_seqlens_,"
-      "Tensor? conv_state_indices) -> Tensor");
+      "Tensor? conv_state_indices,"
+      "int pad_slot_id) -> ()");
   ops.impl("causal_conv1d_update", torch::kCUDA, &causal_conv1d_update);
 
   ops.def(
@@ -298,7 +300,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor? query_start_loc,"
       "Tensor? cache_indices,"
       "Tensor? has_initial_state,"
-      "bool silu_activation) -> Tensor");
+      "bool silu_activation,"
+      "int pad_slot_id) -> ()");
   ops.impl("causal_conv1d_fwd", torch::kCUDA, &causal_conv1d_fwd);
 #endif
 

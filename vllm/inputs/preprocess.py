@@ -10,7 +10,7 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
 from vllm.utils import print_warning_once
 
-from .data import (EncoderDecoderLLMInputs, LLMInputs, PromptType,
+from .data import (DecoderOnlyInputs, EncoderDecoderInputs, PromptType,
                    SingletonPrompt)
 from .parse import is_explicit_encoder_decoder_prompt, parse_singleton_prompt
 
@@ -306,7 +306,7 @@ class InputPreprocessor:
         encoder_comps: PromptComponents,
         decoder_comps: DecoderPromptComponents,
         mm_processor_kwargs: Dict[str, Any],
-    ) -> EncoderDecoderLLMInputs:
+    ) -> EncoderDecoderInputs:
         encoder_prompt, encoder_prompt_ids, encoder_mm_data, _ = encoder_comps
         decoder_prompt, decoder_prompt_ids, decoder_mm_data, _ = decoder_comps
 
@@ -324,7 +324,7 @@ class InputPreprocessor:
             decoder_prompt_ids,
             force_bos=(encoder_mm_data is None and decoder_mm_data is None)))
 
-        return EncoderDecoderLLMInputs(
+        return EncoderDecoderInputs(
             prompt_token_ids=decoder_prompt_ids,
             prompt=decoder_prompt,
             multi_modal_data=decoder_mm_data,
@@ -338,11 +338,11 @@ class InputPreprocessor:
         self,
         prompt: PromptType,
         request_id: str,
-    ) -> EncoderDecoderLLMInputs:
+    ) -> EncoderDecoderInputs:
         '''
         For encoder/decoder models only:
         Process an input prompt into an
-        :class:`EncoderDecoderLLMInputs` instance.
+        :class:`EncoderDecoderInputs` instance.
 
         There are two types of input prompts:
         singleton prompts which carry only the
@@ -369,7 +369,7 @@ class InputPreprocessor:
 
         Returns:
 
-        * :class:`EncoderDecoderLLMInputs` instance
+        * :class:`EncoderDecoderInputs` instance
         '''
 
         encoder_comps: PromptComponents
@@ -411,7 +411,7 @@ class InputPreprocessor:
         self,
         prompt: PromptType,
         request_id: str,
-    ) -> EncoderDecoderLLMInputs:
+    ) -> EncoderDecoderInputs:
         """Async version of :meth:`_process_encoder_decoder_prompt`."""
         encoder_comps: PromptComponents
         decoder_comps: DecoderPromptComponents
@@ -455,17 +455,17 @@ class InputPreprocessor:
         self,
         prompt_comps: PromptComponents,
         prompt_adapter_request: Optional[PromptAdapterRequest],
-    ) -> LLMInputs:
+    ) -> DecoderOnlyInputs:
         (prompt, prompt_token_ids, multi_modal_data,
          mm_processor_kwargs) = prompt_comps
 
         prompt_token_ids = self._apply_prompt_adapter(
             prompt_token_ids, prompt_adapter_request=prompt_adapter_request)
 
-        return LLMInputs(prompt_token_ids=prompt_token_ids,
-                         prompt=prompt,
-                         multi_modal_data=multi_modal_data,
-                         mm_processor_kwargs=mm_processor_kwargs)
+        return DecoderOnlyInputs(prompt_token_ids=prompt_token_ids,
+                                 prompt=prompt,
+                                 multi_modal_data=multi_modal_data,
+                                 mm_processor_kwargs=mm_processor_kwargs)
 
     def _process_decoder_only_prompt(
         self,
@@ -473,10 +473,10 @@ class InputPreprocessor:
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-    ) -> LLMInputs:
+    ) -> DecoderOnlyInputs:
         '''
         For decoder-only models:
-        Process an input prompt into an :class:`LLMInputs` instance.
+        Process an input prompt into an :class:`DecoderOnlyInputs` instance.
 
         Arguments:
 
@@ -487,7 +487,7 @@ class InputPreprocessor:
 
         Returns:
 
-        * :class:`LLMInputs` instance
+        * :class:`DecoderOnlyInputs` instance
         '''
 
         prompt_comps = self._extract_prompt_components(
@@ -507,7 +507,7 @@ class InputPreprocessor:
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-    ) -> LLMInputs:
+    ) -> DecoderOnlyInputs:
         """Async version of :meth:`_process_decoder_only_prompt`."""
         prompt_comps = await self._extract_prompt_components_async(
             prompt,
@@ -526,7 +526,7 @@ class InputPreprocessor:
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-    ) -> Union[LLMInputs, EncoderDecoderLLMInputs]:
+    ) -> Union[DecoderOnlyInputs, EncoderDecoderInputs]:
         """Preprocess the input prompt."""
         if self.is_encoder_decoder_model():
             # Encoder-decoder model requires special mapping of
@@ -554,7 +554,7 @@ class InputPreprocessor:
         request_id: str,
         lora_request: Optional[LoRARequest] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-    ) -> Union[LLMInputs, EncoderDecoderLLMInputs]:
+    ) -> Union[DecoderOnlyInputs, EncoderDecoderInputs]:
         """Async version of :meth:`preprocess`."""
         if self.is_encoder_decoder_model():
             # Encoder-decoder model requires special mapping of

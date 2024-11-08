@@ -499,8 +499,8 @@ def kv_cache_scales_loader(
         logger.error("File or directory '%s' not found.", filename)
     except json.JSONDecodeError:
         logger.error("Error decoding JSON in file '%s'.", filename)
-    except Exception as e:
-        logger.error("An error occurred while reading '%s': %s", filename, e)
+    except Exception:
+        logger.exception("An error occurred while reading '%s'.", filename)
     # This section is reached if and only if any of the excepts are hit
     # Return an empty iterable (list) => no KV cache scales are loaded
     # which ultimately defaults to 1.0 scales

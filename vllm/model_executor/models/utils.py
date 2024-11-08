@@ -8,15 +8,22 @@ import torch.nn as nn
 from torch.func import functional_call
 from transformers import PretrainedConfig
 
+import vllm.envs as envs
+from vllm.attention.selector import (_Backend, backend_name_to_enum,
+                                     get_global_forced_attn_backend)
 from vllm.config import (CacheConfig, LoRAConfig, MultiModalConfig,
                          SchedulerConfig)
+from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.loader import build_model
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models import ModelRegistry
 from vllm.multimodal.base import NestedTensors
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.utils import is_pin_memory_available
+from vllm.utils import is_cpu, is_pin_memory_available
+
+logger = init_logger(__name__)
 
 WeightsMapping = Mapping[str, Optional[str]]
 """If a key maps to a value of `None`, the corresponding weight is ignored."""
@@ -124,7 +131,7 @@ class AutoWeightsLoader:
         base_prefix: str,
         param: nn.Parameter,
         weights: Iterable[Tuple[str, torch.Tensor]],
-    ) -> None:
+    ) -> Iterable[str]:
         for weight_name, weight_data in weights:
             weight_qualname = self._get_qualname(base_prefix, weight_name)
 
@@ -143,12 +150,14 @@ class AutoWeightsLoader:
                                     default_weight_loader)
             weight_loader(param, weight_data)
 
+            yield weight_qualname
+
     def _load_module(
         self,
         base_prefix: str,
         module: nn.Module,
         weights: Iterable[Tuple[str, torch.Tensor]],
-    ) -> None:
+    ) -> Iterable[str]:
         if isinstance(module, PPMissingLayer):
             return
 
@@ -170,14 +179,16 @@ class AutoWeightsLoader:
                 continue
 
             if child_prefix in child_modules:
-                self._load_module(prefix, child_modules[child_prefix],
-                                  child_weights)
+                yield from self._load_module(prefix,
+                                             child_modules[child_prefix],
+                                             child_weights)
             elif child_prefix in child_params:
-                self._load_param(prefix, child_params[child_prefix],
-                                 child_weights)
+                yield from self._load_param(prefix, child_params[child_prefix],
+                                            child_weights)
             else:
                 if not self._can_ignore_unexpected(prefix):
-                    msg = f"There is no module or parameter named '{prefix}'"
+                    msg = (f"There is no module or parameter named '{prefix}' "
+                           f"in {type(self.module).__name__}")
                     raise ValueError(msg)
 
     def load_weights(
@@ -185,11 +196,12 @@ class AutoWeightsLoader:
         weights: Iterable[Tuple[str, torch.Tensor]],
         *,
         mapper: Optional[WeightsMapper] = None,
-    ) -> None:
+    ) -> List[str]:
         if mapper is not None:
             weights = mapper.apply(weights)
 
-        self._load_module("", self.module, weights)
+        autoloaded_weights = list(self._load_module("", self.module, weights))
+        return autoloaded_weights
 
 
 def init_vllm_registered_model(
@@ -482,3 +494,29 @@ class LLMWrapper(nn.Module):
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         llm = super().__getattr__(self.model_name)
         return llm(*args, **kwargs)
+
+
+def get_vit_attn_backend() -> _Backend:
+    selected_backend: Optional[_Backend] = get_global_forced_attn_backend()
+    if selected_backend is None:
+        backend_by_env_var: Optional[str] = envs.VLLM_ATTENTION_BACKEND
+        if backend_by_env_var is not None:
+            selected_backend = backend_name_to_enum(backend_by_env_var)
+    if selected_backend is None:
+        # For Volta and Turing GPUs, use xformers instead.
+        device_available = current_platform.has_device_capability(80)
+        if device_available:
+            from transformers.utils import is_flash_attn_2_available
+            if is_flash_attn_2_available():
+                selected_backend = _Backend.FLASH_ATTN
+            else:
+                logger.warning(
+                    "Current `vllm-flash-attn` has a bug inside vision module, "
+                    "so we use xformers backend instead. You can run "
+                    "`pip install flash-attn` to use flash-attention backend.")
+                selected_backend = _Backend.XFORMERS
+        elif is_cpu():
+            selected_backend = _Backend.TORCH_SDPA
+        else:
+            selected_backend = _Backend.XFORMERS
+    return selected_backend

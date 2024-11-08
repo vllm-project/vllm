@@ -86,7 +86,6 @@ def run_vllm(
     distributed_executor_backend: Optional[str],
     gpu_memory_utilization: float = 0.9,
     num_scheduler_steps: int = 1,
-    use_v2_block_manager: bool = False,
     download_dir: Optional[str] = None,
     load_format: str = EngineArgs.load_format,
     disable_async_output_proc: bool = False,
@@ -113,7 +112,6 @@ def run_vllm(
         distributed_executor_backend=distributed_executor_backend,
         load_format=load_format,
         num_scheduler_steps=num_scheduler_steps,
-        use_v2_block_manager=use_v2_block_manager,
         disable_async_output_proc=disable_async_output_proc,
     )
 
@@ -176,7 +174,6 @@ async def run_vllm_async(
     distributed_executor_backend: Optional[str],
     gpu_memory_utilization: float = 0.9,
     num_scheduler_steps: int = 1,
-    use_v2_block_manager: bool = False,
     download_dir: Optional[str] = None,
     load_format: str = EngineArgs.load_format,
     disable_async_output_proc: bool = False,
@@ -204,7 +201,6 @@ async def run_vllm_async(
         distributed_executor_backend=distributed_executor_backend,
         load_format=load_format,
         num_scheduler_steps=num_scheduler_steps,
-        use_v2_block_manager=use_v2_block_manager,
         disable_async_output_proc=disable_async_output_proc,
         worker_use_ray=False,
         disable_log_requests=True,
@@ -341,8 +337,7 @@ def main(args: argparse.Namespace):
             args.enable_prefix_caching, args.enable_chunked_prefill,
             args.max_num_batched_tokens, args.distributed_executor_backend,
             args.gpu_memory_utilization, args.num_scheduler_steps,
-            args.use_v2_block_manager, args.download_dir, args.load_format,
-            args.disable_async_output_proc
+            args.download_dir, args.load_format, args.disable_async_output_proc
         ]
 
         if args.async_engine:
@@ -471,10 +466,6 @@ if __name__ == "__main__":
         type=int,
         default=1,
         help="Maximum number of forward steps per scheduler call.")
-    parser.add_argument("--use-v2-block-manager",
-                        action='store_true',
-                        default=EngineArgs.use_v2_block_manager,
-                        help="Enable block manager v2.")
     parser.add_argument(
         "--enable-prefix-caching",
         action='store_true',
