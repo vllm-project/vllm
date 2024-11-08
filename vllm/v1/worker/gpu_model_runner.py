@@ -411,7 +411,7 @@ class GPUModelRunner:
             set_compilation_config(
                 CompilationConfig(
                     use_cudagraph=True,
-                    non_cudagraph_ops=["vllm.unified_flash_attention"],
+                    non_cudagraph_ops=["vllm.unified_v1_flash_attention"],
                     use_inductor=True,
                 ))
 
