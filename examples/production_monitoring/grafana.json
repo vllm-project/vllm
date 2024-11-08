@@ -1,13 +1,5 @@
 {
   "__inputs": [
-    {
-      "name": "DS_PROMETHEUS",
-      "label": "prometheus",
-      "description": "",
-      "type": "datasource",
-      "pluginId": "prometheus",
-      "pluginName": "Prometheus"
-    }
   ],
   "__elements": {},
   "__requires": [
@@ -1215,11 +1207,21 @@
   "templating": {
     "list": [
       {
+        "type": "datasource",
+        "name": "DS_PROMETHEUS",
+        "label": "datasource",
         "current": {},
-        "datasource": {
-          "type": "prometheus",
-          "uid": "${DS_PROMETHEUS}"
-        },
+        "hide": 0,
+        "includeAll": false,
+        "multi": false,
+        "options": [],
+        "query": "prometheus",
+        "queryValue": "",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false
+      },
+      {
         "definition": "label_values(model_name)",
         "hide": 0,
         "includeAll": false,
@@ -1250,3 +1252,4 @@
   "version": 1,
   "weekStart": ""
 }
+

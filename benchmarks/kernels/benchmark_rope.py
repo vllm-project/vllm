@@ -6,6 +6,7 @@ import torch
 
 from vllm.model_executor.layers.rotary_embedding import (RotaryEmbedding,
                                                          get_rope)
+from vllm.platforms import current_platform
 from vllm.utils import FlexibleArgumentParser
 
 
@@ -22,9 +23,7 @@ def benchmark_rope_kernels_multi_lora(
     max_position: int = 8192,
     base: int = 10000,
 ) -> None:
-    torch.random.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
+    current_platform.seed_everything(seed)
     torch.set_default_device(device)
     if rotary_dim is None:
         rotary_dim = head_size
@@ -33,7 +32,7 @@ def benchmark_rope_kernels_multi_lora(
     # batched RoPE can take multiple scaling factors
     batched_rope = get_rope(head_size, rotary_dim, max_position, base,
                             is_neox_style, {
-                                "type": "linear",
+                                "rope_type": "linear",
                                 "factor": tuple(scaling_factors)
                             })
     # non-batched RoPE takes only one scaling factor, we create multiple
@@ -43,7 +42,7 @@ def benchmark_rope_kernels_multi_lora(
         non_batched_ropes.append(
             get_rope(head_size, rotary_dim, max_position, base, is_neox_style,
                      {
-                         "type": "linear",
+                         "rope_type": "linear",
                          "factor": (scaling_factor, )
                      }))
 
@@ -94,7 +93,7 @@ if __name__ == '__main__':
     parser.add_argument("--num-heads", type=int, default=8)
     parser.add_argument("--head-size",
                         type=int,
-                        choices=[64, 80, 96, 112, 128, 192, 256],
+                        choices=[64, 80, 96, 112, 120, 128, 192, 256],
                         default=128)
     parser.add_argument("--rotary-dim", type=int, choices=[16, 32], default=32)
     parser.add_argument("--dtype",

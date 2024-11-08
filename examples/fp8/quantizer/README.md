@@ -1,6 +1,6 @@
 ### Quantizer Utilities
-`quantize.py`: NVIDIA Quantization utilities using AMMO, ported from TensorRT-LLM:
-`https://github.com/NVIDIA/TensorRT-LLM/blob/main/examples/quantization/quantize.py`
+`quantize.py`: NVIDIA Quantization utilities using TensorRT-Model-Optimizer, ported
+from TensorRT-LLM: [`examples/quantization/quantize.py`](https://github.com/NVIDIA/TensorRT-LLM/blob/main/examples/quantization/quantize.py)
 
 ### Prerequisite
 
@@ -16,7 +16,7 @@
 #### Run on H100 system for speed if FP8; number of GPUs depends on the model size
 
 #### Example: quantize Llama2-7b model from HF to FP8 with FP8 KV Cache:
-`python quantize.py --model_dir ./ll2-7b --dtype float16 --qformat fp8 --kv_cache_dtype fp8 --output_dir ./ll2_7b_fp8 --calib_size 512 --tp_size 1`
+`python quantize.py --model-dir ./ll2-7b --dtype float16 --qformat fp8 --kv-cache-dtype fp8 --output-dir ./ll2_7b_fp8 --calib-size 512 --tp-size 1`
 
 Outputs: model structure, quantized model & parameters (with scaling factors) are in JSON and Safetensors (npz is generated only for the reference)
 ```

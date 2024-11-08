@@ -1,5 +1,3 @@
-from vllm.transformers_utils.tokenizers.baichuan import BaichuanTokenizer
+from .mistral import MistralTokenizer
 
-__all__ = [
-    "BaichuanTokenizer",
-]
+__all__ = ["MistralTokenizer"]

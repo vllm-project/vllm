@@ -3,13 +3,16 @@
 #include <c10/cuda/CUDAGuard.h>
 
 #include "dispatch_utils.h"
-#include "reduction_utils.cuh"
 #ifndef USE_ROCM
   #include <cuda_bf16.h>
   #include <cuda_fp16.h>
+  #include <cub/util_type.cuh>
+  #include <cub/cub.cuh>
 #else
   #include <hip/hip_bf16.h>
   #include <hip/hip_fp16.h>
+  #include <hipcub/util_type.hpp>
+  #include <hipcub/hipcub.hpp>
 
 using __nv_bfloat16 = __hip_bfloat16;
 using __nv_bfloat162 = __hip_bfloat162;
@@ -31,7 +34,11 @@ __global__ void rms_norm_kernel(
     const float x = (float)input[blockIdx.x * hidden_size + idx];
     variance += x * x;
   }
-  variance = blockReduceSum<float>(variance);
+
+  using BlockReduce = cub::BlockReduce<float, 1024>;
+  __shared__ typename BlockReduce::TempStorage reduceStore;
+  variance = BlockReduce(reduceStore).Reduce(variance, cub::Sum{}, blockDim.x);
+
   if (threadIdx.x == 0) {
     s_variance = rsqrtf(variance / hidden_size + epsilon);
   }
@@ -228,12 +235,11 @@ fused_add_rms_norm_kernel(
     variance += temp.sum_squares();
     residual_v[id] = temp;
   }
-  /* Keep the following if-else block in sync with the
-     calculation of max_block_size in fused_add_rms_norm */
-  if (num_tokens < 256) {
-    variance = blockReduceSum<float, 1024>(variance);
-  } else
-    variance = blockReduceSum<float, 256>(variance);
+
+  using BlockReduce = cub::BlockReduce<float, 1024>;
+  __shared__ typename BlockReduce::TempStorage reduceStore;
+  variance = BlockReduce(reduceStore).Reduce(variance, cub::Sum{}, blockDim.x);
+
   if (threadIdx.x == 0) {
     s_variance = rsqrtf(variance / hidden_size + epsilon);
   }
@@ -268,12 +274,11 @@ fused_add_rms_norm_kernel(
     variance += x * x;
     residual[blockIdx.x * hidden_size + idx] = z;
   }
-  /* Keep the following if-else block in sync with the
-     calculation of max_block_size in fused_add_rms_norm */
-  if (num_tokens < 256) {
-    variance = blockReduceSum<float, 1024>(variance);
-  } else
-    variance = blockReduceSum<float, 256>(variance);
+
+  using BlockReduce = cub::BlockReduce<float, 1024>;
+  __shared__ typename BlockReduce::TempStorage reduceStore;
+  variance = BlockReduce(reduceStore).Reduce(variance, cub::Sum{}, blockDim.x);
+
   if (threadIdx.x == 0) {
     s_variance = rsqrtf(variance / hidden_size + epsilon);
   }

@@ -53,7 +53,8 @@ def test_ngram_algo_correctness_for_single_no_match():
     proposals = proposer.get_spec_proposals(
         execute_model_req=ExecuteModelRequest(
             seq_group_metadata_list=seq_group_metadata_list,
-            num_lookahead_slots=proposal_len), )
+            num_lookahead_slots=proposal_len),
+        seq_ids_with_bonus_token_in_last_step=None)
 
     assert torch.is_tensor(proposals.proposal_token_ids)
     assert torch.is_tensor(proposals.proposal_probs)
@@ -117,11 +118,13 @@ def test_ngram_algo_correctness_for_batches_not_match_all():
         num_gpu_blocks,
         block_size,
         final_prompt_lens=final_prompt_lens)
-
+    for sg in seq_group_metadata_list:
+        sg.is_prompt = False
     proposals = proposer.get_spec_proposals(
         execute_model_req=ExecuteModelRequest(
             seq_group_metadata_list=seq_group_metadata_list,
-            num_lookahead_slots=proposal_len), )
+            num_lookahead_slots=proposal_len),
+        seq_ids_with_bonus_token_in_last_step=None)
 
     assert torch.is_tensor(proposals.proposal_token_ids)
     assert torch.is_tensor(proposals.proposal_probs)
@@ -145,7 +148,7 @@ def test_ngram_algo_correctness_for_batches_not_match_all():
 def test_ngram_algo_correctness_for_batches_match_all():
     """Verify our ngram algo find the right candidate in the prompt
 
-    For the scenario find candidate in all batchs
+    For the scenario find candidate in all batches
     """
 
     block_size = 32
@@ -190,10 +193,15 @@ def test_ngram_algo_correctness_for_batches_match_all():
         block_size,
         final_prompt_lens=final_prompt_lens)
 
+    # Normally drafter is run on decode requests only; here we check the output
+    # of the ngram worker as it is the sole proposer that has no forward.
+    for sg in seq_group_metadata_list:
+        sg.is_prompt = False
     proposals = proposer.get_spec_proposals(
         execute_model_req=ExecuteModelRequest(
             seq_group_metadata_list=seq_group_metadata_list,
-            num_lookahead_slots=proposal_len), )
+            num_lookahead_slots=proposal_len),
+        seq_ids_with_bonus_token_in_last_step=None)
 
     assert torch.is_tensor(proposals.proposal_token_ids)
     assert torch.is_tensor(proposals.proposal_probs)
