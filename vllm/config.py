@@ -1092,6 +1092,7 @@ class SchedulerConfig:
                  max_num_batched_tokens: Optional[int],
                  max_num_seqs: int,
                  max_model_len: int,
+                 num_prefill_slots: int = 1,
                  num_lookahead_slots: int = 0,
                  delay_factor: float = 0.0,
                  enable_chunked_prefill: bool = False,
@@ -1132,6 +1133,7 @@ class SchedulerConfig:
                 )
 
         self.max_num_batched_tokens = max_num_batched_tokens
+        self.num_prefill_slots = num_prefill_slots
 
         if enable_chunked_prefill:
             logger.info(
