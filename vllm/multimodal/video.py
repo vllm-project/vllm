@@ -7,6 +7,7 @@ from vllm.inputs.registry import InputContext
 from vllm.logger import init_logger
 from vllm.transformers_utils.processor import get_video_processor
 from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.utils import is_list_of
 
 from .base import MultiModalData, MultiModalInputs
 from .image import ImagePlugin
@@ -60,7 +61,7 @@ class VideoPlugin(ImagePlugin):
         if isinstance(data, list) and len(data) == 1:
             data = data[0]
 
-        if isinstance(data, np.ndarray):
+        if isinstance(data, np.ndarray) or is_list_of(data, np.ndarray):
             video_processor = self._get_hf_video_processor(
                 model_config,
                 mm_processor_kwargs,

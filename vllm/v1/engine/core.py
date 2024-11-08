@@ -5,7 +5,7 @@ import time
 from contextlib import contextmanager
 from multiprocessing.process import BaseProcess
 from multiprocessing.sharedctypes import Synchronized
-from typing import Any, List, Tuple, Type, Union, Iterator
+from typing import Any, Iterator, List, Tuple, Type, Union
 
 import zmq
 import zmq.asyncio
@@ -45,6 +45,7 @@ class EngineCore:
         elif usage_context == UsageContext.OPENAI_API_SERVER:
             vllm_config.scheduler_config.max_num_seqs = 1024
             vllm_config.scheduler_config.max_num_batched_tokens = 2048
+        vllm_config.cache_config.enable_prefix_caching = True
 
         assert vllm_config.model_config.task != "embedding"
 
