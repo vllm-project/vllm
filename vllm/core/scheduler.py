@@ -1644,7 +1644,8 @@ class Scheduler:
         # in a decode phase. Do not chunk.
         elif enable_chunking and len(seqs) == 1:
             remaining_token_budget = budget.remaining_token_budget()
-            chunk_size = remaining_token_budget
+            # Get the number of tokens to allocate to this prefill slot
+            prefill_slot_budget = self.prefill_chunk_sizes[self.prefill_slots_running]
 
             if self.cache_config.enable_prefix_caching:
                 # When prefix caching is enabled, we always allocate
@@ -1653,10 +1654,10 @@ class Scheduler:
                 block_size = self.cache_config.block_size
                 # Set chunk size to the next lowest multiple of block size
                 # so we don't exceed our budget
-                chunk_size = (chunk_size // block_size) * block_size
+                prefill_slot_budget = (prefill_slot_budget // block_size) * block_size
                 # NB: In the case where num_new_tokens < chunk_size, this does
                 # not allocate a multiple of `block_size` tokens.
 
-            num_new_tokens = min(num_new_tokens, chunk_size)
+            num_new_tokens = min(num_new_tokens, remaining_token_budget, prefill_slot_budget)
 
         return num_new_tokens
