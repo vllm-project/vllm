@@ -21,7 +21,7 @@ docker run -itd --entrypoint /bin/bash -v ~/.cache/huggingface:/root/.cache/hugg
 docker exec cpu-test bash -c "
   set -e
   pip install pytest pytest-asyncio \
-    einops librosa peft Pillow sentence-transformers soundfile \
+    decord einops librosa peft Pillow sentence-transformers soundfile \
     transformers_stream_generator matplotlib datamodel_code_generator
   pip install torchvision --index-url https://download.pytorch.org/whl/cpu
   # Embedding models are not supported for CPU yet
