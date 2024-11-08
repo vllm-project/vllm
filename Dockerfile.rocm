@@ -13,6 +13,7 @@ ARG BUILD_PYTORCH="1"
 # If "0", it is copied in from the local working directory.
 ARG REMOTE_VLLM="0"
 ARG USE_CYTHON="0"
+ARG BUILD_RPD="1"
 
 # -----------------------
 # vLLM base image
@@ -252,12 +253,13 @@ RUN --mount=type=bind,from=export_pytorch,src=/,target=/install \
     fi
 
 RUN python3 -m pip install --upgrade huggingface-hub[cli]
-
-RUN git clone -b nvtx_enabled https://github.com/ROCm/rocmProfileData.git \
+ARG BUILD_RPD
+RUN if [ ${BUILD_RPD} -eq "1" ]; then \
+    git clone -b nvtx_enabled https://github.com/ROCm/rocmProfileData.git \
     && cd rocmProfileData/rpd_tracer \
     && pip install -r requirements.txt && cd ../ \
     && make && make install \
-    && cd hipMarker && python setup.py install
+    && cd hipMarker && python setup.py install ; fi
 
 # Install vLLM (and gradlib)
 # Make sure punica kernels are built (for LoRA)
