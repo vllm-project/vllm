@@ -118,7 +118,7 @@ def main(args):
     random.seed(args.seed)
     if args.dataset_path is not None:
         print(f"Start to sample {args.num_prompts} prompts"
-              "from {args.dataset_path}")
+              f"from {args.dataset_path}")
         filtered_datasets = sample_requests(
             dataset_path=args.dataset_path,
             num_requests=args.num_prompts,
@@ -141,13 +141,6 @@ def main(args):
     prompts = repeat_and_sort_requests(filtered_datasets,
                                        repeat_count=args.repeat_count,
                                        sort=args.sort)
-
-    print("------warm up------")
-    test_prefix(
-        llm=llm,
-        prompts=prompts,
-        sampling_params=sampling_params,
-    )
 
     print("------start generating------")
     test_prefix(
