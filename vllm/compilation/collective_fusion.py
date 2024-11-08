@@ -424,9 +424,10 @@ class CollectiveFusionPass(InductorPass):
                 kwargs["old_my_residual"] = my_res_replacements[-1] if len(
                     my_res_replacements) > 0 else match.kwargs["residual"]
 
-                # TODO: use get
-                gemm_1 = kwargs["gemm_1_weights"].meta["val"]
-                gemm_2 = kwargs["gemm_2_weights"].meta["val"]
+                gemm_1 = kwargs["gemm_1_weights"].meta.get("val")
+                gemm_2 = kwargs["gemm_2_weights"].meta.get("val")
+                if gemm_1 is None or gemm_2 is None:
+                    raise ValueError("Missing 'val' in gemm weights meta data")
 
                 # Extract group_name from matched code.  Use to
                 # generate proper replacement code.
