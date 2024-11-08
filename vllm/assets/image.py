@@ -27,4 +27,4 @@ class ImageAsset:
         """
         image_path = get_vllm_public_assets(filename=f"{self.name}.pt",
                                             s3_prefix=VLM_IMAGES_DIR)
-        return torch.load(image_path)
+        return torch.load(image_path, map_location="cpu")

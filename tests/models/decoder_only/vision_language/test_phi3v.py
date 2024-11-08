@@ -44,8 +44,6 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
 
 
 target_dtype = "half"
-if current_platform.is_cpu():
-    target_dtype = "bfloat16"
 
 # ROCm Triton FA can run into shared memory issues with these models,
 # use other backends in the meantime

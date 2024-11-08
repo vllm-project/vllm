@@ -269,7 +269,6 @@ steps:
   source_file_dependencies:
   - benchmarks/
   commands:
-  - pip install aiohttp
   - bash run-benchmarks.sh
 
 - label: Quantization Test # 33min
@@ -331,7 +330,7 @@ steps:
   commands:
     - pytest -v -s models/decoder_only/language --ignore=models/decoder_only/language/test_models.py
 
-- label: Decoder-only Multi-Modal Models Test (Standard)
+- label: Decoder-only Multi-Modal Models Test (Standard) # 26min
   #mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/

@@ -93,7 +93,8 @@ skip_gitignore = true
 [tool.pytest.ini_options]
 markers = [
     "skip_global_cleanup",
-    "core_model: run this model test in each PR instead of just daily",
+    "core_model: enable this model test in each PR instead of only nightly",
+    "cpu_model: enable this model test in CPU tests",
     "distributed_2_gpus: run this test only in distributed tests for 2 GPUs",
     "skip_v1: do not run this test with v1",
 ]
