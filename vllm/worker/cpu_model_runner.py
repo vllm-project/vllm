@@ -78,6 +78,7 @@ class ModelInputForCPUWithSamplingMetadata(ModelInputForCPU):
     Used by the ModelRunner.
     """
     sampling_metadata: Optional["SamplingMetadata"] = None
+    is_prompt: Optional[bool] = None
 
     def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
         tensor_dict = {
@@ -146,6 +147,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
             # just use seq_lens instead.
             seq_lens=seq_lens,
             query_lens=seq_lens,
+            is_prompt=is_prompt,
         )
 
     def _compute_multi_modal_input(
@@ -432,6 +434,7 @@ class CPUModelRunnerBase(ModelRunnerBase[TModelInputForCPU]):
         vllm_config: VllmConfig,
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
+        return_hidden_states: bool = False,
         *args,
         **kwargs,
     ):
@@ -442,19 +445,25 @@ class CPUModelRunnerBase(ModelRunnerBase[TModelInputForCPU]):
         cache_config = self.cache_config
 
         self.is_driver_worker = is_driver_worker
+        self.return_hidden_states = return_hidden_states
 
         self.device = self.device_config.device
+        self.pin_memory = False
 
         self.kv_cache_dtype = kv_cache_dtype
         self.sliding_window = model_config.get_sliding_window()
         self.block_size = cache_config.block_size
+        num_attn_heads = self.model_config.get_num_attention_heads(
+            self.parallel_config)
+        needs_attn_backend = (num_attn_heads != 0
+                              or self.model_config.is_attention_free)
         self.attn_backend = get_attn_backend(
             self.model_config.get_head_size(),
             self.model_config.dtype,
             self.kv_cache_dtype,
             self.block_size,
             self.model_config.is_attention_free,
-        )
+        ) if needs_attn_backend else None
 
         # Multi-modal data support
         self.mm_registry = MULTIMODAL_REGISTRY
@@ -531,6 +540,7 @@ class CPUModelRunner(CPUModelRunnerBase[ModelInputForCPUWithSamplingMetadata]):
         kv_caches: List[torch.Tensor],
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
+        previous_hidden_states: Optional[torch.Tensor] = None,
     ) -> Optional[List[SamplerOutput]]:
         if num_steps > 1:
             raise ValueError(
@@ -551,7 +561,9 @@ class CPUModelRunner(CPUModelRunnerBase[ModelInputForCPUWithSamplingMetadata]):
             "intermediate_tensors":
             intermediate_tensors,
         }
-
+        if previous_hidden_states is not None:
+            execute_model_kwargs.update(
+                {"previous_hidden_states": previous_hidden_states})
         hidden_states = model_executable(**execute_model_kwargs)
 
         # Compute the logits.
@@ -567,4 +579,21 @@ class CPUModelRunner(CPUModelRunnerBase[ModelInputForCPUWithSamplingMetadata]):
             logits=logits,
             sampling_metadata=model_input.sampling_metadata,
         )
+        if self.return_hidden_states:
+            # we only need to pass hidden states of most recent token
+            if model_input.is_prompt:
+                output.prefill_hidden_states = hidden_states
+            output.hidden_states = hidden_states
         return [output]
+
+    def generate_proposals(self, *args, **kwargs):
+        return self.model.generate_proposals(*args, **kwargs)
+
+    # sampler property will be used by spec_decode_worker
+    @property
+    def sampler(self):
+        return self.model.sampler
+
+    @property
+    def vocab_size(self) -> int:
+        return self.model_config.get_vocab_size()

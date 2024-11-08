@@ -125,8 +125,12 @@ class CPUExecutor(ExecutorBase):
         local_rank: int = 0,
         rank: int = 0,
     ):
-        worker_module_name = "vllm.worker.cpu_worker"
-        worker_class_name = "CPUWorker"
+        if self.speculative_config is not None:
+            worker_module_name = "vllm.spec_decode.spec_decode_worker"
+            worker_class_name = "create_spec_worker"
+        else:
+            worker_module_name = "vllm.worker.cpu_worker"
+            worker_class_name = "CPUWorker"
 
         wrapper = WorkerWrapperBase(
             worker_module_name=worker_module_name,
