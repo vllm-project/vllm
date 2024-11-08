@@ -387,7 +387,9 @@ def run_idefics3(question: str, modality: str):
               max_num_seqs=2,
               enforce_eager=True,
               mm_processor_kwargs={
-                  "size": {"longest_edge": 3*364}
+                  "size": {
+                      "longest_edge": 3 * 364
+                  },
               })
     prompt = (
         f"<|begin_of_text|>User:<image>{question}<end_of_utterance>\nAssistant:"

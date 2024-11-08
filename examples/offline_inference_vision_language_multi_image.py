@@ -301,7 +301,9 @@ def load_idefics3(question, image_urls: List[str]) -> ModelRequestData:
         enforce_eager=True,
         limit_mm_per_prompt={"image": len(image_urls)},
         mm_processor_kwargs={
-            "size": {"longest_edge": 2*364}
+            "size": {
+                "longest_edge": 2 * 364
+            },
         },
     )
 
