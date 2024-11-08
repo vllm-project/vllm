@@ -2,7 +2,6 @@ import os
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List, Optional, Set
-from unittest.mock import patch
 
 import numpy as np
 import torch
@@ -26,7 +25,6 @@ from vllm.v1.attention.backends.flash_attn import (FlashAttentionBackend,
                                                    FlashAttentionMetadata)
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.sample.sampler import Sampler
 
 if TYPE_CHECKING:
     from vllm.v1.core.scheduler import SchedulerOutput
@@ -148,7 +146,7 @@ class GPUModelRunner:
         for req_data in scheduler_output.scheduled_new_reqs:
             req_id = req_data.req_id
             sampling_params = req_data.sampling_params
-            if sampling_params.seed is not None:
+            if sampling_params.sampling_type == SamplingType.RANDOM_SEED:
                 generator = torch.Generator(device=self.device)
                 generator.manual_seed(sampling_params.seed)
             else:
@@ -384,7 +382,8 @@ class GPUModelRunner:
                 # Rewind the generator state as if the token was not sampled.
                 generator = self.input_batch.generators.get(i)
                 if generator is not None:
-                    generator.set_offset(generator.get_offset() - 1)
+                    # This relies on cuda-specific torch-internal impl details
+                    generator.set_offset(generator.get_offset() - 4)
 
         if sampler_output.logprob_token_ids is None:
             logprob_token_ids = None
@@ -412,14 +411,13 @@ class GPUModelRunner:
             set_compilation_config(
                 CompilationConfig(
                     use_cudagraph=True,
-                    non_cudagraph_ops=["vllm.unified_flash_attention"],
+                    non_cudagraph_ops=["vllm.unified_v1_flash_attention"],
                     use_inductor=True,
                 ))
 
         logger.info("Starting to load model %s...", self.model_config.model)
         with DeviceMemoryProfiler() as m:  # noqa: SIM117
-            with patch("vllm.model_executor.layers.sampler.Sampler", Sampler):
-                self.model = get_model(vllm_config=self.vllm_config)
+            self.model = get_model(vllm_config=self.vllm_config)
 
         self.model_memory_usage = m.consumed_memory
         logger.info("Loading model weights took %.4f GB",
