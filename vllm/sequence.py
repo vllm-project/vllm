@@ -470,7 +470,7 @@ class Sequence:
 
         assert_never(inputs)
 
-    @property
+    @cached_property
     def multi_modal_placeholders(self) -> MultiModalPlaceholderDict:
         inputs = self.inputs
 
