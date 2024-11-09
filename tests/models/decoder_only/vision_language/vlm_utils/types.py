@@ -158,6 +158,7 @@ class VLMTestInfo(NamedTuple):
             "max_model_len": self.max_model_len,
             "max_num_seqs": self.max_num_seqs,
             "task": self.task,
+            "tensor_parallel_size": self.tensor_parallel_size,
             "hf_output_post_proc": self.hf_output_post_proc,
             "vllm_output_post_proc": self.vllm_output_post_proc,
             "auto_cls": self.auto_cls,
