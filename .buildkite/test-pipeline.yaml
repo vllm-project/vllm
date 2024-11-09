@@ -314,7 +314,7 @@ steps:
     - pytest -v -s models/test_oot_registration.py # it needs a clean process
     - pytest -v -s models/*.py --ignore=models/test_oot_registration.py
 
-- label: Decoder-only Language Models Test (Standard) # 17min
+- label: Decoder-only Language Models Test (Standard) # 18min
   #mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
@@ -331,7 +331,7 @@ steps:
   commands:
     - pytest -v -s models/decoder_only/language -m 'not core_model and not quant_model'
 
-- label: Decoder-only Multi-Modal Models Test (Standard) # 30min
+- label: Decoder-only Multi-Modal Models Test (Standard) # 22min
   #mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
