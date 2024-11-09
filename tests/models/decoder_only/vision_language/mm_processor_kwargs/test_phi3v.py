@@ -131,12 +131,13 @@ def test_dummy_data_override(dummy_data_for_phi3v, model: str, num_crops: int,
         mm_processor_kwargs=None,
     )
 
-    sequence_data, _, = dummy_data_for_phi3v(
+    dummy_data = dummy_data_for_phi3v(
         ctx=ctx,
         seq_len=8192,  # Should be bigger than num_imgs * toks_per_img
         mm_counts={"image": num_imgs},
         num_crops=num_crops,
     )
+    sequence_data = dummy_data.seq_data
     # Ensure we have the right number of placeholders per num_crops size
     img_tok_count = sequence_data.get_token_ids().count(_IMAGE_TOKEN_ID)
     assert img_tok_count == toks_per_img * num_imgs

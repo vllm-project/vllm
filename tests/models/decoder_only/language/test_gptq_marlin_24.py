@@ -38,6 +38,7 @@ model_pairs = [
 ]
 
 
+@pytest.mark.quant_model
 @pytest.mark.flaky(reruns=2)
 @pytest.mark.skipif(not is_quant_method_supported("gptq_marlin_24"),
                     reason="Marlin24 is not supported on this GPU type.")

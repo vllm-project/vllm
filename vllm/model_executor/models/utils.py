@@ -241,11 +241,11 @@ def init_vllm_registered_model(
     based on the arguments passed to the outer vLLM model.
     """
     model_class, _ = ModelRegistry.resolve_model_cls(hf_config.architectures)
-    import copy
-    copied_config = copy.deepcopy(vllm_config)
-    copied_config.model_config.hf_config = hf_config
 
-    return model_class(vllm_config=copied_config, prefix=prefix)
+    return model_class(
+        vllm_config=vllm_config.with_hf_config(hf_config),
+        prefix=prefix,
+    )
 
 
 @overload

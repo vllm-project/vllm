@@ -15,6 +15,7 @@ from ...utils import check_logprobs_close
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
 
+@pytest.mark.quant_model
 @pytest.mark.skipif(not is_quant_method_supported("fp8"),
                     reason="fp8 is not supported on this GPU type.")
 @pytest.mark.parametrize(

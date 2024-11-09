@@ -305,7 +305,7 @@ steps:
 
 #####  models test  #####
 
-- label: Basic Models Test # 3min
+- label: Basic Models Test # 10min
   source_file_dependencies:
   - vllm/
   - tests/models
@@ -314,23 +314,24 @@ steps:
     - pytest -v -s models/test_oot_registration.py # it needs a clean process
     - pytest -v -s models/*.py --ignore=models/test_oot_registration.py
 
-- label: Decoder-only Language Models Test (Standard) # 35min
+- label: Decoder-only Language Models Test (Standard) # 18min
   #mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
   - tests/models/decoder_only/language
   commands:
-    - pytest -v -s models/decoder_only/language/test_models.py
+    - pytest -v -s models/decoder_only/language -m core_model
+    - pytest -v -s models/decoder_only/language -m quant_model
 
-- label: Decoder-only Language Models Test (Extended) # 1h20min
+- label: Decoder-only Language Models Test (Extended) # 46min
   nightly: true
   source_file_dependencies:
   - vllm/
   - tests/models/decoder_only/language
   commands:
-    - pytest -v -s models/decoder_only/language --ignore=models/decoder_only/language/test_models.py
+    - pytest -v -s models/decoder_only/language -m 'not core_model and not quant_model'
 
-- label: Decoder-only Multi-Modal Models Test (Standard) # 26min
+- label: Decoder-only Multi-Modal Models Test (Standard) # 22min
   #mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
@@ -339,21 +340,24 @@ steps:
   commands:
     - pytest -v -s models/decoder_only/audio_language -m core_model
     - pytest -v -s --ignore models/decoder_only/vision_language/test_phi3v.py models/decoder_only/vision_language -m core_model
+    # No tests under this group for now
+    # - pytest -v -s models/decoder_only/audio_language -m quant_model
+    - pytest -v -s --ignore models/decoder_only/vision_language/test_phi3v.py models/decoder_only/vision_language -m quant_model
 
-- label: Decoder-only Multi-Modal Models Test (Extended)
+- label: Decoder-only Multi-Modal Models Test (Extended) # 1h10m
   nightly: true
   source_file_dependencies:
   - vllm/
   - tests/models/decoder_only/audio_language
   - tests/models/decoder_only/vision_language
   commands:
-    - pytest -v -s models/decoder_only/audio_language -m 'not core_model'
+    - pytest -v -s models/decoder_only/audio_language -m 'not core_model and not quant_model'
     # HACK - run phi3v tests separately to sidestep this transformers bug
     # https://github.com/huggingface/transformers/issues/34307
     - pytest -v -s models/decoder_only/vision_language/test_phi3v.py
-    - pytest -v -s --ignore models/decoder_only/vision_language/test_phi3v.py models/decoder_only/vision_language -m 'not core_model'
+    - pytest -v -s --ignore models/decoder_only/vision_language/test_phi3v.py models/decoder_only/vision_language -m 'not core_model and not quant_model'
 
-- label: Other Models Test # 6min
+- label: Other Models Test # 20min
   #mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
