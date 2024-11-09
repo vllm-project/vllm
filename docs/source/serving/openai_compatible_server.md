@@ -62,6 +62,32 @@ completion = client.chat.completions.create(
 )
 ```
 
+### Extra HTTP Headers
+
+Only `X-Request-Id` HTTP request header is supported for now.
+
+```python
+completion = client.chat.completions.create(
+  model="NousResearch/Meta-Llama-3-8B-Instruct",
+  messages=[
+    {"role": "user", "content": "Classify this sentiment: vLLM is wonderful!"}
+  ],
+  extra_headers={
+    "x-request-id": "sentiment-classification-00001",
+  }
+)
+print(completion._request_id)
+
+completion = client.completions.create(
+  model="NousResearch/Meta-Llama-3-8B-Instruct",
+  prompt="A robot may not injure a human being",
+  extra_headers={
+    "x-request-id": "completion-test",
+  }
+)
+print(completion._request_id)
+```
+
 ### Extra Parameters for Completions API
 
 The following [sampling parameters (click through to see documentation)](../dev/sampling_params.rst) are supported.
