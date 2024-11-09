@@ -42,7 +42,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.models.qwen2 import Qwen2Model
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalInputs
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.multimodal.utils import consecutive_placeholder_ranges
 from vllm.sequence import IntermediateTensors, SequenceData
 
@@ -221,13 +221,13 @@ def input_processor_for_qwen2_audio(
 def input_mapper_for_qwen2_audio(
     ctx: InputContext,
     multi_modal_data: Union[np.ndarray, List[np.ndarray]],
-) -> MultiModalInputs:
+) -> MultiModalKwargs:
     """Input mapper for Qwen2-Audio."""
     if not isinstance(multi_modal_data, list):
         multi_modal_data = [multi_modal_data]
 
     if len(multi_modal_data) == 0:
-        return MultiModalInputs()
+        return MultiModalKwargs()
 
     processor = cached_get_processor(ctx.model_config.model)
     audio_feature_extractor = processor.feature_extractor
@@ -254,7 +254,7 @@ def input_mapper_for_qwen2_audio(
         logger.error("Failed to process audio (%s)", multi_modal_data)
         raise
 
-    return MultiModalInputs(batch_data)
+    return MultiModalKwargs(batch_data)
 
 
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_qwen2_audio)
