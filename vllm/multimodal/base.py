@@ -133,6 +133,7 @@ class MultiModalPlugin(ABC):
             - :ref:`input_processing_pipeline`
             - :ref:`enabling_multimodal_inputs`
         """
+
         # Avoid circular import
         from vllm.model_executor.model_loader import get_model_architecture
 
