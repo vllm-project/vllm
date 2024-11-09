@@ -405,14 +405,6 @@ class Scheduler:
         self.big_prefill_threshold = scheduler_config.max_model_len // 25
         self.max_big_requests = 1  # TODO: something
 
-        # Dict cache with the chunk sizes to hand out to each sequence depending
-        # on how many prefill slots are used.
-        # This is just the full budget / number of prefill slots
-        self.prefill_chunk_sizes = {
-            slots: self.scheduler_config.max_num_batched_tokens / slots
-            for slots in range(self.num_prefill_slots)
-        }
-
     @property
     def next_cache_id(self):
         return (self.cache_id + 1) % self.num_cache_iters
@@ -887,6 +879,15 @@ class Scheduler:
         Returns:
             SchedulerPrefillOutputs.
         """
+        if self.prefill_slots_running >= self.num_prefill_slots \
+            or budget.remaining_token_budget() == 0:
+            # Do nothing: Can't add any more prefill anyway
+            return SchedulerPrefillOutputs(
+                seq_groups=[],
+                ignored_seq_groups=[],
+                num_lookahead_slots=self._get_num_lookahead_slots(
+                    is_prefill=True, enable_chunking=enable_chunking))
+
         ignored_seq_groups: List[SequenceGroup] = []
         seq_groups: List[ScheduledSequenceGroup] = []
 
@@ -900,6 +901,13 @@ class Scheduler:
             assert len(waiting_seqs) == 1, (
                 "Waiting sequence group should have only one prompt "
                 "sequence.")
+
+            if self._is_big_seq_group(
+                    seq_group
+            ) and self.big_prefill_requests >= self.max_big_requests:
+                # Cannot schedule more big requests than max_big_requests
+                break
+
             num_new_tokens = self._get_num_new_tokens(seq_group,
                                                       SequenceStatus.WAITING,
                                                       enable_chunking, budget)
@@ -1208,8 +1216,8 @@ class Scheduler:
         )
 
     def _is_big_seq_group(self, seq_group: SequenceGroup) -> bool:
-        return (seq_group.seqs[0].get_num_new_tokens() >=
-                self.big_prefill_threshold)
+        return seq_group.seqs[0].get_num_new_tokens(
+        ) >= self.big_prefill_threshold
 
     def _will_still_be_prefilling(self,
                                   seq_group: ScheduledSequenceGroup) -> bool:
@@ -1690,8 +1698,8 @@ class Scheduler:
         elif enable_chunking and len(seqs) == 1:
             remaining_token_budget = budget.remaining_token_budget()
             # Get the number of tokens to allocate to this prefill slot
-            prefill_slot_budget = self.prefill_chunk_sizes[
-                self.prefill_slots_running]
+            prefill_slot_budget = \
+                budget.token_budget // self.prefill_slots_running
 
             if self.cache_config.enable_prefix_caching:
                 # When prefix caching is enabled, we always allocate
