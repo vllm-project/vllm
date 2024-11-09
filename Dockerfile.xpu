@@ -1,0 +1,68 @@
+FROM intel/oneapi-basekit:2024.2.1-0-devel-ubuntu22.04 AS vllm-base
+
+RUN wget -O- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | gpg --dearmor | tee /usr/share/keyrings/intel-oneapi-archive-keyring.gpg > /dev/null && \
+    echo "deb [signed-by=/usr/share/keyrings/intel-oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main " | tee /etc/apt/sources.list.d/oneAPI.list && \
+    chmod 644 /usr/share/keyrings/intel-oneapi-archive-keyring.gpg && \
+    wget -O- https://repositories.intel.com/graphics/intel-graphics.key | gpg --dearmor | tee /usr/share/keyrings/intel-graphics.gpg > /dev/null && \
+    echo "deb [arch=amd64,i386 signed-by=/usr/share/keyrings/intel-graphics.gpg] https://repositories.intel.com/graphics/ubuntu jammy arc" | tee /etc/apt/sources.list.d/intel.gpu.jammy.list && \
+    chmod 644 /usr/share/keyrings/intel-graphics.gpg
+
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends --fix-missing \
+    curl \
+    ffmpeg \
+    git \
+    libsndfile1 \
+    libsm6 \
+    libxext6 \
+    libgl1 \
+    lsb-release \
+    numactl \
+    python3 \
+    python3-dev \
+    python3-pip \
+    # vim \
+    wget
+
+WORKDIR /workspace/vllm
+COPY requirements-xpu.txt /workspace/vllm/requirements-xpu.txt
+COPY requirements-common.txt /workspace/vllm/requirements-common.txt
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --no-cache-dir \
+    -r requirements-xpu.txt
+
+RUN git clone https://github.com/intel/pti-gpu && \
+    cd pti-gpu/sdk && \
+    git checkout 6c491f07a777ed872c2654ca9942f1d0dde0a082 && \
+    mkdir build && \
+    cd build && \
+    cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=../cmake/toolchains/icpx_toolchain.cmake -DBUILD_TESTING=OFF .. && \
+    make -j && \
+    cmake --install . --config Release --prefix "/usr/local"
+
+ENV LD_LIBRARY_PATH="$LD_LIBRARY_PATH:/usr/local/lib/"
+
+COPY . .
+ARG GIT_REPO_CHECK
+RUN --mount=type=bind,source=.git,target=.git \
+    if [ "$GIT_REPO_CHECK" != 0 ]; then bash tools/check_repo.sh; fi
+
+ENV VLLM_TARGET_DEVICE=xpu
+
+RUN --mount=type=cache,target=/root/.cache/pip \
+    --mount=type=bind,source=.git,target=.git \
+    python3 setup.py install
+
+CMD ["/bin/bash"]
+
+FROM vllm-base AS vllm-openai
+
+# install additional dependencies for openai api server
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install accelerate hf_transfer 'modelscope!=1.15.0'
+
+ENV VLLM_USAGE_SOURCE production-docker-image \
+    TRITON_XPU_PROFILE 1
+
+ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]

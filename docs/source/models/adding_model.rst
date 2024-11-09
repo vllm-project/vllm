@@ -10,6 +10,10 @@ This document provides a high-level guide on integrating a `HuggingFace Transfor
     The process is considerably straightforward if the model shares a similar architecture with an existing model in vLLM.
     However, for models that include new operators (e.g., a new attention mechanism), the process can be a bit more complex.
 
+.. note::
+    By default, vLLM models do not support multi-modal inputs. To enable multi-modal support,
+    please follow :ref:`this guide <enabling_multimodal_inputs>` after implementing the model here.
+
 .. tip::
     If you are encountering issues while integrating your model into vLLM, feel free to open an issue on our `GitHub <https://github.com/vllm-project/vllm/issues>`_ repository.
     We will be happy to help you out!
@@ -21,6 +25,8 @@ This document provides a high-level guide on integrating a `HuggingFace Transfor
 Start by forking our `GitHub`_ repository and then :ref:`build it from source <build_from_source>`.
 This gives you the ability to modify the codebase and test your model.
 
+.. tip::
+    If you don't want to fork the repository and modify vLLM's codebase, please refer to the "Out-of-Tree Model Integration" section below.
 
 1. Bring your model code
 ------------------------
@@ -35,30 +41,30 @@ For instance, vLLM's `OPT model <https://github.com/vllm-project/vllm/blob/main/
 2. Rewrite the :code:`forward` methods
 --------------------------------------
 
-Next, you need to rewrite the :code:`forward` methods of your model by following these steps:
+Next, you need to rewrite the :meth:`~torch.nn.Module.forward` method of your model by following these steps:
 
 1. Remove any unnecessary code, such as the code only used for training.
 2. Change the input parameters:
 
 .. code-block:: diff
 
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-    -    attention_mask: Optional[torch.Tensor] = None,
-    -    position_ids: Optional[torch.LongTensor] = None,
-    -    past_key_values: Optional[List[torch.FloatTensor]] = None,
-    -    inputs_embeds: Optional[torch.FloatTensor] = None,
-    -    labels: Optional[torch.LongTensor] = None,
-    -    use_cache: Optional[bool] = None,
-    -    output_attentions: Optional[bool] = None,
-    -    output_hidden_states: Optional[bool] = None,
-    -    return_dict: Optional[bool] = None,
-    -) -> Union[Tuple, CausalLMOutputWithPast]:
-    +    positions: torch.Tensor,
-    +    kv_caches: List[KVCache],
-    +    input_metadata: InputMetadata,
-    +) -> Optional[SamplerOutput]:
+      def forward(
+          self,
+          input_ids: torch.Tensor,
+    -     attention_mask: Optional[torch.Tensor] = None,
+    -     position_ids: Optional[torch.LongTensor] = None,
+    -     past_key_values: Optional[List[torch.FloatTensor]] = None,
+    -     inputs_embeds: Optional[torch.FloatTensor] = None,
+    -     labels: Optional[torch.LongTensor] = None,
+    -     use_cache: Optional[bool] = None,
+    -     output_attentions: Optional[bool] = None,
+    -     output_hidden_states: Optional[bool] = None,
+    -     return_dict: Optional[bool] = None,
+    - ) -> Union[Tuple, CausalLMOutputWithPast]:
+    +     positions: torch.Tensor,
+    +     kv_caches: List[torch.Tensor],
+    +     attn_metadata: AttentionMetadata,
+    + ) -> Optional[SamplerOutput]:
 
 1. Update the code by considering that :code:`input_ids` and :code:`positions` are now flattened tensors.
 2. Replace the attention operation with either :code:`PagedAttention`, :code:`PagedAttentionWithRoPE`, or :code:`PagedAttentionWithALiBi` depending on the model's architecture.
@@ -73,24 +79,63 @@ Next, you need to rewrite the :code:`forward` methods of your model by following
 
 If your model is too large to fit into a single GPU, you can use tensor parallelism to manage it.
 To do this, substitute your model's linear and embedding layers with their tensor-parallel versions.
-For the embedding layer, you can simply replace :code:`nn.Embedding` with :code:`VocabParallelEmbedding`. For the output LM head, you can use :code:`ParallelLMHead`.
+For the embedding layer, you can simply replace :class:`torch.nn.Embedding` with :code:`VocabParallelEmbedding`. For the output LM head, you can use :code:`ParallelLMHead`.
 When it comes to the linear layers, we provide the following options to parallelize them:
 
 * :code:`ReplicatedLinear`: Replicates the inputs and weights across multiple GPUs. No memory saving.
 * :code:`RowParallelLinear`: The input tensor is partitioned along the hidden dimension. The weight matrix is partitioned along the rows (input dimension). An *all-reduce* operation is performed after the matrix multiplication to reduce the results. Typically used for the second FFN layer and the output linear transformation of the attention layer.
 * :code:`ColumnParallelLinear`: The input tensor is replicated. The weight matrix is partitioned along the columns (output dimension). The result is partitioned along the column dimension. Typically used for the first FFN layer and the separated QKV transformation of the attention layer in the original Transformer.
-* :code:`MergedColumnParallelLinear`: Column-parallel linear that merges multiple `ColumnParallelLinear` operators. Typically used for the first FFN layer with weighted activation functions (e.g., SiLU). This class handles the sharded weight loading logic of multiple weight matrices.
+* :code:`MergedColumnParallelLinear`: Column-parallel linear that merges multiple :code:`ColumnParallelLinear` operators. Typically used for the first FFN layer with weighted activation functions (e.g., SiLU). This class handles the sharded weight loading logic of multiple weight matrices.
 * :code:`QKVParallelLinear`: Parallel linear layer for the query, key, and value projections of the multi-head and grouped-query attention mechanisms. When number of key/value heads are less than the world size, this class replicates the key/value heads properly. This class handles the weight loading and replication of the weight matrices.
 
-Note that all the linear layers above take `linear_method` as an input. vLLM will set this parameter according to different quantization schemes to support weight quantization.
+Note that all the linear layers above take :code:`linear_method` as an input. vLLM will set this parameter according to different quantization schemes to support weight quantization.
 
 4. Implement the weight loading logic
 -------------------------------------
 
 You now need to implement the :code:`load_weights` method in your :code:`*ForCausalLM` class.
-This method should load the weights from the HuggingFace's checkpoint file and assign them to the corresponding layers in your model. Specifically, for `MergedColumnParallelLinear` and `QKVParallelLinear` layers, if the original model has separated weight matrices, you need to load the different parts separately.
+This method should load the weights from the HuggingFace's checkpoint file and assign them to the corresponding layers in your model. Specifically, for :code:`MergedColumnParallelLinear` and :code:`QKVParallelLinear` layers, if the original model has separated weight matrices, you need to load the different parts separately.
 
 5. Register your model
 ----------------------
 
-Finally, include your :code:`*ForCausalLM` class in `vllm/model_executor/models/__init__.py <https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/__init__.py>`_ and register it to the :code:`_MODEL_REGISTRY` in `vllm/model_executor/model_loader.py <https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/model_loader.py>`_.
+Finally, register your :code:`*ForCausalLM` class to the :code:`_VLLM_MODELS` in `vllm/model_executor/models/registry.py <https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/registry.py>`_.
+
+6. Out-of-Tree Model Integration
+--------------------------------------------
+
+We also provide a way to integrate a model without modifying the vLLM codebase. Step 2, 3, 4 are still required, but you can skip step 1 and 5.
+
+Just add the following lines in your code:
+
+.. code-block:: python
+
+    from vllm import ModelRegistry
+    from your_code import YourModelForCausalLM
+    ModelRegistry.register_model("YourModelForCausalLM", YourModelForCausalLM)
+
+If your model imports modules that initialize CUDA, consider instead lazy-importing it to avoid an error like :code:`RuntimeError: Cannot re-initialize CUDA in forked subprocess`:
+
+.. code-block:: python
+
+    from vllm import ModelRegistry
+
+    ModelRegistry.register_model("YourModelForCausalLM", "your_code:YourModelForCausalLM")
+
+.. important::
+    If your model is a multimodal model, make sure the model class implements the :class:`~vllm.model_executor.models.interfaces.SupportsMultiModal` interface.
+    Read more about that :ref:`here <enabling_multimodal_inputs>`.
+
+If you are running api server with :code:`vllm serve <args>`, you can wrap the entrypoint with the following code:
+
+.. code-block:: python
+
+    from vllm import ModelRegistry
+    from your_code import YourModelForCausalLM
+    ModelRegistry.register_model("YourModelForCausalLM", YourModelForCausalLM)
+
+    if __name__ == '__main__':
+        import runpy
+        runpy.run_module('vllm.entrypoints.openai.api_server', run_name='__main__')
+
+Save the above code in a file and run it with :code:`python your_file.py <args>`.

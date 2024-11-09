@@ -1,0 +1,16 @@
+# Common dependencies
+-r requirements-common.txt
+
+ray >= 2.9
+cmake>=3.26
+ninja
+packaging
+setuptools-scm>=8
+wheel
+jinja2
+
+torch @ https://intel-extension-for-pytorch.s3.us-east-1.amazonaws.com/ipex_dev/xpu/torch-2.5.0a0%2Bgite84e33f-cp310-cp310-linux_x86_64.whl
+intel-extension-for-pytorch @ https://intel-extension-for-pytorch.s3.us-east-1.amazonaws.com/ipex_dev/xpu/intel_extension_for_pytorch-2.5.10%2Bgit9d489a8-cp310-cp310-linux_x86_64.whl
+oneccl_bind_pt @ https://intel-extension-for-pytorch.s3.us-east-1.amazonaws.com/ipex_dev/xpu/oneccl_bind_pt-2.5.0%2Bxpu-cp310-cp310-linux_x86_64.whl
+
+triton-xpu == 3.0.0b1
