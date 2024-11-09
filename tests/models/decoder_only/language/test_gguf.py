@@ -20,7 +20,7 @@ MAX_MODEL_LEN = 1024
 
 @pytest.mark.skipif(not is_quant_method_supported("gguf"),
                     reason="gguf is not supported on this GPU type.")
-@pytest.mark.parametrize(("base_model", "test_model", "model_path"), [
+@pytest.mark.parametrize(("original_model", "gguf_id", "gguf_path"), [
     ("meta-llama/Llama-3.2-1B-Instruct",
      "bartowski/Llama-3.2-1B-Instruct-GGUF",
      "Llama-3.2-1B-Instruct-Q4_K_M.gguf"),
@@ -40,9 +40,9 @@ def test_models(
     num_gpus_available,
     vllm_runner,
     example_prompts,
-    base_model,
-    test_model,
-    model_path,
+    original_model,
+    gguf_id,
+    gguf_path,
     dtype: str,
     max_tokens: int,
     num_logprobs: int,
@@ -51,8 +51,7 @@ def test_models(
     if num_gpus_available < tp_size:
         pytest.skip(f"Not enough GPUs for tensor parallelism {tp_size}")
 
-    original_model = base_model
-    gguf_model = hf_hub_download(test_model, filename=model_path)
+    gguf_model = hf_hub_download(gguf_id, filename=gguf_path)
 
     tokenizer = AutoTokenizer.from_pretrained(original_model)
     messages = [[{
