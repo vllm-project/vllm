@@ -36,7 +36,7 @@ def get_world_name() -> str:
     return torch.distributed.group.WORLD.group_name
 
 
-# TODO: This check is a hack
+# 128 is tile_size on sm90
 def should_slice(shape) -> bool:
     n_slices = get_tensor_model_parallel_world_size()
     return (shape[0] % n_slices == 0 and shape[0] >= 128)
@@ -392,8 +392,8 @@ class CollectiveFusionPass(InductorPass):
         for m in matches:
             gemm_1 = m.kwargs["gemm_1_weights"].meta["val"]
             gemm_2 = m.kwargs["gemm_2_weights"].meta["val"]
-            gemm_1_max_m = max(gemm_1_max_m, gemm_1.shape[0])
-            gemm_2_max_m = max(gemm_2_max_m, gemm_2.shape[0])
+            gemm_1_max_m = max(gemm_1_max_m, gemm_1.shape[1])
+            gemm_2_max_m = max(gemm_2_max_m, gemm_2.shape[1])
         assert gemm_1_max_m > 0
         assert gemm_2_max_m > 0
         return gemm_1_max_m, gemm_2_max_m
