@@ -3,15 +3,15 @@ Integration with HuggingFace
 
 This document describes how vLLM integrates with HuggingFace libraries. We will explain step by step what happens under the hood when we run ``vllm serve``.
 
-Let's say we want to serve the popular llama model by running ``vllm serve meta-llama/Llama-3.1-8B``.
+Let's say we want to serve the popular llama model by running ``vllm serve Qwen/Qwen2-7B``.
 
-1. The ``model`` argument is ``meta-llama/Llama-3.1-8B``. vLLM will first try to locate the config file ``config.json`` using this argument. See the `code snippet <https://github.com/vllm-project/vllm/blob/10b67d865d92e376956345becafc249d4c3c0ab7/vllm/transformers_utils/config.py#L75>`__ for the implementation.
+1. The ``model`` argument is ``Qwen/Qwen2-7B``. vLLM will first try to locate the config file ``config.json`` using this argument. See the `code snippet <https://github.com/vllm-project/vllm/blob/10b67d865d92e376956345becafc249d4c3c0ab7/vllm/transformers_utils/config.py#L75>`__ for the implementation.
 
    - If the ``model`` argument is a local path, vLLM will directly read the config file from the path.
 
    - Otherwise, vLLM will try to read the config from the HuggingFace cache. See `their website <https://huggingface.co/docs/huggingface_hub/en/package_reference/environment_variables#hfhome>`__ for more information on how the HuggingFace cache works. Here, we can also use the argument ``--revision`` to specify the revision of the model in the cache.
 
-   - If neither of the above works, vLLM will download the config file from the HuggingFace model hub, using the ``model`` argument as the model name, the ``--revision`` argument as the revision, and the environment variable ``HF_TOKEN`` as the token to access the model hub. In our case, vLLM will download the ``config.json`` file from ``https://huggingface.co/meta-llama/Llama-3.1-8B/blob/main/config.json``.
+   - If neither of the above works, vLLM will download the config file from the HuggingFace model hub, using the ``model`` argument as the model name, the ``--revision`` argument as the revision, and the environment variable ``HF_TOKEN`` as the token to access the model hub. In our case, vLLM will download the ``config.json`` file from ``https://huggingface.co/Qwen/Qwen2-7B/blob/main/config.json``.
 
 2. After obtaining the config file, vLLM will load the config into a dictionary. It first `inspects <https://github.com/vllm-project/vllm/blob/10b67d865d92e376956345becafc249d4c3c0ab7/vllm/transformers_utils/config.py#L189>`__ the ``model_type`` field in the config to determine the model type and config class to use. There are some ``model_type`` values that vLLM directly supports; see `here <https://github.com/vllm-project/vllm/blob/10b67d865d92e376956345becafc249d4c3c0ab7/vllm/transformers_utils/config.py#L48>`__ for the list. If the ``model_type`` is not in the list, vLLM will try to load the model using the ``model_type`` as the class name. If the class name is not found, vLLM will use `AutoConfig.from_pretrained <https://huggingface.co/docs/transformers/en/model_doc/auto#transformers.AutoConfig.from_pretrained>`__ to load the config class, with ``model``, ``revision``, and ``trust_remote_code`` as the arguments.
 
@@ -23,9 +23,9 @@ Let's say we want to serve the popular llama model by running ``vllm serve meta-
 
 4. The config object is `attached <https://github.com/vllm-project/vllm/blob/10b67d865d92e376956345becafc249d4c3c0ab7/vllm/config.py#L195>`__ as the ``hf_config`` field to vLLM's ``model_config`` object.
 
-5. After vLLM obtains the config object, it will use the ``architectures`` field to determine the model class to initialize. For ``meta-llama/Llama-3.1-8B``, the ``architectures`` field is ``["LlamaForCausalLM"]``. vLLM maintains the mapping from architecture name to model class in `its registry <https://github.com/vllm-project/vllm/blob/127c07480ecea15e4c2990820c457807ff78a057/vllm/model_executor/models/registry.py#L56>`__. If the architecture name is not found in the registry, it means this model architecture is not supported by vLLM.
+5. After vLLM obtains the config object, it will use the ``architectures`` field to determine the model class to initialize. For ``Qwen/Qwen2-7B``, the ``architectures`` field is ``["Qwen2ForCausalLM"]``. vLLM maintains the mapping from architecture name to model class in `its registry <https://github.com/vllm-project/vllm/blob/127c07480ecea15e4c2990820c457807ff78a057/vllm/model_executor/models/registry.py#L56>`__. If the architecture name is not found in the registry, it means this model architecture is not supported by vLLM.
 
-6. Finally, we reach the model class we want to initialize, i.e., the ``LlamaForCausalLM`` class in `vLLM's code <https://github.com/vllm-project/vllm/blob/127c07480ecea15e4c2990820c457807ff78a057/vllm/model_executor/models/llama.py#L439>`__. This class will initialize itself depending on various configs.
+6. Finally, we reach the model class we want to initialize, i.e., the ``Qwen2ForCausalLM`` class in `vLLM's code <https://github.com/vllm-project/vllm/blob/127c07480ecea15e4c2990820c457807ff78a057/vllm/model_executor/models/llama.py#L439>`__. This class will initialize itself depending on various configs.
 
 Beyond that, there are two more things vLLM depends on HuggingFace for.
 
