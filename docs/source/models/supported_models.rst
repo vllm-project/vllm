@@ -330,8 +330,8 @@ Text Embedding
     - :code:`BAAI/bge-multilingual-gemma2`, etc.
     - 
     - ✅︎
-  * - :code:`LlamaModel`, :code:`MistralModel`
-    - Llama-based, Mistral-based
+  * - :code:`LlamaModel`, :code:`LlamaForCausalLM`, :code:`MistralModel`, etc.
+    - Llama-based
     - :code:`intfloat/e5-mistral-7b-instruct`, etc.
     - ✅︎
     - ✅︎
