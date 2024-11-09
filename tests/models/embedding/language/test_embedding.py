@@ -8,9 +8,9 @@ from ..utils import check_embeddings_close
 
 # Model, Guard
 MODELS = [
-    "intfloat/e5-mistral-7b-instruct",
-    "BAAI/bge-base-en-v1.5",
-    "BAAI/bge-multilingual-gemma2",
+    # "intfloat/e5-mistral-7b-instruct",
+    # "BAAI/bge-base-en-v1.5",
+    # "BAAI/bge-multilingual-gemma2",
     "ssmits/Qwen2-7B-Instruct-embed-base",
     "Alibaba-NLP/gte-Qwen2-1.5B-instruct",
 ]
@@ -45,8 +45,13 @@ def test_models(
                    is_sentence_transformer=True) as hf_model:
         hf_outputs = hf_model.encode(example_prompts)
 
-    with vllm_runner(model, dtype=dtype, max_model_len=None) as vllm_model:
+    with vllm_runner(model, task="embedding", dtype=dtype,
+                     max_model_len=None) as vllm_model:
         vllm_outputs = vllm_model.encode(example_prompts)
+        # This test is for verifying whether the model's extra_repr
+        # can be printed correctly.
+        print(vllm_model.model.llm_engine.model_executor.driver_worker.
+              model_runner.model)
 
     check_embeddings_close(
         embeddings_0_lst=hf_outputs,

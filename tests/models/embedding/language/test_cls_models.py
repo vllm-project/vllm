@@ -26,8 +26,13 @@ def test_classification_models(
                    auto_cls=AutoModelForSequenceClassification) as hf_model:
         hf_outputs = hf_model.classify(example_prompts)
 
-    with vllm_runner(model, dtype=dtype) as vllm_model:
+    with vllm_runner(model, task="embedding", dtype=dtype) as vllm_model:
         vllm_outputs = vllm_model.classify(example_prompts)
+        # This test is for verifying whether the model's extra_repr
+        # can be printed correctly.
+        print(vllm_model.model.llm_engine.model_executor.driver_worker.
+              model_runner.model)
+
 
     print(hf_outputs, vllm_outputs)
 
@@ -37,17 +42,3 @@ def test_classification_models(
         vllm_output = torch.tensor(vllm_output)
 
         assert torch.allclose(hf_output, vllm_output, 1e-3)
-
-
-@pytest.mark.parametrize("model", CLASSIFICATION_MODELS)
-@pytest.mark.parametrize("dtype", ["float"])
-def test_classification_model_print(
-    vllm_runner,
-    model: str,
-    dtype: str,
-) -> None:
-    with vllm_runner(model, dtype=dtype) as vllm_model:
-        # This test is for verifying whether the model's extra_repr
-        # can be printed correctly.
-        print(vllm_model.model.llm_engine.model_executor.driver_worker.
-              model_runner.model)
