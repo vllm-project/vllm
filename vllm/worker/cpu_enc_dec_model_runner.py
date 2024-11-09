@@ -5,7 +5,7 @@ import torch
 
 from vllm.attention import AttentionMetadata
 from vllm.model_executor.layers.sampler import SamplerOutput
-from vllm.multimodal import MultiModalInputs
+from vllm.multimodal import MultiModalKwargs
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
 from vllm.utils import make_tensor_with_pad
 from vllm.worker.cpu_model_runner import (CPUModelRunner,
@@ -287,7 +287,7 @@ class CPUEncoderDecoderModelRunner(CPUModelRunner):
             kv_caches,
             "attn_metadata":
             model_input.attn_metadata,
-            **MultiModalInputs.as_kwargs(model_input.multi_modal_kwargs or {},
+            **MultiModalKwargs.as_kwargs(model_input.multi_modal_kwargs or {},
                                          device=self.device),
             "intermediate_tensors":
             intermediate_tensors,

@@ -42,7 +42,7 @@ from transformers import PhiConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, LoRAConfig
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -279,13 +279,14 @@ class PhiForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
     def __init__(
         self,
-        config: PhiConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        lora_config: Optional[LoRAConfig] = None,
-    ):
+        vllm_config: VllmConfig,
+        prefix: str = "",
+    ) -> None:
         super().__init__()
-
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+        lora_config = vllm_config.lora_config
         self.config = config
         # lm_head use bias, cannot share word embeddings
         assert not config.tie_word_embeddings

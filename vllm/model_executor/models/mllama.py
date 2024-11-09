@@ -33,7 +33,7 @@ from transformers.models.mllama.processing_mllama import (
 import vllm.distributed.parallel_state as ps
 from vllm.attention import Attention, AttentionMetadata, AttentionType
 from vllm.attention.ops.paged_attn import PagedAttention
-from vllm.config import CacheConfig, MultiModalConfig
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.inputs import (INPUT_REGISTRY, DummyData, EncoderDecoderInputs,
                          InputContext, TokenInputs, token_inputs)
@@ -1108,12 +1108,15 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
         "up_proj": ("gate_up_proj", 1),
     }
 
-    def __init__(self,
-                 config: config_mllama.MllamaConfig,
-                 multimodal_config: MultiModalConfig,
-                 cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None):
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+    ) -> None:
         super().__init__()
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
         self.vocab_size = config.text_config.vocab_size
         self.hidden_size = config.text_config.hidden_size
         self.max_num_tiles = config.vision_config.max_num_tiles
@@ -1162,7 +1165,7 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
 
     def _parse_and_validate_image_input(self, **kwargs: object):
         # tensor with the same shape will be batched together by
-        # MultiModalInputs.batch, so pixel_values here can be:
+        # MultiModalKwargs.batch, so pixel_values here can be:
         #   - List[List[torch.Tensor]]:
         #       with shape (num_tiles, 3, image_res, image_res)
         #   - List[torch.Tensor]:
