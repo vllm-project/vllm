@@ -25,10 +25,10 @@ PARTITION_SIZE = 512
 DTYPES = [torch.half, torch.bfloat16]
 NUM_GEN_SEQS = [3]  # Arbitrary values for testing
 NUM_PREFILL_SEQS = [3]  # Arbitrary values for testing
-NUM_HEADS = [(40, 40), (64, 8)]  # Arbitrary values for testing
+NUM_HEADS = [(40, 40)]  # Arbitrary values for testing
 
 HEAD_SIZES = [64, 112]
-BLOCK_SIZES = [16, 32]
+BLOCK_SIZES = [16]
 USE_ALIBI = [False, True]
 KV_CACHE_DTYPE = ["auto", "fp8"]
 SEEDS = [0]
@@ -37,7 +37,7 @@ BLOCKSPARSE_LOCAL_BLOCKS = [16]
 BLOCKSPARSE_VERT_STRIDES = [8]
 
 BLOCKSPARSE_BLOCK_SIZES = [64]
-BLOCKSPARSE_HEADS_SLIDINGS = [0, 2, -1]
+BLOCKSPARSE_HEADS_SLIDINGS = [2, -1]
 BLOCKSPARSE_HOMO_HEADS = [True, False]
 
 

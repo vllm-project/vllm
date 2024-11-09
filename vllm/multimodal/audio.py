@@ -1,5 +1,6 @@
 from vllm.inputs.registry import InputContext
-from vllm.multimodal.base import MultiModalKwargs, MultiModalPlugin
+
+from .base import MultiModalKwargs, MultiModalPlugin
 
 
 class AudioPlugin(MultiModalPlugin):

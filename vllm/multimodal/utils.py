@@ -8,11 +8,12 @@ import numpy as np
 import numpy.typing as npt
 from PIL import Image
 
+import vllm.envs as envs
 from vllm.connections import global_http_connection
-from vllm.envs import VLLM_AUDIO_FETCH_TIMEOUT, VLLM_IMAGE_FETCH_TIMEOUT
 from vllm.logger import init_logger
-from vllm.multimodal.base import MultiModalDataDict, PlaceholderRange
 from vllm.transformers_utils.tokenizer import AnyTokenizer, get_tokenizer
+
+from .inputs import MultiModalDataDict, PlaceholderRange
 
 logger = init_logger(__name__)
 
@@ -80,7 +81,9 @@ def fetch_image(image_url: str,
     """
     if image_url.startswith('http'):
         image_raw = global_http_connection.get_bytes(
-            image_url, timeout=VLLM_IMAGE_FETCH_TIMEOUT)
+            image_url,
+            timeout=envs.VLLM_IMAGE_FETCH_TIMEOUT,
+        )
         image = _load_image_from_bytes(image_raw)
 
     elif image_url.startswith('data:image'):
@@ -105,7 +108,9 @@ async def async_fetch_image(image_url: str,
     """
     if image_url.startswith('http'):
         image_raw = await global_http_connection.async_get_bytes(
-            image_url, timeout=VLLM_IMAGE_FETCH_TIMEOUT)
+            image_url,
+            timeout=envs.VLLM_IMAGE_FETCH_TIMEOUT,
+        )
         image = _load_image_from_bytes(image_raw)
 
     elif image_url.startswith('data:image'):
@@ -119,13 +124,92 @@ async def async_fetch_image(image_url: str,
     return image.convert(image_mode)
 
 
+def _load_video_frames_from_bytes(b: bytes):
+    frame = Image.open(BytesIO(b))
+    return np.array(frame)
+
+
+def load_video_frames_from_base64(frame: Union[bytes, str]):
+    """Load frame from base64 format."""
+    return _load_video_frames_from_bytes(base64.b64decode(frame))
+
+
+def _load_video_from_bytes(b: bytes, num_frames: int = 32):
+    _, decord = try_import_video_packages()
+
+    video_path = BytesIO(b)
+    vr = decord.VideoReader(video_path, num_threads=1)
+    total_frame_num = len(vr)
+
+    if total_frame_num > num_frames:
+        uniform_sampled_frames = np.linspace(0,
+                                             total_frame_num - 1,
+                                             num_frames,
+                                             dtype=int)
+        frame_idx = uniform_sampled_frames.tolist()
+    else:
+        frame_idx = [i for i in range(0, total_frame_num)]
+    frames = vr.get_batch(frame_idx).asnumpy()
+
+    return frames
+
+
+def _load_video_from_data_url(video_url: str):
+    # Only split once and assume the second part is the base64 encoded image
+    frames_base64 = video_url.split(",")[1:]
+    return np.stack([
+        load_video_frames_from_base64(frame_base64)
+        for frame_base64 in frames_base64
+    ])
+
+
+def fetch_video(video_url: str, *, num_frames: int = 32) -> npt.NDArray:
+    """
+    Load video from a HTTP or base64 data URL.
+    """
+    if video_url.startswith('http') or video_url.startswith('https'):
+        video_raw = global_http_connection.get_bytes(
+            video_url,
+            timeout=envs.VLLM_VIDEO_FETCH_TIMEOUT,
+        )
+        video = _load_video_from_bytes(video_raw, num_frames)
+    elif video_url.startswith('data:video'):
+        video = _load_video_from_data_url(video_url)
+    else:
+        raise ValueError("Invalid 'video_url': A valid 'video_url' must start "
+                         "with either 'data:video' or 'http'.")
+    return video
+
+
+async def async_fetch_video(video_url: str,
+                            *,
+                            num_frames: int = 32) -> npt.NDArray:
+    """
+    Asynchronously load video from a HTTP or base64 data URL.
+
+    By default, the image is converted into RGB format.
+    """
+    if video_url.startswith('http') or video_url.startswith('https'):
+        video_raw = await global_http_connection.async_get_bytes(
+            video_url,
+            timeout=envs.VLLM_VIDEO_FETCH_TIMEOUT,
+        )
+        video = _load_video_from_bytes(video_raw, num_frames)
+    elif video_url.startswith('data:video'):
+        video = _load_video_from_data_url(video_url)
+    else:
+        raise ValueError("Invalid 'video_url': A valid 'video_url' must start "
+                         "with either 'data:video' or 'http'.")
+    return video
+
+
 def try_import_audio_packages() -> Tuple[Any, Any]:
     try:
         import librosa
         import soundfile
-    except ImportError:
+    except ImportError as exc:
         raise ImportError(
-            "Please install vllm[audio] for audio support.") from None
+            "Please install vllm[audio] for audio support.") from exc
     return librosa, soundfile
 
 
@@ -137,7 +221,9 @@ def fetch_audio(audio_url: str) -> Tuple[np.ndarray, Union[int, float]]:
 
     if audio_url.startswith("http"):
         audio_bytes = global_http_connection.get_bytes(
-            audio_url, timeout=VLLM_AUDIO_FETCH_TIMEOUT)
+            audio_url,
+            timeout=envs.VLLM_AUDIO_FETCH_TIMEOUT,
+        )
     elif audio_url.startswith("data:audio"):
         _, audio_base64 = audio_url.split(",", 1)
         audio_bytes = base64.b64decode(audio_base64)
@@ -157,7 +243,9 @@ async def async_fetch_audio(
 
     if audio_url.startswith("http"):
         audio_bytes = await global_http_connection.async_get_bytes(
-            audio_url, timeout=VLLM_AUDIO_FETCH_TIMEOUT)
+            audio_url,
+            timeout=envs.VLLM_AUDIO_FETCH_TIMEOUT,
+        )
     elif audio_url.startswith("data:audio"):
         _, audio_base64 = audio_url.split(",", 1)
         audio_bytes = base64.b64decode(audio_base64)
@@ -182,6 +270,11 @@ def get_and_parse_image(
     return {"image": image}
 
 
+def get_and_parse_video(video_url: str) -> MultiModalDataDict:
+    video = fetch_video(video_url)
+    return {"video": video}
+
+
 async def async_get_and_parse_audio(audio_url: str) -> MultiModalDataDict:
     audio, sr = await async_fetch_audio(audio_url)
     return {"audio": (audio, sr)}
@@ -194,6 +287,11 @@ async def async_get_and_parse_image(
     image = await async_fetch_image(
         image_url, allowed_local_media_path=allowed_local_media_path)
     return {"image": image}
+
+
+async def async_get_and_parse_video(video_url: str) -> MultiModalDataDict:
+    video = await async_fetch_video(video_url)
+    return {"video": video}
 
 
 def encode_audio_base64(
@@ -246,14 +344,15 @@ def rescale_image_size(image: Image.Image,
 def try_import_video_packages() -> Any:
     try:
         import cv2
-    except ImportError:
+        import decord
+    except ImportError as exc:
         raise ImportError(
-            "Please install vllm[video] for video support.") from None
-    return cv2
+            "Please install vllm[video] for video support.") from exc
+    return cv2, decord
 
 
 def resize_video(frames: npt.NDArray, size: Tuple[int, int]) -> npt.NDArray:
-    cv2 = try_import_video_packages()
+    cv2, _ = try_import_video_packages()
 
     num_frames, _, _, channels = frames.shape
     new_height, new_width = size
@@ -282,6 +381,15 @@ def sample_frames_from_video(frames: npt.NDArray,
         frame_indices = np.linspace(0, total_frames - 1, num_frames, dtype=int)
         sampled_frames = frames[frame_indices, ...]
         return sampled_frames
+
+
+def encode_video_base64(frames: npt.NDArray):
+    base64_frames = []
+    frames_list = [frames[i] for i in range(frames.shape[0])]
+    for frame in frames_list:
+        img_base64 = encode_image_base64(Image.fromarray(frame))
+        base64_frames.append(img_base64)
+    return ",".join(base64_frames)
 
 
 # Utilities for input processors

@@ -18,7 +18,6 @@ from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
                              MultiModalKwargs, MultiModalPlaceholderMap)
 from vllm.sequence import (IntermediateTensors, SequenceData,
                            SequenceGroupMetadata)
-from vllm.transformers_utils.config import uses_mrope
 from vllm.utils import make_tensor_with_pad
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase, ModelRunnerInputBuilderBase,
@@ -167,7 +166,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
 
         # special processing for mrope position deltas.
         mrope_positions = None
-        if self.runner.model_is_mrope:
+        if self.runner.model_config.uses_mrope:
             image_grid_thw = mm_kwargs.get("image_grid_thw", None)
             video_grid_thw = mm_kwargs.get("video_grid_thw", None)
             assert image_grid_thw is not None or video_grid_thw is not None, (
@@ -449,12 +448,6 @@ class CPUModelRunner(ModelRunnerBase[ModelInputForCPU]):
 
         # Lazy initialization.
         self.model: nn.Module  # Set after init_Model
-
-    @property
-    def model_is_mrope(self) -> bool:
-        """Detect if the model has "mrope" rope_scaling type.
-        mrope requires keep "rope_deltas" between prompt and decoding phases."""
-        return uses_mrope(self.model_config.hf_config)
 
     def load_model(self) -> None:
         self.model = get_model(vllm_config=self.vllm_config)

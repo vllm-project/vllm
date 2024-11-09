@@ -103,18 +103,23 @@ class MultiModalPlugin(ABC):
                 logger.warning(
                     "Model class %s already has an input mapper "
                     "registered to %s. It is overwritten by the new one.",
-                    model_cls, self)
+                    model_cls,
+                    self,
+                )
 
-            self._input_mappers[model_cls] = mapper \
-                or self._default_input_mapper
+            self._input_mappers[model_cls] = (mapper
+                                              or self._default_input_mapper)
 
             return model_cls
 
         return wrapper
 
-    def map_input(self, model_config: "ModelConfig",
-                  data: MultiModalData[object],
-                  mm_processor_kwargs: Dict[str, Any]) -> MultiModalKwargs:
+    def map_input(
+        self,
+        model_config: "ModelConfig",
+        data: MultiModalData[object],
+        mm_processor_kwargs: Dict[str, Any],
+    ) -> MultiModalKwargs:
         """
         Transform the data into a dictionary of model inputs using the
         input mapper registered for that model.
@@ -189,13 +194,15 @@ class MultiModalPlugin(ABC):
                 logger.warning(
                     "Model class %s already calculates maximum number of "
                     "tokens in %s. It is overwritten by the new one.",
-                    model_cls, self)
+                    model_cls,
+                    self,
+                )
 
             if isinstance(max_mm_tokens, int):
                 self._validate_max_multimodal_tokens(max_mm_tokens)
 
-            self._max_mm_tokens[model_cls] = max_mm_tokens \
-                or self._default_max_multimodal_tokens
+            self._max_mm_tokens[model_cls] = (
+                max_mm_tokens or self._default_max_multimodal_tokens)
 
             return model_cls
 
@@ -323,8 +330,10 @@ class MultiModalPlaceholderMap:
         placeholder_maps: Dict[str, MultiModalPlaceholderMap] = defaultdict(
             MultiModalPlaceholderMap)
 
-        for modality, placeholders in seq_group.multi_modal_placeholders.items(
-        ):
+        for (
+                modality,
+                placeholders,
+        ) in seq_group.multi_modal_placeholders.items():
             mm_items = mm_data.pop(modality)
             if not isinstance(mm_items, list):
                 mm_items = [mm_items]
@@ -340,8 +349,11 @@ class MultiModalPlaceholderMap:
         return mm_data, placeholder_maps
 
     def append_items_from_seq_group(
-            self, positions: range, multi_modal_items: List[_T],
-            multi_modal_placeholders: Sequence[PlaceholderRange]) -> List[_T]:
+        self,
+        positions: range,
+        multi_modal_items: List[_T],
+        multi_modal_placeholders: Sequence[PlaceholderRange],
+    ) -> List[_T]:
         """
         Adds the multi-modal items that intersect ```positions`` to this
         placeholder map and returns the intersecting items.
@@ -356,20 +368,26 @@ class MultiModalPlaceholderMap:
                                              multi_modal_items):
             placeholder = range(
                 placeholder_dict["offset"],
-                placeholder_dict["offset"] + placeholder_dict["length"])
-            intersection = range(max(positions.start, placeholder.start),
-                                 min(positions.stop, placeholder.stop))
+                placeholder_dict["offset"] + placeholder_dict["length"],
+            )
+            intersection = range(
+                max(positions.start, placeholder.start),
+                min(positions.stop, placeholder.stop),
+            )
 
             if not intersection:
                 # Skip this multi-modal item.
                 continue
 
-            token_embedding_range = range(intersection.start - positions.start,
-                                          intersection.stop - positions.start)
+            token_embedding_range = range(
+                intersection.start - positions.start,
+                intersection.stop - positions.start,
+            )
 
             multimodal_embedding_range = range(
                 intersection.start - placeholder.start + self.src_len,
-                intersection.stop - placeholder.start + self.src_len)
+                intersection.stop - placeholder.start + self.src_len,
+            )
 
             intersecting_items.append(mm_item)
             self.dest_ranges.append(token_embedding_range)
@@ -411,3 +429,18 @@ class MultiModalPlaceholderMap:
 
         return MultiModalPlaceholderMap.IndexMap(src=src_indices,
                                                  dest=dest_indices)
+
+
+def __getattr__(name: str):
+    import warnings
+
+    if name == "MultiModalInputs":
+        msg = ("MultiModalInputs has been renamed to MultiModalKwargs. "
+               "The original name will take another meaning in an upcoming "
+               "version.")
+
+        warnings.warn(DeprecationWarning(msg), stacklevel=2)
+
+        return MultiModalKwargs
+
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
