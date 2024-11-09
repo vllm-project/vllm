@@ -1,4 +1,3 @@
-# coding=utf-8
 # Copyright 2024 The vLLM team.
 # Copyright 2024 Google Inc. HuggingFace Inc. team. All rights reserved.
 #
@@ -22,7 +21,7 @@ from transformers import Gemma2Config
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, LoRAConfig, PoolerConfig
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import GeluAndMul
@@ -34,7 +33,7 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.pooler import Pooler, PoolingType
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -246,12 +245,13 @@ class Gemma2Model(nn.Module):
 
     def __init__(
         self,
-        config: Gemma2Config,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        vllm_config: VllmConfig,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
         self.config = config
 
         self.embed_tokens = VocabParallelEmbedding(
@@ -401,11 +401,13 @@ class Gemma2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
     def __init__(
         self,
-        config: Gemma2Config,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        lora_config: Optional[LoRAConfig] = None,
+        vllm_config: VllmConfig,
+        prefix: str = "",
     ) -> None:
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+        lora_config = vllm_config.lora_config
         del lora_config  # Unused.
         super().__init__()
         self.config = config
@@ -415,7 +417,7 @@ class Gemma2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self.model = Gemma2Model(config, cache_config, quant_config)
         self.logits_processor = LogitsProcessor(
             config.vocab_size, soft_cap=config.final_logit_softcapping)
-        self.sampler = Sampler()
+        self.sampler = get_sampler()
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
@@ -471,14 +473,14 @@ class Gemma2EmbeddingModel(nn.Module, SupportsPP):
 
     def __init__(
         self,
-        pooler_config: Optional[PoolerConfig] = None,
-        **kwargs,
+        vllm_config: VllmConfig,
+        prefix: str = "",
     ) -> None:
         super().__init__()
 
-        self.model = Gemma2Model(**kwargs)
+        self.model = Gemma2Model(vllm_config, prefix)
         self._pooler = Pooler.from_config_with_defaults(
-            pooler_config,
+            vllm_config.model_config.pooler_config,
             pooling_type=PoolingType.LAST,
             normalize=True,
             softmax=False)

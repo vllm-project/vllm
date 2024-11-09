@@ -290,6 +290,37 @@ def load_mllama(question, image_urls: List[str]) -> ModelRequestData:
     )
 
 
+def load_idefics3(question, image_urls: List[str]) -> ModelRequestData:
+    model_name = "HuggingFaceM4/Idefics3-8B-Llama3"
+
+    # The configuration below has been confirmed to launch on a single L40 GPU.
+    llm = LLM(
+        model=model_name,
+        max_model_len=8192,
+        max_num_seqs=16,
+        enforce_eager=True,
+        limit_mm_per_prompt={"image": len(image_urls)},
+        # if you are running out of memory, you can reduce the "longest_edge".
+        # see: https://huggingface.co/HuggingFaceM4/Idefics3-8B-Llama3#model-optimizations
+        mm_processor_kwargs={
+            "size": {
+                "longest_edge": 2 * 364
+            },
+        },
+    )
+
+    placeholders = "\n".join(f"Image-{i}: <image>\n"
+                             for i, _ in enumerate(image_urls, start=1))
+    prompt = f"<|begin_of_text|>User:{placeholders}\n{question}<end_of_utterance>\nAssistant:"  # noqa: E501
+    return ModelRequestData(
+        llm=llm,
+        prompt=prompt,
+        stop_token_ids=None,
+        image_data=[fetch_image(url) for url in image_urls],
+        chat_template=None,
+    )
+
+
 model_example_map = {
     "phi3_v": load_phi3v,
     "h2ovl_chat": load_h2onvl,
@@ -298,6 +329,7 @@ model_example_map = {
     "qwen2_vl": load_qwen2_vl,
     "qwen_vl_chat": load_qwenvl_chat,
     "mllama": load_mllama,
+    "idefics3": load_idefics3,
 }
 
 

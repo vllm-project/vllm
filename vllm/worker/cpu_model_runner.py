@@ -15,10 +15,9 @@ from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
-                             MultiModalInputs, MultiModalPlaceholderMap)
+                             MultiModalKwargs, MultiModalPlaceholderMap)
 from vllm.sequence import (IntermediateTensors, SequenceData,
                            SequenceGroupMetadata)
-from vllm.transformers_utils.config import uses_mrope
 from vllm.utils import make_tensor_with_pad
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase, ModelRunnerInputBuilderBase,
@@ -163,7 +162,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
 
         # special processing for mrope position deltas.
         mrope_positions = None
-        if self.runner.model_is_mrope:
+        if self.runner.model_config.uses_mrope:
             image_grid_thw = mm_kwargs.get("image_grid_thw", None)
             video_grid_thw = mm_kwargs.get("video_grid_thw", None)
             assert image_grid_thw is not None or video_grid_thw is not None, (
@@ -201,7 +200,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
 
         slot_mapping: List[int] = []
         seq_lens: List[int] = []
-        multi_modal_inputs_list: List[MultiModalInputs] = []
+        multi_model_kwargs_list: List[MultiModalKwargs] = []
         multi_modal_placeholder_maps: Dict[
             str,
             MultiModalPlaceholderMap] = defaultdict(MultiModalPlaceholderMap)
@@ -226,7 +225,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
                     ._compute_multi_modal_input(
                         seq_group_metadata, seq_data, computed_len,
                     seq_group_metadata.mm_processor_kwargs)
-                multi_modal_inputs_list.append(mm_kwargs)
+                multi_model_kwargs_list.append(mm_kwargs)
                 for modality, placeholder_map in placeholder_maps.items():
                     multi_modal_placeholder_maps[modality].extend(
                         placeholder_map)
@@ -298,7 +297,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
             multi_modal_placeholder_index_maps=placeholder_index_maps,
         )
 
-        multi_modal_kwargs = MultiModalInputs.batch(multi_modal_inputs_list)
+        multi_modal_kwargs = MultiModalKwargs.batch(multi_model_kwargs_list)
 
         return (input_tokens, input_positions, attn_metadata, seq_lens,
                 multi_modal_kwargs)
@@ -446,12 +445,6 @@ class CPUModelRunner(ModelRunnerBase[ModelInputForCPU]):
         # Lazy initialization.
         self.model: nn.Module  # Set after init_Model
 
-    @property
-    def model_is_mrope(self) -> bool:
-        """Detect if the model has "mrope" rope_scaling type.
-        mrope requires keep "rope_deltas" between prompt and decoding phases."""
-        return uses_mrope(self.model_config.hf_config)
-
     def load_model(self) -> None:
         self.model = get_model(vllm_config=self.vllm_config)
 
@@ -527,7 +520,7 @@ class CPUModelRunner(ModelRunnerBase[ModelInputForCPU]):
             kv_caches,
             "attn_metadata":
             model_input.attn_metadata,
-            **MultiModalInputs.as_kwargs(model_input.multi_modal_kwargs or {},
+            **MultiModalKwargs.as_kwargs(model_input.multi_modal_kwargs or {},
                                          device=self.device),
             "intermediate_tensors":
             intermediate_tensors,

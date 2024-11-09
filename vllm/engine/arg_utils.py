@@ -16,7 +16,9 @@ from vllm.config import (CacheConfig, ConfigFormat, DecodingConfig,
                          VllmConfig)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
+from vllm.model_executor.layers.pooler import PoolingType
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
+from vllm.platforms import current_platform
 from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.transformers_utils.utils import check_gguf_file
@@ -37,6 +39,7 @@ DEVICE_OPTIONS = [
     "openvino",
     "tpu",
     "xpu",
+    "hpu",
 ]
 
 
@@ -110,7 +113,9 @@ class EngineArgs:
     pipeline_parallel_size: int = 1
     tensor_parallel_size: int = 1
     max_parallel_loading_workers: Optional[int] = None
-    block_size: int = 16
+    # NOTE(kzawora): default block size for Gaudi should be 128
+    # smaller sizes still work, but very inefficiently
+    block_size: int = 16 if not current_platform.is_hpu() else 128
     enable_prefix_caching: bool = False
     disable_sliding_window: bool = False
     use_v2_block_manager: bool = True
@@ -397,7 +402,7 @@ class EngineArgs:
         parser.add_argument('--block-size',
                             type=int,
                             default=EngineArgs.block_size,
-                            choices=[8, 16, 32],
+                            choices=[8, 16, 32, 64, 128],
                             help='Token block size for contiguous chunks of '
                             'tokens. This is ignored on neuron devices and '
                             'set to max-model-len')
@@ -859,7 +864,7 @@ class EngineArgs:
 
         parser.add_argument(
             '--pooling-type',
-            choices=['LAST', 'ALL', 'CLS', 'STEP'],
+            choices=[pt.name for pt in PoolingType],
             default=None,
             help='Used to configure the pooling method in the embedding model.'
         )
@@ -1132,8 +1137,7 @@ class EngineArgs:
             multi_step_stream_outputs=self.multi_step_stream_outputs,
             send_delta_data=(envs.VLLM_USE_RAY_SPMD_WORKER
                              and parallel_config.use_ray),
-            policy=self.scheduling_policy,
-        )
+            policy=self.scheduling_policy)
         lora_config = LoRAConfig(
             max_lora_rank=self.max_lora_rank,
             max_loras=self.max_loras,

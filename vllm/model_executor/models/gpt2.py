@@ -1,4 +1,3 @@
-# coding=utf-8
 # Adapted from
 # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/gpt2/modeling_gpt2.py
 # Copyright 2023 The vLLM team.
@@ -25,7 +24,7 @@ from transformers import GPT2Config
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed.parallel_state import (
     get_pp_group, get_tensor_model_parallel_world_size)
 from vllm.model_executor.layers.activation import get_act_fn
@@ -34,7 +33,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -124,8 +123,7 @@ class GPT2MLP(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.c_proj",
         )
-        self.act = get_act_fn(config.activation_function, quant_config,
-                              intermediate_size)
+        self.act = get_act_fn(config.activation_function)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         hidden_states, _ = self.c_fc(hidden_states)
@@ -244,11 +242,13 @@ class GPT2LMHeadModel(nn.Module, SupportsPP):
 
     def __init__(
         self,
-        config: GPT2Config,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        vllm_config: VllmConfig,
+        prefix: str = "",
     ):
         super().__init__()
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
         self.transformer = GPT2Model(config,
@@ -261,7 +261,7 @@ class GPT2LMHeadModel(nn.Module, SupportsPP):
             self.lm_head = ParallelLMHead(self.config.vocab_size,
                                           self.config.hidden_size)
         self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.sampler = Sampler()
+        self.sampler = get_sampler()
         self.make_empty_intermediate_tensors = (
             self.transformer.make_empty_intermediate_tensors)
 

@@ -14,7 +14,7 @@ PATH_TO_HF_HOME="$4"
 shift 4
 
 # Additional arguments are passed directly to the Docker command
-ADDITIONAL_ARGS="$@"
+ADDITIONAL_ARGS=("$@")
 
 # Validate node type
 if [ "${NODE_TYPE}" != "--head" ] && [ "${NODE_TYPE}" != "--worker" ]; then
@@ -45,5 +45,5 @@ docker run \
     --shm-size 10.24g \
     --gpus all \
     -v "${PATH_TO_HF_HOME}:/root/.cache/huggingface" \
-    ${ADDITIONAL_ARGS} \
+    "${ADDITIONAL_ARGS[@]}" \
     "${DOCKER_IMAGE}" -c "${RAY_START_CMD}"

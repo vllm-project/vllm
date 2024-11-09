@@ -1,4 +1,3 @@
-# coding=utf-8
 # Adapted from
 # https://github.com/THUDM/GLM-4
 """Inference-only ChatGLM model compatible with THUDM weights."""
@@ -12,7 +11,7 @@ from torch import nn
 from torch.nn import LayerNorm
 
 from vllm.attention import Attention, AttentionMetadata
-from vllm.config import CacheConfig, LoRAConfig, MultiModalConfig
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
                          InputContext, token_inputs)
@@ -25,13 +24,13 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.glm4_vision_encoder import EVA2CLIPModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalInputs
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.multimodal.base import MultiModalData
 from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
@@ -75,7 +74,7 @@ def mm_input_mapper_for_glmv(
         raise
     pixel_values = raw_batch_data['images']
 
-    return MultiModalInputs({'pixel_values': pixel_values})
+    return MultiModalKwargs({'pixel_values': pixel_values})
 
 
 def merge_glm_vision_embeddings(
@@ -596,14 +595,15 @@ class ChatGLMForCausalLM(nn.Module, SupportsLoRA, SupportsPP,
 
     def __init__(
         self,
-        config: ChatGLMConfig,
-        multimodal_config: MultiModalConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        lora_config: Optional[LoRAConfig] = None,
+        vllm_config: VllmConfig,
+        prefix: str = "",
     ):
         super().__init__()
-
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+        lora_config = vllm_config.lora_config
+        multimodal_config = vllm_config.model_config.multimodal_config
         self.config = config
         self.lora_config = lora_config
         self.multimodal_config = multimodal_config
@@ -617,7 +617,7 @@ class ChatGLMForCausalLM(nn.Module, SupportsLoRA, SupportsPP,
                 self.transformer.embedding.weight)
         self.lm_head = self.transformer.output_layer
         self.logits_processor = LogitsProcessor(config.padded_vocab_size)
-        self.sampler = Sampler()
+        self.sampler = get_sampler()
 
     def forward(self,
                 input_ids: torch.Tensor,
