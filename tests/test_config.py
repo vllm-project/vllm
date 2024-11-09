@@ -239,15 +239,24 @@ def test_rope_customization():
     assert longchat_model_config.max_model_len == 4096
 
 
-def test_hf_kwargs():
-    HF_KWARGS = {"output_attentions": True}
+def test_hf_kwargs_customization():
     config = ModelConfig("Qwen/Qwen1.5-7B",
-                         "Qwen/Qwen1.5-7B",
+                         task="auto",
+                         tokenizer="Qwen/Qwen1.5-7B",
+                         tokenizer_mode="auto",
+                         trust_remote_code=False,
+                         dtype="float16",
+                         seed=0)
+    assert config.hf_config.output_attentions is False
+
+    config = ModelConfig("Qwen/Qwen1.5-7B",
+                         task="auto",
+                         tokenizer="Qwen/Qwen1.5-7B",
                          tokenizer_mode="auto",
                          trust_remote_code=False,
                          dtype="float16",
                          seed=0,
-                         hf_kwargs=HF_KWARGS)
+                         hf_kwargs={"output_attentions": True})
     assert config.hf_config.output_attentions is True
 
 
