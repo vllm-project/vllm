@@ -629,6 +629,8 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
         if image_input is None:
             return None
         vision_embeddings = self._process_image_input(image_input)
+        hidden_size = vision_embeddings.shape[2]
+        vision_embeddings = vision_embeddings.reshape(1, -1, hidden_size)
         return vision_embeddings
 
     def get_inputs_embeds(
