@@ -330,9 +330,14 @@ Text Embedding
     - :code:`BAAI/bge-multilingual-gemma2`, etc.
     - 
     - ✅︎
-  * - :code:`MistralModel`
-    - Mistral-based
+  * - :code:`LlamaModel`, :code:`MistralModel`
+    - Llama-based, Mistral-based
     - :code:`intfloat/e5-mistral-7b-instruct`, etc.
+    - ✅︎
+    - ✅︎
+  * - :code:`Qwen2Model`, :code:`Qwen2ForCausalLM`
+    - Qwen2-based
+    - :code:`ssmits/Qwen2-7B-Instruct-embed-base`, :code:`Alibaba-NLP/gte-Qwen2-1.5B-instruct`, etc.
     - ✅︎
     - ✅︎
 
@@ -355,7 +360,7 @@ Reward Modeling
   * - :code:`Qwen2ForRewardModel`
     - Qwen2-based
     - :code:`Qwen/Qwen2.5-Math-RM-72B`, etc.
-    - 
+    - ✅︎
     - ✅︎
 
 .. note::
@@ -376,7 +381,7 @@ Classification
   * - :code:`Qwen2ForSequenceClassification`
     - Qwen2-based
     - :code:`jason9693/Qwen2.5-1.5B-apeach`, etc.
-    - 
+    - ✅︎
     - ✅︎
 
 .. note::

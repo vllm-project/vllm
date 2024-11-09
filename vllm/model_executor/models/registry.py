@@ -104,6 +104,7 @@ _EMBEDDING_MODELS = {
     },
     "MistralModel": ("llama", "LlamaEmbeddingModel"),
     "Phi3ForCausalLM": ("phi3", "Phi3ForCausalLM"),
+    "Qwen2Model": ("qwen2", "Qwen2EmbeddingModel"),
     "Qwen2ForRewardModel": ("qwen2_rm", "Qwen2ForRewardModel"),
     "Qwen2ForSequenceClassification": ("qwen2_cls", "Qwen2ForSequenceClassification"),  # noqa: E501
     # [Multimodal]

@@ -11,6 +11,8 @@ MODELS = [
     "intfloat/e5-mistral-7b-instruct",
     "BAAI/bge-base-en-v1.5",
     "BAAI/bge-multilingual-gemma2",
+    "ssmits/Qwen2-7B-Instruct-embed-base",
+    "Alibaba-NLP/gte-Qwen2-1.5B-instruct",
 ]
 
 ENCODER_ONLY = [
