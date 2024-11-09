@@ -562,8 +562,8 @@ class Qwen2EmbeddingModel(nn.Module, SupportsLoRA, SupportsPP):
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> torch.Tensor:
-        return self.model(input_ids, positions, kv_caches,
-                          attn_metadata, intermediate_tensors)
+        return self.model(input_ids, positions, kv_caches, attn_metadata,
+                          intermediate_tensors)
 
     def pooler(
         self,
