@@ -19,10 +19,15 @@ async def get_guided_decoding_logits_processor(
             get_local_lm_format_enforcer_guided_decoding_logits_processor)
         return get_local_lm_format_enforcer_guided_decoding_logits_processor(
             guided_params, tokenizer)
+    if guided_params.backend == "guidance":
+        from vllm.model_executor.guided_decoding.guidance_decoding import get_local_guidance_guided_decoding_logits_processor
+        return get_local_guidance_guided_decoding_logits_processor(
+            guided_params, tokenizer
+        )
 
     raise ValueError(
         f"Unknown guided decoding backend '{guided_params.backend}'. "
-        "Must be one of 'outlines, 'lm-format-enforcer'")
+        "Must be one of 'outlines, 'lm-format-enforcer', 'guidance'")
 
 
 def get_local_guided_decoding_logits_processor(
@@ -40,7 +45,14 @@ def get_local_guided_decoding_logits_processor(
             get_local_lm_format_enforcer_guided_decoding_logits_processor)
         return get_local_lm_format_enforcer_guided_decoding_logits_processor(
             guided_params, tokenizer)
+    if guided_params.backend == "guidance":
+        from vllm.model_executor.guided_decoding.guidance_decoding import (
+            get_local_guidance_guided_decoding_logits_processor,
+        )
+        return get_local_guidance_guided_decoding_logits_processor(
+            guided_params, tokenizer
+        )
 
     raise ValueError(
         f"Unknown guided decoding backend '{guided_params.backend}'. "
-        "Must be one of 'outlines, 'lm-format-enforcer'")
+        "Must be one of 'outlines, 'lm-format-enforcer', 'guidance'")
