@@ -3,7 +3,7 @@ Integration with 🤗 Transformers
 
 This document describes how vLLM integrates with 🤗 Transformers. We will explain step by step what is happening under the hood when we run ``vllm serve``.
 
-Let's say we want to serve the popular llama model from 🤗 Transformers by ``vllm serve meta-llama/Llama-3.1-8B``:
+Let's say we want to serve the popular llama model from 🤗 Transformers by running ``vllm serve meta-llama/Llama-3.1-8B``:
 
 - The ``model`` argument is ``meta-llama/Llama-3.1-8B``. vLLM will first try to locate the config file ``config.json`` using this argument. See the `code snippet <https://github.com/vllm-project/vllm/blob/10b67d865d92e376956345becafc249d4c3c0ab7/vllm/transformers_utils/config.py#L75>`_ for the implementation.
    - If the ``model`` argument is a local path, vLLM will directly read the config file under the path.
