@@ -314,7 +314,7 @@ steps:
     - pytest -v -s models/test_oot_registration.py # it needs a clean process
     - pytest -v -s models/*.py --ignore=models/test_oot_registration.py
 
-- label: Decoder-only Language Models Test (Standard) # 8+12min
+- label: Decoder-only Language Models Test (Standard) # 17min
   #mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
@@ -323,7 +323,7 @@ steps:
     - pytest -v -s models/decoder_only/language -m core_model
     - pytest -v -s models/decoder_only/language -m quant_model
 
-- label: Decoder-only Language Models Test (Extended) # 50min
+- label: Decoder-only Language Models Test (Extended) # 46min
   optional: true
   source_file_dependencies:
   - vllm/
@@ -341,7 +341,7 @@ steps:
     - pytest -v -s models/decoder_only/audio_language -m core_model
     - pytest -v -s --ignore models/decoder_only/vision_language/test_phi3v.py models/decoder_only/vision_language -m core_model
 
-- label: Decoder-only Multi-Modal Models Test (Group 1) # 1h
+- label: Decoder-only Multi-Modal Models Test (Group 1) # 41min
   optional: true
   source_file_dependencies:
   - vllm/
@@ -352,7 +352,7 @@ steps:
     # - pytest -v -s models/decoder_only/audio_language -m group_1
     - pytest -v -s --ignore models/decoder_only/vision_language/test_phi3v.py models/decoder_only/vision_language -m group_1
 
-- label: Decoder-only Multi-Modal Models Test (Group 2) # 1h
+- label: Decoder-only Multi-Modal Models Test (Group 2) # 24min
   optional: true
   source_file_dependencies:
   - vllm/
@@ -376,7 +376,7 @@ steps:
     - pytest -v -s models/decoder_only/audio_language -m 'not core_model and not group_1 and not group_2'
     - pytest -v -s --ignore models/decoder_only/vision_language/test_phi3v.py models/decoder_only/vision_language -m 'not core_model and not group_1 and not group_2'
 
-- label: Other Models Test # 6min
+- label: Other Models Test # 20min
   #mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
