@@ -48,7 +48,7 @@ We currently support the following OpenAI APIs:
 
 vLLM supports a set of parameters that are not part of the OpenAI API.
 In order to use them, you can pass them as extra parameters in the OpenAI client.
-Or directly merge them into the HTTP headers or JSON payload if you are using HTTP call directly.
+Or directly merge them into the JSON payload if you are using HTTP call directly.
 
 ```python
 completion = client.chat.completions.create(
