@@ -362,7 +362,7 @@ class InternVLInputPipeline:
             # we can't stack here because images may have different num_patches
             data = [image_pixel_values_mapper(img) for img in data]
         else:
-            return MultiModalInputs({"image_embeds": data})
+            return MultiModalKwargs({"image_embeds": data})
         model_config = ctx.model_config
         tokenizer = cached_get_tokenizer(
             model_config.tokenizer,
@@ -371,7 +371,7 @@ class InternVLInputPipeline:
                                           add_special_tokens=False,
                                           return_tensors="pt")[0]
 
-        return MultiModalInputs({
+        return MultiModalKwargs({
             "pixel_values": data,
             "image_token_id": image_token_id
         })
