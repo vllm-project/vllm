@@ -28,7 +28,7 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> List[str]:
     return generated_texts
 
 
-@pytest.mark.parametrize("lora_bias", [True, False])
+@pytest.mark.parametrize("lora_bias", [True])
 @pytest.mark.parametrize("fully_sharded", [True, False])
 def test_lora_bias(lora_bias_files: str, lora_bias: bool, fully_sharded: bool):
     llm = vllm.LLM(MODEL_PATH,

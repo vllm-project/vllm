@@ -393,7 +393,7 @@ class LoRAModelManager(AdapterModelManager):
             if module_lora:
                 module_lora.optimize()
                 # Bias is not explicitly enabled with the flag enable_lora_bias.
-                if not self.lora_config.bias_enabled:
+                if module_lora.bias is not None and not self.lora_config.bias_enabled:
                     module_lora.bias = None
                     raise ValueError(
                         f"Adapter bias cannot be used for {module_name}"
