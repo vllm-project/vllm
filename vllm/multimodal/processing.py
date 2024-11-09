@@ -95,12 +95,10 @@ def to_multi_format(data: MultiModalDataDict) -> MultiModalMultiDataDict:
 
     for k, v in data.items():
         # yapf: disable
-        if k == "image":
-            multi_data[k] = v if isinstance(v, list) else [v]  # type: ignore[index]
-        elif k == "video":
+        if k == "video":
             # Special case since even a single item can be a list
             multi_data[k] = v if is_list_of(v, list) else [v]  # type: ignore[index]
-        elif k == "audio":
+        elif k in ("image", "audio"):
             multi_data[k] = v if isinstance(v, list) else [v]  # type: ignore[index]
         else:
             multi_data[k] = v if isinstance(v, list) else [v]  # type: ignore[index]

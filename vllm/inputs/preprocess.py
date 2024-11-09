@@ -203,9 +203,22 @@ class InputPreprocessor:
                                             lora_request=lora_request)
 
     def _can_process_multimodal(self) -> bool:
+        model_config = self.model_config
+
+        if not model_config.is_multimodal_model:
+            raise ValueError("Your model does not support multi-modal inputs")
+
         # Interim measure so we can handle models that have yet to be
         # updated to use the new multi-modal processor
-        return self.mm_registry.has_processor(self.model_config)
+        can_process_multimodal = self.mm_registry.has_processor(model_config)
+        if not can_process_multimodal:
+            logger.info(
+                "Your model uses the legacy input pipeline instead of the new "
+                "multi-modal processor. Please note that the legacy pipeline "
+                "will be removed in a future release. For more details, see: "
+                "https://github.com/vllm-project/vllm/issues/10114")
+
+        return can_process_multimodal
 
     def _process_multimodal(
         self,
