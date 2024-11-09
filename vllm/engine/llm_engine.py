@@ -248,11 +248,10 @@ class LLMEngine:
             "Initializing an LLM engine (v%s) with config: "
             "model=%r, speculative_config=%r, tokenizer=%r, "
             "skip_tokenizer_init=%s, tokenizer_mode=%s, revision=%s, "
-            "override_neuron_config=%s, "
-            "rope_scaling=%r, rope_theta=%r, hf_kwargs=%r, "
-            "tokenizer_revision=%s, trust_remote_code=%s, dtype=%s, "
-            "max_seq_len=%d, download_dir=%r, load_format=%s, "
-            "tensor_parallel_size=%d, pipeline_parallel_size=%d, "
+            "override_neuron_config=%s, tokenizer_revision=%s, "
+            "trust_remote_code=%s, dtype=%s, max_seq_len=%d, "
+            "download_dir=%r, load_format=%s, tensor_parallel_size=%d, "
+            "pipeline_parallel_size=%d, "
             "disable_custom_all_reduce=%s, quantization=%s, "
             "enforce_eager=%s, kv_cache_dtype=%s, "
             "quantization_param_path=%s, device_config=%s, "
@@ -271,9 +270,6 @@ class LLMEngine:
             model_config.tokenizer_mode,
             model_config.revision,
             model_config.override_neuron_config,
-            model_config.rope_scaling,
-            model_config.rope_theta,
-            model_config.hf_kwargs,
             model_config.tokenizer_revision,
             model_config.trust_remote_code,
             model_config.dtype,

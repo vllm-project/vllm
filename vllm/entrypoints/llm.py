@@ -101,7 +101,7 @@ class LLM:
         disable_custom_all_reduce: See :class:`~vllm.config.ParallelConfig`
         disable_async_output_proc: Disable async output processing.
             This may result in lower performance.
-        hf_kwargs: Extra arguments for the HuggingFace :code:`config.json`.
+        hf_overrides: Arguments to be forwarded to the HuggingFace config.
         **kwargs: Arguments for :class:`~vllm.EngineArgs`. (See
             :ref:`engine_args`)
 
@@ -156,7 +156,7 @@ class LLM:
         max_seq_len_to_capture: int = 8192,
         disable_custom_all_reduce: bool = False,
         disable_async_output_proc: bool = False,
-        hf_kwargs: Optional[dict] = None,
+        hf_overrides: Optional[dict] = None,
         mm_processor_kwargs: Optional[Dict[str, Any]] = None,
         # After positional args are removed, move this right below `model`
         task: TaskOption = "auto",
@@ -198,7 +198,7 @@ class LLM:
             max_seq_len_to_capture=max_seq_len_to_capture,
             disable_custom_all_reduce=disable_custom_all_reduce,
             disable_async_output_proc=disable_async_output_proc,
-            hf_kwargs=hf_kwargs,
+            hf_overrides=hf_overrides,
             mm_processor_kwargs=mm_processor_kwargs,
             pooling_type=pooling_type,
             pooling_norm=pooling_norm,

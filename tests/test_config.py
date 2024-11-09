@@ -200,8 +200,10 @@ def test_rope_customization():
         trust_remote_code=False,
         dtype="float16",
         seed=0,
-        rope_scaling=TEST_ROPE_SCALING,
-        rope_theta=TEST_ROPE_THETA,
+        hf_overrides={
+            "rope_scaling": TEST_ROPE_SCALING,
+            "rope_theta": TEST_ROPE_THETA,
+        },
     )
     assert getattr(llama_model_config.hf_config, "rope_scaling",
                    None) == TEST_ROPE_SCALING
@@ -232,32 +234,13 @@ def test_rope_customization():
         trust_remote_code=False,
         dtype="float16",
         seed=0,
-        rope_scaling=TEST_ROPE_SCALING,
+        hf_overrides={
+            "rope_scaling": TEST_ROPE_SCALING,
+        },
     )
     assert getattr(longchat_model_config.hf_config, "rope_scaling",
                    None) == TEST_ROPE_SCALING
     assert longchat_model_config.max_model_len == 4096
-
-
-def test_hf_kwargs_customization():
-    config = ModelConfig("Qwen/Qwen1.5-7B",
-                         task="auto",
-                         tokenizer="Qwen/Qwen1.5-7B",
-                         tokenizer_mode="auto",
-                         trust_remote_code=False,
-                         dtype="float16",
-                         seed=0)
-    assert config.hf_config.output_attentions is False
-
-    config = ModelConfig("Qwen/Qwen1.5-7B",
-                         task="auto",
-                         tokenizer="Qwen/Qwen1.5-7B",
-                         tokenizer_mode="auto",
-                         trust_remote_code=False,
-                         dtype="float16",
-                         seed=0,
-                         hf_kwargs={"output_attentions": True})
-    assert config.hf_config.output_attentions is True
 
 
 @pytest.mark.parametrize(("model_id", "is_encoder_decoder"), [

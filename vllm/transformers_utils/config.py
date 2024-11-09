@@ -146,8 +146,6 @@ def get_config(
     trust_remote_code: bool,
     revision: Optional[str] = None,
     code_revision: Optional[str] = None,
-    rope_scaling: Optional[dict] = None,
-    rope_theta: Optional[float] = None,
     config_format: ConfigFormat = ConfigFormat.AUTO,
     token: Optional[str] = None,
     **kwargs,
@@ -230,19 +228,6 @@ def get_config(
                 f"Can't get gguf config for {config.model_type}.")
         model_type = MODEL_FOR_CAUSAL_LM_MAPPING_NAMES[config.model_type]
         config.update({"architectures": [model_type]})
-
-    for key, value in [
-        ("rope_scaling", rope_scaling),
-        ("rope_theta", rope_theta),
-    ]:
-        if value is not None:
-            logger.info(
-                "Updating %s from %r to %r",
-                key,
-                getattr(config, key, None),
-                value,
-            )
-            config.update({key: value})
 
     patch_rope_scaling(config)
 

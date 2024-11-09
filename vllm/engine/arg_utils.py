@@ -130,7 +130,7 @@ class EngineArgs:
     code_revision: Optional[str] = None
     rope_scaling: Optional[Dict[str, Any]] = None
     rope_theta: Optional[float] = None
-    hf_kwargs: Optional[Dict[str, Any]] = None
+    hf_overrides: Optional[Dict[str, Any]] = None
     tokenizer_revision: Optional[str] = None
     quantization: Optional[str] = None
     enforce_eager: Optional[bool] = None
@@ -513,9 +513,9 @@ class EngineArgs:
                             help='RoPE theta. Use with `rope_scaling`. In '
                             'some cases, changing the RoPE theta improves the '
                             'performance of the scaled model.')
-        parser.add_argument('--hf-kwargs',
+        parser.add_argument('--hf-overrides',
                             type=json.loads,
-                            default=EngineArgs.hf_kwargs,
+                            default=EngineArgs.hf_overrides,
                             help='Extra arguments for the HuggingFace config.'
                             'This should be a JSON string that will be '
                             'parsed into a dictionary.')
@@ -947,7 +947,7 @@ class EngineArgs:
             code_revision=self.code_revision,
             rope_scaling=self.rope_scaling,
             rope_theta=self.rope_theta,
-            hf_kwargs=self.hf_kwargs,
+            hf_overrides=self.hf_overrides,
             tokenizer_revision=self.tokenizer_revision,
             max_model_len=self.max_model_len,
             quantization=self.quantization,
