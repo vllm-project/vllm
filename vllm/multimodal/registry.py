@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Any, Dict, Mapping, Optional, Sequence
 from vllm.logger import init_logger
 
 from .audio import AudioPlugin
-from .base import (MultiModalDataDict, MultiModalInputMapper, MultiModalInputs,
+from .base import (MultiModalDataDict, MultiModalInputMapper, MultiModalKwargs,
                    MultiModalPlugin, MultiModalTokensCalc, NestedTensors)
 from .image import ImagePlugin
 from .video import VideoPlugin
@@ -103,7 +103,7 @@ class MultiModalRegistry:
         model_config: "ModelConfig",
         data: MultiModalDataDict,
         mm_processor_kwargs: Optional[Dict[str, Any]] = None,
-    ) -> MultiModalInputs:
+    ) -> MultiModalKwargs:
         """
         Apply an input mapper to the data passed to the model.
 
@@ -139,7 +139,7 @@ class MultiModalRegistry:
 
                 merged_dict[input_key] = input_tensor
 
-        return MultiModalInputs(merged_dict)
+        return MultiModalKwargs(merged_dict)
 
     def create_input_mapper(self, model_config: "ModelConfig"):
         """
