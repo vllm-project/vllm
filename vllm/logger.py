@@ -15,14 +15,16 @@ import vllm.envs as envs
 VLLM_CONFIGURE_LOGGING = envs.VLLM_CONFIGURE_LOGGING
 VLLM_LOGGING_CONFIG_PATH = envs.VLLM_LOGGING_CONFIG_PATH
 VLLM_LOGGING_LEVEL = envs.VLLM_LOGGING_LEVEL
+VLLM_LOGGING_PREFIX = envs.VLLM_LOGGING_PREFIX
 
-_FORMAT = "%(levelname)s %(asctime)s %(filename)s:%(lineno)d] %(message)s"
+_FORMAT = (f"{VLLM_LOGGING_PREFIX}%(levelname)s %(asctime)s "
+           "%(filename)s:%(lineno)d] %(message)s")
 _DATE_FORMAT = "%m-%d %H:%M:%S"
 
 DEFAULT_LOGGING_CONFIG = {
     "formatters": {
         "vllm": {
-            "class": "vllm.logging.NewLineFormatter",
+            "class": "vllm.logging_utils.NewLineFormatter",
             "datefmt": _DATE_FORMAT,
             "format": _FORMAT,
         },
@@ -43,6 +45,7 @@ DEFAULT_LOGGING_CONFIG = {
         },
     },
     "version": 1,
+    "disable_existing_loggers": False
 }
 
 
@@ -64,8 +67,7 @@ def _configure_vllm_root_logger() -> None:
             raise RuntimeError(
                 "Could not load logging config. File does not exist: %s",
                 VLLM_LOGGING_CONFIG_PATH)
-        with open(VLLM_LOGGING_CONFIG_PATH, encoding="utf-8",
-                  mode="r") as file:
+        with open(VLLM_LOGGING_CONFIG_PATH, encoding="utf-8") as file:
             custom_config = json.loads(file.read())
 
         if not isinstance(custom_config, dict):

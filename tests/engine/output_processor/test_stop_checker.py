@@ -4,6 +4,7 @@ import pytest
 from transformers import PreTrainedTokenizer
 
 from vllm.engine.output_processor.stop_checker import StopChecker
+from vllm.inputs import token_inputs
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import Logprob, Sequence, SequenceStatus
 
@@ -15,7 +16,7 @@ def sequence_with_eos(text: str, eos_token: str,
     """
     seq = Sequence(
         seq_id=0,
-        inputs={"prompt_token_ids": []},
+        inputs=token_inputs([]),
         block_size=16,
         eos_token_id=eos_token_id,
     )
@@ -35,8 +36,8 @@ def sequence_with_eos(text: str, eos_token: str,
 @pytest.mark.parametrize(["text_wo_eos", "eos_token", "eos_token_id"], [
     ("This text ends with EOS token", "</s>", 2),
 ])
-@pytest.mark.parametrize("ignore_eos", [True, False, None])
-@pytest.mark.parametrize("include_stop_str_in_output", [True, False, None])
+@pytest.mark.parametrize("ignore_eos", [True, False])
+@pytest.mark.parametrize("include_stop_str_in_output", [True, False])
 @pytest.mark.skip_global_cleanup
 def test_stop_on_eos_token(text_wo_eos: str, eos_token: str, eos_token_id: int,
                            ignore_eos: bool, include_stop_str_in_output: bool):

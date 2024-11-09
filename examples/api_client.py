@@ -1,8 +1,7 @@
-"""Example Python client for vllm.entrypoints.api_server
+"""Example Python client for `vllm.entrypoints.api_server`
 NOTE: The API server is used only for demonstration and simple performance
 benchmarks. It is not intended for production use.
-For production use, we recommend vllm.entrypoints.openai.api_server
-and the OpenAI client API
+For production use, we recommend `vllm serve` and the OpenAI client API.
 """
 
 import argparse
@@ -32,7 +31,10 @@ def post_http_request(prompt: str,
         "max_tokens": 16,
         "stream": stream,
     }
-    response = requests.post(api_url, headers=headers, json=pload, stream=True)
+    response = requests.post(api_url,
+                             headers=headers,
+                             json=pload,
+                             stream=stream)
     return response
 
 

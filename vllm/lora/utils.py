@@ -1,5 +1,10 @@
-from typing import List, Optional, Set, Tuple, Type
+import os
+import re
+from typing import List, Optional, Set, Tuple, Type, Union
 
+import huggingface_hub
+from huggingface_hub.utils import (EntryNotFoundError, HfHubHTTPError,
+                                   HFValidationError, RepositoryNotFoundError)
 from torch import nn
 from transformers import PretrainedConfig
 
@@ -19,6 +24,7 @@ from vllm.lora.layers import (BaseLayerWithLoRA, ColumnParallelLinearWithLoRA,
                               MergedColumnParallelLinearWithLoRA,
                               MergedQKVParallelLinearWithLora,
                               QKVParallelLinearWithLora,
+                              ReplicatedLinearWithLoRA,
                               RowParallelLinearWithLoRA,
                               VocabParallelEmbeddingWithLoRA)
 # yapf: enable
@@ -34,6 +40,7 @@ _all_lora_classes: Set[Type[BaseLayerWithLoRA]] = {
     QKVParallelLinearWithLora,
     MergedQKVParallelLinearWithLora,
     RowParallelLinearWithLoRA,
+    ReplicatedLinearWithLoRA,
     LogitsProcessorWithLoRA,
     ColumnParallelLinearWithShardedLoRA,
     QKVParallelLinearWithShardedLora,
@@ -105,3 +112,78 @@ def parse_fine_tuned_lora_name(name: str) -> Tuple[str, bool]:
             return ".".join(parts[2:-1]), parts[-1] == "lora_embedding_A"
 
     raise ValueError(f"{name} is unsupported LoRA weight")
+
+
+def is_regex_target_modules(load_modules: Union[str, List[str]],
+                            expected_lora_modules: List[str]) -> bool:
+    """
+    PEFT supports passing `target_modules` in the form of regular expressions, 
+    such as `model.*(q_proj|k_proj|v_proj)$`. This function is mainly used to 
+    determine whether the suffix in the regular expression is present in the 
+    `expected_lora_modules`.
+    """
+
+    def is_valid_regex(pattern):
+        try:
+            re.compile(pattern)
+            return True
+        except re.error:
+            return False
+
+    def is_subset(sub_list, full_list):
+        return set(sub_list).issubset(set(full_list))
+
+    # Similar to PEFT's processing logic, regex-related operations are only
+    #  executed when the load_modules is a `str`.
+    if not isinstance(load_modules, str):
+        return False
+
+    if is_valid_regex(load_modules):
+        match = re.search(r"\((.*?)\)\$?$", load_modules)
+        if match:
+            suffix = match.group(1).split("|")
+            return is_subset(suffix, expected_lora_modules)
+    return False
+
+
+def get_adapter_absolute_path(lora_path: str) -> str:
+    """
+    Resolves the given lora_path to an absolute local path.
+
+    If the lora_path is identified as a Hugging Face model identifier,
+    it will download the model and return the local snapshot path.
+    Otherwise, it treats the lora_path as a local file path and
+    converts it to an absolute path.
+
+    Parameters:
+    lora_path (str): The path to the lora model, which can be an absolute path,
+                     a relative path, or a Hugging Face model identifier.
+
+    Returns:
+    str: The resolved absolute local path to the lora model.
+    """
+
+    # Check if the path is an absolute path. Return it no matter exists or not.
+    if os.path.isabs(lora_path):
+        return lora_path
+
+    # If the path starts with ~, expand the user home directory.
+    if lora_path.startswith('~'):
+        return os.path.expanduser(lora_path)
+
+    # Check if the expanded relative path exists locally.
+    if os.path.exists(lora_path):
+        return os.path.abspath(lora_path)
+
+    # If the path does not exist locally, assume it's a Hugging Face repo.
+    try:
+        local_snapshot_path = huggingface_hub.snapshot_download(
+            repo_id=lora_path)
+    except (HfHubHTTPError, RepositoryNotFoundError, EntryNotFoundError,
+            HFValidationError):
+        # Handle errors that may occur during the download
+        # Return original path instead instead of throwing error here
+        logger.exception("Error downloading the HuggingFace model")
+        return lora_path
+
+    return local_snapshot_path

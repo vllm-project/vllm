@@ -1,4 +1,3 @@
-# coding=utf-8
 # Adapted from
 # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/llama/modeling_llama.py
 # Copyright 2023 DeciAI Research Team. All rights reserved.
@@ -23,16 +22,15 @@
 # limitations under the License.
 """Inference-only DeciLM model compatible with HuggingFace weights."""
 
-from typing import Iterable, Optional, Tuple
+from typing import Iterable, Tuple
 
 import torch
-from transformers import LlamaConfig
 
-from vllm.config import CacheConfig, LoRAConfig
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.config import VllmConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.llama import LlamaForCausalLM
+
+from .utils import is_pp_missing_parameter
 
 
 class DeciLMForCausalLM(LlamaForCausalLM):
@@ -55,17 +53,13 @@ class DeciLMForCausalLM(LlamaForCausalLM):
 
     def __init__(
         self,
-        config: LlamaConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        lora_config: Optional[LoRAConfig] = None,
+        vllm_config: VllmConfig,
+        prefix: str = "",
     ) -> None:
+        config = vllm_config.model_config.hf_config
         config.num_key_value_heads = max(config.num_key_value_heads_per_layer)
         delattr(config, "num_key_value_heads_per_layer")
-        super().__init__(config=config,
-                         cache_config=cache_config,
-                         quant_config=quant_config,
-                         lora_config=lora_config)
+        super().__init__(vllm_config=vllm_config)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         stacked_params_mapping = [
@@ -91,6 +85,8 @@ class DeciLMForCausalLM(LlamaForCausalLM):
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
+                if is_pp_missing_parameter(name, self):
+                    continue
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
@@ -98,6 +94,8 @@ class DeciLMForCausalLM(LlamaForCausalLM):
             else:
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
+                    continue
+                if is_pp_missing_parameter(name, self):
                     continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",

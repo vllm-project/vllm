@@ -26,7 +26,7 @@ for the target model outputs.
 
 import pytest
 
-from .conftest import run_greedy_equality_correctness_test
+from .conftest import run_equality_correctness_test
 
 
 @pytest.mark.parametrize(
@@ -35,19 +35,21 @@ from .conftest import run_greedy_equality_correctness_test
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
 
-        # Required for spec decode.
-        "use_v2_block_manager": True,
-
         # Print spec metrics.
         "disable_log_stats": False,
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [
     {
-        "model": "JackFram/llama-68m",
+        "model_name": "JackFram/llama-68m",
     },
 ])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
 @pytest.mark.parametrize("test_llm_kwargs", [
+    {
+        "speculative_model": "[ngram]",
+        "num_speculative_tokens": 5,
+        "ngram_prompt_lookup_max": 3,
+    },
     {
         "speculative_model": "[ngram]",
         "num_speculative_tokens": 5,
@@ -58,16 +60,88 @@ from .conftest import run_greedy_equality_correctness_test
     256,
 ])
 @pytest.mark.parametrize("batch_size", [1, 32])
+@pytest.mark.parametrize("prefill_chunk_size", [-1, 4])
 @pytest.mark.parametrize("seed", [1])
-def test_ngram_e2e_greedy_correctness(baseline_llm_generator,
-                                      test_llm_generator, batch_size: int,
-                                      output_len: int):
+def test_ngram_e2e_greedy_correctness(vllm_runner, common_llm_kwargs,
+                                      per_test_common_llm_kwargs,
+                                      baseline_llm_kwargs, test_llm_kwargs,
+                                      batch_size: int, output_len: int,
+                                      prefill_chunk_size: int, seed: int):
     """Verify greedy equality on a tiny model with different batch size."""
-    run_greedy_equality_correctness_test(baseline_llm_generator,
-                                         test_llm_generator,
-                                         batch_size,
-                                         max_output_len=output_len,
-                                         force_output_len=True)
+    if prefill_chunk_size > 0:
+        common_llm_kwargs.update(
+            **{
+                "enable_chunked_prefill": True,
+                "max_num_batched_tokens": prefill_chunk_size,
+                "max_num_seqs": prefill_chunk_size
+            })
+    else:
+        common_llm_kwargs["enable_chunked_prefill"] = False
+    run_equality_correctness_test(vllm_runner,
+                                  common_llm_kwargs,
+                                  per_test_common_llm_kwargs,
+                                  baseline_llm_kwargs,
+                                  test_llm_kwargs,
+                                  batch_size,
+                                  max_output_len=output_len,
+                                  seed=seed,
+                                  temperature=0.0)
+
+
+@pytest.mark.parametrize(
+    "common_llm_kwargs",
+    [{
+        # Skip cuda graph recording for fast test.
+        "enforce_eager": True,
+
+        # Print spec metrics.
+        "disable_log_stats": False,
+    }])
+@pytest.mark.parametrize("per_test_common_llm_kwargs", [
+    {
+        "model_name": "JackFram/llama-68m",
+    },
+])
+@pytest.mark.parametrize("baseline_llm_kwargs", [{}])
+@pytest.mark.parametrize("test_llm_kwargs", [
+    {
+        "speculative_model": "[ngram]",
+        "num_speculative_tokens": 5,
+        "ngram_prompt_lookup_max": 3,
+        "disable_logprobs_during_spec_decoding": False,
+    },
+    {
+        "speculative_model": "[ngram]",
+        "num_speculative_tokens": 5,
+        "ngram_prompt_lookup_max": 3,
+        "disable_logprobs_during_spec_decoding": True,
+    },
+])
+@pytest.mark.parametrize("output_len", [
+    8,
+])
+@pytest.mark.parametrize("batch_size", [8])
+@pytest.mark.parametrize("seed", [1])
+@pytest.mark.parametrize("logprobs", [1, 6])
+def test_ngram_e2e_greedy_logprobs(vllm_runner, common_llm_kwargs,
+                                   per_test_common_llm_kwargs,
+                                   baseline_llm_kwargs, test_llm_kwargs,
+                                   batch_size: int, output_len: int, seed: int,
+                                   logprobs: int):
+    """Verify greedy equality on a tiny model with different batch size."""
+    run_equality_correctness_test(vllm_runner,
+                                  common_llm_kwargs,
+                                  per_test_common_llm_kwargs,
+                                  baseline_llm_kwargs,
+                                  test_llm_kwargs,
+                                  batch_size,
+                                  max_output_len=output_len,
+                                  seed=seed,
+                                  temperature=0.0,
+                                  logprobs=logprobs,
+                                  prompt_logprobs=logprobs,
+                                  disable_logprobs=test_llm_kwargs[
+                                      'disable_logprobs_during_spec_decoding'])
 
 
 @pytest.mark.parametrize(
@@ -80,13 +154,10 @@ def test_ngram_e2e_greedy_correctness(baseline_llm_generator,
 
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
-
-        # Required for spec decode.
-        "use_v2_block_manager": True
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [
     {
-        "model": "JackFram/llama-160m",
+        "model_name": "JackFram/llama-160m",
     },
 ])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
@@ -95,6 +166,16 @@ def test_ngram_e2e_greedy_correctness(baseline_llm_generator,
         "speculative_model": "[ngram]",
         "num_speculative_tokens": 5,
         "ngram_prompt_lookup_max": 3,
+        "enable_chunked_prefill": False,
+    },
+    {
+        "speculative_model": "[ngram]",
+        "num_speculative_tokens": 5,
+        "ngram_prompt_lookup_max": 3,
+        "enable_chunked_prefill": True,
+        "speculative_disable_mqa_scorer": True,
+        "max_num_batched_tokens": 4,
+        "max_num_seqs": 4
     },
 ])
 @pytest.mark.parametrize(
@@ -105,30 +186,31 @@ def test_ngram_e2e_greedy_correctness(baseline_llm_generator,
     ])
 @pytest.mark.parametrize("batch_size", [4])
 @pytest.mark.parametrize("seed", [1])
-def test_ngram_e2e_greedy_correctness_with_preemption(baseline_llm_generator,
-                                                      test_llm_generator,
-                                                      batch_size: int,
-                                                      output_len: int):
+def test_ngram_e2e_greedy_correctness_with_preemption(
+        vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
+        baseline_llm_kwargs, test_llm_kwargs, batch_size: int, output_len: int,
+        seed: int):
     """Verify greedy equality, even when some sequences are preempted mid-
     generation.
     """
-    run_greedy_equality_correctness_test(baseline_llm_generator,
-                                         test_llm_generator,
-                                         batch_size,
-                                         max_output_len=output_len,
-                                         force_output_len=True)
+    run_equality_correctness_test(vllm_runner,
+                                  common_llm_kwargs,
+                                  per_test_common_llm_kwargs,
+                                  baseline_llm_kwargs,
+                                  test_llm_kwargs,
+                                  batch_size,
+                                  max_output_len=output_len,
+                                  temperature=0,
+                                  seed=seed)
 
 
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
-        "model": "JackFram/llama-68m",
+        "model_name": "JackFram/llama-68m",
 
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
-
-        # Required for spec decode.
-        "use_v2_block_manager": True
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
@@ -159,29 +241,32 @@ def test_ngram_e2e_greedy_correctness_with_preemption(baseline_llm_generator,
         32,
     ])
 @pytest.mark.parametrize("seed", [1])
-def test_ngram_different_k(baseline_llm_generator, test_llm_generator,
-                           batch_size: int, output_len: int):
+def test_ngram_different_k(vllm_runner, common_llm_kwargs,
+                           per_test_common_llm_kwargs, baseline_llm_kwargs,
+                           test_llm_kwargs, batch_size: int, output_len: int,
+                           seed: int):
     """Verify that ngram speculative decoding produces exact equality
     to without spec decode with many different values of k and
     different ngram_prompt_lookup_max.
     """
-    run_greedy_equality_correctness_test(baseline_llm_generator,
-                                         test_llm_generator,
-                                         batch_size,
-                                         max_output_len=output_len,
-                                         force_output_len=True)
+    run_equality_correctness_test(vllm_runner,
+                                  common_llm_kwargs,
+                                  per_test_common_llm_kwargs,
+                                  baseline_llm_kwargs,
+                                  test_llm_kwargs,
+                                  batch_size,
+                                  max_output_len=output_len,
+                                  seed=seed,
+                                  temperature=0.0)
 
 
 @pytest.mark.parametrize(
     "common_llm_kwargs",
     [{
-        "model": "JackFram/llama-68m",
+        "model_name": "JackFram/llama-68m",
 
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
-
-        # Required for spec decode.
-        "use_v2_block_manager": True
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
@@ -191,6 +276,15 @@ def test_ngram_different_k(baseline_llm_generator, test_llm_generator,
                              "num_speculative_tokens": 5,
                              "ngram_prompt_lookup_max": 3,
                              "speculative_disable_by_batch_size": 4
+                         }, {
+                             "speculative_model": "[ngram]",
+                             "num_speculative_tokens": 5,
+                             "ngram_prompt_lookup_max": 3,
+                             "speculative_disable_by_batch_size": 4,
+                             "enable_chunked_prefill": True,
+                             "speculative_disable_mqa_scorer": True,
+                             "max_num_batched_tokens": 4,
+                             "max_num_seqs": 4
                          }])
 @pytest.mark.parametrize("batch_size", [1, 5])
 @pytest.mark.parametrize(
@@ -200,14 +294,65 @@ def test_ngram_different_k(baseline_llm_generator, test_llm_generator,
         32,
     ])
 @pytest.mark.parametrize("seed", [1])
-def test_ngram_disable_queue(baseline_llm_generator, test_llm_generator,
-                             batch_size: int, output_len: int):
+def test_ngram_disable_queue(vllm_runner, common_llm_kwargs,
+                             per_test_common_llm_kwargs, baseline_llm_kwargs,
+                             test_llm_kwargs, batch_size: int, output_len: int,
+                             seed: int):
     """Verify that ngram speculative decoding produces exact equality
     to without spec decode with many different values of k and
     different ngram_prompt_lookup_max.
     """
-    run_greedy_equality_correctness_test(baseline_llm_generator,
-                                         test_llm_generator,
-                                         batch_size,
-                                         max_output_len=output_len,
-                                         force_output_len=True)
+    run_equality_correctness_test(vllm_runner,
+                                  common_llm_kwargs,
+                                  per_test_common_llm_kwargs,
+                                  baseline_llm_kwargs,
+                                  test_llm_kwargs,
+                                  batch_size,
+                                  max_output_len=output_len,
+                                  seed=seed,
+                                  temperature=0.0)
+
+
+@pytest.mark.parametrize(
+    "common_llm_kwargs",
+    [{
+        "model_name": "JackFram/llama-68m",
+
+        # Skip cuda graph recording for fast test.
+        "enforce_eager": True,
+
+        # Required for spec decode.
+        "speculative_model": "[ngram]",
+        "num_speculative_tokens": 5,
+        "ngram_prompt_lookup_max": 3,
+    }])
+@pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
+@pytest.mark.parametrize("baseline_llm_kwargs", [{}])
+@pytest.mark.parametrize("test_llm_kwargs",
+                         [{
+                             "speculative_disable_mqa_scorer": True,
+                         }])
+@pytest.mark.parametrize("batch_size", [1, 5])
+@pytest.mark.parametrize(
+    "output_len",
+    [
+        # Use smaller output len for fast test.
+        32,
+    ])
+@pytest.mark.parametrize("seed", [1])
+def test_ngram_scorer(vllm_runner, common_llm_kwargs,
+                      per_test_common_llm_kwargs, baseline_llm_kwargs,
+                      test_llm_kwargs, batch_size: int, output_len: int,
+                      seed: int):
+    """Verify that ngram speculative decoding generates the same output 
+    with batch expansion scorer and mqa scorer.
+    """
+    run_equality_correctness_test(vllm_runner,
+                                  common_llm_kwargs,
+                                  per_test_common_llm_kwargs,
+                                  baseline_llm_kwargs,
+                                  test_llm_kwargs,
+                                  batch_size,
+                                  max_output_len=output_len,
+                                  seed=seed,
+                                  temperature=0.0)

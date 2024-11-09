@@ -1,12 +1,11 @@
-import asyncio
 from abc import ABC, abstractmethod
 from typing import List, Optional, Set, Tuple
 
-from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, MultiModalConfig, ParallelConfig,
-                         SchedulerConfig, SpeculativeConfig)
+from vllm.config import VllmConfig
 from vllm.lora.request import LoRARequest
-from vllm.sequence import ExecuteModelRequest, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.prompt_adapter.request import PromptAdapterRequest
+from vllm.sequence import ExecuteModelRequest
 
 
 class ExecutorBase(ABC):
@@ -17,28 +16,23 @@ class ExecutorBase(ABC):
     that can execute the model on multiple devices.
     """
 
+    uses_ray: bool  # whether the executor uses Ray for orchestration.
+
     def __init__(
         self,
-        model_config: ModelConfig,
-        cache_config: CacheConfig,
-        parallel_config: ParallelConfig,
-        scheduler_config: SchedulerConfig,
-        device_config: DeviceConfig,
-        load_config: LoadConfig,
-        lora_config: Optional[LoRAConfig],
-        multimodal_config: Optional[MultiModalConfig],
-        speculative_config: Optional[SpeculativeConfig],
+        vllm_config: VllmConfig,
     ) -> None:
-        self.model_config = model_config
-        self.cache_config = cache_config
-        self.lora_config = lora_config
-        self.load_config = load_config
-        self.parallel_config = parallel_config
-        self.scheduler_config = scheduler_config
-        self.device_config = device_config
-        self.multimodal_config = multimodal_config
-        self.speculative_config = speculative_config
-
+        self.vllm_config = vllm_config
+        self.model_config = vllm_config.model_config
+        self.cache_config = vllm_config.cache_config
+        self.lora_config = vllm_config.lora_config
+        self.load_config = vllm_config.load_config
+        self.parallel_config = vllm_config.parallel_config
+        self.scheduler_config = vllm_config.scheduler_config
+        self.device_config = vllm_config.device_config
+        self.speculative_config = vllm_config.speculative_config
+        self.prompt_adapter_config = vllm_config.prompt_adapter_config
+        self.observability_config = vllm_config.observability_config
         self._init_executor()
 
     @abstractmethod
@@ -96,6 +90,23 @@ class ExecutorBase(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def add_prompt_adapter(
+            self, prompt_adapter_request: PromptAdapterRequest) -> bool:
+        raise NotImplementedError
+
+    @abstractmethod
+    def remove_prompt_adapter(self, prompt_adapter_id: int) -> bool:
+        raise NotImplementedError
+
+    @abstractmethod
+    def pin_prompt_adapter(self, prompt_adapter_id: int) -> bool:
+        raise NotImplementedError  # type: ignore
+
+    @abstractmethod
+    def list_prompt_adapters(self) -> Set[int]:
+        raise NotImplementedError
+
+    @abstractmethod
     def check_health(self) -> None:
         """Checks if the executor is healthy. If not, it should raise an
         exception."""
@@ -110,24 +121,6 @@ class ExecutorBase(ABC):
 
 
 class ExecutorAsyncBase(ExecutorBase):
-
-    def __init__(
-        self,
-        model_config: ModelConfig,
-        cache_config: CacheConfig,
-        parallel_config: ParallelConfig,
-        scheduler_config: SchedulerConfig,
-        device_config: DeviceConfig,
-        load_config: LoadConfig,
-        lora_config: Optional[LoRAConfig],
-        multimodal_config: Optional[MultiModalConfig],
-        speculative_config: Optional[SpeculativeConfig],
-    ) -> None:
-        self.pp_locks: Optional[List[asyncio.Lock]] = None
-
-        super().__init__(model_config, cache_config, parallel_config,
-                         scheduler_config, device_config, load_config,
-                         lora_config, multimodal_config, speculative_config)
 
     @abstractmethod
     async def execute_model_async(
