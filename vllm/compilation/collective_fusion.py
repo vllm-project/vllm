@@ -30,21 +30,26 @@ if envs.VLLM_USE_FLUX:
     except ImportError:
         use_flux = False
 
+FLUX_TILE_SIZE: int = 128
+
 
 # TODO: is this right?
 def get_world_name() -> str:
     return torch.distributed.group.WORLD.group_name
 
 
-# 128 is tile_size on sm90
+# Note: this heuristic is unique to flux
 def should_slice(shape) -> bool:
     n_slices = get_tensor_model_parallel_world_size()
-    return (shape[0] % n_slices == 0 and shape[0] >= 128)
+    return (shape[0] % (FLUX_TILE_SIZE * n_slices) == 0
+            and shape[0] >= FLUX_TILE_SIZE * n_slices)
 
 
-def slice_residual(residual) -> List[torch.Tensor]:
+# This is really inefficient.  Should only pick the slice required.
+def residual_slice_shape(residual, rank) -> List[torch.Size]:
     n_slices = get_tensor_model_parallel_world_size()
-    return torch.chunk(residual, n_slices, dim=0)
+    slices = torch.chunk(residual, n_slices, dim=0)
+    return slices[rank].shape
 
 
 def get_match_gemm_rs_ag_gemm(tp_group_name: str, custom_ar: bool):
@@ -101,7 +106,7 @@ def get_gemm_rs_ag_gemm(use_flux: bool, gemm_1_type,
         gemm_rs_op = flux.GemmRS(
             device_group,
             1,  # One node
-            gemm_1_max_m,
+            gemm_1_max_m,  # M
             gemm_1_weights[0],  # N
             # TODO: It would be nicer to modify flux to dispatch based on dtype
             # at run time, but I don't know what the downside would be.
@@ -116,7 +121,7 @@ def get_gemm_rs_ag_gemm(use_flux: bool, gemm_1_type,
         ag_gemm_op = flux.AGKernel(
             device_group,
             1,  # One node
-            gemm_2_max_m,
+            gemm_2_max_m,  # M
             gemm_2_weights[0],  # N
             gemm_2_weights[1],  # K
             # TODO: It would be nicer to modify flux to dispatch based on dtype
@@ -165,13 +170,12 @@ def get_gemm_rs_ag_gemm(use_flux: bool, gemm_1_type,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
 
         if first_layer and should_slice(residual.shape):
-            res_slices = slice_residual(residual)
-            slice_size = res_slices[rank].shape[0]
-            residual_chunk = torch.ops.aten.split.Tensor(residual, slice_size)
+            slice_shape = residual_slice_shape(residual, rank)[0]
+            residual_chunk = torch.ops.aten.split.Tensor(residual, slice_shape)
             my_residual = residual_chunk[0]
         else:
             my_residual = residual
-            slice_size = residual.shape[0]
+            slice_shape = residual.shape[0]
 
         if not should_slice(residual.shape):
             output = torch.ops.aten.mm.default(gemm_1_activations,
@@ -196,8 +200,8 @@ def get_gemm_rs_ag_gemm(use_flux: bool, gemm_1_type,
 
             residual_1 = residual if first_layer else old_my_residual
             slice_scatter = torch.ops.aten.slice_scatter.default(
-                residual_1, my_residual, 0, 0, slice_size)
-            split_2 = torch.ops.aten.split.Tensor(slice_scatter, slice_size)
+                residual_1, my_residual, 0, 0, slice_shape)
+            split_2 = torch.ops.aten.split.Tensor(slice_scatter, slice_shape)
             new_residual = split_2[0]
 
             mm_2 = ag_gemm(output, gemm_2_weights)
@@ -214,9 +218,8 @@ def get_gemm_rs_ag_gemm(use_flux: bool, gemm_1_type,
         first_layer: bool,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if first_layer and should_slice(gemm_1_activations.shape):
-            res_slices = slice_residual(residual)
-            slice_size = res_slices[rank].shape[0]
-            split_1 = torch.ops.aten.split.Tensor(residual, slice_size)
+            slice_shape = residual_slice_shape(residual, rank)[0]
+            split_1 = torch.ops.aten.split.Tensor(residual, slice_shape)
             my_residual = split_1[0]
         else:
             my_residual = residual
@@ -385,10 +388,15 @@ class CollectiveFusionPass(InductorPass):
         gemm_1_max_m = 0
         gemm_2_max_m = 0
         for m in matches:
-            gemm_1 = m.kwargs["gemm_1_weights"].meta["val"]
-            gemm_2 = m.kwargs["gemm_2_weights"].meta["val"]
+            #gemm_1 = m.kwargs["gemm_1_weights"].meta["val"]
+            #gemm_2 = m.kwargs["gemm_2_weights"].meta["val"]
+            #gemm_1_max_m = max(gemm_1_max_m, gemm_1.shape[1])
+            #gemm_2_max_m = max(gemm_2_max_m, gemm_2.shape[1])
+            gemm_1 = m.kwargs["residual"].meta["val"]
+            gemm_2 = m.kwargs["residual"].meta["val"]
             gemm_1_max_m = max(gemm_1_max_m, gemm_1.shape[1])
             gemm_2_max_m = max(gemm_2_max_m, gemm_2.shape[1])
+
         assert gemm_1_max_m > 0
         assert gemm_2_max_m > 0
         return gemm_1_max_m, gemm_2_max_m
