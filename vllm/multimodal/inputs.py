@@ -135,6 +135,12 @@ class MultiModalKwargs(_MultiModalKwargsBase):
         """
         if isinstance(nested_tensors, torch.Tensor):
             return nested_tensors
+        
+        # TODO: Remove these once all models have been migrated
+        if isinstance(nested_tensors, np.ndarray):
+            return torch.from_numpy(nested_tensors)
+        if isinstance(nested_tensors, (int, float)):
+            return torch.tensor(nested_tensors)
 
         stacked = [MultiModalKwargs._try_stack(t) for t in nested_tensors]
         if not is_list_of(stacked, torch.Tensor, check="all"):
