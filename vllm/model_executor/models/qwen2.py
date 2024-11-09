@@ -550,7 +550,7 @@ class Qwen2EmbeddingModel(nn.Module, SupportsLoRA, SupportsPP):
 
         self._pooler = Pooler.from_config_with_defaults(
             pooler_config,
-            pooling_type=PoolingType.LAST,
+            pooling_type=PoolingType.MEAN,
             normalize=True,
             softmax=False)
 
