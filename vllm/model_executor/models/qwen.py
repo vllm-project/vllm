@@ -20,7 +20,7 @@ from transformers import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, LoRAConfig, MultiModalConfig
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
                          InputContext, token_inputs)
@@ -867,13 +867,14 @@ class QWenBaseModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
 
     def __init__(
         self,
-        config: PretrainedConfig,
-        multimodal_config: MultiModalConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        lora_config: Optional[LoRAConfig] = None,
-    ):
+        vllm_config: VllmConfig,
+        prefix: str = "",
+    ) -> None:
         super().__init__()
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+        multimodal_config = vllm_config.model_config.multimodal_config
         self.config = config
         self.multimodal_config = multimodal_config
         self.quant_config = quant_config
@@ -1064,17 +1065,13 @@ class QWenLMHeadModel(QWenBaseModel, SupportsLoRA):
 
     def __new__(
         cls,
-        config: PretrainedConfig,
-        multimodal_config: MultiModalConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        lora_config: Optional[LoRAConfig] = None,
-    ):
+        vllm_config: VllmConfig,
+        prefix: str = "",
+    ) -> None:
+        config = vllm_config.model_config.hf_config
         # Initialize VL
         if hasattr(config, "visual"):
-            return QWenVL(config, multimodal_config, cache_config,
-                          quant_config, lora_config)
+            return QWenVL(vllm_config)
         # Initialize LLM
         else:
-            return QWenLLM(config, multimodal_config, cache_config,
-                           quant_config, lora_config)
+            return QWenLLM(vllm_config)

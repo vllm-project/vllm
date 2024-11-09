@@ -61,15 +61,3 @@ def set_compilation_config(config: Optional[CompilationConfig]):
 
 def get_compilation_config() -> Optional[CompilationConfig]:
     return _compilation_config
-
-
-_vllm_config: Optional[VllmConfig] = None
-
-
-def set_vllm_config(config: Optional[VllmConfig]):
-    global _vllm_config
-    _vllm_config = config
-
-
-def get_vllm_config() -> Optional[VllmConfig]:
-    return _vllm_config
