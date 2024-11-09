@@ -146,9 +146,8 @@ def get_config(
     trust_remote_code: bool,
     revision: Optional[str] = None,
     code_revision: Optional[str] = None,
-    rope_scaling: Optional[dict] = None,
-    rope_theta: Optional[float] = None,
     config_format: ConfigFormat = ConfigFormat.AUTO,
+    token: Optional[str] = None,
     **kwargs,
 ) -> PretrainedConfig:
     # Separate model folder from file path for GGUF models
@@ -159,39 +158,43 @@ def get_config(
         model = Path(model).parent
 
     if config_format == ConfigFormat.AUTO:
-        if is_gguf or file_or_path_exists(model,
-                                          HF_CONFIG_NAME,
-                                          revision=revision,
-                                          token=kwargs.get("token")):
+        if is_gguf or file_or_path_exists(
+                model, HF_CONFIG_NAME, revision=revision, token=token):
             config_format = ConfigFormat.HF
         elif file_or_path_exists(model,
                                  MISTRAL_CONFIG_NAME,
                                  revision=revision,
-                                 token=kwargs.get("token")):
+                                 token=token):
             config_format = ConfigFormat.MISTRAL
         else:
             # If we're in offline mode and found no valid config format, then
             # raise an offline mode error to indicate to the user that they
             # don't have files cached and may need to go online.
             # This is conveniently triggered by calling file_exists().
-            file_exists(model,
-                        HF_CONFIG_NAME,
-                        revision=revision,
-                        token=kwargs.get("token"))
+            file_exists(model, HF_CONFIG_NAME, revision=revision, token=token)
 
             raise ValueError(f"No supported config format found in {model}")
 
     if config_format == ConfigFormat.HF:
         config_dict, _ = PretrainedConfig.get_config_dict(
-            model, revision=revision, code_revision=code_revision, **kwargs)
+            model,
+            revision=revision,
+            code_revision=code_revision,
+            token=token,
+            **kwargs,
+        )
 
         # Use custom model class if it's in our registry
         model_type = config_dict.get("model_type")
         if model_type in _CONFIG_REGISTRY:
             config_class = _CONFIG_REGISTRY[model_type]
-            config = config_class.from_pretrained(model,
-                                                  revision=revision,
-                                                  code_revision=code_revision)
+            config = config_class.from_pretrained(
+                model,
+                revision=revision,
+                code_revision=code_revision,
+                token=token,
+                **kwargs,
+            )
         else:
             try:
                 config = AutoConfig.from_pretrained(
@@ -199,6 +202,7 @@ def get_config(
                     trust_remote_code=trust_remote_code,
                     revision=revision,
                     code_revision=code_revision,
+                    token=token,
                     **kwargs,
                 )
             except ValueError as e:
@@ -216,7 +220,7 @@ def get_config(
                     raise e
 
     elif config_format == ConfigFormat.MISTRAL:
-        config = load_params_config(model, revision, token=kwargs.get("token"))
+        config = load_params_config(model, revision, token=token, **kwargs)
     else:
         raise ValueError(f"Unsupported config format: {config_format}")
 
@@ -227,19 +231,6 @@ def get_config(
                 f"Can't get gguf config for {config.model_type}.")
         model_type = MODEL_FOR_CAUSAL_LM_MAPPING_NAMES[config.model_type]
         config.update({"architectures": [model_type]})
-
-    for key, value in [
-        ("rope_scaling", rope_scaling),
-        ("rope_theta", rope_theta),
-    ]:
-        if value is not None:
-            logger.info(
-                "Updating %s from %r to %r",
-                key,
-                getattr(config, key, None),
-                value,
-            )
-            config.update({key: value})
 
     patch_rope_scaling(config)
 
@@ -462,13 +453,15 @@ def maybe_register_config_serialize_by_value(trust_remote_code: bool) -> None:
 
 def load_params_config(model: Union[str, Path],
                        revision: Optional[str],
-                       token: Optional[str] = None) -> PretrainedConfig:
+                       token: Optional[str] = None,
+                       **kwargs) -> PretrainedConfig:
     # This function loads a params.json config which
     # should be used when loading models in mistral format
 
     config_file_name = "params.json"
 
     config_dict = get_hf_file_to_dict(config_file_name, model, revision, token)
+    assert isinstance(config_dict, dict)
 
     config_mapping = {
         "dim": "hidden_size",
@@ -511,6 +504,8 @@ def load_params_config(model: Union[str, Path],
         }
         config_dict["architectures"] = ["PixtralForConditionalGeneration"]
         config_dict["model_type"] = "pixtral"
+
+    config_dict.update(kwargs)
 
     config = recurse_elems(config_dict)
     return config
