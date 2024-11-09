@@ -34,7 +34,7 @@ from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.models.persimmon import PersimmonForCausalLM
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.base import MultiModalInputs
+from vllm.multimodal.base import MultiModalKwargs
 from vllm.multimodal.image import cached_get_image_processor
 from vllm.multimodal.utils import (cached_get_tokenizer,
                                    consecutive_placeholder_ranges)
@@ -218,7 +218,7 @@ def input_mapper_for_fuyu(ctx: InputContext, data: object):
         ])
 
     # image has been processed with prompt in input processor
-    return MultiModalInputs({"pixel_values": data})
+    return MultiModalKwargs({"pixel_values": data})
 
 
 @MULTIMODAL_REGISTRY.register_image_input_mapper(input_mapper_for_fuyu)

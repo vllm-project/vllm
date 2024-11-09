@@ -8,7 +8,7 @@ from vllm.distributed import get_pp_group
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.pooling_metadata import PoolingMetadata
-from vllm.multimodal import MultiModalInputs
+from vllm.multimodal import MultiModalKwargs
 from vllm.pooling_params import PoolingParams
 from vllm.sequence import (IntermediateTensors, PoolerOutput, SequenceData,
                            SequenceGroupMetadata)
@@ -104,7 +104,7 @@ class EmbeddingModelRunner(
                 kv_caches=kv_caches,
                 attn_metadata=model_input.attn_metadata,
                 intermediate_tensors=intermediate_tensors,
-                **MultiModalInputs.as_kwargs(multi_modal_kwargs,
+                **MultiModalKwargs.as_kwargs(multi_modal_kwargs,
                                              device=self.device))
 
         if (self.observability_config is not None

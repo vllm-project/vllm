@@ -53,7 +53,7 @@ Base Classes
 
 .. autodata:: vllm.multimodal.MultiModalDataDict
 
-.. autoclass:: vllm.multimodal.MultiModalInputs
+.. autoclass:: vllm.multimodal.MultiModalKwargs
     :members:
     :show-inheritance:
 

@@ -1,5 +1,5 @@
 from vllm.inputs.registry import InputContext
-from vllm.multimodal.base import MultiModalInputs, MultiModalPlugin
+from vllm.multimodal.base import MultiModalKwargs, MultiModalPlugin
 
 
 class AudioPlugin(MultiModalPlugin):
@@ -9,7 +9,7 @@ class AudioPlugin(MultiModalPlugin):
         return "audio"
 
     def _default_input_mapper(self, ctx: InputContext, data: object,
-                              **mm_processor_kwargs) -> MultiModalInputs:
+                              **mm_processor_kwargs) -> MultiModalKwargs:
         raise NotImplementedError("There is no default audio input mapper")
 
     def _default_max_multimodal_tokens(self, ctx: InputContext) -> int:

@@ -30,7 +30,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.utils import merge_multimodal_embeddings
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.base import MultiModalInputs
+from vllm.multimodal.base import MultiModalKwargs
 from vllm.multimodal.utils import (cached_get_tokenizer,
                                    consecutive_placeholder_ranges)
 from vllm.sequence import IntermediateTensors, SequenceData
@@ -94,8 +94,8 @@ def dummy_data_for_pixtral(ctx: InputContext, seq_len: int,
 
 
 def input_mapper_for_pixtral(ctx: InputContext,
-                             data: object) -> MultiModalInputs:
-    """Maps the input data to its MultiModalInputs (if any).
+                             data: object) -> MultiModalKwargs:
+    """Maps the input data to its MultiModalKwargs (if any).
 
     Args:
         ctx: Context of the loaded model.
@@ -103,7 +103,7 @@ def input_mapper_for_pixtral(ctx: InputContext,
             to pixel_values in .forward() for a visual QWenLMHeadModel model.
 
     Returns:
-        MultiModalInputs containing the stacked normalized images tensor or
+        MultiModalKwargs containing the stacked normalized images tensor or
         image embeddings.
     """
     # Early exit if we have provided an image to a language only Qwen model
@@ -121,7 +121,7 @@ def input_mapper_for_pixtral(ctx: InputContext,
                                                     dtype=torch.float16)
         images.append(image)
 
-    return MultiModalInputs({"images": images})
+    return MultiModalKwargs({"images": images})
 
 
 def input_processor_for_pixtral(ctx: InputContext, inputs: DecoderOnlyInputs):
