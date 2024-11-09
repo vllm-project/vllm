@@ -188,10 +188,13 @@ def get_config(
         model_type = config_dict.get("model_type")
         if model_type in _CONFIG_REGISTRY:
             config_class = _CONFIG_REGISTRY[model_type]
-            config = config_class.from_pretrained(model,
-                                                  revision=revision,
-                                                  code_revision=code_revision,
-                                                  token=token)
+            config = config_class.from_pretrained(
+                model,
+                revision=revision,
+                code_revision=code_revision,
+                token=token,
+                **kwargs,
+            )
         else:
             try:
                 config = AutoConfig.from_pretrained(
