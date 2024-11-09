@@ -33,7 +33,6 @@ def test_classification_models(
         print(vllm_model.model.llm_engine.model_executor.driver_worker.
               model_runner.model)
 
-
     print(hf_outputs, vllm_outputs)
 
     # check logits difference
