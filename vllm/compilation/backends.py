@@ -11,7 +11,6 @@ from unittest.mock import patch
 
 import torch
 import torch.fx as fx
-from typing import Tuple, List, Optional
 
 import vllm.envs as envs
 from vllm.config import CompilationConfig, VllmConfig

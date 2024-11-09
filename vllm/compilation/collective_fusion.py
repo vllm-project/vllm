@@ -1,5 +1,5 @@
 import operator
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 import torch.fx as fx
@@ -88,14 +88,10 @@ def get_match_gemm_rs_ag_gemm(tp_group_name: str, custom_ar: bool):
     return match_gemm_rs_ag_gemm
 
 
-def get_gemm_rs_ag_gemm(use_flux: bool,
-                        gemm_1_type,
-                        gemm_1_weights: torch.Size,
-                        gemm_1_max_m: int,
-                        gemm_2_type,
-                        gemm_2_weights: torch.Size,
-                        gemm_2_max_m: int,
-                        tp_group_name: str):
+def get_gemm_rs_ag_gemm(use_flux: bool, gemm_1_type,
+                        gemm_1_weights: torch.Size, gemm_1_max_m: int,
+                        gemm_2_type, gemm_2_weights: torch.Size,
+                        gemm_2_max_m: int, tp_group_name: str):
 
     group = get_group_from_group_name(tp_group_name)
     device_group = group.device_group
@@ -146,8 +142,7 @@ def get_gemm_rs_ag_gemm(use_flux: bool,
         name = (
             f"gemm_rs_ag_gemm_{gemm_1_str}_{gemm_1_weights[0]}_{gemm_1_max_m}_"
             f"{gemm_2_str}_{gemm_2_weights[0]}_{gemm_2_weights[1]}_{gemm_2_max_m}_"
-            f"{group_str}"
-        )
+            f"{group_str}")
     else:
         world_group_name = get_world_name()
 
@@ -442,13 +437,9 @@ class CollectiveFusionPass(InductorPass):
                     assert ar_node is not None
                     tp_group_name = ar_node.args[1]
 
-                fused_gemm_func = get_gemm_rs_ag_gemm(use_flux, gemm_1.dtype,
-                                                      gemm_1.shape,
-                                                      gemm_1_max_m,
-                                                      gemm_2.dtype,
-                                                      gemm_2.shape,
-                                                      gemm_2_max_m,
-                                                      tp_group_name)
+                fused_gemm_func = get_gemm_rs_ag_gemm(
+                    use_flux, gemm_1.dtype, gemm_1.shape, gemm_1_max_m,
+                    gemm_2.dtype, gemm_2.shape, gemm_2_max_m, tp_group_name)
 
                 fused_node = graph.call_function(fused_gemm_func,
                                                  kwargs=kwargs)
