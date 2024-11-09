@@ -160,10 +160,8 @@ def get_config(
         model = Path(model).parent
 
     if config_format == ConfigFormat.AUTO:
-        if is_gguf or file_or_path_exists(model,
-                                          HF_CONFIG_NAME,
-                                          revision=revision,
-                                          token=token):
+        if is_gguf or file_or_path_exists(
+                model, HF_CONFIG_NAME, revision=revision, token=token):
             config_format = ConfigFormat.HF
         elif file_or_path_exists(model,
                                  MISTRAL_CONFIG_NAME,
@@ -175,10 +173,7 @@ def get_config(
             # raise an offline mode error to indicate to the user that they
             # don't have files cached and may need to go online.
             # This is conveniently triggered by calling file_exists().
-            file_exists(model,
-                        HF_CONFIG_NAME,
-                        revision=revision,
-                        token=token)
+            file_exists(model, HF_CONFIG_NAME, revision=revision, token=token)
 
             raise ValueError(f"No supported config format found in {model}")
 
@@ -521,7 +516,7 @@ def load_params_config(model: Union[str, Path],
         }
         config_dict["architectures"] = ["PixtralForConditionalGeneration"]
         config_dict["model_type"] = "pixtral"
-    
+
     config_dict.update(kwargs)
 
     config = recurse_elems(config_dict)
