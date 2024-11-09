@@ -67,7 +67,8 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
         self.pin_memory = is_pin_memory_available()
 
         # Multi-modal data support
-        self.multi_modal_input_mapper = MULTIMODAL_REGISTRY \
+        self.mm_registry = MULTIMODAL_REGISTRY
+        self.multi_modal_input_mapper = self.mm_registry \
             .create_input_mapper(self.model_config)
 
         # Lazy initialization.
@@ -144,14 +145,13 @@ class NeuronModelRunner(ModelRunnerBase[ModelInputForNeuron]):
 
             mm_data = seq_group_metadata.multi_modal_data
             if mm_data:
-                if seq_group_metadata.needs_mm_mapper:
+                if self.mm_registry.has_processor(self.model_config):
+                    mm_kwargs = mm_data
+                else:
                     mm_kwargs = self.multi_modal_input_mapper(
                         mm_data,
-                        mm_processor_kwargs=seq_group_metadata.
-                        mm_processor_kwargs,
+                        seq_group_metadata.mm_processor_kwargs,
                     )
-                else:
-                    mm_kwargs = mm_data
 
                 multi_modal_kwargs_list.append(mm_kwargs)
 

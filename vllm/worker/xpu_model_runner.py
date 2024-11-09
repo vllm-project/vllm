@@ -191,14 +191,14 @@ class ModelInputForXPUBuilder(ModelRunnerInputBuilderBase[ModelInputForXPU]):
                 mm_data, placeholder_maps = MultiModalPlaceholderMap \
                     .from_seq_group(seq_group_metadata, positions_range)
 
-                if seq_group_metadata.needs_mm_mapper:
+                if self.runner.mm_registry.has_processor(
+                        self.runner.model_config):
+                    mm_kwargs = mm_data
+                else:
                     mm_kwargs = self.runner.multi_modal_input_mapper(
                         mm_data,
-                        mm_processor_kwargs=seq_group_metadata.
-                        mm_processor_kwargs,
+                        seq_group_metadata.mm_processor_kwargs,
                     )
-                else:
-                    mm_kwargs = mm_data
 
                 multi_modal_kwargs_list.append(mm_kwargs)
 

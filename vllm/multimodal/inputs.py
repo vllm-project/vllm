@@ -135,7 +135,7 @@ class MultiModalKwargs(_MultiModalKwargsBase):
         """
         if isinstance(nested_tensors, torch.Tensor):
             return nested_tensors
-        
+
         # TODO: Remove these once all models have been migrated
         if isinstance(nested_tensors, np.ndarray):
             return torch.from_numpy(nested_tensors)

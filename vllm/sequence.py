@@ -487,10 +487,7 @@ class Sequence:
         inputs = self.inputs
 
         if inputs["type"] == "token":
-            return {
-                "needs_mm_mapper": True,
-                **inputs.get("mm_processor_kwargs", {}),
-            }
+            return inputs.get("mm_processor_kwargs", {})
 
         if inputs["type"] == "multimodal":
             return {}
@@ -964,13 +961,6 @@ class SequenceGroupMetadata(
                     self.seq_data.values())).get_len()
             else:
                 self.token_chunk_size = 1
-
-    @property
-    def needs_mm_mapper(self):
-        # Interim measure so we can handle models that have yet to be
-        # updated to use the new multi-modal processor
-        return (self.mm_processor_kwargs is not None
-                and self.mm_processor_kwargs.get("needs_mm_mapper", False))
 
     @property
     def lora_int_id(self) -> int:
