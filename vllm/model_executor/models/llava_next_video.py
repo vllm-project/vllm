@@ -10,11 +10,10 @@ from transformers import (CLIPVisionConfig, LlavaNextVideoConfig,
                           SiglipVisionConfig)
 
 from vllm.attention import AttentionMetadata
-from vllm.config import CacheConfig, MultiModalConfig
+from vllm.config import VllmConfig
 from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
                          InputContext, token_inputs)
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.models.clip import CLIPVisionModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -254,12 +253,11 @@ class LlavaNextMultiModalProjector(nn.Module):
 class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal,
                                              SupportsPP):
 
-    def __init__(self,
-                 config: LlavaNextVideoConfig,
-                 multimodal_config: MultiModalConfig,
-                 cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None) -> None:
+    def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
+        multimodal_config = vllm_config.model_config.multimodal_config
 
         self.config = config
         self.multimodal_config = multimodal_config
@@ -277,8 +275,7 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal,
             projector_hidden_act=config.projector_hidden_act)
         self.language_model = init_vllm_registered_model(
             config.text_config,
-            cache_config,
-            quant_config,
+            vllm_config=vllm_config,
             prefix="language_model")
 
         self.make_empty_intermediate_tensors = (

@@ -26,7 +26,7 @@ from torch import nn
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -288,11 +288,13 @@ class JAISLMHeadModel(nn.Module, SupportsPP):
 
     def __init__(
         self,
-        config: JAISConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        vllm_config: VllmConfig,
+        prefix: str = "",
     ):
         super().__init__()
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
         self.transformer = JAISModel(config, cache_config, quant_config)

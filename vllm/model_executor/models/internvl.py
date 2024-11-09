@@ -16,7 +16,7 @@ from PIL import Image
 from transformers import PretrainedConfig
 
 from vllm.attention import AttentionMetadata
-from vllm.config import CacheConfig, MultiModalConfig
+from vllm.config import VllmConfig
 from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
                          InputContext, token_inputs)
 from vllm.model_executor.layers.quantization import (AWQConfig,
@@ -410,12 +410,12 @@ input_pipeline = InternVLInputPipeline(IMG_START, IMG_END, IMG_CONTEXT)
 @INPUT_REGISTRY.register_input_processor(input_pipeline.input_processor)
 class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
 
-    def __init__(self,
-                 config: PretrainedConfig,
-                 multimodal_config: MultiModalConfig,
-                 cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None) -> None:
+    def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
+        multimodal_config = vllm_config.model_config.multimodal_config
 
         self.config = config
         self.multimodal_config = multimodal_config
@@ -440,8 +440,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
 
         self.language_model = init_vllm_registered_model(
             config.text_config,
-            cache_config,
-            quant_config,
+            vllm_config=vllm_config,
             prefix="language_model")
 
         self.mlp1 = self._init_mlp1(config)
