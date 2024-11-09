@@ -7,7 +7,9 @@ import pytest
 from ...utils import check_logprobs_close
 
 MODELS = [
+    # TODO(sang): Sliding window should be tested separately.
     "ibm/PowerLM-3b",
+    "ibm/PowerMoE-3b",
 ]
 
 
@@ -24,7 +26,6 @@ def test_models(
     max_tokens: int,
     num_logprobs: int,
 ) -> None:
-    # TODO(sang): Sliding window should be tested separately.
     with hf_runner(model, dtype=dtype) as hf_model:
         hf_outputs = hf_model.generate_greedy_logprobs_limit(
             example_prompts, max_tokens, num_logprobs)

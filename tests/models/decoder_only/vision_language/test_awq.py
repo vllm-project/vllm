@@ -1,4 +1,4 @@
-from typing import List, Optional, Tuple, Type
+from typing import List, Optional, Type
 
 import pytest
 import torch
@@ -19,7 +19,8 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
 def run_awq_test(
     vllm_runner: Type[VllmRunner],
     image_assets: _ImageAssets,
-    models: Tuple[str, str],
+    source_model: str,
+    quant_model: str,
     *,
     size_factors: List[float],
     dtype: str,
@@ -28,8 +29,6 @@ def run_awq_test(
     tensor_parallel_size: int,
     distributed_executor_backend: Optional[str] = None,
 ):
-    source_model, quant_model = models
-
     images = [asset.pil_image for asset in image_assets]
 
     inputs_per_image = [(
@@ -84,8 +83,11 @@ def run_awq_test(
         )
 
 
+@pytest.mark.quant_model
 @pytest.mark.parametrize(
-    "models", [("OpenGVLab/InternVL2-2B", "OpenGVLab/InternVL2-2B-AWQ")])
+    ("source_model", "quant_model"),
+    [("OpenGVLab/InternVL2-2B", "OpenGVLab/InternVL2-2B-AWQ")],
+)
 @pytest.mark.parametrize(
     "size_factors",
     [
@@ -103,12 +105,13 @@ def run_awq_test(
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [5])
 @torch.inference_mode()
-def test_awq_models(vllm_runner, image_assets, models, size_factors,
-                    dtype: str, max_tokens: int, num_logprobs: int) -> None:
+def test_awq_models(vllm_runner, image_assets, source_model, quant_model,
+                    size_factors, dtype, max_tokens, num_logprobs) -> None:
     run_awq_test(
         vllm_runner,
         image_assets,
-        models,
+        source_model,
+        quant_model,
         size_factors=size_factors,
         dtype=dtype,
         max_tokens=max_tokens,
