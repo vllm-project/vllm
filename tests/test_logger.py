@@ -13,7 +13,7 @@ import pytest
 
 from vllm.logger import (_DATE_FORMAT, _FORMAT, _configure_vllm_root_logger,
                          enable_trace_function_call, init_logger)
-from vllm.logging import NewLineFormatter
+from vllm.logging_utils import NewLineFormatter
 
 
 def f1(x):
@@ -29,7 +29,7 @@ def test_trace_function_call():
     cur_dir = os.path.dirname(__file__)
     enable_trace_function_call(path, cur_dir)
     f1(1)
-    with open(path, 'r') as f:
+    with open(path) as f:
         content = f.read()
 
     assert "f1" in content

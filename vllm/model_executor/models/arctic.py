@@ -23,7 +23,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.deepspeedfp import (
     DeepSpeedFPConfig, DeepSpeedFPParameter)
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -48,7 +48,7 @@ class ArcticMLP(nn.Module):
                  is_residual_mlp: bool = False,
                  quant_config: Optional[QuantizationConfig] = None,
                  reduce_results: bool = True):
-        super(ArcticMLP, self).__init__()
+        super().__init__()
         self.hidden_size = config.hidden_size
         self.expert_id = expert_id
         self.layer_id = layer_id
@@ -89,7 +89,7 @@ class ArcticMoE(nn.Module):
                  params_dtype: Optional[torch.dtype] = None,
                  quant_config: Optional[QuantizationConfig] = None,
                  reduce_results: bool = True):
-        super(ArcticMoE, self).__init__()
+        super().__init__()
 
         self.tp_size = tp_size or get_tensor_model_parallel_world_size()
         self.hidden_size = config.hidden_size
@@ -436,7 +436,7 @@ class ArcticForCausalLM(nn.Module, SupportsPP):
         self.unpadded_vocab_size = config.vocab_size
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)
-        self.sampler = Sampler()
+        self.sampler = get_sampler()
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 

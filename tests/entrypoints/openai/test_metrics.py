@@ -70,18 +70,21 @@ EXPECTED_VALUES = {
     [("_sum", _NUM_REQUESTS * _NUM_GENERATION_TOKENS_PER_REQUEST),
      ("_count", _NUM_REQUESTS)],
     "vllm:request_params_n": [("_count", _NUM_REQUESTS)],
+    "vllm:request_params_max_tokens":
+    [("_sum", _NUM_REQUESTS * _NUM_GENERATION_TOKENS_PER_REQUEST),
+     ("_count", _NUM_REQUESTS)],
     "vllm:prompt_tokens": [("_total",
                             _NUM_REQUESTS * _NUM_PROMPT_TOKENS_PER_REQUEST)],
-    "vllm:generation_tokens":
-    [("_total", _NUM_REQUESTS * _NUM_PROMPT_TOKENS_PER_REQUEST)],
+    "vllm:generation_tokens": [
+        ("_total", _NUM_REQUESTS * _NUM_PROMPT_TOKENS_PER_REQUEST)
+    ],
     "vllm:request_success": [("_total", _NUM_REQUESTS)],
 }
 
 
 @pytest.mark.asyncio
-async def test_metrics_counts(client: openai.AsyncOpenAI):
-    base_url = str(client.base_url)[:-3].strip("/")
-
+async def test_metrics_counts(server: RemoteOpenAIServer,
+                              client: openai.AsyncClient):
     for _ in range(_NUM_REQUESTS):
         # sending a request triggers the metrics to be logged.
         await client.completions.create(
@@ -89,7 +92,7 @@ async def test_metrics_counts(client: openai.AsyncOpenAI):
             prompt=_TOKENIZED_PROMPT,
             max_tokens=_NUM_GENERATION_TOKENS_PER_REQUEST)
 
-    response = requests.get(base_url + "/metrics")
+    response = requests.get(server.url_for("metrics"))
     print(response.text)
     assert response.status_code == HTTPStatus.OK
 
@@ -150,6 +153,9 @@ EXPECTED_METRICS = [
     "vllm:request_params_n_sum",
     "vllm:request_params_n_bucket",
     "vllm:request_params_n_count",
+    "vllm:request_params_max_tokens_sum",
+    "vllm:request_params_max_tokens_bucket",
+    "vllm:request_params_max_tokens_count",
     "vllm:num_preemptions_total",
     "vllm:prompt_tokens_total",
     "vllm:generation_tokens_total",
@@ -170,16 +176,15 @@ EXPECTED_METRICS = [
 
 
 @pytest.mark.asyncio
-async def test_metrics_exist(client: openai.AsyncOpenAI):
-    base_url = str(client.base_url)[:-3].strip("/")
-
+async def test_metrics_exist(server: RemoteOpenAIServer,
+                             client: openai.AsyncClient):
     # sending a request triggers the metrics to be logged.
     await client.completions.create(model=MODEL_NAME,
                                     prompt="Hello, my name is",
                                     max_tokens=5,
                                     temperature=0.0)
 
-    response = requests.get(base_url + "/metrics")
+    response = requests.get(server.url_for("metrics"))
     assert response.status_code == HTTPStatus.OK
 
     for metric in EXPECTED_METRICS:

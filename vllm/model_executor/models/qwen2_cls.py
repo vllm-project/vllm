@@ -1,4 +1,3 @@
-# coding=utf-8
 # Adapted from
 # https://huggingface.co/Qwen/Qwen2.5-Math-RM-72B/blob/main/modeling_qwen2_rm.py
 # Copyright 2024 Kakao Corp. (Kanana-X Team)
@@ -12,7 +11,7 @@ from torch import nn
 from transformers import Qwen2Config
 
 from vllm.attention import AttentionMetadata
-from vllm.config import CacheConfig, LoRAConfig
+from vllm.config import CacheConfig, LoRAConfig, PoolerConfig
 from vllm.model_executor.layers.linear import RowParallelLinear
 from vllm.model_executor.layers.pooler import Pooler, PoolingType
 from vllm.model_executor.layers.quantization.base_config import (
@@ -53,15 +52,16 @@ class Qwen2ForSequenceClassification(nn.Module):
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
+        pooler_config: Optional[PoolerConfig] = None,
     ) -> None:
         # TODO (@robertgshaw2): see if this can be moved out
         if (cache_config.sliding_window is not None
                 and hasattr(config, "max_window_layers")):
             raise ValueError("Sliding window for some but all layers is not "
                              "supported. This model uses sliding window "
-                             "but `max_window_layers` = %s is less than "
-                             "`num_hidden_layers` = %s. Please open an issue "
-                             "to discuss this feature." % (
+                             "but `max_window_layers` = {} is less than "
+                             "`num_hidden_layers` = {}. Please open an issue "
+                             "to discuss this feature.".format(
                                  config.max_window_layers,
                                  config.num_hidden_layers,
                              ))
@@ -77,9 +77,11 @@ class Qwen2ForSequenceClassification(nn.Module):
         self.score = RowParallelLinear(config.hidden_size,
                                        config.num_labels,
                                        quant_config=quant_config)
-        self._pooler = Pooler(pooling_type=PoolingType.LAST,
-                              normalize=False,
-                              softmax=True)
+        self._pooler = Pooler.from_config_with_defaults(
+            pooler_config,
+            pooling_type=PoolingType.LAST,
+            normalize=False,
+            softmax=True)
 
     def forward(
         self,

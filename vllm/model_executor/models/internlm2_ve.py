@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 from typing import List, Optional, Tuple, Union
 
 import torch
@@ -15,7 +14,7 @@ from vllm.model_executor.models.internlm2 import (InternLM2Attention,
                                                   InternLM2MLP, InternLM2Model)
 from vllm.sequence import IntermediateTensors
 
-from .utils import make_layers
+from .utils import make_layers, maybe_prefix
 
 
 class InternLM2VEDecoderLayer(nn.Module):
@@ -25,6 +24,7 @@ class InternLM2VEDecoderLayer(nn.Module):
         config: PretrainedConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -41,18 +41,21 @@ class InternLM2VEDecoderLayer(nn.Module):
             max_position_embeddings=max_position_embeddings,
             cache_config=cache_config,
             quant_config=quant_config,
+            prefix=f"{prefix}.attention",
         )
         self.feed_forward = InternLM2MLP(
             hidden_size=self.hidden_size,
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
             quant_config=quant_config,
+            prefix=f"{prefix}.feed_forward",
         )
         self.feed_forward_ve = InternLM2MLP(
             hidden_size=self.hidden_size,
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
             quant_config=quant_config,
+            prefix=f"{prefix}.feed_forward_ve",
         )
         self.attention_norm = RMSNorm(config.hidden_size,
                                       eps=config.rms_norm_eps)
@@ -111,8 +114,8 @@ class InternLM2VEModel(InternLM2Model):
         super().__init__(config, cache_config, quant_config)
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: InternLM2VEDecoderLayer(config, cache_config,
-                                                   quant_config),
+            lambda prefix: InternLM2VEDecoderLayer(
+                config, cache_config, quant_config, prefix=prefix),
             prefix=f"{prefix}.layers")
 
     def forward(
@@ -161,6 +164,10 @@ class InternLM2VEForCausalLM(InternLM2ForCausalLM):
         config: PretrainedConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__(config, cache_config, quant_config)
-        self.model = InternLM2VEModel(config, cache_config, quant_config)
+        self.model = InternLM2VEModel(config,
+                                      cache_config,
+                                      quant_config,
+                                      prefix=maybe_prefix(prefix, "model"))
