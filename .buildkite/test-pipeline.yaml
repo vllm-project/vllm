@@ -324,7 +324,7 @@ steps:
     - pytest -v -s models/decoder_only/language -m quant_model
 
 - label: Decoder-only Language Models Test (Extended) # 46min
-  optional: true
+  nightly: true
   source_file_dependencies:
   - vllm/
   - tests/models/decoder_only/language
@@ -344,8 +344,8 @@ steps:
     # - pytest -v -s models/decoder_only/audio_language -m quant_model
     - pytest -v -s --ignore models/decoder_only/vision_language/test_phi3v.py models/decoder_only/vision_language -m quant_model
 
-- label: Decoder-only Multi-Modal Models Test (Extended 1) # 1h10m
-  optional: true
+- label: Decoder-only Multi-Modal Models Test (Extended) # 1h10m
+  nightly: true
   source_file_dependencies:
   - vllm/
   - tests/models/decoder_only/audio_language
