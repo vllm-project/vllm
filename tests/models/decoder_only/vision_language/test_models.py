@@ -130,8 +130,8 @@ VLM_TEST_SETTINGS = {
         max_num_seqs=2,
         auto_cls=AutoModelForVision2Seq,
         vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
-        marks=[pytest.mark.core_model, pytest.mark.cpu_model],
         image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
+        marks=[pytest.mark.core_model, pytest.mark.cpu_model],
     ),
     #### Extended model tests
     "blip2": VLMTestInfo(
@@ -141,6 +141,7 @@ VLM_TEST_SETTINGS = {
         img_idx_to_prompt=lambda idx: "",
         auto_cls=AutoModelForVision2Seq,
         vllm_output_post_proc=model_utils.blip2_vllm_to_hf_output,
+        marks=[pytest.mark.group_1],
     ),
     "chameleon": VLMTestInfo(
         models=["facebook/chameleon-7b"],
@@ -158,10 +159,11 @@ VLM_TEST_SETTINGS = {
         max_tokens=8,
         dtype="bfloat16",
         marks=[
+            pytest.mark.group_1,
             pytest.mark.skipif(
-                transformers.__version__.startswith("4.46"),
+                transformers.__version__ < "4.46.2",
                 reason="Model broken in HF, see huggingface/transformers#34379"
-            )
+            ),
         ]
     ),
     "fuyu": VLMTestInfo(
@@ -175,6 +177,7 @@ VLM_TEST_SETTINGS = {
         vllm_output_post_proc=model_utils.fuyu_vllm_to_hf_output,
         num_logprobs=10,
         image_size_factors=[(), (0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
+        marks=[pytest.mark.group_1],
     ),
     "glm4": VLMTestInfo(
         models=["THUDM/glm-4v-9b"],
@@ -185,8 +188,8 @@ VLM_TEST_SETTINGS = {
         max_num_seqs=2,
         dtype="bfloat16",
         get_stop_token_ids=lambda tok: [151329, 151336, 151338],
-        marks=[large_gpu_mark(min_gb=48)],
         patch_hf_runner=model_utils.glm_patch_hf_runner,
+        marks=[pytest.mark.group_1, large_gpu_mark(min_gb=48)],
     ),
     "h2ovl": VLMTestInfo(
         models = [
@@ -204,6 +207,24 @@ VLM_TEST_SETTINGS = {
         dtype="bfloat16",
         use_tokenizer_eos=True,
         patch_hf_runner=model_utils.h2ovl_patch_hf_runner,
+        marks=[pytest.mark.group_1],
+    ),
+    "idefics3": VLMTestInfo(
+        models=["HuggingFaceM4/Idefics3-8B-Llama3"],
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        prompt_formatter=lambda img_prompt:f"<|begin_of_text|>User:{img_prompt}<end_of_utterance>\nAssistant:",  # noqa: E501
+        img_idx_to_prompt=lambda idx: "<image>",
+        max_model_len=8192,
+        max_num_seqs=2,
+        auto_cls=AutoModelForVision2Seq,
+        marks=[
+            pytest.mark.group_1,
+            pytest.mark.skipif(
+                transformers.__version__ < "4.46.0",
+                reason="Model introduced in HF >= 4.46.0"
+            ),
+            large_gpu_mark(min_gb=48),
+        ],
     ),
     "intern_vl": VLMTestInfo(
         models=[
@@ -225,6 +246,7 @@ VLM_TEST_SETTINGS = {
         dtype="bfloat16",
         use_tokenizer_eos=True,
         patch_hf_runner=model_utils.internvl_patch_hf_runner,
+        marks=[pytest.mark.group_1],
     ),
     "llava_next": VLMTestInfo(
         models=["llava-hf/llava-v1.6-mistral-7b-hf"],
@@ -241,6 +263,7 @@ VLM_TEST_SETTINGS = {
         )],
         # Llava-next tests fixed sizes & the default size factors
         image_sizes=[((1669, 2560), (2560, 1669), (183, 488), (488, 183))],
+        marks=[pytest.mark.group_2],
     ),
     "llava_one_vision": VLMTestInfo(
         models=["llava-hf/llava-onevision-qwen2-0.5b-ov-hf"],
@@ -262,8 +285,8 @@ VLM_TEST_SETTINGS = {
             limit_mm_per_prompt={"video": 4},
             runner_mm_key="videos",
         )],
+        marks=[pytest.mark.group_2],
     ),
-    # FIXME
     "llava_next_video": VLMTestInfo(
         models=["llava-hf/LLaVA-NeXT-Video-7B-hf"],
         test_type=VLMTestType.VIDEO,
@@ -274,8 +297,9 @@ VLM_TEST_SETTINGS = {
         vllm_output_post_proc=model_utils.llava_video_vllm_to_hf_output,
         image_sizes=[((1669, 2560), (2560, 1669), (183, 488), (488, 183))],
         marks=[
+            pytest.mark.group_2,
             pytest.mark.skipif(
-                transformers.__version__.startswith("4.46"),
+                transformers.__version__ < "4.46.2",
                 reason="Model broken with changes in transformers 4.46"
             )
         ],
@@ -290,6 +314,7 @@ VLM_TEST_SETTINGS = {
         get_stop_token_ids=lambda tok: [tok.eos_id, tok.eot_id],
         postprocess_inputs=model_utils.wrap_inputs_post_processor,
         hf_output_post_proc=model_utils.minicmpv_trunc_hf_output,
+        marks=[pytest.mark.group_2],
     ),
     # Tests for phi3v currently live in another file because of a bug in
     # transformers. Once this issue is fixed, we can enable them here instead.
@@ -307,6 +332,7 @@ VLM_TEST_SETTINGS = {
     #     use_tokenizer_eos=True,
     #     vllm_output_post_proc=model_utils.phi3v_vllm_to_hf_output,
     #     num_logprobs=10,
+    #     marks=[pytest.mark.group_2],
     # ),
     "pixtral_hf": VLMTestInfo(
         models=["nm-testing/pixtral-12b-FP8-dynamic"],
@@ -316,6 +342,7 @@ VLM_TEST_SETTINGS = {
         max_model_len=8192,
         max_num_seqs=2,
         auto_cls=AutoModelForVision2Seq,
+        marks=[pytest.mark.group_2],
     ),
     "qwen": VLMTestInfo(
         models=["Qwen/Qwen-VL"],
@@ -326,22 +353,7 @@ VLM_TEST_SETTINGS = {
         max_num_seqs=2,
         vllm_output_post_proc=model_utils.qwen_vllm_to_hf_output,
         prompt_path_encoder=model_utils.qwen_prompt_path_encoder,
-    ),
-    "idefics3": VLMTestInfo(
-        models=["HuggingFaceM4/Idefics3-8B-Llama3"],
-        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
-        prompt_formatter=lambda img_prompt:f"<|begin_of_text|>User:{img_prompt}<end_of_utterance>\nAssistant:",  # noqa: E501
-        img_idx_to_prompt=lambda idx: "<image>",
-        max_model_len=8192,
-        max_num_seqs=2,
-        auto_cls=AutoModelForVision2Seq,
-        marks=[
-            pytest.mark.skipif(
-                transformers.__version__ < "4.46.0",
-                reason="Model introduced in HF >= 4.46.0"
-            ),
-            large_gpu_mark(min_gb=48),
-        ],
+        marks=[pytest.mark.group_2],
     ),
     ### Tensor parallel / multi-gpu broadcast tests
     "broadcast-chameleon": VLMTestInfo(
@@ -362,7 +374,7 @@ VLM_TEST_SETTINGS = {
                 reason="Need at least 2 GPUs to run the test.",
             ),
             pytest.mark.skipif(
-                transformers.__version__.startswith("4.46"),
+                transformers.__version__ < "4.46.2",
                 reason="Model broken in HF, see huggingface/transformers#34379"
             )
         ],
@@ -412,6 +424,7 @@ VLM_TEST_SETTINGS = {
                 limit_mm_per_prompt={"image": 2},
             ) for inp in custom_inputs.different_patch_input_cases_internvl()
         ],
+        marks=[pytest.mark.group_1],
     ),
     "llava_one_vision-multiple-images": VLMTestInfo(
         models=["llava-hf/llava-onevision-qwen2-0.5b-ov-hf"],
@@ -429,6 +442,7 @@ VLM_TEST_SETTINGS = {
             ),
             limit_mm_per_prompt={"image": 4},
         )],
+        marks=[pytest.mark.group_2],
     ),
 }
 # yapf: enable

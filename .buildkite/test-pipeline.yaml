@@ -348,19 +348,40 @@ steps:
     - pytest -v -s models/decoder_only/audio_language -m core_model
     - pytest -v -s --ignore models/decoder_only/vision_language/test_phi3v.py models/decoder_only/vision_language -m core_model
 
-- label: Decoder-only Multi-Modal Models Test (Extended %N) # 30min each
+- label: Decoder-only Multi-Modal Models Test (Group 1) # 1h
   optional: true
   source_file_dependencies:
   - vllm/
   - tests/models/decoder_only/audio_language
   - tests/models/decoder_only/vision_language
   commands:
-    - pytest -v -s models/decoder_only/audio_language -m 'not core_model' --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
+    # No tests under this group for now
+    # - pytest -v -s models/decoder_only/audio_language -m group_1
+    - pytest -v -s --ignore models/decoder_only/vision_language/test_phi3v.py models/decoder_only/vision_language -m group_1
+
+- label: Decoder-only Multi-Modal Models Test (Group 2) # 1h
+  optional: true
+  source_file_dependencies:
+  - vllm/
+  - tests/models/decoder_only/audio_language
+  - tests/models/decoder_only/vision_language
+  commands:
+    # No tests under this group for now
+    # - pytest -v -s models/decoder_only/audio_language -m group_2
     # HACK - run phi3v tests separately to sidestep this transformers bug
     # https://github.com/huggingface/transformers/issues/34307
-    - pytest -v -s models/decoder_only/vision_language/test_phi3v.py --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-    - pytest -v -s --ignore models/decoder_only/vision_language/test_phi3v.py models/decoder_only/vision_language -m 'not core_model' --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
-  parallelism: 4
+    - pytest -v -s models/decoder_only/vision_language/test_phi3v.py
+    - pytest -v -s --ignore models/decoder_only/vision_language/test_phi3v.py models/decoder_only/vision_language -m group_2
+
+- label: Decoder-only Multi-Modal Models Test (Extended) # 10min
+  optional: true
+  source_file_dependencies:
+  - vllm/
+  - tests/models/decoder_only/audio_language
+  - tests/models/decoder_only/vision_language
+  commands:
+    - pytest -v -s models/decoder_only/audio_language -m 'not core_model and not group_1 and not group_2'
+    - pytest -v -s --ignore models/decoder_only/vision_language/test_phi3v.py models/decoder_only/vision_language -m 'not core_model and not group_1 and not group_2'
 
 - label: Other Models Test # 6min
   #mirror_hardwares: [amd]
