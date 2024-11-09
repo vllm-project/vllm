@@ -1988,27 +1988,35 @@ class KVTransferConfig:
     # KV cache
     kv_buffer_size: Optional[float] = None
     kv_transfer_role: Optional[str] = None
-    kv_init_method: Optional[str] = None
-    kv_xpyd: Optional[str] = None
-    kv_rank: Optional[int] = None
+    kv_device: Optional[str] = None
     
     def __post_init__(self):
         if self.kv_connector is None and not all([
             self.kv_buffer_size is None,
             self.kv_transfer_role is None,
-            self.kv_init_method is None,
-            self.kv_xpyd is None,
-            self.kv_xypd_rank is None,
+            self.kv_device is None,
         ]):
             raise ValueError("Please specify kv_connector before configuring "
                              "variables with prefix `kv_`")
             
         assert self.kv_connector in [
             None,
-            'TorchDistributedConnector',
-            'LMCacheConnector'
+            "TorchDistributedConnector",
+            "LMCacheConnector",
         ],  f"Existing kv connectors are `TorchDistributedConnector` and "\
             f"`LMCacheConnector`. Got {self.kv_connector}"
+
+    @property
+    def is_distributed_kv_instance(self) -> bool:
+        return self.kv_transfer_role in ["kv_producer", "kv_consumer", "kv_both"]
+    
+    @property
+    def is_kv_producer(self) -> bool:
+        return self.kv_transfer_role in ["kv_producer", "kv_both"]
+    
+    @property
+    def is_kv_consumer(self) -> bool:
+        return self.kv_transfer_role in ["kv_consumer", "kv_both"]
     
 
 

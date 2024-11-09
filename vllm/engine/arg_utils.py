@@ -13,7 +13,7 @@ from vllm.config import (CacheConfig, ConfigFormat, DecodingConfig,
                          ModelConfig, ObservabilityConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig,
                          SpeculativeConfig, TaskOption, TokenizerPoolConfig,
-                         VllmConfig)
+                         KVTransferConfig, VllmConfig)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
@@ -913,6 +913,40 @@ class EngineArgs:
             "such as the token IDs of good_token and bad_token in "
             "the math-shepherd-mistral-7b-prm model.")
 
+        parser.add_argument(
+            '--kv-connector',
+            type=str,
+            default=None,
+            choices=["TorchDistributedConnector", "LMCacheConnector"],
+            help="The KV connector for vLLM to transmit KV caches between vLLM"
+            " instances.")
+
+        parser.add_argument(
+            '--kv-buffer-size',
+            type=float,
+            default=None,
+            help="The buffer size for TorchDistributedConnector. Measured in "
+            "number of bytes. Recommended value: 1e9 (about 1GB)."
+        )
+
+        parser.add_argument(
+            '--kv-transfer-role',
+            type=str,
+            default=None,            
+            choices=["kv_producer", "kv_consumer", "both"],
+            help="Whether this vLLM instance produces KV caches, consume KV "
+            "caches, or both."
+        )
+
+        parser.add_argument(
+            '--kv-device',
+            type=str,
+            default=None,
+            choices=["CPU", "GPU"],
+            help="The device used by kv connector to buffer the KV cache. Can "
+            "be CPU or GPU. Recommended value: CPU."
+        )
+
         return parser
 
     @classmethod
@@ -1180,6 +1214,13 @@ class EngineArgs:
             or "all" in detailed_trace_modules,
         )
 
+        kv_transfer_config = KVTransferConfig(
+            kv_connector=self.kv_connector,
+            kv_buffer_size=self.kv_buffer_size,
+            kv_transfer_role=self.kv_transfer_role,
+            kv_device=self.kv_device,
+        )
+
         return VllmConfig(
             model_config=model_config,
             cache_config=cache_config,
@@ -1192,6 +1233,7 @@ class EngineArgs:
             decoding_config=decoding_config,
             observability_config=observability_config,
             prompt_adapter_config=prompt_adapter_config,
+            kv_transfer_config=kv_transfer_config,
         )
 
 

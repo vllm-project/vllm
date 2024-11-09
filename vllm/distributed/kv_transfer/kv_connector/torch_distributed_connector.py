@@ -16,10 +16,15 @@ from torch.distributed import Backend
 
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
 from vllm.logger import init_logger
+from vllm.config import KVTransferConfig
 
 
 
 logger = init_logger(__name__)
+
+
+
+# magic constants to transmit tensors
 
 # if the tensor is only one-element and only contains NONE_INT
 # this means that the sended object is None.
@@ -76,10 +81,12 @@ class TorchDistributedPipe:
         group_ranks: List[List[int]],
         local_rank: int,
         torch_distributed_backend: Union[str, Backend],
+        buffer_size_thresh: float,
     ):
         self.rank = torch.distributed.get_rank()
         self.local_rank = local_rank
         self.device_group = None
+        self.buffer_size_thresh = buffer_size_thresh
 
         for ranks in group_ranks:
             device_group = torch.distributed.new_group(
@@ -241,7 +248,7 @@ class TorchDistributedPipe:
     def block_if_full(self):
         """Block the current thread if the buffer size is larger than 1e9."""
         # TODO: replace this 1e9 with a configurable parameter or a constant
-        while self.buffer_size > 1e9:
+        while self.buffer_size > self.buffer_size_thresh:
             logger.debug("KV cache transfer pipe is full. Waiting...")
             time.sleep(0.05)
 
@@ -305,7 +312,7 @@ class TorchDistributedBuffer:
     def __init__(self, 
                  signal_pipe: TorchDistributedPipe,
                  data_pipe: TorchDistributedPipe,
-                 buffer_size_thresh: int):
+                 buffer_size_thresh: float):
         """
         signal_pipe: on CPU 
         
@@ -518,50 +525,50 @@ class TorchDistributedConnector(KVConnectorBase):
         self,
         group_ranks: List[List[int]],
         local_rank: int,
-        torch_distributed_backend: Union[str, Backend],
-        # FIXME(Kuntai): remove this hardcoding
-        lookup_buffer_size: int):
+        config: KVTransferConfig,
+    ):
 
-        self.lookup_buffer_size = lookup_buffer_size
+        self.lookup_buffer_size = self.kv_buffer_size
 
         self.send_buffer: Optional[TorchDistributedBuffer] = None
         self.recv_buffer: Optional[TorchDistributedBuffer] = None
-
-        SimpleKVLookupBuffer = sklb.SimpleKVLookupBuffer
+        
+        device2backend = {
+            "cpu": "gloo",
+            "gpu": "nccl",
+        }
 
         # In disaggregated prefill, the prefill vLLM only uses send pipe
         # and the decode vLLM only uses recv pipe
         # In remote KV cache store, vLLM will use both send pipe and recv pipe
         # So we build both send pipe and recv pipe for simplicity.
-        if IS_KV_PRODUCER:
+        if config.is_kv_producer:
 
             self.send_pipe = TorchDistributedPipe(
                 group_ranks,
                 local_rank,
-                DISTRIBUTED_BACKEND,
+                device2backend[config.kv_device],
+                self.kv_buffer_size, 
             )
             self.send_signal_pipe = TorchDistributedPipe(
                 group_ranks,
                 local_rank,
                 "gloo",
+                self.kv_buffer_size,
             )
             self.recv_pipe = TorchDistributedPipe(
                 group_ranks,
                 local_rank,
-                DISTRIBUTED_BACKEND,
+                device2backend[config.kv_device],
+                self.kv_buffer_size,
             )
             self.recv_signal_pipe = TorchDistributedPipe(
                 group_ranks,
                 local_rank,
                 "gloo",
+                self.kv_buffer_size
             )
-            self.send_buffer = SimpleKVLookupBuffer(self.send_signal_pipe,
-                                                    self.send_pipe,
-                                                    self.lookup_buffer_size)
-            self.recv_buffer = SimpleKVLookupBuffer(self.recv_signal_pipe,
-                                                    self.recv_pipe,
-                                                    self.lookup_buffer_size)
-            self.tensor_device = DISTRIBUTED_DEVICE
+             
         else:
 
             # the current vLLM instance is KV consumer, so it needs to connect
@@ -570,30 +577,35 @@ class TorchDistributedConnector(KVConnectorBase):
             self.recv_pipe = TorchDistributedPipe(
                 group_ranks,
                 local_rank,
-                DISTRIBUTED_BACKEND,
+                device2backend[config.kv_device],
+                self.kv_buffer_size, 
             )
             self.recv_signal_pipe = TorchDistributedPipe(
                 group_ranks,
                 local_rank,
                 "gloo",
+                self.kv_buffer_size,
             )
             self.send_pipe = TorchDistributedPipe(
                 group_ranks,
                 local_rank,
-                DISTRIBUTED_BACKEND,
+                device2backend[config.kv_device],
+                self.kv_buffer_size,
             )
             self.send_signal_pipe = TorchDistributedPipe(
                 group_ranks,
                 local_rank,
                 "gloo",
+                self.kv_buffer_size
             )
-            self.send_buffer = SimpleKVLookupBuffer(self.send_signal_pipe,
-                                                    self.send_pipe,
-                                                    self.lookup_buffer_size)
-            self.recv_buffer = SimpleKVLookupBuffer(self.recv_signal_pipe,
-                                                    self.recv_pipe,
-                                                    self.lookup_buffer_size)
-            self.tensor_device = DISTRIBUTED_DEVICE
+
+        self.send_buffer = TorchDistributedBuffer(self.send_signal_pipe,
+                                                  self.send_pipe,
+                                                  self.lookup_buffer_size)
+        self.recv_buffer = TorchDistributedBuffer(self.recv_signal_pipe,
+                                                  self.recv_pipe,
+                                                  self.lookup_buffer_size)
+        self.tensor_device = config.kv_device
             
             
     def select(
