@@ -88,7 +88,7 @@ class BaseLogitsProcessor:
         allowed_tokens = allowed_tokens.masked_select(
             allowed_tokens < scores.shape[-1])
         mask.index_fill_(0, allowed_tokens, 0)
-        scores.add_(mask)
+        scores = scores + mask # avoid add_ to make outlines work with threadpool
         return scores
 
 

@@ -1,4 +1,5 @@
 """A layer that compute logits from hidden_stats."""
+import os
 import inspect
 from typing import Optional
 
@@ -11,7 +12,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.platforms import current_platform
-
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 class LogitsProcessor(nn.Module):
     """Process logits and apply logits processors from sampling metadata.
@@ -43,6 +44,9 @@ class LogitsProcessor(nn.Module):
         self.soft_cap = soft_cap
         # Whether to use gather or all-gather to gather the logits.
         self.use_gather = not current_platform.is_tpu()
+        # Thread pool for applying logits processors in parallel.
+        max_workers = int(os.environ.get("VLLM_MAX_LOGITS_PROCESSORS_THREADS", os.cpu_count()))
+        self.thread_pool = ThreadPoolExecutor(max_workers=max_workers)
 
     def forward(
         self,
@@ -71,7 +75,7 @@ class LogitsProcessor(nn.Module):
 
             # Apply logits processors (if any).
             if sampling_metadata is not None:
-                logits = _apply_logits_processors(logits, sampling_metadata)
+                logits = _apply_logits_processors(self.thread_pool, logits, sampling_metadata)
 
         return logits
 
@@ -114,42 +118,61 @@ def _prune_hidden_states(
     return hidden_states.index_select(0,
                                       sampling_metadata.selected_token_indices)
 
+def _apply_logits_processors_per_seq(
+    logits_row_idx: int,
+    logits_row: torch.Tensor,
+    past_tokens_ids: list[int],
+    prompt_tokens_ids: list[int],
+    logits_processors: list
+):
+    for logits_processor in logits_processors:
+        parameters = inspect.signature(logits_processor).parameters
+        if len(parameters) == 3:
+            logits_row = logits_processor(
+                prompt_tokens_ids, past_tokens_ids, logits_row
+            )
+        else:
+            logits_row = logits_processor(past_tokens_ids, logits_row)
+
+    return logits_row_idx, logits_row
 
 def _apply_logits_processors(
+    thread_pool: ThreadPoolExecutor,
     logits: torch.Tensor,
     sampling_metadata: SamplingMetadata,
 ) -> torch.Tensor:
     found_logits_processors = False
     logits_processed = 0
+    req_args_list = []
     for seq_group in sampling_metadata.seq_groups:
         seq_ids = seq_group.seq_ids
         sampling_params = seq_group.sampling_params
         logits_processors = sampling_params.logits_processors
         if logits_processors:
             found_logits_processors = True
-
-            for seq_id, logits_row_idx in zip(seq_ids,
-                                              seq_group.sample_indices):
+            for seq_id, logits_row_idx in zip(seq_ids, seq_group.sample_indices):
                 logits_row = logits[logits_row_idx]
                 past_tokens_ids = seq_group.seq_data[seq_id].output_token_ids
                 prompt_tokens_ids = seq_group.seq_data[seq_id].prompt_token_ids
+                req_args_list.append((logits_row_idx, logits_row, past_tokens_ids, prompt_tokens_ids, logits_processors))
+        else:
+            logits_processed += len(seq_group.sample_indices) + len(
+                seq_group.prompt_logprob_indices
+            )
 
-                for logits_processor in logits_processors:
-                    parameters = inspect.signature(logits_processor).parameters
-                    if len(parameters) == 3:
-                        logits_row = logits_processor(prompt_tokens_ids,
-                                                      past_tokens_ids,
-                                                      logits_row)
-                    else:
-                        logits_row = logits_processor(past_tokens_ids,
-                                                      logits_row)
+    if req_args_list:
+        futures = []
+        for args in req_args_list:
+            f = thread_pool.submit(_apply_logits_processors_per_seq, *args)
+            futures.append(f)
 
-                logits[logits_row_idx] = logits_row
-
-        logits_processed += len(seq_group.sample_indices) + len(
-            seq_group.prompt_logprob_indices)
+        for f in as_completed(futures):
+            logits_row_idx, logits_row = f.result()
+            logits[logits_row_idx] = logits_row
+            logits_processed += 1
 
     if found_logits_processors:
         # verifies that no rows in logits were missed unexpectedly
         assert logits_processed == logits.shape[0]
+
     return logits
