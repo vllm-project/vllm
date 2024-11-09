@@ -1,6 +1,7 @@
+import copy
 import enum
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import (TYPE_CHECKING, Any, ClassVar, Dict, Final, List, Literal,
                     Mapping, Optional, Set, Tuple, Type, Union)
 
@@ -2063,6 +2064,12 @@ class VllmConfig:
                     f"{supported_dtypes}")
             return quant_config
         return None
+
+    def with_hf_config(self, hf_config: PretrainedConfig) -> "VllmConfig":
+        model_config = copy.deepcopy(self.model_config)
+        model_config.hf_config = hf_config
+
+        return replace(self, model_config=model_config)
 
     def __post_init__(self):
         """Verify configs are valid & consistent with each other.

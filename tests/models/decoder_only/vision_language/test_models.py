@@ -263,7 +263,7 @@ VLM_TEST_SETTINGS = {
         )],
         # Llava-next tests fixed sizes & the default size factors
         image_sizes=[((1669, 2560), (2560, 1669), (183, 488), (488, 183))],
-        marks=[pytest.mark.group_2],
+        marks=[pytest.mark.group_1],
     ),
     "llava_one_vision": VLMTestInfo(
         models=["llava-hf/llava-onevision-qwen2-0.5b-ov-hf"],
@@ -285,7 +285,7 @@ VLM_TEST_SETTINGS = {
             limit_mm_per_prompt={"video": 4},
             runner_mm_key="videos",
         )],
-        marks=[pytest.mark.group_2],
+        marks=[pytest.mark.group_1],
     ),
     "llava_next_video": VLMTestInfo(
         models=["llava-hf/LLaVA-NeXT-Video-7B-hf"],
@@ -297,7 +297,7 @@ VLM_TEST_SETTINGS = {
         vllm_output_post_proc=model_utils.llava_video_vllm_to_hf_output,
         image_sizes=[((1669, 2560), (2560, 1669), (183, 488), (488, 183))],
         marks=[
-            pytest.mark.group_2,
+            pytest.mark.group_1,
             pytest.mark.skipif(
                 transformers.__version__ < "4.46.2",
                 reason="Model broken with changes in transformers 4.46"
@@ -342,7 +342,7 @@ VLM_TEST_SETTINGS = {
         max_model_len=8192,
         max_num_seqs=2,
         auto_cls=AutoModelForVision2Seq,
-        marks=[pytest.mark.group_2],
+        marks=[pytest.mark.group_2, large_gpu_mark(min_gb=48)],
     ),
     "qwen": VLMTestInfo(
         models=["Qwen/Qwen-VL"],
@@ -442,7 +442,7 @@ VLM_TEST_SETTINGS = {
             ),
             limit_mm_per_prompt={"image": 4},
         )],
-        marks=[pytest.mark.group_2],
+        marks=[pytest.mark.group_1],
     ),
 }
 # yapf: enable
