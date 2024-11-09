@@ -1,5 +1,6 @@
 import enum
 import json
+import warnings
 from dataclasses import dataclass, field
 from typing import (TYPE_CHECKING, Any, ClassVar, Dict, Final, List, Literal,
                     Mapping, Optional, Set, Tuple, Type, Union)
@@ -74,9 +75,6 @@ class ModelConfig:
         code_revision: The specific revision to use for the model code on
             Hugging Face Hub. It can be a branch name, a tag name, or a
             commit id. If unspecified, will use the default version.
-        rope_scaling: Dictionary containing the scaling configuration for the
-            RoPE embeddings. When using this flag, don't update
-            `max_position_embeddings` to the expected new maximum.
         tokenizer_revision: The specific tokenizer version to use. It can be a
             branch name, a tag name, or a commit id. If unspecified, will use
             the default version.
@@ -116,6 +114,7 @@ class ModelConfig:
             can not be gathered from the vllm arguments.
         config_format: The config format which shall be loaded.
             Defaults to 'auto' which defaults to 'hf'.
+        hf_overrides: Arguments to be forwarded to the HuggingFace config.
         mm_processor_kwargs: Arguments to be forwarded to the model's processor
             for multi-modal data, e.g., image processor.
         pooling_type: Used to configure the pooling method in the embedding 
@@ -146,7 +145,7 @@ class ModelConfig:
             allowed_local_media_path: str = "",
             revision: Optional[str] = None,
             code_revision: Optional[str] = None,
-            rope_scaling: Optional[dict] = None,
+            rope_scaling: Optional[Dict[str, Any]] = None,
             rope_theta: Optional[float] = None,
             tokenizer_revision: Optional[str] = None,
             max_model_len: Optional[int] = None,
@@ -164,6 +163,7 @@ class ModelConfig:
             override_neuron_config: Optional[Dict[str, Any]] = None,
             config_format: ConfigFormat = ConfigFormat.AUTO,
             chat_template_text_format: str = "string",
+            hf_overrides: Optional[Dict[str, Any]] = None,
             mm_processor_kwargs: Optional[Dict[str, Any]] = None,
             pooling_type: Optional[str] = None,
             pooling_norm: Optional[bool] = None,
@@ -178,8 +178,22 @@ class ModelConfig:
         self.seed = seed
         self.revision = revision
         self.code_revision = code_revision
-        self.rope_scaling = rope_scaling
-        self.rope_theta = rope_theta
+
+        if hf_overrides is None:
+            hf_overrides = {}
+        if rope_scaling is not None:
+            hf_override: Dict[str, Any] = {"rope_scaling": rope_scaling}
+            hf_overrides.update(hf_override)
+            msg = ("`--rope-scaling` will be removed in a future release. "
+                   f"'Please instead use `--hf-overrides '{hf_override!r}'`")
+            warnings.warn(DeprecationWarning(msg), stacklevel=2)
+        if rope_theta is not None:
+            hf_override = {"rope_theta": rope_theta}
+            hf_overrides.update(hf_override)
+            msg = ("`--rope-theta` will be removed in a future release. "
+                   f"'Please instead use `--hf-overrides '{hf_override!r}'`")
+            warnings.warn(DeprecationWarning(msg), stacklevel=2)
+
         # The tokenizer version is consistent with the model version by default.
         if tokenizer_revision is None:
             self.tokenizer_revision = revision
@@ -193,8 +207,8 @@ class ModelConfig:
         self.disable_sliding_window = disable_sliding_window
         self.skip_tokenizer_init = skip_tokenizer_init
         self.hf_config = get_config(self.model, trust_remote_code, revision,
-                                    code_revision, rope_scaling, rope_theta,
-                                    config_format)
+                                    code_revision, config_format,
+                                    **hf_overrides)
         self.hf_text_config = get_hf_text_config(self.hf_config)
         self.encoder_config = self._get_encoder_config()
         self.hf_image_processor_config = get_hf_image_processor_config(
