@@ -159,6 +159,7 @@ Documentation
    design/input_processing/model_inputs_index
    design/kernel/paged_attention
    design/multimodal/multimodal_index
+   design/huggingface_transformers
 
 .. Contributing: contributing to the vLLM project
 
