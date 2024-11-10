@@ -171,7 +171,7 @@ TEXT_GENERATION_MODELS = {
     "facebook/opt-iml-max-1.3b": PPTestSettings.fast(),
     "OrionStarAI/Orion-14B-Chat": PPTestSettings.fast(trust_remote_code=True),
     "microsoft/phi-2": PPTestSettings.fast(),
-    "microsoft/Phi-3.5-MoE-instruct": PPTestSettings.detailed(trust_remote_code=True, multi_node_only=True, load_format="dummy", hf_overrides='{"num_hidden_layers": 4}'),  # noqa: E501
+    "microsoft/Phi-3.5-MoE-instruct": PPTestSettings.detailed(trust_remote_code=True, multi_node_only=True, load_format="dummy", hf_overrides='{"num_hidden_layers": 4, "hidden_size": 512, "intermediate_size": 800, "num_attention_heads": 4, "num_key_value_heads": 1}'),  # noqa: E501
     "microsoft/Phi-3-small-8k-instruct": PPTestSettings.fast(trust_remote_code=True),  # noqa: E501
     "adept/persimmon-8b-chat": PPTestSettings.fast(),
     "Qwen/Qwen-7B-Chat": PPTestSettings.fast(trust_remote_code=True),
@@ -223,9 +223,9 @@ MULTIMODAL_MODELS = {
 # NOTE: You can update this on your local machine to run specific tests
 TEST_MODELS = [
     # [LANGUAGE GENERATION]
+    "microsoft/Phi-3.5-MoE-instruct",
     "meta-llama/Meta-Llama-3-8B",
     "ibm/PowerLM-3b",
-    "microsoft/Phi-3.5-MoE-instruct",
     # [LANGUAGE EMBEDDING]
     "intfloat/e5-mistral-7b-instruct",
     "BAAI/bge-multilingual-gemma2",
