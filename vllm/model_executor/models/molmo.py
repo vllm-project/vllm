@@ -3,8 +3,7 @@ import re
 from array import array
 from dataclasses import dataclass
 from functools import lru_cache, partial
-from typing import (Any, Iterable, List, Mapping, Optional, Tuple, TypedDict,
-                    Union)
+from typing import Iterable, List, Mapping, Optional, Tuple, TypedDict, Union
 
 import torch
 from einops import rearrange
@@ -16,7 +15,7 @@ from transformers import PretrainedConfig
 from vllm.attention import Attention, AttentionMetadata
 from vllm.attention.selector import _Backend
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, MultiModalConfig
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               split_tensor_along_last_dim,
@@ -37,7 +36,7 @@ from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalInputs
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
                            SequenceData)
@@ -866,7 +865,7 @@ def image_input_mapper_for_molmo(
     ctx: InputContext,
     data: object,
 ):
-    return MultiModalInputs(data)
+    return MultiModalKwargs(data)
 
 
 def dummy_data_for_molmo(ctx: InputContext, seq_len: int,
@@ -1027,13 +1026,14 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
     def __init__(
         self,
-        config: PretrainedConfig,
-        multimodal_config: Optional[MultiModalConfig] = None,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[Mapping[str, Any]] = None,
+        vllm_config: VllmConfig,
+        prefix: str = "",
     ) -> None:
         super().__init__()
-
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+        multimodal_config = vllm_config.model_config.multimodal_config
         self.config = config
         self.multimodal_config = multimodal_config
 
