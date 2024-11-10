@@ -32,6 +32,8 @@ class PPTestOptions(NamedTuple):
     multi_node_only: bool
     trust_remote_code: bool
     tokenizer_mode: Optional[str]
+    load_format: Optional[str] = None
+    hf_overrides: Optional[str] = None
 
 
 @dataclass
@@ -50,6 +52,8 @@ class PPTestSettings:
         task: TaskOption = "auto",
         trust_remote_code: bool = False,
         tokenizer_mode: Optional[str] = None,
+        load_format: Optional[str] = None,
+        hf_overrides: Optional[str] = None,
     ):
         return PPTestSettings(
             parallel_setups=[
@@ -78,7 +82,9 @@ class PPTestSettings:
             task=task,
             test_options=PPTestOptions(multi_node_only=multi_node_only,
                                        trust_remote_code=trust_remote_code,
-                                       tokenizer_mode=tokenizer_mode),
+                                       tokenizer_mode=tokenizer_mode,
+                                       load_format=load_format,
+                                       hf_overrides=hf_overrides),
         )
 
     @staticmethod
@@ -90,6 +96,8 @@ class PPTestSettings:
         multi_node_only: bool = False,
         trust_remote_code: bool = False,
         tokenizer_mode: Optional[str] = None,
+        load_format: Optional[str] = None,
+        hf_overrides: Optional[str] = None,
     ):
         return PPTestSettings(
             parallel_setups=[
@@ -102,7 +110,9 @@ class PPTestSettings:
             task=task,
             test_options=PPTestOptions(multi_node_only=multi_node_only,
                                        trust_remote_code=trust_remote_code,
-                                       tokenizer_mode=tokenizer_mode),
+                                       tokenizer_mode=tokenizer_mode,
+                                       load_format=load_format,
+                                       hf_overrides=hf_overrides),
         )
 
     def iter_params(self, model_name: str):
@@ -238,7 +248,8 @@ def _compare_tp(
     method: Literal["generate", "encode"],
 ):
     tp_size, pp_size, eager_mode, chunked_prefill = parallel_setup
-    multi_node_only, trust_remote_code, tokenizer_mode = test_options
+    multi_node_only, trust_remote_code, tokenizer_mode, \
+        load_format, hf_overrides = test_options
 
     if num_gpus_available < tp_size * pp_size:
         pytest.skip(f"Need at least {tp_size} x {pp_size} GPUs")
@@ -267,6 +278,10 @@ def _compare_tp(
         common_args.append("--trust-remote-code")
     if tokenizer_mode:
         common_args.extend(["--tokenizer-mode", tokenizer_mode])
+    if load_format:
+        common_args.extend(["--load-format", load_format])
+    if hf_overrides:
+        common_args.extend(["--hf-overrides", hf_overrides])
 
     if (distributed_backend == "ray" and tp_size == 2 and pp_size == 2
             and chunked_prefill):
