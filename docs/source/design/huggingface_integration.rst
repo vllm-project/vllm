@@ -5,7 +5,7 @@ This document describes how vLLM integrates with HuggingFace libraries. We will 
 
 Let's say we want to serve the popular QWen model by running ``vllm serve Qwen/Qwen2-7B``.
 
-1. The ``model`` argument is ``Qwen/Qwen2-7B``, vLLM firstly tries to determine whether this model exists through examing the existance of the corresponding config file ``config.json``. See this `code snippet <https://github.com/vllm-project/vllm/blob/10b67d865d92e376956345becafc249d4c3c0ab7/vllm/transformers_utils/config.py#L162-L182>`__ for the implementation. Within this process:
+1. The ``model`` argument is ``Qwen/Qwen2-7B``, vLLM determines whether this model exists through examing the existance of the corresponding config file ``config.json``. See this `code snippet <https://github.com/vllm-project/vllm/blob/10b67d865d92e376956345becafc249d4c3c0ab7/vllm/transformers_utils/config.py#L162-L182>`__ for the implementation. Within this process:
 
    - If the ``model`` argument corresponds to an existed local HuggingFace cache path, vLLM will later load the config file directly from this path. Hack into `this function <https://github.com/vllm-project/vllm/blob/10b67d865d92e376956345becafc249d4c3c0ab7/vllm/transformers_utils/config.py#L81>`__ for the implementation. Here, we can also use the argument ``--revision`` to specify the revision of the model in the cache. See `their website <https://huggingface.co/docs/huggingface_hub/en/package_reference/environment_variables#hfhome>`__ for more information on how the HuggingFace cache works.
 
