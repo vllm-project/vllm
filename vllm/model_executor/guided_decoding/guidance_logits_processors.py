@@ -89,7 +89,10 @@ class GuidanceLogitsProcessor:
                 regex=self.guide, temperature=0.0
             ).ll_serialize()
         elif self.mode.lower() == "grammar":
-            self.serialized_grammar = self.guide
+            serialized_grammar = self.guide
+            if isinstance(self.guide, str):
+                serialized_grammar = json.loads(self.guide)
+            self.serialized_grammar = serialized_grammar
 
         if f"guidance_tokenizer_{self.tokenizer_name}" not in self.metadata:
             self.metadata[f"guidance_tokenizer_{self.tokenizer_name}"] = TransformersTokenizer(
