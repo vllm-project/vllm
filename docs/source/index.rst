@@ -170,7 +170,6 @@ Documentation
    contributing/overview
    contributing/profiling/profiling_index
    contributing/dockerfile/dockerfile
-   contributing/function_tracing/function_tracing_index
 
 Indices and tables
 ==================
