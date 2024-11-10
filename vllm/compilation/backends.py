@@ -389,6 +389,8 @@ class VllmBackend:
     returned_callable: Callable
     # Inductor passes to run on the graph pre-defunctionalization
     post_grad_passes: Sequence[Callable]
+    sym_tensor_indices: List[int]
+    input_buffers: List[torch.Tensor]
 
     def __init__(self, post_grad_passes: Sequence[Callable] = ()):
         global global_graph_pool
@@ -400,6 +402,9 @@ class VllmBackend:
         # only investigate this when we use multiple streams
         self.graph_pool = global_graph_pool
         self.post_grad_passes = post_grad_passes
+
+        self.sym_tensor_indices = []
+        self.input_buffers = []
 
         # `torch.compile` is JIT compiled, so we don't need to
         # do anything here
@@ -462,7 +467,7 @@ class VllmBackend:
         self._called = True
 
         if not self.compilation_configs.use_cudagraph or \
-            not self.compilation_configs.cudagraph_copy_input_buffers:
+            not self.compilation_configs.cudagraph_copy_inputs:
             return self.split_gm
 
         # if we need to copy input buffers for cudagraph
@@ -474,22 +479,24 @@ class VllmBackend:
         ]
 
         # index of tensors that have symbolic shapes (batch size)
-        sym_tensor_indices = [
+        self.sym_tensor_indices = [
             i for i, x in enumerate(fake_args)
             if isinstance(x, torch._subclasses.fake_tensor.FakeTensor)
         ]
 
-        # keep reference to the tensors that have symbolic shapes
-        # they have the maximum size among all the tensors
-        # and we use them as static buffers for cudagraph
-        tensor_buffers = [example_inputs[x] for x in sym_tensor_indices]
+        # compiler managed cudagraph input buffers
+        # we assume the first run with symbolic shapes
+        # has the maximum size among all the tensors
+        self.input_buffers = [
+            example_inputs[x].clone() for x in self.sym_tensor_indices
+        ]
 
         def copy_and_call(*args):
             list_args = list(args)
-            for i, index in enumerate(sym_tensor_indices):
+            for i, index in enumerate(self.sym_tensor_indices):
                 runtime_tensor = list_args[index]
                 runtime_shape = runtime_tensor.shape[0]
-                static_tensor = tensor_buffers[i][:runtime_shape]
+                static_tensor = self.input_buffers[i][:runtime_shape]
 
                 # copy the tensor to the static buffer
                 static_tensor.copy_(runtime_tensor)

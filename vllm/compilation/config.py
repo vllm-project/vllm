@@ -32,6 +32,11 @@ class CompilationConfig(BaseModel):
             It means the first several runs will be treated as warmup runs.
             Only after that, the execution will be recorded, and the recorded
             cudagraph will be used for subsequent runs.
+        - cudagraph_copy_inputs: whether to copy input tensors for
+            cudagraph. If the caller can guarantee that the same input buffers
+            are always used, it can set this to False. Otherwise, it should
+            set this to True, and the compiler will copy the input to an
+            internally managed buffer.
     - Inductor compilation:
         - use_inductor: whether to use inductor compilation.
             - False: inductor compilation is not used. graph runs in eager.
@@ -78,7 +83,7 @@ class CompilationConfig(BaseModel):
     non_cudagraph_ops: List[str] = Field(default_factory=list)
     cudagraph_num_of_warmups: int = 0
     cudagraph_capture_sizes: Optional[List[int]] = None
-    cudagraph_copy_input_buffers: bool = True
+    cudagraph_copy_inputs: bool = True
 
     dump_graph_stages: List[str] = Field(default_factory=list)
     dump_graph_dir: Path = Field(default=Path("."))
