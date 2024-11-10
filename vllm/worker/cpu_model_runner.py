@@ -255,11 +255,12 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
                     slot_mapping.append(_PAD_SLOT_ID)
                     continue
 
-                block_number = block_table[i //
-                                           self.block_size]  # type: ignore
-                block_offset = i % self.block_size  # type: ignore
-                slot = block_number * self.block_size + block_offset
-                slot_mapping.append(slot)
+                if block_table is not None:
+                    block_number = block_table[i //
+                                            self.block_size]  # type: ignore
+                    block_offset = i % self.block_size  # type: ignore
+                    slot = block_number * self.block_size + block_offset
+                    slot_mapping.append(slot)
 
         if any(input_mrope_positions):
             input_positions = None  # type: ignore
