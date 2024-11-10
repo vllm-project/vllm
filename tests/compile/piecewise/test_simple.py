@@ -94,13 +94,14 @@ def test_simple_piecewise_compile():
         with set_compile_context([1, 2]):
             model(input_buffer)
 
-            model(input_buffer[:2])
-            model(input_buffer[:1])
+            model(torch.randn(2).cuda())
+            model(torch.randn(1).cuda())
 
-        input_buffer[:2].zero_()
+        input = torch.randn(2).cuda()
+        input.zero_()
         global global_counter
         global_counter = 0
-        output = model(input_buffer[:2])
+        output = model(input)
         assert global_counter == 2
         assert torch.allclose(output.cpu(), torch.tensor([3., 1.]))
 
