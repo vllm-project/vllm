@@ -38,10 +38,11 @@ def process_trace_file(file_path):
         tid = int(tid) % 10000000000  # tid has range limit by perfetto
         print(f"Extracted PID: {pid}, TID: {tid}")
 
-        with open(file_path, 'r') as trace_file:
+        with open(file_path) as trace_file:
             total_lines = sum(1 for _ in trace_file)
             trace_file.seek(0)
-            for line in tqdm(trace_file, total=total_lines,
+            for line in tqdm(trace_file,
+                             total=total_lines,
                              desc="Processing trace file"):
                 # Ensure the line has the expected format, and skip empty lines
                 if len(line.strip()) == 0:
@@ -51,7 +52,9 @@ def process_trace_file(file_path):
                     date_, time_, call_info = line.split(" ", 2)
                     timestamp = f"{date_} {time_}"
                     fmt = "%Y-%m-%d %H:%M:%S.%f"
-                    ts = int(datetime.strptime(timestamp, fmt).timestamp() * 1000000)
+                    ts = int(
+                        datetime.strptime(timestamp, fmt).timestamp() *
+                        1000000)
 
                     # Create an event entry
                     type, _, func_name, _, pos, _ = call_info.split(" ", 5)
@@ -100,16 +103,14 @@ def main():
         metavar="TRACE_FILE",
         type=str,
         nargs="+",  # Accept one or more trace files
-        help="Path to one or more trace files to process"
-    )
+        help="Path to one or more trace files to process")
 
     # Add an optional output file argument
     parser.add_argument(
         "--output",
         type=str,
         help=("Path to the output file where results will be written."
-              " If not provided, a default file will be created.")
-    )
+              " If not provided, a default file will be created."))
 
     args = parser.parse_args()
 
