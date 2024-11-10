@@ -1,12 +1,13 @@
 from enum import Enum
-from vllm.model_executor.guided_decoding.guidance_logits_processors import (
-    GuidanceLogitsProcessor
-)
-from vllm.sampling_params import GuidedDecodingParams
-from transformers import PreTrainedTokenizerBase
-from typing import Tuple, Union
-from json import dumps as json_dumps
 from re import escape as regex_escape
+from typing import Union
+
+from transformers import PreTrainedTokenizerBase
+
+from vllm.model_executor.guided_decoding.guidance_logits_processors import (
+    GuidanceLogitsProcessor)
+from vllm.sampling_params import GuidedDecodingParams
+
 
 class GuidedDecodingMode(Enum):
     JSON = "json"
@@ -35,7 +36,9 @@ def get_local_guidance_guided_decoding_logits_processor(
         mode = GuidedDecodingMode.REGEX.value
     elif guided_params.choice:
         # choice just uses regex
-        choices = [regex_escape(str(choice)) for choice in guided_params.choice]
+        choices = [
+            regex_escape(str(choice)) for choice in guided_params.choice
+        ]
         choices_regex = "(" + "|".join(choices) + ")"
         guide = choices_regex
         mode = GuidedDecodingMode.CHOICE.value
@@ -46,4 +49,5 @@ def get_local_guidance_guided_decoding_logits_processor(
     if not guide or not mode:
         return None
 
-    return GuidanceLogitsProcessor(mode, guide, tokenizer, guided_params.whitespace_pattern)
+    return GuidanceLogitsProcessor(mode, guide, tokenizer,
+                                   guided_params.whitespace_pattern)
