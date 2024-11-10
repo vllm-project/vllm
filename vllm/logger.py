@@ -117,13 +117,14 @@ def _trace_calls(log_path, root_dir, frame, event, arg=None):
                 last_lineno = 0
                 last_func_name = ""
             with open(log_path, 'a') as f:
+                ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
                 if event == 'call':
-                    f.write(f"{datetime.datetime.now()} Call to"
+                    f.write(f"{ts} Call to"
                             f" {func_name} in {filename}:{lineno}"
                             f" from {last_func_name} in {last_filename}:"
                             f"{last_lineno}\n")
                 else:
-                    f.write(f"{datetime.datetime.now()} Return from"
+                    f.write(f"{ts} Return from"
                             f" {func_name} in {filename}:{lineno}"
                             f" to {last_func_name} in {last_filename}:"
                             f"{last_lineno}\n")
