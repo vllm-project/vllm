@@ -2,6 +2,7 @@ import os
 import guidance
 import torch
 import json
+import inspect
 import numpy as np
 import llguidance  # type: ignore[import-untyped]
 from pydantic import BaseModel
@@ -69,13 +70,19 @@ class GuidanceLogitsProcessor:
             except:
                 pass
 
-            self.schema = guidance.json(
-                schema=schema,
-                temperature=0.0,
-                whitespace_flexible=whitespaces_config.get(
+            args = {
+                "schema" : schema,
+                "temperature" : 0.0,
+            }
+
+            json_func_sigs = inspect.signature(guidance.json).parameters
+            if "whitespace_flexible" in json_func_sigs:
+                # whitespace_flexible is available in main-repo or later version
+                args["whitespace_flexible"] = whitespaces_config.get(
                     "whitespace_flexible", False
-                ),
-            )
+                )
+
+            self.schema = guidance.json(**args)
             self.serialized_grammar = self.schema.ll_serialize()
         elif self.mode.lower() in ["regex", "choice"]:
             self.serialized_grammar = guidance.gen(
