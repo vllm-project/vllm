@@ -190,7 +190,7 @@ class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata):
         '''
 
         if (attn_type == AttentionType.DECODER
-            or attn_type == AttentionType.ENCODER_ONLY):
+                or attn_type == AttentionType.ENCODER_ONLY):
             return self.attn_bias
         elif attn_type == AttentionType.ENCODER:
             return self.encoder_attn_bias
@@ -217,7 +217,7 @@ class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata):
         '''
 
         if (attn_type == AttentionType.DECODER
-            or attn_type == AttentionType.ENCODER_ONLY):
+                or attn_type == AttentionType.ENCODER_ONLY):
             self.attn_bias = attn_bias
         elif attn_type == AttentionType.ENCODER:
             self.encoder_attn_bias = attn_bias
@@ -255,7 +255,7 @@ class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata):
         '''
 
         if (attn_type == AttentionType.DECODER
-            or attn_type == AttentionType.ENCODER_ONLY):
+                or attn_type == AttentionType.ENCODER_ONLY):
             # Decoder self-attention
             # Choose max_seq_len based on whether we are in prompt_run
             return (self.seq_lens_tensor, self.max_decode_seq_len,

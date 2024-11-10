@@ -257,7 +257,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
 
                 if block_table is not None:
                     block_number = block_table[i //
-                                            self.block_size]  # type: ignore
+                                               self.block_size]  # type: ignore
                     block_offset = i % self.block_size  # type: ignore
                     slot = block_number * self.block_size + block_offset
                     slot_mapping.append(slot)
