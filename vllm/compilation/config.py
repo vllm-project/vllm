@@ -78,6 +78,7 @@ class CompilationConfig(BaseModel):
     non_cudagraph_ops: List[str] = Field(default_factory=list)
     cudagraph_num_of_warmups: int = 0
     cudagraph_capture_sizes: Optional[List[int]] = None
+    cudagraph_copy_input_buffers: bool = True
 
     dump_graph_stages: List[str] = Field(default_factory=list)
     dump_graph_dir: Path = Field(default=Path("."))

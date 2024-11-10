@@ -461,7 +461,44 @@ class VllmBackend:
 
         self._called = True
 
-        return self.split_gm
+        if not self.compilation_configs.use_cudagraph or \
+            not self.compilation_configs.cudagraph_copy_input_buffers:
+            return self.split_gm
+
+        # if we need to copy input buffers for cudagraph
+        from torch._guards import detect_fake_mode
+        fake_mode = detect_fake_mode()
+        fake_args = [
+            fake_mode.from_tensor(t) if isinstance(t, torch.Tensor) else t
+            for t in example_inputs
+        ]
+
+        # index of tensors that have symbolic shapes (batch size)
+        sym_tensor_indices = [
+            i for i, x in enumerate(fake_args)
+            if isinstance(x, torch._subclasses.fake_tensor.FakeTensor)
+        ]
+
+        # keep reference to the tensors that have symbolic shapes
+        # they have the maximum size among all the tensors
+        # and we use them as static buffers for cudagraph
+        tensor_buffers = [example_inputs[x] for x in sym_tensor_indices]
+
+        def copy_and_call(*args):
+            list_args = list(args)
+            for i, index in enumerate(sym_tensor_indices):
+                runtime_tensor = list_args[index]
+                runtime_shape = runtime_tensor.shape[0]
+                static_tensor = tensor_buffers[i][:runtime_shape]
+
+                # copy the tensor to the static buffer
+                static_tensor.copy_(runtime_tensor)
+
+                # replace the tensor in the list_args to the static buffer
+                list_args[index] = static_tensor
+            return self.split_gm(*list_args)
+
+        return copy_and_call
 
 
 @dataclasses.dataclass
