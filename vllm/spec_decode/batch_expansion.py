@@ -314,14 +314,11 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         # this also controls whether the probs get modified in the sampler
         # (see use of _modify_greedy_probs_inplace there).
         sampling_params = input_seq_group_metadata.sampling_params
-        non_bonus_sampling_params = DEFAULT_SIMPLE_SAMPLING_PARAMS \
-            if sampling_params.temperature else sampling_params
-
+        
         target_seq_group_metadata_list: List[SequenceGroupMetadata] = []
         last_index = len(token_ids_to_score) - 1
         for i, token_ids in enumerate(token_ids_to_score):
-            target_sampling_params = sampling_params if i == last_index \
-                else non_bonus_sampling_params
+            target_sampling_params = sampling_params
             target_seq_group_metadata_list.append(
                 self._create_single_target_seq_group_metadata(
                     input_seq_group_metadata,
