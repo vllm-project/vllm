@@ -1,10 +1,11 @@
 import argparse
-from datetime import datetime
 import gzip
 import json
 import os
 import re
 import time
+from datetime import datetime
+
 from tqdm import tqdm
 
 
