@@ -278,6 +278,9 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
                                        or input_mrope_positions,
                                        dtype=torch.long,
                                        device=self.device)  # type: ignore
+        num_orig_input_tokens_tensor = torch.tensor(
+            num_orig_input_tokens_list, dtype=torch.long,
+            device=self.device)  # type: ignore
         slot_mapping = torch.tensor(slot_mapping,
                                     dtype=torch.long,
                                     device=self.device)  # type: ignore
@@ -297,6 +300,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
             num_decode_tokens=0,
             block_tables=torch.tensor([]),
             slot_mapping=slot_mapping,
+            num_orig_input_tokens_tensor=num_orig_input_tokens_tensor,
             multi_modal_placeholder_index_maps=placeholder_index_maps,
         )
 
@@ -376,6 +380,9 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
                                        or input_mrope_positions,
                                        dtype=torch.long,
                                        device=self.device)
+        num_orig_input_tokens_tensor = torch.tensor(
+            num_orig_input_tokens_list, dtype=torch.long,
+            device=self.device)  # type: ignore
         slot_mapping = torch.tensor(slot_mapping,
                                     dtype=torch.long,
                                     device=self.device)
@@ -401,6 +408,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
             num_decode_tokens=len(input_tokens),
             num_prefills=0,
             block_tables=block_tables,
+            num_orig_input_tokens_tensor=num_orig_input_tokens_tensor,
         )
         return (
             input_tokens,
