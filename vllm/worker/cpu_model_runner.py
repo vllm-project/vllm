@@ -257,6 +257,8 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
                     slot_mapping.append(_PAD_SLOT_ID)
                     continue
 
+                # For encoder-only models without cache, the block_table is None,
+                # and there is no need to initialize the slot_mapping.
                 if block_table is not None:
                     block_number = block_table[i //
                                                self.block_size]  # type: ignore
