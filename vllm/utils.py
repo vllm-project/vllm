@@ -4,6 +4,7 @@ import contextlib
 import datetime
 import enum
 import gc
+import getpass
 import inspect
 import ipaddress
 import os
@@ -967,6 +968,8 @@ def enable_trace_function_call_for_thread() -> None:
 
     if envs.VLLM_TRACE_FUNCTION:
         tmp_dir = tempfile.gettempdir()
+        # add username to tmp_dir to avoid permission issues
+        tmp_dir = os.path.join(tmp_dir, getpass.getuser())
         filename = (f"VLLM_TRACE_FUNCTION_for_process_{os.getpid()}"
                     f"_thread_{threading.get_ident()}_"
                     f"at_{datetime.datetime.now()}.log").replace(" ", "_")
