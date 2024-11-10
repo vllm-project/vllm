@@ -314,7 +314,6 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         # this also controls whether the probs get modified in the sampler
         # (see use of _modify_greedy_probs_inplace there).
         sampling_params = input_seq_group_metadata.sampling_params
-        
         target_seq_group_metadata_list: List[SequenceGroupMetadata] = []
         for i, token_ids in enumerate(token_ids_to_score):
             target_sampling_params = sampling_params
