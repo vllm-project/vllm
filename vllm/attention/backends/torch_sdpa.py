@@ -158,7 +158,8 @@ class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata):
         * Appropriate sequence lengths tensor for key & value
         '''
 
-        if attn_type == AttentionType.DECODER or attn_type == AttentionType.ENCODER_ONLY:
+        if (attn_type == AttentionType.DECODER
+                or attn_type == AttentionType.ENCODER_ONLY):
             seq_lens_q = self.seq_lens
             seq_lens_kv = self.seq_lens
         elif attn_type == AttentionType.ENCODER:

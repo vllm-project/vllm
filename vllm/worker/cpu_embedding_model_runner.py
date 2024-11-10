@@ -8,9 +8,8 @@ from vllm.multimodal import MultiModalKwargs
 from vllm.pooling_params import PoolingParams
 from vllm.sequence import (IntermediateTensors, PoolerOutput, SequenceData,
                            SequenceGroupMetadata)
-from vllm.worker.cpu_model_runner import (CPUModelRunner,
-                                          ModelInputForCPUBuilder,
-                                          ModelInputForCPU)
+from vllm.worker.cpu_model_runner import (CPUModelRunnerBase, ModelInputForCPU,
+                                          ModelInputForCPUBuilder)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -21,7 +20,8 @@ class ModelInputForCPUWithPoolingMetadata(ModelInputForCPU):
     pooling_metadata: Optional["PoolingMetadata"] = None
 
 
-class CPUEmbeddingModelRunner(CPUModelRunner):
+class CPUEmbeddingModelRunner(
+        CPUModelRunnerBase[ModelInputForCPUWithPoolingMetadata]):
     _model_input_cls: Type[ModelInputForCPUWithPoolingMetadata] = (
         ModelInputForCPUWithPoolingMetadata)
     _builder_cls: Type[ModelInputForCPUBuilder] = ModelInputForCPUBuilder

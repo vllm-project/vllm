@@ -8,7 +8,7 @@ from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.multimodal import MultiModalKwargs
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
 from vllm.utils import make_tensor_with_pad
-from vllm.worker.cpu_model_runner import (CPUModelRunner,
+from vllm.worker.cpu_model_runner import (CPUModelRunnerBase,
                                           ModelInputForCPUBuilder,
                                           ModelInputForCPUWithSamplingMetadata)
 from vllm.worker.model_runner_base import (
@@ -50,7 +50,8 @@ class EncoderDecoderModelInputForCPU(ModelInputForCPUWithSamplingMetadata):
             super().from_broadcasted_tensor_dict(tensor_dict, attn_backend))
 
 
-class CPUEncoderDecoderModelRunner(CPUModelRunner):
+class CPUEncoderDecoderModelRunner(
+        CPUModelRunnerBase[EncoderDecoderModelInputForCPU]):
     _model_input_cls: Type[EncoderDecoderModelInputForCPU] = (
         EncoderDecoderModelInputForCPU)
     _builder_cls: Type[ModelInputForCPUBuilder] = ModelInputForCPUBuilder
@@ -87,10 +88,8 @@ class CPUEncoderDecoderModelRunner(CPUModelRunner):
         virtual_engine: int = 0,
         finished_requests_ids: Optional[List[str]] = None
     ) -> EncoderDecoderModelInputForCPU:
-        model_input = super().prepare_model_input(seq_group_metadata_list,
-                                                  virtual_engine,
-                                                  finished_requests_ids)
-        model_input = cast(EncoderDecoderModelInputForCPU, model_input)
+        model_input = self._prepare_model_input_tensors(
+            seq_group_metadata_list, finished_requests_ids)
         (
             attn_metadata,
             encoder_input_tokens_tensor,
