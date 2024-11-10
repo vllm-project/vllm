@@ -47,10 +47,12 @@ class GuidanceLogitsProcessor:
         self.is_stopped = False
         self.pending_ff_tokens: list[int] = []
         self.new_sampling = False
-
-        self._initialize()
+        self.initialized = False
 
     def _initialize(self):
+        if self.initialized:
+            return
+
         if self.mode.lower() == "json":
             if isinstance(self.guide, str):
                 schema = json.loads(self.guide)
@@ -116,6 +118,10 @@ class GuidanceLogitsProcessor:
         past_tokens_ids: list[int],
         logits: torch.Tensor,
     ) -> torch.Tensor:
+        # we initialize the guidance model here
+        # to avoid pickling ll_tokenizer and ll_interpreter
+        self._initialize()
+
         if self.is_stopped:
             return logits
 
