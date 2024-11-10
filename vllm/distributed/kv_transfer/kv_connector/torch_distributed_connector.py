@@ -1,15 +1,18 @@
 """
-    This file implements a simple torch distributed connector by 2 classes:
-    - `TorchDistributedPipe`: a tensor transmission pipe between P/D instance,
-      using `torch.distributed`
+    This file implements a simple torch distributed connector by 3 classes:
+    - `TorchDistributedPipe`: a tensor transmission pipe between vllm instances,
+        using `torch.distributed`
+    - `TorchDistributedBuffer`: a buffer to store tensors, implemented on top 
+        of `TorchDistributedPipe`
     - `TorchDistributedConnector`: a torch distributed connector between P/D 
-      instance, implemented on top of `TorchDistributedPipe`
+      instance, implemented on top of `TorchDistributedBuffer`
 """
 import threading
 import time
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from typing import Deque, List, Optional, Union
+from copy import deepcopy
 
 import torch
 from torch.distributed import Backend
@@ -23,8 +26,6 @@ from vllm.config import KVTransferConfig
 logger = init_logger(__name__)
 
 
-
-# magic constants to transmit tensors
 
 # if the tensor is only one-element and only contains NONE_INT
 # this means that the sended object is None.
@@ -611,11 +612,13 @@ class TorchDistributedConnector(KVConnectorBase):
     def select(
         self, input_tokens: Optional[torch.Tensor],
         roi: Optional[torch.Tensor]) -> List[Optional[torch.Tensor]]:
+
         return self.send_buffer.drop_select(input, roi)
     
     def insert(self, input_tokens: torch.Tensor, roi: torch.Tensor,
                key: torch.Tensor, value: torch.Tensor,
                hidden: torch.Tensor) -> None:
+
         return self.recv_buffer.insert(
             input_tokens,
             roi,

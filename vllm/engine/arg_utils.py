@@ -13,7 +13,7 @@ from vllm.config import (CacheConfig, ConfigFormat, DecodingConfig,
                          ModelConfig, ObservabilityConfig, ParallelConfig,
                          PromptAdapterConfig, SchedulerConfig,
                          SpeculativeConfig, TaskOption, TokenizerPoolConfig,
-                         KVTransferConfig, VllmConfig)
+                         VllmConfig)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
@@ -22,6 +22,7 @@ from vllm.transformers_utils.config import (
     maybe_register_config_serialize_by_value)
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.utils import FlexibleArgumentParser, StoreBoolean
+import vllm.distributed.kv_transfer.vllm_adapter as dist_kv
 
 if TYPE_CHECKING:
     from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
@@ -109,6 +110,8 @@ class EngineArgs:
     # notice.
     distributed_executor_backend: Optional[Union[str,
                                                  Type[ExecutorBase]]] = None
+    # number of P/D disaggregation (or other disaggregation) workers
+    kv_disagg_parapllel_size: int = 1
     pipeline_parallel_size: int = 1
     tensor_parallel_size: int = 1
     max_parallel_loading_workers: Optional[int] = None
@@ -195,6 +198,13 @@ class EngineArgs:
     pooling_softmax: Optional[bool] = None
     pooling_step_tag_id: Optional[int] = None
     pooling_returned_token_ids: Optional[List[int]] = None
+
+    # P/D disaggregation coonfiguration
+    kv_connector: Optional[str] = None
+    kv_buffer_size: Optional[int] = None
+    kv_buffer_device: Optional[str] = None
+    kv_disagg_role: Optional[str] = None
+    kv_disagg_device: Optional[str] = None
 
     def __post_init__(self):
         if not self.tokenizer:
@@ -914,6 +924,13 @@ class EngineArgs:
             "the math-shepherd-mistral-7b-prm model.")
 
         parser.add_argument(
+            '--kv-disagg-parallel-size',
+            '-kdp',
+            type=int,
+            default=1
+        )
+
+        parser.add_argument(
             '--kv-connector',
             type=str,
             default=None,
@@ -930,16 +947,16 @@ class EngineArgs:
         )
 
         parser.add_argument(
-            '--kv-transfer-role',
+            '--kv-disagg-role',
             type=str,
             default=None,            
             choices=["kv_producer", "kv_consumer", "both"],
-            help="Whether this vLLM instance produces KV caches, consume KV "
-            "caches, or both."
+            help="Whether this vLLM instance produces, consumes KV cache, or "
+            "both. Choices are 'kv_producer', 'kv_consumer', and 'both'."
         )
 
         parser.add_argument(
-            '--kv-device',
+            '--kv-buffer-device',
             type=str,
             default=None,
             choices=["CPU", "GPU"],
@@ -1054,6 +1071,7 @@ class EngineArgs:
             cpu_offload_gb=self.cpu_offload_gb,
         )
         parallel_config = ParallelConfig(
+            kv_disagg_parallel_size=self.kv_disagg_parallel_size,
             pipeline_parallel_size=self.pipeline_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,
             worker_use_ray=self.worker_use_ray,
@@ -1065,7 +1083,15 @@ class EngineArgs:
                 self.tokenizer_pool_extra_config,
             ),
             ray_workers_use_nsight=self.ray_workers_use_nsight,
-            distributed_executor_backend=self.distributed_executor_backend)
+            distributed_executor_backend=self.distributed_executor_backend,
+            kv_connector=self.kv_connector,
+            kv_buffer_size=self.kv_buffer_size,
+            kv_buffer_device=self.kv_buffer_device,
+            kv_disagg_role=self.kv_transfer_role,
+            kv_disagg_rank=self.kv_disagg_rank,
+        )
+        # set the kv cache transfer condition check variables
+        dist_kv.set_kv_transfer_attribute(parallel_config)
 
         max_model_len = model_config.max_model_len
         use_long_context = max_model_len > 32768
@@ -1214,12 +1240,6 @@ class EngineArgs:
             or "all" in detailed_trace_modules,
         )
 
-        kv_transfer_config = KVTransferConfig(
-            kv_connector=self.kv_connector,
-            kv_buffer_size=self.kv_buffer_size,
-            kv_transfer_role=self.kv_transfer_role,
-            kv_device=self.kv_device,
-        )
 
         return VllmConfig(
             model_config=model_config,
@@ -1233,7 +1253,6 @@ class EngineArgs:
             decoding_config=decoding_config,
             observability_config=observability_config,
             prompt_adapter_config=prompt_adapter_config,
-            kv_transfer_config=kv_transfer_config,
         )
 
 

@@ -907,6 +907,7 @@ class ParallelConfig:
     """Configuration for the distributed execution.
 
     Args:
+        kv_disagg_parallel_size: Number of kv disagg groups.
         pipeline_parallel_size: Number of pipeline parallel groups.
         tensor_parallel_size: Number of tensor parallel groups.
         worker_use_ray: Deprecated, use distributed_executor_backend instead.
@@ -924,10 +925,18 @@ class ParallelConfig:
             workers, either "ray" or "mp" (multiprocessing). If either
             pipeline_parallel_size or tensor_parallel_size is greater than 1,
             will default to "ray" if Ray is installed or "mp" otherwise.
+        kv_connector: The connector to use for kv cache transfer, value can be
+            None, "TorchDistributedConnector" or "LMCacheConnector".
+        kv_buffer_device: The buffer device to use for kv cache transfer.
+        kv_buffer_size: The buffer size to use for kv cache transfer.
+        kv_disagg_role: The role of the kv disagg worker, can be "kv_producer",
+            "kv_consumer", "kv_both" or None.
+        kv_disagg_rank: The rank of the kv disagg worker.
     """
 
     def __init__(
         self,
+        kv_disagg_parallel_size: int,
         pipeline_parallel_size: int,
         tensor_parallel_size: int,
         worker_use_ray: Optional[bool] = None,
@@ -938,7 +947,13 @@ class ParallelConfig:
         placement_group: Optional["PlacementGroup"] = None,
         distributed_executor_backend: Optional[Union[
             str, Type["ExecutorBase"]]] = None,
+        kv_connector: Optional[str] = None,
+        kv_buffer_device: Optional[str] = None,
+        kv_buffer_size: Optional[float] = None,
+        kv_disagg_role: Optional[str] = None,
+        kv_disagg_rank: int = 0,
     ) -> None:
+        self.kv_disagg_parallel_size = kv_disagg_parallel_size
         self.pipeline_parallel_size = pipeline_parallel_size
         self.tensor_parallel_size = tensor_parallel_size
         self.distributed_executor_backend = distributed_executor_backend
@@ -947,7 +962,13 @@ class ParallelConfig:
         self.tokenizer_pool_config = tokenizer_pool_config
         self.ray_workers_use_nsight = ray_workers_use_nsight
         self.placement_group = placement_group
-        self.world_size = pipeline_parallel_size * self.tensor_parallel_size
+        self.world_size = kv_disagg_parallel_size * pipeline_parallel_size *\
+            tensor_parallel_size
+        self.kv_connector = kv_connector
+        self.kv_buffer_device = kv_buffer_device
+        self.kv_buffer_size = kv_buffer_size
+        self.kv_disagg_role = kv_disagg_role
+        self.kv_disagg_rank = kv_disagg_rank
 
         if worker_use_ray:
             if self.distributed_executor_backend is None:
@@ -1008,6 +1029,19 @@ class ParallelConfig:
             isinstance(self.distributed_executor_backend, type)
             and self.distributed_executor_backend.uses_ray)
 
+    @property
+    def is_distributed_kv_instance(self) -> bool:
+        return self.kv_transfer_role in ["kv_producer", "kv_consumer", "kv_both"]
+    
+    @property
+    def is_kv_producer(self) -> bool:
+        return self.kv_transfer_role in ["kv_producer", "kv_both"]
+    
+    @property
+    def is_kv_consumer(self) -> bool:
+        return self.kv_transfer_role in ["kv_consumer", "kv_both"]
+
+
     def _verify_args(self) -> None:
         # Lazy import to avoid circular import
         from vllm.executor.executor_base import ExecutorBase
@@ -1031,6 +1065,38 @@ class ParallelConfig:
         if self.ray_workers_use_nsight and not self.use_ray:
             raise ValueError("Unable to use nsight profiling unless workers "
                              "run with Ray.")
+
+        # A series of checks for P/D disaggregation (and future disaggregation)
+        if self.kv_connector is None and not all([
+            self.kv_disagg_parallel_size == 1,
+            self.kv_disagg_rank == 0,
+            self.kv_buffer_size is None,
+            self.kv_disagg_role is None,
+            self.kv_buffer_device is None,
+        ]):
+            raise ValueError("Please specify kv_connector before configuring "
+                             "variables with prefix `kv_`")
+
+        if self.kv_connector not in [None, 
+                                     "TorchDistributedConnector",
+                                     "LMCacheConnector"]:
+            raise ValueError(f"Unsupported kv_connector: {self.kv_connector}. "
+                             f"Supported connectors are "
+                             f"`TorchDistributedConnector` and "
+                             f"`LMCacheConnector`")
+
+        if self.kv_disagg_role not in [None, 
+                                       "kv_producer", 
+                                       "kv_consumer", 
+                                       "kv_both"]:
+            raise ValueError(f"Unsupported kv_disagg_role: {self.kv_disagg_role}. "
+                             f"Supported roles are `kv_producer`, `kv_consumer`, "
+                             f"and `kv_both`")
+
+        if self.kv_connector is not None and self.kv_disagg_role is None:
+            raise ValueError("Please specify kv_disagg_role when kv_connector "
+                             "is set, supported roles are `kv_producer`, "
+                             "`kv_consumer`, and `kv_both`")
 
 
 class SchedulerConfig:
@@ -1969,56 +2035,6 @@ class ObservabilityConfig:
                 "'otlp_traces_endpoint'. Ensure OpenTelemetry packages are "
                 f"installed. Original error:\n{otel_import_error_traceback}")
             
-            
-@dataclass
-class KVTransferConfig:
-    """Configuration for KV cache transfer between vLLM instances
-    
-    To distinguish between other configs, all the configs here are prefixed 
-    with "kv"
-    """
-    
-    # the connector to use for kv cache transfer
-    # vLLM natively supports TorchDistributedConnector and also include 
-    # third-party connector, but does not provide official support, please 
-    # reach out to the code owner for those connectors for support.
-    kv_connector: Optional[str] = None
-    
-    # the buffer size parameter, used to configure the buffer size of receiving
-    # KV cache
-    kv_buffer_size: Optional[float] = None
-    kv_transfer_role: Optional[str] = None
-    kv_device: Optional[str] = None
-    
-    def __post_init__(self):
-        if self.kv_connector is None and not all([
-            self.kv_buffer_size is None,
-            self.kv_transfer_role is None,
-            self.kv_device is None,
-        ]):
-            raise ValueError("Please specify kv_connector before configuring "
-                             "variables with prefix `kv_`")
-            
-        assert self.kv_connector in [
-            None,
-            "TorchDistributedConnector",
-            "LMCacheConnector",
-        ],  f"Existing kv connectors are `TorchDistributedConnector` and "\
-            f"`LMCacheConnector`. Got {self.kv_connector}"
-
-    @property
-    def is_distributed_kv_instance(self) -> bool:
-        return self.kv_transfer_role in ["kv_producer", "kv_consumer", "kv_both"]
-    
-    @property
-    def is_kv_producer(self) -> bool:
-        return self.kv_transfer_role in ["kv_producer", "kv_both"]
-    
-    @property
-    def is_kv_consumer(self) -> bool:
-        return self.kv_transfer_role in ["kv_consumer", "kv_both"]
-    
-
 
 @dataclass
 class VllmConfig:
@@ -2038,7 +2054,6 @@ class VllmConfig:
     observability_config: Optional[ObservabilityConfig] = None
     prompt_adapter_config: Optional[PromptAdapterConfig] = None
     quant_config: Optional[QuantizationConfig] = None
-    kv_transfer_config: Optional[KVTransferConfig] = None
 
     @staticmethod
     def _get_quantization_config(

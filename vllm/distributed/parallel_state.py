@@ -990,33 +990,6 @@ def set_custom_all_reduce(enable: bool):
     _ENABLE_CUSTOM_ALL_REDUCE = enable
 
 
-def include_decoding_groups_if_disagg_enabled(
-    groups: List[List[int]],
-    world_size: int,
-) -> List[List[int]]:
-    """
-        Include the distributed group for decode
-        Only for disaggregated prefill
-        
-        Example:
-            Original group: [ [0,1], [2,3] ], world_size = 4
-            Extended: [ [0,1], [2,3], [4,5], [6,7] ]
-        Arguments:
-            groups: original distributed group
-            world_size: the vLLM world size, which is half of 
-            torch.distributed.get_world_size()
-    """
-
-    if dist_kv.IS_DISTRIBUTED_KV_INSTANCE:
-        new_groups = []
-        for group in groups:
-            new_groups.append([rank for rank in group])
-        for group in groups:
-            new_groups.append([rank + world_size for rank in group])
-        return new_groups
-    else:
-        return groups
-
 
 def init_distributed_environment(
     world_size: int = -1,
