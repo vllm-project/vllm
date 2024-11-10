@@ -316,7 +316,6 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         sampling_params = input_seq_group_metadata.sampling_params
         
         target_seq_group_metadata_list: List[SequenceGroupMetadata] = []
-        last_index = len(token_ids_to_score) - 1
         for i, token_ids in enumerate(token_ids_to_score):
             target_sampling_params = sampling_params
             target_seq_group_metadata_list.append(
