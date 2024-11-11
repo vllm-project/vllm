@@ -67,7 +67,7 @@ def run_test(more_args):
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(),
-                    reason="V1 currently only supported on V1")
+                    reason="V1 currently only supported on CUDA")
 def test_lm_eval_accuracy_v1_engine(monkeypatch):
     """Run with the V1 Engine."""
 

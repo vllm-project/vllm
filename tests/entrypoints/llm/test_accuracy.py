@@ -23,7 +23,6 @@ EXPECTED_VALUE = 0.58
 def run_test():
     """Run the end to end accuracy test."""
 
-    MODEL_NAME = "Qwen/Qwen2-1.5B-Instruct"
     model_args = f"pretrained={MODEL_NAME},max_model_len=2048"
 
     results = lm_eval.simple_evaluate(
