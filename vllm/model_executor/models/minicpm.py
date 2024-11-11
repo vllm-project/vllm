@@ -53,7 +53,8 @@ from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, make_layers)
+                    make_empty_intermediate_tensors_factory, make_layers,
+                    maybe_prefix)
 
 
 class MiniCPMMoE(nn.Module):
@@ -475,7 +476,7 @@ class MiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self.quant_config = quant_config
 
         self.num_experts = getattr(self.config, "num_experts", 0)
-        self._init_model()
+        self._init_model(vllm_config=vllm_config, prefix=prefix)
         unpadded_vocab_size = config.vocab_size
         if lora_config:
             unpadded_vocab_size += lora_config.lora_extra_vocab_size
@@ -499,9 +500,9 @@ class MiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
-    def _init_model(self):
-        self.model = MiniCPMModel(vllm_config=self.vllm_config,
-                                  prefix=self.prefix)
+    def _init_model(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        self.model = MiniCPMModel(vllm_config=vllm_config,
+                                  prefix=maybe_prefix(prefix, "model"))
 
     def forward(
         self,
