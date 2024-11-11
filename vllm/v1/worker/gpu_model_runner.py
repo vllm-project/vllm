@@ -1,3 +1,4 @@
+import os
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List, Optional, Set
@@ -405,6 +406,7 @@ class GPUModelRunner:
         if self.use_cuda_graph:
             # FIXME(woosuk): Currently, we do not use inductor to reduce the
             # compilation time and any potential issues with the inductor.
+            os.environ["VLLM_CUSTOM_OPS"] = "all"
             set_compilation_config(
                 CompilationConfig(
                     use_cudagraph=True,
