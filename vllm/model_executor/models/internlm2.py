@@ -250,11 +250,7 @@ class InternLMDecoderLayer(nn.Module):
 @support_torch_compile
 class InternLM2Model(nn.Module):
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ) -> None:
+    def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
@@ -320,11 +316,7 @@ class InternLM2Model(nn.Module):
 
 class InternLM2ForCausalLM(nn.Module, SupportsPP):
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ) -> None:
+    def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config

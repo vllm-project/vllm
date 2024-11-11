@@ -271,11 +271,7 @@ class LlamaDecoderLayer(nn.Module):
 @support_torch_compile
 class LlamaModel(nn.Module):
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ) -> None:
+    def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
@@ -495,11 +491,7 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         "norm": "model.norm"
     }
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ) -> None:
+    def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
@@ -651,11 +643,7 @@ class LlamaEmbeddingModel(nn.Module, SupportsLoRA, SupportsPP):
     }
     embedding_padding_modules = []
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ) -> None:
+    def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
         pooler_config = vllm_config.model_config.pooler_config

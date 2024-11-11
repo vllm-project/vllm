@@ -258,11 +258,7 @@ ALL_DECODER_LAYER_TYPES = {
 
 class JambaModel(nn.Module):
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ) -> None:
+    def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
@@ -352,11 +348,7 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA):
     }
     embedding_padding_modules = ["lm_head"]
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ) -> None:
+    def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         lora_config = vllm_config.lora_config
