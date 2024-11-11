@@ -459,7 +459,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         on to the 'device'.
 
         Args:
-            sequence_group (SequenceGroup): The sequence group to swap in.
+            sequence_group (SequenceGroup): The sequence group to swap in/out.
             device (Device): device to swap the 'seq_group' on.
             status (SequenceStatus): The status of sequence which is needed
                 for action. RUNNING for swap out and SWAPPED for swap in
