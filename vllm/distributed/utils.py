@@ -97,10 +97,10 @@ class StatelessProcessGroup:
     group. Only use it to communicate metadata between processes.
     For data-plane communication, create NCCL-related objects.
     """
+    prefix: str
     rank: int
     world_size: int
     store: torch._C._distributed_c10d.Store
-    prefix: str
     data_expiration_seconds: int = 3600  # 1 hour
 
     # dst rank -> counter
@@ -193,8 +193,12 @@ class StatelessProcessGroup:
                 self.broadcast_obj(None, src=i)
 
     @staticmethod
-    def create(init_method: str, rank: int, world_size: int,
-               data_expiration_seconds: int) -> "StatelessProcessGroup":
+    def create(
+        init_method: str,
+        rank: int,
+        world_size: int,
+        data_expiration_seconds: int = 3600,
+    ) -> "StatelessProcessGroup":
         """A replacement for `torch.distributed.init_process_group` that does not
         pollute the global state.
 
@@ -217,5 +221,9 @@ class StatelessProcessGroup:
             rendezvous(init_method, rank, world_size, timeout=timeout))
         store.set_timeout(timeout)
 
-        return StatelessProcessGroup(rank, world_size, store, init_method,
-                                     data_expiration_seconds)
+        return StatelessProcessGroup(
+            prefix=init_method,
+            rank=rank,
+            world_size=world_size,
+            store=store,
+            data_expiration_seconds=data_expiration_seconds)
