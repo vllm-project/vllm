@@ -370,9 +370,14 @@ class EngineArgs:
             '--distributed-executor-backend',
             choices=['ray', 'mp'],
             default=EngineArgs.distributed_executor_backend,
-            help='Backend to use for distributed serving. When more than 1 GPU '
-            'is used, will be automatically set to "ray" if installed '
-            'or "mp" (multiprocessing) otherwise.')
+            help='Backend to use for distributed model '
+            'workers, either "ray" or "mp" (multiprocessing). If the product '
+            'of pipeline_parallel_size and tensor_parallel_size is less than '
+            'or equal to the number of GPUs available, "mp" will be used to '
+            'keep processing on a single host. Otherwise, this will default '
+            'to "ray" if Ray is installed and fail otherwise. Note that tpu '
+            'and hpu only support Ray for distributed inference.')
+
         parser.add_argument(
             '--worker-use-ray',
             action='store_true',
