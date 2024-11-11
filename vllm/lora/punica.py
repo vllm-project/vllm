@@ -216,6 +216,7 @@ class PunicaWrapper:
         self._lora_indices_per_batch = torch.empty(max_batches,
                                                    dtype=torch.long,
                                                    device=device)
+        self.device: torch.device = device
         self.max_length: int = 0
         self.token_nums: int = 0
         self.batch_size: int = -1
@@ -264,6 +265,7 @@ class PunicaWrapper:
             max_loras,
             vocab_size,
             extra_vocab_size,
+            self.device,
             long_lora_context,
         )
         self._token_lora_indices[:base_indices.shape[0]].copy_(base_indices)
