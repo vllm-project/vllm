@@ -926,6 +926,8 @@ class Scheduler:
             is_big = self._is_big_seq_group(seq_group)
             if is_big and self.big_prefill_requests >= self.max_big_requests:
                 # Cannot schedule more big requests than max_big_requests
+                leftover_waiting_sequences.appendleft(seq_group)
+                waiting_queue.popleft()
                 continue
 
             num_new_tokens = self._get_num_new_tokens(seq_group,

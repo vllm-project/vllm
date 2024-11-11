@@ -1264,6 +1264,10 @@ def _build_sampler_output(
         assert sample_logprobs is not None
         assert not isinstance(maybe_deferred_sample_results,
                               SampleResultArgsType)
+        assert len(sampling_metadata.seq_groups) \
+            == len(maybe_deferred_sample_results) \
+            == len(prompt_logprobs) \
+            == len(sample_logprobs)
         deferred_sample_results_args = None
 
         for (seq_group, sample_result, group_prompt_logprobs,
