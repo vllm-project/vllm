@@ -1,6 +1,8 @@
+import copy
 import enum
 import json
-from dataclasses import dataclass, field
+import warnings
+from dataclasses import dataclass, field, replace
 from typing import (TYPE_CHECKING, Any, ClassVar, Dict, Final, List, Literal,
                     Mapping, Optional, Set, Tuple, Type, Union)
 
@@ -13,9 +15,10 @@ from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.model_executor.models import ModelRegistry
 from vllm.platforms import current_platform
 from vllm.tracing import is_otel_available, otel_import_error_traceback
-from vllm.transformers_utils.config import (ConfigFormat, get_config,
-                                            get_hf_image_processor_config,
-                                            get_hf_text_config)
+from vllm.transformers_utils.config import (
+    ConfigFormat, get_config, get_hf_image_processor_config,
+    get_hf_text_config, get_pooling_config,
+    get_sentence_transformer_tokenizer_config, is_encoder_decoder, uses_mrope)
 from vllm.utils import (GiB_bytes, cuda_device_count_stateless, get_cpu_memory,
                         is_mi250, print_warning_once)
 
@@ -23,9 +26,13 @@ if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
 
     from vllm.executor.executor_base import ExecutorBase
+    from vllm.model_executor.layers.quantization.base_config import (
+        QuantizationConfig)
     from vllm.model_executor.model_loader.loader import BaseModelLoader
     from vllm.transformers_utils.tokenizer_group.base_tokenizer_group import (
         BaseTokenizerGroup)
+else:
+    QuantizationConfig = None
 
 logger = init_logger(__name__)
 
@@ -69,9 +76,6 @@ class ModelConfig:
         code_revision: The specific revision to use for the model code on
             Hugging Face Hub. It can be a branch name, a tag name, or a
             commit id. If unspecified, will use the default version.
-        rope_scaling: Dictionary containing the scaling configuration for the
-            RoPE embeddings. When using this flag, don't update
-            `max_position_embeddings` to the expected new maximum.
         tokenizer_revision: The specific tokenizer version to use. It can be a
             branch name, a tag name, or a commit id. If unspecified, will use
             the default version.
@@ -111,6 +115,7 @@ class ModelConfig:
             can not be gathered from the vllm arguments.
         config_format: The config format which shall be loaded.
             Defaults to 'auto' which defaults to 'hf'.
+        hf_overrides: Arguments to be forwarded to the HuggingFace config.
         mm_processor_kwargs: Arguments to be forwarded to the model's processor
             for multi-modal data, e.g., image processor.
         pooling_type: Used to configure the pooling method in the embedding 
@@ -141,7 +146,7 @@ class ModelConfig:
             allowed_local_media_path: str = "",
             revision: Optional[str] = None,
             code_revision: Optional[str] = None,
-            rope_scaling: Optional[dict] = None,
+            rope_scaling: Optional[Dict[str, Any]] = None,
             rope_theta: Optional[float] = None,
             tokenizer_revision: Optional[str] = None,
             max_model_len: Optional[int] = None,
@@ -159,6 +164,7 @@ class ModelConfig:
             override_neuron_config: Optional[Dict[str, Any]] = None,
             config_format: ConfigFormat = ConfigFormat.AUTO,
             chat_template_text_format: str = "string",
+            hf_overrides: Optional[Dict[str, Any]] = None,
             mm_processor_kwargs: Optional[Dict[str, Any]] = None,
             pooling_type: Optional[str] = None,
             pooling_norm: Optional[bool] = None,
@@ -173,8 +179,22 @@ class ModelConfig:
         self.seed = seed
         self.revision = revision
         self.code_revision = code_revision
-        self.rope_scaling = rope_scaling
-        self.rope_theta = rope_theta
+
+        if hf_overrides is None:
+            hf_overrides = {}
+        if rope_scaling is not None:
+            hf_override: Dict[str, Any] = {"rope_scaling": rope_scaling}
+            hf_overrides.update(hf_override)
+            msg = ("`--rope-scaling` will be removed in a future release. "
+                   f"'Please instead use `--hf-overrides '{hf_override!r}'`")
+            warnings.warn(DeprecationWarning(msg), stacklevel=2)
+        if rope_theta is not None:
+            hf_override = {"rope_theta": rope_theta}
+            hf_overrides.update(hf_override)
+            msg = ("`--rope-theta` will be removed in a future release. "
+                   f"'Please instead use `--hf-overrides '{hf_override!r}'`")
+            warnings.warn(DeprecationWarning(msg), stacklevel=2)
+
         # The tokenizer version is consistent with the model version by default.
         if tokenizer_revision is None:
             self.tokenizer_revision = revision
@@ -187,11 +207,11 @@ class ModelConfig:
         self.max_logprobs = max_logprobs
         self.disable_sliding_window = disable_sliding_window
         self.skip_tokenizer_init = skip_tokenizer_init
-
         self.hf_config = get_config(self.model, trust_remote_code, revision,
-                                    code_revision, rope_scaling, rope_theta,
-                                    config_format)
+                                    code_revision, config_format,
+                                    **hf_overrides)
         self.hf_text_config = get_hf_text_config(self.hf_config)
+        self.encoder_config = self._get_encoder_config()
         self.hf_image_processor_config = get_hf_image_processor_config(
             self.model, revision)
         self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
@@ -224,7 +244,8 @@ class ModelConfig:
             max_model_len=max_model_len,
             disable_sliding_window=self.disable_sliding_window,
             sliding_window_len=self.get_hf_config_sliding_window(),
-            spec_target_max_model_len=spec_target_max_model_len)
+            spec_target_max_model_len=spec_target_max_model_len,
+            encoder_config=self.encoder_config)
         self.served_model_name = get_served_model_name(model,
                                                        served_model_name)
         self.multimodal_config = self._init_multimodal_config(
@@ -268,6 +289,10 @@ class ModelConfig:
 
         return None
 
+    def _get_encoder_config(self):
+        return get_sentence_transformer_tokenizer_config(
+            self.model, self.revision)
+
     def _init_pooler_config(
         self,
         pooling_type: Optional[str] = None,
@@ -277,6 +302,14 @@ class ModelConfig:
         pooling_returned_token_ids: Optional[List[int]] = None
     ) -> Optional["PoolerConfig"]:
         if self.task == "embedding":
+            pooling_config = get_pooling_config(self.model, self.revision)
+            if pooling_config is not None:
+                # override if user does not
+                # specifies pooling_type and/or pooling_norm
+                if pooling_type is None:
+                    pooling_type = pooling_config["pooling_type"]
+                if pooling_norm is None:
+                    pooling_norm = pooling_config["normalize"]
             return PoolerConfig(
                 pooling_type=pooling_type,
                 pooling_norm=pooling_norm,
@@ -468,9 +501,10 @@ class ModelConfig:
 
         # Reminder: Please update docs/source/serving/compatibility_matrix.rst
         # If the feature combo become valid
-        if device_config.device_type not in ("cuda", "tpu", "xpu"):
+        if device_config.device_type not in ("cuda", "tpu", "xpu", "hpu"):
             logger.warning(
-                "Async output processing is only supported for CUDA, TPU, XPU. "
+                "Async output processing is only supported for CUDA, TPU, XPU "
+                "and HPU."
                 "Disabling it for other platforms.")
             self.use_async_output_proc = False
             return
@@ -668,11 +702,13 @@ class ModelConfig:
         return self.multimodal_config
 
     @property
-    def is_encoder_decoder_model(self) -> bool:
+    def is_encoder_decoder(self) -> bool:
         """Extract the HF encoder/decoder model flag."""
-        return getattr(self.hf_config, "is_encoder_decoder", False) or (
-            (hasattr(self.hf_config, "text_config") and getattr(
-                self.hf_config.text_config, "is_encoder_decoder", False)))
+        return is_encoder_decoder(self.hf_config)
+
+    @property
+    def uses_mrope(self) -> bool:
+        return uses_mrope(self.hf_config)
 
     @property
     def is_multimodal_model(self) -> bool:
@@ -861,7 +897,6 @@ class LoadConfig:
         ignore_patterns: The list of patterns to ignore when loading the model.
             Default to "original/**/*" to avoid repeated loading of llama's
             checkpoints.
-
     """
 
     load_format: Union[str, LoadFormat, "BaseModelLoader"] = LoadFormat.AUTO
@@ -964,6 +999,13 @@ class ParallelConfig:
             if self.distributed_executor_backend != "ray":
                 raise ValueError(
                     "TPU backend only supports Ray for distributed inference.")
+
+        if current_platform.is_hpu() and self.world_size > 1:
+            if self.distributed_executor_backend is None:
+                self.distributed_executor_backend = "ray"
+            if self.distributed_executor_backend != "ray":
+                raise ValueError(
+                    "HPU backend only supports Ray for distributed inference.")
 
         if self.distributed_executor_backend is None and self.world_size > 1:
             # We use multiprocessing by default if world_size fits on the
@@ -1174,6 +1216,8 @@ class DeviceConfig:
                 self.device_type = "cuda"
             elif current_platform.is_neuron():
                 self.device_type = "neuron"
+            elif current_platform.is_hpu():
+                self.device_type = "hpu"
             elif current_platform.is_openvino():
                 self.device_type = "openvino"
             elif current_platform.is_tpu():
@@ -1300,13 +1344,6 @@ class SpeculativeConfig:
                              "speculative decoding is > 1, but got "
                              f"{speculative_disable_by_batch_size=}")
 
-        # Reminder: Please update docs/source/serving/compatibility_matrix.rst
-        # If the feature combo become valid
-        if enable_chunked_prefill:
-            raise ValueError(
-                "Speculative decoding and chunked prefill are "
-                f"currently mutually exclusive ({enable_chunked_prefill=}).")
-
         # TODO: The user should be able to specify revision/max model len
         # for the draft model. It is not currently supported.
         draft_revision = None
@@ -1372,6 +1409,29 @@ class SpeculativeConfig:
                         "This speculative model supports a maximum of "
                         f"num_speculative_tokens={n_predict}, but "
                         f"{num_speculative_tokens=} was provided.")
+
+            if enable_chunked_prefill and draft_hf_config.model_type in (
+                    "medusa", "mlp_speculator", "eagle"):
+                raise ValueError(
+                    "Chunked prefill and hidden-state based draft models are "
+                    "not compatible.")
+
+            speculative_draft_tensor_parallel_size = \
+                SpeculativeConfig._verify_and_get_draft_model_tensor_parallel_size(
+                    target_parallel_config,
+                    speculative_draft_tensor_parallel_size,
+                    draft_hf_config
+            )
+
+            if (enable_chunked_prefill and \
+                 speculative_draft_tensor_parallel_size != 1):
+                # TODO - Investigate why the error reported in
+                # https://github.com/vllm-project/vllm/pull/9291#issuecomment-2463266258
+                # is happening and re-enable it.
+                raise ValueError(
+                    "Chunked prefill and speculative decoding can be enabled "
+                    "simultaneously only for draft models with tensor "
+                    "parallel size 1.")
 
             draft_model_config.max_model_len = (
                 SpeculativeConfig._maybe_override_draft_max_model_len(
@@ -1451,15 +1511,16 @@ class SpeculativeConfig:
         )
 
     @staticmethod
-    def create_draft_parallel_config(
-        target_parallel_config: ParallelConfig,
-        speculative_draft_tensor_parallel_size: Optional[int],
-        draft_hf_config: PretrainedConfig,
-    ) -> ParallelConfig:
-        """Create a parallel config for use by the draft worker.
-
-        This is mostly a copy of the target parallel config, except the tp_size.
+    def _verify_and_get_draft_model_tensor_parallel_size(
+            target_parallel_config: ParallelConfig,
+            speculative_draft_tensor_parallel_size: Optional[int],
+            draft_hf_config: PretrainedConfig) -> int:
         """
+        Verifies and adjusts the tensor parallel size for a draft model
+        specified using speculative_draft_tensor_parallel_size.
+        """
+        # If speculative_draft_tensor_parallel_size is unset then set it
+        # appropriately else verify that it is set correctly.
         if speculative_draft_tensor_parallel_size is None:
             if draft_hf_config.model_type == "mlp_speculator":
                 speculative_draft_tensor_parallel_size = 1
@@ -1475,7 +1536,18 @@ class SpeculativeConfig:
             raise ValueError(
                 f"{speculative_draft_tensor_parallel_size=} cannot be "
                 f"other value than 1 or target model tensor_parallel_size")
+        return speculative_draft_tensor_parallel_size
 
+    @staticmethod
+    def create_draft_parallel_config(
+        target_parallel_config: ParallelConfig,
+        speculative_draft_tensor_parallel_size: int,
+        draft_hf_config: PretrainedConfig,
+    ) -> ParallelConfig:
+        """Create a parallel config for use by the draft worker.
+
+        This is mostly a copy of the target parallel config, except the tp_size.
+        """
         draft_parallel_config = ParallelConfig(
             pipeline_parallel_size=target_parallel_config.
             pipeline_parallel_size,
@@ -1753,6 +1825,13 @@ def _get_and_verify_dtype(
                     torch_dtype = torch.float16
             else:
                 torch_dtype = config_dtype
+
+            if current_platform.is_hpu() and config_dtype == torch.float16:
+                logger.info(
+                    "For HPU, we cast models to bfloat16 instead of"
+                    "using float16 by default. Please specify `dtype` if you "
+                    "want to use float16.")
+                torch_dtype = torch.bfloat16
         else:
             if dtype not in _STR_DTYPE_TO_TORCH_DTYPE:
                 raise ValueError(f"Unknown dtype: {dtype}")
@@ -1785,6 +1864,7 @@ def _get_and_verify_max_len(
     disable_sliding_window: bool,
     sliding_window_len: Optional[Union[int, List[Optional[int]]]],
     spec_target_max_model_len: Optional[int] = None,
+    encoder_config: Optional[Any] = None,
 ) -> int:
     """Get and verify the model's maximum length."""
     derived_max_model_len = float("inf")
@@ -1866,6 +1946,9 @@ def _get_and_verify_max_len(
                 derived_max_model_len = rope_scaling[
                     "original_max_position_embeddings"]
             derived_max_model_len *= scaling_factor
+
+    if encoder_config and "max_seq_length" in encoder_config:
+        derived_max_model_len = encoder_config["max_seq_length"]
 
     # If the user specified a max length, make sure it is smaller than the
     # derived length from the HF model config.
@@ -1979,6 +2062,41 @@ class VllmConfig:
     decoding_config: Optional[DecodingConfig] = None
     observability_config: Optional[ObservabilityConfig] = None
     prompt_adapter_config: Optional[PromptAdapterConfig] = None
+    quant_config: Optional[QuantizationConfig] = None
+
+    @staticmethod
+    def _get_quantization_config(
+            model_config: ModelConfig,
+            load_config: LoadConfig) -> Optional[QuantizationConfig]:
+        """Get the quantization config."""
+        if model_config.quantization is not None:
+            from vllm.model_executor.model_loader.weight_utils import (
+                get_quant_config)
+            quant_config = get_quant_config(model_config, load_config)
+            capability_tuple = current_platform.get_device_capability()
+
+            if capability_tuple is not None:
+                capability = capability_tuple.to_int()
+                if capability < quant_config.get_min_capability():
+                    raise ValueError(
+                        f"The quantization method {model_config.quantization} "
+                        "is not supported for the current GPU. Minimum "
+                        f"capability: {quant_config.get_min_capability()}. "
+                        f"Current capability: {capability}.")
+            supported_dtypes = quant_config.get_supported_act_dtypes()
+            if model_config.dtype not in supported_dtypes:
+                raise ValueError(
+                    f"{model_config.dtype} is not supported for quantization "
+                    f"method {model_config.quantization}. Supported dtypes: "
+                    f"{supported_dtypes}")
+            return quant_config
+        return None
+
+    def with_hf_config(self, hf_config: PretrainedConfig) -> "VllmConfig":
+        model_config = copy.deepcopy(self.model_config)
+        model_config.hf_config = hf_config
+
+        return replace(self, model_config=model_config)
 
     def __post_init__(self):
         """Verify configs are valid & consistent with each other.
@@ -1996,3 +2114,8 @@ class VllmConfig:
         if self.prompt_adapter_config:
             self.prompt_adapter_config.verify_with_model_config(
                 self.model_config)
+
+        if self.quant_config is None and \
+            self.model_config is not None and self.load_config is not None:
+            self.quant_config = VllmConfig._get_quantization_config(
+                self.model_config, self.load_config)

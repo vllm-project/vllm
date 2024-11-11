@@ -13,6 +13,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.tuned_gemm import tgemm
 from vllm.model_executor.parameter import BasevLLMParameter
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.platforms import current_platform
 
 DEFAULT_VOCAB_PADDING_SIZE = 64
 
@@ -383,8 +384,20 @@ class VocabParallelEmbedding(torch.nn.Module):
 
         # Copy the data.
         loaded_weight = loaded_weight.narrow(output_dim, start_idx, shard_size)
-        param[:loaded_weight.shape[0]].data.copy_(loaded_weight)
-        param[loaded_weight.shape[0]:].data.fill_(0)
+
+        if current_platform.is_hpu():
+            # FIXME(kzawora): Weight copy with slicing bugs out on Gaudi here,
+            # so we're using a workaround. Remove this when fixed in
+            # HPU PT bridge.
+            padded_weight = torch.cat([
+                loaded_weight,
+                torch.zeros(param.shape[0] - loaded_weight.shape[0],
+                            *loaded_weight.shape[1:])
+            ])
+            param.data.copy_(padded_weight)
+        else:
+            param[:loaded_weight.shape[0]].data.copy_(loaded_weight)
+            param[loaded_weight.shape[0]:].data.fill_(0)
 
     def forward(self, input_):
         if self.tp_size > 1:

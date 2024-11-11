@@ -66,12 +66,15 @@ class LLMEngine:
             scheduler_config.max_num_seqs = 1024
             scheduler_config.max_num_batched_tokens = 2048
 
+        # TODO (ywang96): Enable APC by default when VLM supports it.
+        if not model_config.is_multimodal_model:
+            cache_config.enable_prefix_caching = True
+
         logger.info(
             "Initializing an LLM engine (v%s) with config: "
             "model=%r, speculative_config=%r, tokenizer=%r, "
             "skip_tokenizer_init=%s, tokenizer_mode=%s, revision=%s, "
-            "override_neuron_config=%s, "
-            "rope_scaling=%r, rope_theta=%r, tokenizer_revision=%s, "
+            "override_neuron_config=%s, tokenizer_revision=%s, "
             "trust_remote_code=%s, dtype=%s, max_seq_len=%d, "
             "download_dir=%r, load_format=%s, tensor_parallel_size=%d, "
             "pipeline_parallel_size=%d, "
@@ -90,8 +93,6 @@ class LLMEngine:
             model_config.tokenizer_mode,
             model_config.revision,
             model_config.override_neuron_config,
-            model_config.rope_scaling,
-            model_config.rope_theta,
             model_config.tokenizer_revision,
             model_config.trust_remote_code,
             model_config.dtype,
@@ -124,7 +125,10 @@ class LLMEngine:
             # Ping the tokenizer to ensure liveness if it runs in a
             # different process.
             self.tokenizer.ping()
-        self.detokenizer = Detokenizer(self.model_config.tokenizer)
+        self.detokenizer = Detokenizer(
+            tokenizer_name=self.model_config.tokenizer,
+            tokenizer_mode=self.model_config.tokenizer_mode,
+            trust_remote_code=self.model_config.trust_remote_code)
 
         self.generation_config_fields = _load_generation_config_dict(
             model_config)
@@ -154,6 +158,12 @@ class LLMEngine:
         # NOTE: the cache_config here have been updated with the numbers of
         # GPU and CPU blocks, which are profiled in the distributed executor.
         self.scheduler = Scheduler(scheduler_config, cache_config, lora_config)
+
+    def __del__(self):
+        # Small hack- implicit clean up of resources on garbage collect
+        # TODO: this should probably be explicitly invoked when we're done with
+        # the engine
+        self.terminate_detokenizer()
 
     def _initialize_kv_caches(self) -> None:
         num_gpu_blocks, _ = self.model_executor.determine_num_available_blocks(
@@ -318,7 +328,7 @@ class LLMEngine:
         )
         for req, num_tokens in sampled:
             inputs.req_ids.append(req.request_id)
-            if len(req.output_token_ids) == num_tokens:
+            if req.num_output_tokens == num_tokens:
                 # The request is first detokenized.
                 inputs.prompt_token_ids.append(req.prompt_token_ids)
             else:

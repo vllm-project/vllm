@@ -1,7 +1,7 @@
 import itertools
 import warnings
 from contextlib import contextmanager
-from typing import (Any, ClassVar, Dict, List, Optional, Sequence, Tuple,
+from typing import (Any, ClassVar, Dict, List, Optional, Sequence, Tuple, Type,
                     Union, cast, overload)
 
 from tqdm import tqdm
@@ -10,6 +10,7 @@ from vllm import envs
 from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
                               BeamSearchSequence, get_beam_search_score)
 from vllm.engine.arg_utils import EngineArgs, TaskOption
+from vllm.engine.llm_engine import LLMEngine
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          apply_hf_chat_template,
                                          apply_mistral_chat_template,
@@ -30,11 +31,6 @@ from vllm.transformers_utils.tokenizer import (AnyTokenizer, MistralTokenizer,
 from vllm.transformers_utils.tokenizer_group import TokenizerGroup
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import Counter, deprecate_args, deprecate_kwargs, is_list_of
-
-if envs.VLLM_USE_V1:
-    from vllm.v1.engine.llm_engine import LLMEngine  # type: ignore
-else:
-    from vllm.engine.llm_engine import LLMEngine  # type: ignore
 
 logger = init_logger(__name__)
 
@@ -102,7 +98,10 @@ class LLM:
             to eager mode. Additionally for encoder-decoder models, if the
             sequence length of the encoder input is larger than this, we fall
             back to the eager mode.
-        disable_custom_all_reduce: See ParallelConfig
+        disable_custom_all_reduce: See :class:`~vllm.config.ParallelConfig`
+        disable_async_output_proc: Disable async output processing.
+            This may result in lower performance.
+        hf_overrides: Arguments to be forwarded to the HuggingFace config.
         **kwargs: Arguments for :class:`~vllm.EngineArgs`. (See
             :ref:`engine_args`)
 
@@ -157,6 +156,7 @@ class LLM:
         max_seq_len_to_capture: int = 8192,
         disable_custom_all_reduce: bool = False,
         disable_async_output_proc: bool = False,
+        hf_overrides: Optional[dict] = None,
         mm_processor_kwargs: Optional[Dict[str, Any]] = None,
         # After positional args are removed, move this right below `model`
         task: TaskOption = "auto",
@@ -198,6 +198,7 @@ class LLM:
             max_seq_len_to_capture=max_seq_len_to_capture,
             disable_custom_all_reduce=disable_custom_all_reduce,
             disable_async_output_proc=disable_async_output_proc,
+            hf_overrides=hf_overrides,
             mm_processor_kwargs=mm_processor_kwargs,
             pooling_type=pooling_type,
             pooling_norm=pooling_norm,
@@ -206,9 +207,20 @@ class LLM:
             pooling_returned_token_ids=pooling_returned_token_ids,
             **kwargs,
         )
-        self.llm_engine = LLMEngine.from_engine_args(
+        # Logic to switch between engines is done at runtime instead of import
+        # to avoid import order issues
+        self.engine_class = self.get_engine_class()
+        self.llm_engine = self.engine_class.from_engine_args(
             engine_args, usage_context=UsageContext.LLM_CLASS)
         self.request_counter = Counter()
+
+    @staticmethod
+    def get_engine_class() -> Type[LLMEngine]:
+        if envs.VLLM_USE_V1:
+            # Lazy import: the v1 package isn't distributed
+            from vllm.v1.engine.llm_engine import LLMEngine as V1LLMEngine
+            return V1LLMEngine  # type: ignore
+        return LLMEngine
 
     def get_tokenizer(self) -> AnyTokenizer:
         return self.llm_engine.get_tokenizer_group(TokenizerGroup).tokenizer
@@ -394,7 +406,7 @@ class LLM:
             priority=priority)
 
         outputs = self._run_engine(use_tqdm=use_tqdm)
-        return LLMEngine.validate_outputs(outputs, RequestOutput)
+        return self.engine_class.validate_outputs(outputs, RequestOutput)
 
     def beam_search(
         self,
@@ -769,7 +781,8 @@ class LLM:
         )
 
         outputs = self._run_engine(use_tqdm=use_tqdm)
-        return LLMEngine.validate_outputs(outputs, EmbeddingRequestOutput)
+        return self.engine_class.validate_outputs(outputs,
+                                                  EmbeddingRequestOutput)
 
     def start_profile(self) -> None:
         self.llm_engine.start_profile()

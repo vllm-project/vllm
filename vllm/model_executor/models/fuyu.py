@@ -1,4 +1,3 @@
-# coding=utf-8
 # adapted from https://github.com/huggingface/transformers/blob/v4.39.3/src/transformers/models/fuyu/modeling_fuyu.py
 # Copyright 2023 The vLLM team.
 # Copyright 2023 HuggingFace Inc. team. All rights reserved.
@@ -23,19 +22,18 @@ import torch
 import torch.nn as nn
 import torch.utils.checkpoint
 from PIL import Image
-from transformers import FuyuConfig, FuyuImageProcessor
+from transformers import FuyuImageProcessor
 
 from vllm.attention import AttentionMetadata
-from vllm.config import CacheConfig, MultiModalConfig
+from vllm.config import VllmConfig
 from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
                          InputContext, token_inputs)
 from vllm.model_executor.layers.linear import ColumnParallelLinear
-from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.models.persimmon import PersimmonForCausalLM
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.base import MultiModalInputs
+from vllm.multimodal.base import MultiModalKwargs
 from vllm.multimodal.image import cached_get_image_processor
 from vllm.multimodal.utils import (cached_get_tokenizer,
                                    consecutive_placeholder_ranges)
@@ -219,7 +217,7 @@ def input_mapper_for_fuyu(ctx: InputContext, data: object):
         ])
 
     # image has been processed with prompt in input processor
-    return MultiModalInputs({"pixel_values": data})
+    return MultiModalKwargs({"pixel_values": data})
 
 
 @MULTIMODAL_REGISTRY.register_image_input_mapper(input_mapper_for_fuyu)
@@ -228,12 +226,11 @@ def input_mapper_for_fuyu(ctx: InputContext, data: object):
 @INPUT_REGISTRY.register_input_processor(input_processor_for_fuyu)
 class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
-    def __init__(self,
-                 config: FuyuConfig,
-                 multimodal_config: MultiModalConfig,
-                 cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None) -> None:
+    def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
+        multimodal_config = vllm_config.model_config.multimodal_config
         self.config = config
         self.multimodal_config = multimodal_config
 
@@ -248,9 +245,8 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             quant_config=quant_config,
             gather_output=True,
         )
-        self.language_model = PersimmonForCausalLM(config.text_config,
-                                                   cache_config=cache_config,
-                                                   quant_config=quant_config)
+        self.language_model = PersimmonForCausalLM(
+            vllm_config.with_hf_config(config.text_config))
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
 

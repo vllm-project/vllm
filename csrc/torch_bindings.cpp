@@ -107,7 +107,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // Layernorm
   // Apply Root Mean Square (RMS) Normalization to the input tensor.
   ops.def(
-      "rms_norm(Tensor! out, Tensor input, Tensor weight, float epsilon) -> "
+      "rms_norm(Tensor! result, Tensor input, Tensor weight, float epsilon) -> "
       "()");
   ops.impl("rms_norm", torch::kCUDA, &rms_norm);
 
@@ -117,21 +117,22 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "float epsilon) -> ()");
   ops.impl("fused_add_rms_norm", torch::kCUDA, &fused_add_rms_norm);
 
-  // Apply Root Mean Square (RMS) Normalization to the input tensor with scaled
-  // output.
+  // Layernorm-quant
+  // Apply Root Mean Square (RMS) Normalization to the input tensor.
   ops.def(
-      "scaled_rms_norm(Tensor! out, Tensor input, Tensor weight, Tensor scale, "
-      "float epsilon) -> "
+      "rms_norm_static_fp8_quant(Tensor! result, Tensor input, Tensor weight, "
+      "Tensor scale, float epsilon) -> "
       "()");
-  ops.impl("scaled_rms_norm", torch::kCUDA, &scaled_rms_norm);
+  ops.impl("rms_norm_static_fp8_quant", torch::kCUDA,
+           &rms_norm_static_fp8_quant);
 
-  // Fused Add and RMS Normalization with scaled output.
+  // In-place fused Add and RMS Normalization.
   ops.def(
-      "scaled_fused_add_rms_norm(Tensor! out, Tensor input, Tensor! residual, "
-      "Tensor weight, "
+      "fused_add_rms_norm_static_fp8_quant(Tensor! result, Tensor input, "
+      "Tensor! residual, Tensor weight, "
       "Tensor scale, float epsilon) -> ()");
-  ops.impl("scaled_fused_add_rms_norm", torch::kCUDA,
-           &scaled_fused_add_rms_norm);
+  ops.impl("fused_add_rms_norm_static_fp8_quant", torch::kCUDA,
+           &fused_add_rms_norm_static_fp8_quant);
 
   // Rotary embedding
   // Apply GPT-NeoX or GPT-J style rotary embedding to query and key.
@@ -344,18 +345,20 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   // Compute FP8 quantized tensor for given scaling factor.
   ops.def(
-      "static_scaled_fp8_quant(Tensor! out, Tensor input, Tensor scale) -> ()");
+      "static_scaled_fp8_quant(Tensor! result, Tensor input, Tensor scale) -> "
+      "()");
   ops.impl("static_scaled_fp8_quant", torch::kCUDA, &static_scaled_fp8_quant);
 
   // Compute dynamic-per-tensor FP8 quantized tensor and scaling factor.
   ops.def(
-      "dynamic_scaled_fp8_quant(Tensor! out, Tensor input, Tensor! scale) -> "
+      "dynamic_scaled_fp8_quant(Tensor! result, Tensor input, Tensor! scale) "
+      "-> "
       "()");
   ops.impl("dynamic_scaled_fp8_quant", torch::kCUDA, &dynamic_scaled_fp8_quant);
 
   // Compute dynamic-per-token FP8 quantized tensor and scaling factor.
   ops.def(
-      "dynamic_per_token_scaled_fp8_quant(Tensor! out, Tensor input, "
+      "dynamic_per_token_scaled_fp8_quant(Tensor! result, Tensor input, "
       "Tensor! scale, Tensor? scale_ub) -> "
       "()");
   ops.impl("dynamic_per_token_scaled_fp8_quant", torch::kCUDA,
@@ -363,13 +366,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   // Compute int8 quantized tensor for given scaling factor.
   ops.def(
-      "static_scaled_int8_quant(Tensor! out, Tensor input, Tensor scale,"
+      "static_scaled_int8_quant(Tensor! result, Tensor input, Tensor scale,"
       "Tensor? azp) -> ()");
   ops.impl("static_scaled_int8_quant", torch::kCUDA, &static_scaled_int8_quant);
 
   // Compute int8 quantized tensor and scaling factor
   ops.def(
-      "dynamic_scaled_int8_quant(Tensor! out, Tensor input, Tensor! scale, "
+      "dynamic_scaled_int8_quant(Tensor! result, Tensor input, Tensor! scale, "
       "Tensor!? azp) -> ()");
   ops.impl("dynamic_scaled_int8_quant", torch::kCUDA,
            &dynamic_scaled_int8_quant);
