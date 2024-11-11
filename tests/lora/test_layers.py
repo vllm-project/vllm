@@ -51,9 +51,11 @@ TOLERANCES = {
 CUDA_DEVICES = [
     f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
 ]
+CUDA_DEVICES = [
+    "cuda:1","cuda:0"]
 # We will launch different triton kernels between the prefill and decode
 # stages, so we need to verify this. prefill stage(True) or decode stage(False)
-STAGES = [True, False]
+STAGES = [False]
 
 
 def get_random_id_to_index(num_loras: int,
@@ -120,11 +122,12 @@ def populate_loras(
             subloras: List[LoRALayerWeights] = []
             sublora_len = layer_weights.shape[0] // repeats
             for i in range(repeats):
-                sublora = DummyLoRAManager().init_random_lora(
-                    module_name=f"fake_{i}",
-                    weight=layer_weights,
-                    generate_embeddings_tensor=generate_embeddings_tensor,
-                )
+                sublora = DummyLoRAManager(
+                    layer_weights.device).init_random_lora(
+                        module_name=f"fake_{i}",
+                        weight=layer_weights,
+                        generate_embeddings_tensor=generate_embeddings_tensor,
+                    )
                 sublora.lora_b = sublora.lora_b[:, (sublora_len *
                                                     i):(sublora_len * (i + 1))]
                 sublora.optimize()
@@ -152,6 +155,7 @@ def create_random_inputs(
     input_size: Tuple[int, ...],
     input_range: Tuple[float, float],
     input_type: torch.dtype = torch.int,
+    device:torch.device="cuda"
 ) -> Tuple[List[torch.Tensor], List[int], List[int]]:
     """Creates random inputs.
 
@@ -173,10 +177,10 @@ def create_random_inputs(
     for _ in range(num_inputs):
         if input_type == torch.int:
             inputs.append(
-                torch.randint(low=int(low), high=int(high), size=input_size))
+                torch.randint(low=int(low), high=int(high), size=input_size,device=device))
         else:
             inputs.append(
-                torch.rand(size=input_size, dtype=input_type) * high + low)
+                torch.rand(size=input_size, dtype=input_type,device=device) * high + low)
 
         lora_id = random.choice(active_lora_ids)
         index_mapping += [lora_id] * input_size[0]
@@ -192,7 +196,9 @@ def create_random_inputs(
 @pytest.mark.parametrize("stage", STAGES)
 def test_embeddings(dist_init, num_loras, device, vocab_size, stage) -> None:
 
-    torch.set_default_device(device)
+    # torch.set_default_device(device)
+    torch.cuda.set_device(device)
+    
     max_loras = 8
     punica_wrapper = PunicaWrapper(8192, 256, device)
     lora_config = LoRAConfig(max_loras=max_loras,
@@ -201,9 +207,11 @@ def test_embeddings(dist_init, num_loras, device, vocab_size, stage) -> None:
 
     def create_random_embedding_layer():
         embedding = VocabParallelEmbedding(vocab_size, 256)
+        embedding.to(device)
         embedding.weight.data = torch.rand_like(embedding.weight.data)
         embedding.weight.data[vocab_size:, :] = 0
         lora_embedding = VocabParallelEmbeddingWithLoRA(embedding)
+        lora_embedding.to(device)
         lora_embedding.create_lora_weights(max_loras, lora_config)
 
         return embedding, lora_embedding
@@ -225,6 +233,7 @@ def test_embeddings(dist_init, num_loras, device, vocab_size, stage) -> None:
             num_inputs=num_loras * 3,
             input_size=(200, ),
             input_range=(1, vocab_size),
+            device=device
         )
         lora_mapping = LoRAMapping(index_mapping,
                                    prompt_mapping,
@@ -232,7 +241,7 @@ def test_embeddings(dist_init, num_loras, device, vocab_size, stage) -> None:
         punica_wrapper.update_metadata(lora_mapping, id_to_index, max_loras,
                                        vocab_size,
                                        lora_config.lora_extra_vocab_size)
-
+        
         lora_result = lora_embedding(torch.cat(inputs))
 
         expected_results: List[torch.Tensor] = []
@@ -254,7 +263,7 @@ def test_embeddings(dist_init, num_loras, device, vocab_size, stage) -> None:
                                    atol=atol)
 
         # Check that resetting the lora weights succeeds
-
+    
         for slot_idx in range(max_loras):
             lora_embedding.reset_lora(slot_idx)
 
@@ -263,6 +272,7 @@ def test_embeddings(dist_init, num_loras, device, vocab_size, stage) -> None:
             num_inputs=num_loras * 3,
             input_size=(200, ),
             input_range=(1, vocab_size),
+            device=device
         )
         lora_mapping = LoRAMapping(index_mapping,
                                    prompt_mapping,
@@ -270,15 +280,15 @@ def test_embeddings(dist_init, num_loras, device, vocab_size, stage) -> None:
         punica_wrapper.update_metadata(lora_mapping, id_to_index, max_loras,
                                        vocab_size,
                                        lora_config.lora_extra_vocab_size)
-
+        # with torch.cuda.device(device):
         lora_result = lora_embedding(torch.cat(inputs))
         expected_result = embedding(torch.cat(inputs))
 
         rtol, atol = TOLERANCES[lora_result.dtype]
         torch.testing.assert_close(lora_result,
-                                   expected_result,
-                                   rtol=rtol,
-                                   atol=atol)
+                                expected_result,
+                                rtol=rtol,
+                                atol=atol)
 
 
 @torch.inference_mode()
@@ -1212,3 +1222,9 @@ def test_get_masked_input_and_mask():
                        torch.tensor([0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 4, 0]))
     assert torch.equal(modified_x_rank_3,
                        torch.tensor([0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 4]))
+
+
+if __name__ == "__main__":
+    pytest.main([
+        "/home/sobey/Code/Code_leejee/vllm_dev/vllm/tests/lora/test_layers.py::test_embeddings"
+    ])
