@@ -134,8 +134,8 @@ def convert_mapping(
         indices_list.append(long_lora_offsets)
     indices = torch.tensor(indices_list, dtype=torch.long, device=device)
     prompt_mapping_tensor = torch.tensor(prompt_mapping,
-                                         device=device,
-                                         dtype=torch.long)
+                                         dtype=torch.long,
+                                         device=device)
     embeddings_indices = torch.stack([
         indices[2] * extra_vocab_size,
         indices[2] * (vocab_size + extra_vocab_size),

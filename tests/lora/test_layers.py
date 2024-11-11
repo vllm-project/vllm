@@ -1228,4 +1228,3 @@ def test_get_masked_input_and_mask():
                        torch.tensor([0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 4, 0]))
     assert torch.equal(modified_x_rank_3,
                        torch.tensor([0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 4]))
-
