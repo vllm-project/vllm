@@ -172,30 +172,29 @@ class StatelessProcessGroup:
             else:
                 self.broadcast_obj(None, src=i)
 
+    @staticmethod
+    def create(init_method: str, rank: int,
+               world_size: int) -> "StatelessProcessGroup":
+        """A replacement for `torch.distributed.init_process_group` that does not
+        pollute the global state.
 
-def stateless_init_process_group(init_method: str, rank: int,
-                                 world_size: int) -> StatelessProcessGroup:
-    """A replacement for `torch.distributed.init_process_group` that does not
-    pollute the global state.
+        If we have process A and process B called `torch.distributed.init_process_group`
+        to form a group, and then we want to form another group with process A, B, C,
+        D, it is not possible in PyTorch, because process A and process B have already
+        formed a group, and process C and process D cannot join that group. This
+        function is a workaround for this issue.
 
-    If we have process A and process B called `torch.distributed.init_process_group`
-    to form a group, and then we want to form another group with process A, B, C,
-    D, it is not possible in PyTorch, because process A and process B have already
-    formed a group, and process C and process D cannot join that group. This
-    function is a workaround for this issue.
+        `torch.distributed.init_process_group` is a global call, while this function
+        is a stateless call. It will return a `StatelessProcessGroup` object that can be
+        used for exchanging metadata. With this function, process A and process B
+        can call `StatelessProcessGroup.create` to form a group, and then process A, B,
+        C, and D can call `StatelessProcessGroup.create` to form another group.
+        """ # noqa
+        from torch._C._distributed_c10d import _DEFAULT_PG_TIMEOUT
+        timeout = _DEFAULT_PG_TIMEOUT
 
-    `torch.distributed.init_process_group` is a global call, while this function
-    is a stateless call. It will return a `StatelessProcessGroup` object that can be
-    used for exchanging metadata. With this function, process A and process B
-    can call `stateless_init_process_group` to form a group, and then process A, B,
-    C, and D can call `stateless_init_process_group` to form another group.
-    """ # noqa
+        store, rank, world_size = next(
+            rendezvous(init_method, rank, world_size, timeout=timeout))
+        store.set_timeout(timeout)
 
-    from torch._C._distributed_c10d import _DEFAULT_PG_TIMEOUT
-    timeout = _DEFAULT_PG_TIMEOUT
-
-    store, rank, world_size = next(
-        rendezvous(init_method, rank, world_size, timeout=timeout))
-    store.set_timeout(timeout)
-
-    return StatelessProcessGroup(rank, world_size, store, init_method)
+        return StatelessProcessGroup(rank, world_size, store, init_method)

@@ -4,7 +4,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
-from vllm.distributed.utils import stateless_init_process_group
+from vllm.distributed.utils import StatelessProcessGroup
 from vllm.utils import (cuda_device_count_stateless,
                         update_environment_variables)
 
@@ -41,11 +41,11 @@ def test_cuda_device_count_stateless():
 
 
 def cpu_worker(rank, WORLD_SIZE):
-    pg1 = stateless_init_process_group(init_method="tcp://127.0.0.1:29500",
+    pg1 = StatelessProcessGroup.create(init_method="tcp://127.0.0.1:29500",
                                        rank=rank,
                                        world_size=WORLD_SIZE)
     if rank <= 2:
-        pg2 = stateless_init_process_group(init_method="tcp://127.0.0.1:29501",
+        pg2 = StatelessProcessGroup.create(init_method="tcp://127.0.0.1:29501",
                                            rank=rank,
                                            world_size=3)
     data = torch.tensor([rank])
@@ -61,13 +61,13 @@ def cpu_worker(rank, WORLD_SIZE):
 
 def gpu_worker(rank, WORLD_SIZE):
     torch.cuda.set_device(rank)
-    pg1 = stateless_init_process_group(init_method="tcp://127.0.0.1:29502",
+    pg1 = StatelessProcessGroup.create(init_method="tcp://127.0.0.1:29502",
                                        rank=rank,
                                        world_size=WORLD_SIZE)
     pynccl1 = PyNcclCommunicator(pg1, device=rank)
     pynccl1.disabled = False
     if rank <= 2:
-        pg2 = stateless_init_process_group(init_method="tcp://127.0.0.1:29503",
+        pg2 = StatelessProcessGroup.create(init_method="tcp://127.0.0.1:29503",
                                            rank=rank,
                                            world_size=3)
         pynccl2 = PyNcclCommunicator(pg2, device=rank)
@@ -89,7 +89,7 @@ def gpu_worker(rank, WORLD_SIZE):
 
 
 def broadcast_worker(rank, WORLD_SIZE):
-    pg1 = stateless_init_process_group(init_method="tcp://127.0.0.1:29504",
+    pg1 = StatelessProcessGroup.create(init_method="tcp://127.0.0.1:29504",
                                        rank=rank,
                                        world_size=WORLD_SIZE)
     if rank == 2:
@@ -101,7 +101,7 @@ def broadcast_worker(rank, WORLD_SIZE):
 
 
 def allgather_worker(rank, WORLD_SIZE):
-    pg1 = stateless_init_process_group(init_method="tcp://127.0.0.1:29505",
+    pg1 = StatelessProcessGroup.create(init_method="tcp://127.0.0.1:29505",
                                        rank=rank,
                                        world_size=WORLD_SIZE)
     data = pg1.all_gather_obj(rank)
@@ -112,7 +112,7 @@ def allgather_worker(rank, WORLD_SIZE):
 @multi_gpu_test(num_gpus=4)
 @pytest.mark.parametrize(
     "worker", [cpu_worker, gpu_worker, broadcast_worker, allgather_worker])
-def test_stateless_init_process_group(worker):
+def test_stateless_process_group(worker):
     WORLD_SIZE = 4
     from multiprocessing import get_context
     ctx = get_context("fork")
