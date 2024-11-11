@@ -49,7 +49,7 @@ TOLERANCES = {
     torch.bfloat16: (3e-2, 2e-2),
 }
 CUDA_DEVICES = [
-    f"cuda:{1}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
+    f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
 ]
 
 # We will launch different triton kernels between the prefill and decode
