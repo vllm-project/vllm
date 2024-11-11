@@ -80,7 +80,7 @@ def test_simple_piecewise_compile():
     config = os.path.join(directory, "piecewise_compilation_config.json")
     os.environ["VLLM_TORCH_COMPILE_CONFIG"] = config
 
-    input_buffer = torch.randn(100).cuda()
+    inputs = torch.randn(100).cuda()
 
     with compilation_counter.expect(
             num_graphs_seen=1,  # one graph for the model
@@ -92,7 +92,7 @@ def test_simple_piecewise_compile():
     ):
 
         with set_compile_context([1, 2]):
-            model(input_buffer)
+            model(inputs)
 
             model(torch.randn(2).cuda())
             model(torch.randn(1).cuda())
