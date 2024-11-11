@@ -9,6 +9,7 @@ from torch.distributed import ProcessGroup, ReduceOp
 from vllm.distributed.device_communicators.pynccl_wrapper import (
     NCCLLibrary, buffer_type, cudaStream_t, ncclComm_t, ncclDataTypeEnum,
     ncclRedOpTypeEnum, ncclUniqueId)
+from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -18,7 +19,7 @@ class PyNcclCommunicator:
 
     def __init__(
         self,
-        group: ProcessGroup,
+        group: Union[ProcessGroup, StatelessProcessGroup],
         device: Union[int, str, torch.device],
         library_path: Optional[str] = None,
     ):
@@ -33,13 +34,18 @@ class PyNcclCommunicator:
         It is the caller's responsibility to make sure each communicator
         is bind to a unique device.
         """
-        assert dist.is_initialized()
-        assert dist.get_backend(group) != dist.Backend.NCCL, (
-            "PyNcclCommunicator should be attached to a non-NCCL group.")
+        if not isinstance(group, StatelessProcessGroup):
+            assert dist.is_initialized()
+            assert dist.get_backend(group) != dist.Backend.NCCL, (
+                "PyNcclCommunicator should be attached to a non-NCCL group.")
+            # note: this rank is the rank in the group
+            self.rank = dist.get_rank(group)
+            self.world_size = dist.get_world_size(group)
+        else:
+            self.rank = group.rank
+            self.world_size = group.world_size
+
         self.group = group
-        # note: this rank is the rank in the group
-        self.rank = dist.get_rank(group)
-        self.world_size = dist.get_world_size(group)
 
         # if world_size == 1, no need to create communicator
         if self.world_size == 1:
@@ -68,13 +74,17 @@ class PyNcclCommunicator:
         else:
             # construct an empty unique id
             self.unique_id = ncclUniqueId()
-        tensor = torch.ByteTensor(list(self.unique_id.internal))
-        ranks = dist.get_process_group_ranks(group)
-        # arg `src` in `broadcast` is the global rank
-        dist.broadcast(tensor, src=ranks[0], group=group)
-        byte_list = tensor.tolist()
-        for i, byte in enumerate(byte_list):
-            self.unique_id.internal[i] = byte
+
+        if not isinstance(group, StatelessProcessGroup):
+            tensor = torch.ByteTensor(list(self.unique_id.internal))
+            ranks = dist.get_process_group_ranks(group)
+            # arg `src` in `broadcast` is the global rank
+            dist.broadcast(tensor, src=ranks[0], group=group)
+            byte_list = tensor.tolist()
+            for i, byte in enumerate(byte_list):
+                self.unique_id.internal[i] = byte
+        else:
+            self.unique_id = group.broadcast_obj(self.unique_id, src=0)
         if isinstance(device, int):
             device = torch.device(f"cuda:{device}")
         elif isinstance(device, str):
