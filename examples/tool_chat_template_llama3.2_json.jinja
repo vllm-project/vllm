@@ -29,7 +29,12 @@
 
 {#- This block extracts the system message, so we can slot it into the right place. #}
 {%- if messages[0]['role'] == 'system' %}
-    {%- set system_message = messages[0]['content']|trim %}
+    {%- if messages[0]['content'] is string %}
+        {%- set system_message = messages[0]['content']|trim %}
+    {%- else %}
+        {#- Support vLLM's transforming of a content string to JSON. #}
+        {%- set system_message = messages[0]['content'][0]['text']|trim %}
+    {%- endif %}
     {%- set messages = messages[1:] %}
 {%- else %}
     {%- if tools is not none %}
