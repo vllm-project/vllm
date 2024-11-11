@@ -75,6 +75,9 @@ If GPU/CPU communication cannot be established, you can use the following Python
 
     print("PyTorch GLOO is successful!")
 
+    if world_size <= 1:
+        exit()
+
     # Test vLLM NCCL, with cuda graph
     from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 
