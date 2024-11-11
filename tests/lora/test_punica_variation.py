@@ -3,8 +3,6 @@ This script is mainly used to test whether trtion kernels can run normally
 under different conditions, including various batches, numbers of LoRA , and
 maximum ranks.
 """
-from unittest.mock import patch
-
 import pytest
 import torch
 
@@ -15,7 +13,6 @@ from vllm.lora.ops.sgmv_expand import sgmv_expand
 from vllm.lora.ops.sgmv_expand_slice import sgmv_expand_slice
 from vllm.lora.ops.sgmv_shrink import sgmv_shrink
 from vllm.platforms import current_platform
-from vllm.triton_utils.libentry import LibEntry
 
 from .utils import (generate_data, generate_data_for_expand_nslices,
                     ref_torch_groupgemm)
@@ -150,8 +147,6 @@ def test_punica_bgmv(
     seed: int,
     device: str,
 ):
-    from vllm.lora.ops.bgmv_expand import _bgmv_expand_kernel
-    from vllm.lora.ops.bgmv_shrink import _bgmv_shrink_kernel
 
     torch.set_default_device(device)
     current_platform.seed_everything(seed)
@@ -177,33 +172,22 @@ def test_punica_bgmv(
         device,
     )
     if op_type == "shrink":
-        # The current _bgmv_shrink_kernel does not require the libentry
-        # decoration. The purpose of adding this patch is to test the
-        # correctness of libentry.
-        with patch(
-                "vllm.lora.ops.bgmv_shrink._bgmv_shrink_kernel",
-                LibEntry(_bgmv_shrink_kernel),
-        ):
-            bgmv_shrink(
-                inputs_tensor,
-                lora_weights,
-                our_out_tensor,
-                indices,
-                scaling,
-            )
+        bgmv_shrink(
+            inputs_tensor,
+            lora_weights,
+            our_out_tensor,
+            indices,
+            scaling,
+        )
     else:
-        # ditto
-        with patch(
-                "vllm.lora.ops.bgmv_expand._bgmv_expand_kernel",
-                LibEntry(_bgmv_expand_kernel),
-        ):
-            bgmv_expand(
-                inputs_tensor,
-                lora_weights,
-                our_out_tensor,
-                indices,
-                add_inputs=True,
-            )
+
+        bgmv_expand(
+            inputs_tensor,
+            lora_weights,
+            our_out_tensor,
+            indices,
+            add_inputs=True,
+        )
     ref_torch_groupgemm(
         ref_out_tensor,
         inputs_tensor,
@@ -239,8 +223,6 @@ def test_punica_expand_nslices(
     seed: int,
     device: str,
 ):
-    from vllm.lora.ops.bgmv_expand_slice import _bgmv_expand_slice_kernel
-
     torch.set_default_device(device)
     current_platform.seed_everything(seed)
 
@@ -289,22 +271,15 @@ def test_punica_expand_nslices(
                 add_inputs=True,
             )
         else:
-            # The current _bgmv_expand_slice_kernel does not require the
-            # libentry decoration. The purpose of adding this patch is to test
-            # the correctness of libentry.
-            with patch(
-                    "vllm.lora.ops.bgmv_expand_slice._bgmv_expand_slice_kernel",
-                    LibEntry(_bgmv_expand_slice_kernel),
-            ):
-                bgmv_expand_slice(
-                    inputs_tensor,
-                    lora_weights,
-                    our_outputs,
-                    indices,
-                    slice_offset,
-                    slice_size=hidden_size,
-                    add_inputs=True,
-                )
+            bgmv_expand_slice(
+                inputs_tensor,
+                lora_weights,
+                our_outputs,
+                indices,
+                slice_offset,
+                slice_size=hidden_size,
+                add_inputs=True,
+            )
         ref_torch_groupgemm(
             ref_outputs[:, slice_offset:slice_offset + hidden_size],
             inputs_tensor,
