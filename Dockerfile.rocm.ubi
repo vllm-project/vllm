@@ -24,6 +24,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 
 FROM base AS rocm_base
 ARG ROCM_VERSION=6.2.4
+ARG PYTHON_VERSION
 
 RUN printf "[amdgpu]\n\
 name=amdgpu\n\
@@ -53,10 +54,10 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     microdnf clean all
 
 
-ENV LD_LIBRARY_PATH="$VIRTUAL_ENV/lib/python3.12/site-packages/numpy.libs:$LD_LIBRARY_PATH"
-ENV LD_LIBRARY_PATH="$VIRTUAL_ENV/lib/python3.12/site-packages/pillow.libs:$LD_LIBRARY_PATH"
-ENV LD_LIBRARY_PATH="$VIRTUAL_ENV/lib/python3.12/site-packages/triton/backends/amd/lib:$LD_LIBRARY_PATH"
-ENV LD_LIBRARY_PATH="$VIRTUAL_ENV/lib/python3.12/site-packages/torch/lib:$LD_LIBRARY_PATH"
+ENV LD_LIBRARY_PATH="$VIRTUAL_ENV/lib/python${PYTHON_VERSION}/site-packages/numpy.libs:$LD_LIBRARY_PATH"
+ENV LD_LIBRARY_PATH="$VIRTUAL_ENV/lib/python${PYTHON_VERSION}/site-packages/pillow.libs:$LD_LIBRARY_PATH"
+ENV LD_LIBRARY_PATH="$VIRTUAL_ENV/lib/python${PYTHON_VERSION}/site-packages/triton/backends/amd/lib:$LD_LIBRARY_PATH"
+ENV LD_LIBRARY_PATH="$VIRTUAL_ENV/lib/python${PYTHON_VERSION}/site-packages/torch/lib:$LD_LIBRARY_PATH"
 
 FROM rocm_base as rocm_devel
 
@@ -95,7 +96,7 @@ WORKDIR /workspace
 
 ENV LLVM_SYMBOLIZER_PATH=/opt/rocm/llvm/bin/llvm-symbolizer
 ENV PATH=$PATH:/opt/rocm/bin
-ENV CPLUS_INCLUDE_PATH=$VIRTUAL_ENV/lib/python3.12/site-packages/torch/include:/opt/rocm/include
+ENV CPLUS_INCLUDE_PATH=$VIRTUAL_ENV/lib/python${PYTHON_VERSION}/site-packages/torch/include:/opt/rocm/include
 
 
 FROM rocm_devel AS build_amdsmi
@@ -135,6 +136,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 FROM rocm_devel AS build_vllm
 ARG PYTORCH_ROCM_ARCH
+ARG PYTHON_VERSION
 ARG MAX_JOBS
 ENV MAX_JOBS=${MAX_JOBS}
 ENV PYTORCH_ROCM_ARCH=${PYTORCH_ROCM_ARCH}
@@ -149,7 +151,7 @@ ENV VLLM_INSTALL_PUNICA_KERNELS=1
 RUN --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=cache,target=/root/.cache/pip \
     --mount=type=cache,target=/root/.cache/uv \
-    ln -s /opt/vllm/lib64/python3.12/site-packages/torch/lib/libroctx64.so /opt/rocm/lib/libroctx64.so && \
+    ln -s /opt/vllm/lib64/python${PYTHON_VERSION}/site-packages/torch/lib/libroctx64.so /opt/rocm/lib/libroctx64.so && \
     uv pip install -v -U \
         ninja setuptools-scm>=8 "cmake>=3.26" packaging && \
     env CFLAGS="-march=haswell" \
