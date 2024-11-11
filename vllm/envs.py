@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     VLLM_USAGE_SOURCE: str = ""
     VLLM_CONFIGURE_LOGGING: int = 1
     VLLM_LOGGING_LEVEL: str = "INFO"
+    VLLM_LOGGING_PREFIX: str = ""
     VLLM_LOGGING_CONFIG_PATH: Optional[str] = None
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_ATTENTION_BACKEND: Optional[str] = None
@@ -48,7 +49,8 @@ if TYPE_CHECKING:
     VLLM_WORKER_MULTIPROC_METHOD: str = "fork"
     VLLM_ASSETS_CACHE: str = os.path.join(VLLM_CACHE_ROOT, "assets")
     VLLM_IMAGE_FETCH_TIMEOUT: int = 5
-    VLLM_AUDIO_FETCH_TIMEOUT: int = 5
+    VLLM_VIDEO_FETCH_TIMEOUT: int = 15
+    VLLM_AUDIO_FETCH_TIMEOUT: int = 10
     VLLM_TARGET_DEVICE: str = "cuda"
     MAX_JOBS: Optional[str] = None
     NVCC_THREADS: Optional[str] = None
@@ -66,8 +68,10 @@ if TYPE_CHECKING:
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = False
     VLLM_TORCH_COMPILE_LEVEL: int = 0
+    VLLM_TORCH_COMPILE_CONFIG: Optional[str] = None
     VLLM_CUSTOM_OPS: List[str] = []
     VLLM_DISABLED_KERNELS: List[str] = []
+    VLLM_USE_V1: bool = False
 
 
 def get_default_cache_root():
@@ -207,6 +211,11 @@ environment_variables: Dict[str, Callable[[], Any]] = {
         os.environ.get("VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE", "1") != "0"),
     "VLLM_TORCH_COMPILE_LEVEL":
     lambda: int(os.environ.get("VLLM_TORCH_COMPILE_LEVEL", "0")),
+
+    # Path to the config file for torch compile
+    "VLLM_TORCH_COMPILE_CONFIG":
+    lambda: os.environ.get("VLLM_TORCH_COMPILE_CONFIG", None),
+
     # Fine-grained control over which custom ops to enable/disable.
     # Use 'all' to enable all, 'none' to disable all.
     # Also specify a list of custom op names to enable (prefixed with a '+'),
@@ -218,6 +227,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # and disabled when running with Inductor (compile_level >= Inductor).
     "VLLM_CUSTOM_OPS":
     lambda: os.environ.get("VLLM_CUSTOM_OPS", "").replace(" ", "").split(","),
+
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id
     "LOCAL_RANK":
@@ -266,6 +276,10 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # this is used for configuring the default logging level
     "VLLM_LOGGING_LEVEL":
     lambda: os.getenv("VLLM_LOGGING_LEVEL", "INFO"),
+
+    # if set, VLLM_LOGGING_PREFIX will be prepended to all log messages
+    "VLLM_LOGGING_PREFIX":
+    lambda: os.getenv("VLLM_LOGGING_PREFIX", ""),
 
     # Trace function calls
     # If set to 1, vllm will trace function calls
@@ -365,10 +379,15 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_IMAGE_FETCH_TIMEOUT":
     lambda: int(os.getenv("VLLM_IMAGE_FETCH_TIMEOUT", "5")),
 
+    # Timeout for fetching videos when serving multimodal models
+    # Default is 15 seconds
+    "VLLM_VIDEO_FETCH_TIMEOUT":
+    lambda: int(os.getenv("VLLM_VIDEO_FETCH_TIMEOUT", "15")),
+
     # Timeout for fetching audio when serving multimodal models
-    # Default is 5 seconds
+    # Default is 10 seconds
     "VLLM_AUDIO_FETCH_TIMEOUT":
-    lambda: int(os.getenv("VLLM_AUDIO_FETCH_TIMEOUT", "5")),
+    lambda: int(os.getenv("VLLM_AUDIO_FETCH_TIMEOUT", "10")),
 
     # Path to the XLA persistent cache directory.
     # Only used for XLA devices such as TPUs.
@@ -450,6 +469,10 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_DISABLED_KERNELS":
     lambda: [] if "VLLM_DISABLED_KERNELS" not in os.environ else os.environ[
         "VLLM_DISABLED_KERNELS"].split(","),
+
+    # If set, use the V1 code path.
+    "VLLM_USE_V1":
+    lambda: bool(int(os.getenv("VLLM_USE_V1", "0"))),
 }
 
 # end-env-vars-definition

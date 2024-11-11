@@ -6,33 +6,47 @@ on:
   push:
     branches:
       - main
+    paths:
+      - "**/*.py"
+      - pyproject.toml
+      - requirements-lint.txt
+      - .github/workflows/matchers/ruff.json
+      - .github/workflows/ruff.yml
   pull_request:
     branches:
       - main
+    # This workflow is only relevant when one of the following files changes.
+    # However, we have github configured to expect and require this workflow
+    # to run and pass before github with auto-merge a pull request. Until github
+    # allows more flexible auto-merge policy, we can just run this on every PR.
+    # It doesn't take that long to run, anyway.
+    #paths:
+    #  - "**/*.py"
+    #  - pyproject.toml
+    #  - requirements-lint.txt
+    #  - .github/workflows/matchers/ruff.json
+    #  - .github/workflows/ruff.yml
 
 jobs:
   ruff:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.8", "3.9", "3.10", "3.11", "3.12"]
+        python-version: ["3.12"]
     steps:
-    - uses: actions/checkout@eef61447b9ff4aafe5dcd4e0bbf5d482be7e7871 # v4.2.1
-    - name: Set up Python ${{ matrix.python-version }}
-      uses: actions/setup-python@f677139bbe7f9c59b41e40162b753c062f5d49a3 # v5.2.0
-      with:
-        python-version: ${{ matrix.python-version }}
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements-lint.txt
-    - name: Analysing the code with ruff
-      run: |
-        echo "::add-matcher::.github/workflows/matchers/ruff.json"
-        ruff check --output-format github .
-    - name: Spelling check with codespell
-      run: |
-        codespell --toml pyproject.toml
-    - name: Run isort
-      run: |
-        isort . --check-only
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-lint.txt
+      - name: Analysing the code with ruff
+        run: |
+          echo "::add-matcher::.github/workflows/matchers/ruff.json"
+          ruff check --output-format github .
+      - name: Run isort
+        run: |
+          isort . --check-only

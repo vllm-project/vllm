@@ -1,4 +1,3 @@
-# coding=utf-8
 # Adapted from
 # https://huggingface.co/Qwen/Qwen2.5-Math-RM-72B/blob/main/modeling_qwen2_rm.py
 # Copyright 2024 The Qwen team.
@@ -8,14 +7,12 @@ from typing import Iterable, List, Optional, Tuple, Union
 
 import torch
 from torch import nn
-from transformers import Qwen2Config
 
 from vllm.attention import AttentionMetadata
-from vllm.config import CacheConfig, LoRAConfig
+from vllm.config import VllmConfig
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.pooler import Pooler, PoolingType
-from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.sequence import IntermediateTensors, PoolerOutput
 
@@ -60,24 +57,26 @@ class Qwen2ForRewardModel(nn.Module, SupportsPP):
 
     def __init__(
         self,
-        config: Qwen2Config,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        lora_config: Optional[LoRAConfig] = None,
+        vllm_config: VllmConfig,
+        prefix: str = "",
     ) -> None:
+        super().__init__()
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+        lora_config = vllm_config.lora_config
+        pooler_config = vllm_config.model_config.pooler_config
         # TODO (@robertgshaw2): see if this can be moved out
         if (cache_config.sliding_window is not None
                 and hasattr(config, "max_window_layers")):
             raise ValueError("Sliding window for some but all layers is not "
                              "supported. This model uses sliding window "
-                             "but `max_window_layers` = %s is less than "
-                             "`num_hidden_layers` = %s. Please open an issue "
-                             "to discuss this feature." % (
+                             "but `max_window_layers` = {} is less than "
+                             "`num_hidden_layers` = {}. Please open an issue "
+                             "to discuss this feature.".format(
                                  config.max_window_layers,
                                  config.num_hidden_layers,
                              ))
-
-        super().__init__()
 
         self.config = config
         self.lora_config = lora_config
@@ -93,8 +92,11 @@ class Qwen2ForRewardModel(nn.Module, SupportsPP):
             RowParallelLinear(config.hidden_size, 1,
                               quant_config=quant_config),
         )
-        self._pooler = Pooler(pooling_type=PoolingType.ALL, normalize=False)
-
+        self._pooler = Pooler.from_config_with_defaults(
+            pooler_config,
+            pooling_type=PoolingType.ALL,
+            normalize=False,
+            softmax=False)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
@@ -119,5 +121,6 @@ class Qwen2ForRewardModel(nn.Module, SupportsPP):
         return self._pooler(hidden_states, pooling_metadata)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        loader = AutoWeightsLoader(self)
+        loader = AutoWeightsLoader(self,
+                                   ignore_unexpected_prefixes=["lm_head."])
         loader.load_weights(weights)
