@@ -283,8 +283,7 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         self.quant_config = quant_config
 
-        self.language_model = Qwen2Model(config.text_config, cache_config,
-                                         quant_config)
+        self.language_model = Qwen2Model(vllm_config=vllm_config.with_hf_config(config.text_config), prefix=prefix)
         self.unpadded_vocab_size = config.text_config.vocab_size
         if config.text_config.tie_word_embeddings:
             self.lm_head = self.language_model.embed_tokens

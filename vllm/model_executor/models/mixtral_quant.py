@@ -295,12 +295,17 @@ class MixtralModel(nn.Module):
 
     def __init__(
         self,
-        config: MixtralConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        vllm_config: VllmConfig,
         prefix: str = "",
     ) -> None:
         super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+        lora_config = vllm_config.lora_config
+        pooler_config = vllm_config.model_config.pooler_config
+
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
@@ -361,7 +366,7 @@ class MixtralForCausalLM(nn.Module, SupportsPP):
         quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
-        self.model = MixtralModel(config, cache_config, quant_config)
+        self.model = MixtralModel(vllm_config=vllm_config, prefix=prefix)
         self.lm_head = ParallelLMHead(config.vocab_size,
                                       config.hidden_size,
                                       quant_config=quant_config)

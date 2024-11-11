@@ -414,7 +414,7 @@ class Gemma2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         # currently all existing Gemma models have `tie_word_embeddings` enabled
         assert config.tie_word_embeddings
         self.quant_config = quant_config
-        self.model = Gemma2Model(config, cache_config, quant_config)
+        self.model = Gemma2Model(vllm_config=vllm_config, prefix=prefix)
         self.logits_processor = LogitsProcessor(
             config.vocab_size, soft_cap=config.final_logit_softcapping)
         self.sampler = get_sampler()

@@ -331,7 +331,7 @@ class XverseForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self.lora_config = lora_config
 
         self.quant_config = quant_config
-        self.model = XverseModel(config, cache_config, quant_config)
+        self.model = XverseModel(vllm_config=vllm_config, prefix=prefix)
         self.lm_head = ParallelLMHead(config.vocab_size,
                                       config.hidden_size,
                                       quant_config=quant_config)

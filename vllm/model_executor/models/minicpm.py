@@ -350,16 +350,19 @@ class MiniCPMDecoderLayer(nn.Module):
 
 @support_torch_compile
 class MiniCPMModel(nn.Module):
-
     def __init__(
         self,
-        config: PretrainedConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        lora_config: Optional[LoRAConfig] = None,
+        vllm_config: VllmConfig,
         prefix: str = "",
     ) -> None:
         super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+        lora_config = vllm_config.lora_config
+        pooler_config = vllm_config.model_config.pooler_config
+
         self.config = config
         self.cache_config = cache_config
         self.quant_config = quant_config
@@ -472,6 +475,8 @@ class MiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
 
+        self.prefix = prefix
+        self.vllm_config = vllm_config
         self.config = config
         self.lora_config = lora_config
         self.cache_config = cache_config
@@ -503,10 +508,7 @@ class MiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             self.model.make_empty_intermediate_tensors)
 
     def _init_model(self):
-        self.model = MiniCPMModel(config=self.config,
-                                  cache_config=self.cache_config,
-                                  quant_config=self.quant_config,
-                                  lora_config=self.lora_config)
+        self.model = MiniCPMModel(vllm_config=self.vllm_config, prefix=self.prefix)
 
     def forward(
         self,

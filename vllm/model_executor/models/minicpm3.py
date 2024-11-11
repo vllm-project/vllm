@@ -239,7 +239,4 @@ class MiniCPM3ForCausalLM(MiniCPMForCausalLM):
     # are inherited from MiniCPMForCausalLM
 
     def _init_model(self):
-        self.model = MiniCPM3Model(config=self.config,
-                                   cache_config=self.cache_config,
-                                   quant_config=self.quant_config,
-                                   lora_config=self.lora_config)
+        self.model = MiniCPM3Model(vllm_config=self.vllm_config, prefix=self.prefix)

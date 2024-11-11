@@ -419,11 +419,17 @@ class Idefics3Model(nn.Module):
 
     def __init__(
         self,
-        config: Idefics3Config,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-    ):
+        vllm_config: VllmConfig,
+        prefix: str = "",
+    ) -> None:
         super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+        lora_config = vllm_config.lora_config
+        pooler_config = vllm_config.model_config.pooler_config
+
         self.config = config
         self.padding_idx = self.config.text_config.pad_token_id
         self.vocab_size = self.config.text_config.vocab_size
@@ -628,7 +634,7 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal):
         self.config = config
         self.multimodal_config = multimodal_config
 
-        self.model = Idefics3Model(config, cache_config, quant_config)
+        self.model = Idefics3Model(vllm_config=vllm_config, prefix=prefix)
         self.image_token_id = self.config.image_token_id
 
         self.lm_head = ParallelLMHead(

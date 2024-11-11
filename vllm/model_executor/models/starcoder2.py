@@ -195,12 +195,19 @@ class Starcoder2DecoderLayer(nn.Module):
 @support_torch_compile
 class Starcoder2Model(nn.Module):
 
-    def __init__(self,
-                 config: Starcoder2Config,
-                 cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 prefix: str = ""):
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+    ) -> None:
         super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+        lora_config = vllm_config.lora_config
+        pooler_config = vllm_config.model_config.pooler_config
+
         self.config = config
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
@@ -255,9 +262,7 @@ class Starcoder2ForCausalLM(nn.Module, SupportsPP):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         self.config = config
-        self.model = Starcoder2Model(config,
-                                     cache_config,
-                                     quant_config=quant_config)
+        self.model = Starcoder2Model(vllm_config=vllm_config, prefix=prefix)
         self.vocab_size = config.vocab_size
         self.unpadded_vocab_size = config.vocab_size
         if config.tie_word_embeddings:

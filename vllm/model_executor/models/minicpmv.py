@@ -401,10 +401,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
         self.multimodal_config = multimodal_config
 
         self.version = get_version_by_config(self.config)
-        self.llm = self.init_llm(config,
-                                 cache_config,
-                                 quant_config,
-                                 prefix="llm")
+        self.llm = self.init_llm(vllm_config=vllm_config, prefix="llm")
         self.vpm = self.init_vision_module(config, quant_config, prefix="vpm")
         param_dtype = torch.get_default_dtype()
         self.vpm.to(dtype=param_dtype)
@@ -661,9 +658,7 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
 
     def init_llm(
         self,
-        config: PretrainedConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        vllm_config: VllmConfig,
         prefix: str = "",
     ) -> nn.Module:
         raise NotImplementedError
@@ -711,15 +706,10 @@ class MiniCPMV2_0(MiniCPMVBaseModel):
 
     def init_llm(
         self,
-        config: PretrainedConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        vllm_config: VllmConfig,
         prefix: str = "",
     ) -> nn.Module:
-
-        return LLMWrapper(MiniCPMModel(config,
-                                       cache_config=cache_config,
-                                       quant_config=quant_config,
+        return LLMWrapper(MiniCPMModel(vllm_config=vllm_config,
                                        prefix=prefix),
                           name="model")
 
@@ -875,14 +865,10 @@ class MiniCPMV2_5(MiniCPMVBaseModel, SupportsLoRA):
 
     def init_llm(
         self,
-        config: PretrainedConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        vllm_config: VllmConfig,
         prefix: str = "",
     ) -> nn.Module:
-        return LLMWrapper(LlamaModel(config,
-                                     cache_config=cache_config,
-                                     quant_config=quant_config,
+        return LLMWrapper(LlamaModel(vllm_config=vllm_config,
                                      prefix=prefix),
                           name="model")
 
@@ -1022,15 +1008,11 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
 
     def init_llm(
         self,
-        config: PretrainedConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        vllm_config: VllmConfig,
         prefix: str = "",
     ) -> nn.Module:
 
-        return LLMWrapper(Qwen2Model(config,
-                                     cache_config=cache_config,
-                                     quant_config=quant_config,
+        return LLMWrapper(Qwen2Model(vllm_config=vllm_config,
                                      prefix=prefix),
                           name="model")
 

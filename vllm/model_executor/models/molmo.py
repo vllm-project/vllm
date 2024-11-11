@@ -718,12 +718,17 @@ class MolmoModel(nn.Module):
 
     def __init__(
         self,
-        config: PretrainedConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        vllm_config: VllmConfig,
         prefix: str = "",
     ) -> None:
         super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+        lora_config = vllm_config.lora_config
+        pooler_config = vllm_config.model_config.pooler_config
+
         self.config = config
 
         self.embedding_size = config.embedding_size or config.vocab_size
@@ -1040,7 +1045,7 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         vision_config = VisionBackboneConfig()
         self.vision_backbone = MolmoVisionBackbone(config, vision_config,
                                                    quant_config)
-        self.model = MolmoModel(config, cache_config, quant_config)
+        self.model = MolmoModel(vllm_config=vllm_config, prefix=prefix)
 
         if self.config.weight_tying:
             self.lm_head = self.model.transformer.wte

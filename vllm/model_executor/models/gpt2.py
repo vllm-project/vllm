@@ -186,12 +186,17 @@ class GPT2Model(nn.Module):
 
     def __init__(
         self,
-        config: GPT2Config,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        vllm_config: VllmConfig,
         prefix: str = "",
-    ):
+    ) -> None:
         super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+        lora_config = vllm_config.lora_config
+        pooler_config = vllm_config.model_config.pooler_config
+
         self.config = config
         assert not config.add_cross_attention
         assert not config.scale_attn_by_inverse_layer_idx
@@ -251,9 +256,7 @@ class GPT2LMHeadModel(nn.Module, SupportsPP):
         quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
-        self.transformer = GPT2Model(config,
-                                     cache_config,
-                                     quant_config,
+        self.transformer = GPT2Model(vllm_config=vllm_config,
                                      prefix="transformer")
         if self.config.tie_word_embeddings:
             self.lm_head = self.transformer.wte

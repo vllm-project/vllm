@@ -179,12 +179,17 @@ class GPTJModel(nn.Module):
 
     def __init__(
         self,
-        config: GPTJConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        vllm_config: VllmConfig,
         prefix: str = "",
-    ):
+    ) -> None:
         super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+        lora_config = vllm_config.lora_config
+        pooler_config = vllm_config.model_config.pooler_config
+
         self.config = config
         self.embed_dim = config.n_embd
         self.wte = VocabParallelEmbedding(
@@ -241,7 +246,7 @@ class GPTJForCausalLM(nn.Module, SupportsPP):
         self.config = config
         self.quant_config = quant_config
         assert not config.tie_word_embeddings
-        self.transformer = GPTJModel(config, cache_config, quant_config)
+        self.transformer = GPTJModel(vllm_config=vllm_config, prefix=prefix)
         self.lm_head = ParallelLMHead(
             config.vocab_size,
             config.n_embd,

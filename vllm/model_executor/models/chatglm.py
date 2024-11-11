@@ -483,11 +483,16 @@ class ChatGLMModel(nn.Module):
 
     def __init__(
         self,
-        config: ChatGLMConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-    ):
+        vllm_config: VllmConfig,
+        prefix: str = "",
+    ) -> None:
         super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+        lora_config = vllm_config.lora_config
+        pooler_config = vllm_config.model_config.pooler_config
 
         self.config = config
 
@@ -611,7 +616,7 @@ class ChatGLMForCausalLM(nn.Module, SupportsLoRA, SupportsPP,
         self.quant_config = quant_config
         self.max_position_embeddings = getattr(config, "max_sequence_length",
                                                8192)
-        self.transformer = ChatGLMModel(config, cache_config, quant_config)
+        self.transformer = ChatGLMModel(vllm_config=vllm_config, prefix=prefix)
         if self.config.tie_word_embeddings:
             self.transformer.output_layer.weight = (
                 self.transformer.embedding.weight)

@@ -191,12 +191,17 @@ class GPTNeoXModel(nn.Module):
 
     def __init__(
         self,
-        config: GPTNeoXConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        vllm_config: VllmConfig,
         prefix: str = "",
-    ):
+    ) -> None:
         super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+        lora_config = vllm_config.lora_config
+        pooler_config = vllm_config.model_config.pooler_config
+
         self.config = config
 
         self.embed_in = VocabParallelEmbedding(
@@ -253,7 +258,7 @@ class GPTNeoXForCausalLM(nn.Module, SupportsPP):
         quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
-        self.gpt_neox = GPTNeoXModel(config, cache_config, quant_config)
+        self.gpt_neox = GPTNeoXModel(vllm_config=vllm_config, prefix=prefix)
         self.embed_out = ParallelLMHead(
             config.vocab_size,
             config.hidden_size,

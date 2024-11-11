@@ -255,13 +255,17 @@ class CohereModel(nn.Module):
 
     def __init__(
         self,
-        config: CohereConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        lora_config: Optional[LoRAConfig] = None,
+        vllm_config: VllmConfig,
         prefix: str = "",
-    ):
+    ) -> None:
         super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+        lora_config = vllm_config.lora_config
+        pooler_config = vllm_config.model_config.pooler_config
+
         self.config = config
         lora_vocab = (lora_config.lora_extra_vocab_size *
                       (lora_config.max_loras or 1)) if lora_config else 0
@@ -353,10 +357,7 @@ class CohereForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size,
                                                 scale=config.logit_scale)
-        self.model = CohereModel(config,
-                                 cache_config,
-                                 quant_config,
-                                 lora_config=lora_config)
+        self.model = CohereModel(vllm_config=vllm_config, prefix=prefix)
         self.sampler = get_sampler()
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)

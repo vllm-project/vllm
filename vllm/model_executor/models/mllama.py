@@ -941,12 +941,16 @@ class MllamaTextModel(nn.Module):
 
     def __init__(
         self,
-        config: config_mllama.MllamaTextConfig,
-        cache_config: Optional[CacheConfig],
-        quant_config: Optional[QuantizationConfig],
+        vllm_config: VllmConfig,
         prefix: str = "",
     ) -> None:
         super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+        lora_config = vllm_config.lora_config
+        pooler_config = vllm_config.model_config.pooler_config
 
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
@@ -1031,16 +1035,19 @@ class MllamaForCausalLM(nn.Module):
 
     def __init__(
         self,
-        config: config_mllama.MllamaTextConfig,
-        cache_config: Optional[CacheConfig],
-        quant_config: Optional[QuantizationConfig],
+        vllm_config: VllmConfig,
         prefix: str = "",
     ) -> None:
         super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+        lora_config = vllm_config.lora_config
+        pooler_config = vllm_config.model_config.pooler_config
+
         self.vocab_size = config.vocab_size
-        self.model = MllamaTextModel(config,
-                                     cache_config,
-                                     quant_config,
+        self.model = MllamaTextModel(vllm_config=vllm_config,
                                      prefix=f"{prefix}.model")
         self.lm_head = ParallelLMHead(
             config.vocab_size,
@@ -1129,9 +1136,7 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
                                               quant_config,
                                               prefix="vision_model")
         self.language_model = MllamaForCausalLM(
-            config.text_config,
-            cache_config=cache_config,
-            quant_config=quant_config,
+            vllm_config=vllm_config,
             prefix="language_model",
         )
         self.multi_modal_projector = ColumnParallelLinear(

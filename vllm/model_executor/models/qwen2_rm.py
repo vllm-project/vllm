@@ -82,7 +82,7 @@ class Qwen2ForRewardModel(nn.Module, SupportsPP):
         self.lora_config = lora_config
 
         self.quant_config = quant_config
-        self.model = Qwen2Model(config, cache_config, quant_config)
+        self.model = Qwen2Model(vllm_config=vllm_config, prefix=prefix)
 
         self.score = nn.Sequential(
             ColumnParallelLinear(config.hidden_size,

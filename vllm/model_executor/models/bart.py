@@ -739,12 +739,18 @@ class BartModel(nn.Module):
         "encoder.embed_tokens.weight", "decoder.embed_tokens.weight"
     ]
 
-    def __init__(self,
-                 config: BartConfig,
-                 cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 lora_config: Optional[LoRAConfig] = None):
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+    ) -> None:
         super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+        lora_config = vllm_config.lora_config
+        pooler_config = vllm_config.model_config.pooler_config
 
         self.config = config
 
@@ -820,10 +826,7 @@ class BartForConditionalGeneration(nn.Module):
         # currently all existing BART models have `tie_word_embeddings` enabled
         assert config.tie_word_embeddings
         self.config = config
-        self.model = BartModel(config,
-                               cache_config,
-                               quant_config,
-                               lora_config=lora_config)
+        self.model = BartModel(vllm_config=vllm_config, prefix=prefix)
 
         self.unpadded_vocab_size = config.vocab_size
         if lora_config:

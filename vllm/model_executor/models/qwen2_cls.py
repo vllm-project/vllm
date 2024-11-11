@@ -70,7 +70,7 @@ class Qwen2ForSequenceClassification(nn.Module):
         self.lora_config = lora_config
 
         self.quant_config = quant_config
-        self.model = Qwen2Model(config, cache_config, quant_config)
+        self.model = Qwen2Model(vllm_config=vllm_config, prefix=prefix)
 
         self.score = RowParallelLinear(config.hidden_size,
                                        config.num_labels,

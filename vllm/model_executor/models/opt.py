@@ -295,12 +295,17 @@ class OPTModel(nn.Module):
 
     def __init__(
         self,
-        config: OPTConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        vllm_config: VllmConfig,
         prefix: str = "",
-    ):
+    ) -> None:
         super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+        lora_config = vllm_config.lora_config
+        pooler_config = vllm_config.model_config.pooler_config
+
         self.decoder = OPTDecoder(config,
                                   cache_config,
                                   quant_config,
@@ -354,9 +359,7 @@ class OPTForCausalLM(nn.Module, SupportsPP):
         super().__init__()
         self.config = config
         self.quant_config = quant_config
-        self.model = OPTModel(config,
-                              cache_config,
-                              quant_config,
+        self.model = OPTModel(vllm_config=vllm_config,
                               prefix=maybe_prefix(prefix, "model"))
         if self.config.tie_word_embeddings:
             self.lm_head = self.model.decoder.embed_tokens

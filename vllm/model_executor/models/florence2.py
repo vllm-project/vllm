@@ -23,11 +23,19 @@ from .utils import AutoWeightsLoader
 
 class Florence2LanguageModel(nn.Module):
 
-    def __init__(self,
-                 config: PretrainedConfig,
-                 cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None):
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+    ) -> None:
         super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+        lora_config = vllm_config.lora_config
+        pooler_config = vllm_config.model_config.pooler_config
+
         self.config = config
 
         self.padding_idx = config.pad_token_id
@@ -93,15 +101,21 @@ class Florence2LanguageModel(nn.Module):
 
 class Florence2LanguageForConditionalGeneration(nn.Module):
 
-    def __init__(self,
-                 config: PretrainedConfig,
-                 cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None):
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+    ) -> None:
         super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+        lora_config = vllm_config.lora_config
+        pooler_config = vllm_config.model_config.pooler_config
+
         self.config = config
-        self.model = Florence2LanguageModel(config,
-                                            cache_config=cache_config,
-                                            quant_config=quant_config)
+        self.model = Florence2LanguageModel(vllm_config=vllm_config, prefix=prefix)
         embed_scale = math.sqrt(
             config.d_model) if config.scale_embedding else 1.0
 
@@ -197,9 +211,8 @@ class Florence2ForConditionalGeneration(nn.Module):
 
         # TODO(Isotr0py): Add vision backbone
         self.language_model = Florence2LanguageForConditionalGeneration(
-            config=config.text_config,
-            cache_config=cache_config,
-            quant_config=quant_config)
+            config=vllm_config.with_hf_config(config.text_config),
+            prefix=prefix,)
 
     @property
     def sampler(self):

@@ -273,13 +273,17 @@ class LlamaModel(nn.Module):
 
     def __init__(
         self,
-        config: LlamaConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        lora_config: Optional[LoRAConfig] = None,
+        vllm_config: VllmConfig,
         prefix: str = "",
     ) -> None:
         super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+        lora_config = vllm_config.lora_config
+        pooler_config = vllm_config.model_config.pooler_config
+
         self.config = config
         self.padding_idx = config.pad_token_id
         lora_vocab = (lora_config.lora_extra_vocab_size *
@@ -506,10 +510,7 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self.config = config
         self.lora_config = lora_config
 
-        self.model = LlamaModel(config,
-                                cache_config,
-                                quant_config,
-                                lora_config=lora_config,
+        self.model = LlamaModel(vllm_config=vllm_config,
                                 prefix=maybe_prefix(prefix, "model"))
         if get_pp_group().is_last_rank:
             self.unpadded_vocab_size = config.vocab_size
@@ -665,10 +666,7 @@ class LlamaEmbeddingModel(nn.Module, SupportsLoRA, SupportsPP):
         lora_config = vllm_config.lora_config
         pooler_config = vllm_config.model_config.pooler_config
 
-        self.model = LlamaModel(config,
-                                cache_config,
-                                quant_config,
-                                lora_config,
+        self.model = LlamaModel(vllm_config=vllm_config,
                                 prefix=maybe_prefix(prefix, "model"))
         self._pooler = Pooler.from_config_with_defaults(
             pooler_config,

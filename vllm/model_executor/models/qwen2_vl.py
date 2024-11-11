@@ -989,9 +989,7 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             prefix="visual",
         )
 
-        self.model = Qwen2Model(config,
-                                cache_config,
-                                quant_config,
+        self.model = Qwen2Model(vllm_config=vllm_config,
                                 prefix="model")
 
         if get_pp_group().is_last_rank:
