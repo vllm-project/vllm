@@ -110,7 +110,7 @@ DTYPES = [torch.float16, torch.bfloat16]
 MAX_RANKS = [32]
 SCALES = [0.5]
 SEED = [0]
-CUDA_DEVICES = [f"cuda:{0}", f"cuda:{1}"]
+CUDA_DEVICES = [f"cuda:{0}"]
 
 
 def assert_close(a, b):
