@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type, cast
 import torch
 
 from vllm.attention import AttentionMetadata
+from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.multimodal import MultiModalKwargs
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
@@ -96,11 +97,21 @@ class CPUEncoderDecoderModelRunner(
             encoder_input_positions_tensor,
         ) = self._prepare_encoder_model_input_tensors(seq_group_metadata_list,
                                                       model_input)
+        # Sampling metadata is only required for the final pp group
+        generators = self.get_generators(finished_requests_ids)
+        sampling_metadata = SamplingMetadata.prepare(seq_group_metadata_list,
+                                                     model_input.seq_lens,
+                                                     model_input.query_lens,
+                                                     self.device,
+                                                     pin_memory=False,
+                                                     generators=generators)
         return dataclasses.replace(
             model_input,
+            sampling_metadata=sampling_metadata,
             attn_metadata=attn_metadata,
             encoder_input_tokens=encoder_input_tokens_tensor,
             encoder_input_positions=encoder_input_positions_tensor,
+            virtual_engine=virtual_engine,
         )
 
     def _prepare_encoder_model_input_tensors(

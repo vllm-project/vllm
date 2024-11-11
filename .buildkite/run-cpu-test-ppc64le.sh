@@ -18,6 +18,8 @@ source /etc/environment
 docker run -itd --entrypoint /bin/bash -v ~/.cache/huggingface:/root/.cache/huggingface --privileged=true --network host -e HF_TOKEN="$HF_TOKEN" --name cpu-test cpu-test
 
 function cpu_tests() {
+  set -e
+
   # Run basic model test
   docker exec cpu-test bash -c "
     set -e
