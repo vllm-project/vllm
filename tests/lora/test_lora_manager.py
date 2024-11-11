@@ -26,7 +26,7 @@ EMBEDDING_MODULES = {
 EMBEDDING_PADDING_MODULES = ["lm_head"]
 
 CUDA_DEVICES = [
-    f"cuda:{1}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
+    f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)
 ]
 
 
@@ -624,9 +624,3 @@ def test_packed_loras(dist_init, dummy_model_gate_up, device):
                                model_lora1.get_lora("up_proj").lora_a)
     torch.testing.assert_close(packed_lora1.lora_b[1],
                                model_lora1.get_lora("up_proj").lora_b)
-
-
-if __name__ == "__main__":
-    pytest.main([
-        "/home/sobey/Code/Code_leejee/vllm_dev/vllm/tests/lora/test_lora_manager.py::test_replace_submodules"
-    ])
