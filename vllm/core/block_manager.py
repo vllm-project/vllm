@@ -409,7 +409,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         swapping out the given sequence_group with num_lookahead_slots.
 
         Args:
-            sequence_group (SequenceGroup): The sequence group to swap in.
+            sequence_group (SequenceGroup): The sequence group to swap out.
 
         Returns:
             List[Tuple[int, int]]: The mapping of swapping block from 
