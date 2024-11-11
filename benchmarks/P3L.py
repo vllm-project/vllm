@@ -83,7 +83,6 @@ def vllm_init(args):
     sampling_params = SamplingParams(n=1,
                                      temperature=0.0,
                                      top_p=1,
-                                     use_beam_search=False,
                                      ignore_eos=True,
                                      ppl_measurement=True,
                                      future_context=[],
