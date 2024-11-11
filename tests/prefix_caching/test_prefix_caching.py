@@ -65,11 +65,14 @@ def test_mixed_requests(
         req_outputs = vllm_model.model.generate(example_prompts, greedy_params)
 
         # Verify number of cached tokens
-        expected_num_cached_tokens = (
-            len(req_outputs[cached_position].prompt_token_ids) //
-            block_size) * block_size
-        assert req_outputs[
-            cached_position].num_cached_tokens == expected_num_cached_tokens
+        for i in range(len(req_outputs)):
+            if i == cached_position:
+                expected_num_cached_tokens = (
+                    len(req_outputs[i].prompt_token_ids) //
+                    block_size) * block_size
+            else:
+                expected_num_cached_tokens = 0
+            assert req_outputs[i].num_cached_tokens == expected_num_cached_tokens
 
         vllm_outputs = [
             (output.prompt_token_ids + list(output.outputs[0].token_ids),
