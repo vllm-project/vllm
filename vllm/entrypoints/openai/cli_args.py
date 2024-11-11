@@ -190,7 +190,7 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         default=False,
         help=
         "Enable auto tool choice for supported models. Use --tool-call-parser"
-        "to specify which parser to use")
+        " to specify which parser to use")
 
     valid_tool_parsers = ToolParserManager.tool_parsers.keys()
     parser.add_argument(
