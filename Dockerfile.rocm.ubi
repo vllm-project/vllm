@@ -19,7 +19,8 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     python${PYTHON_VERSION}-pip \
     python${PYTHON_VERSION}-wheel && \
     python${PYTHON_VERSION} -m venv $VIRTUAL_ENV && \
-    pip install -U pip wheel setuptools uv
+    pip install -U pip wheel setuptools uv && \
+ microdnf clean all
 
 
 FROM base AS rocm_base
@@ -253,7 +254,7 @@ USER root
 RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,from=build_vllm,src=/workspace/dist,target=/install/vllm/ \
-    uv pip install /install/vllm/*.whl vllm-tgis-adapter==0.5.3
+    HOME=/root/ uv pip install /install/vllm/*.whl vllm-tgis-adapter==0.5.3
 
 ENV GRPC_PORT=8033 \
     PORT=8000 \
