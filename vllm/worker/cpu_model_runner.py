@@ -2,7 +2,8 @@ import dataclasses
 import weakref
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type, Union
+from typing import (TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type,
+                    TypeVar, Union)
 
 import torch
 from torch import nn
@@ -31,6 +32,7 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+TModelInputForCPU = TypeVar('TModelInputForCPU', bound="ModelInputForCPU")
 _PAD_SLOT_ID = -1
 
 
@@ -60,10 +62,10 @@ class ModelInputForCPU(ModelRunnerInputBase):
 
     @classmethod
     def from_broadcasted_tensor_dict(
-        cls: Type["ModelInputForCPU"],
+        cls: Type[TModelInputForCPU],
         tensor_dict: Dict[str, Any],
         attn_backend: Optional["AttentionBackend"] = None
-    ) -> "ModelInputForCPU":
+    ) -> TModelInputForCPU:
         if attn_backend is not None:
             tensor_dict = _init_attn_metadata_from_tensor_dict(
                 attn_backend, tensor_dict)
@@ -255,11 +257,14 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
                     slot_mapping.append(_PAD_SLOT_ID)
                     continue
 
-                block_number = block_table[i //
-                                           self.block_size]  # type: ignore
-                block_offset = i % self.block_size  # type: ignore
-                slot = block_number * self.block_size + block_offset
-                slot_mapping.append(slot)
+                # For encoder-only models, the block_table is None,
+                # and there is no need to initialize the slot_mapping.
+                if block_table is not None:
+                    block_number = block_table[i //
+                                               self.block_size]  # type: ignore
+                    block_offset = i % self.block_size  # type: ignore
+                    slot = block_number * self.block_size + block_offset
+                    slot_mapping.append(slot)
 
         if any(input_mrope_positions):
             input_positions = None  # type: ignore
@@ -402,10 +407,12 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
         )
 
 
-class CPUModelRunner(ModelRunnerBase[ModelInputForCPU]):
-    _model_input_cls: Type[ModelInputForCPUWithSamplingMetadata] = (
-        ModelInputForCPUWithSamplingMetadata)
-    _builder_cls: Type[ModelInputForCPUBuilder] = ModelInputForCPUBuilder
+class CPUModelRunnerBase(ModelRunnerBase[TModelInputForCPU]):
+    """
+    Helper class for shared methods between CPU model runners.
+    """
+    _model_input_cls: Type[TModelInputForCPU]
+    _builder_cls: Type[ModelInputForCPUBuilder]
 
     def __init__(
         self,
@@ -448,20 +455,11 @@ class CPUModelRunner(ModelRunnerBase[ModelInputForCPU]):
     def load_model(self) -> None:
         self.model = get_model(vllm_config=self.vllm_config)
 
-    def make_model_input_from_broadcasted_tensor_dict(
-        self,
-        tensor_dict: Dict[str, Any],
-    ) -> ModelInputForCPUWithSamplingMetadata:
-        return ModelInputForCPUWithSamplingMetadata.from_broadcasted_tensor_dict(  # noqa: E501
-            tensor_dict,
-            attn_backend=self.attn_backend,
-        )
-
     def _prepare_model_input_tensors(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
         finished_requests_ids: Optional[List[str]] = None
-    ) -> ModelInputForCPUWithSamplingMetadata:
+    ) -> TModelInputForCPU:
         """Helper method to prepare the model input based on a given sequence
         group. Prepares metadata needed for the base model forward pass but not
         metadata for possible additional steps, e.g., sampling.
@@ -472,6 +470,21 @@ class CPUModelRunner(ModelRunnerBase[ModelInputForCPU]):
             builder.add_seq_group(seq_group_metadata)
 
         return builder.build()  # type: ignore
+
+
+class CPUModelRunner(CPUModelRunnerBase[ModelInputForCPUWithSamplingMetadata]):
+    _model_input_cls: Type[ModelInputForCPUWithSamplingMetadata] = (
+        ModelInputForCPUWithSamplingMetadata)
+    _builder_cls: Type[ModelInputForCPUBuilder] = ModelInputForCPUBuilder
+
+    def make_model_input_from_broadcasted_tensor_dict(
+        self,
+        tensor_dict: Dict[str, Any],
+    ) -> ModelInputForCPUWithSamplingMetadata:
+        return ModelInputForCPUWithSamplingMetadata.from_broadcasted_tensor_dict(  # noqa: E501
+            tensor_dict,
+            attn_backend=self.attn_backend,
+        )
 
     def prepare_model_input(
         self,
