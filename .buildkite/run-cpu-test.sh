@@ -20,6 +20,8 @@ docker run -itd --entrypoint /bin/bash -v ~/.cache/huggingface:/root/.cache/hugg
  --cpuset-mems=1 --privileged=true --network host -e HF_TOKEN --env VLLM_CPU_KVCACHE_SPACE=4 --shm-size=4g --name cpu-test-avx2 cpu-test-avx2
 
 function cpu_tests() {
+  set -e
+
   # offline inference
   docker exec cpu-test-avx2 bash -c "
     set -e
