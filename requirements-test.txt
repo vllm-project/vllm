@@ -14,7 +14,6 @@ aiohappyeyeballs==2.4.3
     # via aiohttp
 aiohttp==3.10.10
     # via
-    #   -r requirements-test.in
     #   datasets
     #   fsspec
     #   lm-eval
@@ -40,15 +39,15 @@ attrs==24.2.0
     #   referencing
 audioread==3.0.1
     # via librosa
-awscli==1.35.19
+awscli==1.35.23
     # via -r requirements-test.in
 bitsandbytes==0.44.1
     # via -r requirements-test.in
 black==24.10.0
     # via datamodel-code-generator
-boto3==1.35.53
+boto3==1.35.57
     # via tensorizer
-botocore==1.35.53
+botocore==1.35.57
     # via
     #   awscli
     #   boto3
@@ -82,7 +81,7 @@ cupy-cuda12x==13.3.0
     # via ray
 cycler==0.12.1
     # via matplotlib
-datamodel-code-generator==0.26.2
+datamodel-code-generator==0.26.3
     # via -r requirements-test.in
 dataproperty==1.0.1
     # via
@@ -263,7 +262,6 @@ numpy==1.26.4
     #   mistral-common
     #   numba
     #   numexpr
-    #   opencv-python
     #   opencv-python-headless
     #   pandas
     #   peft
@@ -307,8 +305,6 @@ nvidia-nvjitlink-cu12==12.4.127
     #   torch
 nvidia-nvtx-cu12==12.4.127
     # via torch
-opencv-python==4.10.0.84
-    # via -r requirements-test.in
 opencv-python-headless==4.10.0.84
     # via mistral-common
 packaging==24.1
@@ -440,7 +436,6 @@ regex==2024.9.11
     #   transformers
 requests==2.32.3
     # via
-    #   -r requirements-test.in
     #   buildkite-test-collector
     #   datasets
     #   evaluate
@@ -521,7 +516,7 @@ tiktoken==0.7.0
     #   mistral-common
 timm==1.0.11
     # via -r requirements-test.in
-tokenizers==0.20.1
+tokenizers==0.20.3
     # via transformers
 toml==0.10.2
     # via datamodel-code-generator
