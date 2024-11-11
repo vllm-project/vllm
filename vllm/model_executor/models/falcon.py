@@ -27,7 +27,7 @@ from transformers import FalconConfig as HF_FalconConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
@@ -48,7 +48,8 @@ from vllm.transformers_utils.configs import RWConfig
 
 from .interfaces import SupportsPP
 from .utils import (is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, make_layers)
+                    make_empty_intermediate_tensors_factory, make_layers,
+                    maybe_prefix)
 
 FalconConfig = Union[HF_FalconConfig, RWConfig]
 
@@ -332,14 +333,13 @@ class FalconDecoderLayer(nn.Module):
 @support_torch_compile
 class FalconModel(nn.Module):
 
-    def __init__(
-        self,
-        config: FalconConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+
         self.config = config
         self.embed_dim = config.hidden_size
         self.num_heads = config.num_attention_heads
@@ -403,14 +403,17 @@ class FalconForCausalLM(nn.Module, SupportsPP):
 
     def __init__(
         self,
-        config: FalconConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        vllm_config: VllmConfig,
+        prefix: str = "",
     ):
         super().__init__()
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
-        self.transformer = FalconModel(config, cache_config, quant_config)
+        self.transformer = FalconModel(vllm_config=vllm_config,
+                                       prefix=maybe_prefix(
+                                           prefix, "transformer"))
         # only Falcon-11B doesn't share lm_head weight with word embeddings
         # and previous Falcon model doesn't have tie_word_embeddings config
         # so we set tie_word_embeddings to True by default

@@ -18,7 +18,7 @@ from transformers import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -38,7 +38,8 @@ from vllm.utils import print_warning_once
 
 from .interfaces import SupportsPP
 from .utils import (is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, make_layers)
+                    make_empty_intermediate_tensors_factory, make_layers,
+                    maybe_prefix)
 
 
 class OlmoeMoE(nn.Module):
@@ -243,14 +244,13 @@ class OlmoeDecoderLayer(nn.Module):
 @support_torch_compile
 class OlmoeModel(nn.Module):
 
-    def __init__(
-        self,
-        config: PretrainedConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
@@ -309,16 +309,14 @@ class OlmoeForCausalLM(nn.Module, SupportsPP):
 
     fall_back_to_pt_during_load = False
 
-    def __init__(
-        self,
-        config: PretrainedConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-    ) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
-        self.model = OlmoeModel(config, cache_config, quant_config)
+        self.model = OlmoeModel(vllm_config=vllm_config,
+                                prefix=maybe_prefix(prefix, "model"))
         self.lm_head = ParallelLMHead(config.vocab_size,
                                       config.hidden_size,
                                       quant_config=quant_config)
