@@ -34,8 +34,6 @@ function cpu_tests() {
       decord einops librosa peft Pillow sentence-transformers soundfile \
       transformers_stream_generator matplotlib datamodel_code_generator
     pip install torchvision --index-url https://download.pytorch.org/whl/cpu
-    # Intentional failed test
-    pytest tests/cpu/test_failed.py
     pytest -v -s tests/models/embedding/language
     pytest -v -s tests/models/encoder_decoder/language
     pytest -v -s tests/models/decoder_only/language/test_models.py
