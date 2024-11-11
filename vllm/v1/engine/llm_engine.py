@@ -125,7 +125,10 @@ class LLMEngine:
             # Ping the tokenizer to ensure liveness if it runs in a
             # different process.
             self.tokenizer.ping()
-        self.detokenizer = Detokenizer(self.model_config.tokenizer)
+        self.detokenizer = Detokenizer(
+            tokenizer_name=self.model_config.tokenizer,
+            tokenizer_mode=self.model_config.tokenizer_mode,
+            trust_remote_code=self.model_config.trust_remote_code)
 
         self.generation_config_fields = _load_generation_config_dict(
             model_config)
