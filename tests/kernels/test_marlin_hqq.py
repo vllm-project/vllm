@@ -12,8 +12,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_make_empty_g_idx, marlin_permute_scales)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
     MarlinWorkspace)
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    gptq_pack)
+from vllm.model_executor.layers.quantization.utils.quant_utils import gptq_pack
 from vllm.scalar_type import scalar_types
 
 USE_FP32_REDUCE_OPTS = [False, True]
@@ -31,6 +30,7 @@ MNK_FACTORS = [
     (67, 13, 11),
 ]
 
+
 def compute_max_diff(output, output_ref):
     return torch.mean(torch.abs(output - output_ref)) / torch.mean(
         torch.abs(output_ref))
@@ -38,6 +38,7 @@ def compute_max_diff(output, output_ref):
 
 def rand_data(shape, dtype=torch.float16):
     return torch.randn(shape, dtype=dtype, device="cuda")
+
 
 @pytest.mark.skipif(not is_quant_method_supported("gptq_marlin"),
                     reason="Marlin is not supported on this GPU type.")
@@ -118,4 +119,3 @@ def test_hqq_marlin_gemm(
     max_diff = compute_max_diff(output, output_ref)
 
     assert max_diff < 0.04
-
