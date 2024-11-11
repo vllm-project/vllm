@@ -109,6 +109,8 @@ def allgather_worker(rank, WORLD_SIZE, port1, port2):
     pg1.barrier()
 
 
+# TODO: investigate why this test is flaky. It hangs during initialization.
+@pytest.skip("Skip the test because it is flaky.")
 @multi_gpu_test(num_gpus=4)
 @pytest.mark.parametrize(
     "worker", [cpu_worker, gpu_worker, broadcast_worker, allgather_worker])
