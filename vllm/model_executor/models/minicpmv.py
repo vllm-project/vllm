@@ -1134,4 +1134,4 @@ class MiniCPMV(MiniCPMVBaseModel, SupportsLoRA):
         if instance_class is None:
             raise ValueError(
                 "Currently, MiniCPMV only supports versions 2.0, 2.5, and 2.6")
-        return instance_class(vllm_config, prefix=prefix)
+        return instance_class(vllm_config=vllm_config, prefix=prefix)

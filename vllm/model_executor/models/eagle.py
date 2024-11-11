@@ -42,7 +42,7 @@ class EAGLE(nn.Module):
         architectures = getattr(self.config.model, "architectures", [])
         model_cls, _ = ModelRegistry.resolve_model_cls(architectures)
 
-        self.model = model_cls(vllm_config, prefix)
+        self.model = model_cls(vllm_config=vllm_config, prefix=prefix)
         self.fc = nn.Linear(config.model.hidden_size * 2,
                             config.model.hidden_size,
                             bias=getattr(self.config, "eagle_fc_bias", False))
