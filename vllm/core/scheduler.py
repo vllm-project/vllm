@@ -2,7 +2,7 @@ import enum
 import os
 import random
 import time
-from collections import deque
+from collections import defaultdict, deque
 from dataclasses import dataclass, field
 from typing import Callable, Deque, Dict, Iterable, List, Optional
 from typing import Sequence as GenericSequence
@@ -404,6 +404,17 @@ class Scheduler:
         # are "big"
         self.big_prefill_threshold = scheduler_config.max_model_len // 25
         self.max_big_requests = 1  # TODO: something
+
+        # Dict cache with the chunk sizes to hand out to each sequence depending
+        # on how many prefill slots are used.
+        # This is just the full budget / number of prefill slots
+        self.prefill_chunk_sizes = defaultdict(
+            lambda: scheduler_config.max_num_batched_tokens // self.
+            num_prefill_slots)
+        self.prefill_chunk_sizes[0] = scheduler_config.max_num_batched_tokens
+        for i in range(1, self.num_prefill_slots):
+            self.prefill_chunk_sizes[i] = \
+                scheduler_config.max_num_batched_tokens // i
 
     @property
     def next_cache_id(self):
@@ -879,8 +890,7 @@ class Scheduler:
         Returns:
             SchedulerPrefillOutputs.
         """
-        if self.prefill_slots_running >= self.num_prefill_slots \
-            or budget.remaining_token_budget() == 0:
+        if budget.remaining_token_budget() == 0:
             # Do nothing: Can't add any more prefill anyway
             return SchedulerPrefillOutputs(
                 seq_groups=[],
@@ -902,11 +912,10 @@ class Scheduler:
                 "Waiting sequence group should have only one prompt "
                 "sequence.")
 
-            if self._is_big_seq_group(
-                    seq_group
-            ) and self.big_prefill_requests >= self.max_big_requests:
+            is_big = self._is_big_seq_group(seq_group)
+            if is_big and self.big_prefill_requests >= self.max_big_requests:
                 # Cannot schedule more big requests than max_big_requests
-                break
+                continue
 
             num_new_tokens = self._get_num_new_tokens(seq_group,
                                                       SequenceStatus.WAITING,
@@ -972,6 +981,9 @@ class Scheduler:
                 curr_loras.add(lora_int_id)
             waiting_queue.popleft()
             self._allocate_and_set_running(seq_group)
+
+            if is_big:
+                self.big_prefill_requests += 1
 
             if enable_chunking and self.scheduler_config.is_multi_step:
                 blocks_to_copy: List[Tuple[int, int]] = []
@@ -1227,6 +1239,7 @@ class Scheduler:
     def _reserve_prefill_slots_from_waiting_queue(self):
         # Increment self.num_slots_filled for each request in the waiting queue
         # that we can fit into a slot
+        queued_big_requests = 0
         for seq_group in self.waiting:
             # Don't fill more slots than we have
             if self.prefill_slots_running >= self.num_prefill_slots:
@@ -1234,9 +1247,10 @@ class Scheduler:
 
             # Disallow multiple big requests
             if self._is_big_seq_group(seq_group):
-                if self.big_prefill_requests >= self.max_big_requests:
+                if self.big_prefill_requests + queued_big_requests \
+                    >= self.max_big_requests:
                     continue
-                self.big_prefill_requests += 1
+                queued_big_requests += 1
 
             self.prefill_slots_running += 1
 
@@ -1699,7 +1713,7 @@ class Scheduler:
             remaining_token_budget = budget.remaining_token_budget()
             # Get the number of tokens to allocate to this prefill slot
             prefill_slot_budget = \
-                budget.token_budget // self.prefill_slots_running
+                self.prefill_chunk_sizes[self.prefill_slots_running]
 
             if self.cache_config.enable_prefix_caching:
                 # When prefix caching is enabled, we always allocate
