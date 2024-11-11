@@ -561,13 +561,13 @@ def init_app_state(
 
 
 def create_server_socket(addr: Tuple[str, int]) -> socket.socket:
-    if socket.has_dualstack_ipv6():
-        sock = socket.create_server(addr,
-                                    family=socket.AF_INET6,
-                                    dualstack_ipv6=True,
-                                    reuse_port=True)
-    else:
-        sock = socket.create_server(addr, reuse_port=True)
+    family = socket.AF_INET
+    if ":" in addr[0]:
+        family = socket.AF_INET6
+
+    sock = socket.socket(family=family, type=socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(addr)
 
     return sock
 
