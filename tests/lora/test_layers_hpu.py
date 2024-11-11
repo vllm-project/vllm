@@ -43,7 +43,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding, get_masked_input_and_mask)
 from vllm.model_executor.utils import set_random_seed
 from vllm.platforms import current_platform
-from vllm.utils import seed_everything
 
 from .utils import DummyLoRAManager
 
@@ -1043,8 +1042,8 @@ def test_rotary_embedding_long_context(dist_init, num_loras, device,
                                        seq_len) -> None:
     dtype = torch.bfloat16
     seed = 0
-    seed_everything(seed)
-    torch.set_default_device(torch.device("hpu"))
+    current_platform.seed_everything(seed)
+    torch.set_default_device(device)
     if current_platform.is_hpu():
         punica_wrapper = GaudiPunicaWrapper(8192, 256, device="hpu")
     else:
@@ -1076,7 +1075,7 @@ def test_rotary_embedding_long_context(dist_init, num_loras, device,
                            max_position,
                            base,
                            is_neox_style, {
-                               "type": "linear",
+                               "rope_type": "linear",
                                "factor": scaling_factors
                            },
                            dtype=torch.bfloat16)
@@ -1085,7 +1084,7 @@ def test_rotary_embedding_long_context(dist_init, num_loras, device,
     _, index_mapping, prompt_mapping = create_random_inputs(
         active_lora_ids=[0],
         num_inputs=batch_size,
-        input_size=(seq_len, max_position),
+        input_size=(1, max_position),
         input_range=(0, lora_config.lora_extra_vocab_size),
         input_type=torch.bfloat16,
     )
