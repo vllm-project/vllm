@@ -145,13 +145,12 @@ class StatelessProcessGroup:
             self.broadcast_send_counter += 1
             return obj
         else:
-            assert obj is None
-            obj = pickle.loads(
+            recv_obj = pickle.loads(
                 self.store.get(
                     f"{self.prefix}/broadcast/{src}/{self.broadcast_recv_src_counter[src]}"
                 ))
             self.broadcast_recv_src_counter[src] += 1
-            return obj
+            return recv_obj
 
     def all_gather_obj(self, obj: Any) -> list[Any]:
         """All gather an object from all ranks."""

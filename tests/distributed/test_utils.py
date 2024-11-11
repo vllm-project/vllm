@@ -85,8 +85,7 @@ def gpu_worker(rank, WORLD_SIZE):
 def broadcast_worker(rank, WORLD_SIZE):
     pg1 = stateless_init_process_group(init_method="tcp://127.0.0.1:29504",
                                        rank=rank,
-                                       world_size=WORLD_SIZE,
-                                       backend="gloo")
+                                       world_size=WORLD_SIZE)
     if rank == 2:
         pg1.broadcast_obj("secret", src=2)
     else:
@@ -98,8 +97,7 @@ def broadcast_worker(rank, WORLD_SIZE):
 def allgather_worker(rank, WORLD_SIZE):
     pg1 = stateless_init_process_group(init_method="tcp://127.0.0.1:29505",
                                        rank=rank,
-                                       world_size=WORLD_SIZE,
-                                       backend="gloo")
+                                       world_size=WORLD_SIZE)
     data = pg1.all_gather_obj(rank)
     assert data == list(range(WORLD_SIZE))
     pg1.barrier()
