@@ -111,6 +111,15 @@ class Metrics:
             name="vllm:generation_tokens_total",
             documentation="Number of generation tokens processed.",
             labelnames=labelnames)
+        self.counter_tokens = self._counter_cls(
+            name="vllm:tokens_total",
+            documentation="Number of prefill plus generation tokens processed.",
+            labelnames=labelnames)
+        self.histogram_iteration_tokens = self._histogram_cls(
+            name="vllm:iteration_tokens_total",
+            documentation="Histogram of number of tokens per engine_step.",
+            labelnames=labelnames,
+            buckets=[1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8096])
         self.histogram_time_to_first_token = self._histogram_cls(
             name="vllm:time_to_first_token_seconds",
             documentation="Histogram of time to first token in seconds.",
@@ -130,23 +139,45 @@ class Metrics:
 
         # Request stats
         #   Latency
+        request_latency_buckets = [
+            0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0,
+            40.0, 50.0, 60.0
+        ]
         self.histogram_e2e_time_request = self._histogram_cls(
             name="vllm:e2e_request_latency_seconds",
             documentation="Histogram of end to end request latency in seconds.",
             labelnames=labelnames,
-            buckets=[
-                0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0,
-                40.0, 50.0, 60.0
-            ])
+            buckets=request_latency_buckets)
+        self.histogram_queue_time_request = self._histogram_cls(
+            name="vllm:request_queue_time_seconds",
+            documentation=
+            "Histogram of time spent in WAITING phase for request.",
+            labelnames=labelnames,
+            buckets=request_latency_buckets)
+        self.histogram_inference_time_request = self._histogram_cls(
+            name="vllm:request_inference_time_seconds",
+            documentation=
+            "Histogram of time spent in RUNNING phase for request.",
+            labelnames=labelnames,
+            buckets=request_latency_buckets)
+        self.histogram_prefill_time_request = self._histogram_cls(
+            name="vllm:request_prefill_time_seconds",
+            documentation=
+            "Histogram of time spent in PREFILL phase for request.",
+            labelnames=labelnames,
+            buckets=request_latency_buckets)
+        self.histogram_decode_time_request = self._histogram_cls(
+            name="vllm:request_decode_time_seconds",
+            documentation=
+            "Histogram of time spent in DECODE phase for request.",
+            labelnames=labelnames,
+            buckets=request_latency_buckets)
         self.histogram_time_in_queue_request = self._histogram_cls(
             name="vllm:time_in_queue_requests",
             documentation=
             "Histogram of time the request spent in the queue in seconds.",
             labelnames=labelnames,
-            buckets=[
-                0.3, 0.5, 0.8, 1.0, 1.5, 2.0, 2.5, 5.0, 10.0, 15.0, 20.0, 30.0,
-                40.0, 50.0, 60.0
-            ])
+            buckets=request_latency_buckets)
         self.histogram_model_forward_time_request = self._histogram_cls(
             name="vllm:model_forward_time_milliseconds",
             documentation=
@@ -173,6 +204,12 @@ class Metrics:
                 labelnames=labelnames,
                 buckets=build_1_2_5_buckets(max_model_len),
             )
+        self.histogram_max_num_generation_tokens_request = self._histogram_cls(
+            name="vllm:request_max_num_generation_tokens",
+            documentation=
+            "Histogram of maximum number of requested generation tokens.",
+            labelnames=labelnames,
+            buckets=build_1_2_5_buckets(max_model_len))
         self.histogram_n_request = self._histogram_cls(
             name="vllm:request_params_n",
             documentation="Histogram of the n request parameter.",
@@ -526,6 +563,8 @@ class PrometheusStatLogger(StatLoggerBase):
                           stats.num_prompt_tokens_iter)
         self._log_counter(self.metrics.counter_generation_tokens,
                           stats.num_generation_tokens_iter)
+        self._log_histogram(self.metrics.histogram_iteration_tokens,
+                            [stats.num_tokens_iter])
         self._log_histogram(self.metrics.histogram_time_to_first_token,
                             stats.time_to_first_tokens_iter)
         self._log_histogram(self.metrics.histogram_time_per_output_token,
@@ -535,6 +574,14 @@ class PrometheusStatLogger(StatLoggerBase):
         # Latency
         self._log_histogram(self.metrics.histogram_e2e_time_request,
                             stats.time_e2e_requests)
+        self._log_histogram(self.metrics.histogram_queue_time_request,
+                            stats.time_queue_requests)
+        self._log_histogram(self.metrics.histogram_inference_time_request,
+                            stats.time_inference_requests)
+        self._log_histogram(self.metrics.histogram_decode_time_request,
+                            stats.time_prefill_requests)
+        self._log_histogram(self.metrics.histogram_prefill_time_request,
+                            stats.time_decode_requests)
         self._log_histogram(self.metrics.histogram_time_in_queue_request,
                             stats.time_in_queue_requests)
         self._log_histogram(self.metrics.histogram_model_forward_time_request,
@@ -553,6 +600,9 @@ class PrometheusStatLogger(StatLoggerBase):
             self.metrics.histogram_num_generation_tokens_request,
             stats.num_generation_tokens_requests)
         self._log_histogram(self.metrics.histogram_n_request, stats.n_requests)
+        self._log_histogram(
+            self.metrics.histogram_max_num_generation_tokens_request,
+            stats.max_num_generation_tokens_requests)
         self._log_histogram(self.metrics.histogram_max_tokens_request,
                             stats.max_tokens_requests)
 
