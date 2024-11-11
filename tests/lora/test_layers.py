@@ -1229,8 +1229,3 @@ def test_get_masked_input_and_mask():
     assert torch.equal(modified_x_rank_3,
                        torch.tensor([0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 4]))
 
-
-if __name__ == "__main__":
-    pytest.main([
-        "/home/sobey/Code/Code_leejee/vllm_dev/vllm/tests/lora/test_layers.py::test_rotary_embedding_long_context"
-    ])
