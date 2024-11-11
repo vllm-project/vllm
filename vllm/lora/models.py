@@ -4,7 +4,7 @@ import math
 import os
 import re
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Type
+from typing import Any, Callable, Dict, List, Optional, Type, Sequence
 
 import safetensors.torch
 import torch
@@ -393,10 +393,10 @@ class LoRAModelManager(AdapterModelManager):
             if module_lora:
                 module_lora.optimize()
                 # Bias is not explicitly enabled with the flag enable_lora_bias.
-                if ((module_lora.bias is not None)
-                        and (isinstance(module_lora.bias, list)
-                             and any(bias is not None
-                                     for bias in module_lora.bias))
+                bias = module_lora.bias
+                if ((torch.is_tensor(bias)
+                        or (isinstance(bias, Sequence)
+                             and any(b is not None for b in bias)))
                         and not self.lora_config.bias_enabled):
                     module_lora.bias = None
                     raise ValueError(
