@@ -85,8 +85,21 @@ def gpu_worker(rank, WORLD_SIZE):
         assert item == 18
 
 
+def broadcast_worker(rank, WORLD_SIZE):
+    pg1 = stateless_init_process_group(init_method="tcp://127.0.0.1:29504",
+                                       rank=rank,
+                                       world_size=WORLD_SIZE,
+                                       backend="gloo")
+    if rank == 2:
+        pg1.broadcast_obj("secret", src=2)
+    else:
+        obj = pg1.broadcast_obj(None, src=2)
+        assert obj == "secret"
+    pg1.barrier()
+
+
 @multi_gpu_test(num_gpus=4)
-@pytest.mark.parametrize("worker", [cpu_worker, gpu_worker])
+@pytest.mark.parametrize("worker", [cpu_worker, gpu_worker, broadcast_worker])
 def test_stateless_init_process_group(worker):
     WORLD_SIZE = 4
     from multiprocessing import get_context

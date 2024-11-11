@@ -2,7 +2,9 @@
 # Adapted from
 # https://github.com/NVIDIA/Megatron-LM/blob/main/megatron/core/tensor_parallel/utils.py
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
-from typing import Sequence, Tuple
+import dataclasses
+import pickle
+from typing import Any, Dict, Optional, Sequence, Tuple
 
 import torch
 from torch.distributed import ProcessGroup
@@ -91,8 +93,82 @@ def get_pp_indices(num_hidden_layers: int, pp_rank: int,
     return (start_layer, end_layer)
 
 
+@dataclasses.dataclass
+class StatelessProcessGroup:
+    """A dataclass to hold the ProcessGroup and the rank and world_size of the
+    group. Only use it to communicate metadata between processes.
+    For data-plane communication, create NCCL-related objects.
+    """
+    pg: ProcessGroup
+    rank: int
+    world_size: int
+    store: torch._C._distributed_c10d.Store
+    prefix: str
+
+    # dst rank -> counter
+    send_dst_counter: Dict[int, int] = dataclasses.field(default_factory=dict)
+    # src rank -> counter
+    recv_src_counter: Dict[int, int] = dataclasses.field(default_factory=dict)
+    broadcast_send_counter: int = 0
+    broadcast_recv_src_counter: Dict[int, int] = dataclasses.field(
+        default_factory=dict)
+
+    def __post_init__(self):
+        assert self.rank < self.world_size
+        self.send_dst_counter = {i: 0 for i in range(self.world_size)}
+        self.recv_src_counter = {i: 0 for i in range(self.world_size)}
+        self.broadcast_recv_src_counter = {
+            i: 0
+            for i in range(self.world_size)
+        }
+
+    def send_obj(self, obj: Any, dst: int):
+        """Send an object to a destination rank."""
+        self.store.set(
+            f"{self.prefix}/send_to/{dst}/{self.send_dst_counter[dst]}",
+            pickle.dumps(obj))
+        self.send_dst_counter[dst] += 1
+
+    def recv_obj(self, src: int) -> Any:
+        """Receive an object from a source rank."""
+        obj = pickle.loads(
+            self.store.get(
+                f"{self.prefix}/send_to/{self.rank}/{self.recv_src_counter[src]}"
+            ))
+        self.recv_src_counter[src] += 1
+        return obj
+
+    def broadcast_obj(self, obj: Optional[Any], src: int) -> Any:
+        """Broadcast an object from a source rank to all other ranks.
+        It does not clean up after all ranks have received the object.
+        Use it for limited times, e.g., for initialization.
+        """
+        if self.rank == src:
+            self.store.set(
+                f"{self.prefix}/broadcast/{src}/{self.broadcast_send_counter}",
+                pickle.dumps(obj))
+            self.broadcast_send_counter += 1
+            return obj
+        else:
+            assert obj is None
+            obj = pickle.loads(
+                self.store.get(
+                    f"{self.prefix}/broadcast/{src}/{self.broadcast_recv_src_counter[src]}"
+                ))
+            self.broadcast_recv_src_counter[src] += 1
+            return obj
+
+    def barrier(self):
+        """A barrier to synchronize all ranks."""
+        for i in range(self.world_size):
+            if i == self.rank:
+                self.broadcast_obj(None, src=self.rank)
+            else:
+                self.broadcast_obj(None, src=i)
+
+
 def stateless_init_process_group(init_method: str, rank: int, world_size: int,
-                                 backend: str) -> ProcessGroup:
+                                 backend: str) -> StatelessProcessGroup:
     """A replacement for `torch.distributed.init_process_group` that does not
     pollute the global state.
 
@@ -103,8 +179,8 @@ def stateless_init_process_group(init_method: str, rank: int, world_size: int,
     function is a workaround for this issue.
 
     `torch.distributed.init_process_group` is a global call, while this function
-    is a stateless call. It will return a `ProcessGroup` object that can be used
-    for collective communication. With this function, process A and process B
+    is a stateless call. It will return a `StatelessProcessGroup` object that can be
+    used for exchanging metadata. With this function, process A and process B
     can call `stateless_init_process_group` to form a group, and then process A, B,
     C, and D can call `stateless_init_process_group` to form another group.
     """ # noqa
@@ -156,4 +232,4 @@ def stateless_init_process_group(init_method: str, rank: int, world_size: int,
 
     pg._register_backend(device, backend_type, backend_class)
 
-    return pg
+    return StatelessProcessGroup(pg, rank, world_size, store, init_method)
