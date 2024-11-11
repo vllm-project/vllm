@@ -36,11 +36,11 @@ if __name__ == "__main__":
     # collect results
     for test_file in results_folder.glob("*.json"):
 
-        with open(test_file, "r") as f:
+        with open(test_file) as f:
             raw_result = json.loads(f.read())
 
         # attach the benchmarking command to raw_result
-        with open(test_file.with_suffix(".commands"), "r") as f:
+        with open(test_file.with_suffix(".commands")) as f:
             command = json.loads(f.read())
         raw_result.update(command)
 

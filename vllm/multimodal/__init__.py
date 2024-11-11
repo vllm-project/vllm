@@ -1,6 +1,7 @@
 from .base import (BatchedTensorInputs, MultiModalDataBuiltins,
-                   MultiModalDataDict, MultiModalInputs, MultiModalPlugin,
-                   NestedTensors)
+                   MultiModalDataDict, MultiModalKwargs,
+                   MultiModalPlaceholderDict, MultiModalPlaceholderMap,
+                   MultiModalPlugin, NestedTensors)
 from .registry import MultiModalRegistry
 
 MULTIMODAL_REGISTRY = MultiModalRegistry()
@@ -16,9 +17,26 @@ __all__ = [
     "BatchedTensorInputs",
     "MultiModalDataBuiltins",
     "MultiModalDataDict",
-    "MultiModalInputs",
+    "MultiModalKwargs",
+    "MultiModalPlaceholderDict",
+    "MultiModalPlaceholderMap",
     "MultiModalPlugin",
     "NestedTensors",
     "MULTIMODAL_REGISTRY",
     "MultiModalRegistry",
 ]
+
+
+def __getattr__(name: str):
+    import warnings
+
+    if name == "MultiModalInputs":
+        msg = ("MultiModalInputs has been renamed to MultiModalKwargs. "
+               "The original name will take another meaning in an upcoming "
+               "version.")
+
+        warnings.warn(DeprecationWarning(msg), stacklevel=2)
+
+        return MultiModalKwargs
+
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

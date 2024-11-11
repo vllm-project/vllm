@@ -9,11 +9,12 @@ from transformers import (CLIPVisionConfig, LlavaConfig, PixtralVisionConfig,
                           PretrainedConfig, SiglipVisionConfig)
 
 from vllm.attention import AttentionMetadata
-from vllm.config import CacheConfig, MultiModalConfig
-from vllm.inputs import INPUT_REGISTRY, DecoderOnlyInputs, InputContext
+from vllm.config import VllmConfig
+from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
+                         InputContext)
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
@@ -31,7 +32,7 @@ from .siglip import (SiglipVisionModel, dummy_image_for_siglip,
                      dummy_seq_data_for_siglip, get_max_siglip_image_tokens,
                      input_processor_for_siglip)
 from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
-                    merge_multimodal_embeddings)
+                    maybe_prefix, merge_multimodal_embeddings)
 
 
 class LlavaImagePixelInputs(TypedDict):
@@ -111,7 +112,7 @@ def dummy_data_for_llava(ctx: InputContext, seq_len: int,
     image_feature_size = get_max_llava_image_tokens(ctx)
 
     if isinstance(vision_config, CLIPVisionConfig):
-        seq_data = dummy_seq_data_for_clip(
+        seq_data, ranges = dummy_seq_data_for_clip(
             vision_config,
             seq_len,
             num_images,
@@ -120,9 +121,9 @@ def dummy_data_for_llava(ctx: InputContext, seq_len: int,
         )
 
         mm_data = dummy_image_for_clip(vision_config, num_images)
-        return seq_data, mm_data
+        return DummyData(seq_data, mm_data, ranges)
     elif isinstance(vision_config, SiglipVisionConfig):
-        seq_data = dummy_seq_data_for_siglip(
+        seq_data, ranges = dummy_seq_data_for_siglip(
             vision_config,
             seq_len,
             num_images,
@@ -131,9 +132,9 @@ def dummy_data_for_llava(ctx: InputContext, seq_len: int,
         )
 
         mm_data = dummy_image_for_siglip(vision_config, num_images)
-        return seq_data, mm_data
+        return DummyData(seq_data, mm_data, ranges)
     elif isinstance(vision_config, PixtralVisionConfig):
-        seq_data = dummy_seq_data_for_pixtral_hf(
+        seq_data, ranges = dummy_seq_data_for_pixtral_hf(
             vision_config,
             seq_len,
             num_images,
@@ -142,7 +143,7 @@ def dummy_data_for_llava(ctx: InputContext, seq_len: int,
         )
 
         mm_data = dummy_image_for_pixtral_hf(vision_config, num_images)
-        return seq_data, mm_data
+        return DummyData(seq_data, mm_data, ranges)
 
     msg = f"Unsupported vision config: {type(vision_config)}"
     raise NotImplementedError(msg)
@@ -210,6 +211,7 @@ def init_vision_tower_for_llava(
     quant_config: Optional[QuantizationConfig],
     *,
     require_post_norm: Optional[bool] = None,
+    prefix: str = "",
 ):
     vision_config = hf_config.vision_config
 
@@ -224,23 +226,26 @@ def init_vision_tower_for_llava(
     if isinstance(vision_config, CLIPVisionConfig):
         return CLIPVisionModel(
             vision_config,
-            quant_config,
+            quant_config=quant_config,
             num_hidden_layers_override=num_hidden_layers,
             require_post_norm=require_post_norm,
+            prefix=prefix,
         )
     elif isinstance(vision_config, SiglipVisionConfig):
         return SiglipVisionModel(
             vision_config,
-            quant_config,
+            quant_config=quant_config,
             num_hidden_layers_override=num_hidden_layers,
             require_post_norm=require_post_norm,
+            prefix=prefix,
         )
     elif isinstance(vision_config, PixtralVisionConfig):
         return PixtralHFVisionModel(
             vision_config,
-            quant_config,
+            quant_config=quant_config,
             num_hidden_layers_override=num_hidden_layers,
             require_post_norm=require_post_norm,
+            prefix=prefix,
         )
 
     msg = f"Unsupported vision config: {type(vision_config)}"
@@ -253,12 +258,12 @@ def init_vision_tower_for_llava(
 @INPUT_REGISTRY.register_input_processor(input_processor_for_llava)
 class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
 
-    def __init__(self,
-                 config: LlavaConfig,
-                 multimodal_config: MultiModalConfig,
-                 cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None) -> None:
+    def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
+        multimodal_config = vllm_config.model_config.multimodal_config
 
         self.config = config
         self.multimodal_config = multimodal_config
@@ -274,14 +279,19 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
 
         # TODO: Optionally initializes this for supporting embeddings.
         self.vision_tower = init_vision_tower_for_llava(
-            config, quant_config, require_post_norm=False)
+            config,
+            quant_config,
+            require_post_norm=False,
+            prefix=maybe_prefix(prefix, "vision_tower"))
         self.multi_modal_projector = LlavaMultiModalProjector(
             vision_hidden_size=config.vision_config.hidden_size,
             text_hidden_size=config.text_config.hidden_size,
             projector_hidden_act=config.projector_hidden_act)
 
         self.language_model = init_vllm_registered_model(
-            config.text_config, cache_config, quant_config)
+            config.text_config,
+            vllm_config=vllm_config,
+            prefix=maybe_prefix(prefix, "language_model"))
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
@@ -291,7 +301,7 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         if hasattr(self.language_model, "sampler"):
             return self.language_model.sampler
 
-        return Sampler()
+        return get_sampler()
 
     def _validate_pixel_values(self, data: torch.Tensor) -> torch.Tensor:
         h = w = self.config.vision_config.image_size
@@ -483,13 +493,9 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
             :class:`LlavaImageInputs`
         """
         if intermediate_tensors is not None:
-            input_ids = None
             inputs_embeds = None
         else:
-            # always pass the input via `inputs_embeds`
-            # to make sure the computation graph is consistent
             image_input = self._parse_and_validate_image_input(**kwargs)
-
             if image_input is not None:
                 vision_embeddings = self._process_image_input(image_input)
                 inputs_embeds = self.language_model.model.get_input_embeddings(
@@ -501,7 +507,11 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
             else:
                 inputs_embeds = self.language_model.model.get_input_embeddings(
                     input_ids)
-            input_ids = None
+
+        # always pass the input via `inputs_embeds`
+        # to make sure the computation graph is consistent
+        # for `torch.compile` integration
+        input_ids = None
 
         hidden_states = self.language_model.model(input_ids,
                                                   positions,

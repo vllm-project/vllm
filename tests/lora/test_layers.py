@@ -39,7 +39,7 @@ from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding, get_masked_input_and_mask)
 from vllm.model_executor.utils import set_random_seed
-from vllm.utils import seed_everything
+from vllm.platforms import current_platform
 
 from .utils import DummyLoRAManager
 
@@ -923,7 +923,7 @@ def test_rotary_embedding_long_context(dist_init, num_loras, device,
                                        seq_len) -> None:
     dtype = torch.float16
     seed = 0
-    seed_everything(seed)
+    current_platform.seed_everything(seed)
     torch.set_default_device(device)
     punica_wrapper = PunicaWrapper(8192, 256, device)
     max_loras = 8

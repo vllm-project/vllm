@@ -1,6 +1,8 @@
 import enum
+import random
 from typing import NamedTuple, Optional, Tuple, Union
 
+import numpy as np
 import torch
 
 
@@ -8,6 +10,7 @@ class PlatformEnum(enum.Enum):
     CUDA = enum.auto()
     ROCM = enum.auto()
     TPU = enum.auto()
+    HPU = enum.auto()
     XPU = enum.auto()
     CPU = enum.auto()
     NEURON = enum.auto()
@@ -43,6 +46,9 @@ class Platform:
 
     def is_tpu(self) -> bool:
         return self._enum == PlatformEnum.TPU
+
+    def is_hpu(self) -> bool:
+        return self._enum == PlatformEnum.HPU
 
     def is_xpu(self) -> bool:
         return self._enum == PlatformEnum.XPU
@@ -110,6 +116,18 @@ class Platform:
         back to `torch.no_grad` by overriding this method.
         """
         return torch.inference_mode(mode=True)
+
+    @classmethod
+    def seed_everything(cls, seed: int) -> None:
+        """
+        Set the seed of each random module.
+        `torch.manual_seed` will set seed on all devices.
+
+        Loosely based on: https://github.com/Lightning-AI/pytorch-lightning/blob/2.4.0/src/lightning/fabric/utilities/seed.py#L20
+        """
+        random.seed(seed)
+        np.random.seed(seed)
+        torch.manual_seed(seed)
 
 
 class UnspecifiedPlatform(Platform):

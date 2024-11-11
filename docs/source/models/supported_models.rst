@@ -160,13 +160,13 @@ Text Generation
     -
     - ✅︎
   * - :code:`GraniteForCausalLM`
-    - PowerLM
-    - :code:`ibm/PowerLM-3b` etc.
+    - Granite 3.0, PowerLM
+    - :code:`ibm-granite/granite-3.0-2b-base`, :code:`ibm-granite/granite-3.0-8b-instruct`, :code:`ibm/PowerLM-3b`, etc.
     - ✅︎
     - ✅︎
   * - :code:`GraniteMoeForCausalLM`
-    - PowerMoE
-    - :code:`ibm/PowerMoE-3b` etc.
+    - Granite 3.0 MoE, PowerMoE
+    - :code:`ibm-granite/granite-3.0-1b-a400m-base`, :code:`ibm-granite/granite-3.0-3b-a800m-instruct`, :code:`ibm/PowerMoE-3b`, etc.
     - ✅︎
     - ✅︎
   * - :code:`InternLMForCausalLM`
@@ -277,11 +277,11 @@ Text Generation
   * - :code:`QWenLMHeadModel`
     - Qwen
     - :code:`Qwen/Qwen-7B`, :code:`Qwen/Qwen-7B-Chat`, etc.
-    -
+    - ✅︎
     - ✅︎
   * - :code:`Qwen2ForCausalLM`
     - Qwen2
-    - :code:`Qwen/Qwen2-beta-7B`, :code:`Qwen/Qwen2-beta-7B-Chat`, etc.
+    - :code:`Qwen/Qwen2-7B-Instruct`, :code:`Qwen/Qwen2-7B`, etc.
     - ✅︎
     - ✅︎
   * - :code:`Qwen2MoeForCausalLM`
@@ -333,7 +333,7 @@ Text Embedding
   * - :code:`MistralModel`
     - Mistral-based
     - :code:`intfloat/e5-mistral-7b-instruct`, etc.
-    - 
+    - ✅︎
     - ✅︎
 
 .. important::
@@ -440,6 +440,18 @@ Text Generation
     - :code:`THUDM/glm-4v-9b` etc.
     - 
     - ✅︎
+  * - :code:`H2OVLChatModel`
+    - H2OVL
+    - T + I\ :sup:`E+`
+    - :code:`h2oai/h2ovl-mississippi-800m`, :code:`h2oai/h2ovl-mississippi-2b`, etc.
+    - 
+    - ✅︎
+  * - :code:`Idefics3ForConditionalGeneration`
+    - Idefics3
+    - T + I
+    - :code:`HuggingFaceM4/Idefics3-8B-Llama3` etc.
+    - 
+    - 
   * - :code:`InternVLChatModel`
     - InternVL2
     - T + I\ :sup:`E+`
@@ -466,7 +478,7 @@ Text Generation
     - ✅︎
   * - :code:`LlavaOnevisionForConditionalGeneration`
     - LLaVA-Onevision
-    - T + I\ :sup:`+` + V
+    - T + I\ :sup:`+` + V\ :sup:`+`
     - :code:`llava-hf/llava-onevision-qwen2-7b-ov-hf`, :code:`llava-hf/llava-onevision-qwen2-0.5b-ov-hf`, etc.
     -
     - ✅︎
@@ -478,7 +490,7 @@ Text Generation
     - ✅︎
   * - :code:`MllamaForConditionalGeneration`
     - Llama 3.2
-    - T + I
+    - T + I\ :sup:`+`
     - :code:`meta-llama/Llama-3.2-90B-Vision-Instruct`, :code:`meta-llama/Llama-3.2-11B-Vision`, etc.
     -
     -
@@ -516,7 +528,7 @@ Text Generation
     - Qwen-VL
     - T + I\ :sup:`E+`
     - :code:`Qwen/Qwen-VL`, :code:`Qwen/Qwen-VL-Chat`, etc.
-    -
+    - ✅︎
     - ✅︎
   * - :code:`Qwen2AudioForConditionalGeneration`
     - Qwen2-Audio
@@ -528,7 +540,7 @@ Text Generation
     - Qwen2-VL
     - T + I\ :sup:`E+` + V\ :sup:`+`
     - :code:`Qwen/Qwen2-VL-2B-Instruct`, :code:`Qwen/Qwen2-VL-7B-Instruct`, :code:`Qwen/Qwen2-VL-72B-Instruct`, etc.
-    -
+    - ✅︎
     - ✅︎
   * - :code:`UltravoxModel`
     - Ultravox
@@ -539,6 +551,9 @@ Text Generation
 
 | :sup:`E` Pre-computed embeddings can be inputted for this modality.
 | :sup:`+` Multiple items can be inputted per text prompt for this modality.
+
+.. note::
+  vLLM currently only supports adding LoRA to the language backbone of multimodal models.               
 
 .. note::
   For :code:`openbmb/MiniCPM-V-2`, the official repo doesn't work yet, so we need to use a fork (:code:`HwwwH/MiniCPM-V-2`) for now.

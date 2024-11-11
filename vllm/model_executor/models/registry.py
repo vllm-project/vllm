@@ -1,4 +1,5 @@
 import importlib
+import os
 import pickle
 import subprocess
 import sys
@@ -93,11 +94,18 @@ _TEXT_GENERATION_MODELS = {
 _EMBEDDING_MODELS = {
     # [Text-only]
     "BertModel": ("bert", "BertEmbeddingModel"),
+    "DeciLMForCausalLM": ("decilm", "DeciLMForCausalLM"),
     "Gemma2Model": ("gemma2", "Gemma2EmbeddingModel"),
+    "LlamaModel": ("llama", "LlamaEmbeddingModel"),
+    **{
+        # Multiple models share the same architecture, so we include them all
+        k: (mod, arch) for k, (mod, arch) in _TEXT_GENERATION_MODELS.items()
+        if arch == "LlamaForCausalLM"
+    },
     "MistralModel": ("llama", "LlamaEmbeddingModel"),
+    "Phi3ForCausalLM": ("phi3", "Phi3ForCausalLM"),
     "Qwen2ForRewardModel": ("qwen2_rm", "Qwen2ForRewardModel"),
-    "Qwen2ForSequenceClassification": (
-        "qwen2_cls", "Qwen2ForSequenceClassification"),
+    "Qwen2ForSequenceClassification": ("qwen2_cls", "Qwen2ForSequenceClassification"),  # noqa: E501
     # [Multimodal]
     "LlavaNextForConditionalGeneration": ("llava_next", "LlavaNextForConditionalGeneration"),  # noqa: E501
     "Phi3VForCausalLM": ("phi3v", "Phi3VForCausalLM"),
@@ -110,7 +118,9 @@ _MULTIMODAL_MODELS = {
     "ChatGLMModel": ("chatglm", "ChatGLMForCausalLM"),
     "ChatGLMForConditionalGeneration": ("chatglm", "ChatGLMForCausalLM"),
     "FuyuForCausalLM": ("fuyu", "FuyuForCausalLM"),
+    "H2OVLChatModel": ("h2ovl", "H2OVLChatModel"),
     "InternVLChatModel": ("internvl", "InternVLChatModel"),
+    "Idefics3ForConditionalGeneration":("idefics3","Idefics3ForConditionalGeneration"),
     "LlavaForConditionalGeneration": ("llava", "LlavaForConditionalGeneration"),
     "LlavaNextForConditionalGeneration": ("llava_next", "LlavaNextForConditionalGeneration"),  # noqa: E501
     "LlavaNextVideoForConditionalGeneration": ("llava_next_video", "LlavaNextVideoForConditionalGeneration"),  # noqa: E501
@@ -324,6 +334,11 @@ class _ModelRegistry:
     def _raise_for_unsupported(self, architectures: List[str]):
         all_supported_archs = self.get_supported_archs()
 
+        if any(arch in all_supported_archs for arch in architectures):
+            raise ValueError(
+                f"Model architectures {architectures} failed "
+                "to be inspected. Please check the logs for more details.")
+
         raise ValueError(
             f"Model architectures {architectures} are not supported for now. "
             f"Supported architectures: {all_supported_archs}")
@@ -423,9 +438,13 @@ _T = TypeVar("_T")
 
 
 def _run_in_subprocess(fn: Callable[[], _T]) -> _T:
-    with tempfile.NamedTemporaryFile() as output_file:
+    # NOTE: We use a temporary directory instead of a temporary file to avoid
+    # issues like https://stackoverflow.com/questions/23212435/permission-denied-to-write-to-my-temporary-file
+    with tempfile.TemporaryDirectory() as tempdir:
+        output_filepath = os.path.join(tempdir, "registry_output.tmp")
+
         # `cloudpickle` allows pickling lambda functions directly
-        input_bytes = cloudpickle.dumps((fn, output_file.name))
+        input_bytes = cloudpickle.dumps((fn, output_filepath))
 
         # cannot use `sys.executable __file__` here because the script
         # contains relative imports
@@ -442,7 +461,7 @@ def _run_in_subprocess(fn: Callable[[], _T]) -> _T:
             raise RuntimeError(f"Error raised in subprocess:\n"
                                f"{returned.stderr.decode()}") from e
 
-        with open(output_file.name, "rb") as f:
+        with open(output_filepath, "rb") as f:
             return pickle.load(f)
 
 

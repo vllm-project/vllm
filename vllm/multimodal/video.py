@@ -1,17 +1,19 @@
 from functools import lru_cache
-from typing import Any, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 import numpy as np
 
-from vllm.config import ModelConfig
 from vllm.inputs.registry import InputContext
 from vllm.logger import init_logger
 from vllm.transformers_utils.processor import get_video_processor
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.utils import is_list_of
 
-from .base import MultiModalData, MultiModalInputs
+from .base import MultiModalData, MultiModalKwargs
 from .image import ImagePlugin
+
+if TYPE_CHECKING:
+    from vllm.config import ModelConfig
 
 logger = init_logger(__name__)
 
@@ -38,7 +40,7 @@ class VideoPlugin(ImagePlugin):
 
     def _get_hf_video_processor(
         self,
-        model_config: ModelConfig,
+        model_config: "ModelConfig",
         mm_processor_kwargs: Optional[Dict[str, Any]] = None,
     ):
         if mm_processor_kwargs is None:
@@ -53,8 +55,11 @@ class VideoPlugin(ImagePlugin):
         ctx: InputContext,
         data: MultiModalData[object],
         **mm_processor_kwargs,
-    ) -> MultiModalInputs:
+    ) -> MultiModalKwargs:
         model_config = ctx.model_config
+
+        if isinstance(data, list) and len(data) == 1:
+            data = data[0]
 
         if isinstance(data, np.ndarray) or is_list_of(data, np.ndarray):
             video_processor = self._get_hf_video_processor(
@@ -74,7 +79,7 @@ class VideoPlugin(ImagePlugin):
                 logger.error("Failed to process video (%s)", data)
                 raise
 
-            return MultiModalInputs(batch_data)
+            return MultiModalKwargs(batch_data)
 
         raise TypeError(f"Invalid video type: {type(data)}")
 
