@@ -322,21 +322,24 @@ class InternVLInputPipeline:
         new_prompt = self._expand_image_prompt(prompt, image_feature_sizes,
                                                num_patches)
         new_prompt_token_ids = tokenizer.encode(new_prompt)
+        img_context_token_id = tokenizer.encode(self.img_context_token)[1]
 
         # Get precise tracking of placeholder positions
         token_idx = image_idx = 0
         placeholder_ranges = []
         while token_idx < len(new_prompt_token_ids):
-            if new_prompt_token_ids[token_idx] == self.img_context_token:
+            if new_prompt_token_ids[token_idx] == img_context_token_id:
                 curr_image_featue_size = image_feature_sizes[image_idx]
+                print(curr_image_featue_size)
                 placeholder_ranges.append(
                     PlaceholderRange(offset=token_idx,
                                      length=curr_image_featue_size))
                 image_idx += 1
                 token_idx += curr_image_featue_size
+                print(image_idx)
+                print(token_idx)
             else:
                 token_idx += 1
-
         return token_inputs(
             prompt=prompt,
             prompt_token_ids=new_prompt_token_ids,
@@ -594,12 +597,11 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
             if not isinstance(pixel_values, (torch.Tensor, list)):
                 raise ValueError("Incorrect type of pixel values. "
                                  f"Got type: {type(pixel_values)}")
-            # We need to flatten (B, N, P) to (B*N*P),
-            # so we call flatten_bn twice.
+
+            # Pass as a list of pixel value tensors
             return InternVLImagePixelInputs(
                 type="pixel_values",
-                data=self._validate_pixel_values(
-                    flatten_bn(flatten_bn(pixel_values), concat=True)),
+                data=pixel_values,
             )
 
         raise AssertionError("This line should be unreachable.")
@@ -612,7 +614,15 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
             return image_input["data"]
 
         assert self.vision_model is not None
-        image_embeds = self.extract_feature(image_input["data"])
+
+        # Output as a list of image embeddings
+        image_embeds = []
+
+        for pixel_values in image_input["data"]:
+            vision_embeddings = self.extract_feature(flatten_bn(pixel_values))
+            hidden_size = vision_embeddings.shape[2]
+            vision_embeddings = vision_embeddings.reshape(1, -1, hidden_size)
+            image_embeds.append(vision_embeddings)
 
         return image_embeds
 
@@ -629,13 +639,13 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
         if image_input is None:
             return None
         vision_embeddings = self._process_image_input(image_input)
-        hidden_size = vision_embeddings.shape[2]
-        vision_embeddings = vision_embeddings.reshape(1, -1, hidden_size)
         return vision_embeddings
 
     def get_inputs_embeds(
-            self, input_ids: torch.Tensor,
-            vision_embeddings: Optional[torch.Tensor]) -> torch.Tensor:
+        self,
+        input_ids: torch.Tensor,
+        vision_embeddings: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
         inputs_embeds = self.language_model.model.get_input_embeddings(
             input_ids)
         if vision_embeddings is not None:
