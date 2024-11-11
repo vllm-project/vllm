@@ -18,7 +18,7 @@ except (ModuleNotFoundError, ImportError) as err:
         "CUDA and ROCm flash attention backend.") from err
 
 from vllm.logger import init_logger
-from vllm.multimodal import MultiModalInputs
+from vllm.multimodal import MultiModalKwargs
 from vllm.sequence import ExecuteModelRequest, IntermediateTensors
 from vllm.worker.model_runner import (ModelInputForGPUWithSamplingMetadata,
                                       ModelRunner)
@@ -53,6 +53,8 @@ class TP1DraftModelRunner(ModelRunner):
             )
 
         super().__init__(*args, **kwargs)
+
+        self.indices_of_seq_with_bonus_tokens = None
 
     def _update_sampling_metadata(self, sampling_metadata, num_seqs,
                                   num_queries):
@@ -158,6 +160,10 @@ class TP1DraftModelRunner(ModelRunner):
 
         # TODO: Add soft-tuning prompt adapter support
         return not self.prompt_adapter_config
+
+    def set_indices_of_seq_with_bonus_tokens(self,
+                                             indices_of_seq_with_bonus_tokens):
+        self.indices_of_seq_with_bonus_tokens = indices_of_seq_with_bonus_tokens
 
     @torch.inference_mode()
     def execute_model(
@@ -274,7 +280,7 @@ class TP1DraftModelRunner(ModelRunner):
                     kv_caches=kv_caches,
                     attn_metadata=model_input.attn_metadata,
                     intermediate_tensors=intermediate_tensors,
-                    **MultiModalInputs.as_kwargs(multi_modal_kwargs,
+                    **MultiModalKwargs.as_kwargs(multi_modal_kwargs,
                                                  device=self.device),
                     **kwargs,
                 )
@@ -284,11 +290,30 @@ class TP1DraftModelRunner(ModelRunner):
                                                model_input.sampling_metadata)
 
             # Sample the next token.
-            outputs.append(
-                self.model.sample(
-                    logits=logits,
-                    sampling_metadata=model_input.sampling_metadata,
-                ))
+            output = self.model.sample(
+                logits=logits,
+                sampling_metadata=model_input.sampling_metadata,
+            )
+            outputs.append(output)
+
+            if model_input.attn_metadata.num_prefills == 0 \
+                and self.indices_of_seq_with_bonus_tokens is not None:
+                assert output.sampled_token_ids is not None
+                # output.sampled_token_ids should be of shape (num_seqs, 1)
+                nums_seqs, num_tokens_per_seq = output.sampled_token_ids.shape
+                assert num_tokens_per_seq == 1
+                count = 0
+                for i in range(nums_seqs):
+                    bonus_seq_idx = self.indices_of_seq_with_bonus_tokens[
+                        count]
+                    if i != bonus_seq_idx:
+                        # The following might cause a cpu->gpu sync
+                        # However, the performance impact is negligible as we
+                        # benchmarked on H100.
+                        output.sampled_token_ids[
+                            i, :] = model_input.input_tokens[bonus_seq_idx]
+                    else:
+                        count += 1
 
             # Prepare inputs for the next step
             if step != num_steps - 1:

@@ -107,6 +107,40 @@ def load_phi3v(question: str, image_urls: List[str]) -> ModelRequestData:
     )
 
 
+def load_h2onvl(question: str, image_urls: List[str]) -> ModelRequestData:
+    model_name = "h2oai/h2ovl-mississippi-2b"
+
+    llm = LLM(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=8192,
+        limit_mm_per_prompt={"image": len(image_urls)},
+        mm_processor_kwargs={"max_dynamic_patch": 4},
+    )
+
+    placeholders = "\n".join(f"Image-{i}: <image>\n"
+                             for i, _ in enumerate(image_urls, start=1))
+    messages = [{'role': 'user', 'content': f"{placeholders}\n{question}"}]
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name,
+                                              trust_remote_code=True)
+    prompt = tokenizer.apply_chat_template(messages,
+                                           tokenize=False,
+                                           add_generation_prompt=True)
+
+    # Stop tokens for H2OVL-Mississippi
+    # https://huggingface.co/h2oai/h2ovl-mississippi-2b
+    stop_token_ids = [tokenizer.eos_token_id]
+
+    return ModelRequestData(
+        llm=llm,
+        prompt=prompt,
+        stop_token_ids=stop_token_ids,
+        image_data=[fetch_image(url) for url in image_urls],
+        chat_template=None,
+    )
+
+
 def load_internvl(question: str, image_urls: List[str]) -> ModelRequestData:
     model_name = "OpenGVLab/InternVL2-2B"
 
@@ -256,13 +290,46 @@ def load_mllama(question, image_urls: List[str]) -> ModelRequestData:
     )
 
 
+def load_idefics3(question, image_urls: List[str]) -> ModelRequestData:
+    model_name = "HuggingFaceM4/Idefics3-8B-Llama3"
+
+    # The configuration below has been confirmed to launch on a single L40 GPU.
+    llm = LLM(
+        model=model_name,
+        max_model_len=8192,
+        max_num_seqs=16,
+        enforce_eager=True,
+        limit_mm_per_prompt={"image": len(image_urls)},
+        # if you are running out of memory, you can reduce the "longest_edge".
+        # see: https://huggingface.co/HuggingFaceM4/Idefics3-8B-Llama3#model-optimizations
+        mm_processor_kwargs={
+            "size": {
+                "longest_edge": 2 * 364
+            },
+        },
+    )
+
+    placeholders = "\n".join(f"Image-{i}: <image>\n"
+                             for i, _ in enumerate(image_urls, start=1))
+    prompt = f"<|begin_of_text|>User:{placeholders}\n{question}<end_of_utterance>\nAssistant:"  # noqa: E501
+    return ModelRequestData(
+        llm=llm,
+        prompt=prompt,
+        stop_token_ids=None,
+        image_data=[fetch_image(url) for url in image_urls],
+        chat_template=None,
+    )
+
+
 model_example_map = {
     "phi3_v": load_phi3v,
+    "h2ovl_chat": load_h2onvl,
     "internvl_chat": load_internvl,
     "NVLM_D": load_nvlm_d,
     "qwen2_vl": load_qwen2_vl,
     "qwen_vl_chat": load_qwenvl_chat,
     "mllama": load_mllama,
+    "idefics3": load_idefics3,
 }
 
 

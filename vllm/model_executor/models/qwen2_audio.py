@@ -1,4 +1,3 @@
-# coding=utf-8
 # Copyright 2024 The Qwen team.
 # Copyright 2023 The vLLM team.
 # Copyright 2022 EleutherAI and the HuggingFace Inc. team. All rights reserved.
@@ -27,23 +26,21 @@ import librosa
 import numpy as np
 import torch
 import torch.nn as nn
-from transformers import Qwen2AudioConfig, Qwen2AudioEncoder
+from transformers import Qwen2AudioEncoder
 
 from vllm.attention import AttentionMetadata
-from vllm.config import CacheConfig, MultiModalConfig
+from vllm.config import VllmConfig
 from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
                          InputContext, token_inputs)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.models.qwen2 import Qwen2Model
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalInputs
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.multimodal.utils import consecutive_placeholder_ranges
 from vllm.sequence import IntermediateTensors, SequenceData
 
@@ -222,13 +219,13 @@ def input_processor_for_qwen2_audio(
 def input_mapper_for_qwen2_audio(
     ctx: InputContext,
     multi_modal_data: Union[np.ndarray, List[np.ndarray]],
-) -> MultiModalInputs:
+) -> MultiModalKwargs:
     """Input mapper for Qwen2-Audio."""
     if not isinstance(multi_modal_data, list):
         multi_modal_data = [multi_modal_data]
 
     if len(multi_modal_data) == 0:
-        return MultiModalInputs()
+        return MultiModalKwargs()
 
     processor = cached_get_processor(ctx.model_config.model)
     audio_feature_extractor = processor.feature_extractor
@@ -255,7 +252,7 @@ def input_mapper_for_qwen2_audio(
         logger.error("Failed to process audio (%s)", multi_modal_data)
         raise
 
-    return MultiModalInputs(batch_data)
+    return MultiModalKwargs(batch_data)
 
 
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_qwen2_audio)
@@ -267,13 +264,11 @@ def input_mapper_for_qwen2_audio(
 class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal,
                                          SupportsPP):
 
-    def __init__(self,
-                 config: Qwen2AudioConfig,
-                 multimodal_config: MultiModalConfig,
-                 cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
+        multimodal_config = vllm_config.model_config.multimodal_config
         self.config = config
         self.multimodal_config = multimodal_config
 
@@ -283,8 +278,9 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         self.quant_config = quant_config
 
-        self.language_model = Qwen2Model(config.text_config, cache_config,
-                                         quant_config)
+        self.language_model = Qwen2Model(
+            vllm_config=vllm_config.with_hf_config(config.text_config),
+            prefix=prefix)
         self.unpadded_vocab_size = config.text_config.vocab_size
         if config.text_config.tie_word_embeddings:
             self.lm_head = self.language_model.embed_tokens
@@ -296,7 +292,7 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.text_config.vocab_size,
                                                 logit_scale)
-        self.sampler = Sampler()
+        self.sampler = get_sampler()
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)

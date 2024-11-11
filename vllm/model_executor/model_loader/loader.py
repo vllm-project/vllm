@@ -9,8 +9,7 @@ import math
 import os
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
-from typing import (Any, Dict, Generator, Iterable, List, Optional, Tuple,
-                    Type, cast)
+from typing import Any, Dict, Generator, Iterable, List, Optional, Tuple, cast
 
 import gguf
 import huggingface_hub
@@ -18,18 +17,17 @@ import numpy as np
 import torch
 from huggingface_hub import HfApi, hf_hub_download
 from torch import nn
-from transformers import AutoModelForCausalLM, PretrainedConfig
+from transformers import AutoModelForCausalLM
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
-from vllm.config import (CacheConfig, LoadConfig, LoadFormat, LoRAConfig,
-                         ModelConfig, MultiModalConfig, ParallelConfig,
-                         PoolerConfig, SchedulerConfig, VllmConfig)
+from vllm.config import (LoadConfig, LoadFormat, ModelConfig, ParallelConfig,
+                         VllmConfig)
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.linear import (ReplicatedLinear,
+                                               RowParallelLinear)
 from vllm.model_executor.model_loader.tensorizer import (
     TensorizerConfig, is_vllm_tensorized, load_with_tensorizer,
     serialize_vllm_model, tensorizer_weights_iterator)
@@ -38,11 +36,9 @@ from vllm.model_executor.model_loader.utils import (get_model_architecture,
 from vllm.model_executor.model_loader.weight_utils import (
     download_safetensors_index_file_from_hf, download_weights_from_hf,
     filter_duplicate_safetensors_files, filter_files_not_needed_for_inference,
-    get_gguf_extra_tensor_names, get_quant_config, gguf_quant_weights_iterator,
+    get_gguf_extra_tensor_names, gguf_quant_weights_iterator,
     initialize_dummy_weights, np_cache_weights_iterator, pt_weights_iterator,
     safetensors_weights_iterator)
-from vllm.model_executor.models import (has_inner_state, supports_lora,
-                                        supports_multimodal)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.utils import is_pin_memory_available
@@ -92,112 +88,11 @@ def device_loading_context(module: torch.nn.Module,
 logger = init_logger(__name__)
 
 
-def _get_quantization_config(
-        model_config: ModelConfig,
-        load_config: LoadConfig) -> Optional[QuantizationConfig]:
-    """Get the quantization config."""
-    if model_config.quantization is not None:
-        quant_config = get_quant_config(model_config, load_config)
-        capability_tuple = current_platform.get_device_capability()
-
-        if capability_tuple is not None:
-            capability = capability_tuple.to_int()
-            if capability < quant_config.get_min_capability():
-                raise ValueError(
-                    f"The quantization method {model_config.quantization} "
-                    "is not supported for the current GPU. "
-                    f"Minimum capability: {quant_config.get_min_capability()}. "
-                    f"Current capability: {capability}.")
-        supported_dtypes = quant_config.get_supported_act_dtypes()
-        if model_config.dtype not in supported_dtypes:
-            raise ValueError(
-                f"{model_config.dtype} is not supported for quantization "
-                f"method {model_config.quantization}. Supported dtypes: "
-                f"{supported_dtypes}")
-        return quant_config
-    return None
-
-
-def _get_model_initialization_kwargs(
-        model_class: Type[nn.Module],
-        lora_config: Optional[LoRAConfig],
-        multimodal_config: Optional[MultiModalConfig],
-        scheduler_config: Optional[SchedulerConfig] = None,
-        pooler_config: Optional[PoolerConfig] = None) -> Dict[str, Any]:
-    """Get extra kwargs for model initialization."""
-    extra_kwargs: Dict[str, Any] = {}
-
-    if supports_lora(model_class):
-        # lora_config=None is used to disable LoRA
-        extra_kwargs["lora_config"] = lora_config
-    elif lora_config:
-        raise ValueError(
-            f"Model {model_class.__name__} does not support LoRA, "
-            "but LoRA is enabled. Support for this model may "
-            "be added in the future. If this is important to you, "
-            "please open an issue on github.")
-
-    if supports_multimodal(model_class):
-        assert multimodal_config is not None
-
-        extra_kwargs["multimodal_config"] = multimodal_config
-
-    if has_inner_state(model_class) and scheduler_config:
-        extra_kwargs["scheduler_config"] = scheduler_config
-    if pooler_config:
-        extra_kwargs["pooler_config"] = pooler_config
-    return extra_kwargs
-
-
-def build_model(model_class: Type[nn.Module],
-                vllm_config: Optional[VllmConfig],
-                hf_config: PretrainedConfig,
-                cache_config: Optional[CacheConfig],
-                quant_config: Optional[QuantizationConfig],
-                *,
-                lora_config: Optional[LoRAConfig],
-                multimodal_config: Optional[MultiModalConfig],
-                scheduler_config: Optional[SchedulerConfig],
-                prefix: Optional[str] = None,
-                pooler_config: Optional[PoolerConfig] = None) -> nn.Module:
-    extra_kwargs = _get_model_initialization_kwargs(model_class, lora_config,
-                                                    multimodal_config,
-                                                    scheduler_config,
-                                                    pooler_config)
-    if prefix:
-        extra_kwargs["prefix"] = prefix
-
-    # TODO: unify all the module initialization code
-    # to only take the `VllmConfig` object as input
-    from vllm.plugins import set_vllm_config
-    set_vllm_config(vllm_config)
-
-    return model_class(config=hf_config,
-                       cache_config=cache_config,
-                       quant_config=quant_config,
-                       **extra_kwargs)
-
-
 def _initialize_model(vllm_config: VllmConfig) -> nn.Module:
     """Initialize a model with the given configurations."""
     model_config = vllm_config.model_config
-    lora_config = vllm_config.lora_config
-    scheduler_config = vllm_config.scheduler_config
-    cache_config = vllm_config.cache_config
-    load_config = vllm_config.load_config
     model_class, _ = get_model_architecture(model_config)
-
-    return build_model(
-        model_class,
-        vllm_config,
-        model_config.hf_config,
-        cache_config=cache_config,
-        quant_config=_get_quantization_config(model_config, load_config),
-        lora_config=lora_config,
-        multimodal_config=model_config.multimodal_config,
-        scheduler_config=scheduler_config,
-        pooler_config=model_config.pooler_config,
-    )
+    return model_class(vllm_config=vllm_config)
 
 
 class BaseModelLoader(ABC):
@@ -511,25 +406,18 @@ class TensorizerLoader(BaseModelLoader):
 
         device_config = vllm_config.device_config
         model_config = vllm_config.model_config
-        lora_config = vllm_config.lora_config
-        cache_config = vllm_config.cache_config
 
         with set_default_torch_dtype(model_config.dtype):
             with torch.device(device_config.device):
                 model_class = get_model_architecture(model_config)[0]
-                quant_config = _get_quantization_config(
-                    model_config, self.load_config)
-                extra_kwargs = _get_model_initialization_kwargs(
-                    model_class, lora_config, model_config.multimodal_config)
-                extra_kwargs["quant_config"] = quant_config
-                extra_kwargs["cache_config"] = cache_config
 
                 tensorizer_config = copy.copy(self.tensorizer_config)
                 tensorizer_config.model_class = model_class
                 tensorizer_config.hf_config = model_config.hf_config
                 tensorizer_config.dtype = model_config.dtype
 
-                model = load_with_tensorizer(tensorizer_config, **extra_kwargs)
+                model = load_with_tensorizer(tensorizer_config,
+                                             vllm_config=vllm_config)
         return model.eval()
 
     def download_model(self, model_config: ModelConfig) -> None:
@@ -754,6 +642,10 @@ class BitsAndBytesModelLoader(BaseModelLoader):
     def __init__(self, load_config: LoadConfig):
         super().__init__(load_config)
 
+        # Save the module names without sharding.
+        self.unsharded_weights_modules: List[str] = []
+        # Save the module names that are sharded by column.
+        self.column_sharded_weights_modules: List[str] = []
         # we don't need to quantize the whole model, only the target modules
         # that are specified in the adapter config file. If the adapter config
         # file is not provided, we will quantize the default modules.
@@ -768,7 +660,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
         config_file_path = self._get_config_file(qlora_adapter)
 
-        with open(config_file_path, "r") as f:
+        with open(config_file_path) as f:
             config = json.load(f)
             self.target_modules = config["target_modules"]
 
@@ -914,7 +806,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             if not weight_name.lower().endswith(".scb"):
                 continue
 
-            weight_key = weight_name.lower().replace(".scb", ".qweight")
+            weight_key = weight_name.lower().replace(".scb", ".weight")
             quant_state_dict[weight_key] = weight_tensor
 
         for weight_name, weight_tensor in self._hf_weight_iter(
@@ -923,11 +815,9 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             if self._is_8bit_weight_name(weight_name):
                 continue
 
-            qweight_name = weight_name.replace(".weight", ".qweight")
-
-            if qweight_name in quant_state_dict:
+            if weight_name in quant_state_dict:
                 set_weight_attrs(weight_tensor, {"load_in_8bit": True})
-                yield qweight_name, weight_tensor
+                yield weight_name, weight_tensor
             else:
                 yield weight_name, weight_tensor
 
@@ -972,9 +862,8 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             (f"{weight_name}.quant_state.bitsandbytes__fp4" \
                     in temp_state_dict):
                 quant_state = _parse_quant_state(weight_name, temp_state_dict)
-                weight_name = weight_name.replace(".weight", ".qweight")
                 quant_state_dict[weight_name] = quant_state
-                yield weight_name.replace(".weight", ".qweight"), weight_tensor
+                yield weight_name, weight_tensor
             else:
                 yield weight_name, weight_tensor
 
@@ -989,17 +878,21 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
             if any(target_module in weight_name for target_module in
                    self.target_modules) and weight_name.endswith(".weight"):
-                weight_name = weight_name.replace(".weight", ".qweight")
-
-                if any(module in weight_name
-                       for module in self.column_parallel_weights_modules):
-
+                # Without sharding
+                if any(
+                        weight_name.startswith(module)
+                        for module in self.unsharded_weights_modules):
+                    weight_sub_tensor = weight_tensor
+                # Shard by column
+                elif any(
+                        weight_name.startswith(module)
+                        for module in self.column_sharded_weights_modules):
                     total_size = weight_tensor.size(-1)
                     start_index = total_size // tp_size * tp_rank
                     end_index = total_size // tp_size * (tp_rank + 1)
                     weight_sub_tensor = weight_tensor[...,
                                                       start_index:end_index]
-
+                # Shard by row
                 else:
                     total_size = weight_tensor.size(0)
                     start_index = total_size // tp_size * tp_rank
@@ -1048,11 +941,16 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             else:
                 self.target_modules = self.default_target_modules
 
-        if hasattr(model, 'column_parallel_weights_modules'):
-            self.column_parallel_weights_modules = \
-                model.column_parallel_weights_modules
-        else:
-            self.column_parallel_weights_modules = []
+        for name, module in model.named_modules():
+            # Some modules like `ReplicatedLinear` should not have their weights
+            # sharded. The reason for implementing it this way is to avoid new
+            # static variable in the model implementation.
+            if isinstance(module, (ReplicatedLinear, )):
+                self.unsharded_weights_modules.append(name)
+            # In TP, these weights are partitioned along the column
+            # dimension (dim=-1)
+            elif isinstance(module, (RowParallelLinear, )):
+                self.column_sharded_weights_modules.append(name)
 
         self.model_type = type(model).__name__
 
@@ -1100,7 +998,13 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             for shard_name, (
                     weight_name, index
             ) in model.bitsandbytes_stacked_params_mapping.items():
-                if shard_name in quant_param_name:
+
+                shard_pos = quant_param_name.find(shard_name)
+                # Some models, such as MiniCPM V2.5/2.6, contain both
+                # module names 'kv_proj' and 'qkv_proj'. To prevent 'kv_proj'
+                # from being incorrectly identified as being present in
+                # 'vpm.encoder.layers.0.self_attn.qkv_proj.weight
+                if shard_pos > 0 and quant_param_name[shard_pos - 1] == ".":
                     shard_index = index
                     quant_param_name = quant_param_name.replace(
                         shard_name, weight_name)

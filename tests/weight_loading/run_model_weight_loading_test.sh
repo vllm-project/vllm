@@ -14,7 +14,7 @@ while getopts "c:" OPT; do
 done
 
 
-IFS=$'\n' read -d '' -r -a MODEL_CONFIGS < $CONFIG
+IFS=$'\n' read -d '' -r -a MODEL_CONFIGS < "$CONFIG"
 
 for MODEL_CONFIG in "${MODEL_CONFIGS[@]}"
 do
