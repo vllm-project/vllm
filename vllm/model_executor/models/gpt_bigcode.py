@@ -25,7 +25,7 @@ from transformers import GPTBigCodeConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, LoRAConfig, VllmConfig
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -189,15 +189,14 @@ class GPTBigCodeBlock(nn.Module):
 @support_torch_compile
 class GPTBigCodeModel(nn.Module):
 
-    def __init__(
-        self,
-        config: GPTBigCodeConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        lora_config: Optional[LoRAConfig] = None,
-        prefix: str = "",
-    ):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+        lora_config = vllm_config.lora_config
+
         self.config = config
         assert not config.add_cross_attention
 
@@ -265,7 +264,6 @@ class GPTBigCodeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     ):
         super().__init__()
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
 
@@ -273,8 +271,8 @@ class GPTBigCodeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self.lora_config = lora_config
 
         self.quant_config = quant_config
-        self.transformer = GPTBigCodeModel(config, cache_config, quant_config,
-                                           lora_config)
+        self.transformer = GPTBigCodeModel(vllm_config=vllm_config,
+                                           prefix=prefix)
         if self.config.tie_word_embeddings:
             self.lm_head = self.transformer.wte
         else:

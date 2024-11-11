@@ -32,7 +32,7 @@ from .siglip import (SiglipVisionModel, dummy_image_for_siglip,
                      dummy_seq_data_for_siglip, get_max_siglip_image_tokens,
                      input_processor_for_siglip)
 from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
-                    merge_multimodal_embeddings)
+                    maybe_prefix, merge_multimodal_embeddings)
 
 
 class LlavaImagePixelInputs(TypedDict):
@@ -282,7 +282,7 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
             config,
             quant_config,
             require_post_norm=False,
-            prefix="vision_tower")
+            prefix=maybe_prefix(prefix, "vision_tower"))
         self.multi_modal_projector = LlavaMultiModalProjector(
             vision_hidden_size=config.vision_config.hidden_size,
             text_hidden_size=config.text_config.hidden_size,
@@ -291,7 +291,7 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
         self.language_model = init_vllm_registered_model(
             config.text_config,
             vllm_config=vllm_config,
-            prefix="language_model")
+            prefix=maybe_prefix(prefix, "language_model"))
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)

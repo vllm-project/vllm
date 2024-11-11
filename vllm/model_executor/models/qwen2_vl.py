@@ -70,7 +70,7 @@ from vllm.transformers_utils.processor import cached_get_processor
 from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsPP
 from .utils import (PPMissingLayer, get_vit_attn_backend,
                     is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory)
+                    make_empty_intermediate_tensors_factory, maybe_prefix)
 
 logger = init_logger(__name__)
 
@@ -966,11 +966,7 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
     embedding_modules = {}
     embedding_padding_modules = []
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
@@ -986,13 +982,11 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             config.vision_config,
             norm_eps=getattr(config, "rms_norm_eps", 1e-6),
             quant_config=self._maybe_ignore_quant_config(quant_config),
-            prefix="visual",
+            prefix=maybe_prefix(prefix, "visual"),
         )
 
-        self.model = Qwen2Model(config,
-                                cache_config,
-                                quant_config,
-                                prefix="model")
+        self.model = Qwen2Model(vllm_config=vllm_config,
+                                prefix=maybe_prefix(prefix, "model"))
 
         if get_pp_group().is_last_rank:
             if config.tie_word_embeddings:
@@ -1001,7 +995,8 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
                 self.lm_head = ParallelLMHead(config.vocab_size,
                                               config.hidden_size,
                                               quant_config=quant_config,
-                                              prefix="lm_head")
+                                              prefix=maybe_prefix(
+                                                  prefix, "lm_head"))
         else:
             self.lm_head = PPMissingLayer()
 

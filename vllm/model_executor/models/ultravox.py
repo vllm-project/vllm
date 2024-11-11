@@ -34,7 +34,7 @@ from vllm.utils import is_list_of
 
 from .interfaces import SupportsMultiModal, SupportsPP
 from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
-                    init_vllm_registered_model,
+                    init_vllm_registered_model, maybe_prefix,
                     merge_multimodal_embeddings_from_map)
 
 _AUDIO_PLACEHOLDER_TOKEN = 128002
@@ -339,11 +339,7 @@ class ModifiedWhisperEncoder(WhisperEncoder):
 @INPUT_REGISTRY.register_input_processor(input_processor_for_ultravox)
 class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP):
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
         multimodal_config = vllm_config.model_config.multimodal_config
@@ -354,6 +350,8 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP):
         self.secondary_weights = []
         self.audio_tower = ModifiedWhisperEncoder(config.audio_config)
         if config.audio_model_id is not None:
+            # this prefix is not for initialization, but for loading weights
+            # note the trailing dot
             self.secondary_weights.append(
                 DefaultModelLoader.Source(
                     model_or_path=config.audio_model_id,
@@ -362,8 +360,12 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP):
                 ))
         self.multi_modal_projector = UltravoxProjector(config)
         self.language_model = init_vllm_registered_model(
-            config.text_config, vllm_config, prefix="language_model")
+            config.text_config,
+            vllm_config=vllm_config,
+            prefix=maybe_prefix(prefix, "language_model"))
         if config.text_model_id is not None:
+            # this prefix is not for initialization, but for loading weights
+            # note the trailing dot
             self.secondary_weights.append(
                 DefaultModelLoader.Source(model_or_path=config.text_model_id,
                                           revision=None,

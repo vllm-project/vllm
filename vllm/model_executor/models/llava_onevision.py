@@ -35,7 +35,7 @@ from .siglip import (SiglipVisionModel, dummy_seq_data_for_siglip,
                      dummy_video_for_siglip, get_siglip_image_feature_size,
                      get_siglip_patch_grid_length, input_processor_for_siglip)
 from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
-                    merge_multimodal_embeddings)
+                    maybe_prefix, merge_multimodal_embeddings)
 
 # Result in the max possible feature size (2x2 grid of 336x336px tiles)
 MAX_IMAGE_FEATURE_SIZE_HEIGHT = MAX_IMAGE_FEATURE_SIZE_WIDTH = 448
@@ -418,12 +418,12 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
             config,
             quant_config,
             require_post_norm=False,
-            prefix="vision_tower")
+            prefix=maybe_prefix(prefix, "vision_tower"))
         self.multi_modal_projector = LlavaOnevisionMultiModalProjector(config)
         self.language_model = init_vllm_registered_model(
             config.text_config,
             vllm_config=vllm_config,
-            prefix="language_model")
+            prefix=maybe_prefix(prefix, "language_model"))
         self.image_newline = nn.Parameter(
             torch.empty(config.text_config.hidden_size))
 

@@ -38,7 +38,7 @@ from vllm.transformers_utils.processor import cached_get_processor
 from vllm.utils import is_list_of
 
 from .interfaces import SupportsMultiModal, SupportsPP
-from .utils import init_vllm_registered_model
+from .utils import init_vllm_registered_model, maybe_prefix
 
 try:
     from xformers import ops as xops
@@ -152,11 +152,7 @@ def input_processor_for_pixtral(ctx: InputContext, inputs: DecoderOnlyInputs):
 class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
                                       SupportsPP):
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
         multimodal_config = vllm_config.model_config.multimodal_config
@@ -176,7 +172,7 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.language_model = init_vllm_registered_model(
             config.text_config,
             vllm_config=vllm_config,
-            prefix="language_model")
+            prefix=maybe_prefix(prefix, "language_model"))
 
         self.vision_encoder = VisionTransformer(self.vision_args)
         self.vision_language_adapter = VisionLanguageAdapter(

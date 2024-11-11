@@ -28,7 +28,7 @@ from transformers.models.granitemoe import GraniteMoeConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, LoRAConfig, VllmConfig
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -47,7 +47,7 @@ from vllm.sequence import IntermediateTensors
 
 from . import mixtral
 from .interfaces import SupportsLoRA, SupportsPP
-from .utils import make_layers
+from .utils import make_layers, maybe_prefix
 
 
 class GraniteMoeMoE(nn.Module):
@@ -247,15 +247,14 @@ class GraniteMoeDecoderLayer(nn.Module):
 @support_torch_compile
 class GraniteMoeModel(nn.Module):
 
-    def __init__(
-        self,
-        config: GraniteMoeConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        lora_config: Optional[LoRAConfig] = None,
-        prefix: str = "",
-    ) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+        lora_config = vllm_config.lora_config
+
         self.padding_idx = config.pad_token_id
         lora_vocab = (lora_config.lora_extra_vocab_size *
                       (lora_config.max_loras or 1)) if lora_config else 0
@@ -333,25 +332,17 @@ class GraniteMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     }
     embedding_padding_modules = ["lm_head"]
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
 
         self.config = config
         self.lora_config = lora_config
 
-        self.model = GraniteMoeModel(config,
-                                     cache_config,
-                                     quant_config,
-                                     lora_config=lora_config,
-                                     prefix="model")
+        self.model = GraniteMoeModel(vllm_config=vllm_config,
+                                     prefix=maybe_prefix(prefix, "model"))
         self.unpadded_vocab_size = config.vocab_size
         if lora_config:
             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size

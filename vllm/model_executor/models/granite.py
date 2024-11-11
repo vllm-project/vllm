@@ -28,7 +28,7 @@ from transformers import GraniteConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, LoRAConfig, VllmConfig
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -52,7 +52,8 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
-from .utils import PPMissingLayer, is_pp_missing_parameter, make_layers
+from .utils import (PPMissingLayer, is_pp_missing_parameter, make_layers,
+                    maybe_prefix)
 
 
 class GraniteMLP(nn.Module):
@@ -257,15 +258,14 @@ class GraniteDecoderLayer(nn.Module):
 @support_torch_compile
 class GraniteModel(nn.Module):
 
-    def __init__(
-        self,
-        config: GraniteConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        lora_config: Optional[LoRAConfig] = None,
-        prefix: str = "",
-    ) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+        lora_config = vllm_config.lora_config
+
         self.config = config
         self.padding_idx = config.pad_token_id
         lora_vocab = (lora_config.lora_extra_vocab_size *
@@ -370,25 +370,17 @@ class GraniteForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         "up_proj": ("gate_up_proj", 1),
     }
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
 
         self.config = config
         self.lora_config = lora_config
 
-        self.model = GraniteModel(config,
-                                  cache_config,
-                                  quant_config,
-                                  lora_config=lora_config,
-                                  prefix="model")
+        self.model = GraniteModel(vllm_config=vllm_config,
+                                  prefix=maybe_prefix(prefix, "model"))
         if get_pp_group().is_last_rank:
             self.unpadded_vocab_size = config.vocab_size
             if lora_config:
