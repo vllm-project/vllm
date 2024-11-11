@@ -198,8 +198,11 @@ def create_random_inputs(
 @pytest.mark.parametrize("vocab_size", [512, 32000, 64000, 128000])
 @pytest.mark.parametrize("stage", STAGES)
 def test_embeddings(dist_init, num_loras, device, vocab_size, stage) -> None:
-
+    # For multi-GPU testing of Triton kernel, we must explicitly set the CUDA
+    # device, see: https://github.com/triton-lang/triton/issues/2925
+    # Same below.
     torch.cuda.set_device(device)
+
     torch.set_default_device(device)
     max_loras = 8
     punica_wrapper = PunicaWrapper(8192, 256, device)
@@ -278,7 +281,7 @@ def test_embeddings(dist_init, num_loras, device, vocab_size, stage) -> None:
         punica_wrapper.update_metadata(lora_mapping, id_to_index, max_loras,
                                        vocab_size,
                                        lora_config.lora_extra_vocab_size)
-        # with torch.cuda.device(device):
+
         lora_result = lora_embedding(torch.cat(inputs))
         expected_result = embedding(torch.cat(inputs))
 
