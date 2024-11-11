@@ -739,7 +739,7 @@ class BartModel(nn.Module):
         "encoder.embed_tokens.weight", "decoder.embed_tokens.weight"
     ]
 
-    def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
@@ -811,7 +811,7 @@ class BartModel(nn.Module):
 class BartForConditionalGeneration(nn.Module):
     base_model_prefix = "model"
 
-    def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
 
         super().__init__()
         config = vllm_config.model_config.hf_config

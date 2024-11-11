@@ -293,7 +293,7 @@ class MixtralDecoderLayer(nn.Module):
 
 class MixtralModel(nn.Module):
 
-    def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
@@ -349,7 +349,7 @@ class MixtralModel(nn.Module):
 class MixtralForCausalLM(nn.Module, SupportsPP):
     fall_back_to_pt_during_load = False
 
-    def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config

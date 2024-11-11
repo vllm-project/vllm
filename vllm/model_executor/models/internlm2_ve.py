@@ -104,7 +104,7 @@ class InternLM2VEDecoderLayer(nn.Module):
 
 class InternLM2VEModel(InternLM2Model):
 
-    def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
         config = vllm_config.model_config.hf_config
@@ -158,7 +158,7 @@ class InternLM2VEModel(InternLM2Model):
 
 class InternLM2VEForCausalLM(InternLM2ForCausalLM):
 
-    def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config, prefix=prefix)
 
         config = vllm_config.model_config.hf_config

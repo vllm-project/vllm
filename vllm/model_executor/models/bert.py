@@ -309,7 +309,7 @@ class BertOutput(nn.Module):
 
 class BertModel(nn.Module):
 
-    def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
@@ -383,7 +383,7 @@ class BertEmbeddingModel(nn.Module):
        _pooler: An instance of Pooler used for pooling operations.
    """
 
-    def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         pooler_config = vllm_config.model_config.pooler_config
         self.model = BertModel(vllm_config=vllm_config, prefix=prefix)

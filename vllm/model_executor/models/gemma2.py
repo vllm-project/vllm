@@ -243,7 +243,7 @@ class Gemma2DecoderLayer(nn.Module):
 @support_torch_compile
 class Gemma2Model(nn.Module):
 
-    def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
@@ -395,7 +395,7 @@ class Gemma2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         "up_proj": ("gate_up_proj", 1),
     }
 
-    def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
@@ -462,7 +462,7 @@ class Gemma2EmbeddingModel(nn.Module, SupportsPP):
         _pooler: An instance of Pooler used for pooling operations.
     """
 
-    def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
         self.model = Gemma2Model(vllm_config, prefix)

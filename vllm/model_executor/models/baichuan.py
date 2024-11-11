@@ -443,7 +443,7 @@ class BaichuanForCausalLM(BaiChuanBaseForCausalLM):
     NOTE: the class name has a lower case 'c'.
     """
 
-    def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_config
         if config.hidden_size == 4096:  # baichuan2 7b
             super().__init__(vllm_config, prefix, "ROPE")
@@ -456,5 +456,5 @@ class BaiChuanForCausalLM(BaiChuanBaseForCausalLM):
     NOTE: the class name has an upper case 'C'.
     """
 
-    def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config, prefix, "ROPE")

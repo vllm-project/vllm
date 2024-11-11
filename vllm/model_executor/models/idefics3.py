@@ -415,7 +415,7 @@ class Idefics3Connector(nn.Module):
 
 class Idefics3Model(nn.Module):
 
-    def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
@@ -611,7 +611,7 @@ class Idefics3Model(nn.Module):
 @INPUT_REGISTRY.register_input_processor(input_processor_for_idefics3)
 class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal):
 
-    def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
         config = vllm_config.model_config.hf_config

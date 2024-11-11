@@ -184,7 +184,7 @@ class GPT2Block(nn.Module):
 @support_torch_compile
 class GPT2Model(nn.Module):
 
-    def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
         config = vllm_config.model_config.hf_config

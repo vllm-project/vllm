@@ -195,7 +195,7 @@ class Starcoder2DecoderLayer(nn.Module):
 @support_torch_compile
 class Starcoder2Model(nn.Module):
 
-    def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
@@ -246,7 +246,7 @@ class Starcoder2Model(nn.Module):
 
 class Starcoder2ForCausalLM(nn.Module, SupportsPP):
 
-    def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
