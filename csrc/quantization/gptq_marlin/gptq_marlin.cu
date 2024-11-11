@@ -1847,10 +1847,6 @@ int get_scales_cache_size(thread_config_t const& th_config, int prob_m,
   } else {
     int tb_scales = tb_groups * tb_n * 2;
 
-    if (is_zp_float) {
-      tb_scales *= 2;
-    }
-
     return tb_scales * pipe_stages;
   }
 }
