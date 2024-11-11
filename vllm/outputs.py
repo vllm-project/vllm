@@ -114,6 +114,36 @@ class RequestOutput:
         self.encoder_prompt_token_ids = encoder_prompt_token_ids
 
     @classmethod
+    def new(
+        cls,
+        request_id: str,
+        prompt: Optional[str],
+        prompt_token_ids: Optional[List[int]],
+        text: str,
+        token_ids: List[int],
+        finished: bool = False,
+    ) -> "RequestOutput":
+        """Initialize a new RequestOutput object."""
+
+        # TODO: Support `n` > 1.
+        completion_output = CompletionOutput(
+            index=0,
+            text=text,
+            token_ids=token_ids,
+            cumulative_logprob=None,
+            logprobs=None,  # TODO
+        )
+
+        return RequestOutput(
+            request_id=request_id,
+            prompt=prompt,
+            prompt_token_ids=prompt_token_ids,
+            prompt_logprobs=None,  # TODO
+            outputs=[completion_output],
+            finished=finished,
+        )
+
+    @classmethod
     def from_seq_group(
         cls, seq_group: SequenceGroup, use_cache: bool,
         seq_id_to_seq_group: Dict[str, SequenceGroupBase]

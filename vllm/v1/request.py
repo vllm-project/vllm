@@ -1,9 +1,11 @@
 import enum
 from typing import TYPE_CHECKING, List, Optional, Union
 
+from vllm.inputs.data import DecoderOnlyInputs
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import RequestMetrics
+from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.utils import ConstantList
 
 if TYPE_CHECKING:
@@ -43,8 +45,21 @@ class Request:
         self.num_prompt_tokens = len(self.prompt_token_ids)
         self._output_token_ids: List[int] = []
         self._all_token_ids: List[int] = self.prompt_token_ids.copy()
-        self.output_text = ""
         self.num_computed_tokens = 0
+
+    @classmethod
+    def from_engine_core_request(cls, request: EngineCoreRequest) -> "Request":
+
+        return cls(
+            request_id=request.request_id,
+            inputs=DecoderOnlyInputs(type="token",
+                                     prompt_token_ids=request.prompt_token_ids,
+                                     prompt=request.prompt),
+            sampling_params=request.sampling_params,
+            eos_token_id=request.eos_token_id,
+            arrival_time=request.arrival_time,
+            lora_request=request.lora_request,
+        )
 
     @property
     def output_token_ids(self) -> ConstantList[int]:
