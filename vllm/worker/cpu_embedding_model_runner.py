@@ -95,6 +95,7 @@ class CPUEmbeddingModelRunner(
                                                  model_input.seq_lens)
 
         return dataclasses.replace(model_input,
+                                   virtual_engine=virtual_engine,
                                    pooling_metadata=pooling_metadata)
 
     def _prepare_pooling(
