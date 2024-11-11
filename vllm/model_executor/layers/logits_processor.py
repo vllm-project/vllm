@@ -2,7 +2,7 @@
 import inspect
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Optional
+from typing import Optional, Union
 
 import torch
 import torch.nn as nn
@@ -78,7 +78,9 @@ class LogitsProcessor(nn.Module):
 
             # Apply logits processors (if any).
             if sampling_metadata is not None:
-                logits = _apply_logits_processors(self.thread_pool, logits,
+                thread_pool = self.thread_pool if hasattr(
+                    self, "thread_pool") else None
+                logits = _apply_logits_processors(thread_pool, logits,
                                                   sampling_metadata)
 
         return logits
@@ -146,7 +148,7 @@ def _apply_logits_processors_per_seq(logits_row_idx: int,
 
 
 def _apply_logits_processors(
-    thread_pool: ThreadPoolExecutor,
+    thread_pool: Union[ThreadPoolExecutor, None],
     logits: torch.Tensor,
     sampling_metadata: SamplingMetadata,
 ) -> torch.Tensor:
@@ -172,15 +174,23 @@ def _apply_logits_processors(
                 seq_group.prompt_logprob_indices)
 
     if req_args_list:
-        futures = []
-        for args in req_args_list:
-            f = thread_pool.submit(_apply_logits_processors_per_seq, *args)
-            futures.append(f)
+        if thread_pool:
+            futures = []
+            for args in req_args_list:
+                f = thread_pool.submit(_apply_logits_processors_per_seq, *args)
+                futures.append(f)
 
-        for f in as_completed(futures):
-            logits_row_idx, logits_row = f.result()
-            logits[logits_row_idx] = logits_row
-            logits_processed += 1
+            for f in as_completed(futures):
+                logits_row_idx, logits_row = f.result()
+                logits[logits_row_idx] = logits_row
+                logits_processed += 1
+        else:
+            # somehow thread_pool is None when processing LORA logits
+            for args in req_args_list:
+                logits_row_idx, logits_row = _apply_logits_processors_per_seq(
+                    *args)
+                logits[logits_row_idx] = logits_row
+                logits_processed += 1
 
     if found_logits_processors:
         # verifies that no rows in logits were missed unexpectedly
