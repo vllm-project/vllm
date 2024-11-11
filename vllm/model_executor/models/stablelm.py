@@ -203,8 +203,6 @@ class StableLMEpochModel(nn.Module):
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
-        pooler_config = vllm_config.model_config.pooler_config
 
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
@@ -259,7 +257,6 @@ class StablelmForCausalLM(nn.Module, SupportsPP):
     ) -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config

@@ -114,8 +114,6 @@ class InternLM2VEModel(InternLM2Model):
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
-        pooler_config = vllm_config.model_config.pooler_config
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,

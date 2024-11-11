@@ -491,8 +491,6 @@ class ChatGLMModel(nn.Module):
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
-        pooler_config = vllm_config.model_config.pooler_config
 
         self.config = config
 
@@ -605,7 +603,6 @@ class ChatGLMForCausalLM(nn.Module, SupportsLoRA, SupportsPP,
     ):
         super().__init__()
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
         multimodal_config = vllm_config.model_config.multimodal_config

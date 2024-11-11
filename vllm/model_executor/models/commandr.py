@@ -28,7 +28,7 @@ from transformers import CohereConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, LoRAConfig, VllmConfig
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
@@ -264,7 +264,6 @@ class CohereModel(nn.Module):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
-        pooler_config = vllm_config.model_config.pooler_config
 
         self.config = config
         lora_vocab = (lora_config.lora_extra_vocab_size *
@@ -343,7 +342,6 @@ class CohereForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     ) -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
         self.config = config

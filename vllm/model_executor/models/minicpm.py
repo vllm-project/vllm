@@ -29,7 +29,7 @@ from transformers import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, LoRAConfig, VllmConfig
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
@@ -350,6 +350,7 @@ class MiniCPMDecoderLayer(nn.Module):
 
 @support_torch_compile
 class MiniCPMModel(nn.Module):
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -361,7 +362,6 @@ class MiniCPMModel(nn.Module):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
-        pooler_config = vllm_config.model_config.pooler_config
 
         self.config = config
         self.cache_config = cache_config
@@ -508,7 +508,8 @@ class MiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             self.model.make_empty_intermediate_tensors)
 
     def _init_model(self):
-        self.model = MiniCPMModel(vllm_config=self.vllm_config, prefix=self.prefix)
+        self.model = MiniCPMModel(vllm_config=self.vllm_config,
+                                  prefix=self.prefix)
 
     def forward(
         self,

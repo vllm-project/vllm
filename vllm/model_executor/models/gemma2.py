@@ -405,7 +405,6 @@ class Gemma2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         prefix: str = "",
     ) -> None:
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
         del lora_config  # Unused.

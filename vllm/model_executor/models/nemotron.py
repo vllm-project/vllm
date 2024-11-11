@@ -27,7 +27,7 @@ from torch import nn
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, LoRAConfig, VllmConfig
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -304,7 +304,6 @@ class NemotronModel(nn.Module):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
-        pooler_config = vllm_config.model_config.pooler_config
 
         self.config = config
         self.padding_idx = config.pad_token_id
@@ -412,7 +411,6 @@ class NemotronForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     ) -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
         assert isinstance(config, NemotronConfig)
@@ -420,8 +418,7 @@ class NemotronForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self.config = config
         self.lora_config = lora_config
 
-        self.model = NemotronModel(vllm_config=vllm_config,
-                                   prefix="model")
+        self.model = NemotronModel(vllm_config=vllm_config, prefix="model")
         if get_pp_group().is_last_rank:
             self.unpadded_vocab_size = config.vocab_size
             if lora_config:

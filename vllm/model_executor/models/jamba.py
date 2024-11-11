@@ -7,7 +7,7 @@ from transformers import JambaConfig
 
 from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.attention.layer import Attention
-from vllm.config import CacheConfig, LoRAConfig, VllmConfig
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -269,7 +269,6 @@ class JambaModel(nn.Module):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
-        pooler_config = vllm_config.model_config.pooler_config
 
         self.config = config
         self.padding_idx = config.pad_token_id
@@ -360,7 +359,6 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA):
     ) -> None:
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
-        quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
         scheduler_config = vllm_config.scheduler_config
         assert not cache_config.enable_prefix_caching, \

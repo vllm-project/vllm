@@ -22,17 +22,15 @@ import torch.utils.checkpoint
 from PIL import Image
 from torch import nn
 # Temporary solution for transformers below 4.46.0.
-from transformers import PretrainedConfig as Idefics3Config
 from transformers import ProcessorMixin as Idefics3ImageProcessor
 
 from vllm.attention import AttentionMetadata
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
                          InputContext, token_inputs)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.sampling_metadata import SamplingMetadata
@@ -427,8 +425,6 @@ class Idefics3Model(nn.Module):
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        lora_config = vllm_config.lora_config
-        pooler_config = vllm_config.model_config.pooler_config
 
         self.config = config
         self.padding_idx = self.config.text_config.pad_token_id
@@ -627,7 +623,6 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
 

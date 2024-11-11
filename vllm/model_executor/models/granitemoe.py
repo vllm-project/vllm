@@ -28,7 +28,7 @@ from transformers.models.granitemoe import GraniteMoeConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, LoRAConfig, VllmConfig
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -258,7 +258,6 @@ class GraniteMoeModel(nn.Module):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
-        pooler_config = vllm_config.model_config.pooler_config
 
         self.padding_idx = config.pad_token_id
         lora_vocab = (lora_config.lora_extra_vocab_size *
@@ -344,15 +343,13 @@ class GraniteMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     ) -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
 
         self.config = config
         self.lora_config = lora_config
 
-        self.model = GraniteMoeModel(vllm_config=vllm_config,
-                                     prefix="model")
+        self.model = GraniteMoeModel(vllm_config=vllm_config, prefix="model")
         self.unpadded_vocab_size = config.vocab_size
         if lora_config:
             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size

@@ -239,4 +239,5 @@ class MiniCPM3ForCausalLM(MiniCPMForCausalLM):
     # are inherited from MiniCPMForCausalLM
 
     def _init_model(self):
-        self.model = MiniCPM3Model(vllm_config=self.vllm_config, prefix=self.prefix)
+        self.model = MiniCPM3Model(vllm_config=self.vllm_config,
+                                   prefix=self.prefix)
