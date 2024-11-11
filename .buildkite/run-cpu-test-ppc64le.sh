@@ -59,6 +59,8 @@ docker exec cpu-test bash -c "
 >>>>>>> b489fc3c... [CI/Build] Update CPU tests to include all "standard" tests (#5481)
 =======
 function cpu_tests() {
+  set -e
+
   # Run basic model test
   docker exec cpu-test bash -c "
     set -e
