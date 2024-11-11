@@ -234,6 +234,9 @@ def get_config(
 
     patch_rope_scaling(config)
 
+    if trust_remote_code:
+        maybe_register_config_serialize_by_value()
+
     return config
 
 
@@ -389,33 +392,39 @@ def get_sentence_transformer_tokenizer_config(model: str,
     return None
 
 
-def maybe_register_config_serialize_by_value(trust_remote_code: bool) -> None:
+def maybe_register_config_serialize_by_value() -> None:
     """Try to register HF model configuration class to serialize by value
 
-        With trust_remote_code, the config class is typically an instance of a
-        custom class imported from the HF modules cache. The class will not be
-        importable in spawned workers by default (and won't exist at all on
-        other nodes), which breaks serialization of the config.
+        If trust_remote_code is set, and the model's config file specifies an
+        `AutoConfig` class, then the config class is typically an instance of
+        a custom class imported from the HF modules cache.
+
+        Examples:
+
+        >>> from transformers import AutoConfig
+        >>> klass = AutoConfig.from_pretrained('meta-llama/Meta-Llama-3-8B', trust_remote_code=True)
+        >>> klass.__class__ # transformers.models.llama.configuration_llama.LlamaConfig
+        >>> import transformers_modules # error, not initialized
+        >>> klass = AutoConfig.from_pretrained('deepseek-ai/DeepSeek-V2.5', trust_remote_code=True)
+        >>> import transformers_modules # success, initialized
+        >>> klass.__class__ # transformers_modules.deepseek-ai.DeepSeek-V2.5.98b11844770b2c3ffc18b175c758a803640f4e77.configuration_deepseek.DeepseekV2Config
+
+        In the DeepSeek example, the config class is an instance of a custom
+        class that is not serializable by default. This class will not be
+        importable in spawned workers, and won't exist at all on
+        other nodes, which breaks serialization of the config.
 
         In this function we tell the cloudpickle serialization library to pass
         instances of these generated classes by value instead of by reference,
         i.e. the class definition is serialized along with its data so that the
-        class module does not need to be importable on the receiving end. This
-        registration only works if the modules cache has already been
-        initialized.
-
+        class module does not need to be importable on the receiving end.
 
         See: https://github.com/cloudpipe/cloudpickle?tab=readme-ov-file#overriding-pickles-serialization-mechanism-for-importable-constructs
-    """
-    if not trust_remote_code:
-        return
-
+    """ # noqa
     try:
         import transformers_modules
     except ImportError:
-        logger.debug("Could not import transformers_modules used for remote"
-                     " code. If remote code is not needed remove"
-                     " `--trust-remote-code`.")
+        # the config does not need trust_remote_code
         return
 
     try:
@@ -428,19 +437,19 @@ def maybe_register_config_serialize_by_value(trust_remote_code: bool) -> None:
             ray.cloudpickle.register_pickle_by_value(transformers_modules)
 
         # multiprocessing uses pickle to serialize arguments when using spawn
-        # Here we get pickle to use cloudpickle to serialize ModelConfig objects
+        # Here we get pickle to use cloudpickle to serialize config objects
         # that contain instances of the custom config class to avoid
         # serialization problems if the generated module (and model) has a `.`
         # in its name
         import multiprocessing
         import pickle
 
-        from vllm.config import ModelConfig
+        from vllm.config import VllmConfig
 
-        def _reduce_modelconfig(mc: ModelConfig):
-            return (pickle.loads, (cloudpickle.dumps(mc), ))
+        def _reduce_config(config: VllmConfig):
+            return (pickle.loads, (cloudpickle.dumps(config), ))
 
-        multiprocessing.reducer.register(ModelConfig, _reduce_modelconfig)
+        multiprocessing.reducer.register(VllmConfig, _reduce_config)
 
     except Exception as e:
         logger.warning(
