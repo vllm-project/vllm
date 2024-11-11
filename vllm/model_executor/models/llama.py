@@ -476,6 +476,9 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     mistral_mapping = {
         "layers": "model.layers",
         "attention": "self_attn",
+        "qscale_act": "input_scale",
+        "qscale_weight": "weight_scale",
+        "kv_fake_quantizer.qscale_act": "kv_scale",
         "wq": "q_proj",
         "wk": "k_proj",
         "wv": "v_proj",
