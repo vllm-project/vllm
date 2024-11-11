@@ -21,6 +21,8 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.sequence import IntermediateTensors, PoolerOutput
 
+from .utils import maybe_prefix
+
 
 class BertEmbedding(nn.Module):
 
@@ -309,12 +311,13 @@ class BertOutput(nn.Module):
 
 class BertModel(nn.Module):
 
-    def __init__(self,
-                 config: BertConfig,
-                 cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 prefix: str = ""):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+
         self.embeddings = BertEmbedding(config)
         self.encoder = BertEncoder(config,
                                    cache_config,
@@ -382,17 +385,11 @@ class BertEmbeddingModel(nn.Module):
        _pooler: An instance of Pooler used for pooling operations.
    """
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
-        quant_config = vllm_config.quant_config
         pooler_config = vllm_config.model_config.pooler_config
-        self.model = BertModel(config, cache_config, quant_config)
+        self.model = BertModel(vllm_config=vllm_config,
+                               prefix=maybe_prefix(prefix, "model"))
         self._pooler = Pooler.from_config_with_defaults(
             pooler_config,
             pooling_type=PoolingType.CLS,
