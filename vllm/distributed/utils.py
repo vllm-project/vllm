@@ -7,10 +7,6 @@ import pickle
 from typing import Any, Dict, Optional, Sequence, Tuple
 
 import torch
-from torch.distributed import ProcessGroup
-from torch.distributed.distributed_c10d import (Backend, PrefixStore,
-                                                _get_default_timeout,
-                                                is_nccl_available)
 from torch.distributed.rendezvous import rendezvous
 
 import vllm.envs as envs
@@ -95,11 +91,10 @@ def get_pp_indices(num_hidden_layers: int, pp_rank: int,
 
 @dataclasses.dataclass
 class StatelessProcessGroup:
-    """A dataclass to hold the ProcessGroup and the rank and world_size of the
+    """A dataclass to hold a metadata store, and the rank, world_size of the
     group. Only use it to communicate metadata between processes.
     For data-plane communication, create NCCL-related objects.
     """
-    pg: ProcessGroup
     rank: int
     world_size: int
     store: torch._C._distributed_c10d.Store
@@ -179,8 +174,8 @@ class StatelessProcessGroup:
                 self.broadcast_obj(None, src=i)
 
 
-def stateless_init_process_group(init_method: str, rank: int, world_size: int,
-                                 backend: str) -> StatelessProcessGroup:
+def stateless_init_process_group(init_method: str, rank: int,
+                                 world_size: int) -> StatelessProcessGroup:
     """A replacement for `torch.distributed.init_process_group` that does not
     pollute the global state.
 
@@ -197,51 +192,11 @@ def stateless_init_process_group(init_method: str, rank: int, world_size: int,
     C, and D can call `stateless_init_process_group` to form another group.
     """ # noqa
 
-    backend = Backend(backend)  # it is basically string
-    timeout = _get_default_timeout(backend)
+    from torch._C._distributed_c10d import _DEFAULT_PG_TIMEOUT
+    timeout = _DEFAULT_PG_TIMEOUT
 
     store, rank, world_size = next(
         rendezvous(init_method, rank, world_size, timeout=timeout))
     store.set_timeout(timeout)
 
-    group_rank = rank
-    group_size = world_size
-
-    # Use a PrefixStore to avoid accidental overrides of keys used by
-    # different systems (e.g. RPC) in case the store is multi-tenant.
-    prefix_store = PrefixStore(init_method, store)
-
-    pg_options = ProcessGroup.Options(backend=backend, timeout=timeout)
-
-    pg: ProcessGroup = ProcessGroup(
-        prefix_store,
-        group_rank,
-        group_size,
-        pg_options,
-    )
-
-    if backend == "gloo":
-        from torch.distributed.distributed_c10d import ProcessGroupGloo
-        backend_class = ProcessGroupGloo(prefix_store,
-                                         group_rank,
-                                         group_size,
-                                         timeout=timeout)
-        backend_type = ProcessGroup.BackendType.GLOO
-        device = torch.device("cpu")
-    elif backend == "nccl":
-        assert is_nccl_available()
-        from torch.distributed.distributed_c10d import ProcessGroupNCCL
-
-        backend_options = ProcessGroupNCCL.Options()
-        backend_options._timeout = timeout
-
-        backend_class = ProcessGroupNCCL(prefix_store, group_rank, group_size,
-                                         backend_options)
-        backend_type = ProcessGroup.BackendType.NCCL
-        device = torch.device("cuda")
-
-    backend_class._set_sequence_number_for_group()
-
-    pg._register_backend(device, backend_type, backend_class)
-
-    return StatelessProcessGroup(pg, rank, world_size, store, init_method)
+    return StatelessProcessGroup(rank, world_size, store, init_method)
