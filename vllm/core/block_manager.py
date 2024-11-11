@@ -393,7 +393,7 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         with num_lookahead_slots.
 
         Args:
-            seq_group (SequenceGroup): The sequence group to swap in.
+            seq_group (SequenceGroup): The sequence group to swap out.
             num_lookahead_slots (int): Number of lookahead slots used in 
                 speculative decoding, default to 0.
 
