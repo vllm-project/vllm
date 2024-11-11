@@ -98,6 +98,16 @@ def broadcast_worker(rank, WORLD_SIZE):
     pg1.barrier()
 
 
+def allgather_worker(rank, WORLD_SIZE):
+    pg1 = stateless_init_process_group(init_method="tcp://127.0.0.1:29505",
+                                       rank=rank,
+                                       world_size=WORLD_SIZE,
+                                       backend="gloo")
+    data = pg1.allgather_obj(rank)
+    assert data == list(range(WORLD_SIZE))
+    pg1.barrier()
+
+
 @multi_gpu_test(num_gpus=4)
 @pytest.mark.parametrize("worker", [cpu_worker, gpu_worker, broadcast_worker])
 def test_stateless_init_process_group(worker):

@@ -158,6 +158,18 @@ class StatelessProcessGroup:
             self.broadcast_recv_src_counter[src] += 1
             return obj
 
+    def all_gather_obj(self, obj: Any) -> list[Any]:
+        """All gather an object from all ranks."""
+        gathered_objs = []
+        for i in range(self.world_size):
+            if i == self.rank:
+                gathered_objs.append(obj)
+                self.broadcast_obj(obj, src=self.rank)
+            else:
+                recv_obj = self.broadcast_obj(None, src=i)
+                gathered_objs.append(recv_obj)
+        return gathered_objs
+
     def barrier(self):
         """A barrier to synchronize all ranks."""
         for i in range(self.world_size):
