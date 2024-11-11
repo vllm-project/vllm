@@ -97,8 +97,7 @@ def test_simple_piecewise_compile():
             model(torch.randn(2).cuda())
             model(torch.randn(1).cuda())
 
-        input = torch.randn(2).cuda()
-        input.zero_()
+        input = torch.zeros(2).cuda()
         global global_counter
         global_counter = 0
         output = model(input)
