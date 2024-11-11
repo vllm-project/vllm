@@ -72,7 +72,8 @@ def test_mixed_requests(
                     block_size) * block_size
             else:
                 expected_num_cached_tokens = 0
-            assert req_outputs[i].num_cached_tokens == expected_num_cached_tokens
+            assert req_outputs[
+                i].num_cached_tokens == expected_num_cached_tokens
 
         vllm_outputs = [
             (output.prompt_token_ids + list(output.outputs[0].token_ids),

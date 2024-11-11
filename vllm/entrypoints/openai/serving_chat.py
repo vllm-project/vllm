@@ -49,7 +49,8 @@ class OpenAIServingChat(OpenAIServing):
                  chat_template: Optional[str],
                  return_tokens_as_token_ids: bool = False,
                  enable_auto_tools: bool = False,
-                 tool_parser: Optional[str] = None):
+                 tool_parser: Optional[str] = None,
+                 enable_prompt_tokens_details: bool = False):
         super().__init__(engine_client=engine_client,
                          model_config=model_config,
                          base_model_paths=base_model_paths,
@@ -79,6 +80,8 @@ class OpenAIServingChat(OpenAIServing):
                 raise TypeError("Error: --enable-auto-tool-choice requires "
                                 f"tool_parser:'{tool_parser}' which has not "
                                 "been registered") from e
+
+        self.enable_prompt_tokens_details = enable_prompt_tokens_details
 
     async def create_chat_completion(
         self,
@@ -536,7 +539,7 @@ class OpenAIServingChat(OpenAIServing):
                                         completion_tokens=completion_tokens,
                                         total_tokens=num_prompt_tokens +
                                         completion_tokens)
-                if num_cached_tokens:
+                if self.enable_prompt_tokens_details and num_cached_tokens:
                     final_usage.prompt_tokens_details = PromptTokenUsageInfo(
                         cached_tokens=num_cached_tokens)
 
@@ -710,7 +713,7 @@ class OpenAIServingChat(OpenAIServing):
                           completion_tokens=num_generated_tokens,
                           total_tokens=num_prompt_tokens +
                           num_generated_tokens)
-        if final_res.num_cached_tokens:
+        if self.enable_prompt_tokens_details and final_res.num_cached_tokens:
             usage.prompt_tokens_details = PromptTokenUsageInfo(
                 cached_tokens=final_res.num_cached_tokens)
 
