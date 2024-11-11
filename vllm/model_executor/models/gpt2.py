@@ -42,7 +42,8 @@ from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsPP
 from .utils import (is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, make_layers)
+                    make_empty_intermediate_tensors_factory, make_layers,
+                    maybe_prefix)
 
 
 class GPT2Attention(nn.Module):
@@ -250,7 +251,8 @@ class GPT2LMHeadModel(nn.Module, SupportsPP):
         self.config = config
         self.quant_config = quant_config
         self.transformer = GPT2Model(vllm_config=vllm_config,
-                                     prefix="transformer")
+                                     prefix=maybe_prefix(
+                                         prefix, "transformer"))
         if self.config.tie_word_embeddings:
             self.lm_head = self.transformer.wte
         else:

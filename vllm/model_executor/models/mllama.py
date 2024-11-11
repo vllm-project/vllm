@@ -56,6 +56,7 @@ from vllm.utils import is_list_of
 from .clip import CLIPMLP
 from .interfaces import SupportsMultiModal
 from .llama import LlamaDecoderLayer, LlamaMLP
+from .utils import maybe_prefix
 
 logger = init_logger(__name__)
 MLLAMA_IMAGE_TOKEN_ID = 128256
@@ -1116,10 +1117,11 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
 
         self.vision_model = MllamaVisionModel(config.vision_config,
                                               quant_config,
-                                              prefix="vision_model")
+                                              prefix=maybe_prefix(
+                                                  prefix, "vision_model"))
         self.language_model = MllamaForCausalLM(
             vllm_config=vllm_config,
-            prefix="language_model",
+            prefix=maybe_prefix(prefix, "language_model"),
         )
         self.multi_modal_projector = ColumnParallelLinear(
             config.vision_config.vision_output_dim,
@@ -1127,7 +1129,7 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
             bias=True,
             quant_config=quant_config,
             gather_output=True,
-            prefix="multi_modal_projector",
+            prefix=maybe_prefix(prefix, "multi_modal_projector"),
         )
         self.logits_processor = LogitsProcessor(config.output_hidden_states,
                                                 config.text_config.vocab_size)

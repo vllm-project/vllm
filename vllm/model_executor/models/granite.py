@@ -52,7 +52,8 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
-from .utils import PPMissingLayer, is_pp_missing_parameter, make_layers
+from .utils import (PPMissingLayer, is_pp_missing_parameter, make_layers,
+                    maybe_prefix)
 
 
 class GraniteMLP(nn.Module):
@@ -378,7 +379,8 @@ class GraniteForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self.config = config
         self.lora_config = lora_config
 
-        self.model = GraniteModel(vllm_config=vllm_config, prefix="model")
+        self.model = GraniteModel(vllm_config=vllm_config,
+                                  prefix=maybe_prefix(prefix, "model"))
         if get_pp_group().is_last_rank:
             self.unpadded_vocab_size = config.vocab_size
             if lora_config:

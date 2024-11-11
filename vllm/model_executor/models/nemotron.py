@@ -47,7 +47,8 @@ from vllm.transformers_utils.configs import NemotronConfig
 
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (PPMissingLayer, is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, make_layers)
+                    make_empty_intermediate_tensors_factory, make_layers,
+                    maybe_prefix)
 
 # The architecture is pretty similar to Llama, with these changes:
 # - There is no gate_proj, just up_proj
@@ -410,7 +411,8 @@ class NemotronForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self.config = config
         self.lora_config = lora_config
 
-        self.model = NemotronModel(vllm_config=vllm_config, prefix="model")
+        self.model = NemotronModel(vllm_config=vllm_config,
+                                   prefix=maybe_prefix(prefix, "model"))
         if get_pp_group().is_last_rank:
             self.unpadded_vocab_size = config.vocab_size
             if lora_config:

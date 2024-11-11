@@ -59,7 +59,7 @@ from vllm.sequence import IntermediateTensors, SequenceData
 
 from .idefics2_vision_model import Idefics2VisionTransformer
 from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsPP
-from .utils import is_pp_missing_parameter
+from .utils import is_pp_missing_parameter, maybe_prefix
 
 _KEYS_TO_MODIFY_MAPPING = {
     "llm.lm_head": "lm_head",
@@ -400,8 +400,11 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
         self.multimodal_config = multimodal_config
 
         self.version = get_version_by_config(self.config)
-        self.llm = self.init_llm(vllm_config=vllm_config, prefix="llm")
-        self.vpm = self.init_vision_module(config, quant_config, prefix="vpm")
+        self.llm = self.init_llm(vllm_config=vllm_config,
+                                 prefix=maybe_prefix(prefix, "llm"))
+        self.vpm = self.init_vision_module(config,
+                                           quant_config,
+                                           prefix=maybe_prefix(prefix, "vpm"))
         param_dtype = torch.get_default_dtype()
         self.vpm.to(dtype=param_dtype)
         self.vision_dim = (self.vpm.embed_dim if self.version == (2, 0) else
@@ -410,13 +413,15 @@ class MiniCPMVBaseModel(nn.Module, SupportsMultiModal, SupportsPP):
         self.resampler = self.init_resampler(self.embed_dim,
                                              self.vision_dim,
                                              quant_config=quant_config,
-                                             prefix="resampler")
+                                             prefix=maybe_prefix(
+                                                 prefix, "resampler"))
         self.resampler.to(device="cuda", dtype=param_dtype)
         # TODO: why is there _KEYS_TO_MODIFY_MAPPING? lm_head should be in llm
         self.lm_head = ParallelLMHead(config.vocab_size,
                                       config.hidden_size,
                                       quant_config=quant_config,
-                                      prefix="llm.lm_head")
+                                      prefix=maybe_prefix(
+                                          prefix, "llm.lm_head"))
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = get_sampler()
 

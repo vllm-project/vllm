@@ -47,7 +47,7 @@ from vllm.sequence import IntermediateTensors
 
 from . import mixtral
 from .interfaces import SupportsLoRA, SupportsPP
-from .utils import make_layers
+from .utils import make_layers, maybe_prefix
 
 
 class GraniteMoeMoE(nn.Module):
@@ -341,7 +341,8 @@ class GraniteMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self.config = config
         self.lora_config = lora_config
 
-        self.model = GraniteMoeModel(vllm_config=vllm_config, prefix="model")
+        self.model = GraniteMoeModel(vllm_config=vllm_config,
+                                     prefix=maybe_prefix(prefix, "model"))
         self.unpadded_vocab_size = config.vocab_size
         if lora_config:
             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size

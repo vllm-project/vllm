@@ -53,7 +53,8 @@ from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (PPMissingLayer, is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, make_layers)
+                    make_empty_intermediate_tensors_factory, make_layers,
+                    maybe_prefix)
 
 
 class SolarMLP(nn.Module):
@@ -418,7 +419,7 @@ class SolarForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
         self.model = SolarModel(
             vllm_config=vllm_config,
-            prefix="model",
+            prefix=maybe_prefix(prefix, "model"),
         )
         if get_pp_group().is_last_rank:
             self.unpadded_vocab_size = config.vocab_size
