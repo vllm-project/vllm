@@ -396,18 +396,29 @@ class Scheduler:
         self._async_stopped: List[SequenceGroup] = []
 
         # For chunked prefill, we allocate a set of "prefill slots" that
-        # each represent a sequence group that can be concurrently prefilled
+        # each represent a sequence group that can be partially prefilled.
+        # Having multiple partial prefills in flight allows us to minimize TTFT
+        # and avoid decode starvation in cases where a single sequence group
+        # with a very large prompt blocks the queue for too many iterations.
         self.num_prefill_slots = scheduler_config.num_prefill_slots
         self.prefill_slots_running = 0
         self.big_prefill_requests = 0
         # Requests with more than (4% max context length) tokens to prefill
-        # are "big"
+        # are "big".
+        # The number of big prefill requests is limited so that smaller
+        # requests may jump the queue in front of them and get to the decode
+        # phase faster.
         self.big_prefill_threshold = scheduler_config.max_model_len // 25
         self.max_big_requests = 1  # TODO: something
 
         # Dict cache with the chunk sizes to hand out to each sequence depending
-        # on how many prefill slots are used.
-        # This is just the full budget / number of prefill slots
+        # on how many prefill slots are used. This is slightly faster than
+        # running an integer division every time a prefill is scheduled.
+        # This splits the budget evenly among all prefill slots.
+        # We use a defaultdict here to handle the case where we prefill many
+        # more requests than prefill slots. This is normal when requests have
+        # very small prompts to prefill, and we want to give them each the same
+        # budget.
         self.prefill_chunk_sizes = defaultdict(
             lambda: scheduler_config.max_num_batched_tokens // self.
             num_prefill_slots)
@@ -1228,17 +1239,25 @@ class Scheduler:
         )
 
     def _is_big_seq_group(self, seq_group: SequenceGroup) -> bool:
+        """Simple heuristic to check if a sequence group needs a lot of prefill
+        work."""
         return seq_group.seqs[0].get_num_new_tokens(
         ) >= self.big_prefill_threshold
 
     def _will_still_be_prefilling(self,
                                   seq_group: ScheduledSequenceGroup) -> bool:
+        """Check if a sequence will be mid-prefill after this iteration.
+        We need to know how many partial prefills will be running in order to
+        properly budget the next iteration."""
         return seq_group.token_chunk_size != seq_group.seq_group.seqs[
             0].get_num_new_tokens()
 
     def _reserve_prefill_slots_from_waiting_queue(self):
-        # Increment self.num_slots_filled for each request in the waiting queue
-        # that we can fit into a slot
+        """Peek into the waiting queue to see how many requests we may be able
+        to start prefilling during this scheduling iteration. This allows us to
+        budget fewer tokens for currently running prefills if we know that more
+        requests from the queue will fit.
+        """
         queued_big_requests = 0
         for seq_group in self.waiting:
             # Don't fill more slots than we have
