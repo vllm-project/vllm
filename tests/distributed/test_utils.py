@@ -103,7 +103,7 @@ def allgather_worker(rank, WORLD_SIZE):
                                        rank=rank,
                                        world_size=WORLD_SIZE,
                                        backend="gloo")
-    data = pg1.allgather_obj(rank)
+    data = pg1.all_gather_obj(rank)
     assert data == list(range(WORLD_SIZE))
     pg1.barrier()
 
