@@ -350,11 +350,13 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP):
         self.secondary_weights = []
         self.audio_tower = ModifiedWhisperEncoder(config.audio_config)
         if config.audio_model_id is not None:
+            # this prefix is not for initialization, but for loading weights
+            # note the trailing dot
             self.secondary_weights.append(
                 DefaultModelLoader.Source(
                     model_or_path=config.audio_model_id,
                     revision=None,
-                    prefix=maybe_prefix(prefix, "audio_tower."),
+                    prefix="audio_tower.",
                 ))
         self.multi_modal_projector = UltravoxProjector(config)
         self.language_model = init_vllm_registered_model(
@@ -362,11 +364,12 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP):
             vllm_config=vllm_config,
             prefix=maybe_prefix(prefix, "language_model"))
         if config.text_model_id is not None:
+            # this prefix is not for initialization, but for loading weights
+            # note the trailing dot
             self.secondary_weights.append(
                 DefaultModelLoader.Source(model_or_path=config.text_model_id,
                                           revision=None,
-                                          prefix=maybe_prefix(
-                                              prefix, "language_model.")))
+                                          prefix="language_model."))
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
