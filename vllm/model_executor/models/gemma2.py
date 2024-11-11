@@ -465,7 +465,7 @@ class Gemma2EmbeddingModel(nn.Module, SupportsPP):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
-        self.model = Gemma2Model(vllm_config, prefix)
+        self.model = Gemma2Model(vllm_config=vllm_config, prefix=prefix)
         self._pooler = Pooler.from_config_with_defaults(
             vllm_config.model_config.pooler_config,
             pooling_type=PoolingType.LAST,
