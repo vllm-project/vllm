@@ -1,4 +1,5 @@
 {
     "use_cudagraph": true,
-    "non_cudagraph_ops": ["silly.attention"]
+    "non_cudagraph_ops": ["silly.attention"],
+    "cudagraph_copy_inputs": true
 }
