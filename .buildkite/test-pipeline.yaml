@@ -165,6 +165,14 @@ steps:
   # OOM in the CI unless we run this separately
   - pytest -v -s tokenization
 
+- label: V1 Test
+  #mirror_hardwares: [amd]
+  source_file_dependencies:
+    - vllm/
+    - tests/v1
+  commands:
+    - pytest -v -s v1
+
 - label: Examples Test # 15min
   working_dir: "/vllm-workspace/examples"
   #mirror_hardwares: [amd]

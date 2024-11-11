@@ -70,7 +70,7 @@ class KVCacheManager:
 
         Args:
             request: The request to get the computed blocks.
-        
+
         Returns:
             A list of blocks that are computed for the request.
         """
@@ -105,7 +105,7 @@ class KVCacheManager:
         Args:
             request: The request to append slots.
             num_tokens: The number of tokens to append.
-        
+
         Returns:
             A list of new blocks if new blocks are allocated, or None
             if new blocks are required but cannot be allocated.
@@ -176,7 +176,7 @@ class KVCacheManager:
             num_tokens: The number of tokens to allocate. Note that this does
                 not include the tokens that have already been computed.
             computed_blocks: The blocks that have already been computed.
-        
+
         Returns:
             A list of new allocated blocks.
         """
@@ -240,7 +240,8 @@ class KVCacheManager:
         Args:
             request: The request to free the blocks.
         """
-        blocks = self.req_to_blocks.pop(request.request_id)
+        # Default to [] in case a request is freed (aborted) before alloc.
+        blocks = self.req_to_blocks.pop(request.request_id, [])
         if self.enable_caching:
             # Free blocks in reverse order so that the tail blocks are
             # freed first.
@@ -259,13 +260,13 @@ class KVCacheManager:
         """Get new blocks from the free block pool, and add token IDs to
         allocated blocks if caching is enabled.
         Note that we do not check block cache in this function.
-        
+
         Args:
             num_blocks: The number of blocks to allocate.
             token_ids: The token IDs in the blocks. None if caching is disabled.
             parent_block: The parent block. Used to include block chain
                 in the block hash.
-        
+
         Returns:
             A list of new block.
         """
