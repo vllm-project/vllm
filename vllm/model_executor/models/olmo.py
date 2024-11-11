@@ -28,7 +28,7 @@ from transformers import OlmoConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
@@ -46,7 +46,8 @@ from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsPP
 from .utils import (is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, make_layers)
+                    make_empty_intermediate_tensors_factory, make_layers,
+                    maybe_prefix)
 
 
 class OlmoAttention(nn.Module):
@@ -224,12 +225,13 @@ class OlmoDecoderLayer(nn.Module):
 @support_torch_compile
 class OlmoModel(nn.Module):
 
-    def __init__(self,
-                 config: OlmoConfig,
-                 cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 prefix: str = ""):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+
         self.config = config
 
         self.embed_tokens = VocabParallelEmbedding(config.vocab_size,
@@ -291,13 +293,13 @@ class OlmoForCausalLM(nn.Module, SupportsPP):
     Extremely barebones HF model wrapper.
     """
 
-    def __init__(self,
-                 config: OlmoConfig,
-                 cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
         self.config = config
-        self.model = OlmoModel(config, cache_config, quant_config)
+        self.model = OlmoModel(vllm_config=vllm_config,
+                               prefix=maybe_prefix(prefix, "model"))
         if config.tie_word_embeddings:
             self.lm_head = self.model.embed_tokens
         else:

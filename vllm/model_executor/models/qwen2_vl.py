@@ -40,7 +40,7 @@ from transformers.models.qwen2_vl.image_processing_qwen2_vl import (
 
 from vllm.attention import AttentionMetadata
 from vllm.attention.selector import _Backend
-from vllm.config import CacheConfig, LoRAConfig, MultiModalConfig
+from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group, parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
@@ -51,13 +51,15 @@ from vllm.model_executor.layers.activation import QuickGELU
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization import (GPTQConfig,
+                                                     GPTQMarlinConfig,
+                                                     QuantizationConfig)
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.qwen2 import Qwen2Model
 from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalDataDict,
-                             MultiModalInputs)
+                             MultiModalKwargs)
 from vllm.multimodal.base import MultiModalData
 from vllm.multimodal.image import cached_get_image_processor
 from vllm.multimodal.utils import cached_get_tokenizer
@@ -68,7 +70,7 @@ from vllm.transformers_utils.processor import cached_get_processor
 from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsPP
 from .utils import (PPMissingLayer, get_vit_attn_backend,
                     is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory)
+                    make_empty_intermediate_tensors_factory, maybe_prefix)
 
 logger = init_logger(__name__)
 
@@ -576,10 +578,10 @@ def mm_input_mapper_for_qwen2_vl(
     *,
     min_pixels: Optional[int] = None,
     max_pixels: Optional[int] = None,
-) -> MultiModalInputs:
+) -> MultiModalKwargs:
     """Input mapper for Qwen2-VL."""
     if data_type_key == "image" and isinstance(data, dict):
-        return MultiModalInputs({
+        return MultiModalKwargs({
             "image_embeds": data.get("image_embeds"),
             "image_grid_thw": data.get("image_grid_thw"),
         })
@@ -613,7 +615,7 @@ def mm_input_mapper_for_qwen2_vl(
         logger.error("Failed to process image (%s)", data)
         raise
 
-    return MultiModalInputs(batch_data)
+    return MultiModalKwargs(batch_data)
 
 
 image_input_mapper_for_qwen2_vl = partial(mm_input_mapper_for_qwen2_vl,
@@ -964,15 +966,12 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
     embedding_modules = {}
     embedding_padding_modules = []
 
-    def __init__(self,
-                 config: Qwen2VLConfig,
-                 multimodal_config: MultiModalConfig,
-                 cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 lora_config: Optional[LoRAConfig] = None) -> None:
-
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+        multimodal_config = vllm_config.model_config.multimodal_config
         assert not cache_config.enable_prefix_caching, \
             "Qwen2-VL currently does not support prefix caching"
 
@@ -982,14 +981,12 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.visual = Qwen2VisionTransformer(
             config.vision_config,
             norm_eps=getattr(config, "rms_norm_eps", 1e-6),
-            quant_config=quant_config,
-            prefix="visual",
+            quant_config=self._maybe_ignore_quant_config(quant_config),
+            prefix=maybe_prefix(prefix, "visual"),
         )
 
-        self.model = Qwen2Model(config,
-                                cache_config,
-                                quant_config,
-                                prefix="model")
+        self.model = Qwen2Model(vllm_config=vllm_config,
+                                prefix=maybe_prefix(prefix, "model"))
 
         if get_pp_group().is_last_rank:
             if config.tie_word_embeddings:
@@ -998,7 +995,8 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
                 self.lm_head = ParallelLMHead(config.vocab_size,
                                               config.hidden_size,
                                               quant_config=quant_config,
-                                              prefix="lm_head")
+                                              prefix=maybe_prefix(
+                                                  prefix, "lm_head"))
         else:
             self.lm_head = PPMissingLayer()
 
@@ -1007,6 +1005,14 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.make_empty_intermediate_tensors = (
             make_empty_intermediate_tensors_factory(
                 ["hidden_states", "residual"], config.hidden_size))
+
+    def _maybe_ignore_quant_config(self, quant_config: QuantizationConfig):
+        # GPTQ configs do not have a list of ignored modules, however AutoGPTQ
+        # seems to avoid vision encoder sections for some models.
+        # See: https://huggingface.co/Qwen/Qwen2-VL-2B-Instruct-GPTQ-Int4
+        if isinstance(quant_config, (GPTQConfig, GPTQMarlinConfig)):
+            return None
+        return quant_config
 
     def _validate_and_reshape_mm_tensor(self,
                                         mm_input: Union[torch.Tensor,

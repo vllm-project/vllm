@@ -68,6 +68,7 @@ if TYPE_CHECKING:
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = False
     VLLM_TORCH_COMPILE_LEVEL: int = 0
+    VLLM_TORCH_COMPILE_CONFIG: Optional[str] = None
     VLLM_CUSTOM_OPS: List[str] = []
     VLLM_DISABLED_KERNELS: List[str] = []
     VLLM_USE_V1: bool = False
@@ -227,6 +228,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # and disabled when running with Inductor (compile_level >= Inductor).
     "VLLM_CUSTOM_OPS":
     lambda: os.environ.get("VLLM_CUSTOM_OPS", "").replace(" ", "").split(","),
+
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id
     "LOCAL_RANK":
