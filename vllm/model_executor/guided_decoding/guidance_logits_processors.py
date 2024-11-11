@@ -133,12 +133,10 @@ class GuidanceLogitsProcessor:
                 backtrack, ff_tokens = self.ll_interpreter.post_process(
                     past_tokens_ids[-1])
                 if len(ff_tokens) > 0 and backtrack == 0:
+                    # first token is last generated token
                     ff_tokens = ff_tokens[1:]
                 self.pending_ff_tokens.extend(ff_tokens)
                 self.new_sampling = False
-
-                # backtrack is disabled by default
-                # assert backtrack == 0
 
             if len(self.pending_ff_tokens) > 0:
                 # if we have pending fast-forward tokens,
@@ -174,13 +172,13 @@ class GuidanceLogitsProcessor:
                                     device=logits.device)
 
             if mask.shape[0] != logits.shape[0]:
-                # Some model has extra tokens that are not in the vocabulary
+                # Some models have extra tokens that are not in the vocabulary
                 mask = torch.cat([
                     mask,
-                    torch.ones(
+                    torch.zeros(
                         logits.shape[0] - mask.shape[0],
                         device=logits.device,
-                    ) * 200.0,
+                    ),
                 ])
 
             masked_logits = logits + mask
