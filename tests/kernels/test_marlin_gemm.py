@@ -95,8 +95,6 @@ def test_gptq_marlin_repack(k_chunk, n_chunk, quant_type, group_size,
     # Quantize (and apply act_order if provided)
     w_ref, q_w, s, g_idx, rand_perm = gptq_quantize_weights(
         b_weight, quant_type, group_size, act_order)
-    # print(b_weight.dtype, b_weight.shape, q_w.dtype, q_w.shape)
-    print(q_w)
 
     # Pack to GPTQ format
     q_w_gptq = gptq_pack(q_w, quant_type.size_bits, size_k, size_n)
