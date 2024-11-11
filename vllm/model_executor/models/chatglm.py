@@ -39,7 +39,8 @@ from vllm.transformers_utils.configs import ChatGLMConfig
 
 from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsPP
 from .utils import (is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, make_layers)
+                    make_empty_intermediate_tensors_factory, make_layers,
+                    maybe_prefix)
 
 logger = init_logger(__name__)
 
@@ -609,7 +610,9 @@ class ChatGLMForCausalLM(nn.Module, SupportsLoRA, SupportsPP,
         self.quant_config = quant_config
         self.max_position_embeddings = getattr(config, "max_sequence_length",
                                                8192)
-        self.transformer = ChatGLMModel(vllm_config=vllm_config, prefix=prefix)
+        self.transformer = ChatGLMModel(vllm_config=vllm_config,
+                                        prefix=maybe_prefix(
+                                            prefix, "transformer"))
         if self.config.tie_word_embeddings:
             self.transformer.output_layer.weight = (
                 self.transformer.embedding.weight)

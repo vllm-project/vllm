@@ -21,6 +21,8 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.sequence import IntermediateTensors, PoolerOutput
 
+from .utils import maybe_prefix
+
 
 class BertEmbedding(nn.Module):
 
@@ -386,7 +388,8 @@ class BertEmbeddingModel(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         pooler_config = vllm_config.model_config.pooler_config
-        self.model = BertModel(vllm_config=vllm_config, prefix=prefix)
+        self.model = BertModel(vllm_config=vllm_config,
+                               prefix=maybe_prefix(prefix, "model"))
         self._pooler = Pooler.from_config_with_defaults(
             pooler_config,
             pooling_type=PoolingType.CLS,

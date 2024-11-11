@@ -26,6 +26,8 @@ from vllm.sequence import IntermediateTensors
 from vllm.worker.model_runner import (_BATCH_SIZES_TO_CAPTURE,
                                       _get_graph_batch_size)
 
+from .utils import maybe_prefix
+
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
 
@@ -141,7 +143,8 @@ class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree):
         super().__init__()
         self.config = config
         self.scheduler_config = scheduler_config
-        self.backbone = MambaModel(vllm_config=vllm_config, prefix=prefix)
+        self.backbone = MambaModel(vllm_config=vllm_config,
+                                   prefix=maybe_prefix(prefix, "backbone"))
         self.unpadded_vocab_size = config.vocab_size
         if lora_config:
             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size

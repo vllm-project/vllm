@@ -18,7 +18,7 @@ from vllm.sequence import IntermediateTensors, PoolerOutput
 
 from .interfaces import SupportsPP
 from .qwen2 import Qwen2Model
-from .utils import AutoWeightsLoader
+from .utils import AutoWeightsLoader, maybe_prefix
 
 
 class ReLU(nn.Module):
@@ -78,7 +78,8 @@ class Qwen2ForRewardModel(nn.Module, SupportsPP):
         self.lora_config = lora_config
 
         self.quant_config = quant_config
-        self.model = Qwen2Model(vllm_config=vllm_config, prefix=prefix)
+        self.model = Qwen2Model(vllm_config=vllm_config,
+                                prefix=maybe_prefix(prefix, "model"))
 
         self.score = nn.Sequential(
             ColumnParallelLinear(config.hidden_size,

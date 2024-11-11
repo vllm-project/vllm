@@ -42,7 +42,8 @@ from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsPP
 from .utils import (is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, make_layers)
+                    make_empty_intermediate_tensors_factory, make_layers,
+                    maybe_prefix)
 
 
 class GPTJAttention(nn.Module):
@@ -239,7 +240,9 @@ class GPTJForCausalLM(nn.Module, SupportsPP):
         self.config = config
         self.quant_config = quant_config
         assert not config.tie_word_embeddings
-        self.transformer = GPTJModel(vllm_config=vllm_config, prefix=prefix)
+        self.transformer = GPTJModel(vllm_config=vllm_config,
+                                     prefix=maybe_prefix(
+                                         prefix, "transformer"))
         self.lm_head = ParallelLMHead(
             config.vocab_size,
             config.n_embd,

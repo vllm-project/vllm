@@ -49,7 +49,8 @@ from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, make_layers)
+                    make_empty_intermediate_tensors_factory, make_layers,
+                    maybe_prefix)
 
 
 @torch.compile
@@ -347,7 +348,8 @@ class CohereForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size,
                                                 scale=config.logit_scale)
-        self.model = CohereModel(vllm_config=vllm_config, prefix=prefix)
+        self.model = CohereModel(vllm_config=vllm_config,
+                                 prefix=maybe_prefix(prefix, "model"))
         self.sampler = get_sampler()
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)

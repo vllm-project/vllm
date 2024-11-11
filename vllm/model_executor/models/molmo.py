@@ -44,7 +44,8 @@ from vllm.transformers_utils.processor import get_processor
 
 from .interfaces import SupportsMultiModal, SupportsPP
 from .utils import (get_vit_attn_backend,
-                    make_empty_intermediate_tensors_factory, make_layers)
+                    make_empty_intermediate_tensors_factory, make_layers,
+                    maybe_prefix)
 
 # TODO: hard-coded for now. Consider making it configurable.
 VIT_LAYERS = [-2, -9]
@@ -1034,7 +1035,8 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         vision_config = VisionBackboneConfig()
         self.vision_backbone = MolmoVisionBackbone(config, vision_config,
                                                    quant_config)
-        self.model = MolmoModel(vllm_config=vllm_config, prefix=prefix)
+        self.model = MolmoModel(vllm_config=vllm_config,
+                                prefix=maybe_prefix(prefix, "model"))
 
         if self.config.weight_tying:
             self.lm_head = self.model.transformer.wte

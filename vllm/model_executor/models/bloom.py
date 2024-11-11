@@ -42,7 +42,8 @@ from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsPP
 from .utils import (is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, make_layers)
+                    make_empty_intermediate_tensors_factory, make_layers,
+                    maybe_prefix)
 
 
 def _get_alibi_slopes(total_num_heads: int) -> torch.Tensor:
@@ -290,7 +291,9 @@ class BloomForCausalLM(nn.Module, SupportsPP):
         quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
-        self.transformer = BloomModel(vllm_config=vllm_config, prefix=prefix)
+        self.transformer = BloomModel(vllm_config=vllm_config,
+                                      prefix=maybe_prefix(
+                                          prefix, "transformer"))
         if self.config.tie_word_embeddings:
             self.lm_head = self.transformer.word_embeddings
         else:

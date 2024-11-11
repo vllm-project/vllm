@@ -37,7 +37,8 @@ from vllm.utils import print_warning_once
 
 from .interfaces import SupportsMultiModal, SupportsPP
 from .utils import (is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, make_layers)
+                    make_empty_intermediate_tensors_factory, make_layers,
+                    maybe_prefix)
 
 # These configs are not part of the model config but the preprocessor
 # and processor files, so we hardcode them in the model file for now.
@@ -929,7 +930,8 @@ class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
         multimodal_config = vllm_config.model_config.multimodal_config
         self.config = config
         self.multimodal_config = multimodal_config
-        self.model = ChameleonModel(vllm_config=vllm_config, prefix=prefix)
+        self.model = ChameleonModel(vllm_config=vllm_config,
+                                    prefix=maybe_prefix(prefix, "model"))
         self.unpadded_vocab_size = config.vocab_size
         self.lm_head = ParallelLMHead(
             self.unpadded_vocab_size,

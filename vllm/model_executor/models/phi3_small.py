@@ -24,7 +24,8 @@ from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsPP
 from .utils import (is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, make_layers)
+                    make_empty_intermediate_tensors_factory, make_layers,
+                    maybe_prefix)
 
 
 def load_column_parallel_weight(param: torch.nn.Parameter,
@@ -368,7 +369,8 @@ class Phi3SmallForCausalLM(nn.Module, SupportsPP):
         quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
-        self.model = Phi3SmallModel(vllm_config=vllm_config, prefix=prefix)
+        self.model = Phi3SmallModel(vllm_config=vllm_config,
+                                    prefix=maybe_prefix(prefix, "model"))
         self.vocab_size = config.vocab_size
         self.mup_width_multiplier = config.mup_width_multiplier
         self.lm_head = ParallelLMHead(

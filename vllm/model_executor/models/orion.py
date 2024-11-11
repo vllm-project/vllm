@@ -29,7 +29,8 @@ from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsPP
 from .utils import (is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, make_layers)
+                    make_empty_intermediate_tensors_factory, make_layers,
+                    maybe_prefix)
 
 
 class OrionMLP(nn.Module):
@@ -273,7 +274,8 @@ class OrionForCausalLM(nn.Module, SupportsPP):
         quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
-        self.model = OrionModel(vllm_config=vllm_config, prefix=prefix)
+        self.model = OrionModel(vllm_config=vllm_config,
+                                prefix=maybe_prefix(prefix, "model"))
         self.lm_head = ParallelLMHead(config.vocab_size,
                                       config.hidden_size,
                                       quant_config=quant_config)

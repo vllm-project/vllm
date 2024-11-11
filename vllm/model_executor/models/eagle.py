@@ -14,6 +14,8 @@ from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
+from .utils import maybe_prefix
+
 
 class EAGLE(nn.Module):
     """This class implements the EAGLE draft model from the paper: https://arxiv.org/pdf/2401.15077
@@ -42,7 +44,8 @@ class EAGLE(nn.Module):
         architectures = getattr(self.config.model, "architectures", [])
         model_cls, _ = ModelRegistry.resolve_model_cls(architectures)
 
-        self.model = model_cls(vllm_config=vllm_config, prefix=prefix)
+        self.model = model_cls(vllm_config=vllm_config,
+                               prefix=maybe_prefix(prefix, "model"))
         self.fc = nn.Linear(config.model.hidden_size * 2,
                             config.model.hidden_size,
                             bias=getattr(self.config, "eagle_fc_bias", False))

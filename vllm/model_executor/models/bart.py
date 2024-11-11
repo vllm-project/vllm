@@ -41,6 +41,8 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
+from .utils import maybe_prefix
+
 logger = logging.get_logger(__name__)
 
 
@@ -819,7 +821,8 @@ class BartForConditionalGeneration(nn.Module):
         # currently all existing BART models have `tie_word_embeddings` enabled
         assert config.tie_word_embeddings
         self.config = config
-        self.model = BartModel(vllm_config=vllm_config, prefix=prefix)
+        self.model = BartModel(vllm_config=vllm_config,
+                               prefix=maybe_prefix(prefix, "model"))
 
         self.unpadded_vocab_size = config.vocab_size
         if lora_config:

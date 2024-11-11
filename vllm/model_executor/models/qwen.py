@@ -50,7 +50,8 @@ from vllm.utils import is_list_of
 
 from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsPP
 from .utils import (flatten_bn, is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, make_layers)
+                    make_empty_intermediate_tensors_factory, make_layers,
+                    maybe_prefix)
 
 logger = init_logger(__name__)
 
@@ -872,7 +873,9 @@ class QWenBaseModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
         self.config = config
         self.multimodal_config = multimodal_config
         self.quant_config = quant_config
-        self.transformer = QWenModel(vllm_config=vllm_config, prefix=prefix)
+        self.transformer = QWenModel(vllm_config=vllm_config,
+                                     prefix=maybe_prefix(
+                                         prefix, "transformer"))
         self.lm_head = ParallelLMHead(config.vocab_size,
                                       config.hidden_size,
                                       quant_config=quant_config)

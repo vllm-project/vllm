@@ -48,7 +48,8 @@ from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, make_layers)
+                    make_empty_intermediate_tensors_factory, make_layers,
+                    maybe_prefix)
 
 
 class PhiMoEConfig(PretrainedConfig):
@@ -535,7 +536,8 @@ class PhiMoEForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self.config = config
         self.lora_config = lora_config
 
-        self.model = PhiMoEModel(vllm_config=vllm_config, prefix=prefix)
+        self.model = PhiMoEModel(vllm_config=vllm_config,
+                                 prefix=maybe_prefix(prefix, "model"))
         self.unpadded_vocab_size = config.vocab_size
         if lora_config:
             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size

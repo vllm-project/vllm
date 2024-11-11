@@ -46,7 +46,8 @@ from .idefics2_vision_model import (
 # yapf: enable
 from .interfaces import SupportsMultiModal
 from .llama import LlamaModel
-from .utils import AutoWeightsLoader, flatten_bn, merge_multimodal_embeddings
+from .utils import (AutoWeightsLoader, flatten_bn, maybe_prefix,
+                    merge_multimodal_embeddings)
 
 logger = init_logger(__name__)
 
@@ -621,7 +622,8 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal):
         self.config = config
         self.multimodal_config = multimodal_config
 
-        self.model = Idefics3Model(vllm_config=vllm_config, prefix=prefix)
+        self.model = Idefics3Model(vllm_config=vllm_config,
+                                   prefix=maybe_prefix(prefix, "model"))
         self.image_token_id = self.config.image_token_id
 
         self.lm_head = ParallelLMHead(

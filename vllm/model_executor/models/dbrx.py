@@ -25,7 +25,8 @@ from vllm.transformers_utils.configs.dbrx import DbrxConfig
 
 from .interfaces import SupportsPP
 from .utils import (is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, make_layers)
+                    make_empty_intermediate_tensors_factory, make_layers,
+                    maybe_prefix)
 
 
 class DbrxRouter(nn.Module):
@@ -363,7 +364,9 @@ class DbrxForCausalLM(nn.Module, SupportsPP):
                 "tie_word_embeddings is not supported for Dbrx models.")
         self.quant_config = quant_config
         self.unpadded_vocab_size = config.vocab_size
-        self.transformer = DbrxModel(vllm_config=vllm_config, prefix=prefix)
+        self.transformer = DbrxModel(vllm_config=vllm_config,
+                                     prefix=maybe_prefix(
+                                         prefix, "transformer"))
         self.lm_head = ParallelLMHead(
             config.vocab_size,
             config.d_model,

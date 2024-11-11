@@ -43,7 +43,8 @@ from vllm.sequence import IntermediateTensors, PoolerOutput
 
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (AutoWeightsLoader, is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, make_layers)
+                    make_empty_intermediate_tensors_factory, make_layers,
+                    maybe_prefix)
 
 logger = init_logger(__name__)
 
@@ -405,7 +406,8 @@ class Gemma2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         # currently all existing Gemma models have `tie_word_embeddings` enabled
         assert config.tie_word_embeddings
         self.quant_config = quant_config
-        self.model = Gemma2Model(vllm_config=vllm_config, prefix=prefix)
+        self.model = Gemma2Model(vllm_config=vllm_config,
+                                 prefix=maybe_prefix(prefix, "model"))
         self.logits_processor = LogitsProcessor(
             config.vocab_size, soft_cap=config.final_logit_softcapping)
         self.sampler = get_sampler()
@@ -465,7 +467,8 @@ class Gemma2EmbeddingModel(nn.Module, SupportsPP):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
-        self.model = Gemma2Model(vllm_config=vllm_config, prefix=prefix)
+        self.model = Gemma2Model(vllm_config=vllm_config,
+                                 prefix=maybe_prefix(prefix, "model"))
         self._pooler = Pooler.from_config_with_defaults(
             vllm_config.model_config.pooler_config,
             pooling_type=PoolingType.LAST,

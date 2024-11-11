@@ -26,7 +26,8 @@ from vllm.transformers_utils.configs.mpt import MPTConfig
 
 from .interfaces import SupportsPP
 from .utils import (is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, make_layers)
+                    make_empty_intermediate_tensors_factory, make_layers,
+                    maybe_prefix)
 
 
 def _get_alibi_slopes(
@@ -274,7 +275,8 @@ class MPTForCausalLM(nn.Module, SupportsPP):
         assert config.tie_word_embeddings
         self.quant_config = quant_config
 
-        self.transformer = MPTModel(vllm_config=vllm_config, prefix=prefix)
+        self.transformer = MPTModel(vllm_config=vllm_config,
+                                    prefix=maybe_prefix(prefix, "transformer"))
         self.lm_head = self.transformer.wte
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = get_sampler()

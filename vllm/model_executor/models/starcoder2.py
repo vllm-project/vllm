@@ -43,7 +43,8 @@ from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsPP
 from .utils import (is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, make_layers)
+                    make_empty_intermediate_tensors_factory, make_layers,
+                    maybe_prefix)
 
 
 class Starcoder2Attention(nn.Module):
@@ -251,7 +252,8 @@ class Starcoder2ForCausalLM(nn.Module, SupportsPP):
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         self.config = config
-        self.model = Starcoder2Model(vllm_config=vllm_config, prefix=prefix)
+        self.model = Starcoder2Model(vllm_config=vllm_config,
+                                     prefix=maybe_prefix(prefix, "model"))
         self.vocab_size = config.vocab_size
         self.unpadded_vocab_size = config.vocab_size
         if config.tie_word_embeddings:

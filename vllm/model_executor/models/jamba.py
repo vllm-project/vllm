@@ -29,6 +29,7 @@ from vllm.worker.model_runner import (_BATCH_SIZES_TO_CAPTURE,
                                       _get_graph_batch_size)
 
 from .interfaces import HasInnerState, SupportsLoRA
+from .utils import maybe_prefix
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
@@ -359,7 +360,8 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA):
         super().__init__()
         self.config = config
         self.scheduler_config = scheduler_config
-        self.model = JambaModel(vllm_config=vllm_config, prefix=prefix)
+        self.model = JambaModel(vllm_config=vllm_config,
+                                prefix=maybe_prefix(prefix, "model"))
         self.unpadded_vocab_size = config.vocab_size
         if lora_config:
             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size

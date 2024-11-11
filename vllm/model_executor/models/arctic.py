@@ -34,7 +34,8 @@ from vllm.transformers_utils.configs.arctic import ArcticConfig
 
 from .interfaces import SupportsPP
 from .utils import (is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, make_layers)
+                    make_empty_intermediate_tensors_factory, make_layers,
+                    maybe_prefix)
 
 logger = init_logger(__name__)
 
@@ -419,7 +420,8 @@ class ArcticForCausalLM(nn.Module, SupportsPP):
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         self.config = config
-        self.model = ArcticModel(vllm_config=vllm_config, prefix=prefix)
+        self.model = ArcticModel(vllm_config=vllm_config,
+                                 prefix=maybe_prefix(prefix, "model"))
         self.vocab_size = config.vocab_size
         self.lm_head = ParallelLMHead(
             self.vocab_size,

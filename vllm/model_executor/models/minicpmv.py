@@ -1013,7 +1013,6 @@ class MiniCPMV2_6(MiniCPMVBaseModel, SupportsLoRA):
         vllm_config: VllmConfig,
         prefix: str = "",
     ) -> nn.Module:
-
         return LLMWrapper(Qwen2Model(vllm_config=vllm_config, prefix=prefix),
                           name="model")
 

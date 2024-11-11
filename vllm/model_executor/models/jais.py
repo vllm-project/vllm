@@ -44,7 +44,8 @@ from vllm.transformers_utils.configs import JAISConfig
 
 from .interfaces import SupportsPP
 from .utils import (is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, make_layers)
+                    make_empty_intermediate_tensors_factory, make_layers,
+                    maybe_prefix)
 
 
 class SwiGLUActivation(nn.Module):
@@ -295,7 +296,9 @@ class JAISLMHeadModel(nn.Module, SupportsPP):
         quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
-        self.transformer = JAISModel(vllm_config=vllm_config, prefix=prefix)
+        self.transformer = JAISModel(vllm_config=vllm_config,
+                                     prefix=maybe_prefix(
+                                         prefix, "transformer"))
         if self.config.tie_word_embeddings:
             self.lm_head = self.transformer.wte
         else:

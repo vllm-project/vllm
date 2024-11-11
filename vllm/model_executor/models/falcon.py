@@ -48,7 +48,8 @@ from vllm.transformers_utils.configs import RWConfig
 
 from .interfaces import SupportsPP
 from .utils import (is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, make_layers)
+                    make_empty_intermediate_tensors_factory, make_layers,
+                    maybe_prefix)
 
 FalconConfig = Union[HF_FalconConfig, RWConfig]
 
@@ -410,7 +411,9 @@ class FalconForCausalLM(nn.Module, SupportsPP):
         quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
-        self.transformer = FalconModel(vllm_config=vllm_config, prefix=prefix)
+        self.transformer = FalconModel(vllm_config=vllm_config,
+                                       prefix=maybe_prefix(
+                                           prefix, "transformer"))
         # only Falcon-11B doesn't share lm_head weight with word embeddings
         # and previous Falcon model doesn't have tie_word_embeddings config
         # so we set tie_word_embeddings to True by default

@@ -46,7 +46,8 @@ from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsPP
 from .utils import (is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, make_layers)
+                    make_empty_intermediate_tensors_factory, make_layers,
+                    maybe_prefix)
 
 
 class OlmoAttention(nn.Module):
@@ -297,7 +298,8 @@ class OlmoForCausalLM(nn.Module, SupportsPP):
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         self.config = config
-        self.model = OlmoModel(vllm_config=vllm_config, prefix=prefix)
+        self.model = OlmoModel(vllm_config=vllm_config,
+                               prefix=maybe_prefix(prefix, "model"))
         if config.tie_word_embeddings:
             self.lm_head = self.model.embed_tokens
         else:
