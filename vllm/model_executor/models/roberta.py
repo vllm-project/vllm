@@ -1,10 +1,11 @@
 from typing import Optional
 
+import torch
 from torch import nn
 from transformers import RobertaConfig
 
-from vllm.config import CacheConfig
-from vllm.model_executor.layers.pooler import Pooler, PoolingConfig
+from vllm.config import CacheConfig, PoolerConfig
+from vllm.model_executor.layers.pooler import Pooler, PoolingType
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -44,6 +45,8 @@ class RobertaEmbedding(BertEmbedding):
                                                   config.hidden_size)
         self.LayerNorm = nn.LayerNorm(config.hidden_size,
                                       eps=config.layer_norm_eps)
+        self.position_ids = nn.Parameter(
+            torch.empty((1, config.max_position_embeddings)), )
 
         self.position_embedding_type = config.position_embedding_type
         if self.position_embedding_type != "absolute":
@@ -66,9 +69,12 @@ class RobertaEmbeddingModel(BertEmbeddingModel):
                  config: RobertaConfig,
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None,
-                 pooling_config: Optional[PoolingConfig] = None) -> None:
+                 pooler_config: Optional[PoolerConfig] = None) -> None:
         # Skip BertEmbeddingModule.__init__()
         nn.Module.__init__(self)
         self.model = RobertaModel(config, cache_config, quant_config)
-        self._pooler = Pooler(pooling_config.pooling_type,
-                              pooling_config.normalize)
+        self._pooler = Pooler.from_config_with_defaults(
+            pooler_config,
+            pooling_type=PoolingType.CLS,
+            normalize=True,
+            softmax=False)
