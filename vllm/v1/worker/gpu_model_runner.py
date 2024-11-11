@@ -406,7 +406,6 @@ class GPUModelRunner:
         if self.use_cuda_graph:
             # FIXME(woosuk): Currently, we do not use inductor to reduce the
             # compilation time and any potential issues with the inductor.
-            os.environ["VLLM_CUSTOM_OPS"] = "none"
             set_compilation_config(
                 CompilationConfig(
                     use_cudagraph=True,
