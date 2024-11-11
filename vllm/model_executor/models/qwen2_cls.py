@@ -17,7 +17,7 @@ from vllm.model_executor.models.qwen2 import Qwen2Model
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.sequence import IntermediateTensors, PoolerOutput
 
-from .utils import AutoWeightsLoader
+from .utils import AutoWeightsLoader, maybe_prefix
 
 
 class Qwen2ForSequenceClassification(nn.Module):
@@ -43,11 +43,7 @@ class Qwen2ForSequenceClassification(nn.Module):
     embedding_modules = {}
     embedding_padding_modules = []
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
@@ -70,7 +66,8 @@ class Qwen2ForSequenceClassification(nn.Module):
         self.lora_config = lora_config
 
         self.quant_config = quant_config
-        self.model = Qwen2Model(config, cache_config, quant_config)
+        self.model = Qwen2Model(vllm_config=vllm_config,
+                                prefix=maybe_prefix(prefix, "model"))
 
         self.score = RowParallelLinear(config.hidden_size,
                                        config.num_labels,
