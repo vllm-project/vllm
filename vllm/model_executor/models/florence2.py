@@ -201,7 +201,7 @@ class Florence2ForConditionalGeneration(nn.Module):
 
         # TODO(Isotr0py): Add vision backbone
         self.language_model = Florence2LanguageForConditionalGeneration(
-            config=vllm_config.with_hf_config(config.text_config),
+            vllm_config=vllm_config.with_hf_config(config.text_config),
             prefix=prefix,
         )
 
