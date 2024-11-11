@@ -6,7 +6,7 @@ from torch import nn
 from transformers import MambaConfig
 
 from vllm.attention.backends.abstract import AttentionMetadata
-from vllm.config import CacheConfig, LoRAConfig, VllmConfig
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -25,6 +25,8 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.worker.model_runner import (_BATCH_SIZES_TO_CAPTURE,
                                       _get_graph_batch_size)
+
+from .utils import maybe_prefix
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
@@ -73,14 +75,14 @@ class MambaDecoderLayer(nn.Module):
 
 class MambaModel(nn.Module):
 
-    def __init__(
-        self,
-        config: MambaConfig,
-        quant_config: Optional[QuantizationConfig] = None,
-        cache_config: Optional[CacheConfig] = None,
-        lora_config: Optional[LoRAConfig] = None,
-    ) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+        lora_config = vllm_config.lora_config
+
         self.config = config
         self.padding_idx = config.pad_token_id
         lora_vocab = ((lora_config.lora_extra_vocab_size *
@@ -130,14 +132,9 @@ class MambaModel(nn.Module):
 
 class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree):
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
-        quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
         scheduler_config = vllm_config.scheduler_config
         assert not cache_config.enable_prefix_caching, \
@@ -146,10 +143,8 @@ class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree):
         super().__init__()
         self.config = config
         self.scheduler_config = scheduler_config
-        self.backbone = MambaModel(config,
-                                   cache_config=cache_config,
-                                   quant_config=quant_config,
-                                   lora_config=lora_config)
+        self.backbone = MambaModel(vllm_config=vllm_config,
+                                   prefix=maybe_prefix(prefix, "backbone"))
         self.unpadded_vocab_size = config.vocab_size
         if lora_config:
             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size

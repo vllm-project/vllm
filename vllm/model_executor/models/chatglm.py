@@ -39,7 +39,8 @@ from vllm.transformers_utils.configs import ChatGLMConfig
 
 from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsPP
 from .utils import (is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, make_layers)
+                    make_empty_intermediate_tensors_factory, make_layers,
+                    maybe_prefix)
 
 logger = init_logger(__name__)
 
@@ -481,13 +482,12 @@ class GLMTransformer(nn.Module):
 
 class ChatGLMModel(nn.Module):
 
-    def __init__(
-        self,
-        config: ChatGLMConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-    ):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
 
         self.config = config
 
@@ -600,7 +600,6 @@ class ChatGLMForCausalLM(nn.Module, SupportsLoRA, SupportsPP,
     ):
         super().__init__()
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
         multimodal_config = vllm_config.model_config.multimodal_config
@@ -611,7 +610,9 @@ class ChatGLMForCausalLM(nn.Module, SupportsLoRA, SupportsPP,
         self.quant_config = quant_config
         self.max_position_embeddings = getattr(config, "max_sequence_length",
                                                8192)
-        self.transformer = ChatGLMModel(config, cache_config, quant_config)
+        self.transformer = ChatGLMModel(vllm_config=vllm_config,
+                                        prefix=maybe_prefix(
+                                            prefix, "transformer"))
         if self.config.tie_word_embeddings:
             self.transformer.output_layer.weight = (
                 self.transformer.embedding.weight)

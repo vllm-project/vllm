@@ -25,7 +25,8 @@ from vllm.transformers_utils.configs.dbrx import DbrxConfig
 
 from .interfaces import SupportsPP
 from .utils import (is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, make_layers)
+                    make_empty_intermediate_tensors_factory, make_layers,
+                    maybe_prefix)
 
 
 class DbrxRouter(nn.Module):
@@ -294,14 +295,13 @@ class DbrxBlock(nn.Module):
 
 class DbrxModel(nn.Module):
 
-    def __init__(
-        self,
-        config: DbrxConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+
         self.wte = VocabParallelEmbedding(
             config.vocab_size,
             config.d_model,
@@ -357,7 +357,6 @@ class DbrxForCausalLM(nn.Module, SupportsPP):
     ):
         super().__init__()
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         self.config = config
         if config.tie_word_embeddings:
@@ -365,7 +364,9 @@ class DbrxForCausalLM(nn.Module, SupportsPP):
                 "tie_word_embeddings is not supported for Dbrx models.")
         self.quant_config = quant_config
         self.unpadded_vocab_size = config.vocab_size
-        self.transformer = DbrxModel(config, cache_config, quant_config)
+        self.transformer = DbrxModel(vllm_config=vllm_config,
+                                     prefix=maybe_prefix(
+                                         prefix, "transformer"))
         self.lm_head = ParallelLMHead(
             config.vocab_size,
             config.d_model,

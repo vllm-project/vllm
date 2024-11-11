@@ -44,7 +44,8 @@ from vllm.transformers_utils.processor import get_processor
 
 from .interfaces import SupportsMultiModal, SupportsPP
 from .utils import (get_vit_attn_backend,
-                    make_empty_intermediate_tensors_factory, make_layers)
+                    make_empty_intermediate_tensors_factory, make_layers,
+                    maybe_prefix)
 
 # TODO: hard-coded for now. Consider making it configurable.
 VIT_LAYERS = [-2, -9]
@@ -716,14 +717,13 @@ class MolmoVisionBackbone(nn.Module):
 @support_torch_compile
 class MolmoModel(nn.Module):
 
-    def __init__(
-        self,
-        config: PretrainedConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+
         self.config = config
 
         self.embedding_size = config.embedding_size or config.vocab_size
@@ -1024,14 +1024,9 @@ def input_processor_for_molmo(ctx: InputContext, inputs: DecoderOnlyInputs):
 @INPUT_REGISTRY.register_input_processor(input_processor_for_molmo)
 class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
         self.config = config
@@ -1040,7 +1035,8 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         vision_config = VisionBackboneConfig()
         self.vision_backbone = MolmoVisionBackbone(config, vision_config,
                                                    quant_config)
-        self.model = MolmoModel(config, cache_config, quant_config)
+        self.model = MolmoModel(vllm_config=vllm_config,
+                                prefix=maybe_prefix(prefix, "model"))
 
         if self.config.weight_tying:
             self.lm_head = self.model.transformer.wte

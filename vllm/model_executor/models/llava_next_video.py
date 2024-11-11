@@ -29,7 +29,7 @@ from .llava import init_vision_tower_for_llava
 from .siglip import (SiglipVisionModel, dummy_image_for_siglip,
                      dummy_seq_data_for_siglip)
 from .utils import (AutoWeightsLoader, init_vllm_registered_model,
-                    merge_multimodal_embeddings)
+                    maybe_prefix, merge_multimodal_embeddings)
 
 # For profile run
 _MAX_FRAMES_PER_VIDEO = 32
@@ -267,7 +267,7 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal,
             config,
             quant_config,
             require_post_norm=False,
-            prefix="vision_tower")
+            prefix=maybe_prefix(prefix, "vision_tower"))
         self.vision_resampler = LlavaNextVideoPooler(config)
         self.multi_modal_projector = LlavaNextMultiModalProjector(
             vision_hidden_size=config.vision_config.hidden_size,
@@ -276,7 +276,7 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.language_model = init_vllm_registered_model(
             config.text_config,
             vllm_config=vllm_config,
-            prefix="language_model")
+            prefix=maybe_prefix(prefix, "language_model"))
 
         self.make_empty_intermediate_tensors = (
             self.language_model.model.make_empty_intermediate_tensors)
