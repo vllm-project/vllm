@@ -1,7 +1,7 @@
 import contextlib
 import functools
 import importlib
-from typing import TYPE_CHECKING, List, Optional, Tuple, Type, Union
+from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 
 import torch
 import torch.library
@@ -242,8 +242,8 @@ def scaled_rms_norm(out: torch.Tensor, input: torch.Tensor,
 def scaled_fused_add_rms_norm(out: torch.Tensor, input: torch.Tensor,
                               residual: torch.Tensor, weight: torch.Tensor,
                               scale: torch.Tensor, epsilon: float) -> None:
-    torch.ops._C.fused_add_rms_norm_static_fp8_quant(out, input, residual, weight, scale,
-                                           epsilon)
+    torch.ops._C.fused_add_rms_norm_static_fp8_quant(out, input, residual,
+                                                     weight, scale, epsilon)
 
 
 def advance_step_flashattn(num_seqs: int, num_queries: int, block_size: int,

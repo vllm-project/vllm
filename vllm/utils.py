@@ -158,7 +158,7 @@ class _Sentinel:
 ALL_PINNED_SENTINEL = _Sentinel()
 
 
-class rpd_trace():
+class rpd_trace:
 
     def __init__(self,
                  filename=None,
@@ -244,7 +244,7 @@ def is_hipScopedMarker_available():
     return hipScopedMarker is not None
 
 
-class rpd_mark():
+class rpd_mark:
 
     def __init__(self, name=None):
         self.name = name
