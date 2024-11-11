@@ -121,6 +121,136 @@ def test_chunk():
     assert out.num_batched_tokens == 57
 
 
+def test_concurrent_chunking():
+    """Verify prefills are chunked properly when --num-prefill-slots is > 1"""
+    block_size = 4
+    max_seqs = 60
+    max_model_len = 2000
+    max_num_batched_tokens = 64
+    scheduler_config = SchedulerConfig(
+        "generate",
+        max_num_batched_tokens,
+        max_seqs,
+        max_model_len,
+        enable_chunked_prefill=True,
+        num_prefill_slots=2,  # Up to 2 partial prefills at a time
+    )
+    cache_config = CacheConfig(block_size, 1.0, 1, "auto")
+    cache_config.num_cpu_blocks = 32
+    cache_config.num_gpu_blocks = 32
+    scheduler = Scheduler(scheduler_config, cache_config, None)
+    running: List[SequenceGroup] = []
+
+    # Add seq groups to scheduler.
+    for i in range(2):
+        _, seq_group = create_dummy_prompt(str(i),
+                                           prompt_length=60,
+                                           block_size=block_size)
+        scheduler.add_seq_group(seq_group)
+        running.append(seq_group)
+
+    # Verify both requests are chunked with half of max_num_batched_tokens each
+    seq_group_meta, out = schedule_and_update_computed_tokens(scheduler)
+    assert set(get_sequence_groups(out)) == set(running)
+    assert seq_group_meta[0].token_chunk_size == 32
+    assert seq_group_meta[1].token_chunk_size == 32
+    assert out.num_prefill_groups == 2
+    assert out.num_batched_tokens == 64
+
+    # After one iteration, both should have 60 - 32 = 28 tokens left to prefill
+    seq_group_meta, out = schedule_and_update_computed_tokens(scheduler)
+    assert set(get_sequence_groups(out)) == set(running)
+    assert seq_group_meta[0].token_chunk_size == 28
+    assert seq_group_meta[1].token_chunk_size == 28
+    assert out.num_prefill_groups == 2
+    assert out.num_batched_tokens == 56
+
+
+def test_concurrent_chunking_large_requests():
+    """Verify large prefill requests are run one at a time"""
+    block_size = 4
+    max_seqs = 60
+    max_model_len = 2000
+    max_num_batched_tokens = 64
+    scheduler_config = SchedulerConfig(
+        "generate",
+        max_num_batched_tokens,
+        max_seqs,
+        max_model_len,
+        enable_chunked_prefill=True,
+        num_prefill_slots=2,  # Up to 2 partial prefills at a time
+    )
+    cache_config = CacheConfig(block_size, 1.0, 1, "auto")
+    cache_config.num_cpu_blocks = 32
+    cache_config.num_gpu_blocks = 32
+    scheduler = Scheduler(scheduler_config, cache_config, None)
+
+    # Add seq groups to scheduler.
+    for i in range(2):
+        _, seq_group = create_dummy_prompt(
+            str(i),
+            prompt_length=1200,  # Very large prompt
+            block_size=block_size)
+        scheduler.add_seq_group(seq_group)
+
+    # Verify only a single request is chunked, and it gets all 64 tokens
+    seq_group_meta, out = schedule_and_update_computed_tokens(scheduler)
+    assert len(get_sequence_groups(out)) == 1
+    assert seq_group_meta[0].token_chunk_size == 64
+    assert out.num_prefill_groups == 1
+    assert out.num_batched_tokens == 64
+
+
+def test_small_prompts_jump_big_prompts_in_queue():
+    """Verify large prefill requests are punted behind smaller ones if 
+    another large prefill request is already running"""
+    block_size = 4
+    max_seqs = 60
+    max_model_len = 2000
+    max_num_batched_tokens = 64
+    scheduler_config = SchedulerConfig(
+        "generate",
+        max_num_batched_tokens,
+        max_seqs,
+        max_model_len,
+        enable_chunked_prefill=True,
+        num_prefill_slots=2,  # Up to 2 partial prefills at a time
+    )
+    cache_config = CacheConfig(block_size, 1.0, 1, "auto")
+    cache_config.num_cpu_blocks = 32
+    cache_config.num_gpu_blocks = 32
+    scheduler = Scheduler(scheduler_config, cache_config, None)
+    running: List[SequenceGroup] = []
+
+    # Add 2 large seq groups to scheduler.
+    for i in range(2):
+        _, seq_group = create_dummy_prompt(
+            str(i),
+            prompt_length=1200,  # Very large prompt
+            block_size=block_size)
+        scheduler.add_seq_group(seq_group)
+        running.append(seq_group)
+
+    # Add 2 small seq groups behind them
+    for i in range(2):
+        _, seq_group = create_dummy_prompt(
+            str(i),
+            prompt_length=12,  # Very small prompt
+            block_size=block_size)
+        scheduler.add_seq_group(seq_group)
+        running.append(seq_group)
+
+    # Verify one large req and two small reqs chunked
+    seq_group_meta, out = schedule_and_update_computed_tokens(scheduler)
+    assert len(get_sequence_groups(out)) == 3
+    assert seq_group_meta[0].token_chunk_size == 32  # large req gets 32 tokens
+    assert seq_group_meta[
+        1].token_chunk_size == 12  # both small reqs fit in remaining 32 tokens
+    assert seq_group_meta[2].token_chunk_size == 12
+    assert out.num_prefill_groups == 3
+    assert out.num_batched_tokens == 64
+
+
 def test_complex():
     block_size = 4
     max_seqs = 60
