@@ -3,10 +3,11 @@ import ray
 import torch
 
 import vllm.envs as envs
+from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 from vllm.distributed.utils import stateless_init_process_group
 from vllm.utils import (cuda_device_count_stateless,
                         update_environment_variables)
-from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
+
 from ..utils import multi_gpu_test
 
 
@@ -64,15 +65,21 @@ def gpu_worker(rank, WORLD_SIZE):
                                        rank=rank,
                                        world_size=WORLD_SIZE)
     pynccl1 = PyNcclCommunicator(pg1, device=rank)
+    pynccl1.disabled = False
     if rank <= 2:
         pg2 = stateless_init_process_group(init_method="tcp://127.0.0.1:29503",
                                            rank=rank,
                                            world_size=3)
         pynccl2 = PyNcclCommunicator(pg2, device=rank)
+        pynccl2.disabled = False
     data = torch.tensor([rank]).cuda()
     pynccl1.all_reduce(data)
+    pg1.barrier()
+    torch.cuda.synchronize()
     if rank <= 2:
         pynccl2.all_reduce(data)
+        pg2.barrier()
+        torch.cuda.synchronize()
     item = data[0].item()
     print(f"rank: {rank}, item: {item}")
     if rank == 3:
