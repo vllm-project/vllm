@@ -532,13 +532,13 @@ class OpenAIServingChat(OpenAIServing):
             # is sent, send the usage
             if include_usage:
                 completion_tokens = sum(previous_num_tokens)
-                final_usage = UsageInfo(
-                    prompt_tokens=num_prompt_tokens,
-                    completion_tokens=completion_tokens,
-                    total_tokens=num_prompt_tokens + completion_tokens,
-                    prompt_tokens_details=PromptTokenUsageInfo(
-                        cached_tokens=num_cached_tokens),
-                )
+                final_usage = UsageInfo(prompt_tokens=num_prompt_tokens,
+                                        completion_tokens=completion_tokens,
+                                        total_tokens=num_prompt_tokens +
+                                        completion_tokens)
+                if num_cached_tokens:
+                    final_usage.prompt_tokens_details = PromptTokenUsageInfo(
+                        cached_tokens=num_cached_tokens)
 
                 final_usage_chunk = ChatCompletionStreamResponse(
                     id=request_id,
@@ -706,13 +706,13 @@ class OpenAIServingChat(OpenAIServing):
             num_prompt_tokens += len(final_res.encoder_prompt_token_ids)
         num_generated_tokens = sum(
             len(output.token_ids) for output in final_res.outputs)
-        usage = UsageInfo(
-            prompt_tokens=num_prompt_tokens,
-            completion_tokens=num_generated_tokens,
-            total_tokens=num_prompt_tokens + num_generated_tokens,
-            prompt_tokens_details=PromptTokenUsageInfo(
-                cached_tokens=final_res.num_cached_tokens),
-        )
+        usage = UsageInfo(prompt_tokens=num_prompt_tokens,
+                          completion_tokens=num_generated_tokens,
+                          total_tokens=num_prompt_tokens +
+                          num_generated_tokens)
+        if final_res.num_cached_tokens:
+            usage.prompt_tokens_details = PromptTokenUsageInfo(
+                cached_tokens=final_res.num_cached_tokens)
 
         request_metadata.final_usage_info = usage
 
