@@ -4,7 +4,9 @@
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
 import dataclasses
 import pickle
-from typing import Any, Dict, Optional, Sequence, Tuple
+import time
+from collections import deque
+from typing import Any, Deque, Dict, Optional, Sequence, Tuple
 
 import torch
 from torch.distributed.rendezvous import rendezvous
@@ -99,6 +101,7 @@ class StatelessProcessGroup:
     world_size: int
     store: torch._C._distributed_c10d.Store
     prefix: str
+    data_expiration_seconds: int = 3600  # 1 hour
 
     # dst rank -> counter
     send_dst_counter: Dict[int, int] = dataclasses.field(default_factory=dict)
@@ -107,6 +110,10 @@ class StatelessProcessGroup:
     broadcast_send_counter: int = 0
     broadcast_recv_src_counter: Dict[int, int] = dataclasses.field(
         default_factory=dict)
+
+    # A deque to store the data entries, with key and timestamp.
+    entries: Deque[Tuple[str,
+                         float]] = dataclasses.field(default_factory=deque)
 
     def __post_init__(self):
         assert self.rank < self.world_size
@@ -119,10 +126,22 @@ class StatelessProcessGroup:
 
     def send_obj(self, obj: Any, dst: int):
         """Send an object to a destination rank."""
-        self.store.set(
-            f"{self.prefix}/send_to/{dst}/{self.send_dst_counter[dst]}",
-            pickle.dumps(obj))
+        self.expire_data()
+        key = f"{self.prefix}/send_to/{dst}/{self.send_dst_counter[dst]}"
+        self.store.set(key, pickle.dumps(obj))
         self.send_dst_counter[dst] += 1
+        self.entries.append((key, time.time()))
+
+    def expire_data(self):
+        """Expire data that is older than `data_expiration_seconds` seconds."""
+        while self.entries:
+            # check the oldest entry
+            key, timestamp = self.entries[0]
+            if time.time() - timestamp > self.data_expiration_seconds:
+                self.store.delete_key(key)
+                self.entries.popleft()
+            else:
+                break
 
     def recv_obj(self, src: int) -> Any:
         """Receive an object from a source rank."""
@@ -139,16 +158,17 @@ class StatelessProcessGroup:
         Use it for limited times, e.g., for initialization.
         """
         if self.rank == src:
-            self.store.set(
-                f"{self.prefix}/broadcast/{src}/{self.broadcast_send_counter}",
-                pickle.dumps(obj))
+            self.expire_data()
+            key = (f"{self.prefix}/broadcast_from/{src}/"
+                   f"{self.broadcast_send_counter}")
+            self.store.set(key, pickle.dumps(obj))
             self.broadcast_send_counter += 1
+            self.entries.append((key, time.time()))
             return obj
         else:
-            recv_obj = pickle.loads(
-                self.store.get(
-                    f"{self.prefix}/broadcast/{src}/{self.broadcast_recv_src_counter[src]}"
-                ))
+            key = (f"{self.prefix}/broadcast_from/{src}/"
+                   f"{self.broadcast_recv_src_counter[src]}")
+            recv_obj = pickle.loads(self.store.get(key))
             self.broadcast_recv_src_counter[src] += 1
             return recv_obj
 
@@ -173,8 +193,8 @@ class StatelessProcessGroup:
                 self.broadcast_obj(None, src=i)
 
     @staticmethod
-    def create(init_method: str, rank: int,
-               world_size: int) -> "StatelessProcessGroup":
+    def create(init_method: str, rank: int, world_size: int,
+               data_expiration_seconds: int) -> "StatelessProcessGroup":
         """A replacement for `torch.distributed.init_process_group` that does not
         pollute the global state.
 
@@ -197,4 +217,5 @@ class StatelessProcessGroup:
             rendezvous(init_method, rank, world_size, timeout=timeout))
         store.set_timeout(timeout)
 
-        return StatelessProcessGroup(rank, world_size, store, init_method)
+        return StatelessProcessGroup(rank, world_size, store, init_method,
+                                     data_expiration_seconds)
