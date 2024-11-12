@@ -1,5 +1,6 @@
 import base64
 import io
+import argparse
 
 import requests
 from PIL import Image
@@ -96,13 +97,27 @@ def dse_qwen2_vl(inp: dict):
 
 
 if __name__ == '__main__':
-    vlm2vec()
+    parser = argparse.ArgumentParser(
+        "Script to call a specified VLM through the API. Make sure to serve "
+        "the model with --task embedding before running this."
+    )
+    parser.add_argument(
+        "model",
+        type=str,
+        choices=["vlm2vec", "dse_qwen2_vl"],
+        required=True,
+        help="Which model to call."
+    )
+    args = parser.parse_args()
 
-    dse_qwen2_vl({
-        "dtye": "image",
-        "image_url": image_url,
-    })
-    dse_qwen2_vl({
-        "dtype": "text",
-        "content": "What is the weather like today?",
-    })
+    if args.model == "vlm2vec":
+        vlm2vec()
+    elif args.model == "dse_qwen2_vl":
+        dse_qwen2_vl({
+            "dtye": "image",
+            "image_url": image_url,
+        })
+        dse_qwen2_vl({
+            "dtype": "text",
+            "content": "What is the weather like today?",
+        })

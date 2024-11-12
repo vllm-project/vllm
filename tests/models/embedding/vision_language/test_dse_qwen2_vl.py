@@ -1,11 +1,14 @@
-import os
-from typing import List, Type
+from typing import List, Type, Dict, Callable
 
 import pytest
 import torch
+from functools import partial
 from PIL import Image
 from qwen_vl_utils import process_vision_info
-from transformers import AutoProcessor, Qwen2VLForConditionalGeneration
+from transformers import (
+    Qwen2VLForConditionalGeneration,
+    BatchEncoding,
+)
 
 from ....conftest import IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner
 from ....utils import large_gpu_test
@@ -31,92 +34,55 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
 MODELS = ["MrLight/dse-qwen2-2b-mrl-v1"]
 
 
-class QwenVLEncoder:
-
-    def __init__(self):
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
-        attn = "flash_attention_2" if self.device == "cuda" else None
-
-        os.environ["TOKENIZERS_PARALLELISM"] = "true"
-        self.processor = AutoProcessor.from_pretrained(MODELS[0])
-        self.model = Qwen2VLForConditionalGeneration.from_pretrained(
-            MODELS[0], attn_implementation=attn,
-            torch_dtype=torch.bfloat16).to(self.device).eval()
-        self.processor.tokenizer.padding_side = "left"
-        self.model.padding_side = "left"
-        self.base_embed_dim = 1536
-
-    def _get_embedding(self, last_hidden_state: torch.Tensor,
-                       dimension: int) -> torch.Tensor:
-        reps = last_hidden_state[:, -1]
-        reps = torch.nn.functional.normalize(reps[0, :dimension], p=2, dim=-1)
-        return reps
-
-    def embed(self, inp: dict, embed_dim: int = 1536) -> torch.Tensor:
-        """
-        inp: dict
-            {
-                "dtype": "image",
-                "image": PIL.Image,
-            }
-            or 
-            {
-                "dtype": "text",
-                "question": (str) the question to embed,
-            }
-        embed_dim: int
-            Will slice embeddings like emb[:embed_dim]
-        """
-        if inp["dtype"] == "image":
-            messages = [[{
-                "role":
-                "user",
-                "content": [{
+def get_messages(image: Image.Image, text: str, embed_text: bool):
+    # assert False, 'remember to use outer [] as required'
+    if embed_text:
+        messages = [{
+            "role":
+            "user",
+            "content": [
+                {
                     "type": "image",
-                    "image": inp["image"]
-                }, {
+                    "image": Image.new("RGB", (28, 28)),
+                    "resized_height": 1,
+                    "resized_width": 1
+                },  # need a dummy image here for an easier process.
+                {
                     "type": "text",
-                    "text": "What is shown in this image?"
-                }]
-            }]]
-        else:
-            messages = [[{
-                "role":
-                "user",
-                "content": [
-                    {
-                        "type": "image",
-                        "image": Image.new("RGB", (28, 28)),
-                        "resized_height": 1,
-                        "resized_width": 1
-                    },  # need a dummy image here for an easier process.
-                    {
-                        "type": "text",
-                        "text": f"{inp['question']}"
-                    },
-                ]
-            }]]
-        image_inputs, _ = process_vision_info(messages)
+                    "text": text
+                },
+            ]
+        }]
+    else:
+        messages = [{
+            "role":
+            "user",
+            "content": [{
+                "type": "image",
+                "image": image
+            }, {
+                "type": "text",
+                "text": text
+            }]
+        }]
+    return messages
 
-        texts = [
-            self.processor.apply_chat_template(
-                msg, tokenize=False, add_generation_prompt=True) +
-            "<|endoftext|>" for msg in messages
-        ]
-        inputs = self.processor(text=texts,
-                                images=image_inputs,
-                                padding="longest",
-                                return_tensors="pt").to(self.device)
-        inputs = self.model.prepare_inputs_for_generation(**inputs,
-                                                          use_cache=False)
 
-        with torch.no_grad():
-            output = self.model(**inputs,
-                                return_dict=True,
-                                output_hidden_states=True)
+def apply_chat_template_and_add_eos(
+    messages: List[Dict], 
+    apply_chat_template_fn: Callable,
+):
+    prompt = apply_chat_template_fn(
+            messages, tokenize=False, add_generation_prompt=True
+    ) + "<|endoftext|>"
+    return prompt
 
-        embeddings = self._get_embedding(output.hidden_states[-1], embed_dim)
-        return embeddings
+
+def postprocess_inputs(hf_model: HfRunner, inputs: BatchEncoding, **kwargs):
+    return hf_model.model.prepare_inputs_for_generation(
+        **inputs,
+        **kwargs
+    )
 
 
 def _run_test(
@@ -124,51 +90,73 @@ def _run_test(
     vllm_runner: Type[VllmRunner],
     input_texts: List[str],
     input_images: PromptImageInput,
+    embed_texts: List[bool],
     model: str,
     *,
     dtype: str,
 ) -> None:
+    '''SET PYTHONPATH'''
     # NOTE: take care of the order. run vLLM first, and then run HF.
     # vLLM needs a fresh new process without cuda initialization.
     # if we run HF first, the cuda initialization will be done and it
     # will hurt multiprocessing backend with fork method (the default method).
-    processor = AutoProcessor.from_pretrained(MODELS[0])
     with vllm_runner(model,
                      task="embedding",
                      dtype=dtype,
                      enforce_eager=True,
                      max_model_len=8192) as vllm_model:
+        tokenizer = vllm_model.model.get_tokenizer()
         texts = [
-            processor.apply_chat_template([{
-                "role":
-                "user",
-                "content": [
-                    {
-                        "type": "image",
-                        "image": Image.new("RGB", (28, 28)),
-                        "resized_height": 1,
-                        "resized_width": 1
-                    },
-                    {
-                        "type": "text",
-                        "text": text
-                    },
-                ]
-            }],
-                                          tokenize=False,
-                                          add_generation_prompt=True) +
-            "<|endoftext|>" for text in input_texts
+            # this is necessary because vllm_model.encode will not apply any 
+            # templating to the prompt, and therefore lacks an image_pad 
+            # token unless one is inserted beforehand (the (28,28) image 
+            # above is converted to an image pad token by the chat template).
+            apply_chat_template_and_add_eos(
+                get_messages(image, text, False), 
+                apply_chat_template_fn=tokenizer.apply_chat_template,
+            ) for text, image in zip(input_texts, input_images)
+            # vllm will replace the pad token with the actual image,
+            # which may be a placeholder image, later.
         ]
         vllm_outputs = vllm_model.encode(texts, images=input_images)
-
-    hf_model = QwenVLEncoder()
+    
     hf_outputs = []
-    for text, image in zip(input_texts, input_images):
-        if text.startswith("Query:"):
-            inp = {"dtype": "text", "question": text}
-        else:
-            inp = {"dtype": "image", "image": image}
-        hf_outputs.append(hf_model.embed(inp).tolist())
+    with hf_runner(model, 
+                   dtype=dtype,
+                   auto_cls=Qwen2VLForConditionalGeneration) as hf_model:
+        hf_model.postprocess_inputs = partial(
+            postprocess_inputs,
+            hf_model,
+            cache_position=torch.arange(0, 1, # 1 for batch size
+                                        requires_grad=False),
+            use_cache=False
+        )
+        for text, image, embed_text in zip(
+            input_texts, input_images, embed_texts
+        ):
+            # dse requires non-standard input processing
+            # because it needs an image_pad token
+            messages = get_messages(image, text, embed_text)
+            prompt = apply_chat_template_and_add_eos(
+                messages, hf_model.processor.apply_chat_template
+            )
+            image_input, _ = process_vision_info(messages)
+            inputs = hf_model.get_inputs(
+                prompts=[[prompt]],
+                images=[image_input],
+            )
+            with torch.no_grad():
+                outputs = hf_model.model(
+                    **hf_model.wrap_device(inputs[0],
+                                        device=hf_model.model.device.type),
+                    return_dict=True,
+                    output_hidden_states=True,
+                )
+                pooled_output = torch.nn.functional.normalize(
+                    outputs.hidden_states[-1][0, -1], p=2, dim=-1
+                )
+            hf_outputs.append(pooled_output.tolist())
+
     check_embeddings_close(
         embeddings_0_lst=hf_outputs,
         embeddings_1_lst=vllm_outputs,
@@ -190,12 +178,14 @@ def test_models_text(
                           for text, image_placeholder in HF_TEXT_PROMPTS]
     input_texts = [text for text, _ in input_texts_images]
     input_images = [image for _, image in input_texts_images]
+    embed_texts = [True] *  len(input_texts)
 
     _run_test(
         hf_runner,
         vllm_runner,
         input_texts,
         input_images,  # type: ignore
+        embed_texts,
         model,
         dtype=dtype,
     )
@@ -217,12 +207,14 @@ def test_models_image(
     ]
     input_texts = [text for text, _ in input_texts_images]
     input_images = [image for _, image in input_texts_images]
+    embed_texts = [False] *  len(input_texts)
 
     _run_test(
         hf_runner,
         vllm_runner,
         input_texts,
         input_images,
+        embed_texts,
         model,
         dtype=dtype,
     )
