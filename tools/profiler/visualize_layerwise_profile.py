@@ -264,7 +264,8 @@ def group_trace_by_operations(trace_df: pd.DataFrame) -> pd.DataFrame:
     if len(quant_ops):
         trace_df['quant_ops'] = trace_df[quant_ops].agg("sum", axis=1)
     if len(cutlass_gemm_ops):
-        trace_df['cutlass_gemm_ops'] = trace_df[cutlass_gemm_ops].agg("sum", axis=1)
+        trace_df['cutlass_gemm_ops'] = trace_df[cutlass_gemm_ops].agg("sum",
+                                                                      axis=1)
     if len(gemm_ops):
         trace_df['gemm_ops'] = trace_df[gemm_ops].agg("sum", axis=1)
     if len(rms_norm_ops):
@@ -304,8 +305,8 @@ def group_trace_by_operations(trace_df: pd.DataFrame) -> pd.DataFrame:
         trace_df['reduce_kernel_ops'] = trace_df[reduce_kernel_ops].agg("sum",
                                                                         axis=1)
 
-    trace_df.drop(attention_ops + quant_ops + cutlass_gemm_ops + gemm_ops + rms_norm_ops +
-                  vocab_embed_ops + mem_ops + elementwise_ops +
+    trace_df.drop(attention_ops + quant_ops + cutlass_gemm_ops + gemm_ops +
+                  rms_norm_ops + vocab_embed_ops + mem_ops + elementwise_ops +
                   nccl_all_reduce_ops + nccl_gather_ops + nccl_broadcast_ops +
                   nccl_other_ops + cross_device_reduce_1stage_ops +
                   cross_device_reduce_2stage_ops + custom_ar_all_reduce_ops +

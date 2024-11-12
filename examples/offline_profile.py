@@ -1,14 +1,14 @@
 import inspect
 import json
 import os
+import random
 import sys
 from argparse import RawTextHelpFormatter
 from dataclasses import asdict, dataclass
 from typing import Optional
-import random
-import tqdm
 
 import torch
+import tqdm
 
 from vllm import LLM, SamplingParams
 from vllm.engine.arg_utils import EngineArgs
@@ -79,18 +79,17 @@ def run_profile(context: ProfileContext, csv_output: Optional[str],
     print("llm.llm_engine.model_config.max_model_len: ",
           llm.llm_engine.model_config.max_model_len)
     if prompt_len + max_output_len > llm.llm_engine.model_config.max_model_len:
-        print(
-            f"ERROR: chosen prompt_len + max_output_len ({prompt_len} + "
-            f"{max_output_len} = {prompt_len + max_output_len}) is larger "
-            f"than the model's max_model_len ({max_model_len}), please "
-            f"choose a smaller prompt_len or max_output_len, or increase "
-            f"--max-model-len")
+        print(f"ERROR: chosen prompt_len + max_output_len ({prompt_len} + "
+              f"{max_output_len} = {prompt_len + max_output_len}) is larger "
+              f"than the model's max_model_len ({max_model_len}), please "
+              f"choose a smaller prompt_len or max_output_len, or increase "
+              f"--max-model-len")
         sys.exit(-1)
 
     def add_requests():
         for i in range(batch_size):
             sampling_params.max_tokens = \
-                    random.randint(min_output_len, max_output_len)  
+                    random.randint(min_output_len, max_output_len)
 
             prompt_token_ids = torch.randint(
                 llm.llm_engine.model_config.get_vocab_size(),
@@ -271,19 +270,15 @@ Profile a model
                         help=f"Number of requests to run as a single batch, "
                         f"default={BATCH_SIZE_DEFAULT}")
 
-    parser.add_argument(
-        "--max-output-len",
-        type=int,
-        default=OUTPUT_LEN_DEFAULT,
-        help="Maximum output length of the requests"
-    )
+    parser.add_argument("--max-output-len",
+                        type=int,
+                        default=OUTPUT_LEN_DEFAULT,
+                        help="Maximum output length of the requests")
 
-    parser.add_argument(
-        "--min-output-len",
-        type=int,
-        default=OUTPUT_LEN_DEFAULT,
-        help="Minimum output length of the requests"
-    )
+    parser.add_argument("--min-output-len",
+                        type=int,
+                        default=OUTPUT_LEN_DEFAULT,
+                        help="Minimum output length of the requests")
 
     EngineArgs.add_cli_args(parser)
 
