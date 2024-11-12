@@ -423,7 +423,6 @@ class Idefics3Model(nn.Module):
         self.config = config
         self.padding_idx = self.config.text_config.pad_token_id
         self.vocab_size = self.config.text_config.vocab_size
-
         self.vision_model = Idefics3VisionTransformer(config.vision_config,
                                                       quant_config)
         self.connector = Idefics3Connector(config)
