@@ -71,6 +71,6 @@ class TPUExecutor:
         return output
 
     def check_health(self) -> None:
-        # GPUExecutor will always be healthy as long as
+        # TPUExecutor will always be healthy as long as
         # it's running.
         return

@@ -42,20 +42,9 @@ class PallasAttentionBackend(AttentionBackend):
 @dataclass
 class PallasAttentionMetadata:
 
-    # NOTE(sang): Definition of context_len, query_len, and seq_len.
-    # |---------- N-1 iteration --------|
-    # |---------------- N iteration ---------------------|
-    # |- tokenA -|......................|-- newTokens ---|
-    # |---------- context_len ----------|
-    # |-------------------- seq_len ---------------------|
-    #                                   |-- query_len ---|
-
-    num_actual_tokens: int  # Number of tokens excluding padding.
-    max_query_len: int
-    query_start_loc: torch.Tensor
-    max_seq_len: int
-    seq_start_loc: torch.Tensor
-    block_table: torch.Tensor
+    is_prompt: bool
+    block_tables: Optional[torch.Tensor]
+    context_lens: Optional[torch.Tensor]
     slot_mapping: torch.Tensor
 
 
@@ -166,7 +155,7 @@ class PallasAttentionImpl(AttentionImpl):
             write_to_kv_cache(key, value, key_cache, value_cache, slot_mapping)
 
         query = query * self.scale
-        if attn_metadata.num_prefills > 0:
+        if attn_metadata.is_prompt:
             assert seq_len % 16 == 0, (
                 "Pallas FlashAttention kernel requires seq_len to be a "
                 f"multiple of 16 but got {seq_len}")

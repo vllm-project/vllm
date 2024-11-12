@@ -11,9 +11,6 @@ import torch.nn as nn
 import torch_xla.core.xla_model as xm
 import torch_xla.runtime as xr
 
-from vllm import envs
-from vllm.compilation.compile_context import set_compile_context
-from vllm.compilation.config import CompilationConfig
 from vllm.compilation.levels import CompilationLevel
 from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
 from vllm.config import VllmConfig
@@ -21,12 +18,11 @@ from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import MultiModalDataDict
-from vllm.plugins import set_compilation_config
 from vllm.sampling_params import SamplingParams, SamplingType
-from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler, cdiv,
+from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, cdiv,
                         is_pin_memory_available)
-from vllm.v1.attention.backends.flash_attn import (FlashAttentionBackend,
-                                                   FlashAttentionMetadata)
+from vllm.v1.attention.backends.pallas import (PallasAttentionBackend,
+                                               PallasAttentionMetadata)
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 
@@ -34,11 +30,6 @@ if TYPE_CHECKING:
     from vllm.v1.core.scheduler import SchedulerOutput
 
 logger = init_logger(__name__)
-
-# FIXME(woosuk): A temporary hack to support `n > 1`.
-# This can significantly affect the performance if too large.
-_MAX_NUM_SAMPLES = 128
-
 
 class TPUModelRunner:
 
@@ -296,7 +287,7 @@ class TPUModelRunner:
         query_start_loc = query_start_loc.to(self.device, non_blocking=True)
         seq_start_loc = seq_start_loc.to(self.device, non_blocking=True)
         slot_mapping = slot_mapping.to(self.device, non_blocking=True).long()
-        attn_metadata = FlashAttentionMetadata(
+        attn_metadata = PallasAttentionMetadata(
             num_actual_tokens=total_num_scheduled_tokens,
             max_query_len=max_num_scheduled_tokens,
             query_start_loc=query_start_loc,
@@ -447,31 +438,27 @@ class TPUModelRunner:
                                    device=self.device))
                      for _ in range(self.num_attn_layers)]
 
-        num_total_tokens = batch_size * seq_len
-        assert num_total_tokens <= self.input_ids.numel()
+        seq_len = (seq_len + 15) // 16 * 16
 
-        slot_mapping = torch.zeros((num_total_tokens, ),
-                                   dtype=torch.int64,
-                                   device=self.device)
-        query_start_loc = torch.ones((batch_size + 1, ), 
-                                     dtype=torch.int32,
-                                     device=self.device)
-        seq_start_loc = torch.empty((batch_size + 1, ),
-                                    dtype=torch.int32,
+        input_ids = torch.zeros((batch_size, seq_len),
+                                dtype=torch.int32,
+                                device=self.device)
+        positions = torch.zeros((batch_size, seq_len),
+                                dtype=torch.int32,
+                                device=self.device)
+        slot_mapping = torch.zeros((batch_size, seq_len),
+                                    dtype=torch.int64,
                                     device=self.device)
 
-        attn_metadata = FlashAttentionMetadata(
-            num_actual_tokens=num_total_tokens,
-            max_query_len=num_total_tokens,
-            query_start_loc=query_start_loc,
-            max_seq_len=num_total_tokens,
-            seq_start_loc=seq_start_loc,
-            block_table=self.input_batch.block_table[:batch_size],
+        attn_metadata = PallasAttentionMetadata(
+            is_prompt=is_prompt,
+            block_tables=None,
+            context_lens=None,
             slot_mapping=slot_mapping,
         )
 
-        self.model(self.input_ids,
-                   self.positions,
+        self.model(input_ids,
+                   positions,
                    attn_metadata,
                    kv_caches,
                    is_prompt=is_prompt)
@@ -828,7 +815,7 @@ class ModelWrapper(TorchCompileWrapperWithCustomDispatcher):
         self,
         token_ids: torch.Tensor,
         position_ids: torch.Tensor,
-        attn_metadata: FlashAttentionMetadata,
+        attn_metadata: PallasAttentionMetadata,
         kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
     ) -> torch.Tensor:
         """Executes the forward pass of the model and samples the next token.
