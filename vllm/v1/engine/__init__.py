@@ -23,6 +23,7 @@ class DetokenizerRequest:
     include_stop_str_in_output: bool
 
 
+@dataclass
 class EngineCoreRequest:
 
     # NOTE: prompt and prompt_token_ids should be DecoderOnlyInput,
