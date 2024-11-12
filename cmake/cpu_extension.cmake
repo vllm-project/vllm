@@ -60,6 +60,7 @@ find_isa(${CPUINFO} "avx512f" AVX512_FOUND)
 find_isa(${CPUINFO} "POWER10" POWER10_FOUND)
 find_isa(${CPUINFO} "POWER9" POWER9_FOUND)
 find_isa(${CPUINFO} "asimd" ASIMD_FOUND) # Check for ARM NEON support
+find_isa(${CPUINFO} "bf16" BF16_FOUND) # Check for BF16 support
 
 if (AVX512_FOUND AND NOT AVX512_DISABLED)
     list(APPEND CXX_COMPILE_FLAGS
@@ -93,12 +94,16 @@ elseif (POWER9_FOUND OR POWER10_FOUND)
         "-mtune=native")
 
 elseif (ASIMD_FOUND)
-    message(STATUS "ARMv8 architecture detected")
-    list(APPEND CXX_COMPILE_FLAGS
-        "-mcpu=native"
-        "-mtune=native"
-        )
-        
+    message(STATUS "ARMv8 or later architecture detected")
+    if(BF16_FOUND)
+        message(STATUS "BF16 extension detected")
+        set(MARCH_FLAGS "-march=armv8.2-a+bf16+dotprod+fp16")
+        add_compile_definitions(BF16_SUPPORT)
+    else()
+        message(WARNING "BF16 functionality is not available")
+        set(MARCH_FLAGS "-march=armv8.2-a+dotprod+fp16")  
+    endif()
+    list(APPEND CXX_COMPILE_FLAGS ${MARCH_FLAGS})     
 else()
     message(FATAL_ERROR "vLLM CPU backend requires AVX512, AVX2, Power9+ ISA or ARMv8 support.")
 endif()

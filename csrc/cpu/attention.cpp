@@ -51,15 +51,19 @@ struct KernelVecType<c10::BFloat16> {
   using v_load_vec_type = vec_op::BF16Vec16;
 };
 #else
-template <>
-struct KernelVecType<c10::BFloat16> {
-  using q_load_vec_type = vec_op::BF16Vec8;
-  using q_vec_type = vec_op::FP32Vec16;
-  using k_load_vec_type = vec_op::BF16Vec16;
-  using k_vec_type = vec_op::FP32Vec16;
-  using qk_acc_vec_type = vec_op::FP32Vec16;
-  using v_load_vec_type = vec_op::BF16Vec16;
-};
+  #ifndef BF16_SUPPORT
+  //pass
+  #else
+  template <>
+  struct KernelVecType<c10::BFloat16> {
+    using q_load_vec_type = vec_op::BF16Vec8;
+    using q_vec_type = vec_op::FP32Vec16;
+    using k_load_vec_type = vec_op::BF16Vec16;
+    using k_vec_type = vec_op::FP32Vec16;
+    using qk_acc_vec_type = vec_op::FP32Vec16;
+    using v_load_vec_type = vec_op::BF16Vec16;
+  };
+  #endif
 #endif
 
 template <typename T>

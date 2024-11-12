@@ -1,14 +1,19 @@
 #include <arm_neon.h>
-#include <torch/all.h>
+#include <torch/all.h> 
 
 #include <cmath>
 
 namespace vec_op {
 
 // FIXME: FP16 is not fully supported in Torch-CPU
-#define VLLM_DISPATCH_CASE_FLOATING_TYPES(...)                                 \
-  AT_DISPATCH_CASE(at::ScalarType::Float, __VA_ARGS__)                         \
-  AT_DISPATCH_CASE(at::ScalarType::BFloat16, __VA_ARGS__)
+#ifdef BF16_SUPPORT
+  #define VLLM_DISPATCH_CASE_FLOATING_TYPES(...)                                 \
+    AT_DISPATCH_CASE(at::ScalarType::Float, __VA_ARGS__)                         \
+    AT_DISPATCH_CASE(at::ScalarType::BFloat16, __VA_ARGS__)  
+#else
+  #define VLLM_DISPATCH_CASE_FLOATING_TYPES(...)                                 \
+    AT_DISPATCH_CASE(at::ScalarType::Float, __VA_ARGS__)                         
+#endif
 
 #define VLLM_DISPATCH_FLOATING_TYPES(TYPE, NAME, ...)                          \
   AT_DISPATCH_SWITCH(TYPE, NAME, VLLM_DISPATCH_CASE_FLOATING_TYPES(__VA_ARGS__))
@@ -76,6 +81,7 @@ struct FP16Vec8 : public Vec<FP16Vec8> {
   void save(void *ptr) const { vst1q_f16((__fp16 *)ptr, reg); }
 };
 
+#ifdef BF16_SUPPORT
 struct BF16Vec8 : public Vec<BF16Vec8> {
   constexpr static int VEC_ELEM_NUM = 8;
 
@@ -132,6 +138,7 @@ struct BF16Vec32 : public Vec<BF16Vec32> {
 
   void save(void *ptr) const { *reinterpret_cast<bfloat16x8x4_t *>(ptr) = reg; }
 };
+#endif
 
 struct FP32Vec4 : public Vec<FP32Vec4> {
   constexpr static int VEC_ELEM_NUM = 4;
@@ -177,12 +184,15 @@ struct FP32Vec8 : public Vec<FP32Vec8> {
   explicit FP32Vec8(float32x4x2_t data) : reg(data) {}
 
   explicit FP32Vec8(const FP32Vec8 &data) : reg(data.reg) {}
-
+  
+  #ifdef BF16_SUPPORT
   explicit FP32Vec8(float16x8_t v) : reg({vcvt_f32_f16(vget_low_f16(v)), vcvt_f32_f16(vget_high_f16(v))}) {}
 
   explicit FP32Vec8(bfloat16x8_t v) : reg({vcvtq_low_f32_bf16(v), vcvtq_high_f32_bf16(v)}) {}
 
   explicit FP32Vec8(const BF16Vec8 &v) : reg({vcvtq_low_f32_bf16(v.reg), vcvtq_high_f32_bf16(v.reg)}) {}
+
+  #endif
 
   float reduce_sum() const {
     AliasReg ar;
@@ -242,10 +252,10 @@ struct FP32Vec8 : public Vec<FP32Vec8> {
     ar.reg = reg;
 
     // Extract float32x2_t elements for each float32x4_t
-    float32x2_t er_vec0 = {erf(ar.values[0]), erf(ar.values[1])};
-    float32x2_t er_vec1 = {erf(ar.values[2]), erf(ar.values[3])};
-    float32x2_t er_vec2 = {erf(ar.values[4]), erf(ar.values[5])};
-    float32x2_t er_vec3 = {erf(ar.values[6]), erf(ar.values[7])};
+    float32x2_t er_vec0 = {static_cast<float32_t>(erf(ar.values[0])), static_cast<float32_t>(erf(ar.values[1]))};
+    float32x2_t er_vec1 = {static_cast<float32_t>(erf(ar.values[2])), static_cast<float32_t>(erf(ar.values[3]))};
+    float32x2_t er_vec2 = {static_cast<float32_t>(erf(ar.values[4])), static_cast<float32_t>(erf(ar.values[5]))};
+    float32x2_t er_vec3 = {static_cast<float32_t>(erf(ar.values[6])), static_cast<float32_t>(erf(ar.values[7]))};
 
     // Combine the results into float32x4_t vectors
     float32x4_t result0 = vcombine_f32(er_vec0, er_vec1);
@@ -257,8 +267,7 @@ struct FP32Vec8 : public Vec<FP32Vec8> {
     result.val[1] = result1;
 
     return FP32Vec8(result);
-  }
-
+  } 
 
   FP32Vec8 operator*(const FP32Vec8 &b) const {
     return FP32Vec8(float32x4x2_t({vmulq_f32(reg.val[0], b.reg.val[0]), vmulq_f32(reg.val[1], b.reg.val[1])}));
@@ -301,12 +310,14 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
 
   explicit FP32Vec16(const FP32Vec16 &data) : reg(data.reg) {}
 
+  #ifdef BF16_SUPPORT
   explicit FP32Vec16(bfloat16x8x2_t v) : reg({
     vcvtq_low_f32_bf16(v.val[0]),
     vcvtq_high_f32_bf16(v.val[0]),
     vcvtq_low_f32_bf16(v.val[1]),
     vcvtq_high_f32_bf16(v.val[1])
   }) {}
+  #endif
 
   explicit FP32Vec16(const FP32Vec4 &data) {
     reg.val[0] = data.reg;
@@ -322,16 +333,19 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
     reg.val[3] = data.reg.val[1]; // Repeating the second half
   }
 
-
+  #ifdef BF16_SUPPORT
   explicit FP32Vec16(const BF16Vec16 &v) : reg({
     vcvtq_low_f32_bf16(v.reg.val[0]),
     vcvtq_high_f32_bf16(v.reg.val[0]),
     vcvtq_low_f32_bf16(v.reg.val[1]),
     vcvtq_high_f32_bf16(v.reg.val[1])
   }) {}
+  #endif
 
+  #ifdef BF16_SUPPORT
   explicit FP32Vec16(const BF16Vec8 &v) : FP32Vec16(FP32Vec8(v)) {}
-  
+  #endif
+
   FP32Vec16 operator+(const FP32Vec16 &b) const {
     return FP32Vec16(float32x4x4_t({
         vaddq_f32(reg.val[0], b.reg.val[0]),
@@ -402,9 +416,10 @@ template <typename T> using vec_t = typename VecType<T>::vec_type;
 
 template <> struct VecType<float> { using vec_type = FP32Vec8; };
 
+#ifdef BF16_SUPPORT
 template <> struct VecType<c10::Half> { using vec_type = FP16Vec8; };
-
 template <> struct VecType<c10::BFloat16> { using vec_type = BF16Vec8; };
+#endif
 
 template <typename T> void storeFP32(float v, T *ptr) { *ptr = v; }
 
@@ -419,6 +434,7 @@ inline void fma(FP32Vec16 &acc, FP32Vec16 &a, FP32Vec16 &b) {
   acc.reg.val[3] = vfmaq_f32(acc.reg.val[3], a.reg.val[3], b.reg.val[3]);
 }
 
+#ifdef BF16_SUPPORT
 inline void fma(FP32Vec16 &acc, BF16Vec32 &a, BF16Vec32 &b) {
   // Convert BF16 to FP32 for each half of the BF16 vectors
   float32x4_t a0_low = vcvt_f32_bf16(vget_low_bf16(a.reg.val[0]));
@@ -437,21 +453,25 @@ inline void fma(FP32Vec16 &acc, BF16Vec32 &a, BF16Vec32 &b) {
   acc.reg.val[2] = vfmaq_f32(acc.reg.val[2], a1_low, b1_low);
   acc.reg.val[3] = vfmaq_f32(acc.reg.val[3], a1_high, b1_high);
 }
+#endif
 
+#ifdef BF16_SUPPORT
 inline BF16Vec8::BF16Vec8(const FP32Vec8 &v) : reg(vcvtq_high_bf16_f32(vcvtq_low_bf16_f32(v.reg.val[0]), v.reg.val[1])) {};
 
 inline BF16Vec16::BF16Vec16(const FP32Vec16 &v) : reg({
     vcvtq_high_bf16_f32(vcvtq_low_bf16_f32(v.reg.val[0]), v.reg.val[1]),
     vcvtq_high_bf16_f32(vcvtq_low_bf16_f32(v.reg.val[2]), v.reg.val[3])
-  }){};
+  }){}
+#endif
 
 inline void prefetch(const void *addr) {
     __builtin_prefetch(addr, 0, 1);
 }
 
+#ifdef BF16_SUPPORT
 template <>
 inline void storeFP32<c10::BFloat16>(float v, c10::BFloat16 *ptr) { // storeFP32ToT
   *reinterpret_cast<__bf16 *>(ptr) = vcvth_bf16_f32(v);
 }
-
+#endif
 };
