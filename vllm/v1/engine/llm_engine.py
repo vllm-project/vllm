@@ -21,6 +21,7 @@ from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.detokenizer import Detokenizer
 from vllm.v1.engine.processor import Processor
 from vllm.v1.executor.abstract import Executor
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -102,6 +103,7 @@ class LLMEngine:
                    usage_context=usage_context,
                    stat_loggers=stat_loggers,
                    multiprocess_mode=enable_multiprocessing)
+
 
     def get_num_unfinished_requests(self) -> int:
         return self.detokenizer.get_num_unfinished_requests()

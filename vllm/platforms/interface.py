@@ -33,6 +33,7 @@ class _Backend(enum.Enum):
     HPU_ATTN = enum.auto()
     PALLAS = enum.auto()
     IPEX = enum.auto()
+    IPEX_V1 = enum.auto()
     NO_ATTENTION = enum.auto()
 
 

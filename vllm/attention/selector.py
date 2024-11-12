@@ -125,6 +125,10 @@ def _cached_get_attn_backend(
         from vllm.v1.attention.backends.flash_attn import (  # noqa: F401
             FlashAttentionBackend as FlashAttentionBackendV1)
         return FlashAttentionBackendV1
+    if backend == _Backend.IPEX_V1:
+        from vllm.v1.attention.backends.ipex_attn import (  # noqa: F401
+            IPEXAttentionBackend as IPEXAttentionBackendV1)
+        return IPEXAttentionBackendV1
     if backend == _Backend.XFORMERS:
         logger.info("Using XFormers backend.")
         from vllm.attention.backends.xformers import (  # noqa: F401
@@ -208,7 +212,7 @@ def which_attn_to_use(head_size: int,
         return default_backend
 
     if use_v1:
-        return _Backend.FLASH_ATTN_VLLM_V1
+        return _Backend.IPEX_V1
 
     # FlashAttn in NVIDIA GPUs.
     if selected_backend == _Backend.FLASH_ATTN:
