@@ -21,7 +21,8 @@ from vllm.transformers_utils.tokenizer_group import (
     BaseTokenizerGroup, init_tokenizer_from_configs)
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.core.scheduler import Scheduler
-from vllm.v1.executor.gpu_executor import GPUExecutor
+# from vllm.v1.executor.gpu_executor import GPUExecutor
+from vllm.v1.executor.tpu_executor import TPUExecutor
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.tokenizer.detokenizer import Detokenizer, DetokenizerInputs
 from vllm.version import __version__ as VLLM_VERSION
@@ -34,7 +35,7 @@ class LLMEngine:
     def __init__(
         self,
         vllm_config: VllmConfig,
-        executor_class: Type[GPUExecutor],
+        executor_class: Type[TPUExecutor],
         log_stats: bool,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
@@ -489,7 +490,8 @@ class LLMEngine:
 
     @classmethod
     def _get_executor_cls(cls, engine_config: VllmConfig):
-        return GPUExecutor
+        # return GPUExecutor
+        return TPUExecutor
 
     def is_tracing_enabled(self) -> bool:
         return False

@@ -146,7 +146,14 @@ class Scheduler:
                     num_computed_tokens -= 1
                     num_new_tokens = 1
                     computed_blocks.pop()
-                num_new_tokens = min(num_new_tokens, token_budget)
+                
+                # Disabled Chunking.
+                if not self.scheduler_config.chunked_prefill_enabled:
+                    if num_new_tokens > token_budget:
+                        break
+                else:
+                    num_new_tokens = min(num_new_tokens, token_budget)
+
                 assert num_new_tokens > 0
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request, num_new_tokens, computed_blocks)

@@ -8,7 +8,6 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
 from vllm.forward_context import get_forward_context
 from vllm.utils import direct_register_custom_op
-from vllm.vllm_flash_attn import flash_attn_varlen_func
 
 
 class FlashAttentionBackend(AttentionBackend):
@@ -201,6 +200,8 @@ def unified_v1_flash_attention(
         k_scale,
         v_scale,
     )
+
+    from vllm.vllm_flash_attn import flash_attn_varlen_func
 
     attn_output = flash_attn_varlen_func(
         q=query[:num_actual_tokens],

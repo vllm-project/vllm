@@ -728,6 +728,9 @@ def is_pin_memory_available() -> bool:
     elif current_platform.is_hpu():
         print_warning_once("Pin memory is not supported on HPU.")
         return False
+    elif current_platform.is_tpu():
+        print_warning_once("Pin memory is not supported on TPU.")
+        return False
     elif current_platform.is_cpu() or current_platform.is_openvino():
         return False
     return True
