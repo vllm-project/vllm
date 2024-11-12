@@ -305,17 +305,17 @@ class BertOutput(nn.Module):
 
 class BertModel(nn.Module):
 
-    def __init__(self, *, 
-                 vllm_config: VllmConfig, 
+    def __init__(self, 
+                 *, 
+                 config: BertConfig,
+                 vllm_config: VllmConfig,
                  prefix: str = "",
                  embedding_class: type = BertEmbedding):
         super().__init__()
-        self.embeddings = embedding_class(config)
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-
-        self.embeddings = BertEmbedding(config)
+        self.embeddings = embedding_class(config)
         self.encoder = BertEncoder(config,
                                    cache_config,
                                    quant_config,
