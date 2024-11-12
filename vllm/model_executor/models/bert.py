@@ -305,8 +305,8 @@ class BertOutput(nn.Module):
 
 class BertModel(nn.Module):
 
-    def __init__(self, 
-                 *, 
+    def __init__(self,
+                 *,
                  config: BertConfig,
                  vllm_config: VllmConfig,
                  prefix: str = "",
