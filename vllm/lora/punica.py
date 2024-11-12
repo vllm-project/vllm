@@ -62,6 +62,7 @@ def convert_mapping(
     max_loras: int,
     vocab_size: int,
     extra_vocab_size: int,
+    device: torch.device,
     long_lora_context: Optional["LongContextLoRAContext"] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
            Optional[torch.Tensor], List[int]]:
@@ -104,7 +105,7 @@ def convert_mapping(
     long_lora_offsets: Optional[torch.Tensor] = None
     if long_lora_context:
         long_lora_offsets = torch.zeros(len(index_mapping_indices),
-                                        device="cuda",
+                                        device=device,
                                         dtype=torch.long)
     prompt_mapping: List[int] = [
         lora_index_to_id.index(x) if x > 0 else -1
@@ -131,10 +132,10 @@ def convert_mapping(
     if long_lora_context:
         assert long_lora_offsets is not None
         indices_list.append(long_lora_offsets)
-    indices = torch.tensor(indices_list, dtype=torch.long, device="cuda")
+    indices = torch.tensor(indices_list, dtype=torch.long, device=device)
     prompt_mapping_tensor = torch.tensor(prompt_mapping,
-                                         device="cuda",
-                                         dtype=torch.long)
+                                         dtype=torch.long,
+                                         device=device)
     embeddings_indices = torch.stack([
         indices[2] * extra_vocab_size,
         indices[2] * (vocab_size + extra_vocab_size),
@@ -145,7 +146,7 @@ def convert_mapping(
     sampler_indices_padded = sampler_indices.clone()
     sampler_indices_padded[sampler_indices_padded == -1] = max_loras - 1
     sampler_indices_padded = torch.arange(
-        0, len(sampler_indices_padded), device="cuda", dtype=torch.long) + (
+        0, len(sampler_indices_padded), device=device, dtype=torch.long) + (
             sampler_indices_padded * len(sampler_indices_padded))
     long_lora_indices = None
     long_lora_indices_len: Optional[int] = None
@@ -183,7 +184,7 @@ class PunicaWrapper:
     """
 
     def __init__(self, max_num_batched_tokens: int, max_batches: int,
-                 device: str):
+                 device: Union[torch.device, str]):
         self._token_lora_indices = torch.empty(max_num_batched_tokens,
                                                dtype=torch.long,
                                                device=device)
@@ -215,6 +216,7 @@ class PunicaWrapper:
         self._lora_indices_per_batch = torch.empty(max_batches,
                                                    dtype=torch.long,
                                                    device=device)
+        self.device: torch.device = device
         self.max_length: int = 0
         self.token_nums: int = 0
         self.batch_size: int = -1
@@ -263,6 +265,7 @@ class PunicaWrapper:
             max_loras,
             vocab_size,
             extra_vocab_size,
+            self.device,
             long_lora_context,
         )
         self._token_lora_indices[:base_indices.shape[0]].copy_(base_indices)
