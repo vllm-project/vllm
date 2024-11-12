@@ -33,6 +33,7 @@ from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.multimodal.image import cached_get_image_processor
@@ -355,7 +356,8 @@ def dummy_data_for_idefics3(
     max_llm_image_tokens = max_num_image_patches * image_seq_len * num_images
 
     seq_data = SequenceData.from_prompt_token_counts(
-        (hf_config.image_token_id, max_llm_image_tokens), (0, seq_len))
+        (hf_config.image_token_id, max_llm_image_tokens), 
+        (0, seq_len - max_llm_image_tokens))
 
     width = height = hf_config.vision_config.image_size
     image = Image.new("RGB", (width, height), color=0)
@@ -692,3 +694,11 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(self)
         loader.load_weights(weights)
+
+    def get_mm_mapping(self) -> MultiModelKeys:
+        """
+        Get the module prefix in multimodal models
+        """
+        return MultiModelKeys.from_string_field(language_model="model.text_model",
+                                                connector="model.connector",
+                                                tower_model="model.vision_model")
