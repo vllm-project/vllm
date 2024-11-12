@@ -5,6 +5,9 @@ import pytest  # noqa
 
 from vllm.config import CacheConfig, SchedulerConfig
 from vllm.core.scheduler import Scheduler
+from vllm.engine.arg_utils import EngineArgs
+from vllm.engine.llm_engine import LLMEngine
+from vllm.sampling_params import SamplingParams
 from vllm.sequence import Logprob, SequenceGroup
 
 from .utils import create_dummy_prompt
@@ -694,3 +697,31 @@ def test_prefix_caching_with_concurrent_partial_prefills():
     assert seq_group_meta[1].token_chunk_size == 22
     assert out.num_prefill_groups == 2
     assert out.num_batched_tokens == 44
+
+
+@pytest.mark.parametrize("model", ["facebook/opt-125m"])
+@pytest.mark.parametrize("num_prefill_slots", [2, 4, 8])
+def test_chunked_prefill_with_actual_engine(model: str,
+                                            num_prefill_slots: int):
+
+    prompt = "hello" * 40
+
+    engine_args = EngineArgs(
+        model=model,
+        num_prefill_slots=num_prefill_slots,
+        max_num_batched_tokens=40,
+        max_num_seqs=8,
+        enable_chunked_prefill=True,
+        gpu_memory_utilization=0.8,
+    )
+
+    engine = LLMEngine.from_engine_args(engine_args)
+    sampling_params = SamplingParams(temperature=0)
+
+    for req_num in range(num_prefill_slots):
+        engine.add_request(f"{req_num}", prompt, sampling_params)
+    # first step
+    request_outputs = engine.step()
+    # means all are prefilling
+    assert len(request_outputs) == 0
+    assert len(engine.scheduler[0].running) == num_prefill_slots
