@@ -1,10 +1,11 @@
 import enum
 from dataclasses import dataclass
-from typing import List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 import msgspec
 
 from vllm.lora.request import LoRARequest
+from vllm.multimodal import MultiModalDataDict, MultiModalPlaceholderDict
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 
 
@@ -22,7 +23,7 @@ class DetokenizerRequest:
     include_stop_str_in_output: bool
 
 
-class EngineCoreRequest(msgspec.Struct, omit_defaults=True):
+class EngineCoreRequest:
 
     # NOTE: prompt and prompt_token_ids should be DecoderOnlyInput,
     # but this object is currently not playing well with msgspec
@@ -33,6 +34,9 @@ class EngineCoreRequest(msgspec.Struct, omit_defaults=True):
     # always be tokenized?
     prompt: Optional[str]
     prompt_token_ids: List[int]
+    mm_data: Optional[MultiModalDataDict]
+    mm_placeholders: Optional[MultiModalPlaceholderDict]
+    mm_processor_kwargs: Optional[Dict[str, Any]]
     sampling_params: SamplingParams
     eos_token_id: Optional[int]
     arrival_time: float
