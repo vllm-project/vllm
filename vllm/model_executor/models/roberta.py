@@ -19,14 +19,12 @@ class RobertaModel(BertModel):
     def __init__(
         self,
         config: RobertaConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
+        vllm_config: VllmConfig
     ):
-        # Skip BertModel.__init__()
+        nn.Module.__init__(self)
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        nn.Module.__init__(self)
         self.embeddings = RobertaEmbedding(config)
         self.encoder = BertEncoder(config, cache_config, quant_config)
 
