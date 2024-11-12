@@ -37,7 +37,7 @@ set(PYTHON_SUPPORTED_VERSIONS "3.9" "3.10" "3.11" "3.12")
 set(CUDA_SUPPORTED_ARCHS "7.0;7.5;8.0;8.6;8.9;9.0")
 
 # Supported AMD GPU architectures.
-set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx940;gfx941;gfx942;gfx1030;gfx1100")
+set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx940;gfx941;gfx942;gfx1030;gfx1100;gfx1101")
 
 #
 # Supported/expected torch versions for CUDA/ROCm.
@@ -187,7 +187,8 @@ message(STATUS "FetchContent base directory: ${FETCHCONTENT_BASE_DIR}")
 
 set(VLLM_EXT_SRC
   "csrc/cache_kernels.cu"
-  "csrc/attention/attention_kernels.cu"
+  "csrc/attention/paged_attention_v1.cu"
+  "csrc/attention/paged_attention_v2.cu"
   "csrc/pos_encoding_kernels.cu"
   "csrc/activation_kernels.cu"
   "csrc/layernorm_kernels.cu"
