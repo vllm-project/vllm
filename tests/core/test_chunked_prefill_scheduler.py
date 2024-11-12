@@ -634,3 +634,55 @@ def test_prefix_caching():
     assert seq_group_meta[1].token_chunk_size == 12
     assert out.num_prefill_groups == 2
     assert out.num_batched_tokens == 62
+
+
+def test_prefix_caching_with_concurrent_partial_prefills():
+    """Verify allocating full blocks when prefix caching is enabled with 
+    --num-prefill-slots > 1."""
+    block_size = 4
+    max_seqs = 10
+    max_model_len = 8000
+    max_num_batched_tokens = 60  # With two slots, each slot will get 30 tokens
+    scheduler_config = SchedulerConfig("generate",
+                                       max_num_batched_tokens,
+                                       max_seqs,
+                                       max_model_len,
+                                       enable_chunked_prefill=True,
+                                       num_prefill_slots=2)
+    cache_config = CacheConfig(block_size,
+                               1.0,
+                               1,
+                               "auto",
+                               enable_prefix_caching=True)
+    cache_config.num_cpu_blocks = 0
+    cache_config.num_gpu_blocks = 32
+    scheduler = Scheduler(scheduler_config, cache_config, None)
+    running: List[SequenceGroup] = []
+
+    # Add seq groups to scheduler.
+    for i in range(2):
+        _, seq_group = create_dummy_prompt(str(i),
+                                           block_size=block_size,
+                                           prompt_length=50)
+        scheduler.add_seq_group(seq_group)
+        running.append(seq_group)
+
+    seq_group_meta, out = schedule_and_update_computed_tokens(scheduler)
+    assert set(get_sequence_groups(out)) == set(running)
+    # To partially prefill both sequences, both can chunk up to 30 tokens
+    # But the next lowest multiple of the block size (4) is 28
+    assert seq_group_meta[0].token_chunk_size == 28
+    assert seq_group_meta[1].token_chunk_size == 28
+    assert out.num_prefill_groups == 2
+    assert out.num_batched_tokens == 56
+
+    # On the next iteration, both sequences should finish prefill
+    seq_group_meta, out = schedule_and_update_computed_tokens(scheduler)
+    assert set(get_sequence_groups(out)) == set(running)
+    # Both sequences have 50 - 28 = 22 tokens left to prefill.
+    # This is not a multiple of the block size, but we don't care since we don't
+    # cache the final partial block of prefix sequences
+    assert seq_group_meta[0].token_chunk_size == 22
+    assert seq_group_meta[1].token_chunk_size == 22
+    assert out.num_prefill_groups == 2
+    assert out.num_batched_tokens == 44
