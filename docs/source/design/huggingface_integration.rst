@@ -1,3 +1,4 @@
+.. _huggingface_integration:
 Integration with HuggingFace
 ===================================
 
