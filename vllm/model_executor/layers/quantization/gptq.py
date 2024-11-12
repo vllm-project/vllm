@@ -211,27 +211,6 @@ class GPTQLinearMethod(LinearMethodBase):
 
         layer.exllama_state = exllama_state
 
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # for torch.compile
-        layer.qweight = Parameter(layer.qweight.data, requires_grad=False)
-        layer.qzeros = Parameter(layer.qzeros.data, requires_grad=False)
-        layer.qweight = Parameter(layer.qweight.data, requires_grad=False)
-        layer.g_idx = Parameter(layer.g_idx.data, requires_grad=False)
-        layer.scales = Parameter(layer.scales.data, requires_grad=False)
-
-        # exllama needs to shuffle the weight after the weight is loaded
-        # here we do the shuffle on first forward pass
-        if layer.exllama_state == ExllamaState.UNINITIALIZED:
-            if self.quant_config.desc_act:
-                layer.g_idx.data = torch.argsort(layer.g_idx).to(torch.int)
-            else:
-                layer.g_idx.data = torch.empty((0, ),
-                                               dtype=torch.int,
-                                               device=layer.g_idx.device)
-            layer.exllama_state = ExllamaState.READY
-            ops.gptq_shuffle(layer.qweight, layer.g_idx,
-                             self.quant_config.weight_bits)
-
     def apply(self,
               layer: torch.nn.Module,
               x: torch.Tensor,

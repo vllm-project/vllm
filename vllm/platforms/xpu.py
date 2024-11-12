@@ -2,15 +2,16 @@ from typing import Tuple
 
 import torch
 
-from .interface import Platform, PlatformEnum
+from .interface import DeviceCapability, Platform, PlatformEnum
 
 
 class XpuPlatform(Platform):
     _enum = PlatformEnum.XPU
 
-    @staticmethod
-    def get_device_capability(device_id: int = 0) -> Tuple[int, int]:
-        return (100, 9)
+    @classmethod
+    def get_device_capability(cls, device_id: int = 0) -> DeviceCapability:
+        major, minor = (100, 9)
+        return DeviceCapability(major=major, minor=minor)
 
     @staticmethod
     def inference_mode():
