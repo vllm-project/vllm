@@ -153,6 +153,11 @@ def sql_lora_files(sql_lora_huggingface_id):
 
 
 @pytest.fixture(scope="session")
+def lora_bias_files():
+    return snapshot_download(repo_id="followumesh/granite-3b-lora8-bias")
+
+
+@pytest.fixture(scope="session")
 def mixtral_lora_files():
     # Note: this module has incorrect adapter_config.json to test
     # https://github.com/vllm-project/vllm/pull/5909/files.
