@@ -257,8 +257,7 @@ def which_attn_to_use(head_size: int,
         return _Backend.HPU_ATTN
 
     if use_v1:
-        # return _Backend.FLASH_ATTN_VLLM_V1
-        return _Backend.PALLAS_VLLM_V1
+        return _Backend.FLASH_ATTN_VLLM_V1
 
     # FlashAttn in NVIDIA GPUs.
     if selected_backend == _Backend.FLASH_ATTN:
