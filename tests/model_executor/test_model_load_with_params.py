@@ -53,6 +53,7 @@ def test_model_loading_with_params(vllm_runner):
         # assert output
         assert output
 
+
 def test_roberta_model_loading_with_params(vllm_runner):
     """
     Test parameter weight loading with tp>1.
