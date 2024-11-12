@@ -454,6 +454,12 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if "tool_choice" not in data and data.get("tools"):
             data["tool_choice"] = "auto"
 
+        # if "tool_choice" is "none" -- ignore tools if present
+        if "tool_choice" in data and data["tool_choice"] == "none":
+            # ensure that no tools are present
+            data.pop("tools", None)
+            return data
+
         # if "tool_choice" is specified -- validation
         if "tool_choice" in data:
 
@@ -467,8 +473,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
             if data["tool_choice"] != "auto" and not isinstance(
                     data["tool_choice"], dict):
                 raise ValueError(
-                    "`tool_choice` must either be a named tool or \"auto\". "
-                    "`tool_choice=\"none\" is not supported.")
+                    "`tool_choice` must either be a named tool, \"auto\", "
+                    "or \"none\".")
 
             # ensure that if "tool_choice" is specified as an object,
             # it matches a valid tool
