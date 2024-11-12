@@ -1184,7 +1184,6 @@ class Scheduler:
 
     def _schedule(self) -> SchedulerOutputs:
         """Schedule queued requests."""
-        print('Hello In _schedule')
         if self.scheduler_config.chunked_prefill_enabled:
             return self._schedule_chunked_prefill()
         else:
@@ -1581,7 +1580,6 @@ class Scheduler:
         for the prefills for when the prefills turn into decodes in the first
         step.
         """
-        print('Hello in _get_num_lookahead_slots')
         if is_prefill:
             if self.scheduler_config.is_multi_step and enable_chunking:
                 # num_lookahead_slots was introduced in the context of decodes,
@@ -1592,12 +1590,9 @@ class Scheduler:
                 #
                 # "lookaheads" for prefills, is introduced in support for
                 # Chunked-Prefill in Multi-Step.
-                print('num_look_ahead_slots ' + str(self.scheduler_config.num_lookahead_slots + 1))
                 return self.scheduler_config.num_lookahead_slots + 1
             else:
-                print('num_look_ahead_slots 0')
                 return 0
-        print('num_look_ahead_slots ' + str(self.scheduler_config.num_lookahead_slots))
         return self.scheduler_config.num_lookahead_slots
 
     def _get_num_new_tokens(self, seq_group: SequenceGroup,
