@@ -924,8 +924,11 @@ class Scheduler:
                 "sequence.")
 
             is_big = self._is_big_seq_group(seq_group)
-            if is_big and self.big_prefill_requests >= self.max_big_requests:
-                # Cannot schedule more big requests than max_big_requests
+            if is_big and self.big_prefill_requests >= self.max_big_requests \
+                and self.num_prefill_slots > 1:
+                # When we have more than one prefill slot, we limit the number
+                # of big requests to avoid filling all of our slots with partial
+                # prefills of big prompt sequences.
                 leftover_waiting_sequences.appendleft(seq_group)
                 waiting_queue.popleft()
                 continue
@@ -1737,16 +1740,19 @@ class Scheduler:
                 self.prefill_chunk_sizes[self.prefill_slots_running]
 
             if self.cache_config.enable_prefix_caching:
-                # When prefix caching is enabled, we always allocate
-                # the number of new tokens that is dividable by the block
-                # size to avoid partial block matching.
+                # When prefix caching is enabled and we're partially prefilling
+                # a sequence, we always allocate a number of new tokens that is
+                # divisible by the block size to avoid partial block matching.
                 block_size = self.cache_config.block_size
-                # Set chunk size to the next lowest multiple of block size
-                # so we don't exceed our budget
-                prefill_slot_budget = (prefill_slot_budget //
-                                       block_size) * block_size
-                # NB: In the case where num_new_tokens < chunk_size, this does
-                # not allocate a multiple of `block_size` tokens.
+                # Don't exceed either the total budget or slot budget.
+                # Take min of those and get the next lowest multiple of the
+                # block size:
+                remaining_token_budget = \
+                    (min(remaining_token_budget, prefill_slot_budget) //
+                     block_size) * block_size
+                # NB: In the case where num_new_tokens < budget, we are
+                # finishing prefill for this sequence, so we do not need to
+                # allocate a full block.
 
             num_new_tokens = min(num_new_tokens, remaining_token_budget,
                                  prefill_slot_budget)
