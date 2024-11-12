@@ -77,12 +77,12 @@ class SillyModel(nn.Module):
 
 def test_simple_piecewise_compile():
 
-    model = SillyModel(vllm_config=VllmConfig(), prefix='')
-
     directory = os.path.dirname(__file__)
     config = os.path.join(directory, "piecewise_compilation_config.json")
     os.environ["VLLM_TORCH_COMPILE_CONFIG"] = config
     os.environ["VLLM_TORCH_COMPILE_LEVEL"] = str(CompilationLevel.PIECEWISE)
+
+    model = SillyModel(vllm_config=VllmConfig(), prefix='')
 
     inputs = torch.randn(100).cuda()
 
