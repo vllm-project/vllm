@@ -40,7 +40,7 @@ from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.sampling_metadata import SequenceGroupToSample
 from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
-                             MultiModalInputs)
+                             MultiModalKwargs)
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (CompletionSequenceGroupOutput, IntermediateTensors,
                            Logprob, SequenceData, SequenceGroupMetadata,
@@ -791,7 +791,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         context_lens: List[int] = []
         query_lens: List[int] = []
         prefix_block_tables: List[List[int]] = []
-        multi_modal_inputs_list: List[MultiModalInputs] = []
+        multi_model_kwargs_list: List[MultiModalKwargs] = []
 
         if len(seq_group_metadata_list) == 0:
             return PreparePromptMetadata.empty()
@@ -852,7 +852,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             mm_data = seq_group_metadata.multi_modal_data
             if mm_data:
                 mm_kwargs = self.multi_modal_input_mapper(mm_data)
-                multi_modal_inputs_list.append(mm_kwargs)
+                multi_model_kwargs_list.append(mm_kwargs)
 
             if seq_group_metadata.block_tables is None:
                 # During memory profiling, the block tables are not initialized
@@ -979,7 +979,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             multi_modal_placeholder_index_maps=
             None  # FIXME(kzawora): mutli-modality will not work here
         )
-        multi_modal_kwargs = MultiModalInputs.batch(multi_modal_inputs_list)
+        multi_modal_kwargs = MultiModalKwargs.batch(multi_model_kwargs_list)
 
         return PreparePromptMetadata(input_tokens=input_tokens,
                                      input_positions=input_positions,

@@ -8,9 +8,10 @@ from vllm.utils import get_device
 
 class DummyLoRAManager:
 
-    def __init__(self):
+    def __init__(self, device: torch.device = "cuda:0"):
         super().__init__()
         self._loras: Dict[str, LoRALayerWeights] = {}
+        self._device = device
 
     def set_module_lora(self, module_name: str, lora: LoRALayerWeights):
         self._loras[module_name] = lora

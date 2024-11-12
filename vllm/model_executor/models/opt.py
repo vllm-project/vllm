@@ -24,7 +24,7 @@ from transformers import OPTConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -33,7 +33,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -147,8 +147,7 @@ class OPTDecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.fc1",
         )
-        self.activation_fn = get_act_fn(config.activation_function,
-                                        quant_config, config.ffn_dim)
+        self.activation_fn = get_act_fn(config.activation_function)
         self.fc2 = RowParallelLinear(
             config.ffn_dim,
             self.embed_dim,
@@ -294,14 +293,13 @@ class OPTDecoder(nn.Module):
 @support_torch_compile
 class OPTModel(nn.Module):
 
-    def __init__(
-        self,
-        config: OPTConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+
         self.decoder = OPTDecoder(config,
                                   cache_config,
                                   quant_config,
@@ -343,19 +341,14 @@ class OPTForCausalLM(nn.Module, SupportsPP):
         ".q_proj.", ".k_proj.", ".v_proj.", ".out_proj.", ".fc1.", ".fc2."
     ]
 
-    def __init__(
-        self,
-        config: OPTConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__()
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
         super().__init__()
         self.config = config
         self.quant_config = quant_config
-        self.model = OPTModel(config,
-                              cache_config,
-                              quant_config,
+        self.model = OPTModel(vllm_config=vllm_config,
                               prefix=maybe_prefix(prefix, "model"))
         if self.config.tie_word_embeddings:
             self.lm_head = self.model.decoder.embed_tokens
@@ -363,7 +356,7 @@ class OPTForCausalLM(nn.Module, SupportsPP):
             self.lm_head = ParallelLMHead(config.vocab_size,
                                           config.word_embed_proj_dim)
         self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.sampler = Sampler()
+        self.sampler = get_sampler()
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 

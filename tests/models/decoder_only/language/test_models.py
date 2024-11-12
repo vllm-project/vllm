@@ -1,8 +1,5 @@
 """Compare the outputs of HF and vLLM when using greedy sampling.
 
-This test only tests small models. Big models such as 7B should be tested from
-test_big_models.py because it could use a larger instance to run tests.
-
 Run `pytest tests/models/test_models.py`.
 """
 import pytest
@@ -32,10 +29,10 @@ if not current_platform.is_cpu():
         "openbmb/MiniCPM3-4B",
     ]
 
-# TODO: remove this after CPU float16 support ready
-target_dtype = "float" if current_platform.is_cpu() else "half"
+target_dtype = "half"
 
 
+@pytest.mark.core_model
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", [target_dtype])
 @pytest.mark.parametrize("max_tokens", [32])

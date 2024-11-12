@@ -4,11 +4,12 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type, cast
 import torch
 
 from vllm.attention import AttentionMetadata
+from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.sampler import SamplerOutput
-from vllm.multimodal import MultiModalInputs
+from vllm.multimodal import MultiModalKwargs
 from vllm.sequence import IntermediateTensors, SequenceGroupMetadata
 from vllm.utils import make_tensor_with_pad
-from vllm.worker.cpu_model_runner import (CPUModelRunner,
+from vllm.worker.cpu_model_runner import (CPUModelRunnerBase,
                                           ModelInputForCPUBuilder,
                                           ModelInputForCPUWithSamplingMetadata)
 from vllm.worker.model_runner_base import (
@@ -50,7 +51,8 @@ class EncoderDecoderModelInputForCPU(ModelInputForCPUWithSamplingMetadata):
             super().from_broadcasted_tensor_dict(tensor_dict, attn_backend))
 
 
-class CPUEncoderDecoderModelRunner(CPUModelRunner):
+class CPUEncoderDecoderModelRunner(
+        CPUModelRunnerBase[EncoderDecoderModelInputForCPU]):
     _model_input_cls: Type[EncoderDecoderModelInputForCPU] = (
         EncoderDecoderModelInputForCPU)
     _builder_cls: Type[ModelInputForCPUBuilder] = ModelInputForCPUBuilder
@@ -87,21 +89,29 @@ class CPUEncoderDecoderModelRunner(CPUModelRunner):
         virtual_engine: int = 0,
         finished_requests_ids: Optional[List[str]] = None
     ) -> EncoderDecoderModelInputForCPU:
-        model_input = super().prepare_model_input(seq_group_metadata_list,
-                                                  virtual_engine,
-                                                  finished_requests_ids)
-        model_input = cast(EncoderDecoderModelInputForCPU, model_input)
+        model_input = self._prepare_model_input_tensors(
+            seq_group_metadata_list, finished_requests_ids)
         (
             attn_metadata,
             encoder_input_tokens_tensor,
             encoder_input_positions_tensor,
         ) = self._prepare_encoder_model_input_tensors(seq_group_metadata_list,
                                                       model_input)
+        # Sampling metadata is only required for the final pp group
+        generators = self.get_generators(finished_requests_ids)
+        sampling_metadata = SamplingMetadata.prepare(seq_group_metadata_list,
+                                                     model_input.seq_lens,
+                                                     model_input.query_lens,
+                                                     self.device,
+                                                     pin_memory=False,
+                                                     generators=generators)
         return dataclasses.replace(
             model_input,
+            sampling_metadata=sampling_metadata,
             attn_metadata=attn_metadata,
             encoder_input_tokens=encoder_input_tokens_tensor,
             encoder_input_positions=encoder_input_positions_tensor,
+            virtual_engine=virtual_engine,
         )
 
     def _prepare_encoder_model_input_tensors(
@@ -287,7 +297,7 @@ class CPUEncoderDecoderModelRunner(CPUModelRunner):
             kv_caches,
             "attn_metadata":
             model_input.attn_metadata,
-            **MultiModalInputs.as_kwargs(model_input.multi_modal_kwargs or {},
+            **MultiModalKwargs.as_kwargs(model_input.multi_modal_kwargs or {},
                                          device=self.device),
             "intermediate_tensors":
             intermediate_tensors,

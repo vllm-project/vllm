@@ -56,6 +56,16 @@ void rms_norm(torch::Tensor& out, torch::Tensor& input, torch::Tensor& weight,
 void fused_add_rms_norm(torch::Tensor& input, torch::Tensor& residual,
                         torch::Tensor& weight, double epsilon);
 
+void rms_norm_static_fp8_quant(torch::Tensor& out, torch::Tensor& input,
+                               torch::Tensor& weight, torch::Tensor& scale,
+                               double epsilon);
+
+void fused_add_rms_norm_static_fp8_quant(torch::Tensor& out,
+                                         torch::Tensor& input,
+                                         torch::Tensor& residual,
+                                         torch::Tensor& weight,
+                                         torch::Tensor& scale, double epsilon);
+
 void rotary_embedding(torch::Tensor& positions, torch::Tensor& query,
                       torch::Tensor& key, int64_t head_size,
                       torch::Tensor& cos_sin_cache, bool is_neox);
@@ -199,20 +209,16 @@ void causal_conv1d_fwd(const at::Tensor& x, const at::Tensor& weight,
 
 #ifndef USE_ROCM
 using fptr_t = int64_t;
-fptr_t init_custom_ar(torch::Tensor& meta, torch::Tensor& rank_data,
-                      const std::vector<std::string>& handles,
-                      const std::vector<int64_t>& offsets, int64_t rank,
-                      bool full_nvlink);
-void all_reduce_reg(fptr_t _fa, torch::Tensor& inp, torch::Tensor& out);
-void all_reduce_unreg(fptr_t _fa, torch::Tensor& inp, torch::Tensor& reg_buffer,
-                      torch::Tensor& out);
+fptr_t init_custom_ar(const std::vector<int64_t>& fake_ipc_ptrs,
+                      torch::Tensor& rank_data, int64_t rank, bool full_nvlink);
+void all_reduce(fptr_t _fa, torch::Tensor& inp, torch::Tensor& out,
+                fptr_t reg_buffer, int64_t reg_buffer_sz_bytes);
 void dispose(fptr_t _fa);
 int64_t meta_size();
-void register_buffer(fptr_t _fa, torch::Tensor& t,
-                     const std::vector<std::string>& handles,
-                     const std::vector<int64_t>& offsets);
-std::tuple<torch::Tensor, std::vector<int64_t>> get_graph_buffer_ipc_meta(
-    fptr_t _fa);
-void register_graph_buffers(fptr_t _fa, const std::vector<std::string>& handles,
+void register_buffer(fptr_t _fa, const std::vector<int64_t>& fake_ipc_ptrs);
+std::tuple<std::vector<int64_t>, std::vector<int64_t>>
+get_graph_buffer_ipc_meta(fptr_t _fa);
+void register_graph_buffers(fptr_t _fa,
+                            const std::vector<std::vector<int64_t>>& handles,
                             const std::vector<std::vector<int64_t>>& offsets);
 #endif

@@ -1,12 +1,13 @@
 from collections import deque
 from dataclasses import dataclass
-from typing import Deque, Dict, Iterable, List, Optional, Set, Tuple, Union
+from typing import Deque, Dict, Iterable, List, Optional, Set, Union
 
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.logger import init_logger
 from vllm.multimodal import MultiModalDataDict
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.kv_cache_manager import KVCacheManager
+from vllm.v1.engine import EngineCoreOutput
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 
@@ -34,7 +35,7 @@ class Scheduler:
             block_size=self.cache_config.block_size,
             num_gpu_blocks=num_gpu_blocks,
             sliding_window=self.cache_config.sliding_window,
-            enable_caching=True)
+            enable_caching=self.cache_config.enable_prefix_caching)
         self.block_size = self.cache_config.block_size
 
         # Scheduling constraints.
@@ -91,9 +92,9 @@ class Scheduler:
             assert num_new_tokens > 0
 
             while True:
-                new_block_ids = self.kv_cache_manager.append_slots(
+                new_blocks = self.kv_cache_manager.append_slots(
                     request, num_new_tokens)
-                if new_block_ids is None:
+                if new_blocks is None:
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.
                     preempted_req = self.running.pop()
@@ -110,7 +111,9 @@ class Scheduler:
                     # The request can be scheduled.
                     scheduled_running_reqs.append(request)
 
-                    req_to_new_block_ids[request.request_id] = new_block_ids
+                    req_to_new_block_ids[request.request_id] = [
+                        b.block_id for b in new_blocks
+                    ]
                     num_scheduled_tokens[request.request_id] = num_new_tokens
                     token_budget -= num_new_tokens
                     req_index += 1
@@ -126,22 +129,29 @@ class Scheduler:
 
                 request = self.waiting[0]
                 # Get already-cached tokens.
-                computed_block_ids = self.kv_cache_manager.get_computed_blocks(
+                computed_blocks = self.kv_cache_manager.get_computed_blocks(
                     request)
                 # NOTE(woosuk): Since incomplete blocks are not eligible for
                 # sharing, `num_computed_tokens` is always a multiple of
                 # `block_size`.
-                num_computed_tokens = len(computed_block_ids) * self.block_size
+                num_computed_tokens = len(computed_blocks) * self.block_size
                 # Number of tokens to be scheduled.
                 # We use `request.num_tokens` instead of
                 # `request.num_prompt_tokens` to consider the resumed requests,
                 # which have output tokens.
                 num_new_tokens = request.num_tokens - num_computed_tokens
+                if num_new_tokens == 0:
+                    # The happens when prompt length is divisible by the block
+                    # size and all blocks are cached. Now we force to recompute
+                    # the last token.
+                    num_computed_tokens -= 1
+                    num_new_tokens = 1
+                    computed_blocks.pop()
                 num_new_tokens = min(num_new_tokens, token_budget)
                 assert num_new_tokens > 0
-                new_block_ids = self.kv_cache_manager.allocate_slots(
-                    request, num_new_tokens, computed_block_ids)
-                if new_block_ids is None:
+                new_blocks = self.kv_cache_manager.allocate_slots(
+                    request, num_new_tokens, computed_blocks)
+                if new_blocks is None:
                     # The request cannot be scheduled.
                     break
                 request.num_computed_tokens = num_computed_tokens
@@ -156,8 +166,9 @@ class Scheduler:
                     raise RuntimeError(
                         f"Invalid request status: {request.status}")
 
-                req_to_new_block_ids[request.request_id] = (
-                    computed_block_ids + new_block_ids)
+                req_to_new_block_ids[request.request_id] = [
+                    b.block_id for b in computed_blocks + new_blocks
+                ]
                 num_scheduled_tokens[request.request_id] = num_new_tokens
                 token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
@@ -227,13 +238,12 @@ class Scheduler:
         self,
         scheduler_output: "SchedulerOutput",
         model_runner_output: "ModelRunnerOutput",
-    ) -> List[Tuple[Request, int]]:
+    ) -> List[EngineCoreOutput]:
         # NOTE(woosuk): This method doesn't consider speculative decoding.
         sampled_token_ids = model_runner_output.sampled_token_ids_cpu.tolist()
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         new_running: List[Request] = []
-        # (request, num_sampled_tokens)
-        sampled: List[Tuple[Request, int]] = []
+        engine_core_outputs: List[EngineCoreOutput] = []
         for request in self.running:
             req_id = request.request_id
             request.num_computed_tokens += num_scheduled_tokens[req_id]
@@ -246,18 +256,30 @@ class Scheduler:
                 # NOTE(woosuk): Currently, we assume that each request
                 # generates at most one token at each step.
                 token_id = sampled_token_ids[req_index]
-                request.output_token_ids.append(token_id)
-                sampled.append((request, 1))
+                request.append_output_token_ids(token_id)
+                num_new_tokens = 1
                 # TODO: Update the KV cache manager for prefix caching.
 
-                # Check if the request is finished.
+                # Check for stop and update request state.
+                # This must be called before me make the EngineCoreOutput.
                 stopped = self._check_stop(request)
+
+                # Add EngineCoreOutput for this Request.
+                output = EngineCoreOutput(
+                    request_id=req_id,
+                    new_token_ids=request.output_token_ids[-num_new_tokens:],
+                    finished=request.is_finished(),
+                    finish_reason=request.get_finished_reason(),
+                    stop_reason=request.stop_reason)
+                engine_core_outputs.append(output)
+
+                # Breakout of the loop.
                 if stopped:
                     continue
 
             new_running.append(request)
         self.running = new_running
-        return sampled
+        return engine_core_outputs
 
     def _check_stop(self, request: Request) -> bool:
         if (request.num_tokens >= self.max_model_len
