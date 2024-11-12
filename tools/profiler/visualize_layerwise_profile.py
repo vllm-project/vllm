@@ -158,11 +158,10 @@ def group_trace_by_operations(trace_df: pd.DataFrame) -> pd.DataFrame:
     def is_gemm_op(op_name: str):
         if is_quant(op_name):
             return False
-        return "xmma_gemm" in op_name  or \
+        return is_cutlass_gemm_op(op_name) or \
+           "xmma_gemm" in op_name  or \
            "gemv2T_kernel" in op_name or \
            "splitKreduce" in op_name or \
-           "void cutlass::Kernel" in op_name or \
-           "void cutlass::device_kernel" in op_name or \
            "s16816gemm" in op_name
 
     def is_elementwise_op(op_name: str):
