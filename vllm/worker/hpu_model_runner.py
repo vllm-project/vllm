@@ -26,7 +26,6 @@ from vllm_hpu_extension.profiler import (HabanaHighLevelProfiler,
                                          HabanaMemoryProfiler, format_bytes)
 
 from vllm.attention import AttentionMetadata, get_attn_backend
-from vllm.attention.backends.hpu_attn import HPUAttentionBackend
 from vllm.config import DeviceConfig, VllmConfig
 from vllm.distributed import broadcast_tensor_dict
 from vllm.distributed.parallel_state import get_world_group
@@ -393,6 +392,9 @@ class HpuModelAdapter:
     def sample(self, *args, **kwargs):
         return self.model.sample(*args, **kwargs)
 
+    def generate_proposals(self, *args, **kwargs):
+        return self.model.generate_proposals(*args, **kwargs)
+
     # sampler property will be used by spec_decode_worker
     # don't rename
     @property
@@ -563,6 +565,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
     def __init__(
         self,
         vllm_config: VllmConfig,
+        kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
         return_hidden_states: bool = False,
     ):
@@ -591,14 +594,17 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         self.pin_memory = is_pin_memory_available()
         self.kv_cache_dtype = self.cache_config.cache_dtype
 
+        num_attn_heads = self.model_config.get_num_attention_heads(
+            self.parallel_config)
+        needs_attn_backend = (num_attn_heads != 0
+                              or self.model_config.is_attention_free)
         self.attn_backend = get_attn_backend(
             self.model_config.get_head_size(),
             self.model_config.dtype,
             self.kv_cache_dtype,
             self.block_size,
             self.model_config.is_attention_free,
-        )
-        assert self.attn_backend == HPUAttentionBackend
+        ) if needs_attn_backend else None
 
         # Lazy initialization
         self.lora_manager: LRUCacheWorkerLoRAManager = None
@@ -2030,6 +2036,7 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
         warmup_mode=False,
+        previous_hidden_states: Optional[torch.Tensor] = None,
     ) -> Optional[Union[List[SamplerOutput], IntermediateTensors]]:
         if not model_input.is_first_multi_step:
             if not model_input.is_last_step:
@@ -2080,6 +2087,9 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                 "lora_mask": lora_mask,
                 **(model_input.multi_modal_kwargs or {}),
             }
+            if previous_hidden_states is not None:
+                execute_model_kwargs.update(
+                    {"previous_hidden_states": previous_hidden_states})
             if htorch.utils.internal.is_lazy():
                 execute_model_kwargs.update(
                     {"bypass_hpu_graphs": not use_graphs})
@@ -2232,9 +2242,16 @@ class HPUModelRunner(HPUModelRunnerBase[ModelInputForHPUWithSamplingMetadata]):
                     is_prompt=is_prompt)
                 self.profiler.record_counter(self.event_start, counters)
             if num_steps == 1:
+                if self.return_hidden_states:
+                    # we only need to pass hidden states of most recent token
+                    assert model_input.sampling_metadata is not None
+                    if model_input.is_prompt:
+                        output.prefill_hidden_states = hidden_states
+                    output.hidden_states = hidden_states
                 return [output] if self.is_driver_worker else []
             else:
                 return []
+
         return output if type(output) is list else [output]
 
     def _decode_sampler_outputs(self, model_input):

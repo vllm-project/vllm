@@ -42,7 +42,6 @@ class HPUExecutor(ExecutorBase):
             rank=rank,
             distributed_init_method=distributed_init_method,
             is_driver_worker=rank == 0,
-            speculative_config=self.speculative_config,
         )
 
     def _create_worker(self,
