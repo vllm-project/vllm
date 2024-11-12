@@ -1074,9 +1074,9 @@ class Scheduler:
 
         print('num_lookahead_slots in _schedule_default ' +
               str(running_scheduled.num_lookahead_slots))
-        print('prefills in _schedule_chunked_prefill ' +
+        print('prefills in _schedule_default_prefill ' +
               str(num_prefill_groups))
-        print('decodes in _schedule_chunked_prefill ' +
+        print('decodes in _schedule_default_prefill ' +
               str(+len(running_scheduled.decode_seq_groups) +
                   len(swapped_in.decode_seq_groups)))
 
