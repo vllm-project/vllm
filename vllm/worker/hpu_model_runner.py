@@ -272,6 +272,20 @@ def precompute_indices_and_offsets(block_size, slot_mapping, is_prompt):
     return indices, offsets
 
 
+def modify_decoder_layer(module: torch.nn.Module, suffix="DecoderLayer"):
+    if module.__class__.__name__.endswith(suffix):
+        module.original_forward = module.forward
+
+        def new_forward(self, *args, **kwargs):
+            ret = self.original_forward(*args, **kwargs)
+            htorch.core.mark_step()
+            return ret
+
+        module.forward = new_forward.__get__(module)
+    for child_name, child_module in module.named_children():
+        modify_decoder_layer(child_module)
+
+
 class HpuModelAdapter:
 
     def __init__(self, model, block_size, dtype, enforce_eager):
@@ -636,6 +650,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             else:
                 self.model = self.model.to("hpu")
                 htcore.mark_step()
+            modify_decoder_layer(self.model)
             torch.hpu.synchronize()
 
             with HabanaMemoryProfiler() as m_wrap:
