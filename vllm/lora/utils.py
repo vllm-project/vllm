@@ -91,7 +91,7 @@ def replace_submodule(model: nn.Module, module_name: str,
     return new_module
 
 
-def parse_fine_tuned_lora_name(name: str) -> Tuple[str, bool]:
+def parse_fine_tuned_lora_name(name: str) -> Tuple[str, bool, bool]:
     """Parse the name of lora weights.
 
     args:
@@ -101,15 +101,18 @@ def parse_fine_tuned_lora_name(name: str) -> Tuple[str, bool]:
         Tuple(module_name, is_lora_a):
             module_name: the name of the module, e.g. model.dense1,
             is_lora_a whether the tensor is lora_a or lora_b.
+            is_bias whether the tensor is lora bias.
     """
     parts = name.split(".")
+    if parts[-1] == "weight" and (parts[-2] == "lora_A"
+                                  or parts[-2] == "lora_B"):
+        return ".".join(parts[2:-2]), parts[-2] == "lora_A", False
 
-    if len(parts) >= 2 and parts[0] == "base_model" and parts[1] == "model":
-        if parts[-1] == "weight":
-            if parts[-2] == "lora_A" or parts[-2] == "lora_B":
-                return ".".join(parts[2:-2]), parts[-2] == "lora_A"
-        elif parts[-1] == "lora_embedding_A" or parts[-1] == "lora_embedding_B":
-            return ".".join(parts[2:-1]), parts[-1] == "lora_embedding_A"
+    if parts[-1] == "lora_embedding_A" or parts[-1] == "lora_embedding_B":
+        return ".".join(parts[2:-1]), parts[-1] == "lora_embedding_A", False
+
+    if parts[-1] == "bias":
+        return ".".join(parts[2:-2]), False, True
 
     raise ValueError(f"{name} is unsupported LoRA weight")
 

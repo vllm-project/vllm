@@ -70,6 +70,14 @@ class ColumnParallelLinearWithShardedLoRA(ColumnParallelLinearWithLoRA):
                                        self.lora_b_stacked,
                                        add_input=True)
         # now have column partitioned output
+
+        if self.bias_stacked is not None:
+            self.bias_stacked = self.bias_stacked.view(
+                -1, self.bias_stacked.shape[-1])
+            self.bias_stacked = self.bias_stacked[
+                self.punica_wrapper.token_lora_indices]
+            output += self.bias_stacked
+
         output = output.view(*out_orig_shape)
         return output
 
@@ -121,6 +129,15 @@ def _mcp_apply(x, bias, layer: QKVParallelLinearWithLora):
     left_offset = 0
     for idx in range(n):
         shard_size = layer.lora_b_stacked[idx].shape[2]
+
+        if layer.bias_stacked is not None:
+            bias = layer.bias_stacked[idx]
+            if bias is not None:
+                bias = bias.view(-1, bias.shape[-1])
+                bias = bias[layer.punica_wrapper.token_lora_indices]
+                bias[layer.punica_wrapper.token_lora_indices == -1] = 0
+                output[:, left_offset:left_offset + shard_size] += bias
+
         layer.punica_wrapper.add_expand_slice(
             output,
             buffers[idx],
@@ -295,6 +312,15 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
         lora_b = lora_b[:, start_idx:end_idx]
         return lora_b
 
+    def slice_bias(self, bias: torch.Tensor) -> torch.Tensor:
+        if bias is None:
+            return bias
+        shard_size = self.bias_stacked.shape[2]
+        start_idx = self.tp_rank * shard_size
+        end_idx = (self.tp_rank + 1) * shard_size
+        bias = bias[start_idx:end_idx]
+        return bias
+
     def apply(self, x: torch.Tensor) -> torch.Tensor:
         output = self.base_layer.quant_method.apply(self.base_layer, x)
 
@@ -318,6 +344,13 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
         # reduced before being used
         shard_size = self.lora_b_stacked.shape[2]
         start_idx = self.tp_rank * shard_size
+
+        if self.bias_stacked is not None:
+            bias = self.bias_stacked.view(-1, self.bias_stacked.shape[-1])
+            bias = bias[self.punica_wrapper.token_lora_indices]
+            bias[self.punica_wrapper.token_lora_indices == -1] = 0
+            output += bias
+
         self.punica_wrapper.add_expand_slice(output, buffer,
                                              self.lora_b_stacked, start_idx,
                                              shard_size)
