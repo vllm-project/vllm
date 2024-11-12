@@ -139,7 +139,7 @@ def _support_torch_compile(cls: type,
         # torch.compiler.is_compiling() means we are inside the compilation
         # e.g. TPU has the compilation logic in model runner, so we don't
         # need to compile the model inside.
-        if torch.compiler.is_compiling() or self.do_not_compile:
+        if self.do_not_compile or torch.compiler.is_compiling():
             return self.forward(*args, **kwargs)
 
         # the first compilation needs to have dynamic shapes marked
