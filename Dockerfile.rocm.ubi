@@ -26,10 +26,11 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 FROM base AS rocm_base
 ARG ROCM_VERSION=6.2.4
 ARG PYTHON_VERSION
+ARG BASE_UBI_IMAGE_TAG
 
 RUN printf "[amdgpu]\n\
 name=amdgpu\n\
-baseurl=https://repo.radeon.com/amdgpu/${ROCM_VERSION}/rhel/9.4/main/x86_64/\n\
+baseurl=https://repo.radeon.com/amdgpu/${ROCM_VERSION}/rhel/${BASE_UBI_IMAGE_TAG}/main/x86_64/\n\
 enabled=1\n\
 priority=50\n\
 gpgcheck=1\n\
