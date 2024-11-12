@@ -14,6 +14,7 @@ REVISION = os.environ.get("REVISION", "main")
 MODEL_NAME_ROBERTA = os.environ.get("MODEL_NAME", "sdadas/mmlw-roberta-base")
 REVISION_ROBERTA = os.environ.get("REVISION", "main")
 
+
 @pytest.mark.skipif(current_platform.is_rocm(),
                     reason="Xformers backend is not supported on ROCm.")
 def test_model_loading_with_params(vllm_runner):
