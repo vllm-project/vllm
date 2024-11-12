@@ -43,9 +43,9 @@ class PallasAttentionBackend(AttentionBackend):
 class PallasAttentionMetadata:
 
     is_prompt: bool
+    slot_mapping: torch.Tensor
     block_tables: Optional[torch.Tensor]
     context_lens: Optional[torch.Tensor]
-    slot_mapping: torch.Tensor
 
 
 class PallasAttentionImpl(AttentionImpl):
@@ -149,7 +149,7 @@ class PallasAttentionImpl(AttentionImpl):
                            self.head_size)
 
         # Write to KV cache.
-        if kv_cache[0].numel() > 0:
+        if kv_cache.numel() > 0:
             slot_mapping = attn_metadata.slot_mapping
             key_cache, value_cache = kv_cache
             write_to_kv_cache(key, value, key_cache, value_cache, slot_mapping)

@@ -147,7 +147,7 @@ class PallasAttentionBackendImpl(AttentionImpl):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        kv_cache: Tuple[torch.Tensor, torch.Tensor],
+        kv_cache: torch.Tensor,
         attn_metadata: PallasMetadata,
         k_scale: float = 1.0,
         v_scale: float = 1.0,

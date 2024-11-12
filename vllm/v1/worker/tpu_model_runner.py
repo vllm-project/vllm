@@ -417,12 +417,7 @@ class TPUModelRunner:
         xm.wait_device_ops()
         self.model = ModelWrapper(model)
 
-    def _dummy_run(
-        self,
-        batch_size: int,
-        seq_len: int, 
-        is_prompt: bool
-    ) -> None:
+    def _dummy_run(self, batch_size: int, seq_len: int, is_prompt: bool):
         assert is_prompt
 
         # use an empty tensor instead of `None`` to force Dynamo to pass
@@ -432,36 +427,36 @@ class TPUModelRunner:
         # it is important to create tensors inside the loop, rather than
         # multiplying the list, to avoid Dynamo from treating them as
         # tensor aliasing.
-        kv_caches = [(torch.tensor([], dtype=torch.float32,
-                                   device=self.device),
-                      torch.tensor([], dtype=torch.float32,
-                                   device=self.device))
-                     for _ in range(self.num_attn_layers)]
+        dummy_kv_caches = [
+            torch.tensor([], dtype=torch.float32, device=self.device)
+            for _ in range(self.num_attn_layers)
+        ]
 
         seq_len = (seq_len + 15) // 16 * 16
 
         input_ids = torch.zeros((batch_size, seq_len),
                                 dtype=torch.int32,
                                 device=self.device)
-        positions = torch.zeros((batch_size, seq_len),
-                                dtype=torch.int32,
-                                device=self.device)
+        position_ids = torch.zeros((batch_size, seq_len),
+                                   dtype=torch.int32,
+                                   device=self.device)
         slot_mapping = torch.zeros((batch_size, seq_len),
                                     dtype=torch.int64,
                                     device=self.device)
 
         attn_metadata = PallasAttentionMetadata(
             is_prompt=is_prompt,
+            slot_mapping=slot_mapping,
             block_tables=None,
             context_lens=None,
-            slot_mapping=slot_mapping,
         )
 
-        self.model(input_ids,
-                   positions,
-                   attn_metadata,
-                   kv_caches,
-                   is_prompt=is_prompt)
+        torch._dynamo.mark_dynamic(input_ids, 1)
+        torch._dynamo.mark_dynamic(position_ids, 1)
+        torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 1)
+
+        self.model(input_ids, position_ids, attn_metadata,
+                   dummy_kv_caches, is_prompt=is_prompt)
 
 
     def profile_run(self) -> None:
@@ -816,7 +811,7 @@ class ModelWrapper(TorchCompileWrapperWithCustomDispatcher):
         token_ids: torch.Tensor,
         position_ids: torch.Tensor,
         attn_metadata: PallasAttentionMetadata,
-        kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
+        kv_caches: List[torch.Tensor],
     ) -> torch.Tensor:
         """Executes the forward pass of the model and samples the next token.
 
@@ -829,7 +824,7 @@ class ModelWrapper(TorchCompileWrapperWithCustomDispatcher):
         """
 
         # Skip this in memory profiling at initialization.
-        if kv_caches[0][0].numel() > 0:
+        if kv_caches[0].numel() > 0:
             # index_copy_(slot_mapping) only works when the inserted dimension
             # is 0. However, the KV cache in the Pallas backend has the shape
             # [num_kv_heads, num_blocks, block_size, head_size]. To make it
