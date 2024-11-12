@@ -7,7 +7,7 @@ from typing import List, Optional, Tuple
 import pytest
 from transformers import AutoModelForSeq2SeqLM
 
-from vllm.attention.selector import (_Backend, get_attn_backend,
+from vllm.attention.selector import (_Backend, _cached_get_attn_backend,
                                      global_force_attn_backend_context_manager)
 from vllm.platforms import current_platform
 from vllm.sequence import SampleLogprobs
@@ -37,7 +37,7 @@ def vllm_to_hf_output(
 @pytest.fixture(autouse=True)
 def clear_cache():
     """Fixture to clear backend cache before each test."""
-    get_attn_backend.cache_clear()  # Clear the cache
+    _cached_get_attn_backend.cache_clear()  # Clear the cache
     yield  # This allows the test to run
 
 
