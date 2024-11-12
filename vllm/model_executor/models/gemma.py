@@ -22,7 +22,7 @@ from transformers import GemmaConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, LoRAConfig
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import GeluAndMul
@@ -258,14 +258,13 @@ class GemmaDecoderLayer(nn.Module):
 @support_torch_compile
 class GemmaModel(nn.Module):
 
-    def __init__(
-        self,
-        config: GemmaConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+
         self.config = config
 
         self.embed_tokens = VocabParallelEmbedding(
@@ -372,15 +371,11 @@ class GemmaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     embedding_modules = {}
     embedding_padding_modules = []
 
-    def __init__(
-        self,
-        config: GemmaConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        lora_config: Optional[LoRAConfig] = None,
-        prefix: str = "",
-    ) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
+        lora_config = vllm_config.lora_config
 
         self.config = config
         # currently all existing Gemma models have `tie_word_embeddings` enabled
@@ -388,9 +383,7 @@ class GemmaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self.lora_config = lora_config
 
         self.quant_config = quant_config
-        self.model = GemmaModel(config,
-                                cache_config,
-                                quant_config,
+        self.model = GemmaModel(vllm_config=vllm_config,
                                 prefix=maybe_prefix(prefix, "model"))
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = get_sampler()

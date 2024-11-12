@@ -243,7 +243,7 @@ _T = TypeVar("_T", nn.Module, torch.Tensor, BatchEncoding, BatchFeature, dict)
 class HfRunner:
 
     def wrap_device(self, x: _T, device: Optional[str] = None) -> _T:
-        if x is None or isinstance(x, (bool,)):
+        if x is None or isinstance(x, (bool, )):
             return x
 
         if device is None:

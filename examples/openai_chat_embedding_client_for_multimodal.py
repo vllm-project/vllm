@@ -1,6 +1,6 @@
+import argparse
 import base64
 import io
-import argparse
 
 import requests
 from PIL import Image
@@ -99,15 +99,12 @@ def dse_qwen2_vl(inp: dict):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
         "Script to call a specified VLM through the API. Make sure to serve "
-        "the model with --task embedding before running this."
-    )
-    parser.add_argument(
-        "model",
-        type=str,
-        choices=["vlm2vec", "dse_qwen2_vl"],
-        required=True,
-        help="Which model to call."
-    )
+        "the model with --task embedding before running this.")
+    parser.add_argument("model",
+                        type=str,
+                        choices=["vlm2vec", "dse_qwen2_vl"],
+                        required=True,
+                        help="Which model to call.")
     args = parser.parse_args()
 
     if args.model == "vlm2vec":

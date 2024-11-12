@@ -200,8 +200,10 @@ def test_rope_customization():
         trust_remote_code=False,
         dtype="float16",
         seed=0,
-        rope_scaling=TEST_ROPE_SCALING,
-        rope_theta=TEST_ROPE_THETA,
+        hf_overrides={
+            "rope_scaling": TEST_ROPE_SCALING,
+            "rope_theta": TEST_ROPE_THETA,
+        },
     )
     assert getattr(llama_model_config.hf_config, "rope_scaling",
                    None) == TEST_ROPE_SCALING
@@ -232,13 +234,17 @@ def test_rope_customization():
         trust_remote_code=False,
         dtype="float16",
         seed=0,
-        rope_scaling=TEST_ROPE_SCALING,
+        hf_overrides={
+            "rope_scaling": TEST_ROPE_SCALING,
+        },
     )
     assert getattr(longchat_model_config.hf_config, "rope_scaling",
                    None) == TEST_ROPE_SCALING
     assert longchat_model_config.max_model_len == 4096
 
 
+@pytest.mark.skipif(current_platform.is_rocm(),
+                    reason="Encoder Decoder models not supported on ROCm.")
 @pytest.mark.parametrize(("model_id", "is_encoder_decoder"), [
     ("facebook/opt-125m", False),
     ("facebook/bart-base", True),

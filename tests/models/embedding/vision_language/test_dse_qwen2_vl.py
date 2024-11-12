@@ -1,14 +1,11 @@
-from typing import List, Type, Dict, Callable
+from functools import partial
+from typing import Callable, Dict, List, Type
 
 import pytest
 import torch
-from functools import partial
 from PIL import Image
 from qwen_vl_utils import process_vision_info
-from transformers import (
-    Qwen2VLForConditionalGeneration,
-    BatchEncoding,
-)
+from transformers import BatchEncoding, Qwen2VLForConditionalGeneration
 
 from ....conftest import IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner
 from ....utils import large_gpu_test
@@ -69,20 +66,16 @@ def get_messages(image: Image.Image, text: str, embed_text: bool):
 
 
 def apply_chat_template_and_add_eos(
-    messages: List[Dict], 
+    messages: List[Dict],
     apply_chat_template_fn: Callable,
 ):
     prompt = apply_chat_template_fn(
-            messages, tokenize=False, add_generation_prompt=True
-    ) + "<|endoftext|>"
+        messages, tokenize=False, add_generation_prompt=True) + "<|endoftext|>"
     return prompt
 
 
 def postprocess_inputs(hf_model: HfRunner, inputs: BatchEncoding, **kwargs):
-    return hf_model.model.prepare_inputs_for_generation(
-        **inputs,
-        **kwargs
-    )
+    return hf_model.model.prepare_inputs_for_generation(**inputs, **kwargs)
 
 
 def _run_test(
@@ -107,39 +100,38 @@ def _run_test(
                      max_model_len=8192) as vllm_model:
         tokenizer = vllm_model.model.get_tokenizer()
         texts = [
-            # this is necessary because vllm_model.encode will not apply any 
-            # templating to the prompt, and therefore lacks an image_pad 
-            # token unless one is inserted beforehand (the (28,28) image 
+            # this is necessary because vllm_model.encode will not apply any
+            # templating to the prompt, and therefore lacks an image_pad
+            # token unless one is inserted beforehand (the (28,28) image
             # above is converted to an image pad token by the chat template).
             apply_chat_template_and_add_eos(
-                get_messages(image, text, False), 
+                get_messages(image, text, False),
                 apply_chat_template_fn=tokenizer.apply_chat_template,
             ) for text, image in zip(input_texts, input_images)
             # vllm will replace the pad token with the actual image,
             # which may be a placeholder image, later.
         ]
         vllm_outputs = vllm_model.encode(texts, images=input_images)
-    
+
     hf_outputs = []
-    with hf_runner(model, 
+    with hf_runner(model,
                    dtype=dtype,
                    auto_cls=Qwen2VLForConditionalGeneration) as hf_model:
         hf_model.postprocess_inputs = partial(
             postprocess_inputs,
             hf_model,
-            cache_position=torch.arange(0, 1, # 1 for batch size
-                                        requires_grad=False),
-            use_cache=False
-        )
-        for text, image, embed_text in zip(
-            input_texts, input_images, embed_texts
-        ):
+            cache_position=torch.arange(
+                0,
+                1,  # 1 for batch size
+                requires_grad=False),
+            use_cache=False)
+        for text, image, embed_text in zip(input_texts, input_images,
+                                           embed_texts):
             # dse requires non-standard input processing
             # because it needs an image_pad token
             messages = get_messages(image, text, embed_text)
             prompt = apply_chat_template_and_add_eos(
-                messages, hf_model.processor.apply_chat_template
-            )
+                messages, hf_model.processor.apply_chat_template)
             image_input, _ = process_vision_info(messages)
             inputs = hf_model.get_inputs(
                 prompts=[[prompt]],
@@ -148,13 +140,12 @@ def _run_test(
             with torch.no_grad():
                 outputs = hf_model.model(
                     **hf_model.wrap_device(inputs[0],
-                                        device=hf_model.model.device.type),
+                                           device=hf_model.model.device.type),
                     return_dict=True,
                     output_hidden_states=True,
                 )
                 pooled_output = torch.nn.functional.normalize(
-                    outputs.hidden_states[-1][0, -1], p=2, dim=-1
-                )
+                    outputs.hidden_states[-1][0, -1], p=2, dim=-1)
             hf_outputs.append(pooled_output.tolist())
 
     check_embeddings_close(
@@ -178,7 +169,7 @@ def test_models_text(
                           for text, image_placeholder in HF_TEXT_PROMPTS]
     input_texts = [text for text, _ in input_texts_images]
     input_images = [image for _, image in input_texts_images]
-    embed_texts = [True] *  len(input_texts)
+    embed_texts = [True] * len(input_texts)
 
     _run_test(
         hf_runner,
@@ -207,7 +198,7 @@ def test_models_image(
     ]
     input_texts = [text for text, _ in input_texts_images]
     input_images = [image for _, image in input_texts_images]
-    embed_texts = [False] *  len(input_texts)
+    embed_texts = [False] * len(input_texts)
 
     _run_test(
         hf_runner,
