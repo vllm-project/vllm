@@ -61,6 +61,9 @@ ENV LD_LIBRARY_PATH="$VIRTUAL_ENV/lib/python${PYTHON_VERSION}/site-packages/pill
 ENV LD_LIBRARY_PATH="$VIRTUAL_ENV/lib/python${PYTHON_VERSION}/site-packages/triton/backends/amd/lib:$LD_LIBRARY_PATH"
 ENV LD_LIBRARY_PATH="$VIRTUAL_ENV/lib/python${PYTHON_VERSION}/site-packages/torch/lib:$LD_LIBRARY_PATH"
 
+RUN echo $LD_LIBRARY_PATH | tr : \\n >> /etc/ld.so.conf.d/torch-venv.conf && \
+    ldconfig
+
 FROM rocm_base as rocm_devel
 
 ENV CCACHE_DIR=/root/.cache/ccache
@@ -153,7 +156,6 @@ ENV VLLM_INSTALL_PUNICA_KERNELS=1
 RUN --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=cache,target=/root/.cache/pip \
     --mount=type=cache,target=/root/.cache/uv \
-    ln -s /opt/vllm/lib64/python${PYTHON_VERSION}/site-packages/torch/lib/libroctx64.so /opt/rocm/lib/libroctx64.so && \
     uv pip install -v -U \
         ninja setuptools-scm>=8 "cmake>=3.26" packaging && \
     env CFLAGS="-march=haswell" \
