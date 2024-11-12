@@ -1,13 +1,9 @@
-from typing import Optional
-
 import torch
 from torch import nn
 from transformers import RobertaConfig
 
-from vllm.config import CacheConfig, PoolerConfig
+from vllm.config import VllmConfig
 from vllm.model_executor.layers.pooler import Pooler, PoolingType
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.models.bert import (BertEmbedding, BertEmbeddingModel,
@@ -16,11 +12,7 @@ from vllm.model_executor.models.bert import (BertEmbedding, BertEmbeddingModel,
 
 class RobertaModel(BertModel):
 
-    def __init__(
-        self,
-        config: RobertaConfig,
-        vllm_config: VllmConfig
-    ):
+    def __init__(self, vllm_config: VllmConfig):
         nn.Module.__init__(self)
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
@@ -66,21 +58,16 @@ class RobertaEmbeddingModel(BertEmbeddingModel):
        _pooler: An instance of Pooler used for pooling operations.
    """
 
-    def __init__(self,
-                 config: RobertaConfig,
-                 cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 pooler_config: Optional[PoolerConfig] = None) -> None:
+    def __init__(self, *, vllm_config: VllmConfig) -> None:
         nn.Module.__init__(self)
-        self.model = RobertaModel(config, cache_config, quant_config)
+        pooler_config = vllm_config.model_config.pooler_config
+        self.model = RobertaModel(vllm_config=vllm_config)
         self._pooler = Pooler.from_config_with_defaults(
             pooler_config,
             pooling_type=PoolingType.CLS,
             normalize=True,
             softmax=False)
 
-    def _build_model(self,
-                     config: RobertaConfig,
-                     cache_config: Optional[CacheConfig] = None,
-                     quant_config: Optional[QuantizationConfig] = None):
-        return BertModel(config, cache_config, quant_config, RobertaEmbedding)
+    def _build_model(self, vllm_config: VllmConfig):
+        return BertModel(vllm_config=vllm_config,
+                         embedding_class=RobertaEmbedding)

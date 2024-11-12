@@ -307,7 +307,6 @@ class BertModel(nn.Module):
 
     def __init__(self,
                  *,
-                 config: BertConfig,
                  vllm_config: VllmConfig,
                  prefix: str = "",
                  embedding_class: type = BertEmbedding):
@@ -419,8 +418,6 @@ class BertEmbeddingModel(nn.Module):
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         self.model.load_weights(weights)
 
-    def _build_model(self,
-                     config: BertConfig,
-                     cache_config: Optional[CacheConfig] = None,
-                     quant_config: Optional[QuantizationConfig] = None):
-        return BertModel(config, cache_config, quant_config, BertEmbedding)
+    def _build_model(self, vllm_config: VllmConfig):
+        return BertModel(vllm_config=vllm_config,
+                         embedding_class=BertEmbedding)
