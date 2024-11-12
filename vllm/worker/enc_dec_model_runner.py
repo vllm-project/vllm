@@ -33,6 +33,7 @@ from vllm.worker.utils import assert_enc_dec_mr_supported_scenario
 
 logger = init_logger(__name__)
 
+
 @dataclasses.dataclass(frozen=True)
 class EncoderDecoderModelInput(ModelInputForGPUWithSamplingMetadata):
     """
