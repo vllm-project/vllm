@@ -29,8 +29,6 @@ from vllm.v1.sample.metadata import SamplingMetadata
 if TYPE_CHECKING:
     from vllm.v1.core.scheduler import SchedulerOutput
 
-MIN_BATCH_SIZE = 8
-
 logger = init_logger(__name__)
 
 class TPUModelRunner:
