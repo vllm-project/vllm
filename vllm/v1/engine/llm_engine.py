@@ -66,6 +66,10 @@ class LLMEngine:
             scheduler_config.max_num_seqs = 1024
             scheduler_config.max_num_batched_tokens = 2048
 
+        # TODO (ywang96): Enable APC by default when VLM supports it.
+        if not model_config.is_multimodal_model:
+            cache_config.enable_prefix_caching = True
+
         logger.info(
             "Initializing an LLM engine (v%s) with config: "
             "model=%r, speculative_config=%r, tokenizer=%r, "
@@ -324,7 +328,7 @@ class LLMEngine:
         )
         for req, num_tokens in sampled:
             inputs.req_ids.append(req.request_id)
-            if len(req.output_token_ids) == num_tokens:
+            if req.num_output_tokens == num_tokens:
                 # The request is first detokenized.
                 inputs.prompt_token_ids.append(req.prompt_token_ids)
             else:
