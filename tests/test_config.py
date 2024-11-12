@@ -243,6 +243,8 @@ def test_rope_customization():
     assert longchat_model_config.max_model_len == 4096
 
 
+@pytest.mark.skipif(current_platform.is_rocm(),
+                    reason="Encoder Decoder models not supported on ROCm.")
 @pytest.mark.parametrize(("model_id", "is_encoder_decoder"), [
     ("facebook/opt-125m", False),
     ("facebook/bart-base", True),
