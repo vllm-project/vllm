@@ -56,11 +56,13 @@ def test_dummy_data_for_llava_next_feature_size(dummy_data_for_llava_next,
     ctx.model_config.hf_config.image_grid_pinpoints = gridpoints
     seq_len = 5000  # bigger than the max feature size for any image
 
-    seq_data, mm_data = dummy_data_for_llava_next(
+    dummy_data = dummy_data_for_llava_next(
         ctx,
         seq_len=seq_len,
         mm_counts={"image": 1},
     )
+    seq_data = dummy_data.seq_data
+    mm_data = dummy_data.multi_modal_data
 
     # The dummy data dims should match the gridpoint with the biggest feat size
     assert mm_data["image"].height == expected_size[0]

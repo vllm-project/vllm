@@ -24,7 +24,7 @@ from transformers import OPTConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -293,14 +293,13 @@ class OPTDecoder(nn.Module):
 @support_torch_compile
 class OPTModel(nn.Module):
 
-    def __init__(
-        self,
-        config: OPTConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+
         self.decoder = OPTDecoder(config,
                                   cache_config,
                                   quant_config,
@@ -342,19 +341,14 @@ class OPTForCausalLM(nn.Module, SupportsPP):
         ".q_proj.", ".k_proj.", ".v_proj.", ".out_proj.", ".fc1.", ".fc2."
     ]
 
-    def __init__(
-        self,
-        config: OPTConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__()
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
         super().__init__()
         self.config = config
         self.quant_config = quant_config
-        self.model = OPTModel(config,
-                              cache_config,
-                              quant_config,
+        self.model = OPTModel(vllm_config=vllm_config,
                               prefix=maybe_prefix(prefix, "model"))
         if self.config.tie_word_embeddings:
             self.lm_head = self.model.decoder.embed_tokens
