@@ -2168,9 +2168,30 @@ class CompilationConfig(BaseModel):
     cudagraph_capture_sizes: Optional[List[int]] = None
     cudagraph_copy_inputs: bool = False
 
-    dump_graph_stages: List[str] = Field(default_factory=list)
-    dump_graph_dir: Path = Field(default=Path("."))
-    enable_fusion: bool = True
+    class PassConfig(BaseModel):
+        """
+        Configuration for custom Inductor passes.
+        This is separate from general CompilationConfig so that inductor passes
+        don't all have access to full configuration - that would create a cycle
+        as the PassManager is set as a property of config.
+        - dump_graph_stages: list of stages for which we want to dump the graph.
+            Each pass defines its own stages (before, after, maybe in-between).
+        - dump_graph_dir: directory to dump the graphs. Default is .
+        - enable_fusion: whether to enable the custom fusion pass.
+            TODO better pass enabling system.
+        """
+        dump_graph_stages: List[str] = Field(default_factory=list)
+        dump_graph_dir: Path = Field(default=Path("."))
+        enable_fusion: bool = True
+        enable_reshape: bool = True
+
+        def model_post_init(self, __context: Any) -> None:
+            if not self.enable_reshape and self.enable_fusion:
+                print_warning_once(
+                    "Fusion enabled but reshape elimination disabled."
+                    "RMSNorm + quant (fp8) fusion might not work")
+
+    pass_config: PassConfig = Field(default_factory=PassConfig)
 
     # not configurable, computed after init
     compile_sizes: List[int] = PrivateAttr
@@ -2355,7 +2376,8 @@ class VllmConfig:
             self.compilation_config.custom_ops = ["none"]
             self.compilation_config.use_cudagraph = True
             self.compilation_config.use_inductor = True
-            self.compilation_config.enable_fusion = False
+            self.compilation_config.pass_config.enable_fusion = False
+            self.compilation_config.pass_config.enable_reshape = False
 
         current_platform.check_and_update_config(self)
 

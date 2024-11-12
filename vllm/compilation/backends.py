@@ -11,7 +11,7 @@ import torch.fx as fx
 import vllm.envs as envs
 from vllm.config import CompilationConfig
 from vllm.logger import init_logger
-from vllm.utils import combine_fx_passes, weak_ref_tensors
+from vllm.utils import print_warning_once, weak_ref_tensors
 
 from .counter import compilation_counter
 from .fusion import FusionPass
@@ -360,6 +360,76 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):
         return output
 
 
+class PostGradPassManager:
+    """
+    The pass manager for post-grad passes.
+    It handles configuration, adding custom passes, and running passes.
+    It also supports pickling, but custom passes are ignored when pickling.
+
+    The order of the post-grad post-passes is:
+    1. passes (constructor parameter)
+    2. default passes (RedundantReshapesPass, FusionPass)
+    3. config["post_grad_custom_post_pass"] (if it exists)
+    4. fix_functionalization
+    This way, all passes operate on a functionalized graph.
+    """
+
+    def __init__(self):
+        self.passes: List[Callable] = []
+        self.has_custom_passed: bool = False
+
+    def __call__(self, graph: fx.Graph):
+        for pass_ in self.passes:
+            pass_(graph)
+
+        # always run fix_functionalization last
+        self.fix_functionalization(graph)
+
+    def configure(self, pass_config: CompilationConfig.PassConfig):
+        self.pass_config = pass_config
+        if pass_config.enable_reshape:
+            self.passes += [RedundantReshapesPass(pass_config)]
+
+        if pass_config.enable_fusion:
+            self.passes += [FusionPass.instance(pass_config)]
+
+        # fix_functionalization will need config in the future
+        self.fix_functionalization = fix_functionalization
+
+    def add(self, pass_: Callable[[fx.Graph], None]):
+        self.passes.append(pass_)
+        self.has_custom_passes = True
+
+    def __getstate__(self):
+        """
+        Custom pickling for the pass manager, as some passes cannot be pickled.
+        Pickling occurs because the pass manager is set as the value of
+        `config["post_grad_custom_post_pass"]` in the Inductor config.
+
+        Currently we just ignore the custom passes when pickling,
+        but that might mean false hits in the inductor code cache.
+        TODO encode the custom passes.
+        """
+        state = {
+            "pass_config": self.pass_config,
+            "has_custom_passes": self.has_custom_passes,
+        }
+        if self.has_custom_passes:
+            print_warning_once("Custom passes are currently ignored when "
+                               "pickling. This might lead to false hits in "
+                               "the inductor code cache.")
+        return state
+
+    def __setstate__(self, state):
+        """
+        Do not allow unpickling of the pass manager if it has custom passes.
+        """
+        if state["has_custom_passes"]:
+            raise ValueError("Custom passes cannot be un-pickled")
+        self.passes = []
+        self.configure(state["pass_config"])
+
+
 class VllmBackend:
     """The compilation backend for `torch.compile` with VLLM.
     It is used for compilation level of `CompilationLevel.PIECEWISE`,
@@ -368,12 +438,8 @@ class VllmBackend:
     The major work of this backend is to split the graph into
     piecewise graphs, and pass them to the piecewise backend.
 
-    This backend also handles custom passes and adds them to Inductor config.
-    The order of the post-grad post-passes is:
-    1. post_grad_passes (constructor parameter)
-    2. config["post_grad_custom_post_pass"]
-    3. fix_functionalization
-    This way, all passes operate on a functionalized graph.
+    This backend also adds the PostGradPassManager to Inductor config,
+    which handles the post-grad passes.
     """
 
     compilation_configs: CompilationConfig
@@ -402,7 +468,9 @@ class VllmBackend:
         # streams, it might not be safe to share a global pool.
         # only investigate this when we use multiple streams
         self.graph_pool = global_graph_pool
-        self.post_grad_passes = []
+
+        # Passes to run on the graph post-grad.
+        self.post_grad_pass_manager = PostGradPassManager()
 
         self.sym_tensor_indices = []
         self.input_buffers = []
@@ -412,24 +480,17 @@ class VllmBackend:
         # `torch.compile` is JIT compiled, so we don't need to
         # do anything here
 
-    def add_passes_to_config(self):
+    def configure_post_pass(self):
         config = self.compilation_configs
-        passes = list(self.post_grad_passes)
+        self.post_grad_pass_manager.configure(config.pass_config)
 
-        passes = passes + [RedundantReshapesPass(config)]
-
-        if config.enable_fusion:
-            passes = passes + [FusionPass.instance(config)]
-
+        # Post-grad custom passes are run using the post_grad_custom_post_pass
+        # hook. If a pass for that hook exists, add it to the pass manager.
         inductor_config = config.inductor_compile_config
-        if "post_grad_custom_post_pass" in inductor_config:
-            passes = passes + [inductor_config["post_grad_custom_post_pass"]]
-
-        # add the fix_functionalization pass last, so that all other
-        # passes operate on a functionalized graph
-        passes = passes + [fix_functionalization]
-        combined_pass = combine_fx_passes(passes)
-        inductor_config["post_grad_custom_post_pass"] = combined_pass
+        PASS_KEY = "post_grad_custom_post_pass"
+        if PASS_KEY in inductor_config:
+            self.post_grad_pass_manager.add(inductor_config[PASS_KEY])
+        inductor_config[PASS_KEY] = self.post_grad_pass_manager
 
     def __call__(self, graph: fx.GraphModule, example_inputs) -> Callable:
 
@@ -444,7 +505,7 @@ class VllmBackend:
         # we get the sizes to capture for cudagraph
         # from compilation context
         self.compilation_configs.init_during_runtime()
-        self.add_passes_to_config()
+        self.configure_post_pass()
 
         self.split_gm, self.piecewise_graphs = split_graph(
             graph, self.compilation_configs.splitting_ops)

@@ -1501,15 +1501,6 @@ class LazyDict(Mapping, Generic[T]):
         return len(self._factory)
 
 
-def combine_fx_passes(passes: List[Callable]) -> Callable:
-
-    def combined_fx(graph) -> None:
-        for fx in passes:
-            fx(graph)
-
-    return combined_fx
-
-
 def weak_ref_tensor(tensor: torch.Tensor) -> torch.Tensor:
     """
     Create a weak reference to a tensor.

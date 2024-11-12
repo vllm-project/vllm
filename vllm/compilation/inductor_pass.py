@@ -20,7 +20,7 @@ class InductorPass(ABC):
     def __call__(self, graph: torch.fx.Graph):
         raise NotImplementedError
 
-    def __init__(self, config: CompilationConfig):
+    def __init__(self, config: CompilationConfig.PassConfig):
         self.config = config
 
     def dump_graph(self, graph: torch.fx.Graph, stage: str):

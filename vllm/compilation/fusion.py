@@ -142,7 +142,7 @@ class FusionPass(InductorPass):
     _instance: 'Optional[FusionPass]' = None
 
     @classmethod
-    def instance(cls, config: CompilationConfig):
+    def instance(cls, config: CompilationConfig.PassConfig):
         """
         Get the singleton instance of the FusionPass.
         If the instance exists, the config is updated but
@@ -154,7 +154,7 @@ class FusionPass(InductorPass):
             cls._instance.config = config
         return cls._instance
 
-    def __init__(self, config: CompilationConfig):
+    def __init__(self, config: CompilationConfig.PassConfig):
         assert self.__class__._instance is None, \
             "FusionPass singleton instance already exists"
         super().__init__(config)
