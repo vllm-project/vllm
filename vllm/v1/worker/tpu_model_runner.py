@@ -29,6 +29,9 @@ from vllm.v1.sample.metadata import SamplingMetadata
 if TYPE_CHECKING:
     from vllm.v1.core.scheduler import SchedulerOutput
 
+MIN_BATCH_SIZE = 8
+BATCH_SIZE_MULTIPLE = 16
+
 logger = init_logger(__name__)
 
 class TPUModelRunner:
@@ -406,6 +409,7 @@ class TPUModelRunner:
         # determine the order of concatenating the output tensors.
         # As a workaround, we use the xm's rank assignment only when loading
         # the embedding weights.
+
         # xm_tp_rank = xr.global_ordinal()
         # with patch(
         #         "vllm.model_executor.layers.vocab_parallel_embedding."
@@ -417,8 +421,80 @@ class TPUModelRunner:
         xm.wait_device_ops()
         self.model = ModelWrapper(model)
 
-    def _dummy_run(self, batch_size: int, seq_len: int, is_prompt: bool):
-        assert is_prompt
+    def _dummy_run(
+        self,
+        batch_size: int, 
+        seq_len: int,
+        kv_caches: List[torch.Tensor],
+        is_prompt: bool
+    ) -> None:
+        """Dummy warmup run for memory usage and graph compilation."""
+
+        input_ids = torch.zeros(
+            (batch_size, seq_len),
+            dtype=torch.int32,
+            device=self.device
+        )
+        position_ids = torch.zeros(
+            (batch_size, seq_len),
+            dtype=torch.int32,
+            device=self.device
+        )
+        slot_mapping = torch.zeros(
+            (batch_size, seq_len),
+            dtype=torch.int64,
+            device=self.device
+        )
+
+        if is_prompt:
+            block_tables = None
+            context_lens = None
+        else:
+            block_tables = torch.zeros(
+                (batch_size, self.max_num_blocks_per_seq),
+                dtype=torch.int32,
+                device=self.device,
+            )
+            context_lens = torch.ones(
+                (batch_size, ),
+                dtype=torch.int32,
+                device=self.device,
+            )
+        attn_metadata = PallasAttentionMetadata(
+            is_prompt=is_prompt,
+            slot_mapping=slot_mapping,
+            block_tables=block_tables,
+            context_lens=context_lens,
+        )
+        
+        # NOTE: There are two stages of compilation: torch.compile and
+        # XLA compilation. Using `mark_dynamic` can reduce the torch.compile
+        # overhead by reusing the FX graph for different shapes.
+        # However, the XLA graph will still require static shapes and needs to
+        # be re-compiled for every different shapes. This overhead is inevitable
+        # in the first run, but can be skipped afterwards as we cache the XLA
+        # graphs in the disk (VLLM_XLA_CACHE_PATH).
+        if is_prompt:
+            torch._dynamo.mark_dynamic(input_ids, 1)
+            torch._dynamo.mark_dynamic(position_ids, 1)
+            torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 1)
+        else:
+            torch._dynamo.mark_dynamic(input_ids, 0)
+            torch._dynamo.mark_dynamic(position_ids, 0)
+            torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 0)
+            torch._dynamo.mark_dynamic(attn_metadata.context_lens, 0)
+            torch._dynamo.mark_dynamic(attn_metadata.block_tables, 0)
+
+        # Dummy run.
+        self.model(input_ids,
+                   position_ids,
+                   attn_metadata,
+                   kv_caches,
+                   is_prompt=is_prompt)
+
+
+    def profile_run(self) -> None:
+        """Profile to measure peak memory during forward pass."""
 
         # use an empty tensor instead of `None`` to force Dynamo to pass
         # it by reference, rather by specializing on the value `None`.
@@ -432,74 +508,61 @@ class TPUModelRunner:
             for _ in range(self.num_attn_layers)
         ]
 
-        seq_len = (seq_len + 15) // 16 * 16
+        # Round to multiple of 16.
+        seq_len = (self.max_num_tokens + 15) // 16 * 16
 
-        input_ids = torch.zeros((batch_size, seq_len),
-                                dtype=torch.int32,
-                                device=self.device)
-        position_ids = torch.zeros((batch_size, seq_len),
-                                   dtype=torch.int32,
-                                   device=self.device)
-        slot_mapping = torch.zeros((batch_size, seq_len),
-                                    dtype=torch.int64,
-                                    device=self.device)
-
-        attn_metadata = PallasAttentionMetadata(
-            is_prompt=is_prompt,
-            slot_mapping=slot_mapping,
-            block_tables=None,
-            context_lens=None,
-        )
-
-        torch._dynamo.mark_dynamic(input_ids, 1)
-        torch._dynamo.mark_dynamic(position_ids, 1)
-        torch._dynamo.mark_dynamic(attn_metadata.slot_mapping, 1)
-
-        self.model(input_ids, position_ids, attn_metadata,
-                   dummy_kv_caches, is_prompt=is_prompt)
-
-
-    def profile_run(self) -> None:
-        self._dummy_run(batch_size=1,
-                        seq_len=self.max_num_tokens,
-                        is_prompt=True)
-        xm.wait_device_ops()
+        # Run empty forward.
+        self._dummy_run(
+            batch_size=1,
+            seq_len=seq_len,
+            kv_caches=dummy_kv_caches,
+            is_prompt=True)
 
 
     def capture_model(self) -> None:
-        if not self.use_cuda_graph:
-            logger.warning(
-                "Skipping CUDA graph capture. Please set "
-                "VLLM_TORCH_COMPILE_LEVEL=%d to use CUDA graphs.",
-                CompilationLevel.PIECEWISE)
-            return
+        """Compile the model."""
+        
+        logger.info("Compiling the model with different input shapes.")
+        
+        # Prefill shapes.
+        start = time.perf_counter()
+        for batch_size in [1]:
+            seq_len = 16
+            while True:
+                self._dummy_run(batch_size, seq_len, self.kv_caches, is_prompt=True)
+                xm.wait_device_ops()
+                logger.info("batch_size: %d, seq_len: %d", batch_size, seq_len)
 
-        start_time = time.perf_counter()
-        start_free_gpu_memory = torch.cuda.mem_get_info()[0]
+                if seq_len >= self.model_config.max_model_len:
+                    break
+                num_tokens = batch_size * seq_len
+                if num_tokens >= self.scheduler_config.max_num_batched_tokens:
+                    break
+                seq_len = seq_len * 2
 
-        with set_forward_context(None):
-            # Trigger CUDA graph capture for specific shapes.
-            # Capture the large shapes first so that the smaller shapes
-            # can reuse the memory pool allocated for the large shapes.
-            for num_tokens in reversed(self.cudagraph_batch_sizes):
-                self.model(
-                    self.input_ids[:num_tokens],
-                    self.positions[:num_tokens],
-                    kv_caches=self.kv_caches,
-                    attn_metadata=None,
-                )
+        end = time.perf_counter()
+        logger.info("Compilation for prefill done in %.2f s.", end - start)
 
-        end_time = time.perf_counter()
-        end_free_gpu_memory = torch.cuda.mem_get_info()[0]
-        elapsed_time = end_time - start_time
-        cuda_graph_size = start_free_gpu_memory - end_free_gpu_memory
-        # This usually takes 5~20 seconds.
-        logger.info("Graph capturing finished in %.0f secs, took %.2f GiB",
-                    elapsed_time, cuda_graph_size / (1 << 30))
+        # Decode shapes.
+        start = time.time()
+        seq_len = 1
+        batch_size = MIN_BATCH_SIZE  # Must be in sync with _get_padded_batch_size()
+        while True:
+            self._dummy_run(batch_size, seq_len, self.kv_caches, is_prompt=False)
+            xm.wait_device_ops()
+            logger.info("batch_size: %d, seq_len: %d", batch_size, seq_len)
+
+            if batch_size >= self.scheduler_config.max_num_seqs:
+                break
+            batch_size = batch_size + 16 if batch_size >= 16 else batch_size * 2
+
+        end = time.time()
+        logger.info("Compilation for decode done in %.2f s.", end - start)
+
 
     def initialize_kv_cache(self, num_blocks: int) -> None:
         assert len(self.kv_caches) == 0
-        kv_cache_shape = FlashAttentionBackend.get_kv_cache_shape(
+        kv_cache_shape = PallasAttentionBackend.get_kv_cache_shape(
             num_blocks, self.block_size, self.num_kv_heads, self.head_size)
         for _ in range(self.num_attn_layers):
             self.kv_caches.append(
@@ -508,11 +571,13 @@ class TPUModelRunner:
                             device=self.device))
 
     def _get_padded_batch_size(self, batch_size: int) -> Optional[int]:
-        # TODO: Optimize this?
-        for size in self.cudagraph_batch_sizes:
-            if batch_size <= size:
-                return size
-        return None
+        # The GMM Pallas kernel requires num_tokens * topk to be a multiple of 16.
+        # To meet this requirement in the simplest way, we set the minimal batch
+        # size to 8 (== MIN_BATCH_SIZE).
+        if batch_size <= MIN_BATCH_SIZE:
+            return MIN_BATCH_SIZE
+        else:
+            return ((batch_size + 15) // 16) * 16
 
 
 @dataclass
@@ -868,13 +933,3 @@ def _get_padded_prefill_len(x: int) -> int:
     if x <= 16:
         return 16
     return 1 << (x - 1).bit_length()
-
-
-def _get_padded_batch_size(batch_size: int) -> int:
-    # The GMM Pallas kernel requires num_tokens * topk to be a multiple of 16.
-    # To meet this requirement in the simplest way, we set the minimal batch
-    # size to 8.
-    if batch_size <= 8:
-        return 8
-    else:
-        return ((batch_size + 15) // 16) * 16
