@@ -456,9 +456,6 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
-        print('Qwen prefills ' + str(attn_metadata.num_prefill_tokens))
-        print('Qwen decodes ' + str(attn_metadata.num_decode_tokens))
-        print('Qwen input_ids.shape ' + str(input_ids.shape))
         hidden_states = self.model(input_ids, positions, kv_caches,
                                    attn_metadata, intermediate_tensors)
         return hidden_states
