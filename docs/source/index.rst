@@ -160,6 +160,7 @@ Documentation
    design/kernel/paged_attention
    design/multimodal/multimodal_index
    design/huggingface_integration
+   design/class_hierarchy
 
 .. For Developers: contributing to the vLLM project
 
