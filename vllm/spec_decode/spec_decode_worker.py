@@ -409,6 +409,12 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             execute_model_req)
         num_lookahead_slots = execute_model_req.num_lookahead_slots
 
+        if (all(sgm.is_prompt
+                for sgm in execute_model_req.seq_group_metadata_list)):
+            assert num_lookahead_slots == 0, (
+                "Prompt only runs should have num_lookahead_slots equal to 0. "
+                "This should never happen, please file a bug at "
+                "https://github.com/vllm-project/vllm/issues")
         # Speculative decoding is disabled in the following cases:
         # 1. Prefill phase: Speculative decoding is not
         #    used during the prefill phase.
@@ -419,9 +425,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         # In any of these cases, the proposer and scorer workers
         # are called normally.
         # We expect `num_speculative_tokens` to be None for prefills.
-        no_spec = all(
-            sgm.is_prompt for sgm in execute_model_req.seq_group_metadata_list
-        ) or num_lookahead_slots == 0 or disable_all_speculation or all(
+        no_spec = num_lookahead_slots == 0 or disable_all_speculation or all(
             sgm.num_speculative_tokens == 0
             for sgm in execute_model_req.seq_group_metadata_list)
 
