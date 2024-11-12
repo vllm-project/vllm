@@ -159,12 +159,13 @@ Documentation
    design/input_processing/model_inputs_index
    design/kernel/paged_attention
    design/multimodal/multimodal_index
+   design/huggingface_integration
 
-.. Contributing: contributing to the vLLM project
+.. For Developers: contributing to the vLLM project
 
 .. toctree::
    :maxdepth: 2
-   :caption: Contributing
+   :caption: For Developers
 
    contributing/overview
    contributing/profiling/profiling_index

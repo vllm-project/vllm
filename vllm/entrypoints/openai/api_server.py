@@ -7,6 +7,7 @@ import re
 import signal
 import socket
 import tempfile
+import uuid
 from argparse import Namespace
 from contextlib import asynccontextmanager
 from functools import partial
@@ -25,7 +26,6 @@ from typing_extensions import assert_never
 import vllm.envs as envs
 from vllm.config import ModelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.engine.multiprocessing.client import MQLLMEngineClient
 from vllm.engine.multiprocessing.engine import run_mp_engine
 from vllm.engine.protocol import EngineClient
@@ -59,6 +59,11 @@ from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import FlexibleArgumentParser, get_open_zmq_ipc_path
 from vllm.version import __version__ as VLLM_VERSION
+
+if envs.VLLM_USE_V1:
+    from vllm.v1.engine.async_llm import AsyncLLMEngine  # type: ignore
+else:
+    from vllm.engine.async_llm_engine import AsyncLLMEngine  # type: ignore
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds
 
@@ -125,7 +130,8 @@ async def build_async_engine_client_from_engine_args(
     # Fall back
     # TODO: fill out feature matrix.
     if (MQLLMEngineClient.is_unsupported_config(engine_args)
-            or disable_frontend_multiprocessing):
+            or envs.VLLM_USE_V1 or disable_frontend_multiprocessing):
+
         engine_config = engine_args.create_engine_config()
         uses_ray = getattr(AsyncLLMEngine._get_executor_cls(engine_config),
                            "uses_ray", False)
@@ -142,6 +148,8 @@ async def build_async_engine_client_from_engine_args(
                 None, build_engine)
 
         yield engine_client
+        if hasattr(engine_client, "shutdown"):
+            engine_client.shutdown()
         return
 
     # Otherwise, use the multiprocessing AsyncLLMEngine.
@@ -474,6 +482,13 @@ def build_app(args: Namespace) -> FastAPI:
                 return JSONResponse(content={"error": "Unauthorized"},
                                     status_code=401)
             return await call_next(request)
+
+    @app.middleware("http")
+    async def add_request_id(request: Request, call_next):
+        request_id = request.headers.get("X-Request-Id") or uuid.uuid4().hex
+        response = await call_next(request)
+        response.headers["X-Request-Id"] = request_id
+        return response
 
     for middleware in args.middleware:
         module_path, object_name = middleware.rsplit(".", 1)

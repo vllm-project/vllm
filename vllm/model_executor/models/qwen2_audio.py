@@ -26,16 +26,14 @@ import librosa
 import numpy as np
 import torch
 import torch.nn as nn
-from transformers import Qwen2AudioConfig, Qwen2AudioEncoder
+from transformers import Qwen2AudioEncoder
 
 from vllm.attention import AttentionMetadata
-from vllm.config import CacheConfig, MultiModalConfig
+from vllm.config import VllmConfig
 from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
                          InputContext, token_inputs)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import (
@@ -266,13 +264,11 @@ def input_mapper_for_qwen2_audio(
 class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal,
                                          SupportsPP):
 
-    def __init__(self,
-                 config: Qwen2AudioConfig,
-                 multimodal_config: MultiModalConfig,
-                 cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
+        multimodal_config = vllm_config.model_config.multimodal_config
         self.config = config
         self.multimodal_config = multimodal_config
 
@@ -282,8 +278,9 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         self.quant_config = quant_config
 
-        self.language_model = Qwen2Model(config.text_config, cache_config,
-                                         quant_config)
+        self.language_model = Qwen2Model(
+            vllm_config=vllm_config.with_hf_config(config.text_config),
+            prefix=prefix)
         self.unpadded_vocab_size = config.text_config.vocab_size
         if config.text_config.tie_word_embeddings:
             self.lm_head = self.language_model.embed_tokens

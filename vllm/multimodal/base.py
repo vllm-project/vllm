@@ -68,7 +68,7 @@ class MultiModalPlugin(ABC):
     def _default_input_mapper(
         self,
         ctx: InputContext,
-        data: MultiModalData[object],
+        data: MultiModalData[Any],
         **mm_processor_kwargs,
     ) -> MultiModalKwargs:
         """
@@ -117,7 +117,7 @@ class MultiModalPlugin(ABC):
     def map_input(
         self,
         model_config: "ModelConfig",
-        data: MultiModalData[object],
+        data: MultiModalData[Any],
         mm_processor_kwargs: Dict[str, Any],
     ) -> MultiModalKwargs:
         """
