@@ -247,6 +247,14 @@ def test_small_prompts_jump_big_prompts_in_queue():
     assert out.num_prefill_groups == 3
     assert out.num_batched_tokens == 56
 
+    # in the second iteration, both small requests are completed
+    # so large request gets all the budget
+    seq_group_meta, out = schedule_and_update_computed_tokens(scheduler)
+    assert seq_group_meta[
+        0].token_chunk_size == 64  # large req gets all tokens now
+    assert out.num_prefill_groups == 1
+    assert out.num_batched_tokens == 64
+
 
 def test_complex():
     block_size = 4
