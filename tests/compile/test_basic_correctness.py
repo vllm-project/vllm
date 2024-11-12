@@ -62,6 +62,15 @@ test_settings = [
         method="encode",
         fullgraph=True,
     ),
+    TestSetting(
+        model="intfloat/multilingual-e5-large",
+        model_args=["--task", "embedding"],
+        pp_size=1,
+        tp_size=1,
+        attn_backend="FLASHINFER",
+        method="encode",
+        fullgraph=True,
+    ),
     # vision language model
     TestSetting(
         model="microsoft/Phi-3.5-vision-instruct",

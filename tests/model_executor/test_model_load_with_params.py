@@ -11,7 +11,8 @@ MAX_MODEL_LEN = 128
 MODEL_NAME = os.environ.get("MODEL_NAME", "BAAI/bge-base-en-v1.5")
 REVISION = os.environ.get("REVISION", "main")
 
-MODEL_NAME_ROBERTA = os.environ.get("MODEL_NAME", "sdadas/mmlw-roberta-base")
+MODEL_NAME_ROBERTA = os.environ.get("MODEL_NAME", 
+                                    "intfloat/multilingual-e5-large")
 REVISION_ROBERTA = os.environ.get("REVISION", "main")
 
 
@@ -74,17 +75,18 @@ def test_roberta_model_loading_with_params(vllm_runner):
         assert not model_config.encoder_config["do_lower_case"]
 
         # asserts on the pooling config files
-        assert model_config.pooler_config.pooling_type == PoolingType.CLS.name
-        assert not model_config.pooler_config.pooling_norm
+        assert model_config.pooler_config.pooling_type == PoolingType.MEAN.name
+        assert model_config.pooler_config.pooling_norm
 
         # asserts on the tokenizer loaded
-        assert model_tokenizer.tokenizer_id == "sdadas/mmlw-roberta-base"
+        assert model_tokenizer.tokenizer_id == "intfloat/multilingual-e5-large"
         assert not model_tokenizer.tokenizer_config["do_lower_case"]
 
         model = model.model.llm_engine.model_executor\
                      .driver_worker.model_runner.model
         assert isinstance(model, RobertaEmbeddingModel)
-        assert model._pooler.pooling_type == PoolingType.CLS
-        assert not model._pooler.normalize
+        assert model._pooler.pooling_type == PoolingType.MEAN
+        assert model._pooler.normalize
+        
         # assert output
         assert output
