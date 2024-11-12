@@ -1158,6 +1158,8 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         if image_embeds is not None:
             image_embeds = self._validate_and_reshape_mm_tensor(
                 image_embeds, "image embeds")
+            image_grid_thw = self._validate_and_reshape_mm_tensor(
+                image_grid_thw, "image grid_thw")
 
             if not isinstance(image_embeds, torch.Tensor):
                 raise ValueError("Incorrect type of image embeddings. "
@@ -1190,6 +1192,8 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         if video_embeds is not None:
             video_embeds = self._validate_and_reshape_mm_tensor(
                 video_embeds, "video embeds")
+            video_grid_thw = self._validate_and_reshape_mm_tensor(
+                video_grid_thw, "video grid_thw")
 
             if not isinstance(video_embeds, torch.Tensor):
                 raise ValueError("Incorrect type of video embeddings. "
