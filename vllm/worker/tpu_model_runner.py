@@ -302,15 +302,17 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             prompt_len = len(prompt_tokens)
             prompt_lens.append(prompt_len)
 
-            input_tokens.append()
+            input_tokens.append(prompt_tokens)
             positions = np.arange(prompt_len)
             input_positions.append(positions)
 
             assert seq_group_metadata.block_tables is not None
-            block_table = np.array(seq_group_metadata.block_tables[seq_id], dtype=np.int64)
+            block_table = np.array(seq_group_metadata.block_tables[seq_id],
+                                   dtype=np.int64)
             block_numbers = block_table[positions // self.block_size]
             block_offsets = positions % self.block_size
-            slot_mapping = block_numbers * self.block_size + block_offsets
+            slot_mapping.append(block_numbers * self.block_size +
+                                block_offsets)
 
         input_tokens = np.concatenate(input_tokens)
         input_positions = np.concatenate(input_positions)
@@ -547,20 +549,22 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                 token_ids = torch.zeros((1, padded_prefill_len),
                                         dtype=torch.int32,
                                         device="cpu")
-                token_ids[0, :prefill_len] = model_input.token_ids[start_idx:end_idx]
+                token_ids[
+                    0, :prefill_len] = model_input.token_ids[start_idx:end_idx]
                 token_ids = token_ids.to(self.device)
 
                 position_ids = torch.zeros((1, padded_prefill_len),
-                                             dtype=torch.int32,
-                                             device="cpu")
-                position_ids[0, :prefill_len] = model_input.position_ids[start_idx:end_idx]
+                                           dtype=torch.int32,
+                                           device="cpu")
+                position_ids[0, :prefill_len] = model_input.position_ids[
+                    start_idx:end_idx]
                 position_ids = position_ids.to(self.device)
 
                 slot_mapping = torch.empty((1, padded_prefill_len),
-                                             dtype=torch.int64,
-                                             device="cpu")
-                slot_mapping[0, :prefill_len] = orig_slot_mapping[
-                    start_idx:end_idx]
+                                           dtype=torch.int64,
+                                           device="cpu")
+                slot_mapping[
+                    0, :prefill_len] = orig_slot_mapping[start_idx:end_idx]
                 slot_mapping[0, prefill_len:] = _PAD_SLOT_ID
                 slot_mapping = slot_mapping.to(self.device)
 
