@@ -414,6 +414,7 @@ class GPUModelRunner:
                     use_cudagraph=True,
                     non_cudagraph_ops=["vllm.unified_v1_flash_attention"],
                     use_inductor=True,
+                    enable_fusion=False,
                 ))
 
         logger.info("Starting to load model %s...", self.model_config.model)
