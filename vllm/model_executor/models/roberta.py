@@ -23,6 +23,9 @@ class RobertaModel(BertModel):
         quant_config: Optional[QuantizationConfig] = None,
     ):
         # Skip BertModel.__init__()
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
         nn.Module.__init__(self)
         self.embeddings = RobertaEmbedding(config)
         self.encoder = BertEncoder(config, cache_config, quant_config)

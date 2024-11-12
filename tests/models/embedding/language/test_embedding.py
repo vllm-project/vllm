@@ -12,11 +12,11 @@ from ..utils import check_embeddings_close
 MODELS = [
     "intfloat/e5-mistral-7b-instruct",
     "BAAI/bge-base-en-v1.5",
-    "BAAI/bge-multilingual-gemma2"
+    "BAAI/bge-multilingual-gemma2",
 ]
 
 ENCODER_ONLY = [
-    "BAAI/bge-base-en-v1.5"
+    "BAAI/bge-base-en-v1.5",
 ]
 
 
