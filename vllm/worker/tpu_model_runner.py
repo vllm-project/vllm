@@ -284,10 +284,10 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         seq_group_metadata_list: List[SequenceGroupMetadata],
     ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, torch.Tensor]:
         assert len(seq_group_metadata_list) > 0
-        input_tokens: List[int] = []
-        input_positions: List[int] = []
+        input_tokens: List[np.ndarray] = []
+        input_positions: List[np.ndarray] = []
         prompt_lens: List[int] = []
-        slot_mapping: List[int] = []
+        slot_mapping: List[np.ndarray] = []
 
         for seq_group_metadata in seq_group_metadata_list:
             assert seq_group_metadata.is_prompt
@@ -298,43 +298,28 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             seq_data = seq_group_metadata.seq_data[seq_id]
             # Could include output tokens when a request is preempted.
             prompt_tokens = seq_data.get_token_ids()
+            prompt_tokens = np.array(prompt_tokens, dtype=np.int32)
             prompt_len = len(prompt_tokens)
             prompt_lens.append(prompt_len)
 
-            input_tokens.extend(prompt_tokens)
-            input_positions.extend(list(range(prompt_len)))
+            input_tokens.append()
+            positions = np.arange(prompt_len)
+            input_positions.append(positions)
 
             assert seq_group_metadata.block_tables is not None
-            block_table = seq_group_metadata.block_tables[seq_id]
-            for i in range(prompt_len):
-                block_number = block_table[i // self.block_size]
-                block_offset = i % self.block_size
-                slot = block_number * self.block_size + block_offset
-                slot_mapping.append(slot)
+            block_table = np.array(seq_group_metadata.block_tables[seq_id], dtype=np.int64)
+            block_numbers = block_table[positions // self.block_size]
+            block_offsets = positions % self.block_size
+            slot_mapping = block_numbers * self.block_size + block_offsets
 
-            # Add paddings to EACH prompt to the smallest power of 2 that is
-            # greater than or equal to the prompt length.
-            # We pad the seq_len to reduce the compilation overhead.
-            # We execute each prompt individually (i.e., with batch_size 1)
-            # because the FlashAttention kernel does not support ragged inputs.
-            # TODO(woosuk): Use SplashAttention to support ragged inputs.
-            padded_prompt_len = _get_padded_prefill_len(prompt_len)
-            num_paddings = padded_prompt_len - prompt_len
-            input_tokens += [0] * num_paddings
-            input_positions += [0] * num_paddings
-            slot_mapping += [_PAD_SLOT_ID] * num_paddings
+        input_tokens = np.concatenate(input_tokens)
+        input_positions = np.concatenate(input_positions)
+        slot_mapping = np.concatenate(slot_mapping)
 
-        assert len(prompt_lens) > 0
+        input_tokens = torch.from_numpy(input_tokens)
+        input_positions = torch.from_numpy(input_positions)
+        slot_mapping = torch.from_numpy(slot_mapping)
         num_prefills = len(prompt_lens)
-        input_tokens = torch.tensor(input_tokens,
-                                    dtype=torch.int32,
-                                    device="cpu")
-        input_positions = torch.tensor(input_positions,
-                                       dtype=torch.int32,
-                                       device="cpu")
-        slot_mapping = torch.tensor(slot_mapping,
-                                    dtype=torch.int64,
-                                    device="cpu")
         prompt_lens = torch.tensor(prompt_lens,
                                    dtype=torch.int32,
                                    device="cpu")
@@ -556,18 +541,32 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             for i in range(batch_size):
                 # Get the actual prefill_len.
                 prefill_len = model_input.input_lens[i:i + 1].item()
-                prefill_len = _get_padded_prefill_len(prefill_len)
                 end_idx = start_idx + prefill_len
+                padded_prefill_len = _get_padded_prefill_len(prefill_len)
 
-                token_ids = model_input.token_ids[None, start_idx:end_idx].to(
-                    self.device)
-                position_ids = model_input.position_ids[None,
-                                                        start_idx:end_idx].to(
-                                                            self.device)
+                token_ids = torch.zeros((1, padded_prefill_len),
+                                        dtype=torch.int32,
+                                        device="cpu")
+                token_ids[0, :prefill_len] = model_input.token_ids[start_idx:end_idx]
+                token_ids = token_ids.to(self.device)
+
+                position_ids = torch.zeros((1, padded_prefill_len),
+                                             dtype=torch.int32,
+                                             device="cpu")
+                position_ids[0, :prefill_len] = model_input.position_ids[start_idx:end_idx]
+                position_ids = position_ids.to(self.device)
+
+                slot_mapping = torch.empty((1, padded_prefill_len),
+                                             dtype=torch.int64,
+                                             device="cpu")
+                slot_mapping[0, :prefill_len] = orig_slot_mapping[
+                    start_idx:end_idx]
+                slot_mapping[0, prefill_len:] = _PAD_SLOT_ID
+                slot_mapping = slot_mapping.to(self.device)
+
                 attn_metadata = model_input.attn_metadata
                 attn_metadata.num_prefills = 1
-                attn_metadata.slot_mapping = orig_slot_mapping[
-                    None, start_idx:end_idx].to(self.device)
+                attn_metadata.slot_mapping = slot_mapping
                 input_lens = model_input.input_lens[i:i + 1].to(self.device)
                 t = model_input.t[i:i + 1].to(self.device)
                 p = model_input.p[i:i + 1].to(self.device)
