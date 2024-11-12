@@ -1072,6 +1072,12 @@ class Scheduler:
         ignored_seq_groups = prefills.ignored_seq_groups
         ignored_seq_groups.extend(swapped_in.infeasible_seq_groups)
 
+        print('num_lookahead_slots in _schedule_default ' + str(running_scheduled.num_lookahead_slots))
+        print('prefills in _schedule_chunked_prefill ' + str(num_prefill_groups))
+        print('decodes in _schedule_chunked_prefill ' + str(
+             + len(running_scheduled.decode_seq_groups) + len(swapped_in.decode_seq_groups)))
+
+
         return SchedulerOutputs(
             scheduled_seq_groups=scheduled_seq_groups,
             num_prefill_groups=num_prefill_groups,
@@ -1148,6 +1154,12 @@ class Scheduler:
         # Update swapped requests.
         self.swapped.extend(running_scheduled.swapped_out)
         # Put prefills first due to Attention backend ordering assumption.
+        print('num_lookahead_slots in _schedule_chunked_prefill ' + str(running_scheduled.num_lookahead_slots))
+        print('prefills in _schedule_chunked_prefill ' + str( len(prefills.seq_groups) + 
+            len(swapped_in.prefill_seq_groups) + len(running_scheduled.prefill_seq_groups)))
+        print('decodes in _schedule_chunked_prefill ' + str(
+             + len(running_scheduled.decode_seq_groups) + len(swapped_in.decode_seq_groups)))
+
         return SchedulerOutputs(
             scheduled_seq_groups=(prefills.seq_groups +
                                   running_scheduled.prefill_seq_groups +
@@ -1172,6 +1184,7 @@ class Scheduler:
 
     def _schedule(self) -> SchedulerOutputs:
         """Schedule queued requests."""
+        print('Hello In _schedule')
         if self.scheduler_config.chunked_prefill_enabled:
             return self._schedule_chunked_prefill()
         else:
@@ -1568,6 +1581,7 @@ class Scheduler:
         for the prefills for when the prefills turn into decodes in the first
         step.
         """
+        print('Hello in _get_num_lookahead_slots')
         if is_prefill:
             if self.scheduler_config.is_multi_step and enable_chunking:
                 # num_lookahead_slots was introduced in the context of decodes,
@@ -1578,10 +1592,12 @@ class Scheduler:
                 #
                 # "lookaheads" for prefills, is introduced in support for
                 # Chunked-Prefill in Multi-Step.
+                print('num_look_ahead_slots ' + str(self.scheduler_config.num_lookahead_slots + 1))
                 return self.scheduler_config.num_lookahead_slots + 1
             else:
+                print('num_look_ahead_slots 0')
                 return 0
-
+        print('num_look_ahead_slots ' + str(self.scheduler_config.num_lookahead_slots))
         return self.scheduler_config.num_lookahead_slots
 
     def _get_num_new_tokens(self, seq_group: SequenceGroup,
