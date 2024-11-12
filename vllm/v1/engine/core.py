@@ -40,8 +40,9 @@ class EngineCore:
         # Override the configs for V1.
         # FIXME
         if usage_context == UsageContext.LLM_CLASS:
-            vllm_config.scheduler_config.max_num_seqs = 1024
-            vllm_config.scheduler_config.max_num_batched_tokens = 8192
+            # vllm_config.scheduler_config.max_num_seqs = 1024
+            # vllm_config.scheduler_config.max_num_batched_tokens = 8192
+            pass
         elif usage_context == UsageContext.OPENAI_API_SERVER:
             vllm_config.scheduler_config.max_num_seqs = 1024
             vllm_config.scheduler_config.max_num_batched_tokens = 2048

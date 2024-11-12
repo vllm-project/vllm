@@ -30,7 +30,6 @@ if TYPE_CHECKING:
     from vllm.v1.core.scheduler import SchedulerOutput
 
 MIN_BATCH_SIZE = 8
-BATCH_SIZE_MULTIPLE = 16
 
 logger = init_logger(__name__)
 
@@ -52,6 +51,8 @@ class TPUModelRunner:
         self.speculative_config = vllm_config.speculative_config
         self.prompt_adapter_config = vllm_config.prompt_adapter_config
         self.observability_config = vllm_config.observability_config
+
+        print(f"{self.scheduler_config.max_num_seqs=}")
 
         model_config = self.model_config
         cache_config = self.cache_config
@@ -80,7 +81,8 @@ class TPUModelRunner:
 
         # Lazy initialization
         # self.model: nn.Module  # Set after load_model
-        self.kv_caches: List[torch.Tensor] = []
+        # List[k_cache, v_cache]s
+        self.kv_caches: List[Tuple[torch.Tensor, torch.Tensor]] = []
 
         # Request states.
         self.requests: Dict[str, CachedRequestState] = {}
@@ -445,21 +447,16 @@ class TPUModelRunner:
             dtype=torch.int64,
             device=self.device
         )
-
-        if is_prompt:
-            block_tables = None
-            context_lens = None
-        else:
-            block_tables = torch.zeros(
-                (batch_size, self.max_num_blocks_per_seq),
-                dtype=torch.int32,
-                device=self.device,
-            )
-            context_lens = torch.ones(
-                (batch_size, ),
-                dtype=torch.int32,
-                device=self.device,
-            )
+        block_tables = None if is_prompt else torch.zeros(
+            (batch_size, self.max_num_blocks_per_req),
+            dtype=torch.int32,
+            device=self.device,
+        )
+        context_lens = None if is_prompt else torch.ones(
+            (batch_size, ),
+            dtype=torch.int32,
+            device=self.device,
+        )
         attn_metadata = PallasAttentionMetadata(
             is_prompt=is_prompt,
             slot_mapping=slot_mapping,
@@ -503,9 +500,10 @@ class TPUModelRunner:
         # it is important to create tensors inside the loop, rather than
         # multiplying the list, to avoid Dynamo from treating them as
         # tensor aliasing.
-        dummy_kv_caches = [
-            torch.tensor([], dtype=torch.float32, device=self.device)
-            for _ in range(self.num_attn_layers)
+        dummy_kv_caches = [(
+            torch.tensor([], dtype=torch.float32, device=self.device),
+            torch.tensor([], dtype=torch.float32, device=self.device),
+            ) for _ in range(self.num_attn_layers)
         ]
 
         # Round to multiple of 16.
@@ -546,7 +544,7 @@ class TPUModelRunner:
         # Decode shapes.
         start = time.time()
         seq_len = 1
-        batch_size = MIN_BATCH_SIZE  # Must be in sync with _get_padded_batch_size()
+        batch_size = 8  # Must be in sync with _get_padded_batch_size()
         while True:
             self._dummy_run(batch_size, seq_len, self.kv_caches, is_prompt=False)
             xm.wait_device_ops()
@@ -565,17 +563,21 @@ class TPUModelRunner:
         kv_cache_shape = PallasAttentionBackend.get_kv_cache_shape(
             num_blocks, self.block_size, self.num_kv_heads, self.head_size)
         for _ in range(self.num_attn_layers):
-            self.kv_caches.append(
+            self.kv_caches.append((
+                torch.zeros(kv_cache_shape,
+                             dtype=self.kv_cache_dtype,
+                             device=self.device),
                 torch.zeros(kv_cache_shape,
                             dtype=self.kv_cache_dtype,
-                            device=self.device))
+                            device=self.device),
+            ))
 
     def _get_padded_batch_size(self, batch_size: int) -> Optional[int]:
         # The GMM Pallas kernel requires num_tokens * topk to be a multiple of 16.
         # To meet this requirement in the simplest way, we set the minimal batch
         # size to 8 (== MIN_BATCH_SIZE).
-        if batch_size <= MIN_BATCH_SIZE:
-            return MIN_BATCH_SIZE
+        if batch_size <= 8:
+            return 8
         else:
             return ((batch_size + 15) // 16) * 16
 
@@ -889,7 +891,8 @@ class ModelWrapper(TorchCompileWrapperWithCustomDispatcher):
         """
 
         # Skip this in memory profiling at initialization.
-        if kv_caches[0].numel() > 0:
+        is_profiling = kv_caches[0][0].numel() == 0
+        if not is_profiling:
             # index_copy_(slot_mapping) only works when the inserted dimension
             # is 0. However, the KV cache in the Pallas backend has the shape
             # [num_kv_heads, num_blocks, block_size, head_size]. To make it

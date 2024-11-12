@@ -237,9 +237,12 @@ def which_attn_to_use(head_size: int,
         return _Backend.IPEX
 
     if current_platform.is_tpu():
-        if selected_backend != _Backend.PALLAS_VLLM_V1:
+        if (selected_backend != _Backend.PALLAS and 
+            selected_backend != _Backend.PALLAS_VLLM_V1):
             logger.info("Cannot use %s backend on TPU.", selected_backend)
-        return _Backend.PALLAS_VLLM_V1
+        if use_v1:
+            return _Backend.PALLAS_VLLM_V1
+        return _Backend.PALLAS
 
     if current_platform.is_rocm():
         # AMD GPUs.

@@ -36,7 +36,7 @@ class PallasAttentionBackend(AttentionBackend):
     ) -> Tuple[int, ...]:
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
-        return (2, num_blocks, block_size, num_kv_heads, head_size)
+        return (num_kv_heads, num_blocks, block_size, head_size)
 
 
 @dataclass
@@ -115,7 +115,7 @@ class PallasAttentionImpl(AttentionImpl):
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
-        kv_cache: torch.Tensor,
+        kv_cache: Tuple[torch.Tensor, torch.Tensor],
         attn_metadata: PallasAttentionMetadata,
         k_scale: float = 1.0,
         v_scale: float = 1.0,
@@ -124,13 +124,14 @@ class PallasAttentionImpl(AttentionImpl):
         """Forward pass with FlashAttention.
 
         Args:
-            query: shape = [num_tokens, num_heads * head_size]
-            key: shape = [num_tokens, num_kv_heads * head_size]
-            value: shape = [num_tokens, num_kv_heads * head_size]
-            kv_cache = [2, num_blocks, block_size, num_kv_heads, head_size]
+            query: shape = [batch_size, seq_len, num_heads * head_size]
+            key: shape = [batch_size, seq_len, num_kv_heads * head_size]
+            value: shape = [batch_size, seq_len, num_kv_heads * head_size]
+            kv_cache = [2, num_kv_heads, num_blocks, block_size, head_size]
+                NOTE: kv_cache will be an empty tensor for profiling run
             attn_metadata: Metadata for attention.
         Returns:
-            shape = [num_tokens, num_heads * head_size]
+            shape = [batch_size, seq_len, num_heads * head_size]
         """
 
         assert k_scale == 1.0 and v_scale == 1.0, (
@@ -142,6 +143,10 @@ class PallasAttentionImpl(AttentionImpl):
                                       "are not implemented for "
                                       "PallasAttentionImpl")
 
+        # Empty KV cache when profiling (skip write to cache).
+        is_profiling = kv_cache[0].numel() == 0
+
+        # Unpack
         batch_size, seq_len, hidden_size = query.shape
         query = query.view(batch_size, seq_len, self.num_heads, self.head_size)
         key = key.view(batch_size, seq_len, self.num_kv_heads, self.head_size)
@@ -149,9 +154,10 @@ class PallasAttentionImpl(AttentionImpl):
                            self.head_size)
 
         # Write to KV cache.
-        if kv_cache.numel() > 0:
+        if not is_profiling:
             slot_mapping = attn_metadata.slot_mapping
-            key_cache, value_cache = kv_cache
+            key_cache = kv_cache[0]
+            value_cache = kv_cache[1]
             write_to_kv_cache(key, value, key_cache, value_cache, slot_mapping)
 
         query = query * self.scale
@@ -181,7 +187,7 @@ class PallasAttentionImpl(AttentionImpl):
             output = output.permute(0, 2, 1, 3)
         else:
             # Decoding run.
-            assert kv_cache[0].numel() > 0
+            assert not is_profiling
             query = query.squeeze(dim=1)
             pages_per_compute_block = 16  # TODO(woosuk): Tune this value.
 

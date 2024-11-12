@@ -53,14 +53,14 @@ class TPUExecutor:
         """
         return self.worker.determine_num_available_blocks()
 
-    def initialize_cache(self, num_gpu_blocks: int) -> None:
+    def initialize_cache(self, num_tpu_blocks: int) -> None:
         """Initialize the KV cache by invoking the underlying worker.
         """
         # NOTE: This is logged in the executor because there can be >1 worker
         # with other executors. We could log in the engine level, but work
         # remains to abstract away the device for non-GPU configurations.
-        logger.info("# TPU blocks: %d", num_gpu_blocks)
-        self.worker.initialize_cache(num_gpu_blocks)
+        logger.info("# TPU blocks: %d", num_tpu_blocks)
+        self.worker.initialize_cache(num_tpu_blocks)
         self.worker.compile_or_warm_up_model()
 
     def execute_model(

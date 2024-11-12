@@ -10,6 +10,7 @@ import torch_xla.runtime as xr
 import vllm.envs as envs
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
+from vllm.logger import init_logger
 from vllm.config import CacheConfig, ModelConfig, ParallelConfig, VllmConfig
 from vllm.model_executor import set_random_seed
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size
@@ -18,6 +19,8 @@ from vllm.v1.worker.tpu_model_runner import TPUModelRunner
 
 if TYPE_CHECKING:
     from vllm.v1.core.scheduler import SchedulerOutput
+
+logger = init_logger(__name__)
 
 class TPUWorker:
     def __init__(
@@ -116,6 +119,10 @@ class TPUWorker:
         m = xm.get_memory_info(self.device)
         total_tpu_memory = m["bytes_limit"]
         peak_memory = m["peak_bytes_used"]  # Weights + intermediate activations.
+        logger.debug("Peak Used: %sGB", 
+                     peak_memory // 1024 // 1024 // 1024)
+        logger.debug("Total Memory: %sGB", 
+                     total_tpu_memory // 1024 // 1024 // 1024)
 
         cache_block_size = _get_cache_block_size(self.cache_config,
                                                  self.model_config,
@@ -146,6 +153,15 @@ class TPUWorker:
                 "initializing the engine.")
 
         self.model_runner.initialize_kv_cache(num_tpu_blocks)
+
+        # Get the maximum amount of memory used by the model weights and
+        # intermediate activations.
+        xm.mark_step()
+        xm.wait_device_ops()
+        m = xm.get_memory_info(self.device)
+        peak_memory = m["peak_bytes_used"]  # Weights + intermediate activations.
+        logger.debug("Peak GB Used Post KV Cache: %sGB", 
+                     peak_memory // 1024 // 1024 // 1024)
 
 
     def compile_or_warm_up_model(self) -> None:
