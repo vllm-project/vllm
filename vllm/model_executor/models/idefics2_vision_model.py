@@ -1,5 +1,3 @@
-# coding=utf-8
-
 # adapted from https://github.com/huggingface/transformers/blob/v4.43.2/src/transformers/models/idefics2/modeling_idefics2.py
 # Copyright 2024 The vLLM team.
 # Copyright 2024 the HuggingFace Inc. team. All rights reserved.
@@ -17,7 +15,7 @@
 # limitations under the License.
 """PyTorch Idefics2 model."""
 
-from typing import Optional
+from typing import Iterable, Optional, Tuple
 
 import torch
 from torch import nn
@@ -31,6 +29,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
 
 class Idefics2VisionEmbeddings(nn.Module):
@@ -113,7 +112,8 @@ class Idefics2VisionAttention(nn.Module):
         self,
         config: Idefics2Config,
         quant_config: Optional[QuantizationConfig] = None,
-    ):
+        prefix: str = "",
+    ) -> None:
         super().__init__()
         self.config = config
         self.embed_dim = config.hidden_size
@@ -130,12 +130,14 @@ class Idefics2VisionAttention(nn.Module):
             self.head_dim,
             self.num_heads,
             quant_config=quant_config,
+            prefix=f"{prefix}.qkv_proj",
         )
         self.out_proj = RowParallelLinear(
             self.embed_dim,
             self.embed_dim,
             bias=True,
             quant_config=quant_config,
+            prefix=f"{prefix}.out_proj",
         )
         self.tp_size = get_tensor_model_parallel_world_size()
         self.num_heads_per_partition = divide(self.num_heads, self.tp_size)
@@ -178,7 +180,8 @@ class Idefics2VisionMLP(nn.Module):
         self,
         config: Idefics2Config,
         quant_config: Optional[QuantizationConfig] = None,
-    ):
+        prefix: str = "",
+    ) -> None:
         super().__init__()
         self.config = config
         self.activation_fn = get_act_fn(config.hidden_act)
@@ -187,12 +190,14 @@ class Idefics2VisionMLP(nn.Module):
             config.intermediate_size,
             bias=True,
             quant_config=quant_config,
+            prefix=f"{prefix}.fc1",
         )
         self.fc2 = RowParallelLinear(
             config.intermediate_size,
             config.hidden_size,
             bias=True,
             quant_config=quant_config,
+            prefix=f"{prefix}.fc2",
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -204,13 +209,22 @@ class Idefics2VisionMLP(nn.Module):
 
 class Idefics2EncoderLayer(nn.Module):
 
-    def __init__(self, config: Idefics2Config):
+    def __init__(
+        self,
+        config: Idefics2Config,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ) -> None:
         super().__init__()
         self.embed_dim = config.hidden_size
-        self.self_attn = Idefics2VisionAttention(config)
+        self.self_attn = Idefics2VisionAttention(config,
+                                                 quant_config=quant_config,
+                                                 prefix=f"{prefix}.self_attn")
         self.layer_norm1 = nn.LayerNorm(self.embed_dim,
                                         eps=config.layer_norm_eps)
-        self.mlp = Idefics2VisionMLP(config)
+        self.mlp = Idefics2VisionMLP(config,
+                                     quant_config=quant_config,
+                                     prefix=f"{prefix}.mlp")
         self.layer_norm2 = nn.LayerNorm(self.embed_dim,
                                         eps=config.layer_norm_eps)
 
@@ -245,12 +259,20 @@ class Idefics2Encoder(nn.Module):
         config: Idefics2Config
     """
 
-    def __init__(self, config: Idefics2Config):
+    def __init__(
+        self,
+        config: Idefics2Config,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ) -> None:
         super().__init__()
+
         self.config = config
         self.layers = nn.ModuleList([
-            Idefics2EncoderLayer(config)
-            for _ in range(config.num_hidden_layers)
+            Idefics2EncoderLayer(config,
+                                 quant_config=quant_config,
+                                 prefix=f"{prefix}.layers.{layer_idx}")
+            for layer_idx in range(config.num_hidden_layers)
         ])
 
     def forward(
@@ -275,12 +297,20 @@ class Idefics2Encoder(nn.Module):
 
 class Idefics2VisionTransformer(nn.Module):
 
-    def __init__(self, config: Idefics2VisionConfig):
+    def __init__(
+        self,
+        config: Idefics2VisionConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ) -> None:
         super().__init__()
+
         embed_dim = config.hidden_size
         self.config = config
         self.embeddings = Idefics2VisionEmbeddings(config)
-        self.encoder = Idefics2Encoder(config)
+        self.encoder = Idefics2Encoder(config,
+                                       quant_config=quant_config,
+                                       prefix=f"{prefix}.encoder")
         self.post_layernorm = nn.LayerNorm(embed_dim,
                                            eps=config.layer_norm_eps)
 
@@ -300,3 +330,25 @@ class Idefics2VisionTransformer(nn.Module):
         encoder_outputs = self.encoder(hidden_states)
         last_hidden_state = self.post_layernorm(encoder_outputs)
         return last_hidden_state
+
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+        stacked_params_mapping = [
+            # (param_name, shard_name, shard_id)
+            ("qkv_proj", "q_proj", "q"),
+            ("qkv_proj", "k_proj", "k"),
+            ("qkv_proj", "v_proj", "v"),
+        ]
+        params_dict = dict(self.named_parameters())
+        for name, loaded_weight in weights:
+            for param_name, weight_name, shard_id in stacked_params_mapping:
+                if weight_name not in name:
+                    continue
+                param = params_dict[name.replace(weight_name, param_name)]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                weight_loader(param, loaded_weight)

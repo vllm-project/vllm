@@ -30,7 +30,6 @@ The following code configures vLLM in an offline mode to use speculative decodin
         tensor_parallel_size=1,
         speculative_model="facebook/opt-125m",
         num_speculative_tokens=5,
-        use_v2_block_manager=True,
     )
     outputs = llm.generate(prompts, sampling_params)
 
@@ -104,7 +103,6 @@ matching n-grams in the prompt. For more information read `this thread. <https:/
         speculative_model="[ngram]",
         num_speculative_tokens=5,
         ngram_prompt_lookup_max=4,
-        use_v2_block_manager=True,
     )
     outputs = llm.generate(prompts, sampling_params)
 
@@ -135,7 +133,6 @@ For more information see `this blog <https://pytorch.org/blog/hitchhikers-guide-
         tensor_parallel_size=4,
         speculative_model="ibm-fms/llama3-70b-accelerator",
         speculative_draft_tensor_parallel_size=1,
-        use_v2_block_manager=True,
     )
     outputs = llm.generate(prompts, sampling_params)
 
@@ -185,7 +182,7 @@ speculative decoding, breaking down the guarantees into three key areas:
 3. **vLLM Logprob Stability**
    - vLLM does not currently guarantee stable token log probabilities (logprobs). This can result in different outputs for the 
    same request across runs. For more details, see the FAQ section 
-   titled *Can the output of a prompt vary across runs in vLLM?* in the `FAQs <../serving/faq.rst>`_.
+   titled *Can the output of a prompt vary across runs in vLLM?* in the `FAQs <../serving/faq>`_.
 
 
 **Conclusion**
@@ -200,7 +197,7 @@ can occur due to following factors:
 
 **Mitigation Strategies**
 
-For mitigation strategies, please refer to the FAQ entry *Can the output of a prompt vary across runs in vLLM?* in the `FAQs <../serving/faq.rst>`_.
+For mitigation strategies, please refer to the FAQ entry *Can the output of a prompt vary across runs in vLLM?* in the `FAQs <../serving/faq>`_.
 
 Resources for vLLM contributors
 -------------------------------

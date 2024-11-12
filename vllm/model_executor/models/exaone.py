@@ -1,4 +1,3 @@
-# coding=utf-8
 # Adapted from
 # https://huggingface.co/LGAI-EXAONE/EXAONE-3.0-7.8B-Instruct/blob/main/modeling_exaone.py
 # Copyright 2024 The LG U+ CTO AI Tech Lab.
@@ -29,7 +28,8 @@ import torch
 from torch import nn
 
 from vllm.attention import Attention, AttentionMetadata
-from vllm.config import CacheConfig, LoRAConfig
+from vllm.compilation.decorators import support_torch_compile
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.model_executor.layers.activation import SiluAndMul
@@ -42,19 +42,20 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     get_compressed_tensors_cache_scale)
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, kv_cache_scales_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.exaone import ExaoneConfig
-from vllm.utils import is_hip
 
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (PPMissingLayer, is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, make_layers)
+                    make_empty_intermediate_tensors_factory, make_layers,
+                    maybe_prefix)
 
 
 class ExaoneGatedMLP(nn.Module):
@@ -311,17 +312,17 @@ class ExaoneDecoderLayer(nn.Module):
         return hidden_states, residual
 
 
+@support_torch_compile
 class ExaoneModel(nn.Module):
 
-    def __init__(
-        self,
-        config: ExaoneConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        lora_config: Optional[LoRAConfig] = None,
-        prefix: str = "",
-    ) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+        lora_config = vllm_config.lora_config
+
         self.config = config
         self.padding_idx = config.pad_token_id
         lora_vocab = ((lora_config.lora_extra_vocab_size *
@@ -437,24 +438,18 @@ class ExaoneForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         "c_fc_1": ("gate_up_proj", 1),
     }
 
-    def __init__(
-        self,
-        config: ExaoneConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        lora_config: Optional[LoRAConfig] = None,
-    ) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
+        lora_config = vllm_config.lora_config
 
         self.config = config
         self.lora_config = lora_config
 
         self.transformer = ExaoneModel(
-            config,
-            cache_config,
-            quant_config,
-            lora_config=lora_config,
-            prefix="model",
+            vllm_config=vllm_config,
+            prefix=maybe_prefix(prefix, "model"),
         )
         if get_pp_group().is_last_rank:
             self.unpadded_vocab_size = config.vocab_size
@@ -477,7 +472,7 @@ class ExaoneForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                     config.vocab_size,
                                                     logit_scale)
-            self.sampler = Sampler()
+            self.sampler = get_sampler()
         else:
             self.lm_head = PPMissingLayer()
 
@@ -593,7 +588,7 @@ class ExaoneForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             if not isinstance(self.transformer.h[layer_idx], nn.Identity):
                 layer_self_attn = self.transformer.h[layer_idx].attn
 
-            if is_hip():
+            if current_platform.is_rocm():
                 # The scaling factor convention we are assuming is
                 # quantized_value * scaling_factor ~= true_value
                 # which is consistent with the practice of setting

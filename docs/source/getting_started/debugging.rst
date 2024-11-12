@@ -75,6 +75,9 @@ If GPU/CPU communication cannot be established, you can use the following Python
 
     print("PyTorch GLOO is successful!")
 
+    if world_size <= 1:
+        exit()
+
     # Test vLLM NCCL, with cuda graph
     from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 
@@ -107,17 +110,19 @@ If GPU/CPU communication cannot be established, you can use the following Python
 
 If you are testing with a single node, adjust ``--nproc-per-node`` to the number of GPUs you want to use:
 
-.. code-block:: shell
+.. code-block:: console
 
-    NCCL_DEBUG=TRACE torchrun --nproc-per-node=<number-of-GPUs> test.py
+    $ NCCL_DEBUG=TRACE torchrun --nproc-per-node=<number-of-GPUs> test.py
 
 If you are testing with multi-nodes, adjust ``--nproc-per-node`` and ``--nnodes`` according to your setup and set ``MASTER_ADDR`` to the correct IP address of the master node, reachable from all nodes. Then, run:
 
-.. code-block:: shell
+.. code-block:: console
 
-    NCCL_DEBUG=TRACE torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=$MASTER_ADDR test.py
+    $ NCCL_DEBUG=TRACE torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=$MASTER_ADDR test.py
 
 If the script runs successfully, you should see the message ``sanity check is successful!``.
+
+If the test script hangs or crashes, usually it means the hardware/drivers are broken in some sense. You should try to contact your system administrator or hardware vendor for further assistance. As a common workaround, you can try to tune some NCCL environment variables, such as ``export NCCL_P2P_DISABLE=1`` to see if it helps. Please check `their documentation <https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/env.html>`__ for more information. Please only use these environment variables as a temporary workaround, as they might affect the performance of the system. The best solution is still to fix the hardware/drivers so that the test script can run successfully.
 
 .. note::
 

@@ -2,28 +2,38 @@ import json
 import pathlib
 from dataclasses import dataclass
 from http import HTTPStatus
-from typing import Iterable, Iterator, List, Optional, Tuple, TypedDict, Union
+from typing import (Any, Callable, Dict, Iterable, Iterator, List, Mapping,
+                    Optional, Sequence, Tuple, TypedDict, Union)
 
 from pydantic import Field
+from starlette.datastructures import Headers
 from typing_extensions import Annotated
 
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
+from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
+                                         ConversationMessage,
+                                         apply_hf_chat_template,
+                                         apply_mistral_chat_template,
+                                         parse_chat_messages_futures)
 from vllm.entrypoints.logger import RequestLogger
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               CompletionRequest,
                                               DetokenizeRequest,
-                                              EmbeddingRequest, ErrorResponse,
+                                              EmbeddingChatRequest,
+                                              EmbeddingCompletionRequest,
+                                              ErrorResponse,
                                               LoadLoraAdapterRequest,
                                               ModelCard, ModelList,
                                               ModelPermission,
                                               TokenizeChatRequest,
                                               TokenizeCompletionRequest,
-                                              TokenizeRequest,
                                               UnloadLoraAdapterRequest)
+from vllm.entrypoints.openai.tool_parsers import ToolParser
 # yapf: enable
+from vllm.inputs import TokensPrompt
 from vllm.inputs.parse import parse_and_batch_prompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -31,8 +41,10 @@ from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.sequence import Logprob
-from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.utils import AtomicCounter
+from vllm.tracing import (contains_trace_headers, extract_trace_headers,
+                          log_tracing_disabled_warning)
+from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
+from vllm.utils import AtomicCounter, is_list_of
 
 logger = init_logger(__name__)
 
@@ -56,13 +68,22 @@ class LoRAModulePath:
     base_model_name: Optional[str] = None
 
 
-AnyRequest = Union[ChatCompletionRequest, CompletionRequest, DetokenizeRequest,
-                   EmbeddingRequest, TokenizeRequest]
+CompletionLikeRequest = Union[CompletionRequest, DetokenizeRequest,
+                              EmbeddingCompletionRequest,
+                              TokenizeCompletionRequest]
+
+ChatLikeRequest = Union[ChatCompletionRequest, EmbeddingChatRequest,
+                        TokenizeChatRequest]
+
+AnyRequest = Union[CompletionLikeRequest, ChatLikeRequest]
 
 
 class TextTokensPrompt(TypedDict):
     prompt: str
     prompt_token_ids: List[int]
+
+
+RequestPrompt = Union[List[int], str, TextTokensPrompt]
 
 
 class OpenAIServing:
@@ -246,7 +267,8 @@ class OpenAIServing:
         token_num = len(input_ids)
 
         # Note: EmbeddingRequest doesn't have max_tokens
-        if isinstance(request, EmbeddingRequest):
+        if isinstance(request,
+                      (EmbeddingChatRequest, EmbeddingCompletionRequest)):
             if token_num > self.max_model_len:
                 raise ValueError(
                     f"This model's maximum context length is "
@@ -263,20 +285,26 @@ class OpenAIServing:
             return TextTokensPrompt(prompt=input_text,
                                     prompt_token_ids=input_ids)
 
-        if request.max_tokens is None:
+        # chat completion endpoint supports max_completion_tokens
+        if isinstance(request, ChatCompletionRequest):
+            # TODO(#9845): remove max_tokens when field dropped from OpenAI API
+            max_tokens = request.max_completion_tokens or request.max_tokens
+        else:
+            max_tokens = request.max_tokens
+        if max_tokens is None:
             if token_num >= self.max_model_len:
                 raise ValueError(
                     f"This model's maximum context length is "
                     f"{self.max_model_len} tokens. However, you requested "
                     f"{token_num} tokens in the messages, "
                     f"Please reduce the length of the messages.")
-        elif token_num + request.max_tokens > self.max_model_len:
+        elif token_num + max_tokens > self.max_model_len:
             raise ValueError(
                 f"This model's maximum context length is "
                 f"{self.max_model_len} tokens. However, you requested "
-                f"{request.max_tokens + token_num} tokens "
+                f"{max_tokens + token_num} tokens "
                 f"({token_num} in the messages, "
-                f"{request.max_tokens} in the completion). "
+                f"{max_tokens} in the completion). "
                 f"Please reduce the length of the messages or completion.")
 
         return TextTokensPrompt(prompt=input_text, prompt_token_ids=input_ids)
@@ -367,10 +395,121 @@ class OpenAIServing:
                     truncate_prompt_tokens=truncate_prompt_tokens,
                 )
 
+    def _preprocess_completion(
+        self,
+        request: CompletionLikeRequest,
+        tokenizer: AnyTokenizer,
+        input_or_inputs: Union[str, List[str], List[int], List[List[int]]],
+        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
+        add_special_tokens: bool = True,
+    ) -> Tuple[Sequence[TextTokensPrompt], List[TokensPrompt]]:
+        request_prompts = [
+            request_prompt
+            for request_prompt in self._tokenize_prompt_input_or_inputs(
+                request,
+                tokenizer,
+                input_or_inputs,
+                truncate_prompt_tokens=truncate_prompt_tokens,
+                add_special_tokens=add_special_tokens,
+            )
+        ]
+
+        engine_prompts = [
+            TokensPrompt(prompt_token_ids=request_prompt["prompt_token_ids"])
+            for request_prompt in request_prompts
+        ]
+
+        return request_prompts, engine_prompts
+
+    async def _preprocess_chat(
+        self,
+        request: ChatLikeRequest,
+        tokenizer: AnyTokenizer,
+        messages: List[ChatCompletionMessageParam],
+        chat_template: Optional[str] = None,
+        add_generation_prompt: bool = True,
+        continue_final_message: bool = False,
+        tool_dicts: Optional[List[Dict[str, Any]]] = None,
+        documents: Optional[List[Dict[str, str]]] = None,
+        chat_template_kwargs: Optional[Dict[str, Any]] = None,
+        tool_parser: Optional[Callable[[AnyTokenizer], ToolParser]] = None,
+        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
+        add_special_tokens: bool = False,
+    ) -> Tuple[List[ConversationMessage], Sequence[RequestPrompt],
+               List[TokensPrompt]]:
+        conversation, mm_data_future = parse_chat_messages_futures(
+            messages,
+            self.model_config,
+            tokenizer,
+        )
+
+        _chat_template_kwargs: Dict[str, Any] = dict(
+            chat_template=chat_template,
+            add_generation_prompt=add_generation_prompt,
+            continue_final_message=continue_final_message,
+            tools=tool_dicts,
+            documents=documents,
+        )
+        _chat_template_kwargs.update(chat_template_kwargs or {})
+
+        request_prompt: Union[str, List[int]]
+        is_mistral_tokenizer = isinstance(tokenizer, MistralTokenizer)
+        if is_mistral_tokenizer:
+            request_prompt = apply_mistral_chat_template(
+                tokenizer,
+                messages=messages,
+                **_chat_template_kwargs,
+            )
+        else:
+            request_prompt = apply_hf_chat_template(
+                tokenizer,
+                conversation=conversation,
+                **_chat_template_kwargs,
+            )
+
+        mm_data = await mm_data_future
+
+        # tool parsing is done only if a tool_parser has been set and if
+        # tool_choice is not "none" (if tool_choice is "none" but a tool_parser
+        # is set, we want to prevent parsing a tool_call hallucinated by the LLM
+        should_parse_tools = tool_parser is not None and (hasattr(
+            request, "tool_choice") and request.tool_choice != "none")
+
+        if should_parse_tools:
+            if not isinstance(request, ChatCompletionRequest):
+                msg = "Tool usage is only supported for Chat Completions API"
+                raise NotImplementedError(msg)
+
+            request = tool_parser(tokenizer).adjust_request(  # type: ignore
+                request=request)
+
+        if isinstance(request_prompt, str):
+            prompt_inputs = self._tokenize_prompt_input(
+                request,
+                tokenizer,
+                request_prompt,
+                truncate_prompt_tokens=truncate_prompt_tokens,
+                add_special_tokens=add_special_tokens,
+            )
+        else:
+            # For MistralTokenizer
+            assert is_list_of(request_prompt, int), (
+                "Prompt has to be either a string or a list of token ids")
+            prompt_inputs = TextTokensPrompt(
+                prompt=tokenizer.decode(request_prompt),
+                prompt_token_ids=request_prompt)
+
+        engine_prompt = TokensPrompt(
+            prompt_token_ids=prompt_inputs["prompt_token_ids"])
+        if mm_data is not None:
+            engine_prompt["multi_modal_data"] = mm_data
+
+        return conversation, [request_prompt], [engine_prompt]
+
     def _log_inputs(
         self,
         request_id: str,
-        inputs: Union[str, List[int], TextTokensPrompt],
+        inputs: RequestPrompt,
         params: Optional[Union[SamplingParams, PoolingParams,
                                BeamSearchParams]],
         lora_request: Optional[LoRARequest],
@@ -397,6 +536,20 @@ class OpenAIServing:
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
         )
+
+    async def _get_trace_headers(
+        self,
+        headers: Headers,
+    ) -> Optional[Mapping[str, str]]:
+        is_tracing_enabled = await self.engine_client.is_tracing_enabled()
+
+        if is_tracing_enabled:
+            return extract_trace_headers(headers)
+
+        if contains_trace_headers(headers):
+            log_tracing_disabled_warning()
+
+        return None
 
     @staticmethod
     def _get_decoded_token(logprob: Logprob,
