@@ -70,7 +70,6 @@ class RobertaEmbeddingModel(BertEmbeddingModel):
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None,
                  pooler_config: Optional[PoolerConfig] = None) -> None:
-        # Skip BertEmbeddingModule.__init__()
         nn.Module.__init__(self)
         self.model = RobertaModel(config, cache_config, quant_config)
         self._pooler = Pooler.from_config_with_defaults(
@@ -78,3 +77,9 @@ class RobertaEmbeddingModel(BertEmbeddingModel):
             pooling_type=PoolingType.CLS,
             normalize=True,
             softmax=False)
+
+    def _build_model(self,
+                     config: RobertaConfig,
+                     cache_config: Optional[CacheConfig] = None,
+                     quant_config: Optional[QuantizationConfig] = None):
+        return BertModel(config, cache_config, quant_config, RobertaEmbedding)
