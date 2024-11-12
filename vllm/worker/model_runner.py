@@ -542,6 +542,9 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         # this may be larger than the sequence length if chunked
         # prefill is enabled.
         prefix_cache_len = len(computed_block_nums) * self.block_size
+        seq_group_metadata.seq_data[inter_data.seq_ids[
+            seq_idx]].update_num_cached_tokens(prefix_cache_len)
+
         # The number of so far computed prompt tokens in this sequence.
         context_len = inter_data.context_lens[seq_idx]
         # The total number of prompt tokens in this sequence.

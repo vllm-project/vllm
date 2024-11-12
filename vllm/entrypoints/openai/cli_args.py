@@ -228,6 +228,11 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         default=False,
         help="Disable FastAPI's OpenAPI schema, Swagger UI, and ReDoc endpoint"
     )
+    parser.add_argument(
+        "--enable-prompt-tokens-details",
+        action='store_true',
+        default=False,
+        help="If set to True, enable prompt_tokens_details in usage.")
 
     return parser
 
