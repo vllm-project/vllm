@@ -215,10 +215,10 @@ The order of priorities is `command line > config file values > defaults`.
 ---
 
 ## Tool calling in the chat completion API
-
-vLLM supports named function calling and `auto` tool choice  in the chat completion API. The `tool_choice` options `required` is **not yet supported** but on the roadmap.
+vLLM currently supports named function calling, as well as the `auto` and `none` options for the `tool_choice` field in the chat completion API. The `tool_choice` option `required` is **not yet supported** but on the roadmap.
 
 It is the callers responsibility to prompt the model with the tool information, vLLM will not automatically manipulate the prompt.
+Please see below for recommended configuration and chat templates to use when function calling is to be used with the different models.
 
 
 ### Named Function Calling
