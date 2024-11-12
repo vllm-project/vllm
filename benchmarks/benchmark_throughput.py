@@ -148,10 +148,15 @@ def run_vllm(
             ))
 
     use_beam_search = False
-
+    from pyinstrument import Profiler
+    profiler = Profiler()
     if not use_beam_search:
-        start = time.perf_counter()
         llm.generate(prompts, sampling_params, use_tqdm=True)
+        start = time.perf_counter()
+        # profiler.start()
+        llm.generate(prompts, sampling_params, use_tqdm=True)
+        # profiler.stop()
+        # profiler.write_html("inductor.html")
         end = time.perf_counter()
     else:
         prompts = [request.prompt for request in requests]
