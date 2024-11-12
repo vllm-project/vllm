@@ -34,6 +34,47 @@ def test_guided_logits_processors(sample_regex, sample_json_schema):
     assert tensor.shape == original_tensor.shape
     assert not torch.allclose(tensor, original_tensor)
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("backend", ["faster-outlines"])
+async def test_guided_logits_processor_black_box_faster_outlines(backend: str, sample_regex,
+                                                 sample_json_schema):
+    # faster-outlines processors require special handling,
+    # since they do not begin computation of a fsm index until they have been 
+    # both serialized and deserialized. More on the reason why can be found 
+    # in the doc comment for the class:
+    # https://github.com/unaidedelf8777/faster-outlines/blob/main/faster_outlines/fsm/vllm_guide.py
+    import pickle
+    tokenizer = AutoTokenizer.from_pretrained('HuggingFaceH4/zephyr-7b-beta')
+    token_ids = tokenizer.encode(
+        f"Give an example IPv4 address with this regex: {sample_regex}")
+    regex_request = GuidedDecodingParams(regex=sample_regex, backend=backend)
+    regex_lp = await get_guided_decoding_logits_processor(
+        regex_request, tokenizer)
+    assert regex_lp is not None
+    serialized = pickle.dumps(regex_lp)
+    regex_lp = pickle.loads(serialized)
+    tensor = torch.rand(32000)
+    original_tensor = torch.clone(tensor)
+    tensor = regex_lp(token_ids, tensor)
+    assert tensor.shape == original_tensor.shape
+    assert not torch.allclose(tensor, original_tensor)
+
+    token_ids = tokenizer.encode(
+        f"Give an employee profile that fits this schema: {sample_json_schema}"
+    )
+    json_request = GuidedDecodingParams(json=sample_json_schema,
+                                        backend=backend)
+    json_lp = await get_guided_decoding_logits_processor(
+        json_request, tokenizer)
+    assert json_lp is not None
+    serialized = pickle.dumps(json_lp)
+    json_lp = pickle.loads(serialized)
+    tensor = torch.rand(32000)
+    original_tensor = torch.clone(tensor)
+    tensor = json_lp(token_ids, tensor)
+    assert tensor.shape == original_tensor.shape
+    assert not torch.allclose(tensor, original_tensor)
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ["outlines", "lm-format-enforcer"])

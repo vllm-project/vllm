@@ -19,6 +19,11 @@ async def get_guided_decoding_logits_processor(
             get_local_lm_format_enforcer_guided_decoding_logits_processor)
         return get_local_lm_format_enforcer_guided_decoding_logits_processor(
             guided_params, tokenizer)
+    if guided_params.backend == 'faster-outlines':
+        from vllm.model_executor.guided_decoding.faster_outlines_decoding import (  # noqa
+            get_local_faster_outlines_guided_decoding_logits_processor)
+        return get_local_faster_outlines_guided_decoding_logits_processor(
+            guided_params, tokenizer)
 
     raise ValueError(
         f"Unknown guided decoding backend '{guided_params.backend}'. "
@@ -39,6 +44,11 @@ def get_local_guided_decoding_logits_processor(
         from vllm.model_executor.guided_decoding.lm_format_enforcer_decoding import (  # noqa
             get_local_lm_format_enforcer_guided_decoding_logits_processor)
         return get_local_lm_format_enforcer_guided_decoding_logits_processor(
+            guided_params, tokenizer)
+    if guided_params.backend == 'faster-outlines':
+        from vllm.model_executor.guided_decoding.faster_outlines_decoding import (  # noqa
+            get_local_faster_outlines_guided_decoding_logits_processor)
+        return get_local_faster_outlines_guided_decoding_logits_processor(
             guided_params, tokenizer)
 
     raise ValueError(
