@@ -332,7 +332,8 @@ def plot_trace_df(traces_df: pd.DataFrame,
     traces_df = group_trace_by_operations(traces_df)
 
     # Make the figure
-    fig, ax = plt.subplots(1, figsize=(5, 8), sharex=True)
+    fig_size_x = max(5, len(phases))
+    fig, ax = plt.subplots(1, figsize=(fig_size_x, 8), sharex=True)
 
     # Draw the stacked bars
     ops = list(traces_df)
@@ -434,10 +435,13 @@ def main(
     def make_plot_title_suffix(profile_json: dict) -> str:
         context = profile_json["context"]
         sparsity = context.get('sparsity', None)
+        min_output_len = context['min_output_len']
+        max_output_len = context['max_output_len']
+        output_len = f"[{min_output_len}, {max_output_len}]"
         return (f"{context['engine_args']['model']}\n"
                 f"Batch={context['batch_size']}, "
                 f"PromptLen={context['prompt_len']}, "
-                f"OutputLen={context['output_len']},"
+                f"OutputLen={output_len},"
                 f"NumGpus={context['engine_args']['tensor_parallel_size']}"
                 f"{', Sparsity ' + sparsity if sparsity else ''}")
 

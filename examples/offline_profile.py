@@ -5,6 +5,8 @@ import sys
 from argparse import RawTextHelpFormatter
 from dataclasses import asdict, dataclass
 from typing import Optional
+import random
+import tqdm
 
 import torch
 
@@ -22,7 +24,8 @@ OUTPUT_LEN_DEFAULT = 2
 class ProfileContext:
     engine_args: EngineArgs
     prompt_len: int
-    output_len: int
+    min_output_len: int
+    max_output_len: int
     batch_size: int
     save_chrome_traces_folder: Optional[str]
 
@@ -43,14 +46,16 @@ def run_profile(context: ProfileContext, csv_output: Optional[str],
     # Create sampling params
     sampling_params = SamplingParams(temperature=0.8,
                                      top_p=0.95,
-                                     max_tokens=args.output_len,
+                                     max_tokens=args.max_output_len,
                                      ignore_eos=True)
 
     # Create LLM
     llm = LLM(**asdict(context.engine_args))
     batch_size = context.batch_size
     prompt_len = context.prompt_len
-    output_len = context.output_len
+    max_output_len = context.max_output_len
+    min_output_len = context.min_output_len
+    assert min_output_len <= max_output_len
 
     scheduler_config = llm.llm_engine.scheduler_config
     max_model_len = llm.llm_engine.model_config.max_model_len
@@ -73,16 +78,20 @@ def run_profile(context: ProfileContext, csv_output: Optional[str],
         sys.exit(-1)
     print("llm.llm_engine.model_config.max_model_len: ",
           llm.llm_engine.model_config.max_model_len)
-    if prompt_len + output_len > llm.llm_engine.model_config.max_model_len:
+    if prompt_len + max_output_len > llm.llm_engine.model_config.max_model_len:
         print(
-            f"ERROR: chosen prompt_len + output_len ({prompt_len} + "
-            f"{output_len} = {prompt_len + output_len}) is larger than the "
-            f"model's max_model_len ({max_model_len}), please choose a smaller "
-            f"prompt_len or output_len, or increase --max-model-len")
+            f"ERROR: chosen prompt_len + max_output_len ({prompt_len} + "
+            f"{max_output_len} = {prompt_len + max_output_len}) is larger "
+            f"than the model's max_model_len ({max_model_len}), please "
+            f"choose a smaller prompt_len or max_output_len, or increase "
+            f"--max-model-len")
         sys.exit(-1)
 
     def add_requests():
         for i in range(batch_size):
+            sampling_params.max_tokens = \
+                    random.randint(min_output_len, max_output_len)  
+
             prompt_token_ids = torch.randint(
                 llm.llm_engine.model_config.get_vocab_size(),
                 size=(prompt_len, )).tolist()
@@ -110,7 +119,7 @@ def run_profile(context: ProfileContext, csv_output: Optional[str],
         llm.llm_engine.step()  # First step is prefill
 
     decode_profs = []
-    for x in range(args.output_len - 1):
+    for _ in tqdm.tqdm(range(max_output_len - 1)):
         with layerwise_profile() as decode_prof:
             llm.llm_engine.step()
         decode_profs.append(decode_prof)
@@ -261,12 +270,20 @@ Profile a model
                         default=BATCH_SIZE_DEFAULT,
                         help=f"Number of requests to run as a single batch, "
                         f"default={BATCH_SIZE_DEFAULT}")
+
     parser.add_argument(
-        "--output-len",
+        "--max-output-len",
         type=int,
         default=OUTPUT_LEN_DEFAULT,
-        help="Number of llm steps to run (includes prefill and decode) "
-        "- default={OUTPUT_LEN_DEFAULT}")
+        help="Maximum output length of the requests"
+    )
+
+    parser.add_argument(
+        "--min-output-len",
+        type=int,
+        default=OUTPUT_LEN_DEFAULT,
+        help="Minimum output length of the requests"
+    )
 
     EngineArgs.add_cli_args(parser)
 
