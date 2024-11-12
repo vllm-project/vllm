@@ -641,12 +641,6 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         # that the hidden states can be propagated to proposer when needed.
         if data["no_spec"]:
             self.scorer_worker.execute_model()
-            # If no spec case we still want to run the proposer model
-            # but ONLY once to match `not skip_proposer` in
-            # driver `_run_no_spec`
-            if not data["disable_all_speculation"]:
-                self.proposer_worker.execute_model()
-            return True
 
         if not data["disable_all_speculation"]:
             # Even if num_lookahead_slots is zero, we want to run the
