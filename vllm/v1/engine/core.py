@@ -19,6 +19,7 @@ from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
                             EngineCoreRequest, EngineCoreRequestType)
 from vllm.v1.executor.gpu_executor import GPUExecutor
 from vllm.v1.request import Request, RequestStatus
+from vllm.v1.serial_utils import PickleEncoder
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -315,7 +316,7 @@ class EngineCoreProc(EngineCore):
         """Input socket IO thread."""
 
         # Msgpack serialization decoding.
-        decoder_add_req = msgpack.Decoder(EngineCoreRequest)
+        decoder_add_req = PickleEncoder()
         decoder_abort_req = msgpack.Decoder(list[str])
 
         with self.make_socket(input_path, zmq.constants.PULL) as socket:
