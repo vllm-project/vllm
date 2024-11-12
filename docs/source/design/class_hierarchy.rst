@@ -15,7 +15,7 @@ This document describes the class hierarchy of vLLM. We will explain the relatio
 
 The following figure shows the class hierarchy of vLLM:
 
-    .. figure:: ../../assets/design/hierarchy.png
+    .. figure:: ../assets/design/hierarchy.png
         :alt: query
         :width: 100%
         :align: center
