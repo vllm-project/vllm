@@ -2,7 +2,7 @@
 -r requirements-common.txt
 
 # Dependencies for TPU
-cmake>=3.26,<=3.30
+cmake>=3.26
 ninja
 packaging
 setuptools-scm>=8
