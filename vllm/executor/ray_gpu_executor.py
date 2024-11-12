@@ -10,7 +10,7 @@ import vllm.envs as envs
 from vllm.executor.distributed_gpu_executor import (  # yapf: disable
     DistributedGPUExecutor, DistributedGPUExecutorAsync)
 from vllm.executor.msgspec_utils import encode_hook
-from vllm.executor.ray_utils import RayWorkerWrapper, ray
+from vllm.executor.ray_utils import ray
 from vllm.logger import init_logger
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.sequence import ExecuteModelRequest
@@ -108,6 +108,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
 
     def _init_workers_ray(self, placement_group: "PlacementGroup",
                           **ray_remote_kwargs):
+        from vllm.executor.ray_utils import RayWorkerWrapper
         if (self.parallel_config.tensor_parallel_size == 1
                 and self.parallel_config.pipeline_parallel_size == 1):
             # For single GPU case, we use a ray worker with constrained memory.
