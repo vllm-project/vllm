@@ -199,13 +199,6 @@ def main(args):
                                        repeat_count=args.repeat_count,
                                        sort=args.sort)
 
-    print("------warm up------")
-    test_prefix(
-        llm=llm,
-        prompts=prompts,
-        sampling_params=sampling_params,
-    )
-
     print("------start generating------")
     test_prefix(
         llm=llm,

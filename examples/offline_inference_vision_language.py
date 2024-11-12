@@ -176,6 +176,31 @@ def run_minicpmv(question: str, modality: str):
     return llm, prompt, stop_token_ids
 
 
+# H2OVL-Mississippi
+def run_h2ovl(question: str, modality: str):
+    assert modality == "image"
+
+    model_name = "h2oai/h2ovl-mississippi-2b"
+
+    llm = LLM(
+        model=model_name,
+        trust_remote_code=True,
+        max_model_len=8192,
+    )
+
+    tokenizer = AutoTokenizer.from_pretrained(model_name,
+                                              trust_remote_code=True)
+    messages = [{'role': 'user', 'content': f"<image>\n{question}"}]
+    prompt = tokenizer.apply_chat_template(messages,
+                                           tokenize=False,
+                                           add_generation_prompt=True)
+
+    # Stop tokens for H2OVL-Mississippi
+    # https://huggingface.co/h2oai/h2ovl-mississippi-2b
+    stop_token_ids = [tokenizer.eos_token_id]
+    return llm, prompt, stop_token_ids
+
+
 # InternVL
 def run_internvl(question: str, modality: str):
     assert modality == "image"
@@ -262,10 +287,9 @@ def run_qwen2_vl(question: str, modality: str):
 
     model_name = "Qwen/Qwen2-VL-7B-Instruct"
 
-    # Tested on L40
     llm = LLM(
         model=model_name,
-        max_model_len=8192,
+        max_model_len=4096,
         max_num_seqs=5,
         # Note - mm_processor_kwargs can also be passed to generate/chat calls
         mm_processor_kwargs={
@@ -353,6 +377,31 @@ def run_glm4v(question: str, modality: str):
     return llm, prompt, stop_token_ids
 
 
+# Idefics3-8B-Llama3
+def run_idefics3(question: str, modality: str):
+    assert modality == "image"
+    model_name = "HuggingFaceM4/Idefics3-8B-Llama3"
+
+    llm = LLM(
+        model=model_name,
+        max_model_len=8192,
+        max_num_seqs=2,
+        enforce_eager=True,
+        # if you are running out of memory, you can reduce the "longest_edge".
+        # see: https://huggingface.co/HuggingFaceM4/Idefics3-8B-Llama3#model-optimizations
+        mm_processor_kwargs={
+            "size": {
+                "longest_edge": 3 * 364
+            },
+        },
+    )
+    prompt = (
+        f"<|begin_of_text|>User:<image>{question}<end_of_utterance>\nAssistant:"
+    )
+    stop_token_ids = None
+    return llm, prompt, stop_token_ids
+
+
 model_example_map = {
     "llava": run_llava,
     "llava-next": run_llava_next,
@@ -364,6 +413,7 @@ model_example_map = {
     "chameleon": run_chameleon,
     "minicpmv": run_minicpmv,
     "blip-2": run_blip2,
+    "h2ovl_chat": run_h2ovl,
     "internvl_chat": run_internvl,
     "NVLM_D": run_nvlm_d,
     "qwen_vl": run_qwen_vl,
@@ -372,6 +422,7 @@ model_example_map = {
     "mllama": run_mllama,
     "molmo": run_molmo,
     "glm4v": run_glm4v,
+    "idefics3": run_idefics3,
 }
 
 

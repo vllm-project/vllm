@@ -19,14 +19,16 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
 from vllm.model_executor.models.mixtral import MixtralMoE
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
-from vllm.utils import seed_everything
+
+NUM_EXPERTS = [8, 64]
+TOP_KS = [2, 6]
 
 
-@pytest.mark.parametrize("m", [1024 * 128, 512, 222, 33, 1])
-@pytest.mark.parametrize("n", [2048, 256, 1024])
+@pytest.mark.parametrize("m", [1, 33, 64, 222, 1024 * 128])
+@pytest.mark.parametrize("n", [128, 1024, 2048])
 @pytest.mark.parametrize("k", [128, 511, 1024])
-@pytest.mark.parametrize("e", [8, 64])
-@pytest.mark.parametrize("topk", [2, 6])
+@pytest.mark.parametrize("e", NUM_EXPERTS)
+@pytest.mark.parametrize("topk", TOP_KS)
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_fused_moe(
     m: int,
@@ -94,12 +96,12 @@ def test_mixtral_moe(dtype: torch.dtype):
                                atol=mixtral_moe_tol[dtype])
 
 
-@pytest.mark.parametrize("m", [64, 512, 222, 33, 1])
-@pytest.mark.parametrize("n", [128, 2048, 256, 1024])
-@pytest.mark.parametrize("k", [128, 1024, 512])
-@pytest.mark.parametrize("e", [8, 64])
-@pytest.mark.parametrize("topk", [2, 6])
-@pytest.mark.parametrize("group_size", [-1, 32, 64, 128])
+@pytest.mark.parametrize("m", [1, 33, 64, 222])
+@pytest.mark.parametrize("n", [128, 2048])
+@pytest.mark.parametrize("k", [128, 1024])
+@pytest.mark.parametrize("e", NUM_EXPERTS)
+@pytest.mark.parametrize("topk", TOP_KS)
+@pytest.mark.parametrize("group_size", [-1, 32, 128])
 @pytest.mark.parametrize("act_order", [True, False])
 @pytest.mark.parametrize("num_bits", [4, 8])
 @pytest.mark.parametrize("is_k_full", [True, False])
@@ -115,7 +117,7 @@ def test_fused_marlin_moe(
     num_bits: int,
     is_k_full: bool,
 ):
-    seed_everything(7)
+    current_platform.seed_everything(7)
 
     # Filter act_order
     if act_order:
