@@ -78,7 +78,7 @@ class Worker(LocalOrDistributedWorkerBase):
             ModelRunnerClass = model_runner_cls
         elif model_config.task == "embedding":
             ModelRunnerClass = EmbeddingModelRunner
-        elif self._is_encoder_decoder_model():
+        elif self.model_config.is_encoder_decoder:
             ModelRunnerClass = EncoderDecoderModelRunner
         self.model_runner: GPUModelRunnerBase = ModelRunnerClass(
             vllm_config=self.vllm_config,
@@ -146,9 +146,6 @@ class Worker(LocalOrDistributedWorkerBase):
             self.profiler.__exit__()
         else:
             self.profiler.stop()
-
-    def _is_encoder_decoder_model(self):
-        return self.model_config.is_encoder_decoder_model
 
     def init_device(self) -> None:
         if self.device_config.device.type == "cuda":

@@ -1,6 +1,7 @@
 import contextlib
 import functools
-from typing import TYPE_CHECKING, List, Optional, Tuple, Type, Union
+import importlib
+from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 
 import torch
 import torch.library
@@ -13,7 +14,7 @@ from vllm.utils import is_navi
 
 logger = init_logger(__name__)
 
-if not current_platform.is_tpu():
+if not current_platform.is_tpu() and not current_platform.is_hpu():
     try:
         import vllm._C
     except ImportError as e:
@@ -235,14 +236,14 @@ def fused_add_rms_norm(input: torch.Tensor, residual: torch.Tensor,
 def scaled_rms_norm(out: torch.Tensor, input: torch.Tensor,
                     weight: torch.Tensor, scale: torch.Tensor,
                     epsilon: float) -> None:
-    torch.ops._C.scaled_rms_norm(out, input, weight, scale, epsilon)
+    torch.ops._C.rms_norm_static_fp8_quant(out, input, weight, scale, epsilon)
 
 
 def scaled_fused_add_rms_norm(out: torch.Tensor, input: torch.Tensor,
                               residual: torch.Tensor, weight: torch.Tensor,
                               scale: torch.Tensor, epsilon: float) -> None:
-    torch.ops._C.scaled_fused_add_rms_norm(out, input, residual, weight, scale,
-                                           epsilon)
+    torch.ops._C.fused_add_rms_norm_static_fp8_quant(out, input, residual,
+                                                     weight, scale, epsilon)
 
 
 def advance_step_flashattn(num_seqs: int, num_queries: int, block_size: int,
@@ -499,22 +500,6 @@ def cutlass_scaled_mm_supports_fp8(cuda_device_capability: int) -> bool:
     return torch.ops._C.cutlass_scaled_mm_supports_fp8(cuda_device_capability)
 
 
-def scaled_mm_torch(a: torch.Tensor,
-                    b: torch.Tensor,
-                    scale_a: torch.Tensor,
-                    scale_b: torch.Tensor,
-                    out_dtype: Type[torch.dtype],
-                    bias: Optional[torch.Tensor] = None) -> torch.Tensor:
-    out = torch.mm(a.to(torch.float32), b.to(torch.float32))
-    out = scale_a * out
-    out = scale_b.T * out
-    out = out.to(out_dtype)
-    if bias is not None:
-        out = out + bias
-
-    return out
-
-
 def cutlass_scaled_mm(a: torch.Tensor,
                       b: torch.Tensor,
                       scale_a: torch.Tensor,
@@ -530,10 +515,15 @@ def cutlass_scaled_mm(a: torch.Tensor,
     n = b.shape[1]
 
     if current_platform.is_rocm():
-        return scaled_mm_torch(a, b, scale_a, scale_b, out_dtype, bias)
-    else:
-        out = torch.empty((m, n), dtype=out_dtype, device=a.device)
-        torch.ops._C.cutlass_scaled_mm(out, a, b, scale_a, scale_b, bias)
+        triton_scaled_mm_module = importlib.import_module(
+            "vllm.model_executor.layers.quantization.compressed_tensors."
+            "triton_scaled_mm")
+        triton_scaled_mm = triton_scaled_mm_module.triton_scaled_mm
+        return triton_scaled_mm(a, b, scale_a, scale_b, out_dtype, bias)
+
+    out = torch.empty((m, n), dtype=out_dtype, device=a.device)
+
+    torch.ops._C.cutlass_scaled_mm(out, a, b, scale_a, scale_b, bias)
 
     return out
 

@@ -266,7 +266,7 @@ def run_grid(bs, model, TP):
     print(f"writing config to file {filename}")
     existing_content = {}
     if os.path.exists(filename):
-        with open(filename, "r") as f:
+        with open(filename) as f:
             existing_content = json.load(f)
     existing_content[str(bs)] = best_config
     with open(filename, "w") as f:

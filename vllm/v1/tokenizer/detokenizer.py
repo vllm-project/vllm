@@ -42,13 +42,17 @@ class DetokenizerOutputs(msgspec.Struct):
 
 class Detokenizer:
 
-    def __init__(self, tokenizer_name: str):
+    def __init__(self, tokenizer_name: str, tokenizer_mode: str,
+                 trust_remote_code: bool):
         # FIXME(woosuk): Currently, the detokenizer is just a hacky prototype.
         # For example, it does not terminate properly. We need to improve this.
         self.push_port = get_open_port()
         self.pull_port = get_open_port()
-        self.detokenizer = DetokenizerProc(tokenizer_name, self.push_port,
-                                           self.pull_port)
+        self.detokenizer = DetokenizerProc(tokenizer_name=tokenizer_name,
+                                           tokenizer_mode=tokenizer_mode,
+                                           trust_remote_code=trust_remote_code,
+                                           push_port=self.push_port,
+                                           pull_port=self.pull_port)
         self.detokenizer.start()
 
         self.zmq_context = zmq.Context()
@@ -73,7 +77,7 @@ class Detokenizer:
         return None
 
     def terminate(self) -> None:
-        self.push_socket.send(b"", flags=zmq.NOBLOCK)
+        self.detokenizer.kill()
         self.detokenizer.join()
 
 
@@ -82,11 +86,15 @@ class DetokenizerProc(multiprocessing.Process):
     def __init__(
         self,
         tokenizer_name: str,
+        tokenizer_mode: str,
+        trust_remote_code: bool,
         pull_port: int,
         push_port: int,
     ):
         super().__init__()
         self.tokenizer_name = tokenizer_name
+        self.tokenizer_mode = tokenizer_mode
+        self.trust_remote_code = trust_remote_code
         # NOTE: The pull_port of the detokenizer should be the same as the
         # push_port of the engine. Vice versa.
         self.pull_port = pull_port
@@ -97,7 +105,10 @@ class DetokenizerProc(multiprocessing.Process):
         # not picklable.
         self.msgpack_encoder = msgpack.Encoder()
         self.msgpack_decoder = msgpack.Decoder(DetokenizerInputs)
-        self.tokenizer = get_tokenizer(self.tokenizer_name)
+        self.tokenizer = get_tokenizer(
+            tokenizer_name=self.tokenizer_name,
+            tokenizer_mode=self.tokenizer_mode,
+            trust_remote_code=self.trust_remote_code)
         # req_id -> RequestState
         self.request_states: Dict[str, RequestState] = {}
 
@@ -108,10 +119,10 @@ class DetokenizerProc(multiprocessing.Process):
         self.push_socket.bind(f"tcp://*:{self.push_port}")
 
         while True:
+            if self.pull_socket.poll(timeout=1000) == 0:
+                # Nothing to read
+                continue
             message = self.pull_socket.recv()
-            if message == b"":
-                # Terminate signal.
-                break
             inputs = self.msgpack_decoder.decode(message)
 
             for req_id in inputs.free_req_ids:

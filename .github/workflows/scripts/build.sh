@@ -12,7 +12,7 @@ export MAX_JOBS=1
 # Make sure release wheels are built for the following architectures
 export PYTORCH_ROCM_ARCH="gfx90a;gfx942"
 
-rm -f $(which sccache)
+rm -f "$(which sccache)"
 
 export MAX_JOBS=32
 
