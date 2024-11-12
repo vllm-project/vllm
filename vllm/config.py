@@ -951,9 +951,12 @@ class ParallelConfig:
             https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-nsight-profiler.
         placement_group: ray distributed model workers placement group.
         distributed_executor_backend: Backend to use for distributed model
-            workers, either "ray" or "mp" (multiprocessing). If either
-            pipeline_parallel_size or tensor_parallel_size is greater than 1,
-            will default to "ray" if Ray is installed or "mp" otherwise.
+            workers, either "ray" or "mp" (multiprocessing). If the product
+            of pipeline_parallel_size and tensor_parallel_size is less than
+            or equal to the number of GPUs available, "mp" will be used to
+            keep processing on a single host. Otherwise, this will default
+            to "ray" if Ray is installed and fail otherwise. Note that tpu
+            and hpu only support Ray for distributed inference.
     """
 
     def __init__(
