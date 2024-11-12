@@ -137,6 +137,7 @@ class LoRAModel(AdapterModel):
                                 lora_embeddings_tensor.pin_memory())
                 loras[module_name] = LoRALayerWeights(module_name, rank,
                                                       lora_alpha, None, None,
+                                                      None,
                                                       lora_embeddings_tensor)
             if is_bias:
                 loras[module_name].bias = tensor.to(device=device,
