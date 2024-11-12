@@ -44,7 +44,7 @@ from vllm.utils import is_list_of
 from .idefics2_vision_model import (
     Idefics2VisionTransformer as Idefics3VisionTransformer)
 # yapf: enable
-from .interfaces import SupportsMultiModal
+from .interfaces import SupportsMultiModal, SupportsLoRA
 from .llama import LlamaModel
 from .utils import (AutoWeightsLoader, flatten_bn, maybe_prefix,
                     merge_multimodal_embeddings)
@@ -58,8 +58,6 @@ class Idefics3ImagePixelInputs(TypedDict):
     """
     Shape: `(batch_size * num_images, num_channels, height, width)`
     """
-    rows: List[int]
-    cols: List[int]
     pixel_attention_mask: Optional[torch.BoolTensor]
 
 
@@ -420,7 +418,6 @@ class Idefics3Model(nn.Module):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
         self.config = config
@@ -430,8 +427,10 @@ class Idefics3Model(nn.Module):
         self.vision_model = Idefics3VisionTransformer(config.vision_config,
                                                       quant_config)
         self.connector = Idefics3Connector(config)
-        self.text_model = LlamaModel(config.text_config, cache_config,
-                                     quant_config)
+        self.text_model = LlamaModel(
+            vllm_config=vllm_config.with_hf_config(config.text_config),
+            prefix=maybe_prefix(prefix, "text_model"),
+        )
 
         self.image_seq_len = int(
             ((config.vision_config.image_size //
@@ -463,8 +462,6 @@ class Idefics3Model(nn.Module):
             self, **kwargs: object) -> Optional[ImageInputs]:
         pixel_values = kwargs.pop("pixel_values", None)
         image_embeds = kwargs.pop("image_embeds", None)
-        rows = kwargs.pop("rows", None)
-        cols = kwargs.pop("cols", None)
         pixel_attention_mask = kwargs.pop("pixel_attention_mask", None)
 
         if pixel_values is None and image_embeds is None:
@@ -489,8 +486,6 @@ class Idefics3Model(nn.Module):
                                             data=self._validate_pixel_values(
                                                 flatten_bn(pixel_values,
                                                            concat=True)),
-                                            rows=rows,
-                                            cols=cols,
                                             pixel_attention_mask=flatten_bn(
                                                 pixel_attention_mask,
                                                 concat=True))
@@ -610,7 +605,33 @@ class Idefics3Model(nn.Module):
 @MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_idefics3_image_tokens)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_idefics3)
 @INPUT_REGISTRY.register_input_processor(input_processor_for_idefics3)
-class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal):
+class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
+                                       SupportsLoRA):
+    packed_modules_mapping = {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+    }
+    # LoRA specific attributes
+    supported_lora_modules = [
+        # vision_model
+        "fc1",
+        "fc2",
+        "out_proj",
+        # text_model
+        "qkv_proj",  # same name with vision encoder
+        "o_proj",
+        "gate_up_proj",
+        "down_proj",
+    ]
+    embedding_modules = {}
+    embedding_padding_modules = []
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
