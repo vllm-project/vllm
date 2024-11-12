@@ -2038,12 +2038,15 @@ class VllmConfig:
     simplifies passing around the distinct configurations in the codebase.
     """
 
-    model_config: ModelConfig
-    cache_config: CacheConfig
-    parallel_config: ParallelConfig
-    scheduler_config: SchedulerConfig
-    device_config: DeviceConfig
-    load_config: LoadConfig
+    model_config: ModelConfig = field(default=None, init=True)  # type: ignore
+    cache_config: CacheConfig = field(default=None, init=True)  # type: ignore
+    parallel_config: ParallelConfig = field(default=None,
+                                            init=True)  # type: ignore
+    scheduler_config: SchedulerConfig = field(default=None,
+                                              init=True)  # type: ignore
+    device_config: DeviceConfig = field(default=None,
+                                        init=True)  # type: ignore
+    load_config: LoadConfig = field(default=None, init=True)  # type: ignore
     lora_config: Optional[LoRAConfig] = None
     speculative_config: Optional[SpeculativeConfig] = None
     decoding_config: Optional[DecodingConfig] = None
@@ -2088,11 +2091,14 @@ class VllmConfig:
     def __post_init__(self):
         """Verify configs are valid & consistent with each other.
         """
-        self.model_config.verify_async_output_proc(self.parallel_config,
-                                                   self.speculative_config,
-                                                   self.device_config)
-        self.model_config.verify_with_parallel_config(self.parallel_config)
-        self.cache_config.verify_with_parallel_config(self.parallel_config)
+        if self.model_config is not None:
+            self.model_config.verify_async_output_proc(self.parallel_config,
+                                                       self.speculative_config,
+                                                       self.device_config)
+            self.model_config.verify_with_parallel_config(self.parallel_config)
+
+        if self.cache_config is not None:
+            self.cache_config.verify_with_parallel_config(self.parallel_config)
 
         if self.lora_config:
             self.lora_config.verify_with_model_config(self.model_config)
