@@ -11,6 +11,7 @@ from vllm.utils import get_open_zmq_ipc_path
 from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
                             EngineCoreRequest, EngineCoreRequestType)
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
+from vllm.v1.serial_utils import PickleEncoder
 
 logger = init_logger(__name__)
 
@@ -115,7 +116,7 @@ class MPClient(EngineCoreClient):
         **kwargs,
     ):
         # Serialization setup.
-        self.encoder = msgspec.msgpack.Encoder()
+        self.encoder = PickleEncoder()
         self.decoder = msgspec.msgpack.Decoder(EngineCoreOutputs)
 
         # ZMQ setup.

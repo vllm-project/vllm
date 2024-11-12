@@ -91,7 +91,10 @@ class Processor:
         # Make Request for EngineCore.
         engine_core_request = EngineCoreRequest(
             request_id, processed_inputs.get("prompt"),
-            processed_inputs.get("prompt_token_ids"), sampling_params,
+            processed_inputs.get("prompt_token_ids"),
+            processed_inputs.get("multi_modal_data"),
+            processed_inputs.get("multi_modal_placeholders"),
+            processed_inputs.get("mm_processor_kwargs"), sampling_params,
             eos_token_id, arrival_time, lora_request)
 
         return detokenizer_request, engine_core_request
