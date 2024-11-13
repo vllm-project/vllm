@@ -355,6 +355,12 @@ def dummy_data_for_idefics3(
     image_seq_len = processor.image_seq_len
     max_llm_image_tokens = max_num_image_patches * image_seq_len * num_images
 
+    if seq_len - max_llm_image_tokens < 0:
+        raise RuntimeError(
+            f"Idefics3 cannot process {num_images} images in a prompt, "
+            "please increase max_model_len or reduce image limit by "
+            "--limit-mm-per-prompt.")
+
     seq_data = SequenceData.from_prompt_token_counts(
         (hf_config.image_token_id, max_llm_image_tokens),
         (0, seq_len - max_llm_image_tokens))
