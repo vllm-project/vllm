@@ -45,7 +45,7 @@ from vllm.utils import is_list_of
 from .idefics2_vision_model import (
     Idefics2VisionTransformer as Idefics3VisionTransformer)
 # yapf: enable
-from .interfaces import SupportsMultiModal, SupportsLoRA
+from .interfaces import SupportsLoRA, SupportsMultiModal
 from .llama import LlamaModel
 from .utils import (AutoWeightsLoader, flatten_bn, maybe_prefix,
                     merge_multimodal_embeddings)
@@ -356,7 +356,7 @@ def dummy_data_for_idefics3(
     max_llm_image_tokens = max_num_image_patches * image_seq_len * num_images
 
     seq_data = SequenceData.from_prompt_token_counts(
-        (hf_config.image_token_id, max_llm_image_tokens), 
+        (hf_config.image_token_id, max_llm_image_tokens),
         (0, seq_len - max_llm_image_tokens))
 
     width = height = hf_config.vision_config.image_size
@@ -699,6 +699,7 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
         """
         Get the module prefix in multimodal models
         """
-        return MultiModelKeys.from_string_field(language_model="model.text_model",
-                                                connector="model.connector",
-                                                tower_model="model.vision_model")
+        return MultiModelKeys.from_string_field(
+            language_model="model.text_model",
+            connector="model.connector",
+            tower_model="model.vision_model")
