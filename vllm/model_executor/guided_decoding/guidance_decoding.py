@@ -36,9 +36,9 @@ def get_local_guidance_guided_decoding_logits_processor(
         mode = GuidedDecodingMode.REGEX.value
     elif guided_params.choice:
         # choice just uses regex
-        choices = [
+        choices = (
             regex_escape(str(choice)) for choice in guided_params.choice
-        ]
+        )
         choices_regex = "(" + "|".join(choices) + ")"
         guide = choices_regex
         mode = GuidedDecodingMode.CHOICE.value

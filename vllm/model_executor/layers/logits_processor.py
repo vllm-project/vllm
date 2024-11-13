@@ -78,9 +78,7 @@ class LogitsProcessor(nn.Module):
 
             # Apply logits processors (if any).
             if sampling_metadata is not None:
-                thread_pool = self.thread_pool if hasattr(
-                    self, "thread_pool") else None
-                logits = _apply_logits_processors(thread_pool, logits,
+                logits = _apply_logits_processors(self.thread_pool, logits,
                                                   sampling_metadata)
 
         return logits
@@ -131,7 +129,8 @@ def _prune_hidden_states(
         return hidden_states
 
 
-def _apply_logits_processors_per_seq(logits_row_idx: int,
+def _apply_logits_processors_per_seq(logits: torch.Tensor,
+                                    logits_row_idx: int,
                                      logits_row: torch.Tensor,
                                      past_tokens_ids: list[int],
                                      prompt_tokens_ids: list[int],
@@ -144,11 +143,11 @@ def _apply_logits_processors_per_seq(logits_row_idx: int,
         else:
             logits_row = logits_processor(past_tokens_ids, logits_row)
 
-    return logits_row_idx, logits_row
+    logits[logits_row_idx] = logits_row
 
 
 def _apply_logits_processors(
-    thread_pool: Union[ThreadPoolExecutor, None],
+    thread_pool: ThreadPoolExecutor,
     logits: torch.Tensor,
     sampling_metadata: SamplingMetadata,
 ) -> torch.Tensor:
@@ -167,29 +166,19 @@ def _apply_logits_processors(
                 past_tokens_ids = seq_group.seq_data[seq_id].output_token_ids
                 prompt_tokens_ids = seq_group.seq_data[seq_id].prompt_token_ids
                 req_args_list.append(
-                    (logits_row_idx, logits_row, past_tokens_ids,
+                    (logits, logits_row_idx, logits_row, past_tokens_ids,
                      prompt_tokens_ids, logits_processors))
         else:
             logits_processed += len(seq_group.sample_indices) + len(
                 seq_group.prompt_logprob_indices)
 
     if req_args_list:
-        if thread_pool:
-            futures = []
-            for args in req_args_list:
-                f = thread_pool.submit(_apply_logits_processors_per_seq, *args)
-                futures.append(f)
-
-            for f in as_completed(futures):
-                logits_row_idx, logits_row = f.result()
-                logits[logits_row_idx] = logits_row
-                logits_processed += 1
-        else:
-            # somehow thread_pool is None when processing LORA logits
-            for args in req_args_list:
-                logits_row_idx, logits_row = _apply_logits_processors_per_seq(
-                    *args)
-                logits[logits_row_idx] = logits_row
+        with thread_pool:
+            futures = [
+                thread_pool.submit(_apply_logits_processors_per_seq, *req_args)
+                for req_args in req_args_list
+            ]
+            for _ in as_completed(futures):
                 logits_processed += 1
 
     if found_logits_processors:
