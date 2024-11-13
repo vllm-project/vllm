@@ -1,4 +1,3 @@
-# coding=utf-8
 """Inference-only Jamba model."""
 from typing import Iterable, List, Optional, Tuple
 
@@ -8,7 +7,7 @@ from transformers import JambaConfig
 
 from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.attention.layer import Attention
-from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -18,7 +17,7 @@ from vllm.model_executor.layers.linear import (QKVParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.mamba_mixer import MambaMixer
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -30,6 +29,7 @@ from vllm.worker.model_runner import (_BATCH_SIZES_TO_CAPTURE,
                                       _get_graph_batch_size)
 
 from .interfaces import HasInnerState, SupportsLoRA
+from .utils import maybe_prefix
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
@@ -259,14 +259,14 @@ ALL_DECODER_LAYER_TYPES = {
 
 class JambaModel(nn.Module):
 
-    def __init__(
-        self,
-        config: JambaConfig,
-        quant_config: Optional[QuantizationConfig] = None,
-        cache_config: Optional[CacheConfig] = None,
-        lora_config: Optional[LoRAConfig] = None,
-    ) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+        lora_config = vllm_config.lora_config
+
         self.config = config
         self.padding_idx = config.pad_token_id
         lora_vocab = ((lora_config.lora_extra_vocab_size *
@@ -349,24 +349,19 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA):
     }
     embedding_padding_modules = ["lm_head"]
 
-    def __init__(
-        self,
-        config: JambaConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        lora_config: Optional[LoRAConfig] = None,
-        scheduler_config: Optional[SchedulerConfig] = None,
-    ) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        lora_config = vllm_config.lora_config
+        scheduler_config = vllm_config.scheduler_config
         assert not cache_config.enable_prefix_caching, \
             "Jamba currently does not support prefix caching"
 
         super().__init__()
         self.config = config
         self.scheduler_config = scheduler_config
-        self.model = JambaModel(config,
-                                cache_config=cache_config,
-                                quant_config=quant_config,
-                                lora_config=lora_config)
+        self.model = JambaModel(vllm_config=vllm_config,
+                                prefix=maybe_prefix(prefix, "model"))
         self.unpadded_vocab_size = config.vocab_size
         if lora_config:
             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
@@ -384,7 +379,7 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA):
 
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)
-        self.sampler = Sampler()
+        self.sampler = get_sampler()
 
     def forward(self,
                 input_ids: torch.Tensor,

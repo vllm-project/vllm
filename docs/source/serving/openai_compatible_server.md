@@ -62,6 +62,32 @@ completion = client.chat.completions.create(
 )
 ```
 
+### Extra HTTP Headers
+
+Only `X-Request-Id` HTTP request header is supported for now.
+
+```python
+completion = client.chat.completions.create(
+  model="NousResearch/Meta-Llama-3-8B-Instruct",
+  messages=[
+    {"role": "user", "content": "Classify this sentiment: vLLM is wonderful!"}
+  ],
+  extra_headers={
+    "x-request-id": "sentiment-classification-00001",
+  }
+)
+print(completion._request_id)
+
+completion = client.completions.create(
+  model="NousResearch/Meta-Llama-3-8B-Instruct",
+  prompt="A robot may not injure a human being",
+  extra_headers={
+    "x-request-id": "completion-test",
+  }
+)
+print(completion._request_id)
+```
+
 ### Extra Parameters for Completions API
 
 The following [sampling parameters (click through to see documentation)](../dev/sampling_params.rst) are supported.
@@ -160,14 +186,7 @@ this, unless explicitly specified.
 :func: create_parser_for_docs
 :prog: vllm serve
 ```
-## Tool Calling in the Chat Completion API
-### Named Function Calling
-vLLM supports only named function calling in the chat completion API by default. It does so using Outlines, so this is 
-enabled by default, and will work with any supported model. You are guaranteed a validly-parsable function call - not a 
-high-quality one. 
 
-To use a named function, you need to define the functions in the `tools` parameter of the chat completion request, and 
-specify the `name` of one of the tools in the `tool_choice` parameter of the chat completion request. 
 
 ### Config file
 
@@ -196,11 +215,21 @@ The order of priorities is `command line > config file values > defaults`.
 ---
 
 ## Tool calling in the chat completion API
-vLLM supports only named function calling in the chat completion API. The `tool_choice` options `auto` and `required` are **not yet supported** but on the roadmap.
+vLLM currently supports named function calling, as well as the `auto` and `none` options for the `tool_choice` field in the chat completion API. The `tool_choice` option `required` is **not yet supported** but on the roadmap.
 
 It is the callers responsibility to prompt the model with the tool information, vLLM will not automatically manipulate the prompt.
+Please see below for recommended configuration and chat templates to use when function calling is to be used with the different models.
+
+
+### Named Function Calling
+vLLM supports named function calling in the chat completion API by default. It does so using Outlines, so this is 
+enabled by default, and will work with any supported model. You are guaranteed a validly-parsable function call - not a 
+high-quality one. 
 
 vLLM will use guided decoding to ensure the response matches the tool parameter object defined by the JSON schema in the `tools` parameter.
+
+To use a named function, you need to define the functions in the `tools` parameter of the chat completion request, and 
+specify the `name` of one of the tools in the `tool_choice` parameter of the chat completion request. 
 
 
 ### Automatic Function Calling
@@ -275,6 +304,21 @@ it works better with vLLM.
 
 Recommended flags: `--tool-call-parser llama3_json --chat-template examples/tool_chat_template_llama3_json.jinja`
 
+#### IBM Granite
+
+Supported models:
+* `ibm-granite/granite-3.0-8b-instruct`
+
+Recommended flags: `--tool-call-parser granite --chat-template examples/tool_chat_template_granite.jinja`
+
+`examples/tool_chat_template_granite.jinja`: this is a modified chat template from the original on Huggingface. Parallel function calls are supported.
+
+* `ibm-granite/granite-20b-functioncalling`
+
+Recommended flags: `--tool-call-parser granite-20b-fc --chat-template examples/tool_chat_template_granite_20b_fc.jinja`
+
+`examples/tool_chat_template_granite_20b_fc.jinja`: this is a modified chat template from the original on Huggingface, which is not vLLM compatible. It blends function description elements from the Hermes template and follows the same system prompt as "Response Generation" mode from [the paper](https://arxiv.org/abs/2407.00121). Parallel function calls are supported.
+
 
 #### InternLM Models (`internlm`)
 
@@ -295,16 +339,6 @@ AI21's Jamba-1.5 models are supported.
 
 
 Flags: `--tool-call-parser jamba`
-
-
-#### IBM Granite (`granite-20b-fc`)
-
-Supported models:
-* `ibm-granite/granite-20b-functioncalling`
-
-Flags: `--tool-call-parser granite-20b-fc --chat-template examples/tool_chat_template_granite_20b_fc.jinja`
-
-The example chat template deviates slightly from the original on Huggingface, which is not vLLM compatible. It blends function description elements from the Hermes template and follows the same system prompt as "Response Generation" mode from [the paper](https://arxiv.org/abs/2407.00121). Parallel function calls are supported.
 
 
 ### How to write a tool parser plugin

@@ -1,17 +1,23 @@
+import os
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List, Optional, Set
-from unittest.mock import patch
 
 import numpy as np
 import torch
 import torch.distributed
 import torch.nn as nn
 
+from vllm import envs
+from vllm.compilation.compile_context import set_compile_context
+from vllm.compilation.config import CompilationConfig
+from vllm.compilation.levels import CompilationLevel
 from vllm.config import VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import MultiModalDataDict
+from vllm.plugins import set_compilation_config
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler, cdiv,
                         is_pin_memory_available)
@@ -19,7 +25,6 @@ from vllm.v1.attention.backends.flash_attn import (FlashAttentionBackend,
                                                    FlashAttentionMetadata)
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.sample.sampler import Sampler
 
 if TYPE_CHECKING:
     from vllm.v1.core.scheduler import SchedulerOutput
@@ -86,6 +91,18 @@ class GPUModelRunner:
             pin_memory=self.pin_memory,
         )
 
+        self.use_cuda_graph = (envs.VLLM_TORCH_COMPILE_LEVEL
+                               == CompilationLevel.PIECEWISE
+                               and not self.model_config.enforce_eager)
+        # TODO(woosuk): Provide an option to tune the max cudagraph batch size.
+        self.cudagraph_batch_sizes = [1, 2, 4] + [i for i in range(8, 513, 8)]
+        self.input_ids = torch.zeros(self.max_num_tokens,
+                                     dtype=torch.int32,
+                                     device=self.device)
+        self.positions = torch.zeros(self.max_num_tokens,
+                                     dtype=torch.int64,
+                                     device=self.device)
+
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         # Remove stopped requests from the cached states.
         # Keep the states of the pre-empted requests.
@@ -129,7 +146,7 @@ class GPUModelRunner:
         for req_data in scheduler_output.scheduled_new_reqs:
             req_id = req_data.req_id
             sampling_params = req_data.sampling_params
-            if sampling_params.seed is not None:
+            if sampling_params.sampling_type == SamplingType.RANDOM_SEED:
                 generator = torch.Generator(device=self.device)
                 generator.manual_seed(sampling_params.seed)
             else:
@@ -268,12 +285,16 @@ class GPUModelRunner:
         seq_start_loc_np[0] = 0
         np.cumsum(seq_lens, out=seq_start_loc_np[1:])
 
-        input_ids = input_ids.to(self.device, non_blocking=True)
-        positions = positions.to(self.device, non_blocking=True).long()
+        self.input_ids[:total_num_scheduled_tokens].copy_(input_ids,
+                                                          non_blocking=True)
+        self.positions[:total_num_scheduled_tokens].copy_(positions,
+                                                          non_blocking=True)
+
         query_start_loc = query_start_loc.to(self.device, non_blocking=True)
         seq_start_loc = seq_start_loc.to(self.device, non_blocking=True)
         slot_mapping = slot_mapping.to(self.device, non_blocking=True).long()
         attn_metadata = FlashAttentionMetadata(
+            num_actual_tokens=total_num_scheduled_tokens,
             max_query_len=max_num_scheduled_tokens,
             query_start_loc=query_start_loc,
             max_seq_len=max_seq_len,
@@ -287,7 +308,7 @@ class GPUModelRunner:
         # token from the partial request.
         # TODO: Support prompt logprobs.
         logits_indices = query_start_loc[1:] - 1
-        return input_ids, positions, attn_metadata, logits_indices
+        return attn_metadata, logits_indices
 
     def _prepare_sampling(
         self,
@@ -310,16 +331,26 @@ class GPUModelRunner:
         scheduler_output: "SchedulerOutput",
     ) -> ModelRunnerOutput:
         self._update_states(scheduler_output)
-        inputs = self._prepare_inputs(scheduler_output)
-        input_ids, positions, attn_metadata, logits_indices = inputs
+        attn_metadata, logits_indices = self._prepare_inputs(scheduler_output)
+        num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        if (self.use_cuda_graph
+                and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
+            # Use piecewise CUDA graphs.
+            # Add padding to the batch size.
+            num_input_tokens = self._get_padded_batch_size(
+                num_scheduled_tokens)
+        else:
+            # Eager mode.
+            num_input_tokens = num_scheduled_tokens
 
         with set_forward_context(attn_metadata):
             hidden_states = self.model(
-                input_ids=input_ids,
-                positions=positions,
+                input_ids=self.input_ids[:num_input_tokens],
+                positions=self.positions[:num_input_tokens],
                 kv_caches=self.kv_caches,
-                attn_metadata=attn_metadata,
+                attn_metadata=None,
             )
+        hidden_states = hidden_states[:num_scheduled_tokens]
         hidden_states = hidden_states[logits_indices]
         logits = self.model.compute_logits(hidden_states, None)
 
@@ -351,7 +382,8 @@ class GPUModelRunner:
                 # Rewind the generator state as if the token was not sampled.
                 generator = self.input_batch.generators.get(i)
                 if generator is not None:
-                    generator.set_offset(generator.get_offset() - 1)
+                    # This relies on cuda-specific torch-internal impl details
+                    generator.set_offset(generator.get_offset() - 4)
 
         if sampler_output.logprob_token_ids is None:
             logprob_token_ids = None
@@ -371,36 +403,81 @@ class GPUModelRunner:
         return model_runner_output
 
     def load_model(self) -> None:
+        if self.use_cuda_graph:
+            # FIXME(woosuk): Currently, we do not use inductor to reduce the
+            # compilation time and any potential issues with the inductor.
+            os.environ["VLLM_CUSTOM_OPS"] = "all"
+            set_compilation_config(
+                CompilationConfig(
+                    use_cudagraph=True,
+                    non_cudagraph_ops=["vllm.unified_v1_flash_attention"],
+                    use_inductor=False,
+                ))
+
         logger.info("Starting to load model %s...", self.model_config.model)
         with DeviceMemoryProfiler() as m:  # noqa: SIM117
-            with patch("vllm.model_executor.layers.sampler.Sampler", Sampler):
-                self.model = get_model(vllm_config=self.vllm_config)
+            self.model = get_model(vllm_config=self.vllm_config)
 
         self.model_memory_usage = m.consumed_memory
         logger.info("Loading model weights took %.4f GB",
                     self.model_memory_usage / float(2**30))
 
     def _dummy_run(self, model: nn.Module, num_tokens: int) -> None:
-        input_ids = torch.zeros(num_tokens,
-                                dtype=torch.int32,
-                                device=self.device)
-        positions = torch.zeros(num_tokens,
-                                dtype=torch.long,
-                                device=self.device)
-        kv_caches = [None for _ in range(self.num_attn_layers)]
-        model(input_ids, positions, kv_caches, attn_metadata=None)
-        return
+        # use an empty tensor instead of `None`` to force Dynamo to pass
+        # it by reference, rather by specializing on the value `None`.
+        # the `dtype` argument does not matter, and we use `float32` as
+        # a placeholder (it has wide hardware support).
+        # it is important to create tensors inside the loop, rather than
+        # multiplying the list, to avoid Dynamo from treating them as
+        # tensor aliasing.
+        dummy_kv_caches = [
+            torch.tensor([], dtype=torch.float32, device=self.device)
+            for _ in range(self.num_attn_layers)
+        ]
+        with set_forward_context(None):  # noqa: SIM117
+            with set_compile_context(self.cudagraph_batch_sizes):
+                # Trigger compilation for general shape.
+                model(self.input_ids,
+                      self.positions,
+                      dummy_kv_caches,
+                      attn_metadata=None)
 
     @torch.inference_mode()
     def profile_run(self) -> None:
         self._dummy_run(self.model, self.max_num_tokens)
         torch.cuda.synchronize()
-        return
 
     @torch.inference_mode()
     def capture_model(self) -> None:
-        # TODO: Implement CUDA graph support.
-        return
+        if not self.use_cuda_graph:
+            logger.warning(
+                "Skipping CUDA graph capture. Please set "
+                "VLLM_TORCH_COMPILE_LEVEL=%d to use CUDA graphs.",
+                CompilationLevel.PIECEWISE)
+            return
+
+        start_time = time.perf_counter()
+        start_free_gpu_memory = torch.cuda.mem_get_info()[0]
+
+        with set_forward_context(None):
+            # Trigger CUDA graph capture for specific shapes.
+            # Capture the large shapes first so that the smaller shapes
+            # can reuse the memory pool allocated for the large shapes.
+            for num_tokens in reversed(self.cudagraph_batch_sizes):
+                self.model(
+                    self.input_ids[:num_tokens],
+                    self.positions[:num_tokens],
+                    kv_caches=self.kv_caches,
+                    attn_metadata=None,
+                )
+
+        end_time = time.perf_counter()
+        end_free_gpu_memory = torch.cuda.mem_get_info()[0]
+        elapsed_time = end_time - start_time
+        cuda_graph_size = start_free_gpu_memory - end_free_gpu_memory
+        # This usually takes 5~20 seconds.
+        logger.info("Graph capturing finished in %.0f secs, took %.2f GiB",
+                    elapsed_time, cuda_graph_size / (1 << 30))
 
     def initialize_kv_cache(self, num_blocks: int) -> None:
         assert len(self.kv_caches) == 0
@@ -411,6 +488,13 @@ class GPUModelRunner:
                 torch.zeros(kv_cache_shape,
                             dtype=self.kv_cache_dtype,
                             device=self.device))
+
+    def _get_padded_batch_size(self, batch_size: int) -> Optional[int]:
+        # TODO: Optimize this?
+        for size in self.cudagraph_batch_sizes:
+            if batch_size <= size:
+                return size
+        return None
 
 
 @dataclass

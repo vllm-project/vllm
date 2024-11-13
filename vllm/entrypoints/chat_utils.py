@@ -22,7 +22,6 @@ from openai.types.chat import (ChatCompletionMessageToolCallParam,
                                ChatCompletionToolMessageParam)
 # yapf: enable
 # pydantic needs the TypedDict from typing_extensions
-from pydantic import ConfigDict
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
 from typing_extensions import Required, TypeAlias, TypedDict
 
@@ -31,7 +30,9 @@ from vllm.logger import init_logger
 from vllm.multimodal import MultiModalDataDict
 from vllm.multimodal.utils import (async_get_and_parse_audio,
                                    async_get_and_parse_image,
-                                   get_and_parse_audio, get_and_parse_image)
+                                   async_get_and_parse_video,
+                                   get_and_parse_audio, get_and_parse_image,
+                                   get_and_parse_video)
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
 from vllm.utils import print_warning_once
 
@@ -52,17 +53,24 @@ class ChatCompletionContentPartAudioParam(TypedDict, total=False):
     """The type of the content part."""
 
 
-class CustomChatCompletionContentPartParam(TypedDict, total=False):
-    __pydantic_config__ = ConfigDict(extra="allow")  # type: ignore
+class VideoURL(TypedDict, total=False):
+    url: Required[str]
+    """
+    Either a URL of the video or a data URL with base64 encoded video data.
+    """
 
-    type: Required[str]
+
+class ChatCompletionContentPartVideoParam(TypedDict, total=False):
+    video_url: Required[VideoURL]
+
+    type: Required[Literal["video_url"]]
     """The type of the content part."""
 
 
 class CustomChatCompletionContentSimpleImageParam(TypedDict, total=False):
     """A simpler version of the param that only accepts a plain image_url.
     This is supported by OpenAI API, although it is not documented.
-    
+
     Example:
     {
         "image_url": "https://example.com/image.jpg"
@@ -73,7 +81,7 @@ class CustomChatCompletionContentSimpleImageParam(TypedDict, total=False):
 
 class CustomChatCompletionContentSimpleAudioParam(TypedDict, total=False):
     """A simpler version of the param that only accepts a plain audio_url.
-    
+
     Example:
     {
         "audio_url": "https://example.com/audio.mp3"
@@ -82,12 +90,23 @@ class CustomChatCompletionContentSimpleAudioParam(TypedDict, total=False):
     audio_url: Required[str]
 
 
+class CustomChatCompletionContentSimpleVideoParam(TypedDict, total=False):
+    """A simpler version of the param that only accepts a plain audio_url.
+
+    Example:
+    {
+        "video_url": "https://example.com/video.mp4"
+    }
+    """
+    video_url: Required[str]
+
+
 ChatCompletionContentPartParam: TypeAlias = Union[
     OpenAIChatCompletionContentPartParam, ChatCompletionContentPartAudioParam,
-    ChatCompletionContentPartRefusalParam,
-    CustomChatCompletionContentPartParam,
+    ChatCompletionContentPartVideoParam, ChatCompletionContentPartRefusalParam,
     CustomChatCompletionContentSimpleImageParam,
-    CustomChatCompletionContentSimpleAudioParam, str]
+    CustomChatCompletionContentSimpleAudioParam,
+    CustomChatCompletionContentSimpleVideoParam, str]
 
 
 class CustomChatCompletionMessageParam(TypedDict, total=False):
@@ -196,6 +215,8 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
                 return "<|vision_start|><|image_pad|><|vision_end|>"
             if model_type == "molmo":
                 return ""
+            if model_type == "idefics3":
+                return "<image>"
 
             raise TypeError(f"Unknown {modality} model type: {model_type}")
         elif modality == "audio":
@@ -208,6 +229,9 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         elif modality == "video":
             if model_type == "qwen2_vl":
                 return "<|vision_start|><|video_pad|><|vision_end|>"
+            if model_type.startswith("llava"):
+                return self._cached_token_str(self._tokenizer,
+                                              hf_config.video_token_index)
             raise TypeError(f"Unknown {modality} model type: {model_type}")
         else:
             raise TypeError(f"Unknown modality: {modality}")
@@ -298,6 +322,10 @@ class BaseMultiModalContentParser(ABC):
     def parse_audio(self, audio_url: str) -> None:
         raise NotImplementedError
 
+    @abstractmethod
+    def parse_video(self, video_url: str) -> None:
+        raise NotImplementedError
+
 
 class MultiModalContentParser(BaseMultiModalContentParser):
 
@@ -318,6 +346,12 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         audio = get_and_parse_audio(audio_url)
 
         placeholder = self._tracker.add("audio", audio)
+        self._add_placeholder(placeholder)
+
+    def parse_video(self, video_url: str) -> None:
+        video = get_and_parse_video(video_url)
+
+        placeholder = self._tracker.add("video", video)
         self._add_placeholder(placeholder)
 
 
@@ -341,6 +375,12 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         audio_coro = async_get_and_parse_audio(audio_url)
 
         placeholder = self._tracker.add("audio", audio_coro)
+        self._add_placeholder(placeholder)
+
+    def parse_video(self, video_url: str) -> None:
+        video = async_get_and_parse_video(video_url)
+
+        placeholder = self._tracker.add("video", video)
         self._add_placeholder(placeholder)
 
 
@@ -371,7 +411,7 @@ def load_chat_template(
     if chat_template is None:
         return None
     try:
-        with open(chat_template, "r") as f:
+        with open(chat_template) as f:
             resolved_chat_template = f.read()
     except OSError as e:
         if isinstance(chat_template, Path):
@@ -423,6 +463,7 @@ _TextParser = partial(cast, ChatCompletionContentPartTextParam)
 _ImageParser = partial(cast, ChatCompletionContentPartImageParam)
 _AudioParser = partial(cast, ChatCompletionContentPartAudioParam)
 _RefusalParser = partial(cast, ChatCompletionContentPartRefusalParam)
+_VideoParser = partial(cast, ChatCompletionContentPartVideoParam)
 MODEL_KEEP_MULTI_MODAL_CONTENT = {'mllama'}
 
 # Define a mapping from part types to their corresponding parsing functions.
@@ -435,6 +476,8 @@ MM_PARSER_MAP: Dict[str, Callable[[ChatCompletionContentPartParam], str]] = {
     lambda part: _AudioParser(part).get("audio_url", {}).get("url", ""),
     "refusal":
     lambda part: _RefusalParser(part).get("refusal", ""),
+    "video_url":
+    lambda part: _VideoParser(part).get("video_url", {}).get("url", ""),
 }
 
 
@@ -479,7 +522,10 @@ def _parse_chat_message_content_mm_part(
             audio_params = cast(CustomChatCompletionContentSimpleAudioParam,
                                 part)
             return "audio_url", audio_params.get("audio_url", "")
-
+        if part.get("video_url") is not None:
+            video_params = cast(CustomChatCompletionContentSimpleVideoParam,
+                                part)
+            return "video_url", video_params.get("video_url", "")
         # Raise an error if no 'type' or direct URL is found.
         raise ValueError("Missing 'type' field in multimodal part.")
 
@@ -489,7 +535,7 @@ def _parse_chat_message_content_mm_part(
 
 
 VALID_MESSAGE_CONTENT_MM_PART_TYPES = ("text", "refusal", "image_url",
-                                       "audio_url")
+                                       "audio_url", "video_url")
 
 
 def _parse_chat_message_content_parts(
@@ -549,7 +595,7 @@ def _parse_chat_message_content_part(
     # Handle structured dictionary parts
     part_type, content = _parse_chat_message_content_mm_part(part)
 
-    # if part_type is text/refusal/image_url/audio_url but
+    # if part_type is text/refusal/image_url/audio_url/video_url but
     # content is empty, log a warning and skip
     if part_type in VALID_MESSAGE_CONTENT_MM_PART_TYPES and not content:
         logger.warning(
@@ -567,6 +613,10 @@ def _parse_chat_message_content_part(
     if part_type == "audio_url":
         mm_parser.parse_audio(content)
         return {'type': 'audio'} if wrap_dicts else None
+
+    if part_type == "video_url":
+        mm_parser.parse_video(content)
+        return {'type': 'video'} if wrap_dicts else None
 
     raise NotImplementedError(f"Unknown part type: {part_type}")
 

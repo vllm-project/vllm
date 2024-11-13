@@ -1,4 +1,5 @@
 import copy
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, PrivateAttr
@@ -31,6 +32,11 @@ class CompilationConfig(BaseModel):
             It means the first several runs will be treated as warmup runs.
             Only after that, the execution will be recorded, and the recorded
             cudagraph will be used for subsequent runs.
+        - cudagraph_copy_inputs: whether to copy input tensors for
+            cudagraph. If the caller can guarantee that the same input buffers
+            are always used, it can set this to False. Otherwise, it should
+            set this to True, and the compiler will copy the input to an
+            internally managed buffer. Default is False.
     - Inductor compilation:
         - use_inductor: whether to use inductor compilation.
             - False: inductor compilation is not used. graph runs in eager.
@@ -50,6 +56,12 @@ class CompilationConfig(BaseModel):
             name because the config uses json format. If we pass the config
             from Python, functions can also be passed directly via Python object
             constructor, e.g. `CompilationConfig(inductor_passes={"a": func})`
+    - Custom inductor passes:
+        - dump_graph_stages: list of stages for which we want to dump the graph.
+            Each pass defines its own stages (before, after, maybe in-between).
+        - dump_graph_dir: directory to dump the graph. Default is .
+        - enable_fusion: whether to enable the custom fusion pass.
+            TODO better pass enabling system.
     
     Why we have different sizes for cudagraph and inductor:
     - cudagraph: a cudagraph captured for a specific size can only be used
@@ -71,6 +83,11 @@ class CompilationConfig(BaseModel):
     non_cudagraph_ops: List[str] = Field(default_factory=list)
     cudagraph_num_of_warmups: int = 0
     cudagraph_capture_sizes: Optional[List[int]] = None
+    cudagraph_copy_inputs: bool = False
+
+    dump_graph_stages: List[str] = Field(default_factory=list)
+    dump_graph_dir: Path = Field(default=Path("."))
+    enable_fusion: bool = True
 
     # not configurable, computed after init
     compile_sizes: List[int] = PrivateAttr
@@ -81,7 +98,7 @@ class CompilationConfig(BaseModel):
             if not isinstance(v, str):
                 assert callable(v), (
                     f"pass {k} should be a function or a qualified name")
-                self.inductor_passes[k] = v
+                self.inductor_compile_config[k] = v
                 continue
 
             # resolve function from qualified name
@@ -90,18 +107,6 @@ class CompilationConfig(BaseModel):
             func_name = names[-1]
             func = __import__(module).__dict__[func_name]
             self.inductor_compile_config[k] = func
-
-        from vllm.compilation.backends import fix_functionalization
-        from vllm.utils import combine_fx_passes
-        if "post_grad_custom_post_pass" in self.inductor_compile_config:
-            self.inductor_compile_config[
-                "post_grad_custom_post_pass"] = combine_fx_passes(
-                    fix_functionalization,
-                    self.inductor_compile_config["post_grad_custom_post_pass"],
-                )
-        else:
-            self.inductor_compile_config[
-                "post_grad_custom_post_pass"] = fix_functionalization
 
     def init_during_runtime(self):
         """To complete the initialization of config,

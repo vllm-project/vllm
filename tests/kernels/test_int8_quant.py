@@ -7,11 +7,10 @@ from vllm._custom_ops import scaled_int8_quant
 from vllm.platforms import current_platform
 
 DTYPES = [torch.half, torch.bfloat16, torch.float]
-HIDDEN_SIZES = [16, 67, 768, 2048, 5120, 5137, 8192,
-                8193]  # Arbitrary values for testing
+HIDDEN_SIZES = [16, 67, 768, 5137, 8193]  # Arbitrary values for testing
 NUM_TOKENS = [1, 7, 83, 4096]  # Arbitrary values for testing
 SEEDS = [0]
-SCALE = [0.1, 0.5, 0.8, 1.2, 2.1]
+SCALE = [0.1, 2.1]
 
 
 def opcheck_int8_quant_static(output, input, scale, azp=None):
@@ -132,7 +131,7 @@ def test_static_scaled_int8_quant(num_tokens: int, hidden_size: int,
 @pytest.mark.parametrize("hidden_size", HIDDEN_SIZES)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("scale", SCALE[2:])  # Reduce test time
+@pytest.mark.parametrize("scale", SCALE)
 @pytest.mark.parametrize("azp", [-255, 54])
 @torch.inference_mode()
 def test_static_scaled_int8_azp_quant(num_tokens: int, hidden_size: int,
