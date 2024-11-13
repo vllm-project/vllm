@@ -314,13 +314,10 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             slot_mapping.append(block_numbers * self.block_size +
                                 block_offsets)
 
-        input_tokens = np.concatenate(input_tokens)
-        input_positions = np.concatenate(input_positions)
-        slot_mapping = np.concatenate(slot_mapping)
+        input_tokens = torch.from_numpy(np.concatenate(input_tokens))
+        input_positions = torch.from_numpy(np.concatenate(input_positions))
+        slot_mapping = torch.from_numpy(np.concatenate(slot_mapping))
 
-        input_tokens = torch.from_numpy(input_tokens)
-        input_positions = torch.from_numpy(input_positions)
-        slot_mapping = torch.from_numpy(slot_mapping)
         num_prefills = len(prompt_lens)
         prompt_lens = torch.tensor(prompt_lens,
                                    dtype=torch.int32,
