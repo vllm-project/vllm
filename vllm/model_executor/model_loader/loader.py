@@ -4,6 +4,7 @@ import copy
 import dataclasses
 import fnmatch
 import glob
+import inspect
 import json
 import math
 import os
@@ -88,11 +89,24 @@ def device_loading_context(module: torch.nn.Module,
 logger = init_logger(__name__)
 
 
-def _initialize_model(vllm_config: VllmConfig) -> nn.Module:
+def _initialize_model(vllm_config: VllmConfig, prefix: str = "") -> nn.Module:
     """Initialize a model with the given configurations."""
     model_config = vllm_config.model_config
     model_class, _ = get_model_architecture(model_config)
-    return model_class(vllm_config=vllm_config)
+    signatures = inspect.signature(model_class.__init__)
+    # collect all kw-only parameters
+    kw_only_params = [
+        param.name for param in signatures.parameters.values()
+        if param.kind == inspect.Parameter.KEYWORD_ONLY
+    ]
+    assert "vllm_config" in kw_only_params and "prefix" in kw_only_params, \
+    ("vLLM model class must accept `vllm_config` and `prefix` as kw-only "
+    "arguments. Possibly you have an old-style model class registered from "
+    "out of tree and it is used for new vLLM version. "
+    "Please check https://docs.vllm.ai/en/latest/design/class_hierarchy.html "
+    "for the design and update the model class accordingly.")
+    obj = model_class(vllm_config=vllm_config, prefix=prefix)
+    return obj
 
 
 class BaseModelLoader(ABC):
