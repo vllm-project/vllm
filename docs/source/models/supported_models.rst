@@ -450,7 +450,7 @@ Text Generation
     - Idefics3
     - T + I
     - :code:`HuggingFaceM4/Idefics3-8B-Llama3` etc.
-    - 
+    - ✅︎
     - 
   * - :code:`InternVLChatModel`
     - InternVL2
