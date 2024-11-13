@@ -74,7 +74,8 @@ class Qwen2ForSequenceClassification(nn.Module):
         self.score = RowParallelLinear(config.hidden_size,
                                        config.num_labels,
                                        quant_config=quant_config,
-                                       input_is_parallel=False)
+                                       input_is_parallel=False,
+                                       prefix=maybe_prefix(prefix, "score"))
         self._pooler = Pooler.from_config_with_defaults(
             pooler_config,
             pooling_type=PoolingType.LAST,
