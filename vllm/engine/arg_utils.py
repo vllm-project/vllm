@@ -121,6 +121,8 @@ class EngineArgs:
     gpu_memory_utilization: float = 0.90
     max_num_batched_tokens: Optional[int] = None
     max_num_partial_prefills: Optional[int] = 1
+    max_long_partial_prefills: Optional[int] = 1
+    long_prefill_threshold: Optional[float] = 0.04
     max_num_seqs: int = 256
     max_logprobs: int = 20  # Default value for OpenAI Chat Completions API
     disable_log_stats: bool = False
@@ -475,6 +477,21 @@ class EngineArgs:
             help=
             "For chunked prefill, the max number of concurrent partial prefills."
             "Defaults to 1",
+        )
+        parser.add_argument(
+            "--max-long-partial-prefills",
+            type=int,
+            default=EngineArgs.max_long_partial_prefills,
+            help="For chunked prefill, the max number of long concurrent partial prefills. \
+            The length is determined by the long_prefill_threshold argument below"
+            "Defaults to 1",
+        )
+        parser.add_argument(
+            "--long-prefill-threshold",
+            type=float,
+            default=EngineArgs.long_prefill_threshold,
+            help="For chunked prefill, a request is considered long if the prompt is longer than \
+                the max_model_length * long_prefill_threshold. Defaults to 0.04%",
         )
         parser.add_argument('--max-num-seqs',
                             type=int,
@@ -1115,7 +1132,9 @@ class EngineArgs:
             send_delta_data=(envs.VLLM_USE_RAY_SPMD_WORKER
                              and parallel_config.use_ray),
             policy=self.scheduling_policy,
-            max_num_partial_prefills=self.max_num_partial_prefills)
+            max_num_partial_prefills=self.max_num_partial_prefills,
+            max_long_partial_prefills=self.max_long_partial_prefills,
+            long_prefill_threshold=self.long_prefill_threshold)
         lora_config = LoRAConfig(
             bias_enabled=self.enable_lora_bias,
             max_lora_rank=self.max_lora_rank,
