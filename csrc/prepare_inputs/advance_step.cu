@@ -270,9 +270,8 @@ void advance_step_flashinfer(
               num_queries, " block_tables.stride(0) = ", block_tables.stride(0),
               " blocks = ", blocks, " max_threads = ", threads);
   if (logging) {
-    printf(
-        "launching flashinfer kernels with %d blocks and %d num indices = %d\n",
-        blocks, threads, paged_kv_indptr[num_queries]);
+    printf("launching kernels with %d blocks and %d threads\n", blocks,
+           threads);
   }
   advance_step_flashinfer_kernel<<<blocks, threads, 0, stream>>>(
       threads, num_seqs, num_queries, block_size,
