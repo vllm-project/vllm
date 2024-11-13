@@ -75,6 +75,7 @@ class Qwen2ForSequenceClassification(nn.Module):
                                        config.num_labels,
                                        quant_config=quant_config,
                                        input_is_parallel=False,
+                                       bias=False,
                                        prefix=maybe_prefix(prefix, "score"))
         self._pooler = Pooler.from_config_with_defaults(
             pooler_config,
