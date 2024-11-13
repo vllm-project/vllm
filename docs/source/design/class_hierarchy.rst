@@ -28,13 +28,13 @@ There are several important design choices behind this class hierarchy:
 
 .. note::
 
-    To support this change, all of the vLLM models' signature has been changed to:
+    To support this change, all vLLM models' signatures have been updated to:
 
     .. code-block:: python
 
         def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
     
-    To avoid accidentally passing the wrong arguments, we make the constructor keyword-only. This way, the constructor will raise an error if we pass the old configs. vLLM developers already take care of the change for all the models inside vLLM. For out-of-tree registered models, their developers need to make the change manually, possibly by adding shim code to adapt the old constructor signature to the new one, e.g.,
+    To avoid accidentally passing incorrect arguments, the constructor is now keyword-only. This ensures that the constructor will raise an error if old configurations are passed. vLLM developers have already made this change for all models within vLLM. For out-of-tree registered models, developers need to update their models, for example by adding shim code to adapt the old constructor signature to the new one:
 
     .. code-block:: python
 
@@ -63,7 +63,7 @@ There are several important design choices behind this class hierarchy:
         else:
             MyModel = MyOldModel
 
-    This way, the model can work for both old and new versions of vLLM.
+    This way, the model can work with both old and new versions of vLLM.
 
 3. **Sharding and Quantization at Initialization**: Certain features require changing the model weights. For example, tensor parallelism needs to shard the model weights, and quantization needs to quantize the model weights. There are two possible ways to implement this feature. One way is to change the model weights after the model is initialized. The other way is to change the model weights during the model initialization. vLLM chooses the latter. The first approach is not scalable to large models. Suppose we want to run a 405B model (with roughly 810GB weights) with 16 H100 80GB GPUs. Ideally, every GPU should only load 50GB weights. If we change the model weights after the model is initialized, we need to load the full 810GB weights to every GPU and then shard the weights, leading to a huge memory overhead. Instead, if we shard the weights during the model initialization, every layer will only create a shard of the weights it needs, leading to a much smaller memory overhead. The same idea applies to quantization. Note that we also add an additional argument ``prefix`` to the model's constructor so that the model can initialize itself differently based on the prefix. This is useful for non-uniform quantization, where different parts of the model are quantized differently. The ``prefix`` is usually an empty string for the top-level model and a string like ``"vision"`` or ``"language"`` for the sub-models. In general, it matches the name of the module's state dict in the checkpoint file.
 
