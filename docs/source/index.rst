@@ -156,6 +156,7 @@ Documentation
    :maxdepth: 2
    :caption: Design
 
+   design/arch_overview
    design/class_hierarchy
    design/huggingface_integration
    design/plugin_system
