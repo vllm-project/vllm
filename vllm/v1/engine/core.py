@@ -317,7 +317,7 @@ class EngineCoreProc(EngineCore):
 
         # Msgpack serialization decoding.
         decoder_add_req = PickleEncoder()
-        decoder_abort_req = msgpack.Decoder(list[str])
+        decoder_abort_req = PickleEncoder()
 
         with self.make_socket(input_path, zmq.constants.PULL) as socket:
             while True:
