@@ -297,19 +297,27 @@ def scheduled_seq_group_builder():
 
 @dataclass
 class PartialPrefillMetadata:
-    """Holds information about the partial prefills that are
-    currently running. For chunked prefill, we allow a certain number of seqs
-    to be partially prefilled. Having multiple partial prefills in flight
-    allows us to minimize TTFT and avoid decode starvation in cases
-    where a single sequence group with a very large prompt blocks
-    the queue for too many iterations.
+    """Holds information about the partial prefills that are currently running
+    during a single iteration of the Scheduler.
+
+    When chunked prefill is enabled, we allow a certain number of seqs to be
+    partially prefilled during each iteration. Having multiple partial prefills
+    in flight allows us to minimize TTFT and avoid decode starvation in cases
+    where a single sequence group with a very large prompt blocks the queue for
+    too many iterations.
 
     The number of long prefill requests is limited so that smaller
     requests may jump the queue in front of them and get to the decode
     phase faster.
     """
+
+    # A minimum bound on the total number of prefills running during this
+    # scheduling step
     partial_prefills: int
+
+    # The number of long prefill requests currently running
     long_partial_prefills: int
+
     scheduler_config: SchedulerConfig
 
     def cannot_schedule(self, seq_group: SequenceGroup):
@@ -324,6 +332,7 @@ class PartialPrefillMetadata:
                     and self.scheduler_config.max_num_partial_prefills > 1
 
     def increment_partial_prefills(self, seq_group: SequenceGroup):
+        # When a new prefill is scheduled, we need to know if it is a
         if (seq_group.first_seq.get_num_new_tokens() >
                 self.scheduler_config.long_prefill_token_threshold):
             self.long_partial_prefills += 1
@@ -332,7 +341,12 @@ class PartialPrefillMetadata:
     def from_queues(
             cls, running: Deque[SequenceGroup], waiting: Deque[SequenceGroup],
             scheduler_config: SchedulerConfig) -> "PartialPrefillMetadata":
-        """Create a PartialPrefillMetadata object from the running queue."""
+        """Create a PartialPrefillMetadata object from the current state of
+        the scheduler's queues.
+
+        This accounts for the currently running prefill requests, and peeks into
+        the waiting queue to see if there are more prefills to potentially be
+        scheduled during this iteration."""
         partial_prefills = 0
         long_partial_prefills = 0
 
@@ -348,14 +362,15 @@ class PartialPrefillMetadata:
                     long_partial_prefills += 1
 
         for sg in waiting:
-            # Don't bother looping through the rest of the queue
-            # if we know there are already at
+            # Don't bother looping through the rest of the queue if we know
+            # there are already at
             # least max_partial_prefills requests to fill
             if partial_prefills + waiting_partial_prefills \
                 >= scheduler_config.max_num_partial_prefills:
                 break
 
-            # Disallow multiple long requests
+            # Don't count long requests from the waiting queue if we aren't
+            # going to schedule them anyway
             if sg.first_seq.get_num_new_tokens(
             ) > scheduler_config.long_prefill_token_threshold:
                 if long_partial_prefills + waiting_long_prefills \
