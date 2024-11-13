@@ -4,7 +4,6 @@ from typing import Callable, Dict, List, Type
 import pytest
 import torch
 from PIL import Image
-from qwen_vl_utils import process_vision_info
 from transformers import BatchEncoding, Qwen2VLForConditionalGeneration
 
 from ....conftest import IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner
@@ -40,7 +39,7 @@ def get_messages(image: Image.Image, text: str, embed_text: bool):
             "content": [
                 {
                     "type": "image",
-                    "image": Image.new("RGB", (28, 28)),
+                    "image": Image.new("RGB", (56, 56)),
                     "resized_height": 1,
                     "resized_width": 1
                 },  # need a dummy image here for an easier process.
@@ -132,10 +131,9 @@ def _run_test(
             messages = get_messages(image, text, embed_text)
             prompt = apply_chat_template_and_add_eos(
                 messages, hf_model.processor.apply_chat_template)
-            image_input, _ = process_vision_info(messages)
             inputs = hf_model.get_inputs(
                 prompts=[[prompt]],
-                images=[image_input],
+                images=[[image]],
             )
             with torch.no_grad():
                 outputs = hf_model.model(
