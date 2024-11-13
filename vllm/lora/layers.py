@@ -1073,6 +1073,10 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
     @property
     def should_modify_greedy_probs_inplace(self):
         return self.base_layer.should_modify_greedy_probs_inplace
+    
+    @property
+    def thread_pool(self):
+        return self.base_layer.thread_pool
 
     def create_lora_weights(
         self,
