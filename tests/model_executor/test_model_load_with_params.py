@@ -55,6 +55,8 @@ def test_model_loading_with_params(vllm_runner):
         assert output
 
 
+@pytest.mark.skipif(current_platform.is_rocm(),
+                    reason="Xformers backend is not supported on ROCm.")
 def test_roberta_model_loading_with_params(vllm_runner):
     """
     Test parameter weight loading with tp>1.
