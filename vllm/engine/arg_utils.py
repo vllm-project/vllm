@@ -626,8 +626,8 @@ class EngineArgs:
             type=int,
             default=EngineArgs.max_cpu_loras,
             help=('Maximum number of LoRAs to store in CPU memory. '
-                  'Must be >= than max_num_seqs. '
-                  'Defaults to max_num_seqs.'))
+                  'Must be >= than max_loras. '
+                  'Defaults to max_loras.'))
         parser.add_argument(
             '--fully-sharded-loras',
             action='store_true',
