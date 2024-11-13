@@ -2,7 +2,7 @@
 -r requirements-common.txt
 
 ray >= 2.9
-cmake>=3.26,<=3.30
+cmake>=3.26
 ninja
 packaging
 setuptools-scm>=8
