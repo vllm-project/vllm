@@ -1,7 +1,7 @@
 import enum
-from typing import TYPE_CHECKING, List, Optional, Union
+from typing import List, Optional, Union
 
-from vllm.inputs.data import DecoderOnlyInputs
+from vllm.inputs import DecoderOnlyInputs, token_inputs
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MultiModalKwargs
 from vllm.sampling_params import SamplingParams
@@ -9,16 +9,13 @@ from vllm.sequence import RequestMetrics
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.utils import ConstantList
 
-if TYPE_CHECKING:
-    from vllm.inputs import DecoderOnlyInputs
-
 
 class Request:
 
     def __init__(
         self,
         request_id: str,
-        inputs: "DecoderOnlyInputs",
+        inputs: DecoderOnlyInputs,
         sampling_params: SamplingParams,
         eos_token_id: Optional[int],
         arrival_time: float,
@@ -64,8 +61,7 @@ class Request:
     def from_engine_core_request(cls, request: EngineCoreRequest) -> "Request":
         return cls(
             request_id=request.request_id,
-            inputs=DecoderOnlyInputs(
-                type="token",
+            inputs=token_inputs(
                 prompt_token_ids=request.prompt_token_ids,
                 prompt=request.prompt,
                 multi_modal_data=request.mm_data,
