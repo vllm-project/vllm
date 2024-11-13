@@ -1,13 +1,13 @@
 import operator
-from typing import Dict, Iterable, List, Optional, Tuple, Union
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
 import torch
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
 
-from vllm.compilation.inductor_pass import InductorPass, is_func
+from vllm.compilation.inductor_pass import VllmInductorPass, is_func
 
 
-class FixFunctionalizationPass(InductorPass):
+class FixFunctionalizationPass(VllmInductorPass):
     """
     This pass defunctionalizes certain nodes to avoid redundant tensor copies.
     After this pass, DCE (dead-code elimination) should never be run,
@@ -15,6 +15,9 @@ class FixFunctionalizationPass(InductorPass):
 
     To add new nodes to defunctionalize, add to the if-elif chain in __call__.
     """
+
+    def uuid(self) -> Any:
+        return self.get_hash_for_files((__file__, ))
 
     def __call__(self, graph: torch.fx.Graph):
         self.dump_graph(graph, "before_fix_functionalization")

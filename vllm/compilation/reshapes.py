@@ -1,16 +1,16 @@
-from typing import Union
+from typing import Any, Union
 
 import torch.fx
 from torch import SymInt
 
 from vllm.compilation.fusion import is_func
-from vllm.compilation.inductor_pass import InductorPass
+from vllm.compilation.inductor_pass import VllmInductorPass
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
 
-class RedundantReshapesPass(InductorPass):
+class RedundantReshapesPass(VllmInductorPass):
     """
     This is an inductor pass that removes redundant reshape operations.
     It is required for RMSNorm-quant fusion to work properly.
@@ -29,6 +29,9 @@ class RedundantReshapesPass(InductorPass):
     at = auto_functionalized(static_scaled_fp8_quant, input = getitem_1, ...)
     out: "f8e4m3fn[s0, 4096]" = at[1]
     """
+
+    def uuid(self) -> Any:
+        return self.get_hash_for_files((__file__, ))
 
     def __call__(self, graph: torch.fx.Graph):
         self.dump_graph(graph, "before_reshapes")

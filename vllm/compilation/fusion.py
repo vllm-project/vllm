@@ -1,12 +1,12 @@
 import operator
-from typing import Iterable, List, Optional
+from typing import Any, Iterable, List, Optional
 
 import torch
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor.pattern_matcher import (Match, PatternMatcherPass,
                                              fwd_only, register_replacement)
 
-from vllm.compilation.inductor_pass import InductorPass, is_func
+from vllm.compilation.inductor_pass import VllmInductorPass, is_func
 from vllm.config import CompilationConfig
 from vllm.logger import init_logger
 
@@ -125,7 +125,7 @@ def find_getitem(node: torch.fx.Node, idx: int) -> torch.fx.Node:
     return ret
 
 
-class FusionPass(InductorPass):
+class FusionPass(VllmInductorPass):
     """
     This pass fuses a pre-defined set of custom ops into fused ops.
     It uses the torch pattern matcher to find the patterns and replace them.
@@ -151,6 +151,9 @@ class FusionPass(InductorPass):
         else:
             cls._instance.config = config
         return cls._instance
+
+    def uuid(self) -> Any:
+        return self.get_hash_for_files((__file__, ))
 
     def __init__(self, config: CompilationConfig.PassConfig):
         assert self.__class__._instance is None, \

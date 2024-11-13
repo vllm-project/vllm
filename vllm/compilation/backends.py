@@ -6,15 +6,17 @@ from unittest.mock import patch
 
 import torch
 import torch.fx as fx
+from torch._inductor.codecache import BypassFxGraphCache
 
 import vllm.envs as envs
 from vllm.config import CompilationConfig
 from vllm.logger import init_logger
-from vllm.utils import print_warning_once, weak_ref_tensors
+from vllm.utils import weak_ref_tensors
 
 from .counter import compilation_counter
 from .functionalization import FixFunctionalizationPass
 from .fusion import FusionPass
+from .inductor_pass import InductorPass, InductorPassType
 from .reshapes import RedundantReshapesPass
 
 logger = init_logger(__name__)
@@ -174,7 +176,9 @@ class PostGradPassManager:
     """
     The pass manager for post-grad passes.
     It handles configuration, adding custom passes, and running passes.
-    It also supports pickling, but custom passes are ignored when pickling.
+    It also supports pickling, which is used by the Inductor code cache.
+    TODO in torch==2.6, use CustomGraphPass
+    (torch._inductor.custom_graph_pass.CustomGraphPass)
 
     The order of the post-grad post-passes is:
     1. passes (constructor parameter)
@@ -185,8 +189,7 @@ class PostGradPassManager:
     """
 
     def __init__(self):
-        self.passes: List[Callable] = []
-        self.has_custom_passed: bool = False
+        self.passes: List[InductorPassType] = []
 
     def __call__(self, graph: fx.Graph):
         for pass_ in self.passes:
@@ -205,9 +208,8 @@ class PostGradPassManager:
 
         self.fix_functionalization = FixFunctionalizationPass(pass_config)
 
-    def add(self, pass_: Callable[[fx.Graph], None]):
+    def add(self, pass_: InductorPassType):
         self.passes.append(pass_)
-        self.has_custom_passes = True
 
     def __getstate__(self):
         """
@@ -215,28 +217,27 @@ class PostGradPassManager:
         Pickling occurs because the pass manager is set as the value of
         `config["post_grad_custom_post_pass"]` in the Inductor config.
 
-        Currently we just ignore the custom passes when pickling,
-        but that might mean false hits in the inductor code cache.
-        TODO encode the custom passes.
+        TODO in torch==2.6, use the `uuid` method in CustomGraphPass instead.
         """
-        state = {
-            "pass_config": self.pass_config,
-            "has_custom_passes": self.has_custom_passes,
-        }
-        if self.has_custom_passes:
-            print_warning_once("Custom passes are currently ignored when "
-                               "pickling. This might lead to false hits in "
-                               "the inductor code cache.")
+        state = {"pass_config": self.pass_config}
+        passes_state = []
+        for pass_ in self.passes:
+            if isinstance(pass_, InductorPass):
+                passes_state.append(pass_.uuid())
+            else:
+                logger.warning("Custom pass does not inherit from "
+                               "InductorPass. Bypassing Inductor code cache.")
+                raise BypassFxGraphCache(
+                    "Custom pass should inherit InductorPass")
+        passes_state.append(self.fix_functionalization.uuid())
         return state
 
     def __setstate__(self, state):
         """
-        Do not allow unpickling of the pass manager if it has custom passes.
+        Do not allow unpickling of the pass manager.
+        If this is needed in the future, it should properly pickle the passes.
         """
-        if state["has_custom_passes"]:
-            raise ValueError("Custom passes cannot be un-pickled")
-        self.passes = []
-        self.configure(state["pass_config"])
+        raise ValueError("Cannot unpickle PostGradPassManager")
 
 
 class VllmBackend:

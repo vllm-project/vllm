@@ -1,6 +1,11 @@
+import hashlib
 from abc import ABC, abstractmethod
+from functools import lru_cache
+from typing import Any, Callable, Tuple, Union
 
 import torch
+from torch import fx
+from typing_extensions import TypeAlias
 
 from vllm.config import CompilationConfig
 # yapf: disable
@@ -18,11 +23,61 @@ def is_func(node: torch.fx.Node, target) -> bool:
     return node.op == "call_function" and node.target == target
 
 
+@lru_cache(1)
+def get_hash_for_files(paths: Tuple[str, ...], extra: str = "") -> bytes:
+    """
+    Helper to compute a unique string by hashing the contents of a list of files.
+    
+    Taken from torch==2.6 (torch._inductor.custom_graph_pass.get_hash_for_files)
+    """  # noqa
+    hasher = hashlib.sha256()
+    hasher.update(extra.encode("utf-8"))
+    for path in paths:
+        with open(path, "rb") as f:
+            hasher.update(path.encode("utf-8"))
+            hasher.update(f.read())
+    return hasher.digest()
+
+
 class InductorPass(ABC):
+    """
+    General custom inductor pass interface.
+    TODO use torch._inductor.custom_graph_pass.CustomGraphPass in torch==2.6
+    """
 
     @abstractmethod
     def __call__(self, graph: torch.fx.Graph):
+        """
+        Execute the pass on the given graph.
+        """
         raise NotImplementedError
+
+    @abstractmethod
+    def uuid(self) -> Any:
+        """
+        Provide a unique identifier for the pass, used in Inductor code cache.
+        This should depend on the pass implementation, so that changes to the
+        pass result in recompilation. Use `get_hash_for_files` to hash files.
+        """
+        raise NotImplementedError
+
+    @classmethod
+    def get_hash_for_files(cls,
+                           files: Tuple[str, ...],
+                           extra: str = "") -> bytes:
+        """
+        :return: Get hash for provided files and InductorPass file.
+        """
+        return get_hash_for_files((*files, __file__), extra)
+
+
+InductorPassType: TypeAlias = Union[InductorPass, Callable[[fx.Graph], None]]
+
+
+class VllmInductorPass(InductorPass):
+    """
+    An inductor pass with access to vLLM PassConfig.
+    """
 
     def __init__(self, config: CompilationConfig.PassConfig):
         self.config = config
