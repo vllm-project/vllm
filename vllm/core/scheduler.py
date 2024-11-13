@@ -323,17 +323,41 @@ def scheduled_seq_group_builder():
 
 @dataclass
 class PartialPrefillMetadata:
-    """Holds information about the partial prefills that are 
-    currently running."""
+    """Holds information about the partial prefills that are
+    currently running. For chunked prefill, we allow a certain number of seqs
+    to be partially prefilled. Having multiple partial prefills in flight
+    allows us to minimize TTFT and avoid decode starvation in cases
+    where a single sequence group with a very large prompt blocks
+    the queue for too many iterations.
+
+    The number of long prefill requests is limited so that smaller
+    requests may jump the queue in front of them and get to the decode
+    phase faster.
+    """
     partial_prefills: int
     long_partial_prefills: int
+    scheduler_config: SchedulerConfig
 
-    # def can_schedule():
+    def cannot_schedule(self, seq_group: SequenceGroup):
+        """When concurrent partial prefills are enabled,
+        we limit the number of long requests and only accept
+        shorter requests from the queue while running them
+        concurrently"""
+        return seq_group.first_seq.get_num_new_tokens() > \
+                    self.scheduler_config.long_prefill_token_threshold \
+                    and self.long_partial_prefills >= \
+                    self.scheduler_config.max_long_partial_prefills \
+                    and self.scheduler_config.max_num_partial_prefills > 1
+
+    def increment_partial_prefills(self, seq_group: SequenceGroup):
+        if (seq_group.first_seq.get_num_new_tokens() >
+                self.scheduler_config.long_prefill_token_threshold):
+            self.long_partial_prefills += 1
+
     @classmethod
-    def from_queues(cls, running: Deque[SequenceGroup],
-                    waiting: Deque[SequenceGroup], long_prefill_threshold: int,
-                    max_partial_prefills: int,
-                    max_long_prefills: int) -> "PartialPrefillMetadata":
+    def from_queues(
+            cls, running: Deque[SequenceGroup], waiting: Deque[SequenceGroup],
+            scheduler_config: SchedulerConfig) -> "PartialPrefillMetadata":
         """Create a PartialPrefillMetadata object from the running queue."""
         partial_prefills = 0
         long_partial_prefills = 0
@@ -345,7 +369,8 @@ class PartialPrefillMetadata:
             # TODO: Check if this stage is correctly updated before scheduling
             if sg.first_seq.data.stage == SequenceStage.PREFILL:
                 partial_prefills += 1
-            if sg.first_seq.get_num_new_tokens() > long_prefill_threshold:
+            if sg.first_seq.get_num_new_tokens(
+            ) > scheduler_config.long_prefill_token_threshold:
                 long_partial_prefills += 1
 
         for sg in waiting:
@@ -353,19 +378,22 @@ class PartialPrefillMetadata:
             # if we know there are already at
             # least max_partial_prefills requests to fill
             if partial_prefills + waiting_partial_prefills \
-                >= max_partial_prefills:
+                >= scheduler_config.max_num_partial_prefills:
                 break
 
             # Disallow multiple long requests
-            if sg.first_seq.get_num_new_tokens() > long_prefill_threshold:
+            if sg.first_seq.get_num_new_tokens(
+            ) > scheduler_config.long_prefill_token_threshold:
                 if long_partial_prefills + waiting_long_prefills \
-                    >= max_long_prefills:
+                    >= scheduler_config.max_long_partial_prefills:
                     continue
                 waiting_long_prefills += 1
             waiting_partial_prefills += 1
 
-        return PartialPrefillMetadata(
-            partial_prefills + waiting_partial_prefills, long_partial_prefills)
+        return PartialPrefillMetadata(partial_prefills +
+                                      waiting_partial_prefills,
+                                      long_partial_prefills,
+                                      scheduler_config=scheduler_config)
 
 
 class Scheduler:
@@ -468,32 +496,15 @@ class Scheduler:
         # for processing and deallocation by the free_finished_seq_groups()
         self._async_stopped: List[SequenceGroup] = []
 
-        # For chunked prefill, we allow a certain number of seqs
-        # to be partially prefilled.
-        # Having multiple partial prefills in flight allows us to minimize TTFT
-        # and avoid decode starvation in cases where a single sequence group
-        # with a very large prompt blocks the queue for too many iterations.
-        self.max_num_partial_prefills = \
-            scheduler_config.max_num_partial_prefills
-        self.prefill_slots_running = 0
-        self.long_prefill_requests = 0
-        # The number of long prefill requests is limited so that smaller
-        # requests may jump the queue in front of them and get to the decode
-        # phase faster.
-        self.long_prefill_threshold = int(
-            scheduler_config.max_model_len *
-            scheduler_config.long_prefill_threshold)
-        self.max_long_requests = scheduler_config.max_long_partial_prefills
-
         # List with the chunk sizes to hand out to each sequence depending
         # on how many partial prefills are running. This is slightly faster than
         # running an integer division every time a prefill is scheduled.
         # This splits the budget evenly among all prefills.
         self.partial_prefill_budget_lookup_list = [0] * (
-            self.max_num_partial_prefills + 1)
+            self.scheduler_config.max_num_partial_prefills + 1)
         self.partial_prefill_budget_lookup_list[
             0] = scheduler_config.max_num_batched_tokens
-        for i in range(1, self.max_num_partial_prefills + 1):
+        for i in range(1, self.scheduler_config.max_num_partial_prefills + 1):
             self.partial_prefill_budget_lookup_list[i] = \
                 scheduler_config.max_num_batched_tokens // i
 
@@ -1006,21 +1017,14 @@ class Scheduler:
         while self._passed_delay(time.time()) and waiting_queue:
             seq_group = waiting_queue[0]
 
-            waiting_seqs = seq_group.get_seqs(status=SequenceStatus.WAITING)
+            waiting_seqs = \
+                seq_group.get_seqs(status=SequenceStatus.WAITING)
             assert len(waiting_seqs) == 1, (
                 "Waiting sequence group should have only one prompt "
                 "sequence.")
 
-            if (partial_prefill_metadata is not None
-                    and seq_group.first_seq.get_num_new_tokens() >
-                    self.long_prefill_threshold
-                    and partial_prefill_metadata.long_partial_prefills >=
-                    self.max_long_requests
-                    and self.max_num_partial_prefills > 1):
-                # When concurrent partial prefills are enabled,
-                # we limit the number of long requests and only accept
-                # shorter requests from the queue while running them
-                # concurrently
+            if partial_prefill_metadata is not None and \
+                partial_prefill_metadata.cannot_schedule(seq_group):
                 leftover_waiting_sequences.appendleft(seq_group)
                 waiting_queue.popleft()
                 continue
@@ -1094,10 +1098,8 @@ class Scheduler:
             waiting_queue.popleft()
             self._allocate_and_set_running(seq_group)
 
-            if partial_prefill_metadata is not None and \
-                seq_group.first_seq.get_num_new_tokens(
-            ) > self.long_prefill_threshold:
-                partial_prefill_metadata.long_partial_prefills += 1
+            if partial_prefill_metadata is not None:
+                partial_prefill_metadata.increment_partial_prefills(seq_group)
 
             if enable_chunking and self.scheduler_config.is_multi_step:
                 blocks_to_copy: List[Tuple[int, int]] = []
@@ -1264,16 +1266,7 @@ class Scheduler:
         partial_prefill_metadata = PartialPrefillMetadata.from_queues(
             running=self.running,
             waiting=self.waiting,
-            long_prefill_threshold=self.long_prefill_threshold,
-            max_partial_prefills=self.max_num_partial_prefills,
-            max_long_prefills=self.max_long_requests)
-
-        # Before any scheduling, look at the requests in the waiting queue.
-        # We may decide to budget fewer tokens for running prefills if there are
-        # requests in the queue we want to prefill concurrently
-        # if self.prefill_slots_running < self.max_num_partial_prefills and len(
-        #         self.waiting) > 0:
-        #     self._count_prefills_in_waiting_queue()
+            scheduler_config=self.scheduler_config)
 
         # Decoding should be always scheduled first by fcfs.
         running_scheduled = self._schedule_running(budget,
@@ -1339,41 +1332,6 @@ class Scheduler:
             preempted=(len(running_scheduled.preempted) +
                        len(running_scheduled.swapped_out)),
         )
-
-    def _is_long_seq_group(self, seq_group: SequenceGroup) -> bool:
-        """Simple heuristic to check if a sequence group needs a lot of prefill
-        work."""
-        return seq_group.seqs[0].get_num_new_tokens(
-        ) >= self.long_prefill_threshold
-
-    def _will_still_be_prefilling(self,
-                                  seq_group: ScheduledSequenceGroup) -> bool:
-        """Check if a sequence will be mid-prefill after this iteration.
-        We need to know how many partial prefills will be running in order to
-        properly budget the next iteration."""
-        return seq_group.token_chunk_size != seq_group.seq_group.seqs[
-            0].get_num_new_tokens()
-
-    def _count_prefills_in_waiting_queue(self):
-        """Peek into the waiting queue to see how many requests we may be able
-        to start prefilling during this scheduling iteration. This allows us to
-        budget fewer tokens for currently running prefills if we know that more
-        requests from the queue will fit.
-        """
-        queued_long_requests = 0
-        for seq_group in self.waiting:
-            # Don't fill more slots than we have
-            if self.prefill_slots_running >= self.max_num_partial_prefills:
-                break
-
-            # Disallow multiple long requests
-            if self._is_long_seq_group(seq_group):
-                if self.long_prefill_requests + queued_long_requests \
-                    >= self.max_long_requests:
-                    continue
-                queued_long_requests += 1
-
-            self.prefill_slots_running += 1
 
     def _schedule(self) -> SchedulerOutputs:
         """Schedule queued requests."""
