@@ -735,7 +735,7 @@ def test_resolve_content_format_hf_defined(model, expected_format):
     chat_template = tokenizer.chat_template
     assert isinstance(chat_template, str)
 
-    print("[ORIGINAL]")
+    print("[TEXT]")
     print(chat_template)
     print("[AST]")
     print(_try_extract_ast(chat_template))
@@ -785,7 +785,7 @@ def test_resolve_content_format_examples(template_path, expected_format):
     chat_template = load_chat_template(EXAMPLES_DIR / template_path)
     assert isinstance(chat_template, str)
 
-    print("[ORIGINAL]")
+    print("[TEXT]")
     print(chat_template)
     print("[AST]")
     print(_try_extract_ast(chat_template))

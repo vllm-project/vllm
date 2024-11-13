@@ -187,20 +187,20 @@ def _is_var_or_elems_access(
     varname: str,
     key: Optional[str] = None,
 ) -> bool:
-    if isinstance(node, jinja2.nodes.Getitem):
-        return (node.ctx == "load"
-                and _is_var_or_elems_access(node.node, varname, key)
-                and isinstance(node.arg, jinja2.nodes.Slice))
     if isinstance(node, jinja2.nodes.Filter):
         return (node.node is not None
                 and _is_var_or_elems_access(node.node, varname, key))
     if isinstance(node, jinja2.nodes.Test):
         return _is_var_or_elems_access(node.node, varname, key)
 
+    if (isinstance(node, jinja2.nodes.Getitem)
+        and isinstance(node.arg, jinja2.nodes.Slice)):
+        return _is_var_or_elems_access(node.node, varname, key)
+
     # yapf: disable
     return (
         _is_attr_access(node, varname, key) if key
-        else _is_var_access( node, varname)
+        else _is_var_access(node, varname)
     ) # yapf: enable
 
 
