@@ -216,9 +216,11 @@ class GPT2Model(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors],
+        inputs_embeds: Optional[torch.Tensor],
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if get_pp_group().is_first_rank:
-            inputs_embeds = self.wte(input_ids)
+            if inputs_embeds is None:
+                inputs_embeds = self.wte(input_ids)
             position_embeds = self.wpe(position_ids)
             hidden_states = inputs_embeds + position_embeds
         else:
