@@ -420,7 +420,7 @@ class Scheduler:
             self.max_num_partial_prefills + 1)
         self.partial_prefill_budget_lookup_list[
             0] = scheduler_config.max_num_batched_tokens
-        for i in range(1, self.max_num_partial_prefills):
+        for i in range(1, self.max_num_partial_prefills + 1):
             self.partial_prefill_budget_lookup_list[i] = \
                 scheduler_config.max_num_batched_tokens // i
 
