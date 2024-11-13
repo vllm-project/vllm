@@ -115,7 +115,7 @@ class GuidanceLogitsProcessor:
     def __call__(
         self,
         prompt_tokens_ids: List[int],
-        past_tokens_ids: list[int],
+        past_tokens_ids: List[int],
         logits: torch.Tensor,
     ) -> torch.Tensor:
         # we initialize the guidance model here
@@ -125,65 +125,58 @@ class GuidanceLogitsProcessor:
         if self.is_stopped:
             return logits
 
-        try:
-            if len(past_tokens_ids) == 0:
-                self.ll_interpreter.process_prompt(prompt_tokens_ids)
+        if len(past_tokens_ids) == 0:
+            self.ll_interpreter.process_prompt(prompt_tokens_ids)
 
-            if self.new_sampling and len(past_tokens_ids) > 0:
-                backtrack, ff_tokens = self.ll_interpreter.post_process(
-                    past_tokens_ids[-1])
-                if len(ff_tokens) > 0 and backtrack == 0:
-                    # first token is last generated token
-                    ff_tokens = ff_tokens[1:]
-                self.pending_ff_tokens.extend(ff_tokens)
-                self.new_sampling = False
+        if self.new_sampling and len(past_tokens_ids) > 0:
+            backtrack, ff_tokens = self.ll_interpreter.post_process(
+                past_tokens_ids[-1])
+            if len(ff_tokens) > 0 and backtrack == 0:
+                # first token is last generated token
+                ff_tokens = ff_tokens[1:]
+            self.pending_ff_tokens.extend(ff_tokens)
+            self.new_sampling = False
 
-            if len(self.pending_ff_tokens) > 0:
-                # if we have pending fast-forward tokens,
-                # just return them immediately
-                ff_token = self.pending_ff_tokens.pop(0)
-                masked_logits = torch.zeros_like(logits,
-                                                 dtype=logits.dtype,
-                                                 device=logits.device)
-                masked_logits[ff_token] = 200.0
-                return masked_logits
+        if len(self.pending_ff_tokens) > 0:
+            # if we have pending fast-forward tokens,
+            # just return them immediately
+            ff_token = self.pending_ff_tokens.pop(0)
+            masked_logits = torch.zeros_like(logits,
+                                                dtype=logits.dtype,
+                                                device=logits.device)
+            masked_logits[ff_token] = 200.0
+            return masked_logits
 
-            mask, resp = self.ll_interpreter.mid_process()
-            r = LLInterpreterResponse.model_validate_json(resp)
+        mask, resp = self.ll_interpreter.mid_process()
+        r = LLInterpreterResponse.model_validate_json(resp)
 
-            if r.stop:
-                mask = torch.zeros_like(logits,
-                                        dtype=logits.dtype,
-                                        device=logits.device)
-                if self.guidance_tokenizer.eos_token_id is not None:
-                    mask[self.guidance_tokenizer.eos_token_id] = 200.0
-                self.is_stopped = True
-            elif mask is None:
-                # NOTE: mask should not be None unless r.stop is True
-                # However, we are handling this case just in case
-                # llguidance allows free-style generation
-                mask = torch.zeros_like(logits,
-                                        dtype=logits.dtype,
-                                        device=logits.device)
-            else:
-                mask = np.frombuffer(mask, dtype=np.uint8)
-                mask = torch.tensor(mask,
+        if r.stop:
+            mask = torch.zeros_like(logits,
                                     dtype=logits.dtype,
                                     device=logits.device)
+            if self.guidance_tokenizer.eos_token_id is not None:
+                mask[self.guidance_tokenizer.eos_token_id] = 200.0
+            self.is_stopped = True
+        elif mask is None:
+            # NOTE: mask should not be None unless r.stop is True
+            # However, we are handling this case just in case
+            # llguidance allows free-style generation
+            mask = torch.zeros_like(logits,
+                                    dtype=logits.dtype,
+                                    device=logits.device)
+        else:
+            mask = np.frombuffer(mask, dtype=np.uint8)
+            mask = torch.tensor(mask,
+                                dtype=logits.dtype,
+                                device=logits.device)
 
-            if mask.shape[0] != logits.shape[0]:
+        if mask.shape[0] != logits.shape[0]:
+            extra_tokens = logits.shape[0] - mask.shape[0]
+            if extra_tokens > 0:
                 # Some models have extra tokens that are not in the vocabulary
-                mask = torch.cat([
-                    mask,
-                    torch.zeros(
-                        logits.shape[0] - mask.shape[0],
-                        device=logits.device,
-                    ),
-                ])
+                mask = torch.nn.functional.pad(mask, (0, extra_tokens))
 
-            masked_logits = logits + mask
-            self.new_sampling = True
-        except Exception as e:
-            raise e
+        masked_logits = logits + mask
+        self.new_sampling = True
 
         return masked_logits
