@@ -66,10 +66,6 @@ class Qwen2VLPromptVideoEmbeddingInput(TypedDict):
     video_grid_thw: torch.Tensor
 
 
-llm = None
-processor = None
-
-
 def batch_make_image_embeddings(
         image_batches: List[Union[Image.Image, List[Image.Image]]], processor,
         llm: LLM) -> List[Qwen2VLPromptImageEmbeddingInput]:
