@@ -192,10 +192,17 @@ class IncrementalDetokenizer:
 
 class Detokenizer:
 
-    def __init__(self, tokenizer_name: str):
+    def __init__(self,
+                 tokenizer_name: str,
+                 tokenizer_mode: str = "auto",
+                 trust_remote_code: bool = False,
+                 revision: Optional[str] = None):
         # TODO: once we support LoRA, we should should pass the tokenizer
         # here. We currently have two copies (this + in the LLMEngine).
-        self.tokenizer = get_tokenizer(tokenizer_name)
+        self.tokenizer = get_tokenizer(tokenizer_name=tokenizer_name,
+                                       tokenizer_mode=tokenizer_mode,
+                                       trust_remote_code=trust_remote_code,
+                                       revision=revision)
 
         # Request id -> IncrementalDetokenizer
         self.request_states: Dict[str, IncrementalDetokenizer] = {}
