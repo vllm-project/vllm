@@ -11,10 +11,11 @@ class TestBackend:
     It also saves the graph before and after the custom passes for inspection.
     """
 
-    def __init__(self, *args: Callable[[torch.fx.Graph], None]):
-        self.custom_passes = args
+    def __init__(self, *passes: Callable[[torch.fx.Graph], None]):
+        self.custom_passes = passes
         from torch._inductor import config
         self.current_config = config.shallow_copy_dict()
+        self.current_config['force_disable_caches'] = True
         self.current_config['post_grad_custom_post_pass'] = self.post_pass
 
     def __call__(self, graph: torch.fx.GraphModule, example_inputs):

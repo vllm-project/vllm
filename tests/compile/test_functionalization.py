@@ -12,12 +12,6 @@ from vllm.compilation.reshapes import RedundantReshapesPass
 
 from .backend import TestBackend
 
-# Init does pattern registration, which can only happen once
-config = CompilationConfig.PassConfig(enable_fusion=True,
-                                      enable_reshape=True)
-reshape_pass = RedundantReshapesPass(config)
-fusion_pass = FusionPass.instance(config)
-
 OPS_IN_MODEL = [
     torch.ops._C.fused_add_rms_norm.default,
     torch.ops._C.silu_and_mul.default,
@@ -47,6 +41,11 @@ prompts = [
                     reason="Only test on CUDA")
 def test_fix_functionalization(model: str, do_fusion: bool):
     torch.set_default_device("cuda")
+
+    config = CompilationConfig.PassConfig(enable_fusion=do_fusion,
+                                          enable_reshape=True)
+    reshape_pass = RedundantReshapesPass(config)
+    fusion_pass = FusionPass.instance(config)
 
     passes = [reshape_pass, fusion_pass] if do_fusion else [reshape_pass]
     func_pass = FixFunctionalizationPass(config)
