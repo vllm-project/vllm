@@ -136,7 +136,7 @@ def test_concurrent_chunking():
         max_seqs,
         max_model_len,
         enable_chunked_prefill=True,
-        num_prefill_slots=2,  # Up to 2 partial prefills at a time
+        max_num_partial_prefills=2,  # Up to 2 partial prefills at a time
     )
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 32
@@ -181,7 +181,7 @@ def test_concurrent_chunking_large_requests():
         max_seqs,
         max_model_len,
         enable_chunked_prefill=True,
-        num_prefill_slots=2,  # Up to 2 partial prefills at a time
+        max_num_partial_prefills=2,  # Up to 2 partial prefills at a time
     )
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 3200  # large KV cache size for large requests
@@ -217,7 +217,7 @@ def test_small_prompts_jump_big_prompts_in_queue():
         max_seqs,
         max_model_len,
         enable_chunked_prefill=True,
-        num_prefill_slots=2,  # Up to 2 partial prefills at a time
+        max_num_partial_prefills=2,  # Up to 2 partial prefills at a time
     )
     cache_config = CacheConfig(block_size, 1.0, 1, "auto")
     cache_config.num_cpu_blocks = 3200  # large KV cache size for large requests
@@ -659,7 +659,7 @@ def test_prefix_caching_with_concurrent_partial_prefills():
                                        max_seqs,
                                        max_model_len,
                                        enable_chunked_prefill=True,
-                                       num_prefill_slots=2)
+                                       max_num_partial_prefills=2)
     cache_config = CacheConfig(block_size,
                                1.0,
                                1,
@@ -700,15 +700,15 @@ def test_prefix_caching_with_concurrent_partial_prefills():
 
 
 @pytest.mark.parametrize("model", ["facebook/opt-125m"])
-@pytest.mark.parametrize("num_prefill_slots", [2, 4, 8])
+@pytest.mark.parametrize("max_num_partial_prefills", [2, 4, 8])
 def test_chunked_prefill_with_actual_engine(model: str,
-                                            num_prefill_slots: int):
+                                            max_num_partial_prefills: int):
 
     prompt = "hello" * 40
 
     engine_args = EngineArgs(
         model=model,
-        num_prefill_slots=num_prefill_slots,
+        max_num_partial_prefills=max_num_partial_prefills,
         max_num_batched_tokens=40,
         max_num_seqs=8,
         enable_chunked_prefill=True,
@@ -718,10 +718,10 @@ def test_chunked_prefill_with_actual_engine(model: str,
     engine = LLMEngine.from_engine_args(engine_args)
     sampling_params = SamplingParams(temperature=0)
 
-    for req_num in range(num_prefill_slots):
+    for req_num in range(max_num_partial_prefills):
         engine.add_request(f"{req_num}", prompt, sampling_params)
     # first step
     request_outputs = engine.step()
     # means all are prefilling
     assert len(request_outputs) == 0
-    assert len(engine.scheduler[0].running) == num_prefill_slots
+    assert len(engine.scheduler[0].running) == max_num_partial_prefills

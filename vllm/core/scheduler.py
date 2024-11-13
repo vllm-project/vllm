@@ -400,7 +400,8 @@ class Scheduler:
         # Having multiple partial prefills in flight allows us to minimize TTFT
         # and avoid decode starvation in cases where a single sequence group
         # with a very large prompt blocks the queue for too many iterations.
-        self.num_prefill_slots = scheduler_config.num_prefill_slots
+        self.max_num_partial_prefills = \
+            scheduler_config.max_num_partial_prefills
         self.prefill_slots_running = 0
         self.big_prefill_requests = 0
         # Requests with more than (4% max context length) tokens to prefill
@@ -421,9 +422,9 @@ class Scheduler:
         # budget.
         self.prefill_chunk_sizes = defaultdict(
             lambda: scheduler_config.max_num_batched_tokens // self.
-            num_prefill_slots)
+            max_num_partial_prefills)
         self.prefill_chunk_sizes[0] = scheduler_config.max_num_batched_tokens
-        for i in range(1, self.num_prefill_slots):
+        for i in range(1, self.max_num_partial_prefills):
             self.prefill_chunk_sizes[i] = \
                 scheduler_config.max_num_batched_tokens // i
 
@@ -925,7 +926,7 @@ class Scheduler:
 
             is_big = self._is_big_seq_group(seq_group)
             if is_big and self.big_prefill_requests >= self.max_big_requests \
-                and self.num_prefill_slots > 1:
+                and self.max_num_partial_prefills > 1:
                 # When we have more than one prefill slot, we limit the number
                 # of big requests to avoid filling all of our slots with partial
                 # prefills of big prompt sequences.
@@ -1165,7 +1166,7 @@ class Scheduler:
 
         # Before any scheduling, decide if we have prefill slots available
         # to pull new requests from the waiting queue
-        if self.prefill_slots_running < self.num_prefill_slots and len(
+        if self.prefill_slots_running < self.max_num_partial_prefills and len(
                 self.waiting) > 0:
             self._reserve_prefill_slots_from_waiting_queue()
 
@@ -1267,7 +1268,7 @@ class Scheduler:
         queued_big_requests = 0
         for seq_group in self.waiting:
             # Don't fill more slots than we have
-            if self.prefill_slots_running >= self.num_prefill_slots:
+            if self.prefill_slots_running >= self.max_num_partial_prefills:
                 break
 
             # Disallow multiple big requests

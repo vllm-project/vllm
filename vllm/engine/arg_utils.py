@@ -120,7 +120,7 @@ class EngineArgs:
     cpu_offload_gb: float = 0  # GiB
     gpu_memory_utilization: float = 0.90
     max_num_batched_tokens: Optional[int] = None
-    num_prefill_slots: Optional[int] = 1
+    max_num_partial_prefills: Optional[int] = 1
     max_num_seqs: int = 256
     max_logprobs: int = 20  # Default value for OpenAI Chat Completions API
     disable_log_stats: bool = False
@@ -469,11 +469,11 @@ class EngineArgs:
                             help='Maximum number of batched tokens per '
                             'iteration.')
         parser.add_argument(
-            "--num-prefill-slots",
+            "--max-num-partial-prefills",
             type=int,
-            default=EngineArgs.num_prefill_slots,
-            help='For chunked prefill, the number of prefill slots to use. '
-            'Defaults to 1',
+            default=EngineArgs.max_num_partial_prefills,
+            help="For chunked prefill, the number of prefill slots to use. "
+            "Defaults to 1",
         )
         parser.add_argument('--max-num-seqs',
                             type=int,
@@ -1114,7 +1114,7 @@ class EngineArgs:
             send_delta_data=(envs.VLLM_USE_RAY_SPMD_WORKER
                              and parallel_config.use_ray),
             policy=self.scheduling_policy,
-            num_prefill_slots=self.num_prefill_slots)
+            max_num_partial_prefills=self.max_num_partial_prefills)
         lora_config = LoRAConfig(
             bias_enabled=self.enable_lora_bias,
             max_lora_rank=self.max_lora_rank,
