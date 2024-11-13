@@ -74,6 +74,38 @@ class InductorPass(ABC):
 InductorPassType: TypeAlias = Union[InductorPass, Callable[[fx.Graph], None]]
 
 
+class CallableInductorPass(InductorPass):
+
+    def __init__(self, callable: Callable[[fx.Graph], None], uuid: Any):
+        self.callable = callable
+        self._uuid = uuid
+
+    def __call__(self, graph: torch.fx.Graph):
+        self.callable(graph)
+
+    def uuid(self) -> Any:
+        return self._uuid
+
+
+def as_inductor_pass(*, uuid: Any = None, files: Tuple[str, ...] = ()):
+    """
+    Decorator to convert a callable into an InductorPass.
+    Either uuid or files must be provided.
+    :param uuid: unique uuid for the pass
+    :param files: files to hash to generate uuid
+    """
+
+    def decorator(
+            callable: Callable[[fx.Graph], None]) -> CallableInductorPass:
+        if uuid is not None:
+            return CallableInductorPass(callable, uuid)
+        assert len(files) > 0, "Must provide files or uuid"
+        return CallableInductorPass(
+            callable, CallableInductorPass.get_hash_for_files(files))
+
+    return decorator
+
+
 class VllmInductorPass(InductorPass):
     """
     An inductor pass with access to vLLM PassConfig.
