@@ -30,7 +30,7 @@ from vllm.executor.executor_base import ExecutorBase
 from vllm.executor.gpu_executor import GPUExecutor
 from vllm.executor.ray_utils import initialize_ray_cluster
 from vllm.inputs import (INPUT_REGISTRY, InputRegistry, ProcessorInputs,
-                         PromptType)
+                         PromptType, SingletonInputsAdapter)
 from vllm.inputs.parse import is_encoder_decoder_inputs, is_token_prompt
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
@@ -853,13 +853,6 @@ class LLMEngine:
             prompt_adapter_request=prompt_adapter_request,
         )
         processed_inputs = self.input_processor(preprocessed_inputs)
-
-        # This is a bit of a hack - copy the mm_processor_kwargs that were
-        # used in the input processor to the processed output, since these
-        # kwargs are presumed to be immutable and the values should be aligned
-        # between the input processor (here) and the input mapper.
-        processed_inputs["mm_processor_kwargs"] = preprocessed_inputs.get(
-            "mm_processor_kwargs")
 
         self._add_processed_request(
             request_id=request_id,
@@ -2022,7 +2015,7 @@ class LLMEngine:
         else:
             prompt_inputs = inputs
 
-        prompt_ids = prompt_inputs.get("prompt_token_ids")
+        prompt_ids = SingletonInputsAdapter(prompt_inputs).prompt_token_ids
 
         if prompt_ids is None or len(prompt_ids) == 0:
             raise ValueError("Prompt cannot be empty")
