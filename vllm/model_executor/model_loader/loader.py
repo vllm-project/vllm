@@ -991,7 +991,13 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
         param_dict = dict(model.named_parameters())
         stacked_quant_state_dict: Dict[str, Dict[int, Any]] = {}
+        # TODO: Change this lazy import to normal import
+        # after the checks are updated to run on a new version
+        from vllm.model_executor.models.utils import is_pp_missing_parameter
         for quant_param_name in quant_state_dict:
+            if is_pp_missing_parameter(quant_param_name, model):
+                continue
+
             non_stacked_param_name = quant_param_name
 
             shard_index = 0
