@@ -11,7 +11,7 @@ MAX_MODEL_LEN = 128
 MODEL_NAME = os.environ.get("MODEL_NAME", "BAAI/bge-base-en-v1.5")
 REVISION = os.environ.get("REVISION", "main")
 
-MODEL_NAME_ROBERTA = os.environ.get("MODEL_NAME", 
+MODEL_NAME_ROBERTA = os.environ.get("MODEL_NAME",
                                     "intfloat/multilingual-e5-large")
 REVISION_ROBERTA = os.environ.get("REVISION", "main")
 
@@ -87,6 +87,6 @@ def test_roberta_model_loading_with_params(vllm_runner):
         assert isinstance(model, RobertaEmbeddingModel)
         assert model._pooler.pooling_type == PoolingType.MEAN
         assert model._pooler.normalize
-        
+
         # assert output
         assert output
