@@ -194,7 +194,7 @@ def _is_var_or_elems_access(
         return _is_var_or_elems_access(node.node, varname, key)
 
     if (isinstance(node, jinja2.nodes.Getitem)
-        and isinstance(node.arg, jinja2.nodes.Slice)):
+            and isinstance(node.arg, jinja2.nodes.Slice)):
         return _is_var_or_elems_access(node.node, varname, key)
 
     # yapf: disable
