@@ -10,9 +10,9 @@ from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
                                               AttentionMetadata, AttentionType)
 from vllm.attention.backends.utils import CommonAttentionState
 from vllm.attention.ops.paged_attn import PagedAttentionMetadata
-from vllm.utils import is_cpu
+from vllm.platforms import current_platform
 
-if is_cpu():
+if current_platform.is_cpu():
     try:
         from vllm.attention.ops.ipex_attn import PagedAttention
     except ImportError:
@@ -25,7 +25,7 @@ class TorchSDPABackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "torch-sdpa"
+        return "TORCH_SDPA"
 
     @staticmethod
     def get_impl_cls() -> Type["TorchSDPABackendImpl"]:
@@ -158,7 +158,8 @@ class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata):
         * Appropriate sequence lengths tensor for key & value
         '''
 
-        if attn_type == AttentionType.DECODER:
+        if (attn_type == AttentionType.DECODER
+                or attn_type == AttentionType.ENCODER_ONLY):
             seq_lens_q = self.seq_lens
             seq_lens_kv = self.seq_lens
         elif attn_type == AttentionType.ENCODER:
@@ -189,7 +190,8 @@ class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata):
         * Appropriate attention bias value given the attention type
         '''
 
-        if attn_type == AttentionType.DECODER:
+        if (attn_type == AttentionType.DECODER
+                or attn_type == AttentionType.ENCODER_ONLY):
             return self.attn_bias
         elif attn_type == AttentionType.ENCODER:
             return self.encoder_attn_bias
@@ -215,7 +217,8 @@ class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata):
                     encoder/decoder cross-attention
         '''
 
-        if attn_type == AttentionType.DECODER:
+        if (attn_type == AttentionType.DECODER
+                or attn_type == AttentionType.ENCODER_ONLY):
             self.attn_bias = attn_bias
         elif attn_type == AttentionType.ENCODER:
             self.encoder_attn_bias = attn_bias
@@ -234,10 +237,10 @@ class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata):
         on the type of attention operation.
 
         Decoder attn -> select entirely decoder self-attention-related fields
-        Encoder/decoder cross-attn -> select encoder sequence lengths & 
+        Encoder/decoder cross-attn -> select encoder sequence lengths &
                                     cross-attn block-tables fields
         Encoder attn -> select encoder sequence lengths fields & no block tables
-        
+
         Arguments:
 
         * attn_metadata: Attention metadata structure associated with attention
@@ -252,7 +255,8 @@ class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata):
         * Appropriate block tables (or None)
         '''
 
-        if attn_type == AttentionType.DECODER:
+        if (attn_type == AttentionType.DECODER
+                or attn_type == AttentionType.ENCODER_ONLY):
             # Decoder self-attention
             # Choose max_seq_len based on whether we are in prompt_run
             return (self.seq_lens_tensor, self.max_decode_seq_len,
@@ -420,6 +424,8 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
                     "Torch SDPA backend doesn't support prefix decoding.")
 
         if decode_meta := attn_metadata.decode_metadata:
+            assert attn_type != AttentionType.ENCODER_ONLY, (
+                "Encoder-only models should not have decode metadata.")
             # Decoding run.
             (
                 seq_lens_arg,

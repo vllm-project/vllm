@@ -4,13 +4,18 @@ Run `pytest tests/models/test_mistral.py`.
 """
 import pytest
 
-from vllm import LLM, SamplingParams
+from vllm import SamplingParams
 
 from ...utils import check_logprobs_close
 
 MODELS = [
     "mistralai/Mistral-7B-Instruct-v0.1",
+]
+
+MISTRAL_FORMAT_MODELS = [
     "mistralai/Mistral-7B-Instruct-v0.3",
+    # uses the v3-Tekken tokenizer
+    "mistralai/Ministral-8B-Instruct-2410",
     # Mistral-Nemo is to big for CI, but passes locally
     # "mistralai/Mistral-Nemo-Instruct-2407"
 ]
@@ -19,6 +24,8 @@ SAMPLING_PARAMS = SamplingParams(max_tokens=512, temperature=0.0, logprobs=5)
 SYMBOLIC_LANG_PROMPTS = [
     "勇敢な船乗りについての詩を書く",  # japanese
     "寫一首關於勇敢的水手的詩",  # chinese
+    "ပုံပြင်လေးပြောပြပါ်:\n",  # burmese
+    "Repeat the phrase 'URGENCY🌶️':\nURGENCY🌶️\nURGENCY🌶️\n",  # see https://github.com/vllm-project/vllm/pull/9625
 ]
 
 # for function calling
@@ -95,7 +102,7 @@ def test_models(
     )
 
 
-@pytest.mark.parametrize("model", MODELS[1:])
+@pytest.mark.parametrize("model", MISTRAL_FORMAT_MODELS)
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [64])
 @pytest.mark.parametrize("num_logprobs", [5])
@@ -135,28 +142,29 @@ def test_mistral_format(
     )
 
 
-@pytest.mark.parametrize("model", MODELS[1:])
+@pytest.mark.parametrize("model", MISTRAL_FORMAT_MODELS)
 @pytest.mark.parametrize("dtype", ["bfloat16"])
-@pytest.mark.parametrize("prompt", SYMBOLIC_LANG_PROMPTS)
 def test_mistral_symbolic_languages(
+    vllm_runner,
     model: str,
     dtype: str,
-    prompt: str,
 ) -> None:
-    prompt = "hi"
-    msg = {"role": "user", "content": prompt}
-    llm = LLM(model=model,
-              dtype=dtype,
-              max_model_len=8192,
-              tokenizer_mode="mistral",
-              config_format="mistral",
-              load_format="mistral")
-    outputs = llm.chat([msg], sampling_params=SAMPLING_PARAMS)
-    assert "�" not in outputs[0].outputs[0].text.strip()
+    with vllm_runner(model,
+                     dtype=dtype,
+                     max_model_len=8192,
+                     tokenizer_mode="mistral",
+                     config_format="mistral",
+                     load_format="mistral") as vllm_model:
+        for prompt in SYMBOLIC_LANG_PROMPTS:
+            msg = {"role": "user", "content": prompt}
+            outputs = vllm_model.model.chat([msg],
+                                            sampling_params=SAMPLING_PARAMS)
+            assert "�" not in outputs[0].outputs[0].text.strip()
 
 
 @pytest.mark.parametrize("dtype", ["bfloat16"])
-@pytest.mark.parametrize("model", MODELS[1:])  # v1 can't do func calling
+@pytest.mark.parametrize("model",
+                         MISTRAL_FORMAT_MODELS)  # v1 can't do func calling
 def test_mistral_function_calling(
     vllm_runner,
     model: str,

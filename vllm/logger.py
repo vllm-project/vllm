@@ -15,14 +15,16 @@ import vllm.envs as envs
 VLLM_CONFIGURE_LOGGING = envs.VLLM_CONFIGURE_LOGGING
 VLLM_LOGGING_CONFIG_PATH = envs.VLLM_LOGGING_CONFIG_PATH
 VLLM_LOGGING_LEVEL = envs.VLLM_LOGGING_LEVEL
+VLLM_LOGGING_PREFIX = envs.VLLM_LOGGING_PREFIX
 
-_FORMAT = "%(levelname)s %(asctime)s %(filename)s:%(lineno)d] %(message)s"
+_FORMAT = (f"{VLLM_LOGGING_PREFIX}%(levelname)s %(asctime)s "
+           "%(filename)s:%(lineno)d] %(message)s")
 _DATE_FORMAT = "%m-%d %H:%M:%S"
 
 DEFAULT_LOGGING_CONFIG = {
     "formatters": {
         "vllm": {
-            "class": "vllm.logging.NewLineFormatter",
+            "class": "vllm.logging_utils.NewLineFormatter",
             "datefmt": _DATE_FORMAT,
             "format": _FORMAT,
         },
@@ -65,8 +67,7 @@ def _configure_vllm_root_logger() -> None:
             raise RuntimeError(
                 "Could not load logging config. File does not exist: %s",
                 VLLM_LOGGING_CONFIG_PATH)
-        with open(VLLM_LOGGING_CONFIG_PATH, encoding="utf-8",
-                  mode="r") as file:
+        with open(VLLM_LOGGING_CONFIG_PATH, encoding="utf-8") as file:
             custom_config = json.loads(file.read())
 
         if not isinstance(custom_config, dict):
@@ -116,13 +117,14 @@ def _trace_calls(log_path, root_dir, frame, event, arg=None):
                 last_lineno = 0
                 last_func_name = ""
             with open(log_path, 'a') as f:
+                ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")
                 if event == 'call':
-                    f.write(f"{datetime.datetime.now()} Call to"
+                    f.write(f"{ts} Call to"
                             f" {func_name} in {filename}:{lineno}"
                             f" from {last_func_name} in {last_filename}:"
                             f"{last_lineno}\n")
                 else:
-                    f.write(f"{datetime.datetime.now()} Return from"
+                    f.write(f"{ts} Return from"
                             f" {func_name} in {filename}:{lineno}"
                             f" to {last_func_name} in {last_filename}:"
                             f"{last_lineno}\n")

@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import List, Tuple, Type
+from typing import Dict, List, Optional, Tuple, Type
 
 import openvino as ov
 import torch
@@ -7,6 +7,7 @@ import torch
 from vllm.attention.backends.abstract import (AttentionBackend,
                                               AttentionMetadata)
 from vllm.attention.backends.utils import CommonAttentionState
+from vllm.multimodal import MultiModalPlaceholderMap
 
 
 def copy_cache_block(src_tensor: ov.Tensor, dst_tensor: ov.Tensor,
@@ -38,7 +39,7 @@ class OpenVINOAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "openvino"
+        return "OPENVINO"
 
     @staticmethod
     def get_impl_cls():
@@ -128,3 +129,12 @@ class OpenVINOAttentionMetadata:
     # Shape: scalar
     # Type: i32
     max_context_len: torch.Tensor
+
+    # The index maps that relate multi-modal embeddings to the corresponding
+    # placeholders.
+    #
+    # N.B. These aren't really related to attention and don't belong on this
+    # type -- this is just a temporary solution to make them available to
+    # `model_executable`.
+    multi_modal_placeholder_index_maps: Optional[Dict[
+        str, MultiModalPlaceholderMap.IndexMap]]

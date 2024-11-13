@@ -35,9 +35,6 @@ from .conftest import run_equality_correctness_test
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
 
-        # Required for spec decode.
-        "use_v2_block_manager": True,
-
         # Print spec metrics.
         "disable_log_stats": False,
     }])
@@ -53,18 +50,33 @@ from .conftest import run_equality_correctness_test
         "num_speculative_tokens": 5,
         "ngram_prompt_lookup_max": 3,
     },
+    {
+        "speculative_model": "[ngram]",
+        "num_speculative_tokens": 5,
+        "ngram_prompt_lookup_max": 3,
+    },
 ])
 @pytest.mark.parametrize("output_len", [
     256,
 ])
 @pytest.mark.parametrize("batch_size", [1, 32])
+@pytest.mark.parametrize("prefill_chunk_size", [-1, 4])
 @pytest.mark.parametrize("seed", [1])
 def test_ngram_e2e_greedy_correctness(vllm_runner, common_llm_kwargs,
                                       per_test_common_llm_kwargs,
                                       baseline_llm_kwargs, test_llm_kwargs,
                                       batch_size: int, output_len: int,
-                                      seed: int):
+                                      prefill_chunk_size: int, seed: int):
     """Verify greedy equality on a tiny model with different batch size."""
+    if prefill_chunk_size > 0:
+        common_llm_kwargs.update(
+            **{
+                "enable_chunked_prefill": True,
+                "max_num_batched_tokens": prefill_chunk_size,
+                "max_num_seqs": prefill_chunk_size
+            })
+    else:
+        common_llm_kwargs["enable_chunked_prefill"] = False
     run_equality_correctness_test(vllm_runner,
                                   common_llm_kwargs,
                                   per_test_common_llm_kwargs,
@@ -81,9 +93,6 @@ def test_ngram_e2e_greedy_correctness(vllm_runner, common_llm_kwargs,
     [{
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
-
-        # Required for spec decode.
-        "use_v2_block_manager": True,
 
         # Print spec metrics.
         "disable_log_stats": False,
@@ -145,9 +154,6 @@ def test_ngram_e2e_greedy_logprobs(vllm_runner, common_llm_kwargs,
 
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
-
-        # Required for spec decode.
-        "use_v2_block_manager": True
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [
     {
@@ -160,6 +166,16 @@ def test_ngram_e2e_greedy_logprobs(vllm_runner, common_llm_kwargs,
         "speculative_model": "[ngram]",
         "num_speculative_tokens": 5,
         "ngram_prompt_lookup_max": 3,
+        "enable_chunked_prefill": False,
+    },
+    {
+        "speculative_model": "[ngram]",
+        "num_speculative_tokens": 5,
+        "ngram_prompt_lookup_max": 3,
+        "enable_chunked_prefill": True,
+        "speculative_disable_mqa_scorer": True,
+        "max_num_batched_tokens": 4,
+        "max_num_seqs": 4
     },
 ])
 @pytest.mark.parametrize(
@@ -195,9 +211,6 @@ def test_ngram_e2e_greedy_correctness_with_preemption(
 
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
-
-        # Required for spec decode.
-        "use_v2_block_manager": True
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
@@ -254,9 +267,6 @@ def test_ngram_different_k(vllm_runner, common_llm_kwargs,
 
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
-
-        # Required for spec decode.
-        "use_v2_block_manager": True
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
@@ -266,6 +276,15 @@ def test_ngram_different_k(vllm_runner, common_llm_kwargs,
                              "num_speculative_tokens": 5,
                              "ngram_prompt_lookup_max": 3,
                              "speculative_disable_by_batch_size": 4
+                         }, {
+                             "speculative_model": "[ngram]",
+                             "num_speculative_tokens": 5,
+                             "ngram_prompt_lookup_max": 3,
+                             "speculative_disable_by_batch_size": 4,
+                             "enable_chunked_prefill": True,
+                             "speculative_disable_mqa_scorer": True,
+                             "max_num_batched_tokens": 4,
+                             "max_num_seqs": 4
                          }])
 @pytest.mark.parametrize("batch_size", [1, 5])
 @pytest.mark.parametrize(
@@ -303,7 +322,6 @@ def test_ngram_disable_queue(vllm_runner, common_llm_kwargs,
         "enforce_eager": True,
 
         # Required for spec decode.
-        "use_v2_block_manager": True,
         "speculative_model": "[ngram]",
         "num_speculative_tokens": 5,
         "ngram_prompt_lookup_max": 3,
