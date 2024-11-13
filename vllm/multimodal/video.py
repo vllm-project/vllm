@@ -38,6 +38,9 @@ class VideoPlugin(ImagePlugin):
     def get_data_key(self) -> str:
         return "video"
 
+    def hash_content(self, data: object) -> int:
+        raise NotImplementedError("Video hashing is not yet implemented")
+
     def _get_hf_video_processor(
         self,
         model_config: "ModelConfig",

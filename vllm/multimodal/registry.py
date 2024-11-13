@@ -243,3 +243,6 @@ class MultiModalRegistry:
             This should be called after :meth:`init_mm_limits_per_prompt`.
         """
         return self._limits_by_model[model_config]
+
+    def hash_mm_item_content(self, data_type_key: str, item: object) -> int:
+        return self._get_plugin(data_type_key).hash_content(item)

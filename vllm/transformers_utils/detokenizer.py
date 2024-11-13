@@ -40,7 +40,7 @@ class Detokenizer:
         # We can pick any sequence for the prompt.
         seq = seq_group.get_seqs()[0]
         # Only prompt, without the generated token.
-        all_token_ids = seq.get_token_ids()
+        all_token_ids = list(seq.get_token_ids().token_ids)
         prompt_token_ids = all_token_ids[:-1]
         tokenizer = self.get_tokenizer_for_seq(seq)
         prefix_offset = 0
@@ -105,7 +105,7 @@ class Detokenizer:
         Returns:
             The number of characters added to the output text.
         """
-        all_input_ids = seq.get_token_ids()
+        all_input_ids = list(seq.get_token_ids().token_ids)
         token_id_generated_this_iteration = all_input_ids[-1]
         tokenizer = self.get_tokenizer_for_seq(seq)
 

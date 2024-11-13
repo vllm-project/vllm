@@ -1,9 +1,10 @@
-from typing import List, Optional
+from typing import Optional
 
 import pytest
 
 from vllm.core.block.interfaces import Block, BlockAllocator
 from vllm.core.block.naive_block import NaiveBlock, NaiveBlockAllocator
+from vllm.core.block.token_ids import TokenIds
 
 
 class TestNaiveBlockAllocator:
@@ -12,7 +13,7 @@ class TestNaiveBlockAllocator:
     def create_allocate_lambda(allocate_type: str,
                                allocator: NaiveBlockAllocator,
                                prev_block: Optional[Block],
-                               token_ids: List[int]):
+                               token_ids: TokenIds):
         if allocate_type == "immutable":
             allocate_block = lambda: allocator.allocate_immutable_block(
                 prev_block=prev_block, token_ids=token_ids)
@@ -37,7 +38,7 @@ class TestNaiveBlockAllocator:
             allocate_type,
             allocator,
             prev_block=None,
-            token_ids=list(range(block_size)))
+            token_ids=TokenIds(range(block_size)))
 
         [allocate_block() for _ in range(num_blocks)]
         with pytest.raises(BlockAllocator.NoFreeBlocksError):
@@ -56,7 +57,7 @@ class TestNaiveBlockAllocator:
             allocate_type,
             allocator,
             prev_block=None,
-            token_ids=list(range(block_size)))
+            token_ids=TokenIds(range(block_size)))
 
         blocks = [allocate_block() for _ in range(num_blocks)]
 
@@ -91,7 +92,7 @@ class TestNaiveBlockAllocator:
             allocate_type,
             allocator,
             prev_block=None,
-            token_ids=list(range(block_size)))
+            token_ids=TokenIds(range(block_size)))
 
         assert allocator.get_num_free_blocks() == num_blocks
 
@@ -120,7 +121,7 @@ class TestNaiveBlockAllocator:
             "immutable",
             allocator_src,
             prev_block=None,
-            token_ids=list(range(block_size)))
+            token_ids=TokenIds(range(block_size)))
         src_blocks = [allocate_block() for _ in range(num_blocks - 1)]
 
         # All blocks are cached
@@ -134,12 +135,12 @@ class TestNaiveBlockAllocator:
                 prev_block=src_blocks[-1],token_ids=[]
             )
         src_blocks.append(allocate_non_full_block())
-        src_blocks[-1].append_token_ids([0])
+        src_blocks[-1].append_token_ids(TokenIds([0]))
 
         assert allocator_dst.get_num_full_blocks_touched(
             src_blocks) == num_blocks - 1
         # Fill up the last source block and then invoke
         # get_num_blocks_touched
-        src_blocks[-1].append_token_ids([0] * (block_size - 1))
+        src_blocks[-1].append_token_ids(TokenIds([0] * (block_size - 1)))
         assert allocator_dst.get_num_full_blocks_touched(
             src_blocks) == num_blocks

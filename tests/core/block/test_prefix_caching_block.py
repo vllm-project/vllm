@@ -8,6 +8,7 @@ import pytest
 from vllm.core.block.interfaces import Block, BlockAllocator
 from vllm.core.block.prefix_caching_block import (PrefixCachingBlock,
                                                   PrefixCachingBlockAllocator)
+from vllm.core.block.token_ids import TokenIds
 
 
 class TestPrefixCachingBlock:
@@ -23,7 +24,7 @@ class TestPrefixCachingBlock:
         random.seed(seed)
         num_to_fill = block_size if is_curr_block_full else random.randint(
             0, block_size - 1)
-        token_ids = list(range(num_to_fill))
+        token_ids = TokenIds(range(num_to_fill))
         mock_allocator = MagicMock(spec=PrefixCachingBlockAllocator)
 
         block_with_prev = PrefixCachingBlock(prev_block=None,
@@ -63,7 +64,7 @@ class TestPrefixCachingBlock:
 
         num_to_fill = block_size if is_curr_block_full else random.randint(
             0, block_size - 1)
-        token_ids = list(range(num_to_fill))
+        token_ids = TokenIds(range(num_to_fill))
         mock_allocator = MagicMock(spec=PrefixCachingBlockAllocator)
 
         block_with_prev = PrefixCachingBlock(
@@ -97,7 +98,8 @@ class TestPrefixCachingBlock:
         """
         random.seed(0)
 
-        token_ids = [random.randint(0, 50_000) for _ in range(num_tokens)]
+        token_ids = TokenIds(
+            [random.randint(0, 50_000) for _ in range(num_tokens)])
 
         first_chain, second_chain = (TestPrefixCachingBlock.create_chain(
             block_size=block_size,
@@ -116,7 +118,7 @@ class TestPrefixCachingBlock:
 
     @staticmethod
     def create_chain(block_size: int,
-                     token_ids: List[int],
+                     token_ids: TokenIds,
                      num_empty_trailing_blocks=0) -> List[PrefixCachingBlock]:
         """Helper method which creates a chain of blocks.
         """
@@ -176,7 +178,7 @@ class TestPrefixCachingBlockAllocator:
             allocate_type="mutable",
             allocator=allocator,
             prev_block=None,
-            token_ids=list(range(block_size)),
+            token_ids=TokenIds(range(block_size)),
         )
 
         [allocate_block() for _ in range(num_blocks)]
@@ -194,7 +196,7 @@ class TestPrefixCachingBlockAllocator:
             allocate_type="immutable",
             allocator=allocator,
             prev_block=None,
-            token_ids=list(range(block_size)),
+            token_ids=TokenIds(range(block_size)),
         )
 
         blocks = [allocate_block() for _ in range(num_blocks)]
@@ -220,7 +222,7 @@ class TestPrefixCachingBlockAllocator:
                                                 block_size=block_size)
 
         # Create token ids that will exhaust all blocks.
-        token_ids = list(range(num_blocks * block_size))
+        token_ids = TokenIds(range(num_blocks * block_size))
 
         chain = TestPrefixCachingBlockAllocator.create_immutable_chain(
             block_size=block_size,
@@ -231,7 +233,7 @@ class TestPrefixCachingBlockAllocator:
         # Expect allocation with unseen hash to fail.
         with pytest.raises(BlockAllocator.NoFreeBlocksError):
             allocator.allocate_immutable_block(prev_block=chain[-1],
-                                               token_ids=list(
+                                               token_ids=TokenIds(
                                                    range(block_size)))
 
         # Expect mutable allocation to fail.
@@ -258,7 +260,7 @@ class TestPrefixCachingBlockAllocator:
                                                 block_size=block_size)
 
         # Create token ids that will exhaust all blocks.
-        token_ids = list(range(num_blocks * block_size))
+        token_ids = TokenIds(range(num_blocks * block_size))
 
         chain = TestPrefixCachingBlockAllocator.create_immutable_chain(
             block_size=block_size,
@@ -297,7 +299,7 @@ class TestPrefixCachingBlockAllocator:
         num_blocks_to_consume = random.randint(1, num_blocks - 1)
 
         # Create token ids that will exhaust all blocks.
-        token_ids = list(range(num_blocks_to_consume * block_size))
+        token_ids = TokenIds(range(num_blocks_to_consume * block_size))
 
         chain = TestPrefixCachingBlockAllocator.create_immutable_chain(
             block_size=block_size,
@@ -327,7 +329,7 @@ class TestPrefixCachingBlockAllocator:
                                                     block_size=block_size)
 
         # Create token ids that will exhaust all blocks except the last
-        token_ids = list(range((num_blocks - 1) * block_size))
+        token_ids = TokenIds(range((num_blocks - 1) * block_size))
 
         # Create a chain of cacheable blocks in the dst
         cached_blocks = TestPrefixCachingBlockAllocator.create_immutable_chain(
@@ -358,13 +360,13 @@ class TestPrefixCachingBlockAllocator:
         # Insert one non-full block in the src
         non_full_block = allocator_src.allocate_mutable_block(
             blocks_to_swap_in[-1])
-        non_full_block.append_token_ids([0])
+        non_full_block.append_token_ids(TokenIds([0]))
         blocks_to_swap_in.append(non_full_block)
         assert allocator_dst.get_num_full_blocks_touched(
             blocks_to_swap_in) == 1
         # Fill up the last mutable block and invoke get_num_blocks_touched.
         # Note: The last block is not cached so it will be touched.
-        non_full_block.append_token_ids([0] * (block_size - 1))
+        non_full_block.append_token_ids(TokenIds([0] * (block_size - 1)))
         assert allocator_dst.get_num_full_blocks_touched(
             blocks_to_swap_in) == 2
 
@@ -383,7 +385,7 @@ class TestPrefixCachingBlockAllocator:
         num_blocks_to_consume = random.randint(1, num_blocks - 1)
 
         # Create token ids that will exhaust all blocks.
-        token_ids = list(range(num_blocks_to_consume * block_size))
+        token_ids = TokenIds(range(num_blocks_to_consume * block_size))
 
         first_chain = TestPrefixCachingBlockAllocator.create_immutable_chain(
             block_size=block_size,
@@ -428,7 +430,7 @@ class TestPrefixCachingBlockAllocator:
         num_blocks_to_consume = random.randint(1, num_blocks - 1)
 
         # Create token ids that will exhaust all blocks.
-        token_ids = list(range(num_blocks_to_consume * block_size))
+        token_ids = TokenIds(range(num_blocks_to_consume * block_size))
 
         first_chain = TestPrefixCachingBlockAllocator.create_immutable_chain(
             block_size=block_size,
@@ -440,7 +442,8 @@ class TestPrefixCachingBlockAllocator:
         # make it different from here comparing with first_chain
         zero_point = random.randint(1, len(token_ids) - 1)
         zero_point_blocks = zero_point // block_size
-        token_ids[zero_point:] = [-1] * (len(token_ids) - zero_point)
+        token_ids = token_ids[:zero_point] + TokenIds(
+            [-1] * (len(token_ids) - zero_point))
 
         second_chain = TestPrefixCachingBlockAllocator.create_immutable_chain(
             block_size=block_size,
@@ -471,7 +474,7 @@ class TestPrefixCachingBlockAllocator:
 
         allocator = PrefixCachingBlockAllocator(num_blocks=num_blocks,
                                                 block_size=block_size)
-        token_ids = list(range(block_size))
+        token_ids = TokenIds(range(block_size))
 
         block = allocator.allocate_immutable_block(prev_block=None,
                                                    token_ids=token_ids)
@@ -481,7 +484,7 @@ class TestPrefixCachingBlockAllocator:
 
         block_id = m.block_id
         for i in range(block_size):
-            m.append_token_ids([i])
+            m.append_token_ids(TokenIds([i]))
 
         # After block get promoted to immutable from mutable, if there is
         # already same content hash block, then it shall be released into
@@ -505,7 +508,7 @@ class TestPrefixCachingBlockAllocator:
         one_ref = {i: 1 for i in range(num_blocks)}
         allocator = PrefixCachingBlockAllocator(num_blocks=num_blocks,
                                                 block_size=block_size)
-        token_ids = list(range(num_blocks * block_size))
+        token_ids = TokenIds(range(num_blocks * block_size))
 
         # Verify initial/pre-alloc state
 
@@ -628,7 +631,7 @@ class TestPrefixCachingBlockAllocator:
                                                 block_size=block_size)
         num_blocks_to_consume = num_blocks + 1
 
-        token_ids = list(range(num_blocks_to_consume * block_size))
+        token_ids = TokenIds(range(num_blocks_to_consume * block_size))
 
         num_blocks_in_first_chain = 2
         num_tokens_in_first_chain = block_size * num_blocks_in_first_chain
@@ -690,7 +693,7 @@ class TestPrefixCachingBlockAllocator:
         # Test when no query (0/0)
         assert allocator.get_prefix_cache_hit_rate() == 0.0
 
-        token_ids = list(range(block_size))
+        token_ids = TokenIds(range(block_size))
         allocator.allocate_immutable_block(prev_block=None,
                                            token_ids=token_ids)
         # Test 0/1 hit rate
@@ -716,7 +719,7 @@ class TestPrefixCachingBlockAllocator:
         allocator = PrefixCachingBlockAllocator(num_blocks=8,
                                                 block_size=block_size)
 
-        common_token_ids = list(range(block_size * common_blocks))
+        common_token_ids = TokenIds(range(block_size * common_blocks))
 
         # Mimic the behavior of allocating the same block chain
         # (i.e., common prefix) for a batch of 3 different prefill sequences.
@@ -741,7 +744,7 @@ class TestPrefixCachingBlockAllocator:
     @staticmethod
     def create_immutable_chain(
         block_size: int,
-        token_ids: List[int],
+        token_ids: TokenIds,
         allocator: PrefixCachingBlockAllocator,
     ) -> List[PrefixCachingBlock]:
         """Helper method which creates a chain of blocks.

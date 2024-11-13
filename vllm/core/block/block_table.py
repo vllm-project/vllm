@@ -3,7 +3,9 @@ from typing import List, Optional
 
 from vllm.core.block.common import BlockList
 from vllm.core.block.interfaces import Block, DeviceAwareBlockAllocator
-from vllm.utils import Device, cdiv, chunk_list
+from vllm.core.block.token_ids import TokenIds
+from vllm.sequence import Sequence
+from vllm.utils import Device, cdiv
 
 
 class BlockTable:
@@ -55,7 +57,7 @@ class BlockTable:
         self._num_full_slots = self._get_num_token_ids()
 
     @staticmethod
-    def get_num_required_blocks(token_ids: List[int],
+    def get_num_required_blocks(token_count: int,
                                 block_size: int,
                                 num_lookahead_slots: int = 0) -> int:
         """Calculates the minimum number of blocks required to store a given
@@ -66,7 +68,7 @@ class BlockTable:
         allocation (e.g. ignoring prefix caching).
 
         Args:
-            token_ids (List[int]): The sequence of token IDs to be stored.
+            token_ids (int): The number of token ids to be stored.
             block_size (int): The maximum number of tokens that can be stored in
                 a single block.
             num_lookahead_slots (int): look-ahead slots that the sequence may
@@ -76,10 +78,10 @@ class BlockTable:
             int: The minimum number of blocks required to store the given
                 sequence of token IDs along with any required look-ahead slots.
         """
-        return cdiv(len(token_ids) + num_lookahead_slots, block_size)
+        return cdiv(token_count + num_lookahead_slots, block_size)
 
     def allocate(self,
-                 token_ids: List[int],
+                 token_ids: TokenIds,
                  device: Device = Device.GPU) -> None:
         """Allocates memory blocks for storing the given sequence of token IDs.
 
@@ -87,7 +89,8 @@ class BlockTable:
         sequence of token IDs.
 
         Args:
-            token_ids (List[int]): The sequence of token IDs to be stored.
+            token_ids (TokenIds): The sequence of token IDs to be
+                stored.
             device (Device, optional): The device on which the blocks should be
                 allocated. Defaults to Device.GPU.
         """
@@ -106,7 +109,7 @@ class BlockTable:
         self._blocks.update(blocks)
 
     def append_token_ids(self,
-                         token_ids: List[int],
+                         token_ids: TokenIds,
                          num_lookahead_slots: int = 0,
                          num_computed_slots: Optional[int] = None) -> None:
         """Appends a sequence of token IDs to the existing blocks in the
@@ -122,7 +125,7 @@ class BlockTable:
         separate block.
 
         Args:
-            token_ids (List[int]): The sequence of token IDs to be appended.
+            token_ids (TokenIds): The token IDs to be appended.
             num_computed_slots (Optional[int]): The number of KV cache slots
                 that are already filled (computed).
                 When sliding window is enabled, this is used to compute how many
@@ -240,33 +243,35 @@ class BlockTable:
         """
         return self._blocks.ids()
 
-    def get_unseen_token_ids(self, sequence_token_ids: List[int]) -> List[int]:
+    def get_unseen_token_id_count(self, sequence: Sequence) -> int:
+        # Since the block table is append-only, the unseen token ids are the
+        # ones after the appended ones.
+        return max(0, sequence.get_len() - self.num_full_slots)
+
+    def get_unseen_token_ids(self, sequence: Sequence) -> TokenIds:
         """Get the number of "unseen" tokens in the sequence.
 
         Unseen tokens are tokens in the sequence corresponding to this block
         table, but are not yet appended to this block table.
 
         Args:
-            sequence_token_ids (List[int]): The list of token ids in the
-                sequence.
+            sequence (Sequence): The sequence.
 
         Returns:
-            List[int]: The postfix of sequence_token_ids that has not yet been
-                appended to the block table.
+            TokenIds: The postfix of the sequence's tokens that has
+                not yet been appended to the block table.
         """
 
-        # Since the block table is append-only, the unseen token ids are the
-        # ones after the appended ones.
-        return sequence_token_ids[self.num_full_slots:]
+        return sequence.get_token_ids()[self._num_full_slots:]
 
     def _allocate_blocks_for_token_ids(self, prev_block: Optional[Block],
-                                       token_ids: List[int],
+                                       token_ids: TokenIds,
                                        device: Device) -> List[Block]:
         blocks: List[Block] = []
 
-        block_token_ids = []
-        tail_token_ids = []
-        for cur_token_ids in chunk_list(token_ids, self._block_size):
+        block_token_ids: List[TokenIds] = []
+        tail_token_ids: List[TokenIds] = []
+        for cur_token_ids in token_ids.to_chunks(self._block_size):
             if len(cur_token_ids) == self._block_size:
                 block_token_ids.append(cur_token_ids)
             else:
@@ -290,18 +295,6 @@ class BlockTable:
             blocks.append(block)
 
         return blocks
-
-    def _get_all_token_ids(self) -> List[int]:
-        # NOTE: This function is O(seq_len); use sparingly.
-        token_ids: List[int] = []
-
-        if not self._is_allocated:
-            return token_ids
-
-        for block in self.blocks:
-            token_ids.extend(block.token_ids)
-
-        return token_ids
 
     def _get_num_token_ids(self) -> int:
         res = 0
@@ -334,7 +327,7 @@ class BlockTable:
         return self._num_full_slots
 
     def get_num_blocks_touched_by_append_slots(
-            self, token_ids: List[int], num_lookahead_slots: int) -> int:
+            self, num_token_ids: int, num_lookahead_slots: int) -> int:
         """Determine how many blocks will be "touched" by appending the token
         ids.
 
@@ -346,15 +339,15 @@ class BlockTable:
         # token_blocks = self._chunk_token_blocks_for_append(all_token_ids)
         # return len(token_blocks)
 
-        num_token_ids = len(token_ids) + num_lookahead_slots
+        num_token_ids = num_token_ids + num_lookahead_slots
         first_chunk_size = self._block_size - (self._num_full_slots %
                                                self._block_size)
         num_token_blocks = (1 + math.ceil(
             (num_token_ids - first_chunk_size) / self._block_size))
         return num_token_blocks
 
-    def _chunk_token_blocks_for_append(
-            self, token_ids: List[int]) -> List[List[int]]:
+    def _chunk_token_blocks_for_append(self,
+                                       token_ids: TokenIds) -> List[TokenIds]:
         """Split the token ids into block-sized chunks so they can be easily
         appended to blocks. The first such "token block" may have less token ids
         than the block size, since the last allocated block may be partially
@@ -363,12 +356,7 @@ class BlockTable:
         If no token ids are provided, then no chunks are returned.
         """
 
-        if not token_ids:
-            return []
-
-        first_chunk_size = self._block_size - (self._num_full_slots %
-                                               self._block_size)
-        token_blocks = [token_ids[:first_chunk_size]]
-        token_blocks.extend(
-            chunk_list(token_ids[first_chunk_size:], self._block_size))
-        return token_blocks
+        return list(
+            token_ids.to_chunks(self._block_size,
+                                first_chunk_size=self._block_size -
+                                (self._num_full_slots % self._block_size)))
