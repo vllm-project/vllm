@@ -6,6 +6,7 @@ on:
   push:
     branches:
       - main
+      - develop
     paths:
       - "**/*.py"
       - "**/*.md"
@@ -16,6 +17,7 @@ on:
   pull_request:
     branches:
       - main
+      - develop
     paths:
       - "**/*.py"
       - "**/*.md"

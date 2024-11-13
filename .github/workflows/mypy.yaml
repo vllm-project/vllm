@@ -6,6 +6,7 @@ on:
   push:
     branches:
       - main
+      - develop
     paths:
       - '**/*.py'
       - '.github/workflows/mypy.yaml'
@@ -14,6 +15,7 @@ on:
   pull_request:
     branches:
       - main
+      - develop
     # This workflow is only relevant when one of the following files changes.
     # However, we have github configured to expect and require this workflow
     # to run and pass before github with auto-merge a pull request. Until github
