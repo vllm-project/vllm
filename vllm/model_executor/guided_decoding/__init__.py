@@ -8,6 +8,9 @@ async def get_guided_decoding_logits_processor(
         guided_params: GuidedDecodingParams,
         tokenizer) -> Optional[LogitsProcessor]:
     # CFG grammar not supported by LMFE, so we use outlines instead
+    if guided_params.grammar and guided_params.backend not in ['outlines', 'guidance']:
+        guided_params.backend = 'outlines'
+        
     if guided_params.backend == 'outlines':
         # NOTE: lazy import outlines to avoid https://github.com/vllm-project/vllm/issues/4193
         from vllm.model_executor.guided_decoding.outlines_decoding import (  # noqa
