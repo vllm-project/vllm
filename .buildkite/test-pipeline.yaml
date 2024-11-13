@@ -330,8 +330,7 @@ steps:
   - tests/models/embedding/language
   - tests/models/encoder_decoder/language
   commands:
-    - pytest -v -s models/decoder_only/language -m core_model
-    - pytest -v -s models/decoder_only/language -m quant_model
+    - pytest -v -s models/decoder_only/language -m 'core_model or quant_model'
     - pytest -v -s models/embedding/language -m core_model
     - pytest -v -s models/embedding/vision_language -m core_model
 
@@ -356,11 +355,8 @@ steps:
   - tests/models/embedding/vision_language
   - tests/models/encoder_decoder/vision_language
   commands:
-    - pytest -v -s models/decoder_only/audio_language -m core_model
-    - pytest -v -s --ignore models/decoder_only/vision_language/test_phi3v.py models/decoder_only/vision_language -m core_model
-    # No tests under this group for now
-    # - pytest -v -s models/decoder_only/audio_language -m quant_model
-    - pytest -v -s --ignore models/decoder_only/vision_language/test_phi3v.py models/decoder_only/vision_language -m quant_model
+    - pytest -v -s models/decoder_only/audio_language -m 'core_model or quant_model'
+    - pytest -v -s --ignore models/decoder_only/vision_language/test_phi3v.py models/decoder_only/vision_language -m 'core_model or quant_model'
     - pytest -v -s models/encoder_decoder/language -m core_model
     - pytest -v -s models/encoder_decoder/vision_language -m core_model
 
