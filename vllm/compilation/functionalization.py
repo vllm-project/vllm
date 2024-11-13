@@ -4,7 +4,11 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 import torch
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
 
-from vllm.compilation.inductor_pass import VllmInductorPass, is_func
+from vllm.logger import init_logger
+
+from .inductor_pass import VllmInductorPass, is_func
+
+logger = init_logger(__name__)
 
 
 class FixFunctionalizationPass(VllmInductorPass):
@@ -23,6 +27,7 @@ class FixFunctionalizationPass(VllmInductorPass):
         self.dump_graph(graph, "before_fix_functionalization")
 
         self.nodes_to_remove: List[torch.fx.Node] = []
+        count = 0
         for node in graph.nodes:
             if not is_func(node, auto_functionalized):
                 continue  # Avoid deep if-elif nesting
@@ -72,13 +77,20 @@ class FixFunctionalizationPass(VllmInductorPass):
                                      node,
                                      mutated_args,
                                      args=('out', 'input'))
+            else:
+                continue  # skip the count
+
+            count += 1
 
         self.dump_graph(graph, "before_fix_functionalization_cleanup")
 
         # Remove the nodes all at once
+        count_removed = len(self.nodes_to_remove)
         for node in self.nodes_to_remove:
             graph.erase_node(node)
 
+        logger.debug("De-functionalized %s nodes, removed %s nodes", count,
+                     count_removed)
         self.dump_graph(graph, "after_fix_functionalization")
 
     def _remove(self, node_or_nodes: Union[torch.fx.Node,
