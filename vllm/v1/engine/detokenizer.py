@@ -1,7 +1,6 @@
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Tuple
 
-from vllm.config import ModelConfig
 from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
@@ -193,14 +192,17 @@ class IncrementalDetokenizer:
 
 class Detokenizer:
 
-    def __init__(self, model_config: ModelConfig):
+    def __init__(self,
+                 tokenizer_name: str,
+                 tokenizer_mode: str = "auto",
+                 trust_remote_code: bool = False,
+                 revision: Optional[str] = None):
         # TODO: once we support LoRA, we should should pass the tokenizer
         # here. We currently have two copies (this + in the LLMEngine).
-        init_kwargs = dict(tokenizer_name=model_config.tokenizer,
-                           tokenizer_mode=model_config.tokenizer_mode,
-                           trust_remote_code=model_config.trust_remote_code,
-                           revision=model_config.tokenizer_revision)
-        self.tokenizer = get_tokenizer(**init_kwargs)
+        self.tokenizer = get_tokenizer(tokenizer_name=tokenizer_name,
+                                       tokenizer_mode=tokenizer_mode,
+                                       trust_remote_code=trust_remote_code,
+                                       revision=revision)
 
         # Request id -> IncrementalDetokenizer
         self.request_states: Dict[str, IncrementalDetokenizer] = {}
