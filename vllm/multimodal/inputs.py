@@ -1,4 +1,3 @@
-import sys
 from collections import UserDict, defaultdict
 from typing import (Any, Dict, List, Literal, Mapping, Sequence, Tuple,
                     TypedDict, TypeVar, Union, cast, final)
@@ -108,17 +107,8 @@ A dictionary containing nested tensors which have been batched via
 :meth:`MultiModalKwargs.batch`.
 """
 
-if sys.version_info < (3, 9):
-    # UserDict cannot be subscripted
-    class _MultiModalKwargsBase(UserDict):
-        pass
-else:
 
-    class _MultiModalKwargsBase(UserDict[str, NestedTensors]):
-        pass
-
-
-class MultiModalKwargs(_MultiModalKwargsBase):
+class MultiModalKwargs(UserDict[str, NestedTensors]):
     """
     A dictionary that represents the keyword arguments to
     :meth:`~torch.nn.Module.forward`.

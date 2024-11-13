@@ -109,7 +109,7 @@ class DummyDataFactory(Protocol):
         ...
 
 
-class _MultiModalCounts(UserDict):
+class _MultiModalCounts(UserDict[str, int]):
     """
     Wraps `mm_counts` for a more informative error message
     when attempting to access a plugin that does not exist.

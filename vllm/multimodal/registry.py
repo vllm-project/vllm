@@ -33,7 +33,7 @@ The processing metadata should be derived from the context.
 """
 
 
-class _MultiModalLimits(UserDict):
+class _MultiModalLimits(UserDict["ModelConfig", Dict[str, int]]):
     """
     Wraps `_limits_by_model` for a more informative error message
     when attempting to access a model that does not exist.
