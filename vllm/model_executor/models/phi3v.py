@@ -39,7 +39,7 @@ from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.base import NestedTensors, PlaceholderRange
+from vllm.multimodal.inputs import NestedTensors, PlaceholderRange
 from vllm.multimodal.utils import cached_get_tokenizer, repeat_and_pad_token
 from vllm.sequence import IntermediateTensors, PoolerOutput
 from vllm.utils import is_list_of
