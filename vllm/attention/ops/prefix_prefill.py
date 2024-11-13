@@ -609,7 +609,7 @@ if triton.__version__ >= "2.1.0":
                 v = v_load
             p = p.to(v.dtype)
 
-            acc = tl.dot(p, v, acc=acc, input_precision=IN_PRECISION)
+            acc = tl.dot(p, v, acc=acc, input_precision='ieee')
             # update m_i and l_i
             l_i = l_i_new
             m_i = m_i_new
@@ -644,7 +644,7 @@ if triton.__version__ >= "2.1.0":
                         other=0.0)
 
             qk = tl.zeros([BLOCK_M, BLOCK_N], dtype=tl.float32)
-            qk = tl.dot(q, k, acc=qk, input_precision=IN_PRECISION)
+            qk = tl.dot(q, k, acc=qk, input_precision='ieee')
             qk *= sm_scale
             qk = tl.where(offs_m[:, None] >= (start_n + offs_n[None, :]), qk,
                           float("-inf"))
@@ -682,7 +682,7 @@ if triton.__version__ >= "2.1.0":
                         other=0.0)
             p = p.to(v.dtype)
 
-            acc = tl.dot(p, v, acc=acc, input_precision=IN_PRECISION)
+            acc = tl.dot(p, v, acc=acc, input_precision='ieee')
             # update m_i and l_i
             l_i = l_i_new
             m_i = m_i_new
