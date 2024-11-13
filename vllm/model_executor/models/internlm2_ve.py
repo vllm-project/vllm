@@ -104,14 +104,13 @@ class InternLM2VEDecoderLayer(nn.Module):
 
 class InternLM2VEModel(InternLM2Model):
 
-    def __init__(
-        self,
-        config: PretrainedConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ) -> None:
-        super().__init__(config, cache_config, quant_config)
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
+
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: InternLM2VEDecoderLayer(
@@ -159,15 +158,13 @@ class InternLM2VEModel(InternLM2Model):
 
 class InternLM2VEForCausalLM(InternLM2ForCausalLM):
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__(vllm_config=vllm_config, prefix=prefix)
+
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
-        super().__init__(config, cache_config, quant_config)
+
         self.model = InternLM2VEModel(config,
                                       cache_config,
                                       quant_config,

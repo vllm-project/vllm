@@ -73,6 +73,7 @@ class WorkerLoRAManager(AbstractWorkerManager):
             max_num_batched_tokens=self.max_num_batched_tokens,
             vocab_size=self.vocab_size,
             lora_config=self.lora_config,
+            device=self.device,
             lora_manager_cls=self._manager_cls,
         )
         self._adapter_manager = lora_manager
@@ -176,6 +177,7 @@ class LRUCacheWorkerLoRAManager(WorkerLoRAManager):
             max_num_seqs=self.max_num_seqs,
             vocab_size=self.vocab_size,
             lora_config=self.lora_config,
+            device=self.device,
             max_num_batched_tokens=self.max_num_batched_tokens,
         )
         self._adapter_manager = lora_manager

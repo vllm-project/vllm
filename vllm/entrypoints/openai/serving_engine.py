@@ -478,12 +478,19 @@ class OpenAIServing:
 
         mm_data = await mm_data_future
 
-        if tool_parser is not None:
+        # tool parsing is done only if a tool_parser has been set and if
+        # tool_choice is not "none" (if tool_choice is "none" but a tool_parser
+        # is set, we want to prevent parsing a tool_call hallucinated by the LLM
+        should_parse_tools = tool_parser is not None and (hasattr(
+            request, "tool_choice") and request.tool_choice != "none")
+
+        if should_parse_tools:
             if not isinstance(request, ChatCompletionRequest):
                 msg = "Tool usage is only supported for Chat Completions API"
                 raise NotImplementedError(msg)
 
-            request = tool_parser(tokenizer).adjust_request(request=request)
+            request = tool_parser(tokenizer).adjust_request(  # type: ignore
+                request=request)
 
         if isinstance(request_prompt, str):
             prompt_inputs = self._tokenize_prompt_input(

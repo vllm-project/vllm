@@ -45,7 +45,7 @@ from vllm.utils import is_list_of
 
 from .clip import dummy_image_for_clip, dummy_seq_data_for_clip
 from .interfaces import SupportsMultiModal, SupportsPP
-from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
+from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn, maybe_prefix,
                     merge_multimodal_embeddings)
 
 logger = init_logger(__name__)
@@ -525,11 +525,7 @@ def input_processor_for_phi3v(ctx: InputContext,
 @INPUT_REGISTRY.register_input_processor(input_processor_for_phi3v)
 class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
@@ -544,12 +540,14 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             config.hidden_size,
             org_num_embeddings=config.vocab_size,
             quant_config=quant_config,
-            prefix="model.embed_tokens",
+            prefix=maybe_prefix(prefix, "model.embed_tokens"),
         )
 
         # TODO: Optionally initializes this for supporting input embeddings.
         self.vision_embed_tokens = Phi3HDImageEmbedding(
-            config, quant_config, prefix="model.vision_embed_tokens")
+            config,
+            quant_config,
+            prefix=maybe_prefix(prefix, "model.vision_embed_tokens"))
 
         # The prefix is empty intentionally because default prefix of
         # LlamaForCausalLM is "model"

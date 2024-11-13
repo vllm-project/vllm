@@ -35,7 +35,7 @@ from .clip import (dummy_image_for_clip, dummy_seq_data_for_clip,
                    get_clip_num_patches)
 from .interfaces import SupportsMultiModal, SupportsPP
 from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
-                    merge_multimodal_embeddings)
+                    maybe_prefix, merge_multimodal_embeddings)
 
 IMG_START = '<img>'
 IMG_END = '</img>'
@@ -435,13 +435,13 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
             config,
             quant_config=quant_config,
             is_mono=self.is_mono,
-            prefix="vision_model",
+            prefix=maybe_prefix(prefix, "vision_model"),
         )
 
         self.language_model = init_vllm_registered_model(
             config.text_config,
             vllm_config=vllm_config,
-            prefix="language_model")
+            prefix=maybe_prefix(prefix, "language_model"))
 
         self.mlp1 = self._init_mlp1(config)
 
