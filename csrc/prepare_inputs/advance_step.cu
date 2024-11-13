@@ -146,21 +146,25 @@ __global__ void advance_step_flashinfer_indptr_kernel(
     }
     paged_kv_indptr_ptr[idx + 1] = sum;
   }
-  // if cudagraph, fill padded seqs with the last valid seq's indptr
-  if (num_queries < (idx + 1) && (idx + 1) <= num_seqs) {
-    paged_kv_indptr_ptr[idx + 1] = paged_kv_indptr_ptr[num_queries];
-  }
 }
 
-// each thread processes a block_ptr in block_tables
-// block_tables shape: [num_queries, max_num_blocks_per_seq]
-// paged_kv_indices is flattened block_tables.
 __global__ void advance_step_flashinfer_indices_kernel(
     int num_seqs, int num_queries, int const* block_tables_ptr,
     int64_t const max_num_blocks_per_seq, int* paged_kv_indices_ptr,
     int* paged_kv_indptr_ptr, int* block_table_bound_ptr) {
   // note: max_num_blocks_per_seq = block_tables.stride(0)
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
+
+  // when cuda graphs are enabled, paged_kv_indptr tensor
+  // has to be updated for the padded queries
+  // tid represents a query# for paged_kv_indptr tensor
+  if (num_queries < tid && tid <= num_seqs) {
+    paged_kv_indptr_ptr[tid] = paged_kv_indptr_ptr[num_queries];
+  }
+
+  // each thread processes a block_ptr in block_tables
+  // block_tables shape: [num_queries, max_num_blocks_per_seq]
+  // paged_kv_indices is flattened block_tables.
   for (int idx = tid; idx < (num_seqs * max_num_blocks_per_seq);
        idx += (gridDim.x * blockDim.x)) {
     // block_tables-row = paged_kv_indptr[queryNum]
