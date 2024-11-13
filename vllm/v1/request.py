@@ -1,7 +1,7 @@
 import enum
 from typing import List, Optional, Union
 
-from vllm.inputs import DecoderOnlyInputs, token_inputs
+from vllm.inputs import DecoderOnlyInputs, SingletonInputsAdapter, token_inputs
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MultiModalKwargs
 from vllm.sampling_params import SamplingParams
@@ -22,7 +22,7 @@ class Request:
         lora_request: Optional[LoRARequest] = None,
     ) -> None:
         self.request_id = request_id
-        self.inputs = inputs
+        self.inputs = SingletonInputsAdapter(inputs)
         self.sampling_params = sampling_params
         # Because of LoRA, the eos token id can be different for each request.
         self.eos_token_id = eos_token_id
@@ -38,17 +38,17 @@ class Request:
         assert sampling_params.max_tokens is not None
         self.max_tokens = sampling_params.max_tokens
 
-        self.prompt = inputs.get("prompt")
-        self.prompt_token_ids = inputs["prompt_token_ids"]
+        self.prompt = self.inputs.prompt
+        self.prompt_token_ids = self.inputs.prompt_token_ids
         self.num_prompt_tokens = len(self.prompt_token_ids)
         self._output_token_ids: List[int] = []
         self._all_token_ids: List[int] = self.prompt_token_ids.copy()
         self.num_computed_tokens = 0
 
         # Raw multimodal data before the mm input mapper (e.g., PIL images).
-        self.mm_data = inputs.get("multi_modal_data")
-        self.mm_processor_kwargs = inputs.get("mm_processor_kwargs")
-        mm_positions = inputs.get("multi_modal_placeholders")
+        self.mm_data = self.inputs.multi_modal_data
+        self.mm_processor_kwargs = self.inputs.mm_processor_kwargs
+        mm_positions = self.inputs.multi_modal_placeholders
         if mm_positions:
             # FIXME(woosuk): Support other modalities.
             self.mm_positions = mm_positions.get("image", [])
