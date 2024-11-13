@@ -204,7 +204,7 @@ def test_concurrent_chunking_large_requests():
     assert out.num_batched_tokens == 64
 
 
-def test_small_prompts_jump_big_prompts_in_queue():
+def test_short_prompts_jump_long_prompts_in_queue():
     """Verify large prefill requests are punted behind smaller ones if 
     another large prefill request is already running"""
     block_size = 4

@@ -403,14 +403,14 @@ class Scheduler:
         self.max_num_partial_prefills = \
             scheduler_config.max_num_partial_prefills
         self.prefill_slots_running = 0
-        self.big_prefill_requests = 0
+        self.long_prefill_requests = 0
         # Requests with more than (4% max context length) tokens to prefill
-        # are "big".
-        # The number of big prefill requests is limited so that smaller
+        # are "long".
+        # The number of long prefill requests is limited so that smaller
         # requests may jump the queue in front of them and get to the decode
         # phase faster.
-        self.big_prefill_threshold = scheduler_config.max_model_len // 25
-        self.max_big_requests = 1  # TODO: something
+        self.long_prefill_threshold = scheduler_config.max_model_len // 25
+        self.max_long_requests = 1  # TODO: something
 
         # Dict cache with the chunk sizes to hand out to each sequence depending
         # on how many prefill slots are used. This is slightly faster than
@@ -924,12 +924,12 @@ class Scheduler:
                 "Waiting sequence group should have only one prompt "
                 "sequence.")
 
-            is_big = self._is_big_seq_group(seq_group)
-            if is_big and self.big_prefill_requests >= self.max_big_requests \
+            is_long = self._is_long_seq_group(seq_group)
+            if is_long and self.long_prefill_requests >= self.max_long_requests \
                 and self.max_num_partial_prefills > 1:
                 # When we have more than one prefill slot, we limit the number
-                # of big requests to avoid filling all of our slots with partial
-                # prefills of big prompt sequences.
+                # of long requests to avoid filling all of our slots with partial
+                # prefills of long prompt sequences.
                 leftover_waiting_sequences.appendleft(seq_group)
                 waiting_queue.popleft()
                 continue
@@ -1000,8 +1000,8 @@ class Scheduler:
             waiting_queue.popleft()
             self._allocate_and_set_running(seq_group)
 
-            if is_big:
-                self.big_prefill_requests += 1
+            if is_long:
+                self.long_prefill_requests += 1
 
             if enable_chunking and self.scheduler_config.is_multi_step:
                 blocks_to_copy: List[Tuple[int, int]] = []
@@ -1195,9 +1195,9 @@ class Scheduler:
 
         # Set slot counts for next iteration
         self.prefill_slots_running = len(prefilling)
-        self.big_prefill_requests = len([
+        self.long_prefill_requests = len([
             seq_group for seq_group in prefilling
-            if self._is_big_seq_group(seq_group.seq_group)
+            if self._is_long_seq_group(seq_group.seq_group)
         ])
 
         assert (budget.num_batched_tokens <=
@@ -1246,11 +1246,11 @@ class Scheduler:
                        len(running_scheduled.swapped_out)),
         )
 
-    def _is_big_seq_group(self, seq_group: SequenceGroup) -> bool:
+    def _is_long_seq_group(self, seq_group: SequenceGroup) -> bool:
         """Simple heuristic to check if a sequence group needs a lot of prefill
         work."""
         return seq_group.seqs[0].get_num_new_tokens(
-        ) >= self.big_prefill_threshold
+        ) >= self.long_prefill_threshold
 
     def _will_still_be_prefilling(self,
                                   seq_group: ScheduledSequenceGroup) -> bool:
@@ -1266,18 +1266,18 @@ class Scheduler:
         budget fewer tokens for currently running prefills if we know that more
         requests from the queue will fit.
         """
-        queued_big_requests = 0
+        queued_long_requests = 0
         for seq_group in self.waiting:
             # Don't fill more slots than we have
             if self.prefill_slots_running >= self.max_num_partial_prefills:
                 break
 
-            # Disallow multiple big requests
-            if self._is_big_seq_group(seq_group):
-                if self.big_prefill_requests + queued_big_requests \
-                    >= self.max_big_requests:
+            # Disallow multiple long requests
+            if self._is_long_seq_group(seq_group):
+                if self.long_prefill_requests + queued_long_requests \
+                    >= self.max_long_requests:
                     continue
-                queued_big_requests += 1
+                queued_long_requests += 1
 
             self.prefill_slots_running += 1
 
