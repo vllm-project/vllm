@@ -64,7 +64,6 @@ class OpenAIServingChat(OpenAIServing):
                          return_tokens_as_token_ids=return_tokens_as_token_ids)
 
         self.response_role = response_role
-        self.use_tool_use_model_template = False
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
 
