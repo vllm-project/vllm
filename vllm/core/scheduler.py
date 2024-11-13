@@ -343,9 +343,9 @@ class PartialPrefillMetadata:
             # TODO: Check if this stage is correctly updated before scheduling
             if sg.first_seq.data.stage == SequenceStage.PREFILL:
                 partial_prefills += 1
-            if sg.first_seq.get_num_new_tokens(
-            ) > scheduler_config.long_prefill_token_threshold:
-                long_partial_prefills += 1
+                if sg.first_seq.get_num_new_tokens(
+                ) > scheduler_config.long_prefill_token_threshold:
+                    long_partial_prefills += 1
 
         for sg in waiting:
             # Don't bother looping through the rest of the queue
@@ -581,6 +581,7 @@ class Scheduler:
         budget: SchedulingBudget,
         curr_loras: Optional[Set[int]],
         enable_chunking: bool = False,
+        partial_prefill_metadata: Optional[PartialPrefillMetadata] = None,
     ) -> SchedulerRunningOutputs:
         """Schedule sequence groups that are running.
 
@@ -595,7 +596,9 @@ class Scheduler:
                 chunked number of tokens are scheduled  if
                 `budget.num_batched_tokens` has not enough capacity to schedule
                 all tokens.
-    
+            partial_prefill_metadata: information about the partial prefills
+                that are currently running
+
         Returns:
             SchedulerRunningOutputs.
         """
@@ -629,7 +632,12 @@ class Scheduler:
         while running_queue:
             seq_group = running_queue[0]
             num_running_tokens = self._get_num_new_tokens(
-                seq_group, SequenceStatus.RUNNING, enable_chunking, budget)
+                seq_group,
+                SequenceStatus.RUNNING,
+                enable_chunking,
+                budget,
+                partial_prefill_metadata,
+            )
 
             if num_running_tokens == 0:
                 # No budget => Stop
@@ -1227,12 +1235,13 @@ class Scheduler:
             waiting=self.waiting,
             scheduler_config=self.scheduler_config)
 
-        print("partial_prefill_metadata : ", partial_prefill_metadata)
-
         # Decoding should be always scheduled first by fcfs.
-        running_scheduled = self._schedule_running(budget,
-                                                   curr_loras,
-                                                   enable_chunking=True)
+        running_scheduled = self._schedule_running(
+            budget,
+            curr_loras,
+            enable_chunking=True,
+            partial_prefill_metadata=partial_prefill_metadata,
+        )
 
         # Schedule swapped out requests.
         # If preemption happens, it means we don't have space for swap-in.
