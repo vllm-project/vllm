@@ -151,7 +151,8 @@ def create_bench_tensors(shape: Tuple[int, int, int], types: TypeConfig,
 
 
 def torch_matmul_f16_create_bench_fn(bt: BenchmarkTensors) -> Callable:
-    a, w = bt.a, bt.w_ref.to(bt.a.dtype)
+    a = bt.a
+    w = bt.w_ref.to(bt.a.dtype)  # use float reference tensor
     if a.dtype not in [torch.float16, torch.bfloat16]:
         a = a.to(torch.float16)
         w = w.to(torch.float16)

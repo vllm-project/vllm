@@ -149,6 +149,66 @@ struct ArrayConverterPacked32Bit {
   }
 };
 
+// Convert 8 4bit values packed into a 32bit register to 8 8bit values packed
+// into 2 32bit register.
+template <uint8_t LUT0, uint8_t LUT1, uint8_t LUT2, uint8_t LUT3,    //
+          uint8_t LUT4, uint8_t LUT5, uint8_t LUT6, uint8_t LUT7,    //
+          uint8_t LUT8, uint8_t LUT9, uint8_t LUT10, uint8_t LUT11,  //
+          uint8_t LUT12, uint8_t LUT13, uint8_t LUT14, uint8_t LUT15>
+CUTLASS_DEVICE cutlass::AlignedArray<uint32_t, 2> lut_4bit_to_8bit_convert(
+    uint32_t src) {
+  cutlass::AlignedArray<uint32_t, 2> r;
+
+  // Ignore the high bit when indexing into LUT, for each 4bit value
+  //  we index into both the positive and negative candidates then use
+  //  high_bit | final_prmt_base to select the correct candidate
+  uint32_t lut_idx = (src & 0x77777777);
+
+  // Determines if the value is in the top half of the LUT if set or
+  //  (i.e. LUT[8:15]) in the bottom half (i.e. LUT[0:7]) if not set. Then move
+  //  into bit position 0x4 of each nibble so when or'd with final_prmt_base it
+  //  selects the correct candidate. When elements in final_prmt_base
+  //  are >= 0x4, the high candidate is selected (i.e. LUT[8:15]), when elements
+  //  are  < 0x4, the low candidate is selected (i.e. LUT[0:7])
+  uint32_t high_bit = (src & 0x88888888) >> 1;
+
+  // `high_bit` is OR'd with 0x31203120 to find the correct value in the LUT
+  // (selects correct high or low candidate)
+  const uint32_t final_prmt_base = 0x32103210;
+
+  auto pack = [](uint8_t a, uint8_t b, uint8_t c, uint8_t d) {
+    return uint32_t(a) | (uint32_t(b) << 8) | (uint32_t(c) << 16) |
+           (uint32_t(d) << 24);
+  };
+
+  static constexpr uint32_t LOW_0 = pack(LUT0, LUT1, LUT2, LUT3);
+  static constexpr uint32_t LOW_1 = pack(LUT4, LUT5, LUT6, LUT7);
+  static constexpr uint32_t HIGH_0 = pack(LUT8, LUT9, LUT10, LUT11);
+  static constexpr uint32_t HIGH_1 = pack(LUT12, LUT13, LUT14, LUT15);
+
+  CUTLASS_PRAGMA_UNROLL
+  for (int ii = 0; ii < 2; ++ii, lut_idx >>= 16, high_bit >>= 16) {
+    uint32_t final_prmt_idx = final_prmt_base | high_bit;
+
+    // This uses a look up table to convert packed int4s to packed int8s,
+    // using the int4 value as the index to prmt. It first select both the
+    // high and low candidates, then uses the high bit (i.e. `high_bit`) to
+    // select the correct candidate.
+    asm volatile(
+        "{\n"
+        "  .reg .b32 low, high;\n"
+        "  prmt.b32 low, %1, %2, %5;\n"
+        "  prmt.b32 high, %3, %4, %5;\n"
+        "  prmt.b32 %0, low, high, %6;\n"
+        "}\n"
+        : "=r"(r[ii])
+        : "n"(LOW_0), "n"(LOW_1), "n"(HIGH_0), "n"(HIGH_1), "r"(lut_idx),
+          "r"(final_prmt_idx));
+  }
+
+  return r;
+};
+
 // for Array<int8_t, N> <= Array<vllm_uint4b8_t, N>
 template <FloatRoundStyle Round, int N>
 struct NumericArrayConverter<int8_t, vllm_uint4b8_t, N, Round> {
@@ -161,46 +221,11 @@ struct NumericArrayConverter<int8_t, vllm_uint4b8_t, N, Round> {
   struct RegConvert {
     template <typename PackedResultType>
     CUTLASS_DEVICE static PackedResultType convert(Array<uint32_t, 1> src_) {
-      cutlass::AlignedArray<uint32_t, std::max(PackedResultType::kElements / 4,
-                                               size_t(1))>
-          r;
-      uint32_t src = src_[0];
-      // Determines if to get from the signed or unsigned candidates
-      uint32_t sign = (src & 0x88888888) >> 1;
-
-      // Ignore sign bit when indexing into LUT
-      uint32_t lut_idx = (src & 0x77777777);
-
-      // Signed is OR'd with 0x31203120 to find the correct value in the LUT
-      // (selects correct positive or negative candidate)
-      const uint32_t final_prmt_base = 0x32103210;
-
-      static constexpr uint32_t POS_INT8_REG1 = 0x03020100;  // [0, 1, 2, 3]
-      static constexpr uint32_t POS_INT8_REG2 = 0x07060504;  // [4, 5, 6, 7]
-      static constexpr uint32_t NEG_INT8_REG1 = 0xFBFAF9F8;  // [-8,-7,-6,-5]
-      static constexpr uint32_t NEG_INT8_REG2 = 0xFFFEFDFC;  // [-4,-3,-2,-1]
-
-      const int iters = std::max(PackedResultType::kElements / 4, size_t(1));
-      CUTLASS_PRAGMA_UNROLL
-      for (int ii = 0; ii < iters; ++ii, lut_idx >>= 16, sign >>= 16) {
-        uint32_t final_prmt_idx = final_prmt_base | sign;
-
-        // This uses a look up table to convert packed int4s to packed fp8s,
-        // using the int4 value as the index to prmt. It first select both the
-        // positive and negative candidates, then uses the sign bit to select
-        // the correct candidate.
-        asm volatile(
-            "{\n"
-            "  .reg .b32 pos_f8s, neg_f8s;\n"
-            "  prmt.b32 pos_f8s, %1, %2, %5;\n"
-            "  prmt.b32 neg_f8s, %3, %4, %5;\n"
-            "  prmt.b32 %0, neg_f8s, pos_f8s, %6;\n"
-            "}\n"
-            : "=r"(r[ii])
-            : "n"(POS_INT8_REG1), "n"(POS_INT8_REG2), "n"(NEG_INT8_REG1),
-              "n"(NEG_INT8_REG2), "r"(lut_idx), "r"(final_prmt_idx));
-      }
-
+      // [-8, -7, -6, -5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5, 6, 7] as int8s
+      auto r = lut_4bit_to_8bit_convert<0xF8, 0xF9, 0xFA, 0xFB,  //
+                                        0xFC, 0xFD, 0xFE, 0xFF,  //
+                                        0x00, 0x01, 0x02, 0x03,  //
+                                        0x04, 0x05, 0x06, 0x07>(src_[0]);
       return reinterpret_cast<PackedResultType&>(r);
     };
   };
@@ -229,46 +254,11 @@ struct NumericArrayConverter<cutlass::float_e4m3_t, vllm_uint4b8_t, N, Round> {
   struct RegConvert {
     template <typename PackedResultType>
     CUTLASS_DEVICE static PackedResultType convert(Array<uint32_t, 1> src_) {
-      cutlass::AlignedArray<uint32_t, std::max(PackedResultType::kElements / 4,
-                                               size_t(1))>
-          r;
-      uint32_t src = src_[0];
-      // Determines if to get from the signed or unsigned candidates
-      uint32_t sign = (src & 0x88888888) >> 1;
-
-      // Ignore sign bit when indexing into LUT
-      uint32_t lut_idx = (src & 0x77777777);
-
-      // Signed is OR'd with 0x31203120 to find the correct value in the LUT
-      // (selects correct positive or negative candidate)
-      const uint32_t final_prmt_base = 0x32103210;
-
-      static constexpr uint32_t POS_E4M3s_REG1 = 0x44403800;  // [0, 1, 2, 3]
-      static constexpr uint32_t POS_E4M3s_REG2 = 0x4E4C4A48;  // [4, 5, 6, 7]
-      static constexpr uint32_t NEG_E4M3s_REG1 = 0xCACCCED0;  // [-8,-7,-6,-5]
-      static constexpr uint32_t NEG_E4M3s_REG2 = 0xB8C0C4C8;  // [-4,-3,-2,-1]
-
-      const int iters = std::max(PackedResultType::kElements / 4, size_t(1));
-      CUTLASS_PRAGMA_UNROLL
-      for (int ii = 0; ii < iters; ++ii, lut_idx >>= 16, sign >>= 16) {
-        uint32_t final_prmt_idx = final_prmt_base | sign;
-
-        // This uses a look up table to convert packed int4s to packed fp8s,
-        // using the int4 value as the index to prmt. It first select both the
-        // positive and negative candidates, then uses the sign bit to select
-        // the correct candidate.
-        asm volatile(
-            "{\n"
-            "  .reg .b32 pos_f8s, neg_f8s;\n"
-            "  prmt.b32 pos_f8s, %1, %2, %5;\n"
-            "  prmt.b32 neg_f8s, %3, %4, %5;\n"
-            "  prmt.b32 %0, neg_f8s, pos_f8s, %6;\n"
-            "}\n"
-            : "=r"(r[ii])
-            : "n"(POS_E4M3s_REG1), "n"(POS_E4M3s_REG2), "n"(NEG_E4M3s_REG1),
-              "n"(NEG_E4M3s_REG2), "r"(lut_idx), "r"(final_prmt_idx));
-      }
-
+      // [-8, -7, -6, -5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5, 6, 7] as fp8s
+      auto r = lut_4bit_to_8bit_convert<0xD0, 0xCE, 0xCC, 0xCA,  //
+                                        0xC8, 0xC4, 0xC0, 0xB8,  //
+                                        0x00, 0x38, 0x40, 0x44,  //
+                                        0x48, 0x4A, 0x4C, 0x4E>(src_[0]);
       return reinterpret_cast<PackedResultType&>(r);
     };
   };

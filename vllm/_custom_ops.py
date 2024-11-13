@@ -447,7 +447,7 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
     @register_fake("_C::machete_mm")
     def machete_mm_fake(
         a: torch.Tensor,
-        # Should be the tensor returned by machete_prepack_B
+        # b_q Should be the tensor returned by machete_prepack_B
         b_q: torch.Tensor,
         b_type: ScalarType,
         out_type: Optional[torch.dtype] = None,
@@ -633,8 +633,8 @@ def machete_supported_schedules(
 
 def machete_mm(
         a: torch.Tensor,
-        b_q: torch.
-    Tensor,  # Should be the tensor returned by machete_prepack_B
+        # b_q Should be the tensor returned by machete_prepack_B
+        b_q: torch.Tensor,
         b_type: ScalarType,
         out_type: Optional[torch.dtype] = None,
         b_group_scales: Optional[torch.Tensor] = None,

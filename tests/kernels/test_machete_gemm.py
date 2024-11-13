@@ -128,7 +128,7 @@ def rand_data(shape, dtype=torch.float16, scale=1, offset=0):
     if dtype.is_floating_point:
         return (scale * torch.rand(shape, device="cuda") - offset).to(dtype)
     else:
-        return torch.randint(-15, 15, shape, dtype=dtype, device="cuda")
+        return torch.randint(-8, 7, shape, dtype=dtype, device="cuda")
 
 
 def maybe_convert_zeropoints(zps: Optional[torch.Tensor], s: torch.Tensor):
@@ -241,20 +241,19 @@ def machete_mm_test_helper(types: TypeConfig,
         schedule=schedule,
     )
 
-    print(schedule)
-    print(tensors.w_ref)
     print(output)
     print(output_ref)
 
     # Relax atol as our reduction dim becomes larger (more rounding error)
     # Relax atol when we have zeropoints since the way machete applies
     #  zeropoints (after scales) causes noise around 0
-    # atol = 1 if tensors.w_g_zp is not None\
-    #     else min(5e-2 * math.sqrt(tensors.a.shape[1]), 1)
-    # torch.testing.assert_close(output,
-    #                            output_ref.to(output.dtype),
-    #                            rtol=1e-1,
-    #                            atol=atol)
+    atol = 1 if tensors.w_g_zp is not None\
+        else min(5e-2 * math.sqrt(tensors.a.shape[1]), 1)
+    rtol = 1e-1 if tensors.a.element_size() >= 2 else 2e-1
+    torch.testing.assert_close(output,
+                               output_ref.to(output.dtype),
+                               rtol=rtol,
+                               atol=atol)
 
 
 @pytest.mark.skipif(not IS_SUPPORTED_BY_GPU,
