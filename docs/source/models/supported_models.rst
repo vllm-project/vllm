@@ -450,7 +450,7 @@ Text Generation
     - Idefics3
     - T + I
     - :code:`HuggingFaceM4/Idefics3-8B-Llama3` etc.
-    - 
+    - ✅︎
     - 
   * - :code:`InternVLChatModel`
     - InternVL2
@@ -583,6 +583,12 @@ Multimodal Embedding
     - T + I
     - :code:`TIGER-Lab/VLM2Vec-Full`
     - 🚧
+    - ✅︎
+  * - :code:`Qwen2VLForConditionalGeneration`
+    - Qwen2-VL-based
+    - T + I
+    - :code:`MrLight/dse-qwen2-2b-mrl-v1`
+    - 
     - ✅︎
 
 .. important::

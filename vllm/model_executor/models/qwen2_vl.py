@@ -51,6 +51,7 @@ from vllm.model_executor.layers.activation import QuickGELU
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.pooler import Pooler, PoolingType
 from vllm.model_executor.layers.quantization import (GPTQConfig,
                                                      GPTQMarlinConfig,
                                                      QuantizationConfig)
@@ -58,12 +59,13 @@ from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.qwen2 import Qwen2Model
-from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalDataDict,
-                             MultiModalKwargs)
-from vllm.multimodal.base import MultiModalData
+from vllm.model_executor.pooling_metadata import PoolingMetadata
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import cached_get_image_processor
+from vllm.multimodal.inputs import (MultiModalData, MultiModalDataDict,
+                                    MultiModalKwargs)
 from vllm.multimodal.utils import cached_get_tokenizer
-from vllm.sequence import IntermediateTensors, SequenceData
+from vllm.sequence import IntermediateTensors, PoolerOutput, SequenceData
 from vllm.transformers_utils.config import uses_mrope
 from vllm.transformers_utils.processor import cached_get_processor
 
@@ -1067,6 +1069,7 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
+        pooler_config = vllm_config.model_config.pooler_config
         multimodal_config = vllm_config.model_config.multimodal_config
         assert not cache_config.enable_prefix_caching, \
             "Qwen2-VL currently does not support prefix caching"
@@ -1098,6 +1101,11 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = get_sampler()
+        self._pooler = Pooler.from_config_with_defaults(
+            pooler_config,
+            pooling_type=PoolingType.LAST,
+            normalize=True,
+            softmax=False)
         self.make_empty_intermediate_tensors = (
             make_empty_intermediate_tensors_factory(
                 ["hidden_states", "residual"], config.hidden_size))
@@ -1317,6 +1325,13 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
     ) -> Optional[SamplerOutput]:
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
+
+    def pooler(
+        self,
+        hidden_states: torch.Tensor,
+        pooling_metadata: PoolingMetadata,
+    ) -> Optional[PoolerOutput]:
+        return self._pooler(hidden_states, pooling_metadata)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         stacked_params_mapping = [
