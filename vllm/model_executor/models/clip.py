@@ -396,11 +396,8 @@ class CLIPEncoder(nn.Module):
     def forward(self, inputs_embeds: torch.Tensor):
         hidden_states_pool = []
         hidden_states = inputs_embeds
-        # Initialize the hidden states to pool with the inputs if needed
-        if 0 in self.feature_sample_layers:
-            hidden_states_pool.append(hidden_states)
 
-        for layer_idx, encoder_layer in enumerate(self.layers, start=1):
+        for layer_idx, encoder_layer in enumerate(self.layers):
             hidden_states = encoder_layer(hidden_states)
             if layer_idx in self.feature_sample_layers:
                 hidden_states_pool.append(hidden_states)
@@ -471,7 +468,7 @@ class CLIPVisionTransformer(nn.Module):
             # Apply normalization if the last layer is one of the feature sample
             # layers; otherwise don't, since it's not stacked into the output
             if self.post_layernorm is not None and len(
-                    self.encoder.layers) in self.feature_sample_layers:
+                    self.encoder.layers) - 1 in self.feature_sample_layers:
                 hs_pool[-1] = self.post_layernorm(encoder_outputs)
             encoder_outputs = torch.cat(hs_pool, dim=-1)
 

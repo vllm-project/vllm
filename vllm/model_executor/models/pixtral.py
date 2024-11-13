@@ -977,14 +977,11 @@ class PixtralHFTransformer(nn.Module):
         position_embeddings: torch.Tensor,
     ) -> torch.Tensor:
         hidden_states_pool = []
-        # Initialize the hidden states to pool with the inputs if needed
-        if 0 in self.feature_sample_layers:
-            hidden_states_pool.append(x)
 
         # Process the encoder layers, and save hidden states that are
-        # feature_sample_layers; post-norm will by applied later if it's
-        # enabled for the last block.
-        for layer_idx, layer in enumerate(self.layers, start=1):
+        # feature_sample_layers. Pixtral does not have post-norm, so we
+        # do not worry about it here.
+        for layer_idx, layer in enumerate(self.layers):
             x = layer(x, attention_mask, position_embeddings)
             if layer_idx in self.feature_sample_layers:
                 hidden_states_pool.append(x)
