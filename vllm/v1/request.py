@@ -110,7 +110,7 @@ class Request:
         return RequestStatus.get_finished_reason(self.status)
 
     def has_encoder_inputs(self) -> bool:
-        return self.mm_data is not None
+        return len(self.mm_data) > 0
 
     @property
     def num_encoder_inputs(self) -> int:
