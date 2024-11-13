@@ -173,13 +173,12 @@ def _apply_logits_processors(
                 seq_group.prompt_logprob_indices)
 
     if req_args_list:
-        with thread_pool:
-            futures = [
-                thread_pool.submit(_apply_logits_processors_per_seq, *req_args)
-                for req_args in req_args_list
-            ]
-            for _ in as_completed(futures):
-                logits_processed += 1
+        futures = [
+            thread_pool.submit(_apply_logits_processors_per_seq, *req_args)
+            for req_args in req_args_list
+        ]
+        for _ in as_completed(futures):
+            logits_processed += 1
 
     if found_logits_processors:
         # verifies that no rows in logits were missed unexpectedly
