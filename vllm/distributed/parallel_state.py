@@ -32,6 +32,7 @@ from multiprocessing import shared_memory
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from unittest.mock import patch
 
+from numpy import product
 import torch
 import torch.distributed
 from torch.distributed import Backend, ProcessGroup
@@ -1052,7 +1053,6 @@ def init_distributed_environment(
             # so this vLLM instance's world size is half of torch's world size
             torch_dist_world_size = torch_dist_world_size // 2
         ranks = [[i for i in range(torch_dist_world_size)]]
-        ranks = include_decoding_groups_if_disagg_enabled(ranks, world_size)
 
         _WORLD = init_world_group(ranks, local_rank, backend)
         logger.debug("_WORLD initialized for rank %d",
@@ -1064,6 +1064,7 @@ def init_distributed_environment(
 
 
 def initialize_model_parallel(
+    kv_transfer_parallel_size: int = 1,
     tensor_model_parallel_size: int = 1,
     pipeline_model_parallel_size: int = 1,
     backend: Optional[str] = None,
@@ -1113,18 +1114,15 @@ def initialize_model_parallel(
     world_size: int = torch.distributed.get_world_size()
     backend = backend or torch.distributed.get_backend(
         get_world_group().device_group)
-    if dist_kv.IS_DISTRIBUTED_KV_INSTANCE:
-        # Disaggregated prefill enabled
-        # This vLLM instance thinks its word size is tp * pp, but
-        # torch.distributed contains 2 vLLM instances,
-        # its world size is 2 * tp * pp
-        # Adjust the world_size to match.
-        world_size = world_size // 2
 
-    if (world_size !=
-            tensor_model_parallel_size * pipeline_model_parallel_size):
+    if (world_size != product([
+        kv_transfer_parallel_size,
+        tensor_model_parallel_size,
+        pipeline_model_parallel_size,
+    ])):
         raise RuntimeError(
             f"world_size ({world_size}) is not equal to "
+            f"kv_transfer_parallel_size ({kv_transfer_parallel_size}) x "
             f"tensor_model_parallel_size ({tensor_model_parallel_size}) x "
             f"pipeline_model_parallel_size ({pipeline_model_parallel_size})")
 
@@ -1139,8 +1137,6 @@ def initialize_model_parallel(
             range(i * tensor_model_parallel_size,
                   (i + 1) * tensor_model_parallel_size))
         group_ranks.append(ranks)
-    group_ranks = include_decoding_groups_if_disagg_enabled(
-        group_ranks, world_size)
     # message queue broadcaster is only used in tensor model parallel group
     _TP = init_model_parallel_group(group_ranks,
                                     get_world_group().local_rank,
@@ -1159,8 +1155,6 @@ def initialize_model_parallel(
     for i in range(num_pipeline_model_parallel_groups):
         ranks = list(range(i, world_size, num_pipeline_model_parallel_groups))
         group_ranks.append(ranks)
-    group_ranks = include_decoding_groups_if_disagg_enabled(
-        group_ranks, world_size)
     # pipeline parallel does not need custom allreduce
     _PP = init_model_parallel_group(group_ranks,
                                     get_world_group().local_rank,
