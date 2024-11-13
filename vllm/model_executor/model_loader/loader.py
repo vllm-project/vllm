@@ -105,8 +105,7 @@ def _initialize_model(vllm_config: VllmConfig, prefix: str = "") -> nn.Module:
     "out of tree and it is used for new vLLM version. "
     "Please check https://docs.vllm.ai/en/latest/design/class_hierarchy.html "
     "for the design and update the model class accordingly.")
-    obj = model_class(vllm_config=vllm_config, prefix=prefix)
-    return obj
+    return model_class(vllm_config=vllm_config, prefix=prefix)
 
 
 class BaseModelLoader(ABC):
