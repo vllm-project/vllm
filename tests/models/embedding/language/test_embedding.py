@@ -4,6 +4,8 @@ Run `pytest tests/models/embedding/language/test_embedding.py`.
 """
 import pytest
 
+from vllm.utils import current_platform
+
 from ..utils import check_embeddings_close
 
 # Model, Guard
@@ -23,15 +25,14 @@ ENCODER_ONLY = [
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 def test_models(
-    monkeypatch,
     hf_runner,
     vllm_runner,
     example_prompts,
     model,
     dtype: str,
 ) -> None:
-    if model in ENCODER_ONLY:
-        monkeypatch.setenv("VLLM_ATTENTION_BACKEND", "XFORMERS")
+    if model not in ENCODER_ONLY and current_platform.is_cpu():
+        pytest.skip("Skip large embedding models test on CPU.")
 
     # The example_prompts has ending "\n", for example:
     # "Write a short story about a robot that dreams for the first time.\n"

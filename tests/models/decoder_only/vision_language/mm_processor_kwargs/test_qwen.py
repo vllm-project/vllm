@@ -6,7 +6,7 @@ import torch
 from PIL.Image import Image
 
 from vllm.inputs import InputContext, token_inputs
-from vllm.multimodal.base import MultiModalKwargs
+from vllm.multimodal import MultiModalKwargs
 from vllm.multimodal.utils import cached_get_tokenizer
 
 from .....conftest import IMAGE_ASSETS

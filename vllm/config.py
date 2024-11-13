@@ -107,7 +107,7 @@ class ModelConfig:
             matches the model name exposed via the APIs. If multiple model
             names provided, the first name will be used. If not specified,
             the model name will be the same as `model`.
-        limit_mm_per_prompt: Maximum number of data instances per modality
+        limit_mm_per_prompt: Maximum number of data items per modality
             per prompt. Only applicable for multimodal models.
         override_neuron_config: Initialize non default neuron config or
             override default neuron config that are specific to Neuron devices,
@@ -951,9 +951,12 @@ class ParallelConfig:
             https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-nsight-profiler.
         placement_group: ray distributed model workers placement group.
         distributed_executor_backend: Backend to use for distributed model
-            workers, either "ray" or "mp" (multiprocessing). If either
-            pipeline_parallel_size or tensor_parallel_size is greater than 1,
-            will default to "ray" if Ray is installed or "mp" otherwise.
+            workers, either "ray" or "mp" (multiprocessing). If the product
+            of pipeline_parallel_size and tensor_parallel_size is less than
+            or equal to the number of GPUs available, "mp" will be used to
+            keep processing on a single host. Otherwise, this will default
+            to "ray" if Ray is installed and fail otherwise. Note that tpu
+            and hpu only support Ray for distributed inference.
     """
 
     def __init__(
@@ -1684,6 +1687,7 @@ class LoRAConfig:
     # This is a constant.
     lora_vocab_padding_size: ClassVar[int] = 256
     long_lora_scaling_factors: Optional[Tuple[float]] = None
+    bias_enabled: bool = False
 
     def __post_init__(self):
         # Setting the maximum rank to 256 should be able to satisfy the vast
@@ -2038,12 +2042,15 @@ class VllmConfig:
     simplifies passing around the distinct configurations in the codebase.
     """
 
-    model_config: ModelConfig
-    cache_config: CacheConfig
-    parallel_config: ParallelConfig
-    scheduler_config: SchedulerConfig
-    device_config: DeviceConfig
-    load_config: LoadConfig
+    model_config: ModelConfig = field(default=None, init=True)  # type: ignore
+    cache_config: CacheConfig = field(default=None, init=True)  # type: ignore
+    parallel_config: ParallelConfig = field(default=None,
+                                            init=True)  # type: ignore
+    scheduler_config: SchedulerConfig = field(default=None,
+                                              init=True)  # type: ignore
+    device_config: DeviceConfig = field(default=None,
+                                        init=True)  # type: ignore
+    load_config: LoadConfig = field(default=None, init=True)  # type: ignore
     lora_config: Optional[LoRAConfig] = None
     speculative_config: Optional[SpeculativeConfig] = None
     decoding_config: Optional[DecodingConfig] = None
@@ -2088,11 +2095,14 @@ class VllmConfig:
     def __post_init__(self):
         """Verify configs are valid & consistent with each other.
         """
-        self.model_config.verify_async_output_proc(self.parallel_config,
-                                                   self.speculative_config,
-                                                   self.device_config)
-        self.model_config.verify_with_parallel_config(self.parallel_config)
-        self.cache_config.verify_with_parallel_config(self.parallel_config)
+        if self.model_config is not None:
+            self.model_config.verify_async_output_proc(self.parallel_config,
+                                                       self.speculative_config,
+                                                       self.device_config)
+            self.model_config.verify_with_parallel_config(self.parallel_config)
+
+        if self.cache_config is not None:
+            self.cache_config.verify_with_parallel_config(self.parallel_config)
 
         if self.lora_config:
             self.lora_config.verify_with_model_config(self.model_config)
@@ -2106,3 +2116,44 @@ class VllmConfig:
             self.model_config is not None and self.load_config is not None:
             self.quant_config = VllmConfig._get_quantization_config(
                 self.model_config, self.load_config)
+
+    def __str__(self):
+        return ("model=%r, speculative_config=%r, tokenizer=%r, "
+        "skip_tokenizer_init=%s, tokenizer_mode=%s, revision=%s, "
+        "override_neuron_config=%s, tokenizer_revision=%s, "
+        "trust_remote_code=%s, dtype=%s, max_seq_len=%d, "
+        "download_dir=%r, load_format=%s, tensor_parallel_size=%d, "
+        "pipeline_parallel_size=%d, "
+        "disable_custom_all_reduce=%s, quantization=%s, "
+        "enforce_eager=%s, kv_cache_dtype=%s, "
+        "quantization_param_path=%s, device_config=%s, "
+        "decoding_config=%r, observability_config=%r, "
+        "seed=%d, served_model_name=%s, "
+        "num_scheduler_steps=%d, enable_prefix_caching=%s, "
+        "use_async_output_proc=%s, mm_processor_kwargs=%s") % \
+        (self.model_config.model, self.speculative_config,
+        self.model_config.tokenizer,
+        self.model_config.skip_tokenizer_init,
+        self.model_config.tokenizer_mode,
+        self.model_config.revision,
+        self.model_config.override_neuron_config,
+        self.model_config.tokenizer_revision,
+        self.model_config.trust_remote_code,
+        self.model_config.dtype,
+        self.model_config.max_model_len,
+        self.load_config.download_dir,
+        self.load_config.load_format,
+        self.parallel_config.tensor_parallel_size,
+        self.parallel_config.pipeline_parallel_size,
+        self.parallel_config.disable_custom_all_reduce,
+        self.model_config.quantization,
+        self.model_config.enforce_eager,
+        self.cache_config.cache_dtype,
+        self.model_config.quantization_param_path,
+        self.device_config.device, self.decoding_config,
+        self.observability_config, self.model_config.seed,
+        self.model_config.served_model_name,
+        self.scheduler_config.num_scheduler_steps,
+        self.cache_config.enable_prefix_caching,
+        self.model_config.use_async_output_proc,
+        self.model_config.mm_processor_kwargs)
