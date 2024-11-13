@@ -584,6 +584,12 @@ Multimodal Embedding
     - :code:`TIGER-Lab/VLM2Vec-Full`
     - 🚧
     - ✅︎
+  * - :code:`Qwen2VLForConditionalGeneration`
+    - Qwen2-VL-based
+    - T + I
+    - :code:`MrLight/dse-qwen2-2b-mrl-v1`
+    - 
+    - ✅︎
 
 .. important::
   Some model architectures support both generation and embedding tasks.
