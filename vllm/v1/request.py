@@ -1,9 +1,12 @@
 import enum
 from typing import TYPE_CHECKING, List, Optional, Union
 
+from vllm.inputs.data import DecoderOnlyInputs
 from vllm.lora.request import LoRARequest
+from vllm.multimodal import MultiModalKwargs
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import RequestMetrics
+from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.utils import ConstantList
 
 if TYPE_CHECKING:
@@ -43,8 +46,37 @@ class Request:
         self.num_prompt_tokens = len(self.prompt_token_ids)
         self._output_token_ids: List[int] = []
         self._all_token_ids: List[int] = self.prompt_token_ids.copy()
-        self.output_text = ""
         self.num_computed_tokens = 0
+
+        # Raw multimodal data before the mm input mapper (e.g., PIL images).
+        self.mm_data = inputs.get("multi_modal_data")
+        self.mm_processor_kwargs = inputs.get("mm_processor_kwargs")
+        mm_positions = inputs.get("multi_modal_placeholders")
+        if mm_positions:
+            # FIXME(woosuk): Support other modalities.
+            self.mm_positions = mm_positions.get("image", [])
+        else:
+            self.mm_positions = []
+        # Output of the mm input mapper (e.g., image tensors).
+        self.mm_inputs: List[MultiModalKwargs] = []
+
+    @classmethod
+    def from_engine_core_request(cls, request: EngineCoreRequest) -> "Request":
+        return cls(
+            request_id=request.request_id,
+            inputs=DecoderOnlyInputs(
+                type="token",
+                prompt_token_ids=request.prompt_token_ids,
+                prompt=request.prompt,
+                multi_modal_data=request.mm_data,
+                multi_modal_placeholders=request.mm_placeholders,
+                mm_processor_kwargs=request.mm_processor_kwargs,
+            ),
+            sampling_params=request.sampling_params,
+            eos_token_id=request.eos_token_id,
+            arrival_time=request.arrival_time,
+            lora_request=request.lora_request,
+        )
 
     @property
     def output_token_ids(self) -> ConstantList[int]:
@@ -81,9 +113,21 @@ class Request:
     def get_finished_reason(self) -> Union[str, None]:
         return RequestStatus.get_finished_reason(self.status)
 
+    def has_encoder_inputs(self) -> bool:
+        return self.mm_data is not None
+
+    @property
+    def num_encoder_inputs(self) -> int:
+        return len(self.mm_positions)
+
+    def get_num_encoder_tokens(self, input_id: int) -> int:
+        assert input_id < len(self.mm_positions)
+        num_tokens = self.mm_positions[input_id]["length"]
+        return num_tokens
+
 
 class RequestStatus(enum.IntEnum):
-    """Status of a sequence."""
+    """Status of a request."""
     WAITING = 0
     RUNNING = 1
     PREEMPTED = 2
@@ -104,7 +148,7 @@ class RequestStatus(enum.IntEnum):
 
 
 # Mapping of finished statuses to their finish reasons.
-# NOTE: The ignored sequences are the sequences whose prompt lengths
+# NOTE: The ignored requests are the requests whose prompt lengths
 # are longer than the model's length cap. Therefore, the stop
 # reason should also be "length" as in OpenAI API.
 _FINISHED_REASON_MAP = {

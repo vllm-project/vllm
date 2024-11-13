@@ -83,10 +83,11 @@ class RequestOutput:
         finished: Whether the whole request is finished.
         metrics: Metrics associated with the request.
         lora_request: The LoRA request that was used to generate the output.
-        encoder_prompt: The encoder prompt string of the request; 
-                        None if decoder-only
-        encoder_prompt_token_ids: The token IDs of the encoder prompt;
-                                  None if decoder-only
+        encoder_prompt: The encoder prompt string of the request.
+                        None if decoder-only.
+        encoder_prompt_token_ids: The token IDs of the encoder prompt.
+                                  None if decoder-only.
+        num_cached_tokens: The number of tokens with prefix cache hit.
     """
 
     def __init__(
@@ -101,6 +102,7 @@ class RequestOutput:
         lora_request: Optional[LoRARequest] = None,
         encoder_prompt: Optional[str] = None,
         encoder_prompt_token_ids: Optional[List[int]] = None,
+        num_cached_tokens: Optional[int] = None,
     ) -> None:
         self.request_id = request_id
         self.prompt = prompt
@@ -112,6 +114,37 @@ class RequestOutput:
         self.lora_request = lora_request
         self.encoder_prompt = encoder_prompt
         self.encoder_prompt_token_ids = encoder_prompt_token_ids
+        self.num_cached_tokens = num_cached_tokens
+
+    @classmethod
+    def new(
+        cls,
+        request_id: str,
+        prompt: Optional[str],
+        prompt_token_ids: Optional[List[int]],
+        text: str,
+        token_ids: List[int],
+        finished: bool = False,
+    ) -> "RequestOutput":
+        """Initialize a new RequestOutput object."""
+
+        # TODO: Support `n` > 1.
+        completion_output = CompletionOutput(
+            index=0,
+            text=text,
+            token_ids=token_ids,
+            cumulative_logprob=None,
+            logprobs=None,  # TODO
+        )
+
+        return RequestOutput(
+            request_id=request_id,
+            prompt=prompt,
+            prompt_token_ids=prompt_token_ids,
+            prompt_logprobs=None,  # TODO
+            outputs=[completion_output],
+            finished=finished,
+        )
 
     @classmethod
     def from_seq_group(
@@ -162,6 +195,8 @@ class RequestOutput:
 
         outputs = []
         include_prompt = True
+        # num_cached_tokens should be the same for all the sequences
+        num_cached_tokens = None
         for i, seq in enumerate(top_n_seqs):
             output_text = seq.get_output_text_to_return(
                 text_buffer_length, delta)
@@ -169,6 +204,7 @@ class RequestOutput:
             output_token_ids = seq.get_output_token_ids_to_return(delta)
             num_output_tokens = 1 if isinstance(output_token_ids,
                                                 int) else len(output_token_ids)
+            num_cached_tokens = seq.data.get_num_cached_tokens()
 
             output_logprobs = seq.output_logprobs if include_logprobs else None
 
@@ -242,7 +278,7 @@ class RequestOutput:
         init_args = (seq_group.request_id, prompt, prompt_token_ids,
                      prompt_logprobs, outputs, finished, seq_group.metrics,
                      seq_group.lora_request, encoder_prompt,
-                     encoder_prompt_token_ids)
+                     encoder_prompt_token_ids, num_cached_tokens)
 
         if use_cache:
             request_output = seq_group.cached_request_output
@@ -263,7 +299,8 @@ class RequestOutput:
                 f"outputs={self.outputs}, "
                 f"finished={self.finished}, "
                 f"metrics={self.metrics}, "
-                f"lora_request={self.lora_request})")
+                f"lora_request={self.lora_request}, "
+                f"num_cached_tokens={self.num_cached_tokens})")
 
 
 class EmbeddingRequestOutput:

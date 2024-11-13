@@ -28,7 +28,7 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
-from vllm.config import CacheConfig
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -40,7 +40,7 @@ from vllm.model_executor.models.minicpm import (MiniCPMDecoderLayer,
                                                 MiniCPMForCausalLM,
                                                 MiniCPMModel)
 
-from .utils import make_layers
+from .utils import make_layers, maybe_prefix
 
 
 class MiniCPM3Attention(nn.Module):
@@ -238,8 +238,6 @@ class MiniCPM3ForCausalLM(MiniCPMForCausalLM):
     # `embedding_modules` and `embedding_padding_modules`
     # are inherited from MiniCPMForCausalLM
 
-    def _init_model(self):
-        self.model = MiniCPM3Model(config=self.config,
-                                   cache_config=self.cache_config,
-                                   quant_config=self.quant_config,
-                                   lora_config=self.lora_config)
+    def _init_model(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        self.model = MiniCPM3Model(vllm_config=vllm_config,
+                                   prefix=maybe_prefix(prefix, "model"))

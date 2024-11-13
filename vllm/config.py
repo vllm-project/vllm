@@ -1,6 +1,8 @@
+import copy
 import enum
 import json
-from dataclasses import dataclass, field
+import warnings
+from dataclasses import dataclass, field, replace
 from typing import (TYPE_CHECKING, Any, ClassVar, Dict, Final, List, Literal,
                     Mapping, Optional, Set, Tuple, Type, Union)
 
@@ -74,9 +76,6 @@ class ModelConfig:
         code_revision: The specific revision to use for the model code on
             Hugging Face Hub. It can be a branch name, a tag name, or a
             commit id. If unspecified, will use the default version.
-        rope_scaling: Dictionary containing the scaling configuration for the
-            RoPE embeddings. When using this flag, don't update
-            `max_position_embeddings` to the expected new maximum.
         tokenizer_revision: The specific tokenizer version to use. It can be a
             branch name, a tag name, or a commit id. If unspecified, will use
             the default version.
@@ -116,6 +115,7 @@ class ModelConfig:
             can not be gathered from the vllm arguments.
         config_format: The config format which shall be loaded.
             Defaults to 'auto' which defaults to 'hf'.
+        hf_overrides: Arguments to be forwarded to the HuggingFace config.
         mm_processor_kwargs: Arguments to be forwarded to the model's processor
             for multi-modal data, e.g., image processor.
         pooling_type: Used to configure the pooling method in the embedding 
@@ -146,7 +146,7 @@ class ModelConfig:
             allowed_local_media_path: str = "",
             revision: Optional[str] = None,
             code_revision: Optional[str] = None,
-            rope_scaling: Optional[dict] = None,
+            rope_scaling: Optional[Dict[str, Any]] = None,
             rope_theta: Optional[float] = None,
             tokenizer_revision: Optional[str] = None,
             max_model_len: Optional[int] = None,
@@ -164,6 +164,7 @@ class ModelConfig:
             override_neuron_config: Optional[Dict[str, Any]] = None,
             config_format: ConfigFormat = ConfigFormat.AUTO,
             chat_template_text_format: str = "string",
+            hf_overrides: Optional[Dict[str, Any]] = None,
             mm_processor_kwargs: Optional[Dict[str, Any]] = None,
             pooling_type: Optional[str] = None,
             pooling_norm: Optional[bool] = None,
@@ -178,8 +179,22 @@ class ModelConfig:
         self.seed = seed
         self.revision = revision
         self.code_revision = code_revision
-        self.rope_scaling = rope_scaling
-        self.rope_theta = rope_theta
+
+        if hf_overrides is None:
+            hf_overrides = {}
+        if rope_scaling is not None:
+            hf_override: Dict[str, Any] = {"rope_scaling": rope_scaling}
+            hf_overrides.update(hf_override)
+            msg = ("`--rope-scaling` will be removed in a future release. "
+                   f"'Please instead use `--hf-overrides '{hf_override!r}'`")
+            warnings.warn(DeprecationWarning(msg), stacklevel=2)
+        if rope_theta is not None:
+            hf_override = {"rope_theta": rope_theta}
+            hf_overrides.update(hf_override)
+            msg = ("`--rope-theta` will be removed in a future release. "
+                   f"'Please instead use `--hf-overrides '{hf_override!r}'`")
+            warnings.warn(DeprecationWarning(msg), stacklevel=2)
+
         # The tokenizer version is consistent with the model version by default.
         if tokenizer_revision is None:
             self.tokenizer_revision = revision
@@ -193,8 +208,8 @@ class ModelConfig:
         self.disable_sliding_window = disable_sliding_window
         self.skip_tokenizer_init = skip_tokenizer_init
         self.hf_config = get_config(self.model, trust_remote_code, revision,
-                                    code_revision, rope_scaling, rope_theta,
-                                    config_format)
+                                    code_revision, config_format,
+                                    **hf_overrides)
         self.hf_text_config = get_hf_text_config(self.hf_config)
         self.encoder_config = self._get_encoder_config()
         self.hf_image_processor_config = get_hf_image_processor_config(
@@ -936,9 +951,12 @@ class ParallelConfig:
             https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-nsight-profiler.
         placement_group: ray distributed model workers placement group.
         distributed_executor_backend: Backend to use for distributed model
-            workers, either "ray" or "mp" (multiprocessing). If either
-            pipeline_parallel_size or tensor_parallel_size is greater than 1,
-            will default to "ray" if Ray is installed or "mp" otherwise.
+            workers, either "ray" or "mp" (multiprocessing). If the product
+            of pipeline_parallel_size and tensor_parallel_size is less than
+            or equal to the number of GPUs available, "mp" will be used to
+            keep processing on a single host. Otherwise, this will default
+            to "ray" if Ray is installed and fail otherwise. Note that tpu
+            and hpu only support Ray for distributed inference.
     """
 
     def __init__(
@@ -1671,6 +1689,7 @@ class LoRAConfig:
     # This is a constant.
     lora_vocab_padding_size: ClassVar[int] = 256
     long_lora_scaling_factors: Optional[Tuple[float]] = None
+    bias_enabled: bool = False
 
     def __post_init__(self):
         # Setting the maximum rank to 256 should be able to satisfy the vast
@@ -2025,12 +2044,15 @@ class VllmConfig:
     simplifies passing around the distinct configurations in the codebase.
     """
 
-    model_config: ModelConfig
-    cache_config: CacheConfig
-    parallel_config: ParallelConfig
-    scheduler_config: SchedulerConfig
-    device_config: DeviceConfig
-    load_config: LoadConfig
+    model_config: ModelConfig = field(default=None, init=True)  # type: ignore
+    cache_config: CacheConfig = field(default=None, init=True)  # type: ignore
+    parallel_config: ParallelConfig = field(default=None,
+                                            init=True)  # type: ignore
+    scheduler_config: SchedulerConfig = field(default=None,
+                                              init=True)  # type: ignore
+    device_config: DeviceConfig = field(default=None,
+                                        init=True)  # type: ignore
+    load_config: LoadConfig = field(default=None, init=True)  # type: ignore
     lora_config: Optional[LoRAConfig] = None
     speculative_config: Optional[SpeculativeConfig] = None
     decoding_config: Optional[DecodingConfig] = None
@@ -2066,14 +2088,23 @@ class VllmConfig:
             return quant_config
         return None
 
+    def with_hf_config(self, hf_config: PretrainedConfig) -> "VllmConfig":
+        model_config = copy.deepcopy(self.model_config)
+        model_config.hf_config = hf_config
+
+        return replace(self, model_config=model_config)
+
     def __post_init__(self):
         """Verify configs are valid & consistent with each other.
         """
-        self.model_config.verify_async_output_proc(self.parallel_config,
-                                                   self.speculative_config,
-                                                   self.device_config)
-        self.model_config.verify_with_parallel_config(self.parallel_config)
-        self.cache_config.verify_with_parallel_config(self.parallel_config)
+        if self.model_config is not None:
+            self.model_config.verify_async_output_proc(self.parallel_config,
+                                                       self.speculative_config,
+                                                       self.device_config)
+            self.model_config.verify_with_parallel_config(self.parallel_config)
+
+        if self.cache_config is not None:
+            self.cache_config.verify_with_parallel_config(self.parallel_config)
 
         if self.lora_config:
             self.lora_config.verify_with_model_config(self.model_config)
@@ -2087,3 +2118,44 @@ class VllmConfig:
             self.model_config is not None and self.load_config is not None:
             self.quant_config = VllmConfig._get_quantization_config(
                 self.model_config, self.load_config)
+
+    def __str__(self):
+        return ("model=%r, speculative_config=%r, tokenizer=%r, "
+        "skip_tokenizer_init=%s, tokenizer_mode=%s, revision=%s, "
+        "override_neuron_config=%s, tokenizer_revision=%s, "
+        "trust_remote_code=%s, dtype=%s, max_seq_len=%d, "
+        "download_dir=%r, load_format=%s, tensor_parallel_size=%d, "
+        "pipeline_parallel_size=%d, "
+        "disable_custom_all_reduce=%s, quantization=%s, "
+        "enforce_eager=%s, kv_cache_dtype=%s, "
+        "quantization_param_path=%s, device_config=%s, "
+        "decoding_config=%r, observability_config=%r, "
+        "seed=%d, served_model_name=%s, "
+        "num_scheduler_steps=%d, enable_prefix_caching=%s, "
+        "use_async_output_proc=%s, mm_processor_kwargs=%s") % \
+        (self.model_config.model, self.speculative_config,
+        self.model_config.tokenizer,
+        self.model_config.skip_tokenizer_init,
+        self.model_config.tokenizer_mode,
+        self.model_config.revision,
+        self.model_config.override_neuron_config,
+        self.model_config.tokenizer_revision,
+        self.model_config.trust_remote_code,
+        self.model_config.dtype,
+        self.model_config.max_model_len,
+        self.load_config.download_dir,
+        self.load_config.load_format,
+        self.parallel_config.tensor_parallel_size,
+        self.parallel_config.pipeline_parallel_size,
+        self.parallel_config.disable_custom_all_reduce,
+        self.model_config.quantization,
+        self.model_config.enforce_eager,
+        self.cache_config.cache_dtype,
+        self.model_config.quantization_param_path,
+        self.device_config.device, self.decoding_config,
+        self.observability_config, self.model_config.seed,
+        self.model_config.served_model_name,
+        self.scheduler_config.num_scheduler_steps,
+        self.cache_config.enable_prefix_caching,
+        self.model_config.use_async_output_proc,
+        self.model_config.mm_processor_kwargs)

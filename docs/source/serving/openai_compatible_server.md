@@ -62,6 +62,32 @@ completion = client.chat.completions.create(
 )
 ```
 
+### Extra HTTP Headers
+
+Only `X-Request-Id` HTTP request header is supported for now.
+
+```python
+completion = client.chat.completions.create(
+  model="NousResearch/Meta-Llama-3-8B-Instruct",
+  messages=[
+    {"role": "user", "content": "Classify this sentiment: vLLM is wonderful!"}
+  ],
+  extra_headers={
+    "x-request-id": "sentiment-classification-00001",
+  }
+)
+print(completion._request_id)
+
+completion = client.completions.create(
+  model="NousResearch/Meta-Llama-3-8B-Instruct",
+  prompt="A robot may not injure a human being",
+  extra_headers={
+    "x-request-id": "completion-test",
+  }
+)
+print(completion._request_id)
+```
+
 ### Extra Parameters for Completions API
 
 The following [sampling parameters (click through to see documentation)](../dev/sampling_params.rst) are supported.
@@ -189,10 +215,10 @@ The order of priorities is `command line > config file values > defaults`.
 ---
 
 ## Tool calling in the chat completion API
-
-vLLM supports named function calling and `auto` tool choice  in the chat completion API. The `tool_choice` options `required` is **not yet supported** but on the roadmap.
+vLLM currently supports named function calling, as well as the `auto` and `none` options for the `tool_choice` field in the chat completion API. The `tool_choice` option `required` is **not yet supported** but on the roadmap.
 
 It is the callers responsibility to prompt the model with the tool information, vLLM will not automatically manipulate the prompt.
+Please see below for recommended configuration and chat templates to use when function calling is to be used with the different models.
 
 
 ### Named Function Calling
