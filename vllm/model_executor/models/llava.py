@@ -232,9 +232,8 @@ def init_vision_tower_for_llava(
         # encoder implementations
         num_hidden_layers = hf_config.vision_config.num_hidden_layers
         feature_sample_layers = [
-            layer_idx
-            if layer_idx >= 0
-            else hf_config.vision_config.num_hidden_layers + layer_idx - 1
+            layer_idx if layer_idx >= 0 else
+            hf_config.vision_config.num_hidden_layers + layer_idx - 1
             for layer_idx in vision_feature_layer
         ]
     else:
