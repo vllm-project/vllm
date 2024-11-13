@@ -336,7 +336,7 @@ Example supported models:
 
 Flags: `--tool-call-parser pythonic --chat-template {see_above}`
 
-\* Llama's smaller models frequently fail to emit tool calls in the correct format. Your mileage may vary.
+WARNING: Llama's smaller models frequently fail to emit tool calls in the correct format. Your mileage may vary.
 
 
 ### How to write a tool parser plugin
