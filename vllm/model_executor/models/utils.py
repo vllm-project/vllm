@@ -11,14 +11,11 @@ from transformers import PretrainedConfig
 import vllm.envs as envs
 from vllm.attention.selector import (_Backend, backend_name_to_enum,
                                      get_global_forced_attn_backend)
-from vllm.config import (CacheConfig, LoRAConfig, MultiModalConfig,
-                         SchedulerConfig)
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.model_loader.loader import build_model
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models import ModelRegistry
-from vllm.multimodal.base import MultiModalPlaceholderMap, NestedTensors
+from vllm.multimodal import MultiModalPlaceholderMap, NestedTensors
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils import is_pin_memory_available
@@ -236,12 +233,7 @@ class AutoWeightsLoader:
 
 def init_vllm_registered_model(
     hf_config: PretrainedConfig,
-    cache_config: Optional[CacheConfig],
-    quant_config: Optional[QuantizationConfig],
-    *,
-    lora_config: Optional[LoRAConfig] = None,
-    multimodal_config: Optional[MultiModalConfig] = None,
-    scheduler_config: Optional[SchedulerConfig] = None,
+    vllm_config: VllmConfig,
     prefix: str = "",
 ) -> nn.Module:
     """
@@ -250,15 +242,8 @@ def init_vllm_registered_model(
     """
     model_class, _ = ModelRegistry.resolve_model_cls(hf_config.architectures)
 
-    return build_model(
-        model_class,
-        None,
-        hf_config,
-        cache_config,
-        quant_config,
-        lora_config=lora_config,
-        multimodal_config=multimodal_config,
-        scheduler_config=scheduler_config,
+    return model_class(
+        vllm_config=vllm_config.with_hf_config(hf_config),
         prefix=prefix,
     )
 

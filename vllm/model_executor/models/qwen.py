@@ -20,7 +20,7 @@ from transformers import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, LoRAConfig, MultiModalConfig
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
                          InputContext, token_inputs)
@@ -42,15 +42,15 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.base import MultiModalInputs
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.sequence import IntermediateTensors, SequenceData
 from vllm.utils import is_list_of
 
 from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsPP
 from .utils import (flatten_bn, is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, make_layers)
+                    make_empty_intermediate_tensors_factory, make_layers,
+                    maybe_prefix)
 
 logger = init_logger(__name__)
 
@@ -552,14 +552,13 @@ class QWenBlock(nn.Module):
 @support_torch_compile
 class QWenModel(nn.Module):
 
-    def __init__(
-        self,
-        config: PretrainedConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+
         self.config = config
         self.vocab_size = config.vocab_size
 
@@ -722,8 +721,8 @@ def input_processor_for_qwen(ctx: InputContext,
                         multi_modal_data=multi_modal_data)
 
 
-def input_mapper_for_qwen(ctx: InputContext, data: object) -> MultiModalInputs:
-    """Maps the input data to its MultiModalInputs (if any).
+def input_mapper_for_qwen(ctx: InputContext, data: object) -> MultiModalKwargs:
+    """Maps the input data to its MultiModalKwargs (if any).
 
     Args:
         ctx: Context of the loaded model.
@@ -731,7 +730,7 @@ def input_mapper_for_qwen(ctx: InputContext, data: object) -> MultiModalInputs:
             to pixel_values in .forward() for a visual QWenLMHeadModel model.
 
     Returns:
-        MultiModalInputs containing the stacked normalized images tensor or
+        MultiModalKwargs containing the stacked normalized images tensor or
         image embeddings.
     """
     # Early exit if we have provided an image to a language only Qwen model
@@ -740,7 +739,7 @@ def input_mapper_for_qwen(ctx: InputContext, data: object) -> MultiModalInputs:
         logger.warning(
             "Images were provided but this model has no visual config; "
             "multimodal inputs will not be forwarded to the model.")
-        return MultiModalInputs()
+        return MultiModalKwargs()
 
     model_config = ctx.model_config
     tokenizer = cached_get_tokenizer(
@@ -784,7 +783,7 @@ def input_mapper_for_qwen(ctx: InputContext, data: object) -> MultiModalInputs:
             data = [data]
         transformed_images = [transform(datum) for datum in data]
         pixel_values = torch.stack(transformed_images, dim=0)
-    return MultiModalInputs({"pixel_values": pixel_values})
+    return MultiModalKwargs({"pixel_values": pixel_values})
 
 
 def build_normalization_transform(image_size: int) -> transforms.Compose:
@@ -865,19 +864,17 @@ def dummy_data_for_qwen(
 
 class QWenBaseModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
 
-    def __init__(
-        self,
-        config: PretrainedConfig,
-        multimodal_config: MultiModalConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        lora_config: Optional[LoRAConfig] = None,
-    ):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
+        multimodal_config = vllm_config.model_config.multimodal_config
         self.config = config
         self.multimodal_config = multimodal_config
         self.quant_config = quant_config
-        self.transformer = QWenModel(config, cache_config, quant_config)
+        self.transformer = QWenModel(vllm_config=vllm_config,
+                                     prefix=maybe_prefix(
+                                         prefix, "transformer"))
         self.lm_head = ParallelLMHead(config.vocab_size,
                                       config.hidden_size,
                                       quant_config=quant_config)
@@ -1064,17 +1061,13 @@ class QWenLMHeadModel(QWenBaseModel, SupportsLoRA):
 
     def __new__(
         cls,
-        config: PretrainedConfig,
-        multimodal_config: MultiModalConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        lora_config: Optional[LoRAConfig] = None,
-    ):
+        vllm_config: VllmConfig,
+        prefix: str = "",
+    ) -> None:
+        config = vllm_config.model_config.hf_config
         # Initialize VL
         if hasattr(config, "visual"):
-            return QWenVL(config, multimodal_config, cache_config,
-                          quant_config, lora_config)
+            return QWenVL(vllm_config=vllm_config)
         # Initialize LLM
         else:
-            return QWenLLM(config, multimodal_config, cache_config,
-                           quant_config, lora_config)
+            return QWenLLM(vllm_config=vllm_config)

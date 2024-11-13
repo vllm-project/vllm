@@ -5,24 +5,20 @@ from abc import ABC, abstractmethod
 from array import array
 from collections import defaultdict
 from dataclasses import dataclass, field
-from functools import cached_property, reduce
-from typing import (TYPE_CHECKING, Any, Callable, DefaultDict, Dict, List,
-                    Mapping, Optional)
+from functools import reduce
+from typing import Any, Callable, DefaultDict, Dict, List, Mapping, Optional
 from typing import Sequence as GenericSequence
 from typing import Set, Tuple, Union
 
 import msgspec
 import torch
-from typing_extensions import assert_never
 
+from vllm.inputs import SingletonInputs, SingletonInputsAdapter
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MultiModalDataDict, MultiModalPlaceholderDict
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import RequestOutputKind, SamplingParams
-
-if TYPE_CHECKING:
-    from vllm.inputs import SingletonInputs
 
 VLLM_TOKEN_ID_ARRAY_TYPE = "l"
 
@@ -167,6 +163,8 @@ class SequenceData(msgspec.Struct,
                                    ...] = msgspec.field(default_factory=tuple)
     # The number of tokens that are computed (that run against the model).
     _num_computed_tokens: int = 0
+    # The number of tokens with prefix cache hit.
+    _num_cached_tokens: int = 0
     _stage: SequenceStage = SequenceStage.PREFILL
     _cached_all_token_ids: List[int] = msgspec.field(default_factory=list)
 
@@ -323,6 +321,14 @@ class SequenceData(msgspec.Struct,
         if self.get_num_uncomputed_tokens() == 0:
             self._stage = SequenceStage.DECODE
 
+    def get_num_cached_tokens(self) -> int:
+        """Return the number of tokens with prefix cache hit."""
+        return self._num_cached_tokens
+
+    def update_num_cached_tokens(self, num_cached_tokens: int):
+        """Update the number of tokens with prefix cache hit."""
+        self._num_cached_tokens = num_cached_tokens
+
     def reset_state_for_recompute(self) -> None:
         """Reset the number of computed tokens from this sequence. It is
         supposed to be called when a sequence needs to be started from
@@ -379,7 +385,7 @@ class SequenceData(msgspec.Struct,
 
 class Sequence:
     """Stores the data, status, and block information of a sequence.
-    
+
     The sequence is constructed from the :data:`DecoderOnlyInputs`
     (for decoder-only) or :data:`EncoderDecoderInputs` (for encoder-decoder)
     instance passed in through the :code:`inputs` constructor argument.
@@ -397,14 +403,14 @@ class Sequence:
     def __init__(
         self,
         seq_id: int,
-        inputs: "SingletonInputs",
+        inputs: SingletonInputs,
         block_size: int,
         eos_token_id: Optional[int] = None,
         lora_request: Optional[LoRARequest] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> None:
         self.seq_id = seq_id
-        self.inputs = inputs
+        self.inputs = SingletonInputsAdapter(inputs)
         self.block_size = block_size
         self.eos_token_id = eos_token_id
         self.lora_request = lora_request
@@ -431,59 +437,29 @@ class Sequence:
     def n_blocks(self) -> int:
         return (self.get_len() + self.block_size - 1) // self.block_size
 
-    @cached_property
+    @property
     def prompt(self) -> Optional[str]:
-        inputs = self.inputs
+        return self.inputs.prompt
 
-        if inputs["type"] == "token":
-            return inputs.get("prompt")
-
-        assert_never(inputs)
-
-    @cached_property
+    @property
     def prompt_token_ids(self) -> List[int]:
-        inputs = self.inputs
+        return self.inputs.prompt_token_ids
 
-        if inputs["type"] == "token":
-            return inputs.get("prompt_token_ids", [])
-
-        assert_never(inputs)
-
-    @cached_property
+    @property
     def prompt_embeds(self) -> Optional[torch.Tensor]:
-        inputs = self.inputs
+        return self.inputs.prompt_embeds
 
-        if inputs["type"] == "token":
-            return None
-
-        assert_never(inputs)
-
-    @cached_property
+    @property
     def multi_modal_data(self) -> "MultiModalDataDict":
-        inputs = self.inputs
-
-        if inputs["type"] == "token":
-            return inputs.get("multi_modal_data", {})
-
-        assert_never(inputs)
-
-    @cached_property
-    def mm_processor_kwargs(self) -> Dict[str, Any]:
-        inputs = self.inputs
-
-        if inputs["type"] == "token":
-            return inputs.get("mm_processor_kwargs", {})
-
-        assert_never(inputs)
+        return self.inputs.multi_modal_data
 
     @property
     def multi_modal_placeholders(self) -> MultiModalPlaceholderDict:
-        inputs = self.inputs
+        return self.inputs.multi_modal_placeholders
 
-        if inputs["type"] == "token":
-            return inputs.get("multi_modal_placeholders", {})
-
-        assert_never(inputs)
+    @property
+    def mm_processor_kwargs(self) -> Dict[str, Any]:
+        return self.inputs.mm_processor_kwargs
 
     @property
     def lora_int_id(self) -> int:
@@ -906,7 +882,7 @@ class SequenceGroupMetadata(
         multi_modal_data: Multi modal data.
         mm_processor_kwargs: Multimodal input processor / mapper overrides.
         encoder_seq_data: Optional sequence data for encoder prompt
-                          (SequenceGroup.encoder_seq). Should be None 
+                          (SequenceGroup.encoder_seq). Should be None
                           unless you are working with an encoder/decoder
                           model.
         cross_block_table: Optional cross-attention block table associated
