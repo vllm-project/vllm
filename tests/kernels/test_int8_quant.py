@@ -145,11 +145,15 @@ def test_static_scaled_int8_azp_quant(num_tokens: int, hidden_size: int,
 
     out1 = ((x / scale).round() + azp).clamp(int8_traits.min,
                                              int8_traits.max).to(torch.int8)
-    out2 = torch.empty_like(x, dtype=torch.int8)
     scale_arg = torch.tensor([scale], dtype=torch.float32, device="cuda")
     azp_arg = torch.tensor([azp], dtype=torch.int32, device="cuda")
 
-    torch.ops._C.static_scaled_int8_quant(out2, x, scale_arg, azp_arg)
+    out2, scale_arg_out, azp_arg_out = scaled_int8_quant(
+        x, scale_arg, azp_arg, False)
+
+    # scale_arg_out, azp_arg_out must be returned as-is
+    assert scale_arg_out is scale_arg
+    assert azp_arg_out is azp_arg
 
     # big atol to account for rounding errors
     torch.testing.assert_close(out1, out2, atol=1, rtol=0.0)

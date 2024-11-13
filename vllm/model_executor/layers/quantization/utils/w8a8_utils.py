@@ -211,6 +211,11 @@ def apply_int8_linear(
                                                symmetric=symmetric)
 
     if x_zp is not None:
+        # Expand zero point from static quantization to the number of
+        # tokens (as required by the cutlass kernel).
+        if x_zp.numel() == 1:
+            x_zp = x_zp.repeat(input.shape[0], 1)
+
         return ops.cutlass_scaled_mm_azp(x_q,
                                          weight,
                                          scale_a=x_scale,

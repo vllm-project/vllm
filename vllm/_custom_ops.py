@@ -735,7 +735,7 @@ def scaled_int8_quant(
             azp is
             None), "azp must only be provided for asymmetric quantization."
         torch.ops._C.static_scaled_int8_quant(output, input, scale, azp)
-        return output, scale, None
+        return output, scale, azp
 
     # dynamic-per-token quantization.
     input_scales = torch.empty((input.numel() // input.shape[-1], 1),
