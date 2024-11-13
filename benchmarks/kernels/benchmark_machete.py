@@ -549,6 +549,10 @@ if __name__ == "__main__":
             "int": torch.int,
             "float": torch.float,
         }[dt]
+        
+    class ToTorchDtype(argparse.Action):
+     def __call__(self, parser, namespace, values, option_string=None):
+         setattr(namespace, self.dest, to_torch_dtype(values))
 
     parser = FlexibleArgumentParser(
         description="""
@@ -570,36 +574,34 @@ Benchmark Machete GEMM.
     )
     parser.add_argument(
         "--act-type",
-        type=to_torch_dtype,
+        action=ToTorchDtype,
         required=True,
-        help="Available options are "
-        "['bfloat16', 'float16', 'int8', 'float8_e4m3fn']",
+        choices=['bfloat16', 'float16', 'int8', 'float8_e4m3fn'],
     )
     parser.add_argument(
         "--group-scale-type",
-        type=to_torch_dtype,
-        help="Available options are ['bfloat16', 'float16']",
+        action=ToTorchDtype,
+        choices=['bfloat16', 'float16'],
     )
     parser.add_argument(
         "--group-zero-type",
         type=to_torch_dtype,
-        help="Available options are ['bfloat16', 'float16']",
+        choices=['bfloat16', 'float16'],
     )
     parser.add_argument(
         "--channel-scale-type",
-        type=to_torch_dtype,
-        help="Available options are ['bfloat16', 'float16', 'float']",
+        action=ToTorchDtype,
+        choices=['float'],
     )
     parser.add_argument(
         "--token-scale-type",
-        type=to_torch_dtype,
-        help="Available options are ['bfloat16', 'float16', 'float']",
+        action=ToTorchDtype,
+        choices=['float'],
     )
     parser.add_argument(
         "--out-type",
-        type=to_torch_dtype,
-        help="Available options are "
-        "['bfloat16', 'float16', 'int', 'float']",
+        action=ToTorchDtype,
+        choices=['bfloat16', 'float16'],
     )
     parser.add_argument(
         "--group-size",
