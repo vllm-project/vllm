@@ -309,10 +309,10 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         vision_embeddings = self._process_image_input(image_input)
         return vision_embeddings
 
-    def get_inputs_embeds(
+    def get_input_embeddings(
             self, input_ids: torch.Tensor,
             vision_embeddings: Optional[torch.Tensor]) -> torch.Tensor:
-        inputs_embeds = self.language_model.model.embed_tokens(input_ids)
+        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
         if vision_embeddings is not None:
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids=input_ids,
@@ -340,7 +340,7 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         # fully deprecated.
         elif inputs_embeds is None:
             vision_embeddings = self.process_mm_inputs(**kwargs)
-            inputs_embeds = self.get_inputs_embeds(
+            inputs_embeds = self.get_input_embeddings(
                 input_ids=input_ids, vision_embeddings=vision_embeddings)
             input_ids = None
 

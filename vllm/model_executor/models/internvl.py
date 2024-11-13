@@ -330,14 +330,11 @@ class InternVLInputPipeline:
         while token_idx < len(new_prompt_token_ids):
             if new_prompt_token_ids[token_idx] == img_context_token_id:
                 curr_image_featue_size = image_feature_sizes[image_idx]
-                print(curr_image_featue_size)
                 placeholder_ranges.append(
                     PlaceholderRange(offset=token_idx,
                                      length=curr_image_featue_size))
                 image_idx += 1
                 token_idx += curr_image_featue_size
-                print(image_idx)
-                print(token_idx)
             else:
                 token_idx += 1
         return token_inputs(
@@ -640,7 +637,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
         vision_embeddings = self._process_image_input(image_input)
         return vision_embeddings
 
-    def get_inputs_embeds(
+    def get_input_embeddings(
         self,
         input_ids: torch.Tensor,
         vision_embeddings: Optional[torch.Tensor] = None,
@@ -678,7 +675,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
             vision_embeddings = self.process_mm_inputs(**kwargs)
             if vision_embeddings is not None:
                 visual_token_mask = self._get_visual_token_mask(input_ids)
-            inputs_embeds = self.get_inputs_embeds(
+            inputs_embeds = self.get_input_embeddings(
                 input_ids=input_ids, vision_embeddings=vision_embeddings)
             input_ids = None
 
