@@ -187,13 +187,6 @@ def _is_var_or_elems_access(
     varname: str,
     key: Optional[str] = None,
 ) -> bool:
-    if key:
-        if _is_attr_access(node, varname, key):
-            return True
-    else:
-        if _is_var_access(node, varname):
-            return True
-
     if isinstance(node, jinja2.nodes.Getitem):
         return (node.ctx == "load"
                 and _is_var_or_elems_access(node.node, varname, key)
@@ -204,7 +197,11 @@ def _is_var_or_elems_access(
     if isinstance(node, jinja2.nodes.Test):
         return _is_var_or_elems_access(node.node, varname, key)
 
-    return False
+    # yapf: disable
+    return (
+        _is_attr_access(node, varname, key) if key
+        else _is_var_access( node, varname)
+    ) # yapf: enable
 
 
 def _iter_nodes_assign_var_or_elems(root: jinja2.nodes.Node, varname: str):
@@ -241,8 +238,7 @@ def _iter_nodes_assign_messages_item(root: jinja2.nodes.Node):
 
 def _iter_nodes_assign_content_item(root: jinja2.nodes.Node):
     message_varnames = [
-        varname
-        for _, varname in _iter_nodes_assign_messages_item(root)
+        varname for _, varname in _iter_nodes_assign_messages_item(root)
     ]
 
     # Search for {%- for content in message['content'] -%} loops
