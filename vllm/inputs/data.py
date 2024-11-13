@@ -256,7 +256,7 @@ class SingletonInputsAdapter:
         assert_never(inputs)
 
     @cached_property
-    def multi_modal_placeholders(self) -> MultiModalPlaceholderDict:
+    def multi_modal_placeholders(self) -> "MultiModalPlaceholderDict":
         inputs = self.inputs
 
         if inputs["type"] == "token":
