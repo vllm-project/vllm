@@ -15,6 +15,9 @@
 #include "dtype_float16.h"
 #include "dtype_float32.h"
 
+#include <functional>
+#include <ipex.h>
+
 #define WARP_SIZE 32
 #define MAX(a, b) ((a) > (b) ? (a) : (b))
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
@@ -623,7 +626,7 @@ void paged_attention_v1_kernel(
       num_blocks);
 
 #define LAUNCH_PAGED_ATTENTION_V1(HEAD_SIZE)                                \
-  queue.submit([&](sycl::handler& cgh) {                                    \
+  event = queue.submit([&](sycl::handler& cgh) {                            \
     sycl::local_accessor<uint8_t, 1> dpct_local_acc_ct1(                    \
         sycl::range<1>(shared_mem_size), cgh);                              \
     sycl::local_accessor<Q_Vec, 1> q_vecs_acc_ct1(                          \
@@ -672,7 +675,8 @@ void paged_attention_v1_kernel(
               q_vecs_acc_ct1.get_pointer(),                                 \
               red_smem_acc_ct1.get_pointer());                              \
         });                                                                 \
-  });
+  });                                                                       \
+  ::xpu::profiler_record("paged attn v1", event);
 
 template <typename T, int BLOCK_SIZE, int NUM_THREADS = 512>
 void paged_attention_xpu_v1_impl_launcher(
@@ -727,6 +731,7 @@ void paged_attention_xpu_v1_impl_launcher(
   sycl::range<3> grid(1, num_seqs, num_heads);
   sycl::range<3> block(1, 1, NUM_THREADS);
   sycl::queue& queue = vllm::xpu::vllmGetQueue();
+  sycl::event event;
 
   switch (head_size) {
     // NOTE(woosuk): To reduce the compilation time, we only compile for the
@@ -996,7 +1001,7 @@ void paged_attention_v2_kernel(
 }
 
 #define LAUNCH_PAGED_ATTENTION_V2(HEAD_SIZE)                                \
-  queue.submit([&](sycl::handler& cgh) {                                    \
+  event = queue.submit([&](sycl::handler& cgh) {                            \
     sycl::local_accessor<uint8_t, 1> dpct_local_acc_ct1(                    \
         sycl::range<1>(shared_mem_size), cgh);                              \
     sycl::local_accessor<Q_Vec, 1> q_vecs_acc_ct1(                          \
@@ -1051,7 +1056,8 @@ void paged_attention_v2_kernel(
               red_smem_acc_ct1.get_pointer());                              \
         });                                                                 \
   });                                                                       \
-  queue.submit([&](sycl::handler& cgh) {                                    \
+  ::xpu::profiler_record("paged attn v2", event);                           \
+  event2 = queue.submit([&](sycl::handler& cgh) {                           \
     sycl::local_accessor<uint8_t, 1> dpct_local_acc_ct1(                    \
         sycl::range<1>(reduce_shared_mem_size), cgh);                       \
     sycl::local_accessor<float, 1> red_smem_acc_ct1(                        \
@@ -1082,7 +1088,8 @@ void paged_attention_v2_kernel(
               dpct_local_acc_ct1.get_pointer(),                             \
               red_smem_acc_ct1.get_pointer());                              \
         });                                                                 \
-  });
+  });                                                                       \
+  ::xpu::profiler_record("paged attn v2", event2);
 
 template <
     typename T,
@@ -1151,6 +1158,8 @@ void paged_attention_v2_launcher(
 
   sycl::range<3> block(1, 1, NUM_THREADS);
   sycl::queue& queue = vllm::xpu::vllmGetQueue();
+  sycl::event event;
+  sycl::event event2;
   switch (head_size) {
     // NOTE(woosuk): To reduce the compilation time, we only compile for the
     // head sizes that we use in the model. However, we can easily extend this
