@@ -107,7 +107,7 @@ class ModelConfig:
             matches the model name exposed via the APIs. If multiple model
             names provided, the first name will be used. If not specified,
             the model name will be the same as `model`.
-        limit_mm_per_prompt: Maximum number of data instances per modality
+        limit_mm_per_prompt: Maximum number of data items per modality
             per prompt. Only applicable for multimodal models.
         override_neuron_config: Initialize non default neuron config or
             override default neuron config that are specific to Neuron devices,

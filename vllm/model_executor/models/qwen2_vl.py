@@ -60,10 +60,10 @@ from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.qwen2 import Qwen2Model
 from vllm.model_executor.pooling_metadata import PoolingMetadata
-from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalDataDict,
-                             MultiModalKwargs)
-from vllm.multimodal.base import MultiModalData
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import cached_get_image_processor
+from vllm.multimodal.inputs import (MultiModalData, MultiModalDataDict,
+                                    MultiModalKwargs)
 from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.sequence import IntermediateTensors, PoolerOutput, SequenceData
 from vllm.transformers_utils.config import uses_mrope

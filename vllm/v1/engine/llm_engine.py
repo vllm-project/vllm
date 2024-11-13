@@ -7,6 +7,7 @@ from vllm.envs import VLLM_ENABLE_V1_MULTIPROCESSING
 from vllm.inputs import INPUT_REGISTRY, InputRegistry, PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.outputs import RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
@@ -32,6 +33,7 @@ class LLMEngine:
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
         input_registry: InputRegistry = INPUT_REGISTRY,
+        mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         use_cached_outputs: bool = False,
         multiprocess_mode: bool = False,
     ) -> None:
@@ -50,7 +52,7 @@ class LLMEngine:
         # Processor (convert Inputs --> EngineCoreRequests)
         self.processor = Processor(vllm_config.model_config,
                                    vllm_config.lora_config, self.tokenizer,
-                                   input_registry)
+                                   input_registry, mm_registry)
 
         # Detokenizer (converts EngineCoreOutputs --> RequestOutput)
         self.detokenizer = Detokenizer(

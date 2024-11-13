@@ -148,19 +148,29 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
             query_lens=seq_lens,
         )
 
-    def _compute_multi_modal_input(self, seq_group: SequenceGroupMetadata,
-                                   seq_data: SequenceData, computed_len: int,
-                                   mm_processor_kwargs: Dict[str, Any]):
-
+    def _compute_multi_modal_input(
+        self,
+        seq_data: SequenceData,
+        computed_len: int,
+        seq_group_metadata: SequenceGroupMetadata,
+    ):
         # NOTE: mm_data only includes the subset of multi-modal items that
         # intersect with the current prefill positions.
         mm_data, placeholder_maps = MultiModalPlaceholderMap.from_seq_group(
-            seq_group, range(computed_len, len(seq_data.get_token_ids())))
+            seq_group_metadata,
+            range(computed_len, len(seq_data.get_token_ids())),
+        )
 
         if not mm_data:
-            return
+            return None, None, None
 
-        mm_kwargs = self.multi_modal_input_mapper(mm_data, mm_processor_kwargs)
+        if self.runner.mm_registry.has_processor(self.runner.model_config):
+            mm_kwargs = mm_data
+        else:
+            mm_kwargs = self.multi_modal_input_mapper(
+                mm_data,
+                seq_group_metadata.mm_processor_kwargs,
+            )
 
         # special processing for mrope position deltas.
         mrope_positions = None
@@ -202,7 +212,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
 
         slot_mapping: List[int] = []
         seq_lens: List[int] = []
-        multi_model_kwargs_list: List[MultiModalKwargs] = []
+        multi_modal_kwargs_list: List[MultiModalKwargs] = []
         multi_modal_placeholder_maps: Dict[
             str,
             MultiModalPlaceholderMap] = defaultdict(MultiModalPlaceholderMap)
@@ -223,11 +233,14 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
 
             mrope_positions = None
             if seq_group_metadata.multi_modal_data:
-                mm_kwargs, placeholder_maps, mrope_positions = self \
-                    ._compute_multi_modal_input(
-                        seq_group_metadata, seq_data, computed_len,
-                    seq_group_metadata.mm_processor_kwargs)
-                multi_model_kwargs_list.append(mm_kwargs)
+                (
+                    mm_kwargs,
+                    placeholder_maps,
+                    mrope_positions,
+                ) = self._compute_multi_modal_input(seq_data, computed_len,
+                                                    seq_group_metadata)
+
+                multi_modal_kwargs_list.append(mm_kwargs)
                 for modality, placeholder_map in placeholder_maps.items():
                     multi_modal_placeholder_maps[modality].extend(
                         placeholder_map)
@@ -302,7 +315,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
             multi_modal_placeholder_index_maps=placeholder_index_maps,
         )
 
-        multi_modal_kwargs = MultiModalKwargs.batch(multi_model_kwargs_list)
+        multi_modal_kwargs = MultiModalKwargs.batch(multi_modal_kwargs_list)
 
         return (input_tokens, input_positions, attn_metadata, seq_lens,
                 multi_modal_kwargs)

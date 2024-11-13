@@ -1,5 +1,5 @@
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import numpy as np
 
@@ -9,8 +9,9 @@ from vllm.transformers_utils.processor import get_video_processor
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from vllm.utils import is_list_of
 
-from .base import MultiModalData, MultiModalKwargs
+from .base import MultiModalData
 from .image import ImagePlugin
+from .inputs import MultiModalKwargs, VideoItem
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -19,17 +20,6 @@ logger = init_logger(__name__)
 
 cached_get_video_processor = lru_cache(get_video_processor)
 cached_get_tokenizer = lru_cache(get_tokenizer)
-
-VideoInput = Union[
-    "np.ndarray",  # single video input
-    List["np.ndarray"],
-    # TODO: support more types
-    # List[Image.Image], List[List[Image.Image]],
-    # "torch.Tensor",
-    # List["torch.Tensor"],
-    # List[List["np.ndarrray"]],
-    # List[List["torch.Tensor"]],
-]
 
 
 class VideoPlugin(ImagePlugin):
@@ -53,13 +43,13 @@ class VideoPlugin(ImagePlugin):
     def _default_input_mapper(
         self,
         ctx: InputContext,
-        data: MultiModalData[object],
+        data: MultiModalData[VideoItem],
         **mm_processor_kwargs,
     ) -> MultiModalKwargs:
         model_config = ctx.model_config
 
         if isinstance(data, list) and len(data) == 1:
-            data = data[0]
+            data = data[0]  # type: ignore
 
         if isinstance(data, np.ndarray) or is_list_of(data, np.ndarray):
             video_processor = self._get_hf_video_processor(

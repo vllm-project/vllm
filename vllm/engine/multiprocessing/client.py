@@ -31,6 +31,7 @@ from vllm.engine.protocol import EngineClient
 # yapf: enable
 from vllm.envs import VLLM_RPC_TIMEOUT
 from vllm.inputs import PromptType
+from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
@@ -94,6 +95,8 @@ class MQLLMEngineClient(EngineClient):
             parallel_config=engine_config.parallel_config,
             enable_lora=bool(engine_config.lora_config),
         )
+        self.input_preprocessor = InputPreprocessor(self.model_config,
+                                                    self.tokenizer)
 
         # Send RPCGenerateRequest to the MQLLMEngine.
         self.input_socket: Socket = self.context.socket(zmq.constants.PUSH)
@@ -344,6 +347,9 @@ class MQLLMEngineClient(EngineClient):
         elif (not isinstance(response, str)
               or response != VLLM_RPC_SUCCESS_STR):
             raise ValueError(error_message)
+
+    async def get_input_preprocessor(self) -> InputPreprocessor:
+        return self.input_preprocessor
 
     async def get_tokenizer(self, lora_request: Optional[LoRARequest] = None):
         return await self.tokenizer.get_lora_tokenizer_async(lora_request)

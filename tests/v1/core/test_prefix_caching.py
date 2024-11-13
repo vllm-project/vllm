@@ -1,5 +1,5 @@
 """Compare the with and without prefix caching."""
-from vllm.inputs import DecoderOnlyInputs
+from vllm.inputs import token_inputs
 from vllm.sampling_params import SamplingParams
 from vllm.v1.core.kv_cache_manager import KVCacheManager, Request
 from vllm.v1.core.kv_cache_utils import hash_block_tokens
@@ -8,7 +8,7 @@ from vllm.v1.core.kv_cache_utils import hash_block_tokens
 def make_request(request_id, prompt_token_ids):
     return Request(
         request_id=request_id,
-        inputs=DecoderOnlyInputs(prompt_token_ids=prompt_token_ids),
+        inputs=token_inputs(prompt_token_ids=prompt_token_ids),
         sampling_params=SamplingParams(max_tokens=17),
         eos_token_id=100,
         arrival_time=0,

@@ -28,7 +28,7 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 
 if TYPE_CHECKING:
-    from vllm.multimodal.base import PlaceholderRange
+    from vllm.multimodal.inputs import PlaceholderRange
     from vllm.v1.core.scheduler import SchedulerOutput
 
 logger = init_logger(__name__)
