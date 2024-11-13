@@ -118,7 +118,7 @@ class MultiModalPlugin(ABC):
         self,
         model_config: "ModelConfig",
         data: MultiModalData[Any],
-        mm_processor_kwargs: Dict[str, Any],
+        mm_processor_kwargs: Optional[Dict[str, Any]],
     ) -> MultiModalKwargs:
         """
         Transform the data into a dictionary of model inputs using the
@@ -144,6 +144,9 @@ class MultiModalPlugin(ABC):
         if mapper is None:
             raise KeyError(f"No input mapper in {self} is registered for "
                            f"model class {model_cls.__name__}.")
+
+        if mm_processor_kwargs is None:
+            mm_processor_kwargs = {}
 
         # In the case of the default mapper, we have to get resource
         # processor through its HuggingFace autoclass; since this goes
