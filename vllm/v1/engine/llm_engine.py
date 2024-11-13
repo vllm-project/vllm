@@ -53,7 +53,7 @@ class LLMEngine:
                                    input_registry)
 
         # Detokenizer (converts EngineCoreOutputs --> RequestOutput)
-        self.detokenizer = Detokenizer(vllm_config.model_config.tokenizer)
+        self.detokenizer = Detokenizer(model_config=vllm_config.model_config)
 
         # EngineCore (gets EngineCoreRequests and gives EngineCoreOutputs)
         self.engine_core = EngineCoreClient.make_client(
