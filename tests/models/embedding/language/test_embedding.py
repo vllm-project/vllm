@@ -4,25 +4,24 @@ Run `pytest tests/models/embedding/language/test_embedding.py`.
 """
 import pytest
 
-from vllm.utils import current_platform
-
 from ..utils import check_embeddings_close
 
-# Model, Guard
-MODELS = [
-    # "intfloat/e5-mistral-7b-instruct",
-    # "BAAI/bge-base-en-v1.5",
-    # "BAAI/bge-multilingual-gemma2",
-    "ssmits/Qwen2-7B-Instruct-embed-base",
-    "Alibaba-NLP/gte-Qwen2-1.5B-instruct",
-]
 
-ENCODER_ONLY = [
-    "BAAI/bge-base-en-v1.5",
-]
-
-
-@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize(
+    "model",
+    [
+        # [Encoder-only]
+        pytest.param("BAAI/bge-base-en-v1.5",
+                     marks=[pytest.mark.core_model, pytest.mark.cpu_model]),
+        # [Encoder-decoder]
+        pytest.param("intfloat/e5-mistral-7b-instruct",
+                     marks=[pytest.mark.core_model]),
+        pytest.param("BAAI/bge-multilingual-gemma2",
+                     marks=[pytest.mark.core_model]),
+        pytest.param("ssmits/Qwen2-7B-Instruct-embed-base"),
+        pytest.param("Alibaba-NLP/gte-Qwen2-1.5B-instruct"),
+    ],
+)
 @pytest.mark.parametrize("dtype", ["half"])
 def test_models(
     hf_runner,
@@ -31,9 +30,6 @@ def test_models(
     model,
     dtype: str,
 ) -> None:
-    if model not in ENCODER_ONLY and current_platform.is_cpu():
-        pytest.skip("Skip large embedding models test on CPU.")
-
     # The example_prompts has ending "\n", for example:
     # "Write a short story about a robot that dreams for the first time.\n"
     # sentence_transformers will strip the input texts, see:
