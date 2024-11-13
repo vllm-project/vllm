@@ -295,32 +295,6 @@ def scheduled_seq_group_builder():
     # return ScheduledSequenceGroup(seq_group=None, token_chunk_size=0)
 
 
-# @dataclass
-# class PartialPrefillConfig:
-#     max_num_partial_prefills: int
-#     max_long_partial_prefills: int
-#     long_prefill_threshold: int
-#     # Default this list to empty
-#     partial_prefill_budget_lookup_list: List[int] =  \
-#       field(default_factory=list)
-
-#     def __post_init__(self):
-#         # Initialize partial_prefill_budget_lookup_list here
-#         # List with the chunk sizes to hand out to each sequence depending
-#         # on how many partial prefills are running.
-#          # This is slightly faster than
-#         # running an integer division every time a prefill is
-#         # scheduled.
-#         # This splits the budget evenly among all prefills.
-#         self.partial_prefill_budget_lookup_list = [0] * (
-#             self.max_num_partial_prefills + 1)
-#         self.partial_prefill_budget_lookup_list[
-#             0] = scheduler_config.max_num_batched_tokens
-#         for i in range(1, self.max_num_partial_prefills + 1):
-#             self.partial_prefill_budget_lookup_list[i] = \
-#                 scheduler_config.max_num_batched_tokens // i
-
-
 @dataclass
 class PartialPrefillMetadata:
     """Holds information about the partial prefills that are
@@ -507,21 +481,6 @@ class Scheduler:
         for i in range(1, self.scheduler_config.max_num_partial_prefills + 1):
             self.partial_prefill_budget_lookup_list[i] = \
                 scheduler_config.max_num_batched_tokens // i
-
-        # @dataclass
-        # class PartialPrefillConfig:
-        #     max_num_partial_prefills: int
-        #     max_long_partial_prefills: int
-        #     long_prefill_threshold: int
-        #     partial_prefill_budget_lookup_list: list
-
-        # @dataclass
-        # class PartialPrefillMetadata:
-        #     partial_prefills: int
-        #     long_partial_prefills: int
-
-        #     def from_running_queue(running):
-        #         # ...
 
     @property
     def next_cache_id(self):
@@ -1267,6 +1226,8 @@ class Scheduler:
             running=self.running,
             waiting=self.waiting,
             scheduler_config=self.scheduler_config)
+
+        print("partial_prefill_metadata : ", partial_prefill_metadata)
 
         # Decoding should be always scheduled first by fcfs.
         running_scheduled = self._schedule_running(budget,
