@@ -1210,7 +1210,7 @@ class Scheduler:
                               len(swapped_in.prefill_seq_groups) +
                               len(running_scheduled.prefill_seq_groups))
         # If all prompts, then we set num_lookahead_slots to 0
-        # this alloows us to go through the `no_spec` path in
+        # this allows us to go through the `no_spec` path in
         # `spec_decode_worker.py`
         all_prefills = (len(scheduled_seq_groups) == num_prefill_groups)
         num_lookahead_slots = (0 if all_prefills else
