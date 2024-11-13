@@ -295,7 +295,7 @@ def _resolve_chat_template_content_format(
     jinja_text: Optional[str]
     if isinstance(tokenizer_chat_template, str) and chat_template is None:
         jinja_text = tokenizer_chat_template
-    if (isinstance(tokenizer_chat_template, dict)
+    elif (isinstance(tokenizer_chat_template, dict)
             and chat_template in tokenizer_chat_template):
         jinja_text = tokenizer_chat_template[chat_template]
     else:

@@ -741,7 +741,7 @@ def test_resolve_content_format_hf_defined(model, expected_format):
     print(_try_extract_ast(chat_template))
 
     resolved_format = resolve_chat_template_content_format(
-        chat_template,
+        None,  # Test detecting the tokenizer's chat_template
         "auto",
         tokenizer,
     )
