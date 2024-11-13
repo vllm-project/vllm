@@ -538,7 +538,7 @@ Text Generation
     - ✅︎
   * - :code:`Qwen2VLForConditionalGeneration`
     - Qwen2-VL
-    - T + I\ :sup:`E+` + V\ :sup:`+`
+    - T + I\ :sup:`E+` + V\ :sup:`E+`
     - :code:`Qwen/Qwen2-VL-2B-Instruct`, :code:`Qwen/Qwen2-VL-7B-Instruct`, :code:`Qwen/Qwen2-VL-72B-Instruct`, etc.
     - ✅︎
     - ✅︎
