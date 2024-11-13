@@ -42,6 +42,8 @@ from vllm.model_executor.model_loader.weight_utils import (
     runai_safetensors_weights_iterator, safetensors_weights_iterator)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
+from vllm.transformers_utils.s3_utils import glob as s3_glob
+from vllm.transformers_utils.s3_utils import is_s3
 from vllm.utils import is_pin_memory_available
 
 
@@ -1175,17 +1177,25 @@ class RunaiModelStreamerLoader(BaseModelLoader):
                 os.environ["RUNAI_STREAMER_MEMORY_LIMIT"] = str(
                     extra_config.get("memory_limit"))
 
+            runai_streamer_s3_endpoint = os.getenv(
+                'RUNAI_STREAMER_S3_ENDPOINT')
+            aws_endpoint_url = os.getenv('AWS_ENDPOINT_URL')
+            if (runai_streamer_s3_endpoint is None
+                    and aws_endpoint_url is not None):
+                os.environ["RUNAI_STREAMER_S3_ENDPOINT"] = aws_endpoint_url
+
     def _prepare_weights(self, model_name_or_path: str,
                          revision: Optional[str]) -> List[str]:
         """Prepare weights for the model.
 
         If the model is not local, it will be downloaded."""
+        is_s3_path = is_s3(model_name_or_path)
         is_local = os.path.isdir(model_name_or_path)
         safetensors_pattern = "*.safetensors"
         index_file = SAFE_WEIGHTS_INDEX_NAME
 
-        hf_folder = (model_name_or_path
-                     if is_local else download_weights_from_hf(
+        hf_folder = (model_name_or_path if
+                     (is_local or is_s3_path) else download_weights_from_hf(
                          model_name_or_path,
                          self.load_config.download_dir,
                          [safetensors_pattern],
@@ -1193,15 +1203,17 @@ class RunaiModelStreamerLoader(BaseModelLoader):
                          ignore_patterns=self.load_config.ignore_patterns,
                      ))
 
-        hf_weights_files = glob.glob(
-            os.path.join(hf_folder, safetensors_pattern))
+        if is_s3_path:
+            hf_weights_files = s3_glob(path=hf_folder,
+                                       allow_pattern=[safetensors_pattern])
+        else:
+            hf_weights_files = glob.glob(
+                os.path.join(hf_folder, safetensors_pattern))
 
-        if not is_local:
+        if not is_local and not is_s3_path:
             download_safetensors_index_file_from_hf(
                 model_name_or_path, index_file, self.load_config.download_dir,
                 revision)
-        hf_weights_files = filter_duplicate_safetensors_files(
-            hf_weights_files, hf_folder, index_file)
 
         if len(hf_weights_files) == 0:
             raise RuntimeError(
@@ -1229,8 +1241,9 @@ class RunaiModelStreamerLoader(BaseModelLoader):
             with target_device:
                 model = _initialize_model(vllm_config=vllm_config)
 
+            assert hasattr(model_config, "model_weights")
             model.load_weights(
-                self._get_weights_iterator(model_config.model,
+                self._get_weights_iterator(model_config.model_weights,
                                            model_config.revision))
 
             for _, module in model.named_modules():

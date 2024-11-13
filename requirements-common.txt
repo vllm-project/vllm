@@ -33,3 +33,4 @@ setuptools>=74.1.1; python_version > '3.11' # Setuptools is used by triton, we n
 einops # Required for Qwen2-VL.
 compressed-tensors == 0.8.0 # required for compressed-tensors
 runai-model-streamer
+boto3

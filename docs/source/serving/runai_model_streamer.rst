@@ -13,6 +13,19 @@ To run it as an OpenAI-compatible server, add the `--load-format runai_streamer`
 
     $ vllm serve /home/meta-llama/Llama-3.2-3B-Instruct --load-format runai_streamer
 
+To run model from AWS S3 object store run:
+
+.. code-block:: console
+
+    $ vllm serve s3://core-llm/Llama-3-8b --load-format runai_streamer
+
+
+To run model from a S3 compatible object store run:
+
+.. code-block:: console
+
+    $ RUNAI_STREAMER_S3_USE_VIRTUAL_ADDRESSING=0 AWS_EC2_METADATA_DISABLED=true AWS_ENDPOINT_URL=https://storage.googleapis.com vllm serve s3://core-llm/Llama-3-8b --load-format runai_streamer
+
 Tunable parameters
 ------------------
 
