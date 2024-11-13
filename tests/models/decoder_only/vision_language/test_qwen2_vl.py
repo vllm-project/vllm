@@ -297,6 +297,7 @@ def run_test(
         )
 
 
+@pytest.mark.core_model
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize(
     "size_factors",
@@ -337,6 +338,7 @@ def test_qwen2_vl_image_embeddings_input(vllm_runner, image_assets, model,
     )
 
 
+@pytest.mark.core_model
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize(
     "size_factors",
@@ -381,6 +383,7 @@ def test_qwen2_vl_multiple_image_embeddings_input(vllm_runner, image_assets,
     )
 
 
+@pytest.mark.core_model
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize(
     "size_factors",
