@@ -167,6 +167,8 @@ class SequenceData(msgspec.Struct,
                                    ...] = msgspec.field(default_factory=tuple)
     # The number of tokens that are computed (that run against the model).
     _num_computed_tokens: int = 0
+    # The number of tokens with prefix cache hit.
+    _num_cached_tokens: int = 0
     _stage: SequenceStage = SequenceStage.PREFILL
     _cached_all_token_ids: List[int] = msgspec.field(default_factory=list)
 
@@ -323,6 +325,14 @@ class SequenceData(msgspec.Struct,
         if self.get_num_uncomputed_tokens() == 0:
             self._stage = SequenceStage.DECODE
 
+    def get_num_cached_tokens(self) -> int:
+        """Return the number of tokens with prefix cache hit."""
+        return self._num_cached_tokens
+
+    def update_num_cached_tokens(self, num_cached_tokens: int):
+        """Update the number of tokens with prefix cache hit."""
+        self._num_cached_tokens = num_cached_tokens
+
     def reset_state_for_recompute(self) -> None:
         """Reset the number of computed tokens from this sequence. It is
         supposed to be called when a sequence needs to be started from
@@ -379,7 +389,7 @@ class SequenceData(msgspec.Struct,
 
 class Sequence:
     """Stores the data, status, and block information of a sequence.
-    
+
     The sequence is constructed from the :data:`DecoderOnlyInputs`
     (for decoder-only) or :data:`EncoderDecoderInputs` (for encoder-decoder)
     instance passed in through the :code:`inputs` constructor argument.
@@ -915,7 +925,7 @@ class SequenceGroupMetadata(
         multi_modal_data: Multi modal data.
         mm_processor_kwargs: Multimodal input processor / mapper overrides.
         encoder_seq_data: Optional sequence data for encoder prompt
-                          (SequenceGroup.encoder_seq). Should be None 
+                          (SequenceGroup.encoder_seq). Should be None
                           unless you are working with an encoder/decoder
                           model.
         cross_block_table: Optional cross-attention block table associated

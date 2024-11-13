@@ -1067,7 +1067,7 @@ class QWenLMHeadModel(QWenBaseModel, SupportsLoRA):
         config = vllm_config.model_config.hf_config
         # Initialize VL
         if hasattr(config, "visual"):
-            return QWenVL(vllm_config)
+            return QWenVL(vllm_config=vllm_config)
         # Initialize LLM
         else:
-            return QWenLLM(vllm_config)
+            return QWenLLM(vllm_config=vllm_config)

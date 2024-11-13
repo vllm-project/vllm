@@ -420,18 +420,18 @@ class Idefics3Model(nn.Module):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
         self.config = config
         self.padding_idx = self.config.text_config.pad_token_id
         self.vocab_size = self.config.text_config.vocab_size
-
         self.vision_model = Idefics3VisionTransformer(config.vision_config,
                                                       quant_config)
         self.connector = Idefics3Connector(config)
-        self.text_model = LlamaModel(config.text_config, cache_config,
-                                     quant_config)
+        self.text_model = LlamaModel(
+            vllm_config=vllm_config.with_hf_config(config.text_config),
+            prefix=maybe_prefix(prefix, "text_model"),
+        )
 
         self.image_seq_len = int(
             ((config.vision_config.image_size //
