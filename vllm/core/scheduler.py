@@ -14,7 +14,7 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
-                           SequenceGroupMetadata, SequenceGroupMetadataDelta,
+                           SequenceGroupMetadata, SequenceGroupMetadataDelta, SequenceStage,
                            SequenceStatus)
 from vllm.utils import Device, PyObjectCache
 
@@ -294,6 +294,74 @@ def scheduled_seq_group_builder():
                                   token_chunk_size=0)
     # return ScheduledSequenceGroup(seq_group=None, token_chunk_size=0)
 
+# @dataclass
+# class PartialPrefillConfig:
+#     max_num_partial_prefills: int
+#     max_long_partial_prefills: int
+#     long_prefill_threshold: int
+#     # Default this list to empty
+#     partial_prefill_budget_lookup_list: List[int] = field(default_factory=list)
+
+#     def __post_init__(self):
+#         # Initialize partial_prefill_budget_lookup_list here
+#         # List with the chunk sizes to hand out to each sequence depending
+#         # on how many partial prefills are running. This is slightly faster than
+#         # running an integer division every time a prefill is scheduled.
+#         # This splits the budget evenly among all prefills.
+#         self.partial_prefill_budget_lookup_list = [0] * (
+#             self.max_num_partial_prefills + 1)
+#         self.partial_prefill_budget_lookup_list[
+#             0] = scheduler_config.max_num_batched_tokens
+#         for i in range(1, self.max_num_partial_prefills + 1):
+#             self.partial_prefill_budget_lookup_list[i] = \
+#                 scheduler_config.max_num_batched_tokens // i
+
+
+@dataclass
+class PartialPrefillMetadata:
+    """Holds information about the partial prefills that are currently running."""
+    partial_prefills: int
+    long_partial_prefills: int
+
+    waiting_partial_prefills: int
+    waiting_long_partial_prefills: int
+
+    def from_queues(running: Deque[SequenceGroup], 
+                    waiting: Deque[SequenceGroup], 
+                    long_prefill_threshold: int, 
+                    max_partial_prefills: int,
+                    max_long_prefills: int) -> "PartialPrefillMetadata":
+        """Create a PartialPrefillMetadata object from the running queue."""
+        partial_prefills = 0
+        long_partial_prefills = 0
+
+        waiting_partial_prefills = 0
+        waiting_long_prefills = 0
+
+        for sg in running:
+            # TODO: Check if this stage is correctly updated before scheduling
+            if sg.first_seq.data.stage == SequenceStage.PREFILL:
+                partial_prefills += 1
+            if sg.first_seq.get_num_new_tokens() > long_prefill_threshold:
+                long_partial_prefills += 1
+
+        for sg in waiting:
+            # Don't bother looping through the rest of the queue if we know there are already at least max_partial_prefills requests to fill
+            if partial_prefills + waiting_partial_prefills >= max_partial_prefills:
+                break
+
+            # Disallow multiple long requests
+            if sg.first_seq.get_num_new_tokens() > long_prefill_threshold:
+                if long_partial_prefills + waiting_long_prefills >= max_long_prefills:
+                    continue
+                waiting_long_prefills += 1
+            waiting_partial_prefills += 1
+
+        return PartialPrefillMetadata(partial_prefills, 
+                                      long_partial_prefills, 
+                                      waiting_partial_prefills,
+                                      waiting_long_prefills)
+
 
 class Scheduler:
 
@@ -423,6 +491,22 @@ class Scheduler:
         for i in range(1, self.max_num_partial_prefills + 1):
             self.partial_prefill_budget_lookup_list[i] = \
                 scheduler_config.max_num_batched_tokens // i
+        
+        @dataclass
+        class PartialPrefillConfig:
+            max_num_partial_prefills: int
+            max_long_partial_prefills: int
+            long_prefill_threshold: int
+            partial_prefill_budget_lookup_list: list
+
+
+        @dataclass
+        class PartialPrefillMetadata:
+            partial_prefills: int
+            long_partial_prefills: int
+
+            def from_running_queue(running):
+                # ...
 
     @property
     def next_cache_id(self):
@@ -1161,6 +1245,12 @@ class Scheduler:
 
         prefills = SchedulerPrefillOutputs.create_empty()
         swapped_in = SchedulerSwappedInOutputs.create_empty()
+
+        # Create partial prefill metadata
+        partial_prefill_metadata = PartialPrefillMetadata.from_running_queue(
+            self.running, self.long_prefill_threshold
+        )
+
 
         # Before any scheduling, look at the requests in the waiting queue.
         # We may decide to budget fewer tokens for running prefills if there are
