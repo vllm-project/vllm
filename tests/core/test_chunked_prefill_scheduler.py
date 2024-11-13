@@ -125,7 +125,8 @@ def test_chunk():
 
 
 def test_concurrent_chunking():
-    """Verify prefills are chunked properly when --max-num-partial-prefills is > 1"""
+    """Verify prefills are chunked properly when 
+    --max-num-partial-prefills is > 1"""
     block_size = 4
     max_seqs = 60
     max_model_len = 2000

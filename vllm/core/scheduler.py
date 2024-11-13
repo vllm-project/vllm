@@ -2,7 +2,7 @@ import enum
 import os
 import random
 import time
-from collections import defaultdict, deque
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Callable, Deque, Dict, Iterable, List, Optional
 from typing import Sequence as GenericSequence
@@ -412,20 +412,16 @@ class Scheduler:
         self.long_prefill_threshold = scheduler_config.max_model_len // 25
         self.max_long_requests = 1  # TODO: something
 
-        # Dict cache with the chunk sizes to hand out to each sequence depending
-        # on how many prefill slots are used. This is slightly faster than
+        # List with the chunk sizes to hand out to each sequence depending
+        # on how many partial prefills are running. This is slightly faster than
         # running an integer division every time a prefill is scheduled.
-        # This splits the budget evenly among all prefill slots.
-        # We use a defaultdict here to handle the case where we prefill many
-        # more requests than prefill slots. This is normal when requests have
-        # very small prompts to prefill, and we want to give them each the same
-        # budget.
-        self.prefill_chunk_sizes = defaultdict(
-            lambda: scheduler_config.max_num_batched_tokens // self.
-            max_num_partial_prefills)
-        self.prefill_chunk_sizes[0] = scheduler_config.max_num_batched_tokens
+        # This splits the budget evenly among all prefills.
+        self.partial_prefill_budget_lookup_list = [0] * (
+            self.max_num_partial_prefills + 1)
+        self.partial_prefill_budget_lookup_list[
+            0] = scheduler_config.max_num_batched_tokens
         for i in range(1, self.max_num_partial_prefills):
-            self.prefill_chunk_sizes[i] = \
+            self.partial_prefill_budget_lookup_list[i] = \
                 scheduler_config.max_num_batched_tokens // i
 
     @property
@@ -925,11 +921,13 @@ class Scheduler:
                 "sequence.")
 
             is_long = self._is_long_seq_group(seq_group)
-            if is_long and self.long_prefill_requests >= self.max_long_requests \
+            if is_long \
+                and self.long_prefill_requests >= self.max_long_requests \
                 and self.max_num_partial_prefills > 1:
-                # When we have more than one prefill slot, we limit the number
-                # of long requests to avoid filling all of our slots with partial
-                # prefills of long prompt sequences.
+                # When concurrent partial prefills are enabled,
+                # we limit the number of long requests and only accept
+                # shorter requests from the queue while running them
+                # concurrently
                 leftover_waiting_sequences.appendleft(seq_group)
                 waiting_queue.popleft()
                 continue
@@ -1740,7 +1738,7 @@ class Scheduler:
             remaining_token_budget = budget.remaining_token_budget()
             # Get the number of tokens to allocate to this prefill slot
             prefill_slot_budget = \
-                self.prefill_chunk_sizes[self.prefill_slots_running]
+                self.partial_prefill_budget_lookup_list[self.prefill_slots_running]
 
             if self.cache_config.enable_prefix_caching:
                 # When prefix caching is enabled and we're partially prefilling

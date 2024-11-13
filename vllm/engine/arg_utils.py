@@ -474,24 +474,26 @@ class EngineArgs:
             "--max-num-partial-prefills",
             type=int,
             default=EngineArgs.max_num_partial_prefills,
-            help=
-            "For chunked prefill, the max number of concurrent partial prefills."
+            help="For chunked prefill, the max number of concurrent \
+            partial prefills."
             "Defaults to 1",
         )
         parser.add_argument(
             "--max-long-partial-prefills",
             type=int,
             default=EngineArgs.max_long_partial_prefills,
-            help="For chunked prefill, the max number of long concurrent partial prefills. \
-            The length is determined by the long_prefill_threshold argument below"
+            help="For chunked prefill, the max number of long concurrent "
+            "partial prefills. The length is determined by the "
+            "long-prefill-threshold argument. "
             "Defaults to 1",
         )
         parser.add_argument(
             "--long-prefill-threshold",
             type=float,
             default=EngineArgs.long_prefill_threshold,
-            help="For chunked prefill, a request is considered long if the prompt is longer than \
-                the max_model_length * long_prefill_threshold. Defaults to 0.04%",
+            help="For chunked prefill, a request is considered long "
+            "if the prompt is longer than the "
+            "max_model_length * long_prefill_threshold. Defaults to 0.04%",
         )
         parser.add_argument('--max-num-seqs',
                             type=int,
