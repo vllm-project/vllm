@@ -704,6 +704,9 @@ def test_prefix_caching_with_concurrent_partial_prefills():
 @pytest.mark.parametrize("max_num_partial_prefills", [2, 4, 8])
 def test_chunked_prefill_with_actual_engine(model: str,
                                             max_num_partial_prefills: int):
+    """Make sure the model can actually sample with concurrent 
+    partial prefills
+    """
 
     prompt = "hello" * 40
 
