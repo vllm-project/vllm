@@ -62,7 +62,6 @@ class EngineClient(ABC):
     async def beam_search(
         self,
         prompt: PromptType,
-        model_config: ModelConfig,
         request_id: str,
         params: BeamSearchParams,
     ) -> AsyncGenerator[RequestOutput, None]:
@@ -74,13 +73,14 @@ class EngineClient(ABC):
         length_penalty = params.length_penalty
         include_stop_str_in_output = params.include_stop_str_in_output
 
-        tokenizer = await self.get_tokenizer()
-        input_preprocessor = InputPreprocessor(model_config, tokenizer)
+        preprocessor = await self.get_input_preprocessor()
+        tokenizer_group = preprocessor.get_tokenizer_group()
+        tokenizer = await tokenizer_group.get_lora_tokenizer_async()
 
         if is_explicit_encoder_decoder_prompt(prompt):
             raise NotImplementedError
         else:
-            processed_inputs = input_preprocessor._prompt_to_llm_inputs(
+            processed_inputs = preprocessor._prompt_to_llm_inputs(
                 prompt,
                 request_id=request_id,
             )
@@ -220,6 +220,7 @@ class EngineClient(ABC):
         Args:
             request_id: The unique id of the request.
         """
+        ...
 
     @abstractmethod
     async def get_model_config(self) -> ModelConfig:
@@ -228,8 +229,13 @@ class EngineClient(ABC):
 
     @abstractmethod
     async def get_decoding_config(self) -> DecodingConfig:
-        ...
         """Get the decoding configuration of the vLLM engine."""
+        ...
+
+    @abstractmethod
+    async def get_input_preprocessor(self) -> InputPreprocessor:
+        """Get the input processor of the vLLM engine."""
+        ...
 
     @abstractmethod
     async def get_tokenizer(

@@ -11,8 +11,9 @@ from PIL import Image
 import vllm.envs as envs
 from vllm.connections import global_http_connection
 from vllm.logger import init_logger
-from vllm.multimodal.base import MultiModalDataDict, PlaceholderRange
 from vllm.transformers_utils.tokenizer import AnyTokenizer, get_tokenizer
+
+from .inputs import MultiModalDataDict, PlaceholderRange
 
 logger = init_logger(__name__)
 

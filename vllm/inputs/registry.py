@@ -5,14 +5,17 @@ from typing import (TYPE_CHECKING, Any, Callable, Dict, Mapping, NamedTuple,
                     Optional, Protocol, Type, cast)
 
 from torch import nn
-from transformers import PretrainedConfig
-from typing_extensions import TypeVar
+from transformers import PretrainedConfig, ProcessorMixin
+from typing_extensions import TypeVar, assert_never
 
 from vllm.logger import init_logger
+from vllm.transformers_utils.processor import cached_get_processor
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import (get_allowed_kwarg_only_overrides, print_warning_once,
                         resolve_mm_processor_kwargs)
 
-from .data import ProcessorInputs
+from .data import ProcessorInputs, SingletonInputs
+from .parse import is_encoder_decoder_inputs
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -61,6 +64,19 @@ class InputContext:
         return self.model_config.hf_image_processor_config
 
 
+@dataclass(frozen=True)
+class InputProcessingContext(InputContext):
+    tokenizer: AnyTokenizer
+    """The tokenizer used to tokenize the inputs."""
+
+    def get_hf_processor(self) -> ProcessorMixin:
+        return cached_get_processor(
+            self.model_config.tokenizer,
+            tokenizer=self.tokenizer,  # Override the tokenizer with ours
+            trust_remote_code=self.model_config.trust_remote_code,
+        )
+
+
 N = TypeVar("N", bound=Type[nn.Module])
 
 
@@ -94,7 +110,7 @@ class DummyDataFactory(Protocol):
         ...
 
 
-class _MultiModalCounts(UserDict):
+class _MultiModalCounts(UserDict[str, int]):
     """
     Wraps `mm_counts` for a more informative error message
     when attempting to access a plugin that does not exist.
@@ -287,6 +303,21 @@ class InputRegistry:
         return self._input_processors_by_model_type \
             .get(model_cls, self._default_input_processor)
 
+    def _ensure_mm_kwargs(
+        self,
+        inputs: SingletonInputs,
+        mm_processor_kwargs: Dict[str, Any],
+    ):
+        if inputs["type"] == "token":
+            # In case the input processor for that model fails to set it
+            if "mm_processor_kwargs" not in inputs:
+                inputs["mm_processor_kwargs"] = mm_processor_kwargs
+        elif inputs["type"] == "multimodal":
+            # Be more strict in V2
+            assert "mm_kwargs" in inputs
+        else:
+            assert_never(inputs["type"])
+
     def process_input(self, model_config: "ModelConfig",
                       inputs: ProcessorInputs) -> ProcessorInputs:
         """
@@ -312,8 +343,21 @@ class InputRegistry:
             processor,
         )
 
-        return processor(InputContext(model_config), inputs,
-                         **mm_processor_kwargs)
+        processed_inputs = processor(
+            InputContext(model_config),
+            inputs,
+            **mm_processor_kwargs,
+        )
+
+        if is_encoder_decoder_inputs(processed_inputs):
+            self._ensure_mm_kwargs(processed_inputs["encoder"],
+                                   mm_processor_kwargs)
+            self._ensure_mm_kwargs(processed_inputs["decoder"],
+                                   mm_processor_kwargs)
+        else:
+            self._ensure_mm_kwargs(processed_inputs, mm_processor_kwargs)
+
+        return processed_inputs
 
     def create_input_processor(self, model_config: "ModelConfig"):
         """

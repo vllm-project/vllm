@@ -6,6 +6,7 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.metrics_types import StatLoggerBase
 from vllm.engine.protocol import EngineClient
 from vllm.inputs import INPUT_REGISTRY, InputRegistry, PromptType
+from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import EmbeddingRequestOutput, RequestOutput
@@ -320,6 +321,9 @@ class AsyncLLM(EngineClient):
 
     async def get_decoding_config(self):
         raise ValueError("Not Supported on V1 yet.")
+
+    async def get_input_preprocessor(self) -> InputPreprocessor:
+        return self.processor.input_preprocessor
 
     async def get_tokenizer(
         self,
