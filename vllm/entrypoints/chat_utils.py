@@ -182,38 +182,88 @@ def _is_attr_access(node: jinja2.nodes.Node, varname: str, key: str) -> bool:
     return False
 
 
-def _iter_self_and_descendants(node: jinja2.nodes.Node):
-    yield node
-    yield from node.find_all(jinja2.nodes.Node)
+def _is_var_or_elems_access(
+    node: jinja2.nodes.Node,
+    varname: str,
+    key: Optional[str] = None,
+) -> bool:
+    if key:
+        if _is_attr_access(node, varname, key):
+            return True
+    else:
+        if _is_var_access(node, varname):
+            return True
+
+    if isinstance(node, jinja2.nodes.Getitem):
+        return (node.ctx == "load"
+                and _is_var_or_elems_access(node.node, varname, key)
+                and isinstance(node.arg, jinja2.nodes.Slice))
+    if isinstance(node, jinja2.nodes.Filter):
+        return (node.node is not None
+                and _is_var_or_elems_access(node.node, varname, key))
+    if isinstance(node, jinja2.nodes.Test):
+        return _is_var_or_elems_access(node.node, varname, key)
+
+    return False
 
 
-def _iter_nodes_define_message(chat_template_ast: jinja2.nodes.Template):
+def _iter_nodes_assign_var_or_elems(root: jinja2.nodes.Node, varname: str):
+    yield root, varname
+
+    for assign_ast in root.find_all(jinja2.nodes.Assign):
+        lhs = assign_ast.target
+        rhs = assign_ast.node
+
+        if _is_var_or_elems_access(rhs, varname):
+            assert isinstance(lhs, jinja2.nodes.Name)
+            yield assign_ast, lhs.name
+
+
+# NOTE: The proper way to handle this is to build a CFG so that we can handle
+# the scope in which each variable is defined, but that is too complicated
+def _iter_nodes_assign_messages_item(root: jinja2.nodes.Node):
+    messages_varnames = [
+        varname
+        for _, varname in _iter_nodes_assign_var_or_elems(root, "messages")
+    ]
+
     # Search for {%- for message in messages -%} loops
-    for loop_ast in chat_template_ast.find_all(jinja2.nodes.For):
+    for loop_ast in root.find_all(jinja2.nodes.For):
+        loop_iter = loop_ast.iter
         loop_target = loop_ast.target
 
-        # yapf: disable
-        if any(
-            _is_var_access(loop_iter_desc, "messages") for loop_iter_desc
-            in _iter_self_and_descendants(loop_ast.iter)
-        ):  # yapf: enable
-            assert isinstance(loop_target, jinja2.nodes.Name)
-            yield loop_ast, loop_target.name
-
-
-def _iter_nodes_define_content_item(chat_template_ast: jinja2.nodes.Template):
-    for node, message_varname in _iter_nodes_define_message(chat_template_ast):
-        # Search for {%- for content in message['content'] -%} loops
-        for loop_ast in node.find_all(jinja2.nodes.For):
-            loop_target = loop_ast.target
-
-            # yapf: disable
-            if any(
-                _is_attr_access(loop_iter_desc, message_varname, "content")
-                for loop_iter_desc in _iter_self_and_descendants(loop_ast.iter)
-            ):  # yapf: enable
+        for varname in messages_varnames:
+            if _is_var_or_elems_access(loop_iter, varname):
                 assert isinstance(loop_target, jinja2.nodes.Name)
                 yield loop_ast, loop_target.name
+                break
+
+
+def _iter_nodes_assign_content_item(root: jinja2.nodes.Node):
+    message_varnames = [
+        varname
+        for _, varname in _iter_nodes_assign_messages_item(root)
+    ]
+
+    # Search for {%- for content in message['content'] -%} loops
+    for loop_ast in root.find_all(jinja2.nodes.For):
+        loop_iter = loop_ast.iter
+        loop_target = loop_ast.target
+
+        for varname in message_varnames:
+            if _is_var_or_elems_access(loop_iter, varname, "content"):
+                assert isinstance(loop_target, jinja2.nodes.Name)
+                yield loop_ast, loop_target.name
+                break
+
+
+def _try_extract_ast(chat_template: str) -> Optional[jinja2.nodes.Template]:
+    try:
+        jinja_compiled = hf_chat_utils._compile_jinja_template(chat_template)
+        return jinja_compiled.environment.parse(chat_template)
+    except Exception:
+        logger.exception("Error when compiling Jinja template")
+        return None
 
 
 def _detect_content_format(
@@ -221,15 +271,12 @@ def _detect_content_format(
     *,
     default: _ChatTemplateContentFormat,
 ) -> _ChatTemplateContentFormat:
-    try:
-        jinja_compiled = hf_chat_utils._compile_jinja_template(chat_template)
-        jinja_ast = jinja_compiled.environment.parse(chat_template)
-    except Exception:
-        logger.exception("Error when compiling Jinja template")
+    jinja_ast = _try_extract_ast(chat_template)
+    if jinja_ast is None:
         return default
 
     try:
-        next(_iter_nodes_define_content_item(jinja_ast))
+        next(_iter_nodes_assign_content_item(jinja_ast))
     except StopIteration:
         return "string"
     except Exception:
@@ -615,7 +662,6 @@ _ImageParser = partial(cast, ChatCompletionContentPartImageParam)
 _AudioParser = partial(cast, ChatCompletionContentPartAudioParam)
 _RefusalParser = partial(cast, ChatCompletionContentPartRefusalParam)
 _VideoParser = partial(cast, ChatCompletionContentPartVideoParam)
-
 
 # Define a mapping from part types to their corresponding parsing functions.
 MM_PARSER_MAP: Dict[str, Callable[[ChatCompletionContentPartParam], str]] = {

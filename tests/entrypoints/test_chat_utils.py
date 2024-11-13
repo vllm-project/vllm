@@ -6,7 +6,7 @@ from PIL import Image
 
 from vllm.assets.image import ImageAsset
 from vllm.config import ModelConfig
-from vllm.entrypoints.chat_utils import (load_chat_template,
+from vllm.entrypoints.chat_utils import (_try_extract_ast, load_chat_template,
                                          parse_chat_messages,
                                          parse_chat_messages_futures,
                                          resolve_chat_template_content_format)
@@ -732,8 +732,16 @@ def test_resolve_content_format_hf_defined(model, expected_format):
     )
     tokenizer = tokenizer_group.tokenizer
 
+    chat_template = tokenizer.chat_template
+    assert isinstance(chat_template, str)
+
+    print("[ORIGINAL]")
+    print(chat_template)
+    print("[AST]")
+    print(_try_extract_ast(chat_template))
+
     resolved_format = resolve_chat_template_content_format(
-        tokenizer.chat_template,
+        chat_template,
         "auto",
         tokenizer,
     )
@@ -774,8 +782,16 @@ def test_resolve_content_format_examples(template_path, expected_format):
     dummy_tokenizer = tokenizer_group.tokenizer
     dummy_tokenizer.chat_template = None
 
+    chat_template = load_chat_template(EXAMPLES_DIR / template_path)
+    assert isinstance(chat_template, str)
+
+    print("[ORIGINAL]")
+    print(chat_template)
+    print("[AST]")
+    print(_try_extract_ast(chat_template))
+
     resolved_format = resolve_chat_template_content_format(
-        load_chat_template(EXAMPLES_DIR / template_path),
+        chat_template,
         "auto",
         dummy_tokenizer,
     )
