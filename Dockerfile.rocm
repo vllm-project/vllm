@@ -34,7 +34,7 @@ RUN apt-get update && apt-get install -y \
     unzip \
     tmux \
     ccache \
- && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/*
 
 # When launching the container, mount the code directory to /vllm-workspace
 ARG APP_MOUNT=/vllm-workspace
@@ -48,14 +48,14 @@ RUN apt-get purge -y sccache; python3 -m pip uninstall -y sccache; rm -f "$(whic
 # Install torch == 2.6.0 on ROCm
 RUN --mount=type=cache,target=/root/.cache/pip \
     case "$(ls /opt | grep -Po 'rocm-[0-9]\.[0-9]')" in \
-        *"rocm-6.2"*) \
-            python3 -m pip uninstall -y torch torchvision \
-            && python3 -m pip install --pre \
-                torch==2.6.0.dev20240918 \
-                'setuptools-scm>=8' \
-                torchvision==0.20.0.dev20240918 \
-                --extra-index-url https://download.pytorch.org/whl/nightly/rocm6.2;; \
-        *) ;; esac
+    *"rocm-6.2"*) \
+    python3 -m pip uninstall -y torch torchvision \
+    && python3 -m pip install --pre \
+    torch==2.6.0.dev20240918 \
+    'setuptools-scm>=8' \
+    torchvision==0.20.0.dev20240918 \
+    --extra-index-url https://download.pytorch.org/whl/nightly/rocm6.2;; \
+    *) ;; esac
 
 ENV LLVM_SYMBOLIZER_PATH=/opt/rocm/llvm/bin/llvm-symbolizer
 ENV PATH=$PATH:/opt/rocm/bin:/libtorch/bin:
@@ -81,13 +81,13 @@ ARG FA_BRANCH
 # Build ROCm flash-attention wheel if `BUILD_FA = 1`
 RUN --mount=type=cache,target=${CCACHE_DIR} \
     if [ "$BUILD_FA" = "1" ]; then \
-        mkdir -p libs \
-        && cd libs \
-        && git clone https://github.com/ROCm/flash-attention.git \
-        && cd flash-attention \
-        && git checkout "${FA_BRANCH}" \
-        && git submodule update --init \
-        && GPU_ARCHS="${FA_GFX_ARCHS}" python3 setup.py bdist_wheel --dist-dir=/install; \
+    mkdir -p libs \
+    && cd libs \
+    && git clone https://github.com/ROCm/flash-attention.git \
+    && cd flash-attention \
+    && git checkout "${FA_BRANCH}" \
+    && git submodule update --init \
+    && GPU_ARCHS="${FA_GFX_ARCHS}" python3 setup.py bdist_wheel --dist-dir=/install; \
     # Create an empty directory otherwise as later build stages expect one
     else mkdir -p /install; \
     fi
@@ -117,9 +117,9 @@ RUN --mount=type=cache,target=${CCACHE_DIR} \
 FROM base AS final
 # Import the vLLM development directory from the build context
 COPY . .
-ARG GIT_REPO_CHECK=0
-RUN --mount=type=bind,source=.git,target=.git \
-    if [ "$GIT_REPO_CHECK" != 0 ]; then bash tools/check_repo.sh ; fi
+# ARG GIT_REPO_CHECK=0
+# RUN --mount=type=bind,source=.git,target=.git \
+#     if [ "$GIT_REPO_CHECK" != 0 ]; then bash tools/check_repo.sh ; fi
 
 RUN python3 -m pip install --upgrade pip
 
@@ -134,7 +134,7 @@ ENV RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES=1
 ENV TOKENIZERS_PARALLELISM=false
 
 RUN --mount=type=cache,target=${CCACHE_DIR} \
-    --mount=type=bind,source=.git,target=.git \
+    # --mount=type=bind,source=.git,target=.git \
     --mount=type=cache,target=/root/.cache/pip \
     python3 -m pip install -Ur requirements-rocm.txt \
     && python3 setup.py clean --all \
@@ -151,17 +151,17 @@ RUN --mount=type=bind,from=build_amdsmi,src=/install,target=/install \
 RUN --mount=type=bind,from=build_triton,src=/install,target=/install \
     mkdir -p libs \
     && if ls /install/*.whl; then \
-        cp /install/*.whl libs \
-        # Preemptively uninstall to avoid same-version no-installs
-        && python3 -m pip uninstall -y triton; fi
+    cp /install/*.whl libs \
+    # Preemptively uninstall to avoid same-version no-installs
+    && python3 -m pip uninstall -y triton; fi
 
 # Copy flash-attn wheel(s) into final image if they were built
 RUN --mount=type=bind,from=build_fa,src=/install,target=/install \
     mkdir -p libs \
     && if ls /install/*.whl; then \
-        cp /install/*.whl libs \
-        # Preemptively uninstall to avoid same-version no-installs
-        && python3 -m pip uninstall -y flash-attn; fi
+    cp /install/*.whl libs \
+    # Preemptively uninstall to avoid same-version no-installs
+    && python3 -m pip uninstall -y flash-attn; fi
 
 # Install wheels that were built to the final image
 RUN --mount=type=cache,target=/root/.cache/pip \
