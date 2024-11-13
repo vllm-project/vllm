@@ -395,8 +395,8 @@ class Scheduler:
         # for processing and deallocation by the free_finished_seq_groups()
         self._async_stopped: List[SequenceGroup] = []
 
-        # For chunked prefill, we allocate a set of "prefill slots" that
-        # each represent a sequence group that can be partially prefilled.
+        # For chunked prefill, we allow a certain number of seqs
+        # to be partially prefilled.
         # Having multiple partial prefills in flight allows us to minimize TTFT
         # and avoid decode starvation in cases where a single sequence group
         # with a very large prompt blocks the queue for too many iterations.
@@ -1164,11 +1164,12 @@ class Scheduler:
         prefills = SchedulerPrefillOutputs.create_empty()
         swapped_in = SchedulerSwappedInOutputs.create_empty()
 
-        # Before any scheduling, decide if we have prefill slots available
-        # to pull new requests from the waiting queue
+        # Before any scheduling, look at the reqests in the waiting queue.
+        # We may decide to budget fewer tokens for running prefills if there are
+        # requests in the queue we want to prefill concurrently
         if self.prefill_slots_running < self.max_num_partial_prefills and len(
                 self.waiting) > 0:
-            self._reserve_prefill_slots_from_waiting_queue()
+            self._count_prefills_in_waiting_queue()
 
         # Decoding should be always scheduled first by fcfs.
         running_scheduled = self._schedule_running(budget,
@@ -1259,7 +1260,7 @@ class Scheduler:
         return seq_group.token_chunk_size != seq_group.seq_group.seqs[
             0].get_num_new_tokens()
 
-    def _reserve_prefill_slots_from_waiting_queue(self):
+    def _count_prefills_in_waiting_queue(self):
         """Peek into the waiting queue to see how many requests we may be able
         to start prefilling during this scheduling iteration. This allows us to
         budget fewer tokens for currently running prefills if we know that more

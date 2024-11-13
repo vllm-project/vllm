@@ -472,7 +472,8 @@ class EngineArgs:
             "--max-num-partial-prefills",
             type=int,
             default=EngineArgs.max_num_partial_prefills,
-            help="For chunked prefill, the number of prefill slots to use. "
+            help=
+            "For chunked prefill, the max number of concurrent partial prefills."
             "Defaults to 1",
         )
         parser.add_argument('--max-num-seqs',

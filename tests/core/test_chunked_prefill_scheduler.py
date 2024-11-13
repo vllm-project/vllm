@@ -125,7 +125,7 @@ def test_chunk():
 
 
 def test_concurrent_chunking():
-    """Verify prefills are chunked properly when --num-prefill-slots is > 1"""
+    """Verify prefills are chunked properly when --max-num-partial-prefills is > 1"""
     block_size = 4
     max_seqs = 60
     max_model_len = 2000
@@ -649,7 +649,7 @@ def test_prefix_caching():
 
 def test_prefix_caching_with_concurrent_partial_prefills():
     """Verify allocating full blocks when prefix caching is enabled with 
-    --num-prefill-slots > 1."""
+    --max-num-partial-prefills > 1."""
     block_size = 4
     max_seqs = 10
     max_model_len = 8000
