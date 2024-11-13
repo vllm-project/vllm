@@ -2,10 +2,14 @@
 
 Run `pytest tests/prefix_caching/test_prefix_caching.py`.
 """
+import random
+from typing import List, Optional
+
 import pytest
 
 from tests.kernels.utils import override_backend_env_variable
 from vllm import SamplingParams, TokensPrompt
+from vllm.transformers_utils.tokenizer import get_tokenizer
 
 from ..models.utils import check_outputs_equal
 
@@ -27,6 +31,7 @@ UNSTABLE_PROMPT_SEQUENCE = [
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [5])
 @pytest.mark.parametrize("cached_position", [0, 1])
+@pytest.mark.parametrize("enable_chunked_prefill", [True, False])
 @pytest.mark.parametrize("block_size", [16])
 def test_mixed_requests(
     hf_runner,
@@ -37,6 +42,7 @@ def test_mixed_requests(
     dtype: str,
     max_tokens: int,
     cached_position: int,
+    enable_chunked_prefill: bool,
     block_size: int,
     monkeypatch,
 ) -> None:
@@ -55,6 +61,7 @@ def test_mixed_requests(
             model,
             dtype=dtype,
             enable_prefix_caching=True,
+            enable_chunked_prefill=enable_chunked_prefill,
             block_size=block_size,
     ) as vllm_model:
         # Run the first prompt so the cache is populated
@@ -84,6 +91,82 @@ def test_mixed_requests(
         outputs_0_lst=hf_outputs,
         outputs_1_lst=vllm_outputs,
         name_0="hf",
+        name_1="vllm",
+    )
+
+
+@pytest.mark.parametrize("chunk_size", [None, 64])
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("prefix_ratio", [0.0, 0.5, 1.0])
+def test_partially_cached_prefills(
+    vllm_runner,
+    model: str,
+    chunk_size: Optional[int],
+    prefix_ratio: float,
+) -> None:
+    """ """
+    # Prompts with various lengths.
+    prompt_lens = [16, 32, 63, 64, 65, 127, 128, 256, 512]
+
+    # NOTE(rickyx): We could potentially run against HF here and with a longer
+    # decode len, but seems there's quite some invariance in the generated
+    # tokens, i.e. decoded tokens might mismatch indeterministically across
+    # runs. There's even mismatch between non-prefix-cached enabled and HF
+    # ones.
+    max_tokens = 1
+    max_model_len = 2 * max(prompt_lens)
+    if chunk_size is None:
+        max_num_batched_tokens = max_model_len
+        max_num_seqs = len(prompt_lens)
+    else:
+        max_num_batched_tokens = chunk_size
+        max_num_seqs = chunk_size
+
+    tokenizer = get_tokenizer(model, trust_remote_code=True)
+    random.seed(0)
+    vocab = list(tokenizer.get_vocab().values())
+
+    batch_prompts: List[List[str]] = []
+    for prompt_len in prompt_lens:
+        num_prefix_tokens = int(prefix_ratio * prompt_len)
+        num_unique_tokens = prompt_len - num_prefix_tokens
+
+        prefix_token_ids = random.choices(vocab, k=num_prefix_tokens)
+        unique_token_ids = random.choices(vocab, k=num_unique_tokens)
+
+        prompt_token_ids = prefix_token_ids + unique_token_ids
+        prompt_str = tokenizer.decode(prompt_token_ids)
+
+        # First 2 prompts might not have prefix cache hit even with shared
+        # prefix cache since not yet computed.
+        batch_prompts.append([prompt_str] * 2)
+
+        # Next prompts should be fully cached, guaranteed to have prefix cache
+        # hit.
+        batch_prompts.append([prompt_str])
+
+    dtype = "half"
+    outputs = {}  # type: ignore
+    for enable_prefix_caching in (True, False):
+        with vllm_runner(
+                model,
+                dtype=dtype,
+                enable_prefix_caching=enable_prefix_caching,
+                enable_chunked_prefill=chunk_size is not None,
+                max_num_batched_tokens=max_num_batched_tokens,
+                max_num_seqs=max_num_seqs,
+                max_model_len=max_model_len,
+                enforce_eager=True,
+        ) as vllm_model:
+            outputs[enable_prefix_caching] = []
+            for prompts in batch_prompts:
+                outputs[enable_prefix_caching] += vllm_model.generate_greedy(
+                    prompts, max_tokens=max_tokens)
+
+    check_outputs_equal(
+        outputs_0_lst=outputs[False],
+        outputs_1_lst=outputs[True],
+        name_0="vllm_no_apc",
         name_1="vllm",
     )
 
