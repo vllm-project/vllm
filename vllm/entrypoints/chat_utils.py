@@ -735,12 +735,12 @@ def _parse_chat_message_content_parts(
     role: str,
     parts: Iterable[ChatCompletionContentPartParam],
     mm_tracker: BaseMultiModalItemTracker,
-    content_format: _ChatTemplateContentFormat,
+    *,
+    wrap_dicts: bool,
 ) -> List[ConversationMessage]:
     content: List[Union[str, Dict[str, str]]] = []
 
     mm_parser = mm_tracker.create_parser()
-    wrap_dicts = content_format == "openai"
 
     for part in parts:
         parse_res = _parse_chat_message_content_part(
@@ -765,9 +765,11 @@ def _parse_chat_message_content_parts(
 
 
 def _parse_chat_message_content_part(
-        part: ChatCompletionContentPartParam,
-        mm_parser: BaseMultiModalContentParser,
-        wrap_dicts: bool) -> Optional[Union[str, Dict[str, str]]]:
+    part: ChatCompletionContentPartParam,
+    mm_parser: BaseMultiModalContentParser,
+    *,
+    wrap_dicts: bool,
+) -> Optional[Union[str, Dict[str, str]]]:
     """Parses a single part of a conversation. If wrap_dicts is True,
     structured dictionary pieces for texts and images will be
     wrapped in dictionaries, i.e., {"type": "text", "text", ...} and
@@ -832,7 +834,7 @@ def _parse_chat_message_content(
         role,
         content,  # type: ignore
         mm_tracker,
-        content_format,
+        wrap_dicts=(content_format == "openai"),
     )
 
     for result_msg in result:
