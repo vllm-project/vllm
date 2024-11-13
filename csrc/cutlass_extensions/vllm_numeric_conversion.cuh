@@ -158,12 +158,6 @@ template <uint8_t LUT0, uint8_t LUT1, uint8_t LUT2, uint8_t LUT3,    //
 CUTLASS_DEVICE cutlass::AlignedArray<uint32_t, 2> lut_4bit_to_8bit_convert(
     uint32_t src) {
   cutlass::AlignedArray<uint32_t, 2> r;
-
-  // Ignore the high bit when indexing into LUT, for each 4bit value
-  //  we index into both the positive and negative candidates then use
-  //  high_bit | final_prmt_base to select the correct candidate
-  uint32_t lut_idx = (src & 0x77777777);
-
   // Determines if the value is in the top half of the LUT if set or
   //  (i.e. LUT[8:15]) in the bottom half (i.e. LUT[0:7]) if not set. Then move
   //  into bit position 0x4 of each nibble so when or'd with final_prmt_base it
@@ -175,6 +169,11 @@ CUTLASS_DEVICE cutlass::AlignedArray<uint32_t, 2> lut_4bit_to_8bit_convert(
   // `high_bit` is OR'd with 0x31203120 to find the correct value in the LUT
   // (selects correct high or low candidate)
   const uint32_t final_prmt_base = 0x32103210;
+
+  // Ignore the high bit when indexing into LUT, for each 4bit value
+  //  we index into both the high and low candidates then use
+  //  high_bit | final_prmt_base to select the correct candidate
+  uint32_t lut_idx = (src & 0x77777777);
 
   auto pack = [](uint8_t a, uint8_t b, uint8_t c, uint8_t d) {
     return uint32_t(a) | (uint32_t(b) << 8) | (uint32_t(c) << 16) |
