@@ -474,8 +474,10 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         key = key[:num_prefill_tokens]
         value = value[:num_prefill_tokens]
 
-        assert query.shape[0] == num_prefill_tokens
-        assert decode_query.shape[0] == num_decode_tokens
+        if key is not None and value is not None \
+            and attn_type != AttentionType.ENCODER_DECODER:
+            key = key[:num_prefill_tokens]
+            value = value[:num_prefill_tokens]
 
         if prefill_meta := attn_metadata.prefill_metadata:
             # Prompt run.
