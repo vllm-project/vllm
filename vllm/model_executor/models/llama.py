@@ -541,6 +541,9 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             normalize=False,
             softmax=False)
 
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.get_input_embeddings(input_ids)
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -548,9 +551,11 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         model_output = self.model(input_ids, positions, kv_caches,
-                                  attn_metadata, intermediate_tensors)
+                                  attn_metadata, intermediate_tensors,
+                                  inputs_embeds)
         return model_output
 
     def compute_logits(

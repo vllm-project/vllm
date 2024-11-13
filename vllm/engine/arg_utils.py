@@ -143,6 +143,7 @@ class EngineArgs:
     limit_mm_per_prompt: Optional[Mapping[str, int]] = None
     mm_processor_kwargs: Optional[Dict[str, Any]] = None
     enable_lora: bool = False
+    enable_lora_bias: bool = False
     max_loras: int = 1
     max_lora_rank: int = 16
     enable_prompt_adapter: bool = False
@@ -584,6 +585,9 @@ class EngineArgs:
         parser.add_argument('--enable-lora',
                             action='store_true',
                             help='If True, enable handling of LoRA adapters.')
+        parser.add_argument('--enable-lora-bias',
+                            action='store_true',
+                            help='If True, enable bias for LoRA adapters.')
         parser.add_argument('--max-loras',
                             type=int,
                             default=EngineArgs.max_loras,
@@ -622,8 +626,8 @@ class EngineArgs:
             type=int,
             default=EngineArgs.max_cpu_loras,
             help=('Maximum number of LoRAs to store in CPU memory. '
-                  'Must be >= than max_num_seqs. '
-                  'Defaults to max_num_seqs.'))
+                  'Must be >= than max_loras. '
+                  'Defaults to max_loras.'))
         parser.add_argument(
             '--fully-sharded-loras',
             action='store_true',
@@ -1148,6 +1152,7 @@ class EngineArgs:
                              and parallel_config.use_ray),
             policy=self.scheduling_policy)
         lora_config = LoRAConfig(
+            bias_enabled=self.enable_lora_bias,
             max_lora_rank=self.max_lora_rank,
             max_loras=self.max_loras,
             fully_sharded_loras=self.fully_sharded_loras,
