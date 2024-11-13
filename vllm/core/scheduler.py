@@ -1164,7 +1164,7 @@ class Scheduler:
         prefills = SchedulerPrefillOutputs.create_empty()
         swapped_in = SchedulerSwappedInOutputs.create_empty()
 
-        # Before any scheduling, look at the reqests in the waiting queue.
+        # Before any scheduling, look at the requests in the waiting queue.
         # We may decide to budget fewer tokens for running prefills if there are
         # requests in the queue we want to prefill concurrently
         if self.prefill_slots_running < self.max_num_partial_prefills and len(
