@@ -385,6 +385,9 @@ void paged_attention_v1_impl_launcher(
   int* seq_lens_ptr = seq_lens.data_ptr<int>();
 
   switch (head_size) {
+    case 32:
+      LAUNCH_V1_ATTENTION_KERNEL(T, 32, BLOCK_SIZE);
+      break;
     case 64:
       LAUNCH_V1_ATTENTION_KERNEL(T, 64, BLOCK_SIZE);
       break;
@@ -702,6 +705,9 @@ void paged_attention_v2_impl_launcher(
   int* seq_lens_ptr = seq_lens.data_ptr<int>();
 
   switch (head_size) {
+    case 32:
+      LAUNCH_V2_ATTENTION_KERNEL(T, 32, BLOCK_SIZE);
+      break;
     case 64:
       LAUNCH_V2_ATTENTION_KERNEL(T, 64, BLOCK_SIZE);
       break;
