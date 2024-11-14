@@ -61,7 +61,7 @@ function cpu_tests() {
   docker exec cpu-test bash -c "
     set -e
     export VLLM_CPU_KVCACHE_SPACE=10 
-    export VLLM_CPU_OMP_THREADS_BIND=$CORE_RANGE
+    export VLLM_CPU_OMP_THREADS_BIND=$1
     python3 -m vllm.entrypoints.openai.api_server --model facebook/opt-125m --dtype half & 
     timeout 600 bash -c 'until curl localhost:8000/v1/models; do sleep 1; done' || exit 1
     python3 benchmarks/benchmark_serving.py \
@@ -75,4 +75,4 @@ function cpu_tests() {
 
 # All of CPU tests are expected to be finished less than 25 mins.
 export -f cpu_tests
-timeout 25m bash -c "cpu_tests"
+timeout 25m bash -c "cpu_tests $CORE_RANGE"
