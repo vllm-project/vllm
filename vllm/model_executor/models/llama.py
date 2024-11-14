@@ -316,6 +316,11 @@ class LlamaModel(nn.Module):
             make_empty_intermediate_tensors_factory(
                 ["hidden_states", "residual"], config.hidden_size))
 
+        if is_hpu:
+            import os
+            self.config_hidden_layers = int(
+                os.getenv('VLLM_CONFIG_HIDDEN_LAYERS', '1'))
+
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
@@ -347,7 +352,7 @@ class LlamaModel(nn.Module):
             hidden_states, residual = layer(positions, hidden_states,
                                             kv_caches[i - self.start_layer],
                                             attn_metadata, residual)
-            if is_hpu:
+            if is_hpu and i % self.config_hidden_layers == 0:
                 htorch.core.mark_step()
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
