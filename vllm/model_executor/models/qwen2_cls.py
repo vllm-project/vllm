@@ -69,9 +69,14 @@ class Qwen2ForSequenceClassification(nn.Module):
         self.model = Qwen2Model(vllm_config=vllm_config,
                                 prefix=maybe_prefix(prefix, "model"))
 
+        # hidden_states from Qwen2Model has been reduced,
+        # the input of score layer is not parallelized.
         self.score = RowParallelLinear(config.hidden_size,
                                        config.num_labels,
-                                       quant_config=quant_config)
+                                       quant_config=quant_config,
+                                       input_is_parallel=False,
+                                       bias=False,
+                                       prefix=maybe_prefix(prefix, "score"))
         self._pooler = Pooler.from_config_with_defaults(
             pooler_config,
             pooling_type=PoolingType.LAST,
