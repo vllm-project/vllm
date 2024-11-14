@@ -3,14 +3,11 @@ from typing import Iterable, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
-from transformers import PretrainedConfig
 
 from vllm.attention import AttentionMetadata
-from vllm.config import CacheConfig
+from vllm.config import VllmConfig
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.bart import (BartDecoder, BartEncoder,
                                              BartParallelLMHead,
@@ -23,11 +20,13 @@ from .utils import AutoWeightsLoader
 
 class Florence2LanguageModel(nn.Module):
 
-    def __init__(self,
-                 config: PretrainedConfig,
-                 cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+
         self.config = config
 
         self.padding_idx = config.pad_token_id
@@ -93,15 +92,14 @@ class Florence2LanguageModel(nn.Module):
 
 class Florence2LanguageForConditionalGeneration(nn.Module):
 
-    def __init__(self,
-                 config: PretrainedConfig,
-                 cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+
+        config = vllm_config.model_config.hf_config
+
         self.config = config
-        self.model = Florence2LanguageModel(config,
-                                            cache_config=cache_config,
-                                            quant_config=quant_config)
+        self.model = Florence2LanguageModel(vllm_config=vllm_config,
+                                            prefix=prefix)
         embed_scale = math.sqrt(
             config.d_model) if config.scale_embedding else 1.0
 
@@ -112,7 +110,7 @@ class Florence2LanguageForConditionalGeneration(nn.Module):
 
         self.logits_processor = LogitsProcessor(self.vocab_size,
                                                 config.vocab_size)
-        self.sampler = Sampler()
+        self.sampler = get_sampler()
 
     def forward(
         self,
@@ -189,17 +187,15 @@ class Florence2LanguageForConditionalGeneration(nn.Module):
 
 class Florence2ForConditionalGeneration(nn.Module):
 
-    def __init__(self,
-                 config: PretrainedConfig,
-                 cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        config = vllm_config.model_config.hf_config
 
         # TODO(Isotr0py): Add vision backbone
         self.language_model = Florence2LanguageForConditionalGeneration(
-            config=config.text_config,
-            cache_config=cache_config,
-            quant_config=quant_config)
+            vllm_config=vllm_config.with_hf_config(config.text_config),
+            prefix=prefix,
+        )
 
     @property
     def sampler(self):

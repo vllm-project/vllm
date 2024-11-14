@@ -19,6 +19,7 @@ from vllm.executor.executor_base import ExecutorAsyncBase
 from vllm.executor.gpu_executor import GPUExecutorAsync
 from vllm.executor.ray_utils import initialize_ray_cluster
 from vllm.inputs import PromptType
+from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.guided_decoding import (
@@ -627,6 +628,14 @@ class AsyncLLMEngine(EngineClient):
         elif engine_config.device_config.device_type == "cpu":
             from vllm.executor.cpu_executor import CPUExecutorAsync
             executor_class = CPUExecutorAsync
+        elif engine_config.device_config.device_type == "hpu":
+            if distributed_executor_backend == "ray":
+                initialize_ray_cluster(engine_config.parallel_config)
+                from vllm.executor.ray_hpu_executor import RayHPUExecutorAsync
+                executor_class = RayHPUExecutorAsync
+            else:
+                from vllm.executor.hpu_executor import HPUExecutorAsync
+                executor_class = HPUExecutorAsync
         elif engine_config.device_config.device_type == "openvino":
             assert distributed_executor_backend is None, (
                 "Distributed execution is not supported with "
@@ -721,6 +730,9 @@ class AsyncLLMEngine(EngineClient):
         self.set_errored(exc)
         self._request_tracker.propagate_exception(exc)
 
+    async def get_input_preprocessor(self) -> InputPreprocessor:
+        return self.engine.input_preprocessor
+
     async def get_tokenizer(
         self,
         lora_request: Optional[LoRARequest] = None,
@@ -812,7 +824,7 @@ class AsyncLLMEngine(EngineClient):
     async def run_engine_loop(engine_ref: ReferenceType):
         """We use a weakref to the engine so that the running loop
         doesn't prevent the engine being garbage collected."""
-        engine: Optional["AsyncLLMEngine"] = engine_ref()
+        engine: Optional[AsyncLLMEngine] = engine_ref()
         if not engine:
             return
 

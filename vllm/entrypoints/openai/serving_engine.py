@@ -443,39 +443,45 @@ class OpenAIServing:
             tokenizer,
         )
 
+        _chat_template_kwargs: Dict[str, Any] = dict(
+            chat_template=chat_template,
+            add_generation_prompt=add_generation_prompt,
+            continue_final_message=continue_final_message,
+            tools=tool_dicts,
+            documents=documents,
+        )
+        _chat_template_kwargs.update(chat_template_kwargs or {})
+
         request_prompt: Union[str, List[int]]
         is_mistral_tokenizer = isinstance(tokenizer, MistralTokenizer)
         if is_mistral_tokenizer:
             request_prompt = apply_mistral_chat_template(
                 tokenizer,
                 messages=messages,
-                chat_template=chat_template,
-                add_generation_prompt=add_generation_prompt,
-                continue_final_message=continue_final_message,
-                tools=tool_dicts,
-                documents=documents,
-                **(chat_template_kwargs or {}),
+                **_chat_template_kwargs,
             )
         else:
             request_prompt = apply_hf_chat_template(
                 tokenizer,
                 conversation=conversation,
-                chat_template=chat_template,
-                add_generation_prompt=add_generation_prompt,
-                continue_final_message=continue_final_message,
-                tools=tool_dicts,
-                documents=documents,
-                **(chat_template_kwargs or {}),
+                **_chat_template_kwargs,
             )
 
         mm_data = await mm_data_future
 
-        if tool_parser is not None:
+        # tool parsing is done only if a tool_parser has been set and if
+        # tool_choice is not "none" (if tool_choice is "none" but a tool_parser
+        # is set, we want to prevent parsing a tool_call hallucinated by the LLM
+        should_parse_tools = tool_parser is not None and (hasattr(
+            request, "tool_choice") and request.tool_choice != "none")
+
+        if should_parse_tools:
             if not isinstance(request, ChatCompletionRequest):
                 msg = "Tool usage is only supported for Chat Completions API"
                 raise NotImplementedError(msg)
 
-            request = tool_parser(tokenizer).adjust_request(request=request)
+            request = tool_parser(tokenizer).adjust_request(  # type: ignore
+                request=request)
 
         if isinstance(request_prompt, str):
             prompt_inputs = self._tokenize_prompt_input(

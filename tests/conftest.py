@@ -1,11 +1,11 @@
 import json
 import os
-import sys
 import tempfile
 from collections import UserList
 from enum import Enum
 from typing import (Any, Callable, Dict, List, Optional, Tuple, Type,
                     TypedDict, TypeVar, Union)
+from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -52,7 +52,7 @@ PromptVideoInput = _PromptMultiModalInput[np.ndarray]
 
 
 def _read_prompts(filename: str) -> List[str]:
-    with open(filename, "r") as f:
+    with open(filename) as f:
         prompts = f.readlines()
         return prompts
 
@@ -62,14 +62,8 @@ class _ImageAssetPrompts(TypedDict):
     cherry_blossom: str
 
 
-if sys.version_info < (3, 9):
-    # UserList cannot be subscripted
-    class _ImageAssetsBase(UserList):
-        pass
-else:
-
-    class _ImageAssetsBase(UserList[ImageAsset]):
-        pass
+class _ImageAssetsBase(UserList[ImageAsset]):
+    pass
 
 
 class _ImageAssets(_ImageAssetsBase):
@@ -94,14 +88,8 @@ class _VideoAssetPrompts(TypedDict):
     sample_demo_1: str
 
 
-if sys.version_info < (3, 9):
-    # UserList cannot be subscripted
-    class _VideoAssetsBase(UserList):
-        pass
-else:
-
-    class _VideoAssetsBase(UserList[VideoAsset]):
-        pass
+class _VideoAssetsBase(UserList[VideoAsset]):
+    pass
 
 
 class _VideoAssets(_VideoAssetsBase):
@@ -119,6 +107,23 @@ IMAGE_ASSETS = _ImageAssets()
 """Singleton instance of :class:`_ImageAssets`."""
 VIDEO_ASSETS = _VideoAssets()
 """Singleton instance of :class:`_VideoAssets`."""
+
+
+@pytest.fixture(params=[True, False])
+def run_with_both_engines(request):
+    # Automatically runs tests twice, once with V1 and once without
+    use_v1 = request.param
+    # Tests decorated with `@skip_v1` are only run without v1
+    skip_v1 = request.node.get_closest_marker("skip_v1")
+
+    if use_v1:
+        if skip_v1:
+            pytest.skip("Skipping test on vllm V1")
+        with patch('vllm.envs.VLLM_USE_V1', True):
+            yield
+    else:
+        with patch('vllm.envs.VLLM_USE_V1', False):
+            yield
 
 
 @pytest.fixture(autouse=True)
@@ -238,6 +243,9 @@ _T = TypeVar("_T", nn.Module, torch.Tensor, BatchEncoding, BatchFeature, dict)
 class HfRunner:
 
     def wrap_device(self, x: _T, device: Optional[str] = None) -> _T:
+        if x is None or isinstance(x, (bool, )):
+            return x
+
         if device is None:
             device = "cpu" if current_platform.is_cpu() else "cuda"
 
@@ -958,7 +966,7 @@ def dummy_opt_path():
                               "*.msgpack"
                           ])
         assert os.path.exists(json_path)
-        with open(json_path, "r") as f:
+        with open(json_path) as f:
             config = json.load(f)
         config["architectures"] = ["MyOPTForCausalLM"]
         with open(json_path, "w") as f:
@@ -977,7 +985,7 @@ def dummy_llava_path():
                               "*.msgpack"
                           ])
         assert os.path.exists(json_path)
-        with open(json_path, "r") as f:
+        with open(json_path) as f:
             config = json.load(f)
         config["architectures"] = ["MyLlava"]
         with open(json_path, "w") as f:
@@ -996,7 +1004,7 @@ def dummy_gemma2_embedding_path():
                               "*.msgpack"
                           ])
         assert os.path.exists(json_path)
-        with open(json_path, "r") as f:
+        with open(json_path) as f:
             config = json.load(f)
         config["architectures"] = ["MyGemma2Embedding"]
         with open(json_path, "w") as f:

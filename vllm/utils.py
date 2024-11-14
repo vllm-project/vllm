@@ -4,6 +4,7 @@ import contextlib
 import datetime
 import enum
 import gc
+import getpass
 import inspect
 import ipaddress
 import os
@@ -88,9 +89,6 @@ STR_NOT_IMPL_ENC_DEC_PROMPT_ADAPTER = ("Prompt adapters are not "
                                        "currently supported with encoder/"
                                        "decoder models.")
 
-STR_NOT_IMPL_ENC_DEC_CPU = ("CPU is not currently supported with "
-                            "encoder/decoder models.")
-
 # Efficiently import all enc/dec error strings
 # rather than having to import all of the above
 STR_NOT_IMPL_ENC_DEC_ERR_STRS = {
@@ -105,7 +103,6 @@ STR_NOT_IMPL_ENC_DEC_ERR_STRS = {
     "STR_NOT_IMPL_ENC_DEC_SPEC_DEC": STR_NOT_IMPL_ENC_DEC_SPEC_DEC,
     "STR_NOT_IMPL_ENC_DEC_BACKEND": STR_NOT_IMPL_ENC_DEC_BACKEND,
     "STR_NOT_IMPL_ENC_DEC_PROMPT_ADAPTER": STR_NOT_IMPL_ENC_DEC_PROMPT_ADAPTER,
-    "STR_NOT_IMPL_ENC_DEC_CPU": STR_NOT_IMPL_ENC_DEC_CPU
 }
 
 # Constants related to forcing the attention backend selection
@@ -728,6 +725,9 @@ def is_pin_memory_available() -> bool:
     elif current_platform.is_neuron():
         print_warning_once("Pin memory is not supported on Neuron.")
         return False
+    elif current_platform.is_hpu():
+        print_warning_once("Pin memory is not supported on HPU.")
+        return False
     elif current_platform.is_cpu() or current_platform.is_openvino():
         return False
     return True
@@ -968,6 +968,8 @@ def enable_trace_function_call_for_thread() -> None:
 
     if envs.VLLM_TRACE_FUNCTION:
         tmp_dir = tempfile.gettempdir()
+        # add username to tmp_dir to avoid permission issues
+        tmp_dir = os.path.join(tmp_dir, getpass.getuser())
         filename = (f"VLLM_TRACE_FUNCTION_for_process_{os.getpid()}"
                     f"_thread_{threading.get_ident()}_"
                     f"at_{datetime.datetime.now()}.log").replace(" ", "_")
@@ -1148,8 +1150,22 @@ class StoreBoolean(argparse.Action):
                              "Expected 'true' or 'false'.")
 
 
+class SortedHelpFormatter(argparse.HelpFormatter):
+    """SortedHelpFormatter that sorts arguments by their option strings."""
+
+    def add_arguments(self, actions):
+        actions = sorted(actions, key=lambda x: x.option_strings)
+        super().add_arguments(actions)
+
+
 class FlexibleArgumentParser(argparse.ArgumentParser):
     """ArgumentParser that allows both underscore and dash in names."""
+
+    def __init__(self, *args, **kwargs):
+        # Set the default 'formatter_class' to SortedHelpFormatter
+        if 'formatter_class' not in kwargs:
+            kwargs['formatter_class'] = SortedHelpFormatter
+        super().__init__(*args, **kwargs)
 
     def parse_args(self, args=None, namespace=None):
         if args is None:
@@ -1265,7 +1281,7 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
 
         config: Dict[str, Union[int, str]] = {}
         try:
-            with open(file_path, 'r') as config_file:
+            with open(file_path) as config_file:
                 config = yaml.safe_load(config_file)
         except Exception as ex:
             logger.error(
