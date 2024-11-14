@@ -646,6 +646,7 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
         "gate_up_proj",
         "down_proj",
     ]
+<<<<<<< HEAD
 
     # BitandBytes specific attributes
     default_bitsandbytes_target_modules = [
@@ -672,6 +673,8 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
         "up_proj": ("gate_up_proj", 1),
     }
 
+=======
+>>>>>>> origin/main
     embedding_modules = {}
     embedding_padding_modules = []
 
