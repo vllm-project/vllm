@@ -1,6 +1,6 @@
 """Minimal implementation of BlipVisionModel intended to be only used 
 within a vision language model."""
-from typing import Iterable, Optional, Tuple, Union
+from typing import Iterable, Optional, Set, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -415,7 +415,8 @@ class BlipVisionModel(nn.Module):
 
         return self.post_layernorm(hidden_states)
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -423,6 +424,7 @@ class BlipVisionModel(nn.Module):
             ("qkv_proj", "v_proj", "v"),
         ] if self.shard_weight else []
         params_dict = dict(self.named_parameters())
+        loaded_params: Set[str] = set()
         layer_count = len(self.encoder.layers)
 
         for name, loaded_weight in weights:
@@ -450,3 +452,5 @@ class BlipVisionModel(nn.Module):
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params
