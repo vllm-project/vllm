@@ -1,3 +1,5 @@
+from typing import Optional
+
 import torch
 from torch import nn
 from transformers import RobertaConfig
@@ -5,15 +7,13 @@ from transformers import RobertaConfig
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
-from vllm.model_executor.models.bert import (BertEmbedding, BertEmbeddingModel,
-                                             BertModel)
+from vllm.model_executor.models.bert import BertEmbeddingModel, BertModel
 
 
-class RobertaEmbedding(BertEmbedding):
+class RobertaEmbedding(nn.Module):
 
     def __init__(self, config: RobertaConfig):
-        # Skip BertEmbedding.__init__()
-        nn.Module.__init__(self)
+        super().__init__()
         self.size = config.hidden_size
         self.word_embeddings = VocabParallelEmbedding(config.vocab_size,
                                                       config.hidden_size)
@@ -33,6 +33,36 @@ class RobertaEmbedding(BertEmbedding):
         if self.position_embedding_type != "absolute":
             raise ValueError("Only 'absolute' position_embedding_type" +
                              " is supported")
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        position_ids: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        input_shape = input_ids.size()
+
+        # Input embeddings.
+        inputs_embeds = self.word_embeddings(input_ids)
+
+        # TODO: figure out if there is a better way
+        # to make to make position ids start at padding_idx + 1
+        # References:
+        # - https://github.com/huggingface/transformers/blob/a3d69a8994d673899608a7c17fbf4f953f50474e/src/transformers/models/roberta/modeling_roberta.py#L133
+        # - https://github.com/huggingface/transformers/blob/a3d69a8994d673899608a7c17fbf4f953f50474e/src/transformers/models/roberta/modeling_roberta.py#L1669
+        position_ids += self.padding_idx + 1
+
+        # Position embeddings.
+        position_embeddings = self.position_embeddings(position_ids)
+
+        # Token type embeddings. (TODO: move off hotpath?)
+        token_type_embeddings = self.token_type_embeddings(
+            torch.zeros(input_shape,
+                        dtype=torch.long,
+                        device=inputs_embeds.device))
+
+        embeddings = inputs_embeds + token_type_embeddings + position_embeddings
+        embeddings = self.LayerNorm(embeddings)
+        return embeddings
 
 
 class RobertaEmbeddingModel(BertEmbeddingModel):
