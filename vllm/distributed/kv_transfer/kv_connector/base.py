@@ -10,7 +10,6 @@ All distributed communications are abstracted behind this class.
 from abc import ABC, abstractmethod
 from typing import List, Optional
 
-from vllm.config import KVTransferConfig
 
 import torch
 
@@ -40,7 +39,7 @@ class KVConnectorBase(ABC):
     """
     
     @abstractmethod
-    def init(self, config: KVTransferConfig):
+    def init(self, config):
         raise NotImplementedError
 
     @abstractmethod

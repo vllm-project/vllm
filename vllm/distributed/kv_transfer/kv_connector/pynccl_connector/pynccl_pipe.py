@@ -27,7 +27,6 @@ from vllm.config import ParallelConfig
 logger = init_logger(__name__)
 
 
-
 # if the tensor is only one-element and only contains NONE_INT
 # this means that the sended object is None.
 NONE_INT = -150886311
@@ -72,7 +71,7 @@ class BrokenPipeException(Exception):
         super().__init__(self.message)
 
 
-class PyncclPipe:
+class PyNcclPipe:
     
     METADATA_LENGTH = 16
     MAX_TENSOR_DIMENSIONS = 14
@@ -80,45 +79,69 @@ class PyncclPipe:
 
     def __init__(
         self,
+        local_rank: int,
         config: ParallelConfig
     ):
-        self.rank = torch.distributed.get_rank()
+        self.config = config
+        
         self.local_rank = local_rank
-        self.device_group = None
-        self.buffer_size_thresh = buffer_size_thresh
+        self.kv_rank = self.config.kv_rank
+        self.kv_parallel_size = self.config.kv_parallel_size
+        self.device = self._select_device()
+        
 
-        for ranks in group_ranks:
-            device_group = torch.distributed.new_group(
-                ranks, backend=torch_distributed_backend)
-            if self.rank in ranks:
-                self.ranks = ranks
-                self.world_size = len(ranks)
-                self.rank_in_group = ranks.index(self.rank)
-                self.device_group = device_group
+        # build distributed connection and send/recv implementation
+        self.group = StatelessProcessGroup.create(
+            host = self.config.kv_ip,
+            port = self.config.kv_port,
+            rank = self.kv_rank,
+            world_size = self.kv_parallel_size
+        )
+        # add a barrier to make sure all ranks are ready
+        self.group.barrier()
+        self.metadata_send_func, self.metadata_recv_func = \
+            self._get_metadata_send_recv_impl(self.group)
+        self.device_send_func, self.device_recv_func = \
+            self._get_device_send_recv_impl(self.group)
+        # set target rank
+        self.target_rank_for_send = (self.kv_rank+ 1) % self.kv_parallel_size
+        self.target_rank_for_recv = (self.kv_rank - 1) % self.kv_parallel_size
 
-        assert self.device_group is not None
-        assert self.rank_in_group <= 1
 
-        self.device = self._select_device(torch_distributed_backend)
-
-        self.target_rank_for_send = self.ranks[(self.rank_in_group + 1) %
-                                               self.world_size]
-        self.target_rank_for_recv = self.ranks[(self.rank_in_group - 1) %
-                                               self.world_size]
-
+        # transportation-related variables
         self.transport_thread: Optional[ThreadPoolExecutor] = None
         self.buffer_size = 0
         self.buffer_size_lock = threading.Lock()
+        self.buffer_size_thresh = self.config.kv_buffer_size
 
         self.none_tensor = torch.tensor([NONE_INT], device=self.device)
 
         # On-device tensors to be reused for recv
         self.rcv_metadata_buffer = torch.zeros(self.METADATA_LENGTH,
                                                dtype=self.METADATA_DTYPE,
-                                               device=self.device)
+                                               device="cpu")
 
-    def _select_device(self, backend: Union[str, Backend]):
-        if torch.cuda.is_available() and backend == Backend.NCCL:
+    def _get_metadata_send_recv_impl(self, group: StatelessProcessGroup):
+        return group.send, group.recv
+    
+    def _get_device_send_recv_impl(self, group: StatelessProcessGroup):
+        if self.config.kv_buffer_device == "cuda":
+            # use PyNCCL for send / recv
+            comm = PyNcclCommunicator(
+                group,
+                device=self.local_rank,
+            )
+            comm.disabled = False
+            send, recv = comm.send, comm.recv
+        else:
+            # use torch c10store for send / recv
+            send = group.send
+            recv = group.recv
+
+        return send, recv
+
+    def _select_device(self):
+        if self.config.kv_buffer_device == "cuda":
             return torch.device(f"cuda:{self.local_rank}")
         else:
             return "cpu"
@@ -149,7 +172,8 @@ class PyncclPipe:
         ndims = len(tensor.shape)
         buffer[1] = len(tensor.shape)
         buffer[2:2 + ndims] = torch.tensor(tensor.shape,
-                                           dtype=self.METADATA_DTYPE)
+                                           dtype=self.METADATA_DTYPE,
+                                           device="cpu")
         return buffer.to(self.device)
 
     def _prepare_recv_buffer(self,
@@ -171,11 +195,7 @@ class PyncclPipe:
     def _send_metadata(self, d_metadata_buffer: torch.Tensor):
         """Send the metadata buffer to the target rank.
         """
-        torch.distributed.send(
-            d_metadata_buffer,
-            dst=self.target_rank_for_send,
-            group=self.device_group,
-        )
+        self.metadata_send_func(d_metadata_buffer, self.target_rank_for_send)
 
     def _recv_metadata(self) -> torch.Tensor:
         """Receive the metadata buffer from the target rank.
@@ -188,10 +208,9 @@ class PyncclPipe:
             race conditions during sending/receiving. Therefore, the metadata
             buffer can be reused
         """
-        torch.distributed.recv(
-            self.rcv_metadata_buffer,
-            src=self.target_rank_for_recv,
-            group=self.device_group,
+        self.metadata_recv_func(
+            self.rcv_metadata_buffer, 
+            self.target_rank_for_recv
         )
 
         return self.rcv_metadata_buffer
@@ -207,9 +226,7 @@ class PyncclPipe:
 
         metadata = self._make_metadata(tensor)
         self._send_metadata(metadata)
-        torch.distributed.send(tensor.to(self.device),
-                               dst=self.target_rank_for_send,
-                               group=self.device_group)
+        self.device_send_func(tensor.to(self.device), self.target_rank_for_send)
 
     def _recv_impl(self) -> torch.Tensor:
         """
@@ -221,12 +238,12 @@ class PyncclPipe:
         Returns:
             - buffer: the received tensor, on self.device
         """
+        print('recv_metadata...')
         d_metadata = self._recv_metadata()
+        print('recv metadata done, receiving tensor ...')
         buffer = self._prepare_recv_buffer(d_metadata)
-
-        torch.distributed.recv(buffer,
-                               src=self.target_rank_for_recv,
-                               group=self.device_group)
+        self.device_recv_func(buffer, self.target_rank_for_recv)
+        print('recv tensor done.')
 
         return buffer
 
@@ -291,8 +308,9 @@ class PyncclPipe:
             # the underlying pipe is likely broken
             logger.error("Encountering exception in KV receiving thread")
             logger.error("%s", e)
-            # fault tolerance: if the pipe is broken, return None
-            return None
+            import traceback
+            traceback.print_exc()
+            raise e
 
         if tensor.numel() == 1 and tensor.item() == NONE_INT:
             return None

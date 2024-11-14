@@ -5,7 +5,9 @@ from typing import List
 import torch
 from tqdm import tqdm
 
-import vllm.distributed.kv_transfer.kv_pipe.torch_distributed_pipe as tdp
+import vllm.distributed.kv_transfer.kv_connector.pynccl_connector.pynccl_pipe \
+    as pnp 
+from vllm.config import ParallelConfig
 
 
 def test_run(my_rank, pipe):
@@ -35,10 +37,15 @@ def test_run(my_rank, pipe):
     assert torch.allclose(x, x2)
     assert torch.allclose(y, y2)
 
+    
+def barrier(my_rank):
+    torch.distributed.barrier()
+
 
 def stress_test(my_rank, pipe):
 
-    torch.distributed.barrier()
+    # barrier
+    barrier(my_rank)
 
     tensors: List[torch.Tensor] = []
 
@@ -59,7 +66,8 @@ def stress_test(my_rank, pipe):
             tensors.append(x.mean().unsqueeze(0))
             tensors.append(x.std().unsqueeze(0))
 
-    torch.distributed.barrier()
+    barrier(my_rank)
+
 
     for i in tqdm(range(500)):
         if my_rank == int((i % 10) > 3):
@@ -78,7 +86,6 @@ def stress_test(my_rank, pipe):
                 assert x.mean() == mean[0]
                 assert x.std() == std[0]
 
-    torch.distributed.barrier()
 
     print("Stress test passed.")
 
@@ -123,13 +130,31 @@ if __name__ == "__main__":
 
     my_rank = int(os.environ['RANK'])
 
-    torch.distributed.init_process_group(init_method="tcp://127.0.0.1:23456",
-                                         world_size=2,
-                                         rank=my_rank)
+    torch.distributed.init_process_group(
+        backend='gloo',
+        init_method='tcp://localhost:12567',
+        rank=my_rank,
+        world_size=2,
+    )
+    print('done')
 
-    print("initialized! My rank is %d" % my_rank)
+    config = ParallelConfig(
+        1,
+        1,
+        kv_connector='PyNcclConnector',
+        kv_buffer_device='cuda',
+        kv_buffer_size=1e9,
+        kv_rank=my_rank,
+        kv_role="kv_both", # this arg doesn't matter in this test
+        kv_parallel_size=2,
+        kv_ip="127.0.0.1",
+        kv_port=12345,
+    )
 
-    pipe = tdp.TorchDistributedPipe([[0, 1]], my_rank, "nccl")
+    pipe = pnp.PyNcclPipe(
+        local_rank=my_rank,
+        config=config,
+    )
 
     torch.manual_seed(0)
     test_run(my_rank, pipe)

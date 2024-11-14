@@ -36,7 +36,6 @@ from packaging.version import Version
 from torch.library import Library
 from typing_extensions import ParamSpec, TypeIs, assert_never
 
-import vllm.distributed.kv_transfer.vllm_adapter as dist_kv
 import vllm.envs as envs
 from vllm.logger import enable_trace_function_call, init_logger
 from vllm.platforms import current_platform

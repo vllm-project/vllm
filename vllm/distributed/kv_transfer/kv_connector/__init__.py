@@ -1,12 +1,11 @@
 
 from .base import KVConnectorBase
-from vllm.config import ParallelConfig
 
 class KVConnectorFactory:
     
     @staticmethod
     def create_connector(
-        config: ParallelConfig
+        config
     ) -> KVConnectorBase:
         if config.kv_connector == 'LMCacheConnector':
             from .lmcache_connector import LMCacheConnector

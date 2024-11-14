@@ -131,6 +131,9 @@ class StatelessProcessGroup:
         self.send_dst_counter[dst] += 1
         self.entries.append((key, time.time()))
 
+    def send(self, tensor: torch.Tensor, dst: int):
+        self.send_obj(tensor, dst)
+
     def expire_data(self):
         """Expire data that is older than `data_expiration_seconds` seconds."""
         while self.entries:
@@ -149,6 +152,15 @@ class StatelessProcessGroup:
                 f"send_to/{self.rank}/{self.recv_src_counter[src]}"))
         self.recv_src_counter[src] += 1
         return obj
+
+    def recv(self, tensor: torch.Tensor, src: int):
+        """Receive a tensor from a source rank."""
+        recv_tensor = self.recv_obj(src)
+        assert isinstance(recv_tensor, torch.Tensor), "Received object is"\
+            " not a tensor."
+        assert tensor.size() == recv_tensor.size(), "Received tensor size"\
+            " does not match the recv buffer size."
+        tensor[...] = recv_tensor
 
     def broadcast_obj(self, obj: Optional[Any], src: int) -> Any:
         """Broadcast an object from a source rank to all other ranks.

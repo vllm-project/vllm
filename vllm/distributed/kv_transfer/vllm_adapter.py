@@ -33,7 +33,6 @@ from vllm import _custom_ops as ops
 from vllm.distributed.kv_transfer.kv_connector import KVConnectorFactory
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
-from vllm.config import ParallelConfig
 
 logger = init_logger(__name__)
 
@@ -44,7 +43,7 @@ IS_KV_PRODUCER: Optional[bool] = None
 IS_KV_CONSUMER: Optional[bool] = None
 
 
-def set_kv_transfer_attribute(config: ParallelConfig):
+def set_kv_transfer_attribute(config):
     global IS_DISTRIBUTED_KV_INSTANCE, IS_KV_PRODUCER, IS_KV_CONSUMER
 
     IS_DISTRIBUTED_KV_INSTANCE = config.is_distributed_kv_instance
@@ -65,7 +64,7 @@ class KV_transfer_agent:
         self,
         group_ranks: List[List[int]],
         local_rank: int,
-        config: ParallelConfig,
+        config,
     ):
 
         assert self.config.is_distributed_kv_instance, "KV cache transfer "\
