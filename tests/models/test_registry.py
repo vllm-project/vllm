@@ -80,5 +80,6 @@ def test_hf_registry_coverage():
     untested_archs = (HF_EXAMPLE_MODELS.get_supported_archs() -
                       set(ModelRegistry.get_supported_archs()))
 
-    assert not untested_archs, ("Please add the following architectures to "
-                                f"`tests/models/registry.py`: {untested_archs}")
+    assert not untested_archs, (
+        "Please add the following architectures to "
+        f"`tests/models/registry.py`: {untested_archs}")
