@@ -442,8 +442,9 @@ if hasattr(torch.ops._C, "gptq_marlin_24_gemm"):
         return torch.empty_like(b_q_weight,
                                 memory_format=torch.contiguous_format)
 
+
 if hasattr(torch.ops._C, "ggml_dequantize"):
-    
+
     @register_fake("_C::ggml_dequantize")
     def _ggml_dequantize_fake(W: torch.Tensor, quant_type: int,
                               m: torch.SymInt,
@@ -468,6 +469,7 @@ if hasattr(torch.ops._C, "ggml_dequantize"):
     ) -> torch.Tensor:
         batch = X.size(0)
         return torch.empty((batch, row), dtype=torch.float16, device=W.device)
+
 
 # cutlass
 def cutlass_scaled_mm_supports_fp8(cuda_device_capability: int) -> bool:
