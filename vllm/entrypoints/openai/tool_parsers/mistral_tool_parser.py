@@ -62,7 +62,7 @@ class MistralToolParser(ToolParser):
         ]  # map what has been streamed for each tool so far to a list
         self.bot_token = "[TOOL_CALLS]"
         self.bot_token_id = self.vocab.get(self.bot_token)
-        self.tool_call_regex = re.compile(r"\[{.*?}\]", re.DOTALL)
+        self.tool_call_regex = re.compile(r"\[({.*})\]", re.DOTALL)
         if self.bot_token_id is None:
             raise RuntimeError(
                 "Mistral Tool Parser could not locate the tool call token in "
@@ -86,14 +86,22 @@ class MistralToolParser(ToolParser):
                                                 content=model_output)
         try:
 
-            # use a regex to find the tool call. remove the BOT token
-            #   and make sure to replace single quotes with double quotes
-            raw_tool_call = self.tool_call_regex.findall(
-                model_output.replace(self.bot_token, ""))[0]
+            # first remove the BOT token
+            raw_tool_call = model_output.replace(self.bot_token, "").strip()
 
-            # load the JSON, and then use it to build the Function and
+            # we first try to directly load the json as parsing very nested
+            # jsons is difficult
+            try:
+                function_call_arr = json.loads(raw_tool_call)
+            except json.JSONDecodeError:
+                # use a regex to find the part corresponding to the tool call.
+                # NOTE: This use case should not happen if the model is trained
+                # correctly. It's a easy possible fix so it's included, but 
+                # can be brittle for very complex / highly nested tool calls
+                raw_tool_call = self.tool_call_regex.findall(raw_tool_call)[0]
+                function_call_arr = json.loads(raw_tool_call)
+
             # Tool Call
-            function_call_arr = json.loads(raw_tool_call)
             tool_calls: List[MistralToolCall] = [
                 MistralToolCall(
                     type="function",

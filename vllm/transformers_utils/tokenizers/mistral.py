@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union, cast
 
+from mistral_common.tokens.tokenizers.base import SpecialTokens
+
 import huggingface_hub
 from huggingface_hub import HfApi, hf_hub_download
 from mistral_common.protocol.instruct.request import ChatCompletionRequest
@@ -221,8 +223,7 @@ class MistralTokenizer:
     def convert_tokens_to_string(self, tokens: List[str]) -> str:
         if self.is_tekken:
             tokens = [
-                t for t in tokens
-                if t not in self.tokenizer._all_special_tokens
+                t for t in tokens if (t is SpecialTokens.tool_calls or t not in self.tokenizer._all_special_tokens)
             ]
 
             if any(isinstance(t, bytes) for t in tokens):
@@ -246,7 +247,25 @@ class MistralTokenizer:
             else:
                 decoded = "".join(tokens)
         else:
-            decoded = self.tokenizer.decode(tokens)  # type: ignore[arg-type]
+            # make sure certain special tokens like Tool calls are
+            # not decoded
+            special_tokens = {SpecialTokens.tool_calls}
+            regular_tokens = []
+            decoded_list = []
+
+            for token in tokens:
+                if token in special_tokens:
+                    if regular_tokens:
+                        decoded_list.append(self.tokenizer.decode(regular_tokens))
+                        regular_tokens = []
+                    decoded_list.append(token)
+                else:
+                    regular_tokens.append(token)
+
+            if regular_tokens:
+                decoded_list.append(self.decode(regular_tokens))
+
+            decoded = ''.join(decoded_list)
 
         return decoded
 
@@ -274,8 +293,8 @@ class MistralTokenizer:
         assert self.is_tekken or self.is_spm, type(self.tokenizer)
 
         if self.is_tekken:
-            # skip special tokens
-            ids = [i for i in ids if i > self.tokenizer.num_special_tokens]
+            # skip special tokens except tool call
+            ids = [i for i in ids if i > self.tokenizer.num_special_tokens or i == self.tokenizer.get_control_token(SpecialTokens.tool_calls)]
 
         tokens = [self.tokenizer.id_to_piece(id) for id in ids]
 
