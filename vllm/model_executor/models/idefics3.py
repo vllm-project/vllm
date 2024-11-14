@@ -646,37 +646,10 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal,
         "gate_up_proj",
         "down_proj",
     ]
-<<<<<<< HEAD
-
-    # BitandBytes specific attributes
-    default_bitsandbytes_target_modules = [
-        ".gate_proj.",
-        ".down_proj.",
-        ".up_proj.",
-        ".q_proj.",
-        ".k_proj.",
-        ".v_proj.",
-        ".o_proj.",
-        # vision_model
-        ".fc1.",
-        ".fc2.",
-        ".out_proj.",
-        # connector
-        ".proj.",
-    ]
-    bitsandbytes_stacked_params_mapping = {
-        # shard_name, weight_name, index
-        "q_proj": ("qkv_proj", 0),
-        "k_proj": ("qkv_proj", 1),
-        "v_proj": ("qkv_proj", 2),
-        "gate_proj": ("gate_up_proj", 0),
-        "up_proj": ("gate_up_proj", 1),
-    }
-
-=======
->>>>>>> origin/main
     embedding_modules = {}
     embedding_padding_modules = []
+
+
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
