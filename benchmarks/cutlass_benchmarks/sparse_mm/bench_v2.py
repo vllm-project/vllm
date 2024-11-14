@@ -152,7 +152,7 @@ class BenchMM:
                     self.fn(*args, **kwargs)
         return g
 
-    def run_cudagrah(self) -> TMeasurement:
+    def run_cudagraph(self) -> TMeasurement:
         assert self.use_cuda_graph
         globals = {'g': self.g}
 
@@ -204,7 +204,7 @@ class BenchMM:
     def run(self) -> TMeasurement:
         timer = None
         if self.use_cuda_graph:  # noqa SIM108
-            timer = self.run_cudagrah()
+            timer = self.run_cudagraph()
         else:
             timer = self.run_eager()
         #assert timer.meets_confidence()
