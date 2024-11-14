@@ -1,4 +1,3 @@
-
 #ifndef CPU_TYPES_HPP
 #define CPU_TYPES_HPP
 
@@ -10,7 +9,7 @@
   #include "cpu_types_vsx.hpp"
 #elif defined(__aarch64__)
   //arm implementation
-  #include "cpu_types_arm.hpp"
+  #include "cpu_types_generic.hpp"
 #else
   #warning "unsupported vLLM cpu implementation"
 #endif

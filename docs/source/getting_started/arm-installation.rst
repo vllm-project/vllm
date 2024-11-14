@@ -4,9 +4,9 @@ Installation with ARM CPU
 =========================
 
 Based on the CPU backend developed on x86 CPU platform, with the basic vector types implemented on ARM64 with NEON, vLLM is enabled on ARM CPUs.
-This document is just about installation, refer to the x86 platform write-up for more information about:
+This document is about installation, please refer to the x86 platform installation for information about:
 
-* CPU backend inferencing support
+* CPU backend inference support
 * Runtime environment variables
 * Performance tips
 

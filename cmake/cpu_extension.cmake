@@ -18,8 +18,10 @@ include_directories("${CMAKE_SOURCE_DIR}/csrc")
 #
 list(APPEND CXX_COMPILE_FLAGS
     "-fopenmp"
-    "-mf16c"
     "-DVLLM_CPU_EXTENSION")
+if (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64")
+    list(APPEND CXX_COMPILE_FLAGS "-mf16c")
+endif()
 
 execute_process(COMMAND cat /proc/cpuinfo
                 RESULT_VARIABLE CPUINFO_RET

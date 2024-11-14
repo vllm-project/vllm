@@ -1,7 +1,7 @@
 # Common dependencies
 -r requirements-common.txt
 
-torch == 2.4.0
+torch == 2.5.1
 torchvision  # required for the image processor of phi3v, this must be updated alongside torch
 pybind11 >= 2.13.6
 scipy >= 1.14.1
