@@ -58,8 +58,7 @@ from vllm.entrypoints.openai.serving_tokenization import (
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import (FlexibleArgumentParser,
-                        get_open_zmq_ipc_path,
+from vllm.utils import (FlexibleArgumentParser, get_open_zmq_ipc_path,
                         is_valid_ipv6_address)
 from vllm.version import __version__ as VLLM_VERSION
 
