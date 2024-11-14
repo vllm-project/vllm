@@ -291,7 +291,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
             # For encoder-only models, the block_table is None,
             # and there is no need to initialize the slot_mapping.
             if block_table is not None:
-                slot_mapping = [-1] * len(token_positions)
+                slot_mapping = [_PAD_SLOT_ID] * len(token_positions)
                 for i, pos in enumerate(token_positions):
                     block_number = block_table[pos // block_size]
                     block_offset = pos % block_size
@@ -350,7 +350,8 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
 
         data.seq_lens.append(seq_len)
 
-    def _compute_multi_modal_input(self, seq_group: SequenceGroupMetadata,
+    def _compute_multi_modal_input(self,
+                                   seq_group_metadata: SequenceGroupMetadata,
                                    seq_data: SequenceData):
         assert not self.chunked_prefill, \
             "multi-model on CPU does not support chunked-prefill."
@@ -360,13 +361,18 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
         # NOTE: mm_data only includes the subset of multi-modal items that
         # intersect with the current prefill positions.
         mm_data, placeholder_maps = MultiModalPlaceholderMap.from_seq_group(
-            seq_group, range(computed_len, seq_len))
+            seq_group_metadata, range(computed_len, seq_len))
 
         if not mm_data:
-            return None, None, None
+            return
 
-        mm_processor_kwargs = seq_group.mm_processor_kwargs
-        mm_kwargs = self.multi_modal_input_mapper(mm_data, mm_processor_kwargs)
+        if self.runner.mm_registry.has_processor(self.runner.model_config):
+            mm_kwargs = mm_data
+        else:
+            mm_kwargs = self.multi_modal_input_mapper(
+                mm_data,
+                seq_group_metadata.mm_processor_kwargs,
+            )
 
         # special processing for mrope position deltas.
         if self.runner.model_config.uses_mrope:
