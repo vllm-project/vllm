@@ -22,6 +22,7 @@ def test_can_initialize(model_arch):
         "num_local_experts": 2,
     }
 
+    # Avoid calling model.forward()
     def _initialize_kv_caches(self) -> None:
         self.cache_config.num_gpu_blocks = 0
         self.cache_config.num_cpu_blocks = 0
