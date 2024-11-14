@@ -37,6 +37,10 @@ class EngineCore:
         vllm_config: VllmConfig,
         executor_class: Type[GPUExecutor],
         usage_context: UsageContext,
+        stage, # either Prefill or Decode
+        on_scheduling_finished_callback = None,
+        on_execute_model_finish_callback = None,
+
     ):
         # Override the configs for V1.
         # FIXME
@@ -71,6 +75,10 @@ class EngineCore:
                                    vllm_config.lora_config)
 
         self._last_logging_time = time.time()
+
+        self.stage = stage
+        self.on_scheduling_finished_callback = on_scheduling_finished_callback
+        self.on_execute_model_finish_callback = on_execute_model_finish_callback
 
     def _initialize_kv_caches(self,
                               cache_config: CacheConfig) -> Tuple[int, int]:
@@ -111,7 +119,16 @@ class EngineCore:
             return []
 
         scheduler_output = self.scheduler.schedule()
+        
+        if self.on_scheduling_finished_callback and self.stage == 'decode':
+            # modify scheduler output for decoding phase
+            scheduler_output = self.on_scheduling_finished_callback(scheduler_output, self.scheduler.max_num_batched_tokens)
+        
         output = self.model_executor.execute_model(scheduler_output)
+        
+        if self.on_execute_model_finish_callback and self.stage == 'prefill':
+            # modify scheduler running request for decoding phase
+            self.scheduler.running = self.on_execute_model_finish_callback(self.scheduler.running)
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, output)
         return engine_core_outputs
