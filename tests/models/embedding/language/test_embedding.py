@@ -13,10 +13,12 @@ MODELS = [
     "intfloat/e5-mistral-7b-instruct",
     "BAAI/bge-base-en-v1.5",
     "BAAI/bge-multilingual-gemma2",
+    "intfloat/multilingual-e5-large",
 ]
 
 ENCODER_ONLY = [
     "BAAI/bge-base-en-v1.5",
+    "intfloat/multilingual-e5-large",
 ]
 
 
