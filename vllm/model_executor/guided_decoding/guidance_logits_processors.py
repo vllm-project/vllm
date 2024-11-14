@@ -176,7 +176,8 @@ class GuidanceLogitsProcessor:
                 # Some models have extra tokens that are not in the vocabulary
                 mask = torch.nn.functional.pad(mask, (0, extra_tokens))
 
-        masked_logits = logits + mask
+        # Force all invalid tokens to have 0 value
+        masked_logits = (logits - torch.min(logits)) * mask
         self.new_sampling = True
 
         return masked_logits
