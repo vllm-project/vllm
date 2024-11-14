@@ -213,32 +213,6 @@ class BenchMM:
             print(f"exc traceback {traceback}")
 
 
-def get_autogen_functions():
-    import importlib
-    from importlib.util import find_spec
-
-    # import vllm nm_cutlass modules so torch._C can find it
-    m_idx = 0
-    m_name = f'vllm._nm_cutlass_{m_idx}_C'
-    while find_spec(m_name):
-        print(f"attempting import {m_name}")
-        importlib.import_module(m_name)
-        m_idx += 1
-        m_name = f'vllm._nm_cutlass_{m_idx}_C'
-
-    dispatch_names = torch._C._dispatch_get_all_op_names()
-    autogen_dispatch_names = [x for x in dispatch_names if 'autogen' in x]
-    assert all([x.startswith('_nm_cutlass') for x in autogen_dispatch_names])
-    autogen_dispatch_modules_names = [(getattr(torch.ops,
-                                               x.split('::')[0]),
-                                       x.split('::')[1])
-                                      for x in autogen_dispatch_names]
-    name_fn = [(name, getattr(m, name))
-               for m, name in autogen_dispatch_modules_names]
-    print(f"#autogen functions found {len(name_fn)}")
-    return name_fn
-
-
 def bench_fp8(dtype: torch.dtype, with_cuda_graph: Optional[int],
               with_arg_pool: Optional[int], m: int, k: int, n: int, label: str,
               sub_label: str) -> Iterable[TMeasurement]:
@@ -306,56 +280,6 @@ def bench_fp8(dtype: torch.dtype, with_cuda_graph: Optional[int],
                  ArgPool(As), ArgPool(Bs), scale_a, scale_b,
                  torch.bfloat16) as bench:
         timers.append(bench.run())
-
-    def attempt_run(fn, *args, **kwargs) -> bool:
-        try:
-            fn(*args, **kwargs)
-            return True
-        except Exception as e:
-            print(f"Failed to run {autogen_name} because {e} ...")
-            return False
-
-    autogen_name_fn = get_autogen_functions()
-    for autogen_name, autogen_fn in autogen_name_fn:
-        print(f"Bench autogen {autogen_name}")
-        out = torch.empty((m, n), dtype=torch.bfloat16, device="cuda")
-        if "scaled_mm_streamk" in autogen_name:
-
-            # Reduction mode and decomposition mode
-            run_options = [("Deterministic", "StreamK"),
-                           ("Nondeterministic", "StreamK")]
-            for run_option in run_options:
-                reduction_mode, decomposition_mode = run_option
-                if not attempt_run(autogen_fn, out, As[0], Bs[0],
-                                   reduction_mode, decomposition_mode,
-                                   scale_a, scale_b):
-                    continue
-
-                description = (f'{autogen_name}_'
-                              f'{reduction_mode}_'
-                              f'{decomposition_mode}')
-
-                with BenchMM(cuda_graph_params, label,
-                             sub_label, description, autogen_fn, out,
-                             ArgPool(As), ArgPool(Bs),
-                             reduction_mode, decomposition_mode,
-                             scale_a, scale_b) as bench:
-                    timers.append(bench.run())
-
-        elif "scaled_mm" in autogen_name:
-            if not attempt_run(autogen_fn, out, As[0], Bs[0], scale_a, scale_b):
-                continue
-            with BenchMM(cuda_graph_params, label,
-                         sub_label, autogen_name, autogen_fn, out, ArgPool(As),
-                         ArgPool(Bs), scale_a, scale_b) as bench:
-                timers.append(bench.run())
-        else:
-            assert "simple_gemm" in autogen_name
-            if not attempt_run(autogen_fn, out, As[0], Bs[0]):
-                continue
-            with BenchMM(cuda_graph_params, label, sub_label, autogen_name,
-                         autogen_fn, out, ArgPool(As), ArgPool(Bs)) as bench:
-                timers.append(bench.run())
 
     return timers
 

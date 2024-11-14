@@ -224,32 +224,6 @@ class BenchMM:
             print(f"exc traceback {traceback}")
 
 
-def get_autogen_functions():
-    import importlib
-    from importlib.util import find_spec
-
-    # import vllm nm_cutlass modules so torch._C can find it
-    m_idx = 0
-    m_name = f'vllm._nm_cutlass_{m_idx}_C'
-    while find_spec(m_name):
-        # print(f"attempting import {m_name}")
-        importlib.import_module(m_name)
-        m_idx += 1
-        m_name = f'vllm._nm_cutlass_{m_idx}_C'
-
-    dispatch_names = torch._C._dispatch_get_all_op_names()
-    autogen_dispatch_names = [x for x in dispatch_names if 'autogen' in x]
-    assert all([x.startswith('_nm_cutlass') for x in autogen_dispatch_names])
-    autogen_dispatch_modules_names = [(getattr(torch.ops,
-                                               x.split('::')[0]),
-                                       x.split('::')[1])
-                                      for x in autogen_dispatch_names]
-    name_fn = [(name, getattr(m, name))
-               for m, name in autogen_dispatch_modules_names]
-    # print(f"#autogen functions found {len(name_fn)}")
-    return name_fn
-
-
 def run_single_benchmark_process(kernel_config: Dict, gpu_id: int, queue: Queue):
     """
     Run a single kernel benchmark in an isolated process.
@@ -325,16 +299,6 @@ def run_single_benchmark_process(kernel_config: Dict, gpu_id: int, queue: Queue)
                             ArgPool(BComps), ArgPool(Es), ArgPool(AsT), 
                             scale_b, scale_a, torch.bfloat16)
 
-        elif kernel_type == 'autogen_kernel':
-            # Get the autogen kernel
-            kernel_num = kernel_config['kernel_num']
-            kernel_name, autogen_fn = get_autogen_functions()[kernel_num]
-
-            # Create appropriate benchmark based on kernel type
-            bench = BenchMM(cuda_graph_params, label, sub_label,
-                            kernel_name, autogen_fn, out, 
-                            ArgPool(BComps), ArgPool(Es), ArgPool(AsT),
-                            scale_b, scale_a)
 
         # Run the benchmark
         result = bench.run()
@@ -393,7 +357,7 @@ def benchmark_gpu_worker(gpu_id: int, task_queue: Queue, result_queue: Queue):
 def run_kernels_on_gpus(configs: List[Dict]) -> List[Tuple[bool, Optional[TMeasurement], Dict]]:
     MULTI_GPU_MULTI_PROCESS = False  # Set to False for single GPU testing
     if MULTI_GPU_MULTI_PROCESS:
-        gpus_list = [5]
+        gpus_list = [0]
         task_queue = Queue()
         result_queue = Queue()
 
@@ -423,14 +387,8 @@ def run_kernels_on_gpus(configs: List[Dict]) -> List[Tuple[bool, Optional[TMeasu
             completed += 1
 
             # Print progress
-            if config['kernel_type'] == 'autogen_kernel':
-                kernel_num = config['kernel_num']
-                kernel_name = get_autogen_functions()[kernel_num][0]
-                status = "Success" if success else "Failed"
-                print(f"{status}: autogen {kernel_num} {kernel_name}")
-            else:
-                status = "Success" if success else "Failed"
-                print(f"{status}: {config['kernel_type']}")
+            status = "Success" if success else "Failed"
+            print(f"{status}: {config['kernel_type']}")
 
         # Cleanup workers
         for worker in workers:
@@ -443,7 +401,7 @@ def run_kernels_on_gpus(configs: List[Dict]) -> List[Tuple[bool, Optional[TMeasu
     else:
         """Run kernel benchmarks in a single process."""
         results = []
-        gpu_id = 5  # Using the same GPU as before
+        gpu_id = 0  # Using the same GPU as before
         torch.cuda.set_device(gpu_id)
         # configs = configs[:10]  # Keep the original slice
         
@@ -515,27 +473,11 @@ def run_kernels_on_gpus(configs: List[Dict]) -> List[Tuple[bool, Optional[TMeasu
                                     ArgPool(BComps), ArgPool(Es), ArgPool(AsT), 
                                     scale_b, scale_a, torch.bfloat16)
 
-                elif kernel_type == 'autogen_kernel':
-                    # Get the autogen kernel
-                    kernel_num = config['kernel_num']
-                    kernel_name, autogen_fn = get_autogen_functions()[kernel_num]
-
-                    # Create appropriate benchmark based on kernel type
-                    bench = BenchMM(cuda_graph_params, label, sub_label,
-                                    kernel_name, autogen_fn, out, 
-                                    ArgPool(BComps), ArgPool(Es), ArgPool(AsT),
-                                    scale_b, scale_a)
-
                 # Run the benchmark
                 result = bench.run()
                 
                 # Print progress
-                if kernel_type == 'autogen_kernel':
-                    kernel_num = config['kernel_num']
-                    kernel_name = get_autogen_functions()[kernel_num][0]
-                    print(f"Success: autogen {kernel_num} {kernel_name}")
-                else:
-                    print(f"Success: {kernel_type}")
+                print(f"Success: {kernel_type}")
                     
                 results.append((True, result, config))
                 
@@ -551,251 +493,9 @@ def run_kernels_on_gpus(configs: List[Dict]) -> List[Tuple[bool, Optional[TMeasu
         return results
 
 
-
-def test_autogen_kernel_process(kernel_config: Dict, gpu_id: int, queue: Queue):
-    """
-    Test run a single autogen kernel in an isolated process.
-    Puts (kernel_num, success) tuple in the queue.
-    """
-    try:
-        torch.cuda.set_device(gpu_id)
-        
-        # Initialize test tensors (using smaller dimensions for quick testing)
-        test_m, test_k, test_n = 256, 256, 256  # Small test dimensions
-        dtype = kernel_config['dtype']
-        kernel_num = kernel_config['kernel_num']
-        
-        # Create minimal test tensors
-        BComps, Es, As, Bs = make_n_rand_sparse_tensors(1, dtype, test_m, test_n, test_k)
-        AsT = [x.t() for x in As]
-        BsT = [x.t() for x in Bs]
-        scale_a = torch.tensor(1.0, device="cuda", dtype=torch.float32)
-        scale_b = torch.tensor(1.0, device="cuda", dtype=torch.float32)
-        out = torch.zeros((test_m, test_n), dtype=torch.bfloat16, device="cuda")
-        
-        # Get the autogen kernel
-        kernel_name, autogen_fn = get_autogen_functions()[kernel_num]
-        
-        # Test run based on kernel type
-        autogen_fn(out, BComps[0], Es[0], AsT[0], scale_a, scale_b)
-            
-        # Run a second time to ensure stability
-        torch.cuda.synchronize()
-        autogen_fn(out, BComps[0], Es[0], AsT[0], scale_a, scale_b)
-        torch.cuda.synchronize()
-        
-        queue.put((kernel_num, True))
-        
-    except Exception as e:
-        print(f"Kernel {kernel_num} ({kernel_name if 'kernel_name' in locals() else 'unknown'}) failed test: {str(e)}")
-        queue.put((kernel_num, False))
-    finally:
-        # Explicit cleanup
-        torch.cuda.empty_cache()
-
-
-def test_gpu_worker(gpu_id: int, task_queue: Queue, result_queue: Queue):
-    """Worker process that spawns individual test processes for each kernel."""
-    try:
-        while True:
-            try:
-                kernel_config = task_queue.get_nowait()
-                if kernel_config is None:  # Poison pill
-                    break
-                
-                # Create a new process queue for this specific test
-                process_queue = Queue()
-                
-                # Create and start a new process for this kernel test
-                p = Process(target=test_autogen_kernel_process, 
-                          args=(kernel_config, gpu_id, process_queue))
-                p.start()
-                
-                # Wait for result with timeout
-                try:
-                    kernel_num, success = process_queue.get(timeout=30)  # 30 second timeout
-                    result_queue.put((kernel_num, success))
-                except Empty:
-                    print(f"Kernel {kernel_config['kernel_num']} timed out")
-                    result_queue.put((kernel_config['kernel_num'], False))
-                
-                # Cleanup
-                p.join(timeout=1)  # Give it 1 second to join
-                if p.is_alive():
-                    p.terminate()
-                    p.join()
-                
-            except Empty:
-                break
-            except Exception as e:
-                print(f"Error in GPU {gpu_id} test worker: {str(e)}")
-                print(traceback.format_exc())
-                if 'kernel_config' in locals():
-                    result_queue.put((kernel_config['kernel_num'], False))
-                
-    finally:
-        print(f"GPU {gpu_id} test worker finished")
-
-
-def filter_stable_autogen_kernels(base_config: Dict, gpus_list: List[int]) -> List[int]:
-    """
-    Test all autogen kernels and return list of kernel numbers that pass the test.
-    Each kernel is tested in a completely isolated process.
-    """
-    task_queue = Queue()
-    result_queue = Queue()
-    
-    # Get all autogen kernels
-    autogen_name_fn = get_autogen_functions()
-    total_kernels = len(autogen_name_fn)
-    
-    # Fill task queue with test configs
-    for i in range(total_kernels):
-        config = {
-            **base_config,
-            'kernel_type': 'autogen_kernel',
-            'kernel_num': i
-        }
-        task_queue.put(config)
-    
-    # Add poison pills
-    for _ in gpus_list:
-        task_queue.put(None)
-    
-    # Start GPU workers
-    workers = []
-    for gpu_id in gpus_list:
-        p = Process(target=test_gpu_worker, args=(gpu_id, task_queue, result_queue))
-        p.start()
-        workers.append(p)
-    
-    # Collect results
-    stable_kernels = []
-    completed = 0
-    
-    print(f"Testing {total_kernels} autogen kernels for stability...")
-    while completed < total_kernels:
-        kernel_num, success = result_queue.get()
-        completed += 1
-        
-        if success:
-            kernel_name = get_autogen_functions()[kernel_num][0]
-            stable_kernels.append(kernel_num)
-            print(f"Kernel {kernel_num} ({kernel_name}) passed stability test")
-        
-        if completed % 10 == 0:
-            print(f"Tested {completed}/{total_kernels} kernels. {len(stable_kernels)} stable so far.")
-    
-    # Wait for workers to finish
-    for worker in workers:
-        worker.join(timeout=1)
-        if worker.is_alive():
-            worker.terminate()
-            worker.join()
-    
-    print(f"Found {len(stable_kernels)} stable kernels out of {total_kernels}")
-    return stable_kernels
-
-
-def get_config_hash(base_config: Dict) -> str:
-    """
-    Create a hash of the relevant configuration parameters that would affect kernel stability.
-    """
-    # Extract only the parameters that affect kernel stability
-    relevant_params = {
-        'dtype': str(base_config['dtype']),  # Convert dtype to string for hashing
-        'm': base_config['m'],
-        'k': base_config['k'],
-        'n': base_config['n'],
-    }
-    
-    # Add CUDA version and PyTorch version to the hash
-    relevant_params['cuda_version'] = torch.version.cuda
-    relevant_params['torch_version'] = torch.__version__
-    
-    # Create a sorted string representation for consistent hashing
-    param_str = json.dumps(relevant_params, sort_keys=True)
-    
-    # Create hash
-    return hashlib.sha256(param_str.encode()).hexdigest()[:16]
-
-
 def get_cache_path() -> str:
     """Get the path to the cache file for the given configuration hash."""
     return f'{Path(os.path.dirname(os.path.realpath(__file__)))}/stable_kernels.json'
-
-
-def load_cached_kernels(cache_path: str) -> Optional[List[int]]:
-    """
-    Load cached stable kernel list if it exists and is not too old.
-    Returns None if cache doesn't exist or is invalid.
-    """
-    try:
-        if not os.path.exists(cache_path):
-            return None
-            
-        with open(cache_path, 'r') as f:
-            cache_data = json.load(f)
-            
-        # # Check if cache is too old (e.g., older than 7 days)
-        # cache_date = datetime.fromisoformat(cache_data['date'])
-        # cache_age = (datetime.now() - cache_date).days
-        # if cache_age > 7:
-        #     print("Cache is older than 7 days, will rerun stability tests")
-        #     return None
-            
-        # Verify the cached kernel numbers are valid
-        total_kernels = len(get_autogen_functions())
-        stable_kernels = cache_data['stable_kernels']
-        if any(k >= total_kernels for k in stable_kernels):
-            print("Cache is invalid (kernel numbers out of range), will rerun stability tests")
-            return None
-            
-        print(f"Loaded {len(stable_kernels)} stable kernels from cache")
-        return stable_kernels
-        
-    except Exception as e:
-        print(f"Error loading cache: {str(e)}")
-        return None
-
-
-def save_cached_kernels(cache_path: str, stable_kernels: List[int]):
-    """Save the list of stable kernels to cache."""
-    try:
-        cache_data = {
-            'date': datetime.now().isoformat(),
-            'stable_kernels': stable_kernels
-        }
-        
-        with open(cache_path, 'w') as f:
-            json.dump(cache_data, f)
-            
-        print(f"Saved {len(stable_kernels)} stable kernels to cache")
-        
-    except Exception as e:
-        print(f"Error saving cache: {str(e)}")
-
-
-def get_stable_autogen_kernels(base_config: Dict, gpus_list: List[int]) -> List[int]:
-    """
-    Get the list of stable autogen kernels, either from cache or by running tests.
-    """
-    # Generate config hash and get cache path
-    # config_hash = get_config_hash(base_config)
-    cache_path = get_cache_path()
-    
-    # Try to load from cache
-    stable_kernels = load_cached_kernels(cache_path)
-    
-    if stable_kernels is None:
-        # Cache miss or invalid cache - run stability tests
-        print("Running stability tests for autogen kernels...")
-        stable_kernels = filter_stable_autogen_kernels(base_config, gpus_list)
-        
-        # Save results to cache
-        save_cached_kernels(cache_path, stable_kernels)
-    
-    return stable_kernels
 
 
 def bench_fp8(dtype: torch.dtype, with_cuda_graph: Optional[int],
@@ -833,23 +533,7 @@ def bench_fp8(dtype: torch.dtype, with_cuda_graph: Optional[int],
     ]
     
     # Create configs for standard kernels
-    standard_configs = [{**base_config, **kernel} for kernel in standard_kernels]
-    
-    # Get stable kernels (from cache or by testing)
-    stable_kernel_nums = get_stable_autogen_kernels(base_config, gpus_list)
-    
-    # Create configs only for stable autogen kernels
-    autogen_configs = []
-    for kernel_num in stable_kernel_nums:
-        config = {
-            **base_config,
-            'kernel_type': 'autogen_kernel',
-            'kernel_num': kernel_num
-        }
-        autogen_configs.append(config)
-    
-    # Combine all configs
-    all_configs = standard_configs + autogen_configs
+    all_configs = [{**base_config, **kernel} for kernel in standard_kernels]
     
     # Run all kernels distributed across GPUs
     print(f"Running {len(all_configs)} benchmarks across {len(gpus_list)} GPUs...")
