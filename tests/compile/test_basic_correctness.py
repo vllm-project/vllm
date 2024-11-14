@@ -67,7 +67,7 @@ test_settings = [
         model_args=["--task", "embedding"],
         pp_size=1,
         tp_size=1,
-        attn_backend="FLASHINFER",
+        attn_backend="FLASH_ATTN",
         method="encode",
         fullgraph=True,
     ),
