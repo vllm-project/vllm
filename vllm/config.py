@@ -2178,6 +2178,7 @@ class CompilationConfig(BaseModel):
             Each pass defines its own stages (before, after, maybe in-between).
         - dump_graph_dir: directory to dump the graphs. Default is .
         - enable_fusion: whether to enable the custom fusion pass.
+        - enable_reshape: whether to enable the custom reshape elimination pass.
             TODO better pass enabling system.
         """
         dump_graph_stages: List[str] = Field(default_factory=list)
