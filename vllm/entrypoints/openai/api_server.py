@@ -58,7 +58,7 @@ from vllm.entrypoints.openai.serving_tokenization import (
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import FlexibleArgumentParser, get_open_zmq_ipc_path
+from vllm.utils import FlexibleArgumentParser, get_open_zmq_ipc_path, is_valid_ipv6_address
 from vllm.version import __version__ as VLLM_VERSION
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds
@@ -562,7 +562,7 @@ def init_app_state(
 
 def create_server_socket(addr: Tuple[str, int]) -> socket.socket:
     family = socket.AF_INET
-    if ":" in addr[0]:
+    if is_valid_ipv6_address(addr[0]):
         family = socket.AF_INET6
 
     sock = socket.socket(family=family, type=socket.SOCK_STREAM)
