@@ -2,7 +2,8 @@ import dataclasses
 import weakref
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type, Union
+from typing import (TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type,
+                    TypeVar, Union)
 
 import torch
 from torch import nn
@@ -15,10 +16,9 @@ from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
-                             MultiModalInputs, MultiModalPlaceholderMap)
+                             MultiModalKwargs, MultiModalPlaceholderMap)
 from vllm.sequence import (IntermediateTensors, SequenceData,
                            SequenceGroupMetadata)
-from vllm.transformers_utils.config import uses_mrope
 from vllm.utils import make_tensor_with_pad
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase, ModelRunnerInputBuilderBase,
@@ -32,6 +32,7 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+TModelInputForCPU = TypeVar('TModelInputForCPU', bound="ModelInputForCPU")
 _PAD_SLOT_ID = -1
 
 
@@ -61,10 +62,10 @@ class ModelInputForCPU(ModelRunnerInputBase):
 
     @classmethod
     def from_broadcasted_tensor_dict(
-        cls: Type["ModelInputForCPU"],
+        cls: Type[TModelInputForCPU],
         tensor_dict: Dict[str, Any],
         attn_backend: Optional["AttentionBackend"] = None
-    ) -> "ModelInputForCPU":
+    ) -> TModelInputForCPU:
         if attn_backend is not None:
             tensor_dict = _init_attn_metadata_from_tensor_dict(
                 attn_backend, tensor_dict)
@@ -147,23 +148,33 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
             query_lens=seq_lens,
         )
 
-    def _compute_multi_modal_input(self, seq_group: SequenceGroupMetadata,
-                                   seq_data: SequenceData, computed_len: int,
-                                   mm_processor_kwargs: Dict[str, Any]):
-
+    def _compute_multi_modal_input(
+        self,
+        seq_data: SequenceData,
+        computed_len: int,
+        seq_group_metadata: SequenceGroupMetadata,
+    ):
         # NOTE: mm_data only includes the subset of multi-modal items that
         # intersect with the current prefill positions.
         mm_data, placeholder_maps = MultiModalPlaceholderMap.from_seq_group(
-            seq_group, range(computed_len, len(seq_data.get_token_ids())))
+            seq_group_metadata,
+            range(computed_len, len(seq_data.get_token_ids())),
+        )
 
         if not mm_data:
-            return
+            return None, None, None
 
-        mm_kwargs = self.multi_modal_input_mapper(mm_data, mm_processor_kwargs)
+        if self.runner.mm_registry.has_processor(self.runner.model_config):
+            mm_kwargs = mm_data
+        else:
+            mm_kwargs = self.multi_modal_input_mapper(
+                mm_data,
+                seq_group_metadata.mm_processor_kwargs,
+            )
 
         # special processing for mrope position deltas.
         mrope_positions = None
-        if self.runner.model_is_mrope:
+        if self.runner.model_config.uses_mrope:
             image_grid_thw = mm_kwargs.get("image_grid_thw", None)
             video_grid_thw = mm_kwargs.get("video_grid_thw", None)
             assert image_grid_thw is not None or video_grid_thw is not None, (
@@ -201,7 +212,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
 
         slot_mapping: List[int] = []
         seq_lens: List[int] = []
-        multi_modal_inputs_list: List[MultiModalInputs] = []
+        multi_modal_kwargs_list: List[MultiModalKwargs] = []
         multi_modal_placeholder_maps: Dict[
             str,
             MultiModalPlaceholderMap] = defaultdict(MultiModalPlaceholderMap)
@@ -222,11 +233,14 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
 
             mrope_positions = None
             if seq_group_metadata.multi_modal_data:
-                mm_kwargs, placeholder_maps, mrope_positions = self \
-                    ._compute_multi_modal_input(
-                        seq_group_metadata, seq_data, computed_len,
-                    seq_group_metadata.mm_processor_kwargs)
-                multi_modal_inputs_list.append(mm_kwargs)
+                (
+                    mm_kwargs,
+                    placeholder_maps,
+                    mrope_positions,
+                ) = self._compute_multi_modal_input(seq_data, computed_len,
+                                                    seq_group_metadata)
+
+                multi_modal_kwargs_list.append(mm_kwargs)
                 for modality, placeholder_map in placeholder_maps.items():
                     multi_modal_placeholder_maps[modality].extend(
                         placeholder_map)
@@ -256,11 +270,14 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
                     slot_mapping.append(_PAD_SLOT_ID)
                     continue
 
-                block_number = block_table[i //
-                                           self.block_size]  # type: ignore
-                block_offset = i % self.block_size  # type: ignore
-                slot = block_number * self.block_size + block_offset
-                slot_mapping.append(slot)
+                # For encoder-only models, the block_table is None,
+                # and there is no need to initialize the slot_mapping.
+                if block_table is not None:
+                    block_number = block_table[i //
+                                               self.block_size]  # type: ignore
+                    block_offset = i % self.block_size  # type: ignore
+                    slot = block_number * self.block_size + block_offset
+                    slot_mapping.append(slot)
 
         if any(input_mrope_positions):
             input_positions = None  # type: ignore
@@ -298,7 +315,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
             multi_modal_placeholder_index_maps=placeholder_index_maps,
         )
 
-        multi_modal_kwargs = MultiModalInputs.batch(multi_modal_inputs_list)
+        multi_modal_kwargs = MultiModalKwargs.batch(multi_modal_kwargs_list)
 
         return (input_tokens, input_positions, attn_metadata, seq_lens,
                 multi_modal_kwargs)
@@ -403,10 +420,12 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
         )
 
 
-class CPUModelRunner(ModelRunnerBase[ModelInputForCPU]):
-    _model_input_cls: Type[ModelInputForCPUWithSamplingMetadata] = (
-        ModelInputForCPUWithSamplingMetadata)
-    _builder_cls: Type[ModelInputForCPUBuilder] = ModelInputForCPUBuilder
+class CPUModelRunnerBase(ModelRunnerBase[TModelInputForCPU]):
+    """
+    Helper class for shared methods between CPU model runners.
+    """
+    _model_input_cls: Type[TModelInputForCPU]
+    _builder_cls: Type[ModelInputForCPUBuilder]
 
     def __init__(
         self,
@@ -446,29 +465,14 @@ class CPUModelRunner(ModelRunnerBase[ModelInputForCPU]):
         # Lazy initialization.
         self.model: nn.Module  # Set after init_Model
 
-    @property
-    def model_is_mrope(self) -> bool:
-        """Detect if the model has "mrope" rope_scaling type.
-        mrope requires keep "rope_deltas" between prompt and decoding phases."""
-        return uses_mrope(self.model_config.hf_config)
-
     def load_model(self) -> None:
         self.model = get_model(vllm_config=self.vllm_config)
-
-    def make_model_input_from_broadcasted_tensor_dict(
-        self,
-        tensor_dict: Dict[str, Any],
-    ) -> ModelInputForCPUWithSamplingMetadata:
-        return ModelInputForCPUWithSamplingMetadata.from_broadcasted_tensor_dict(  # noqa: E501
-            tensor_dict,
-            attn_backend=self.attn_backend,
-        )
 
     def _prepare_model_input_tensors(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
         finished_requests_ids: Optional[List[str]] = None
-    ) -> ModelInputForCPUWithSamplingMetadata:
+    ) -> TModelInputForCPU:
         """Helper method to prepare the model input based on a given sequence
         group. Prepares metadata needed for the base model forward pass but not
         metadata for possible additional steps, e.g., sampling.
@@ -479,6 +483,21 @@ class CPUModelRunner(ModelRunnerBase[ModelInputForCPU]):
             builder.add_seq_group(seq_group_metadata)
 
         return builder.build()  # type: ignore
+
+
+class CPUModelRunner(CPUModelRunnerBase[ModelInputForCPUWithSamplingMetadata]):
+    _model_input_cls: Type[ModelInputForCPUWithSamplingMetadata] = (
+        ModelInputForCPUWithSamplingMetadata)
+    _builder_cls: Type[ModelInputForCPUBuilder] = ModelInputForCPUBuilder
+
+    def make_model_input_from_broadcasted_tensor_dict(
+        self,
+        tensor_dict: Dict[str, Any],
+    ) -> ModelInputForCPUWithSamplingMetadata:
+        return ModelInputForCPUWithSamplingMetadata.from_broadcasted_tensor_dict(  # noqa: E501
+            tensor_dict,
+            attn_backend=self.attn_backend,
+        )
 
     def prepare_model_input(
         self,
@@ -527,7 +546,7 @@ class CPUModelRunner(ModelRunnerBase[ModelInputForCPU]):
             kv_caches,
             "attn_metadata":
             model_input.attn_metadata,
-            **MultiModalInputs.as_kwargs(model_input.multi_modal_kwargs or {},
+            **MultiModalKwargs.as_kwargs(model_input.multi_modal_kwargs or {},
                                          device=self.device),
             "intermediate_tensors":
             intermediate_tensors,
