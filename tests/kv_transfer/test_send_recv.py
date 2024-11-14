@@ -45,13 +45,17 @@ def barrier(my_rank):
 def stress_test(my_rank, pipe):
 
     # barrier
-    barrier(my_rank)
+
+    torch.distributed.barrier()
 
     tensors: List[torch.Tensor] = []
 
+    
+    torch.manual_seed(0)
+
     for i in tqdm(range(500)):
-        mean = torch.rand(1).item()
-        std = torch.rand(1).item()
+        mean = torch.rand(1).item() * 100
+        std = torch.rand(1).item() * 100
         size = torch.randint(900, 1000, (2, ))
         x = torch.normal(mean * 1.0, std * 1.0,
                          size=size.tolist()).to(pipe.device)
@@ -66,7 +70,10 @@ def stress_test(my_rank, pipe):
             tensors.append(x.mean().unsqueeze(0))
             tensors.append(x.std().unsqueeze(0))
 
-    barrier(my_rank)
+    
+
+    torch.distributed.barrier()
+
 
 
     for i in tqdm(range(500)):
@@ -78,13 +85,20 @@ def stress_test(my_rank, pipe):
             x = pipe.recv_tensor()
             mean = pipe.recv_tensor()
             std = pipe.recv_tensor()
-            if x is None:
-                assert mean is None
-                assert std is None
-            else:
-                assert torch.allclose(x, tensors[3 * i])
-                assert x.mean() == mean[0]
-                assert x.std() == std[0]
+            try:
+                if x is None:
+                    assert mean is None
+                    assert std is None
+                else:
+                    assert torch.allclose(x, tensors[3 * i])
+                    assert x.mean() == mean[0]
+                    assert x.std() == std[0]
+            except Exception as e:
+                print("Error at iteration", i, "rank", my_rank)
+                print(x)
+                raise e
+
+        torch.distributed.barrier()
 
 
     print("Stress test passed.")
@@ -132,11 +146,11 @@ if __name__ == "__main__":
 
     torch.distributed.init_process_group(
         backend='gloo',
-        init_method='tcp://localhost:12567',
-        rank=my_rank,
+        init_method='tcp://localhost:12398',
         world_size=2,
+        rank=my_rank,
     )
-    print('done')
+    
 
     config = ParallelConfig(
         1,
@@ -156,8 +170,8 @@ if __name__ == "__main__":
         config=config,
     )
 
-    torch.manual_seed(0)
     test_run(my_rank, pipe)
+    # torch.distributed.barrier()
     stress_test(my_rank, pipe)
 
     # Use this function if you want to test the latency of pipe impl.
