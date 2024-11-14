@@ -108,8 +108,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
 
 _EMBEDDING_EXAMPLE_MODELS = {
     # [Text-only]
-    "BertModel": _HfExamplesInfo("google-bert/bert-base"),
-    "Gemma2Model": _HfExamplesInfo("gBAAI/bge-multilingual-gemma2"),
+    "BertModel": _HfExamplesInfo("google-bert/bert-base-uncased"),
+    "Gemma2Model": _HfExamplesInfo("BAAI/bge-multilingual-gemma2"),
     "MistralModel": _HfExamplesInfo("intfloat/e5-mistral-7b-instruct"),
     "Qwen2ForRewardModel": _HfExamplesInfo("Qwen/Qwen2.5-Math-RM-72B"),
     "Qwen2ForSequenceClassification": _HfExamplesInfo("jason9693/Qwen2.5-1.5B-apeach"),  # noqa: E501
