@@ -376,18 +376,23 @@ def dummy_data_for_idefics3(
 
 class Idefics3SimpleMLP(nn.Module):
 
-    def __init__(self,
-                 config: Idefics3Config,
-                 quant_config: Optional[QuantizationConfig] = None):
+    def __init__(
+        self,
+        config: Idefics3Config,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ):
         super().__init__()
         input_size = config.vision_config.hidden_size * (config.scale_factor**
                                                          2)
         output_size = config.text_config.hidden_size
-        self.proj = ReplicatedLinear(input_size,
-                                     output_size,
-                                     bias=False,
-                                     quant_config=quant_config,
-                                     prefix=maybe_prefix(prefix, "proj"))
+        self.proj = ReplicatedLinear(
+            input_size,
+            output_size,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.proj",
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out, _ = self.proj(x)
@@ -396,12 +401,19 @@ class Idefics3SimpleMLP(nn.Module):
 
 class Idefics3Connector(nn.Module):
 
-    def __init__(self,
-                 config: Idefics3Config,
-                 quant_config: Optional[QuantizationConfig] = None):
+    def __init__(
+        self,
+        config: Idefics3Config,
+        quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
+    ):
         super().__init__()
         self.scale_factor = config.scale_factor
-        self.modality_projection = Idefics3SimpleMLP(config, quant_config)
+        self.modality_projection = Idefics3SimpleMLP(
+            config,
+            quant_config,
+            prefix=f"{prefix}.modality_projection",
+        )
 
     def pixel_shuffle(self,
                       x: torch.Tensor,
@@ -443,7 +455,11 @@ class Idefics3Model(nn.Module):
         self.vocab_size = self.config.text_config.vocab_size
         self.vision_model = Idefics3VisionTransformer(config.vision_config,
                                                       quant_config)
-        self.connector = Idefics3Connector(config, quant_config)
+        self.connector = Idefics3Connector(
+            config,
+            quant_config,
+            prefix=maybe_prefix(prefix, "connector"),
+        )
         self.text_model = LlamaModel(
             vllm_config=vllm_config.with_hf_config(config.text_config),
             prefix=maybe_prefix(prefix, "text_model"),
