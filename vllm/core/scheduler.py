@@ -320,7 +320,7 @@ class PartialPrefillMetadata:
 
     scheduler_config: SchedulerConfig
 
-    def cannot_schedule(self, seq_group: SequenceGroup):
+    def cannot_schedule(self, seq_group: SequenceGroup) -> bool:
         """When concurrent partial prefills are enabled,
         we limit the number of long requests and only accept
         shorter requests from the queue while running them
@@ -331,8 +331,9 @@ class PartialPrefillMetadata:
                     self.scheduler_config.max_long_partial_prefills \
                     and self.scheduler_config.max_num_partial_prefills > 1
 
-    def increment_partial_prefills(self, seq_group: SequenceGroup):
+    def increment_partial_prefills(self, seq_group: SequenceGroup) -> None:
         # When a new prefill is scheduled, we need to know if it is a
+        # long request
         if (seq_group.first_seq.get_num_new_tokens() >
                 self.scheduler_config.long_prefill_token_threshold):
             self.long_partial_prefills += 1
