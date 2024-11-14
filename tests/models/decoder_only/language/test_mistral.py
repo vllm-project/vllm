@@ -89,7 +89,7 @@ MSGS = [
         "role":
         "user",
         "content":
-        "Could you please rewrite the below article? \n\n My English needs improvving, maybe I make erors."  # noqa
+        "Could you please rewrite the below article? \n\n My English needs improvving, maybe I make errors."  # noqa
     },
     {
         "role":
@@ -103,7 +103,7 @@ MSGS = [
                 "name":
                 "rewrite",
                 "arguments":
-                '{\"text\":\"My English needs improvving, maybe I make erors.\"}'
+                '{\"text\":\"My English needs improvving, maybe I make errors.\"}'  # noqa
             }
         }]
     },
