@@ -1,3 +1,5 @@
+from unittest.mock import patch
+
 import pytest
 
 from vllm import LLM
@@ -20,16 +22,18 @@ def test_can_initialize(model_arch):
         "num_local_experts": 2,
     }
 
-    try:
+    def _initialize_kv_caches(self) -> None:
+        self.cache_config.num_gpu_blocks = 0
+        self.cache_config.num_cpu_blocks = 0
+
+    with patch.object(LLM.get_engine_class(), "_initialize_kv_caches",
+                      _initialize_kv_caches):
         LLM(
             model_info.default,
             trust_remote_code=model_info.trust_remote_code,
-            max_model_len=512,
-            max_num_seqs=1,
             load_format="dummy",
             hf_overrides={
                 **text_config_overrides,
                 "text_config": text_config_overrides,  # For multi-modal models
-            })
-    except Exception:
-        raise
+            },
+        )
