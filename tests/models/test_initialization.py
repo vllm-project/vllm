@@ -6,7 +6,7 @@ from .registry import HF_EXAMPLE_MODELS
 
 
 @pytest.mark.parametrize("model_arch", HF_EXAMPLE_MODELS.get_supported_archs())
-def test_model_can_initialize(model_arch):
+def test_can_initialize(model_arch):
     model_info = HF_EXAMPLE_MODELS.get_hf_info(model_arch)
 
     if not model_info.is_available_online:
