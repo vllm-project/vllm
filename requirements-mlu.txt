@@ -1,0 +1,9 @@
+# Common dependencies
+-r requirements-common.txt
+
+ray >= 2.9
+triton == 3.0.0
+torch == 2.5.0+cpu
+torch-mlu >= 1.23.0
+torch_mlu_ops >= 1.2.0
+xformers == 0.0.24

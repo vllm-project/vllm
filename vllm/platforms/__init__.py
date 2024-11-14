@@ -82,6 +82,14 @@ try:
 except Exception:
     pass
 
+is_mlu = False
+try:
+    import torch
+    import torch_mlu
+    is_mlu = True
+except ImportError:
+    pass
+
 if is_tpu:
     # people might install pytorch built with cuda but run on tpu
     # so we need to check tpu first
@@ -108,6 +116,9 @@ elif is_neuron:
 elif is_openvino:
     from .openvino import OpenVinoPlatform
     current_platform = OpenVinoPlatform()
+elif is_mlu:
+    from .mlu import MluPlatform
+    current_platform = MluPlatform()
 else:
     current_platform = UnspecifiedPlatform()
 

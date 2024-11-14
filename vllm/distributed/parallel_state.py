@@ -208,6 +208,8 @@ class GroupCoordinator:
 
         if current_platform.is_cuda_alike():
             self.device = torch.device(f"cuda:{local_rank}")
+        elif current_platform.is_mlu():
+            self.device = torch.device(f"mlu:{local_rank}")
         else:
             self.device = torch.device("cpu")
 

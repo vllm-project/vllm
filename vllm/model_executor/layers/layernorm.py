@@ -135,6 +135,20 @@ class RMSNorm(CustomOp):
             self.variance_epsilon,
         )
 
+    def forward_mlu(
+        self,
+        x: torch.Tensor,
+        residual: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        from vllm import _mlu_ops as mlu_ops
+
+        x = x.view(-1, self.weight.data.shape[0])
+        if residual is not None:
+            residual = residual.view(-1, self.weight.data.shape[0])
+            return mlu_ops.fused_rms_norm(x, residual, self.weight.data, None, None, self.variance_epsilon, True)
+        else:
+            return mlu_ops.fused_rms_norm(x, residual, self.weight.data, None, None, self.variance_epsilon, False)
+
     def extra_repr(self) -> str:
         s = f"hidden_size={self.weight.data.size(0)}"
         s += f", eps={self.variance_epsilon}"

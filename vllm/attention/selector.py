@@ -26,6 +26,7 @@ class _Backend(enum.Enum):
     HPU_ATTN = enum.auto()
     PALLAS = enum.auto()
     IPEX = enum.auto()
+    MLU_FLASH = enum.auto()
     NO_ATTENTION = enum.auto()
 
 
@@ -178,6 +179,10 @@ def _cached_get_attn_backend(
         logger.info("Using Pallas backend.")
         from vllm.attention.backends.pallas import PallasAttentionBackend
         return PallasAttentionBackend
+    elif backend == _Backend.MLU_FLASH:
+        logger.info("Using MLU attention backend.")
+        from vllm.attention.backends.mlu_flash_attn import MLUFlashAttentionBackend
+        return MLUFlashAttentionBackend
     elif backend == _Backend.NO_ATTENTION:
         from vllm.attention.backends.placeholder_attn import (
             PlaceholderAttentionBackend)
@@ -250,6 +255,11 @@ def which_attn_to_use(head_size: int,
 
     if current_platform.is_hpu():
         return _Backend.HPU_ATTN
+
+    if current_platform.is_mlu():
+        if selected_backend != _Backend.MLU_FLASH:
+            logger.debug("Cannot use %s backend on MLU.", selected_backend)
+        return _Backend.MLU_FLASH
 
     if use_v1:
         return _Backend.FLASH_ATTN_VLLM_V1

@@ -60,6 +60,12 @@ class CustomOp(nn.Module):
         # PyTorch-native implementation.
         return self.forward_native(*args, **kwargs)
 
+    def forward_mlu(self, *args, **kwargs):
+        # By default, we assume that MLU ops are compatible with the
+        # PyTorch-native implementation.
+        # NOTE(woosuk): This is a placeholder for future extensions.
+        return self.forward_native(*args, **kwargs)
+
     def dispatch_forward(self):
         # NOTE(woosuk): Here we assume that vLLM was built for only one
         # specific backend. Currently, we do not support dynamic dispatching.
@@ -81,6 +87,8 @@ class CustomOp(nn.Module):
             return self.forward_tpu
         elif current_platform.is_xpu():
             return self.forward_xpu
+        elif current_platform.is_mlu():
+            return self.forward_mlu
         else:
             return self.forward_cuda
 

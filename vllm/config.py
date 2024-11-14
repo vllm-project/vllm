@@ -1216,6 +1216,8 @@ class DeviceConfig:
                 self.device_type = "cpu"
             elif current_platform.is_xpu():
                 self.device_type = "xpu"
+            elif current_platform.is_mlu():
+                self.device_type = "mlu"
             else:
                 raise RuntimeError("Failed to infer device type")
         else:

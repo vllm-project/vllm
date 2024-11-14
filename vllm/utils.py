@@ -746,6 +746,9 @@ class DeviceMemoryProfiler:
         elif current_platform.is_xpu():
             torch.xpu.reset_peak_memory_stats(self.device)  # type: ignore
             mem = torch.xpu.max_memory_allocated(self.device)  # type: ignore
+        elif current_platform.is_mlu():
+            torch.mlu.reset_peak_memory_stats(self.device)  # type: ignore
+            mem = torch.mlu.max_memory_allocated(self.device)  # type: ignore
         return mem
 
     def __enter__(self):
@@ -1103,6 +1106,33 @@ def cuda_device_count_stateless() -> int:
     # This can be removed and simply replaced with torch.cuda.get_device_count
     # after https://github.com/pytorch/pytorch/pull/122815 is released.
     return _cuda_device_count_stateless(envs.CUDA_VISIBLE_DEVICES)
+
+
+@lru_cache(maxsize=8)
+def _mlu_device_count_stateless(
+    mlu_visible_devices: Optional[str] = None) -> int:
+
+    if mlu_visible_devices is None:
+        return torch.mlu.device_count()
+    if mlu_visible_devices == "":
+        return 0
+    if "," not in mlu_visible_devices:
+        return 1
+    return len(mlu_visible_devices.split(","))
+
+
+def mlu_device_count_stateless() -> int:
+    """Get number of MLU devices, caching based on the value of
+    MLU_VISIBLE_DEVICES at the time of call.
+    
+    This should be used instead of torch.mlu.device_count()
+    unless MLU_VISIBLE_DEVICES has already been set to the desired
+    value."""
+
+    # This can be removed and simply replaced with torch.cuda.get_device_count
+    # after https://github.com/pytorch/pytorch/pull/122815 is released.
+    return _mlu_device_count_stateless(envs.MLU_VISIBLE_DEVICES)
+
 
 
 def cuda_is_initialized() -> bool:
@@ -1577,6 +1607,10 @@ def direct_register_custom_op(
         schema_str = torch._custom_op.impl.infer_schema(op_func, mutates_args)
     my_lib = target_lib or vllm_lib
     my_lib.define(op_name + schema_str)
-    my_lib.impl(op_name, op_func, "CUDA")
+    if current_platform.is_cuda_alike():
+        my_lib.impl(op_name, op_func, "CUDA")
+    elif current_platform.is_mlu():
+        # FIXME: use dispatch key 'MLU' after PYTORCH-13014 finished.
+        my_lib.impl(op_name, op_func, "PrivateUse1")
     if fake_impl is not None:
         my_lib._register_fake(op_name, fake_impl)

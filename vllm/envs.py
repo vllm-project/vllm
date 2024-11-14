@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     VLLM_USE_TRITON_FLASH_ATTN: bool = False
     LOCAL_RANK: int = 0
     CUDA_VISIBLE_DEVICES: Optional[str] = None
+    MLU_VISIBLE_DEVICES: Optional[str] = None
     VLLM_ENGINE_ITERATION_TIMEOUT_S: int = 60
     VLLM_API_KEY: Optional[str] = None
     S3_ACCESS_KEY_ID: Optional[str] = None
@@ -237,6 +238,10 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # used to control the visible devices in the distributed setting
     "CUDA_VISIBLE_DEVICES":
     lambda: os.environ.get("CUDA_VISIBLE_DEVICES", None),
+
+    # used to control the visible devices in the distributed setting
+    "MLU_VISIBLE_DEVICES":
+    lambda: os.environ.get("MLU_VISIBLE_DEVICES", None),
 
     # timeout for each iteration in the engine
     "VLLM_ENGINE_ITERATION_TIMEOUT_S":
