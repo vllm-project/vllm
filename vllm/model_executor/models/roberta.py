@@ -5,7 +5,6 @@ from torch import nn
 from transformers import RobertaConfig
 
 from vllm.attention import AttentionMetadata
-from vllm.attention.backends.xformers import XFormersMetadata
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
@@ -100,7 +99,7 @@ class RobertaEmbeddingModel(BertEmbeddingModel):
         # 0 to N. (Actually here we just check 0 and N to simplify).
         # This is important to fix the position which are assumed to
         # start from padding_idx + 1 instead of 0 in the Roberta models.
-        assert isinstance(attn_metadata, XFormersMetadata)
+        assert hasattr(attn_metadata, "seq_lens_tensor")
         cumulative = attn_metadata.seq_lens_tensor.cumsum(dim=0)
         start_pos = torch.cat(
             (torch.tensor([0], device=attn_metadata.seq_lens_tensor.device),
