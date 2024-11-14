@@ -82,8 +82,11 @@ def stress_test(my_rank, pipe):
             pipe.send_tensor(tensors[3 * i + 1])
             pipe.send_tensor(tensors[3 * i + 2])
         else:
+            print('receiving x')
             x = pipe.recv_tensor()
+            print('receiving mean')
             mean = pipe.recv_tensor()
+            print('receiving std')
             std = pipe.recv_tensor()
             try:
                 if x is None:
@@ -96,12 +99,15 @@ def stress_test(my_rank, pipe):
             except Exception as e:
                 print("Error at iteration", i, "rank", my_rank)
                 print(x)
+                print(x.numel())
+                print(x.item() == -150886311)
                 raise e
+            
+        if i == 80:
+            break
 
         torch.distributed.barrier()
 
-
-    print("Stress test passed.")
 
 
 def latency_test(my_rank, pipe, nelement, ntensor):

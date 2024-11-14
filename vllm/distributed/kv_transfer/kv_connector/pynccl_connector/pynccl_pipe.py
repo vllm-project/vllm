@@ -311,6 +311,10 @@ class PyNcclPipe:
             import traceback
             traceback.print_exc()
             raise e
+        
+        if tensor.numel() == 1:
+            print(tensor.item())
+            print(tensor.sum())
 
         if tensor.numel() == 1 and tensor.item() == NONE_INT:
             return None
