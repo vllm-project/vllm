@@ -1121,8 +1121,9 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
 
         padding_fn = None
         if self.use_contiguous_pa:
+            block_bucket_size = max(max(block_list) + 1, len(block_list))
             block_bucket_size = find_bucket(
-                max(block_list) + 1,
+                block_bucket_size,
                 self.bucketing_global_state.decode_block_bucket_cfg)
             indices: List[Any]
             indices = [None] * block_bucket_size
