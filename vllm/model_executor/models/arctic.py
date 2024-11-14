@@ -415,7 +415,7 @@ class ArcticModel(nn.Module):
 
 class ArcticForCausalLM(nn.Module, SupportsPP):
 
-    def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
