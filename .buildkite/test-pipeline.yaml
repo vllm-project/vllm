@@ -322,7 +322,7 @@ steps:
     - pytest -v -s models/test_oot_registration.py # it needs a clean process
     - pytest -v -s models/*.py --ignore=models/test_oot_registration.py
 
-- label: Language Models Test (Standard) # 25min
+- label: Language Models Test (Standard) # 42min
   #mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
@@ -346,7 +346,7 @@ steps:
     - pytest -v -s models/embedding/language -m 'not core_model'
     - pytest -v -s models/embedding/vision_language -m 'not core_model'
 
-- label: Multi-Modal Models Test (Standard) # 25min
+- label: Multi-Modal Models Test (Standard) # 26min
   #mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
