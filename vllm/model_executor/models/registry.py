@@ -1,7 +1,6 @@
 """
 Whenever you add an architecture to this page, please also update
-`vllm/model_executor/models/registry.py` with example HuggingFace models
-for that architecture.
+`tests/models/registry.py` with example HuggingFace models for it.
 """
 import importlib
 import os
