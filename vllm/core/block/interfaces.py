@@ -109,11 +109,13 @@ class BlockAllocator(ABC):
 
     @abstractmethod
     def allocate_immutable_blocks(
-            self, prev_block: Optional[Block],
-            block_token_ids: List[List[int]],
-            allow_swap: Optional[bool] = False,
-            dual_allocator: Optional['BlockAllocator'] = None,
-            swap_mapping: Optional[Dict[int, int]] = None,) -> List[Block]:
+        self,
+        prev_block: Optional[Block],
+        block_token_ids: List[List[int]],
+        allow_swap: Optional[bool] = False,
+        dual_allocator: Optional['BlockAllocator'] = None,
+        swap_mapping: Optional[Dict[int, int]] = None,
+    ) -> List[Block]:
         pass
 
     @abstractmethod

@@ -722,19 +722,17 @@ class CacheConfig:
             profiled num_gpu_blocks if specified. Does nothing if None.
     """
 
-    def __init__(
-        self,
-        block_size: int,
-        gpu_memory_utilization: float,
-        swap_space: float,
-        cache_dtype: str,
-        is_attention_free: bool = False,
-        num_gpu_blocks_override: Optional[int] = None,
-        sliding_window: Optional[int] = None,
-        enable_prefix_caching: bool = False,
-        cpu_offload_gb: float = 0,
-        enable_host_memory_caching: bool = False
-    ) -> None:
+    def __init__(self,
+                 block_size: int,
+                 gpu_memory_utilization: float,
+                 swap_space: float,
+                 cache_dtype: str,
+                 is_attention_free: bool = False,
+                 num_gpu_blocks_override: Optional[int] = None,
+                 sliding_window: Optional[int] = None,
+                 enable_prefix_caching: bool = False,
+                 cpu_offload_gb: float = 0,
+                 enable_host_memory_caching: bool = False) -> None:
         self.block_size = block_size
         self.gpu_memory_utilization = gpu_memory_utilization
         self.swap_space_bytes = swap_space * GiB_bytes
