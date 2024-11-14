@@ -358,7 +358,7 @@ class EngineArgs:
             '--guided-decoding-backend',
             type=str,
             default='outlines',
-            choices=['outlines', 'lm-format-enforcer'],
+            choices=['outlines', 'lm-format-enforcer', 'faster-outlines'],
             help='Which engine will be used for guided decoding'
             ' (JSON schema / regex etc) by default. Currently support '
             'https://github.com/outlines-dev/outlines and '

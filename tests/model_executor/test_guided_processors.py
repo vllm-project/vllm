@@ -34,13 +34,16 @@ def test_guided_logits_processors(sample_regex, sample_json_schema):
     assert tensor.shape == original_tensor.shape
     assert not torch.allclose(tensor, original_tensor)
 
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("backend", ["faster-outlines"])
-async def test_guided_logits_processor_black_box_faster_outlines(backend: str, sample_regex, # noqa: E501
-                                                 sample_json_schema):
+async def test_guided_logits_processor_black_box_faster_outlines(
+        backend: str,
+        sample_regex,  # noqa: E501
+        sample_json_schema):
     # faster-outlines processors require special handling,
-    # since they do not begin computation of a fsm index until they have been 
-    # both serialized and deserialized. More on the reason why can be found 
+    # since they do not begin computation of a fsm index until they have been
+    # both serialized and deserialized. More on the reason why can be found
     # in the doc comment for the class:
     # https://github.com/unaidedelf8777/faster-outlines/blob/main/faster_outlines/fsm/vllm_guide.py # noqa: E501
     import pickle
