@@ -315,6 +315,7 @@ class PyNcclPipe:
         if tensor.numel() == 1:
             print(tensor.item())
             print(tensor.sum())
+            print(tensor)
 
         if tensor.numel() == 1 and tensor.item() == NONE_INT:
             return None
