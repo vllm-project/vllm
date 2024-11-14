@@ -510,10 +510,16 @@ def cutlass_scaled_mm_azp(a: torch.Tensor,
                           azp_adj: torch.Tensor,
                           azp: Optional[torch.Tensor] = None,
                           bias: Optional[torch.Tensor] = None) -> torch.Tensor:
+    """
+    :param azp_adj: In the per-tensor case, this should include the azp.
+    Always per-channel.
+    :param azp: Only set in the per-token case. Per-token if set.
+    """
     assert (b.shape[0] % 16 == 0 and b.shape[1] % 16 == 0)
     assert (out_dtype is torch.bfloat16 or out_dtype is torch.float16)
     assert bias is None or bias.numel(
     ) == b.shape[1] and bias.dtype == out_dtype
+    assert azp is None or azp.numel() == a.shape[0]
 
     m = a.shape[0]
     n = b.shape[1]
