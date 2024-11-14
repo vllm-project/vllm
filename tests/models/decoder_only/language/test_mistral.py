@@ -6,7 +6,6 @@ import pytest
 
 import copy
 from vllm import SamplingParams
-from vllm.entrypoints.openai import tool_parsers
 from vllm.entrypoints.openai.tool_parsers.mistral_tool_parser import MistralToolParser
 
 from ...utils import check_logprobs_close
