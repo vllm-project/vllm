@@ -549,10 +549,11 @@ if __name__ == "__main__":
             "int": torch.int,
             "float": torch.float,
         }[dt]
-        
+
     class ToTorchDtype(argparse.Action):
-     def __call__(self, parser, namespace, values, option_string=None):
-         setattr(namespace, self.dest, to_torch_dtype(values))
+
+        def __call__(self, parser, namespace, values, option_string=None):
+            setattr(namespace, self.dest, to_torch_dtype(values))
 
     parser = FlexibleArgumentParser(
         description="""

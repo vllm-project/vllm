@@ -94,8 +94,8 @@ torch::Tensor mm_dispatch(MMArgs args) {
       && {%if t.b_channel_scale != void -%}
       maybe_ch_scales_type == {{TorchTypeTag[t.b_channel_scale]}}
       {%- else %}!maybe_ch_scales_type{%endif%}
-      && {%if t.b_token_scale != void -%}
-      maybe_tok_scales_type == {{TorchTypeTag[t.b_token_scale]}}
+      && {%if t.a_token_scale != void -%}
+      maybe_tok_scales_type == {{TorchTypeTag[t.a_token_scale]}}
       {%- else %}!maybe_tok_scales_type{%endif%}
   ) {
       return mm_dispatch_{{type_sig}}(args);
@@ -188,7 +188,7 @@ using Kernel_{{type_sig}} = MacheteKernelTemplate<
   {{DataTypeTag[t.b_group_scale]}}, // GroupScaleT
   {{DataTypeTag[t.b_group_zeropoint]}}, // GroupZeroT
   {{DataTypeTag[t.b_channel_scale]}}, // ChannelScaleT
-  {{DataTypeTag[t.b_token_scale]}}, // TokenScaleT
+  {{DataTypeTag[t.a_token_scale]}}, // TokenScaleT
   cutlass::gemm::KernelTmaWarpSpecializedCooperativeMixedInput,
   Sch>;
 
@@ -259,7 +259,7 @@ class TypeConfig:
     b_group_scale: DataType
     b_group_zeropoint: DataType
     b_channel_scale: DataType
-    b_token_scale: DataType
+    a_token_scale: DataType
     out: DataType
     accumulator: DataType
 
@@ -532,7 +532,7 @@ def generate():
             b_group_scale=a,
             b_group_zeropoint=DataType.void,
             b_channel_scale=DataType.void,
-            b_token_scale=DataType.void,
+            a_token_scale=DataType.void,
             out=a,
             accumulator=DataType.f32,
         ) for b in (VLLMDataType.u4b8, VLLMDataType.u8b128)
@@ -552,7 +552,7 @@ def generate():
             b_group_scale=a,
             b_group_zeropoint=a,
             b_channel_scale=DataType.void,
-            b_token_scale=DataType.void,
+            a_token_scale=DataType.void,
             out=a,
             accumulator=DataType.f32,
         ) for b in (DataType.u4, DataType.u8)
@@ -615,7 +615,7 @@ def generate():
             b_group_scale=b_group_scale,
             b_group_zeropoint=DataType.void,
             b_channel_scale=DataType.f32,
-            b_token_scale=DataType.f32,
+            a_token_scale=DataType.f32,
             out=DataType.f16,
             accumulator=DataType.s32,
         ) for b_group_scale in (DataType.f16, DataType.void)),
@@ -625,7 +625,7 @@ def generate():
             b_group_scale=b_group_scale,
             b_group_zeropoint=DataType.void,
             b_channel_scale=DataType.f32,
-            b_token_scale=DataType.f32,
+            a_token_scale=DataType.f32,
             out=DataType.f16,
             accumulator=DataType.f32,
         ) for b_group_scale in (DataType.f16, DataType.void)),

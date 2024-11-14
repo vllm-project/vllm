@@ -408,8 +408,6 @@ def unpack_cols(
 
     orig_device = packed_q_w.device
 
-    packed_q_w = packed_q_w.t()
-
     packed_q_w_cpu = packed_q_w.cpu().numpy().astype(numpy.uint32)
     q_res = numpy.zeros((size_k, size_n), dtype=numpy.uint32)
 
