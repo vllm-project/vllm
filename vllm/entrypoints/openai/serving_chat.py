@@ -30,6 +30,8 @@ from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.sequence import Logprob
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
+from vllm.transformers_utils.tokenizer.mistral import (
+    maybe_serialize_tool_calls)
 from vllm.utils import iterate_with_cancellation
 
 logger = init_logger(__name__)
@@ -127,41 +129,11 @@ class OpenAIServingChat(OpenAIServing):
                 return self.create_error_response(
                     "tool_choice = \"required\" is not supported!")
 
-            # NOTE: There is currently a bug in pydantic where attributes
-            # declared as iterables are replaced in in the instances by
-            # pydantic-core ValidatorIterator instance. In particular, this
-            # affects tool_calls defined in ChatCompletionAssistantMessageParam
-            # model:
-            # see:
-            #   - https://github.com/pydantic/pydantic/issues/9467
-            # As a result, tool_calls from assistant messages are never
-            # deserialized in the request object if the tool_calls iterator is
-            # not consumed. This affect messages passed to the MistralTokenizer
-            # since no chat template is applied and therefore the tools_calls
-            # iterator is not directly consumed.
-            # Issue is tracked on Pydantic side, with resolution planned for
-            # v2.11 release. In the meantime, the official workaround is to
-            # consume the iterator so the tool_calls are correctly deserialized
-            # in the OpenAI ChatCompletionAssistantMessageParam object
-            # https://github.com/pydantic/pydantic/issues/9467#issuecomment-2442097291 # noqa: E501
-            # Official Pydantic Issues:
-            #   - https://github.com/pydantic/pydantic/issues/9541
-            # TODO: remove when pydantic v2.11 is released
+            # because of issues with pydantic we need to potentially
+            # re-serialize the tool_calls field of the request
+            # for more info: see comment in `maybe_serialize_tool_calls`
             if isinstance(tokenizer, MistralTokenizer):
-                for i, message in enumerate(request.messages):
-                    if message.get("role") == 'assistant':
-                        tool_calls_validator = message.get(
-                            "tool_calls", ().__iter__())
-                        validated_tool_calls = []
-                        while True:
-                            try:
-                                tool_call = next(
-                                    tool_calls_validator)  # type: ignore
-                                validated_tool_calls.append(tool_call)
-                            except StopIteration:
-                                break
-                        request.messages[i][
-                            "tool_calls"] = validated_tool_calls
+                maybe_serialize_tool_calls(request)
 
             if (request.tool_choice == "auto" and
                     not (self.enable_auto_tools and tool_parser is not None)
