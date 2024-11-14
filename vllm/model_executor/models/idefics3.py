@@ -386,7 +386,8 @@ class Idefics3SimpleMLP(nn.Module):
         self.proj = ReplicatedLinear(input_size,
                                      output_size,
                                      bias=False,
-                                     quant_config=quant_config)
+                                     quant_config=quant_config,
+                                     prefix=maybe_prefix(prefix, "proj"))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out, _ = self.proj(x)
