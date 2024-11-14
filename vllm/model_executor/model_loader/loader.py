@@ -2,6 +2,7 @@
 import collections
 import copy
 import dataclasses
+import enum
 import fnmatch
 import glob
 import inspect
@@ -10,6 +11,7 @@ import math
 import os
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import Any, Dict, Generator, Iterable, List, Optional, Tuple, cast
 
 import gguf
@@ -27,7 +29,8 @@ from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
-from vllm.model_executor.layers.linear import (ReplicatedLinear,
+from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+                                               ReplicatedLinear,
                                                RowParallelLinear)
 from vllm.model_executor.model_loader.tensorizer import (
     TensorizerConfig, is_vllm_tensorized, load_with_tensorizer,
@@ -43,6 +46,24 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.utils import is_pin_memory_available
+
+
+class ShardMethod(str, enum.Enum):
+    # Applicable for `ReplicatedLinear`
+    SHARD_NONE = "no shard"
+    # Applicable for `RowParallelLinear`
+    SHARD_BY_COLUMN = "sharded by column"
+    # Applicable for `ColumnParallelLinear`
+    SHARD_BY_ROW = "sharded by row"
+
+
+@dataclass
+class ModuleProperty:
+    """
+    A class representing linear sharding configuration for a module.
+    """
+    module_name: str
+    shard_method: ShardMethod
 
 
 @contextmanager
@@ -654,11 +675,8 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
     def __init__(self, load_config: LoadConfig):
         super().__init__(load_config)
+        self.target_weights_modules: Dict[str, ModuleProperty] = {}
 
-        # Save the module names without sharding.
-        self.unsharded_weights_modules: List[str] = []
-        # Save the module names that are sharded by column.
-        self.column_sharded_weights_modules: List[str] = []
         # we don't need to quantize the whole model, only the target modules
         # that are specified in the adapter config file. If the adapter config
         # file is not provided, we will quantize the default modules.
@@ -889,17 +907,13 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         for weight_name, weight_tensor in self._hf_weight_iter(
                 hf_weights_files, use_safetensors):
 
-            if any(target_module in weight_name for target_module in
-                   self.target_modules) and weight_name.endswith(".weight"):
+            if target_module := self.target_weights_modules.get(
+                    weight_name, False):
                 # Without sharding
-                if any(
-                        weight_name.startswith(module)
-                        for module in self.unsharded_weights_modules):
+                if target_module.shard_method == ShardMethod.SHARD_NONE:
                     weight_sub_tensor = weight_tensor
                 # Shard by column
-                elif any(
-                        weight_name.startswith(module)
-                        for module in self.column_sharded_weights_modules):
+                elif target_module.shard_method == ShardMethod.SHARD_BY_COLUMN:
                     total_size = weight_tensor.size(-1)
                     start_index = total_size // tp_size * tp_rank
                     end_index = total_size // tp_size * (tp_rank + 1)
@@ -948,22 +962,24 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 f"Model {type(model).__name__} does not support BitsAndBytes "
                 "quantization yet.")
 
-        if len(self.target_modules) == 0:
-            if hasattr(model, 'default_bitsandbytes_target_modules'):
-                self.target_modules = model.default_bitsandbytes_target_modules
-            else:
-                self.target_modules = self.default_target_modules
-
         for name, module in model.named_modules():
             # Some modules like `ReplicatedLinear` should not have their weights
             # sharded. The reason for implementing it this way is to avoid new
             # static variable in the model implementation.
+            name = name + ".weight"
             if isinstance(module, (ReplicatedLinear, )):
-                self.unsharded_weights_modules.append(name)
+                self.target_weights_modules[name] = ModuleProperty(
+                    name, ShardMethod.SHARD_NONE)
             # In TP, these weights are partitioned along the column
             # dimension (dim=-1)
             elif isinstance(module, (RowParallelLinear, )):
-                self.column_sharded_weights_modules.append(name)
+                self.target_weights_modules[name] = ModuleProperty(
+                    name, ShardMethod.SHARD_BY_COLUMN)
+            # In TP, these weights are partitioned along the row
+            # dimension (dim=0)
+            elif isinstance(module, (ColumnParallelLinear, )):
+                self.target_weights_modules[name] = ModuleProperty(
+                    name, ShardMethod.SHARD_BY_ROW)
 
         self.model_type = type(model).__name__
 
