@@ -90,6 +90,7 @@ class AutoWeightsLoader:
         super().__init__()
 
         self.module = module
+        self.weights_to_load = {name for name, _ in module.named_parameters()}
         self.skip_prefixes = skip_prefixes or []
         self.ignore_unexpected_prefixes = ignore_unexpected_prefixes or []
 
@@ -172,8 +173,9 @@ class AutoWeightsLoader:
         if module != self.module:
             module_load_weights = getattr(module, "load_weights", None)
             if callable(module_load_weights):
-                module_load_weights(weights)
-                return
+                loaded_params = module_load_weights(weights)
+                yield from map(lambda x: self._get_qualname(base_prefix, x),
+                               loaded_params)
 
         child_modules = dict(module.named_children())
         child_params = dict(module.named_parameters(recurse=False))
@@ -226,7 +228,11 @@ class AutoWeightsLoader:
         if mapper is not None:
             weights = mapper.apply(weights)
 
-        autoloaded_weights = list(self._load_module("", self.module, weights))
+        autoloaded_weights = set(self._load_module("", self.module, weights))
+        if (weights_not_loaded := autoloaded_weights - self.weights_to_load):
+            logger.warning(
+                "Following weights were not initialized from checkpoint: %s",
+                weights_not_loaded)
         return autoloaded_weights
 
 
