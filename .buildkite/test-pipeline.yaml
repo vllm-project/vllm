@@ -320,7 +320,15 @@ steps:
   commands:
     - pip install -e ./plugins/vllm_add_dummy_model
     - pytest -v -s models/test_oot_registration.py # it needs a clean process
-    - pytest -v -s models/*.py --ignore=models/test_oot_registration.py
+    - pytest -v -s models/test_registry.py
+
+- label: Model Initialization Test # 1h
+  optional: true
+  source_file_dependencies:
+  - vllm/
+  - tests/models
+  commands:
+    - pytest -v -s models/test_initialization.py
 
 - label: Decoder-only Language Models Test (Standard) # 18min
   #mirror_hardwares: [amd]
