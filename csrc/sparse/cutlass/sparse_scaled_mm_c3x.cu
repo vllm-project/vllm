@@ -48,6 +48,10 @@ void cutlass_gemm_sm90_fp8_dispatch(torch::Tensor& out, torch::Tensor const& a,
       typename sm90_fp8_config_M64<InType, OutType, Epilogue>::Cutlass3xGemm;
   using Cutlass3xGemmM128 =
       typename sm90_fp8_config_M128<InType, OutType, Epilogue>::Cutlass3xGemm;
+  using Cutlass3xGemmM256 =
+      typename sm90_fp8_config_M256<InType, OutType, Epilogue>::Cutlass3xGemm;
+  using Cutlass3xGemmM512 =
+      typename sm90_fp8_config_M512<InType, OutType, Epilogue>::Cutlass3xGemm;
 
   uint32_t const m = a.size(0);
   uint32_t const mp2 =
@@ -61,9 +65,13 @@ void cutlass_gemm_sm90_fp8_dispatch(torch::Tensor& out, torch::Tensor const& a,
     // m in (64, 128]
     return cutlass_sparse_gemm_caller<Cutlass3xGemmM128>(
         out, a, e, b, std::forward<EpilogueArgs>(args)...);
+  } else if (mp2 <= 256) {
+    // m in (128, 256]
+    return cutlass_sparse_gemm_caller<Cutlass3xGemmM256>(
+        out, a, e, b, std::forward<EpilogueArgs>(args)...);
   } else {
-    // m in (128, inf)
-    return cutlass_sparse_gemm_caller<Cutlass3xGemmDefault>(
+    // m in (256, inf)
+    return cutlass_sparse_gemm_caller<Cutlass3xGemmM512>(
         out, a, e, b, std::forward<EpilogueArgs>(args)...);
   }
 }

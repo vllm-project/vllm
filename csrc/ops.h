@@ -124,7 +124,7 @@ void cutlass_scaled_sparse_mm(torch::Tensor& out, torch::Tensor const& a,
                        torch::Tensor const& b_scales,
                        c10::optional<torch::Tensor> const& bias);
 
-bool cutlass_sparsify_and_compress_entry(torch::Tensor& a_compressed, torch::Tensor& e,
+bool cutlass_compress_entry(torch::Tensor& a_compressed, torch::Tensor& e,
                                  torch::Tensor const& a);
 #endif
 

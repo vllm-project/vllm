@@ -14,7 +14,7 @@ def plot_heatmap(data: np.array,
                  save_filename='heatmap.png'):
     # min because of some matplotlib render restrictions.
     fig_size_x = min(len(x_labels), 320)
-    fig_size_y = len(y_labels) + 15
+    fig_size_y = len(y_labels) + 25
     fig, ax = plt.subplots(figsize=(fig_size_x, fig_size_y))
     im = ax.imshow(data, cmap="Reds", vmin=0.0, vmax=1.0, interpolation=None)
 
@@ -37,7 +37,7 @@ def plot_heatmap(data: np.array,
                     ha="center",
                     va="center",
                     color="w",
-                    fontsize=10.0)
+                    fontsize=6.0)
 
     #ax.colorbar()
 
@@ -155,7 +155,7 @@ def select_kernels_and_plot(gemm_problems: List[str], ops: List[str],
     selected_autogen_ops = select_kernels(gemm_autogenops,
                                           gemm_problems,
                                           autogen_ops,
-                                          min_gemm_efficiency=0.98)
+                                          min_gemm_efficiency=0.99)
 
     # prepare plot data
     selected_ops = selected_autogen_ops + cutlass_ops + pytorch_ops

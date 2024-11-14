@@ -54,9 +54,9 @@ def make_rand_sparse_tensors(dtype: torch.dtype, m: int, n: int,
     # # Initialize a to all ones
     # a = torch.ones((m, k), device='cuda')
     # # Initialize b to all ones
-    # b = torch.ones((n, k), device='cuda').t()
+    # b = torch.ones((n, k), device='cuda')
 
-    a = prune_to_2_4(a)
+    b = prune_to_2_4(b)
 
     if dtype == torch.int8:
         a, b = to_int8(a), to_int8(b)
@@ -69,10 +69,10 @@ def make_rand_sparse_tensors(dtype: torch.dtype, m: int, n: int,
     else:
         raise ValueError("unsupported dtype")
 
-    a_compressed, e = ops.cutlass_sparsify_and_compress_entry(a)
+    b_compressed, e = ops.cutlass_compress_entry(b)
 
-    # Compressed A, Metadata, Original A, B
-    return a_compressed, e, a, b
+    # Compressed B, Metadata, Original A, B
+    return b_compressed, e, a, b
 
 
 def make_n_rand_sparse_tensors(num_tensors: int, dtype: torch.dtype,
@@ -80,8 +80,8 @@ def make_n_rand_sparse_tensors(num_tensors: int, dtype: torch.dtype,
                         Tuple[Iterable[torch.Tensor], Iterable[torch.Tensor]]:
     ABs = []
     for _ in range(num_tensors):
-        a_comp, e, a, b = make_rand_sparse_tensors(dtype, m, n, k)
-        if a_comp is not None:
+        b_comp, e, a, b = make_rand_sparse_tensors(dtype, m, n, k)
+        if b_comp is not None:
             ABs.append(make_rand_sparse_tensors(dtype, m, n, k))
-    AComps, Es, As, Bs = zip(*ABs)
-    return list(AComps), list(Es), list(As), list(Bs)
+    BComps, Es, As, Bs = zip(*ABs)
+    return list(BComps), list(Es), list(As), list(Bs)

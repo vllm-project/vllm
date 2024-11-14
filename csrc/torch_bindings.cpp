@@ -277,9 +277,9 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.impl("cutlass_scaled_sparse_mm_supports_fp8", &cutlass_scaled_sparse_mm_supports_fp8);
 
   // Test
-  ops.def("cutlass_sparsify_and_compress_entry(Tensor! a_compressed, Tensor! e,"
+  ops.def("cutlass_compress_entry(Tensor! a_compressed, Tensor! e,"
           " Tensor a) -> bool");
-  ops.impl("cutlass_sparsify_and_compress_entry", &cutlass_sparsify_and_compress_entry);
+  ops.impl("cutlass_compress_entry", &cutlass_compress_entry);
 
   // Mamba selective scan kernel
   ops.def(

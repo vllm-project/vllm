@@ -513,7 +513,7 @@ def cutlass_scaled_sparse_mm_supports_fp8(cuda_device_capability: int) -> bool:
     return torch.ops._C.cutlass_scaled_sparse_mm_supports_fp8(cuda_device_capability)
 
 
-def cutlass_sparsify_and_compress_entry(a: torch.Tensor) \
+def cutlass_compress_entry(a: torch.Tensor) \
     -> Tuple[torch.Tensor, torch.Tensor]:
     assert (a.dtype is torch.int8 or a.dtype is torch.float8_e4m3fn or \
             a.dtype is torch.bfloat16 or a.dtype is torch.float16)
@@ -527,7 +527,7 @@ def cutlass_sparsify_and_compress_entry(a: torch.Tensor) \
     a_compressed = torch.empty((m, k // 2), dtype=a.dtype, device=a.device)
     e = torch.empty((m, k // 2 // elemsPerElemE), dtype=torch.uint8, device=a.device)
 
-    if not (torch.ops._C.cutlass_sparsify_and_compress_entry(a_compressed, e, a)):
+    if not (torch.ops._C.cutlass_compress_entry(a_compressed, e, a)):
         raise ValueError
 
     return a_compressed, e

@@ -187,7 +187,7 @@ bool sparsify_and_compress(torch::Tensor& a_compressed, torch::Tensor& e, torch:
   return true;
 }
 
-bool cutlass_sparsify_and_compress_entry(torch::Tensor& a_compressed, torch::Tensor& e, torch::Tensor const& a)
+bool cutlass_compress_entry(torch::Tensor& a_compressed, torch::Tensor& e, torch::Tensor const& a)
 {
   if (a.dtype() == torch::kBFloat16) {
     return sparsify_and_compress<cutlass::bfloat16_t>(a_compressed, e, a);
