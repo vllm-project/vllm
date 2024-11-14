@@ -14,8 +14,7 @@ from vllm.attention.selector import (_Backend, backend_name_to_enum,
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models import ModelRegistry
-from vllm.multimodal.base import MultiModalPlaceholderMap, NestedTensors
+from vllm.multimodal import MultiModalPlaceholderMap, NestedTensors
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils import is_pin_memory_available
@@ -240,12 +239,9 @@ def init_vllm_registered_model(
     Helper function to initialize an inner model registered to vLLM,
     based on the arguments passed to the outer vLLM model.
     """
-    model_class, _ = ModelRegistry.resolve_model_cls(hf_config.architectures)
-
-    return model_class(
-        vllm_config=vllm_config.with_hf_config(hf_config),
-        prefix=prefix,
-    )
+    from vllm.model_executor.model_loader.loader import _initialize_model
+    vllm_config = vllm_config.with_hf_config(hf_config)
+    return _initialize_model(vllm_config, prefix)
 
 
 @overload

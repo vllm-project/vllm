@@ -122,7 +122,17 @@ CONFIGS: Dict[str, ServerConfig] = {
         ],
         "supports_parallel":
         False,
-    }
+    },
+    "toolACE": {
+        "model":
+        "Team-ACE/ToolACE-8B",
+        "arguments": [
+            "--tool-call-parser", "pythonic", "--chat-template",
+            str(VLLM_PATH / "examples/tool_chat_template_toolace.jinja")
+        ],
+        "supports_parallel":
+        True,
+    },
 }
 
 WEATHER_TOOL: ChatCompletionToolParam = {

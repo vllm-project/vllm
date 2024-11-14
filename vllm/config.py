@@ -107,7 +107,7 @@ class ModelConfig:
             matches the model name exposed via the APIs. If multiple model
             names provided, the first name will be used. If not specified,
             the model name will be the same as `model`.
-        limit_mm_per_prompt: Maximum number of data instances per modality
+        limit_mm_per_prompt: Maximum number of data items per modality
             per prompt. Only applicable for multimodal models.
         override_neuron_config: Initialize non default neuron config or
             override default neuron config that are specific to Neuron devices,
@@ -1687,6 +1687,7 @@ class LoRAConfig:
     # This is a constant.
     lora_vocab_padding_size: ClassVar[int] = 256
     long_lora_scaling_factors: Optional[Tuple[float]] = None
+    bias_enabled: bool = False
 
     def __post_init__(self):
         # Setting the maximum rank to 256 should be able to satisfy the vast

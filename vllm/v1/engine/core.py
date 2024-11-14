@@ -17,8 +17,10 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.v1.core.scheduler import Scheduler
 from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
                             EngineCoreRequest, EngineCoreRequestType)
+from vllm.v1.engine.mm_input_mapper import MMInputMapper
 from vllm.v1.executor.gpu_executor import GPUExecutor
 from vllm.v1.request import Request, RequestStatus
+from vllm.v1.serial_utils import PickleEncoder
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -64,6 +66,9 @@ class EngineCore:
         vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
         vllm_config.cache_config.num_cpu_blocks = num_cpu_blocks
 
+        # Set up multimodal input mapper (e.g., convert PIL images to tensors).
+        self.mm_input_mapper = MMInputMapper(vllm_config.model_config)
+
         # Setup scheduler.
         self.scheduler = Scheduler(vllm_config.scheduler_config,
                                    vllm_config.cache_config,
@@ -92,6 +97,12 @@ class EngineCore:
         """Add request to the scheduler."""
 
         req = Request.from_engine_core_request(request)
+        # FIXME(woosuk): The input mapping (e.g., PIL images to tensors) may
+        # take 10-50 ms, which can cause a spike in the latency. We should
+        # consider moving this to a separate thread.
+        if req.mm_data:
+            req.mm_inputs = self.mm_input_mapper.process_inputs(
+                req.mm_data, req.mm_processor_kwargs)
         self.scheduler.add_request(req)
 
     def abort_requests(self, request_ids: List[str]):
@@ -315,8 +326,8 @@ class EngineCoreProc(EngineCore):
         """Input socket IO thread."""
 
         # Msgpack serialization decoding.
-        decoder_add_req = msgpack.Decoder(EngineCoreRequest)
-        decoder_abort_req = msgpack.Decoder(list[str])
+        decoder_add_req = PickleEncoder()
+        decoder_abort_req = PickleEncoder()
 
         with self.make_socket(input_path, zmq.constants.PULL) as socket:
             while True:
