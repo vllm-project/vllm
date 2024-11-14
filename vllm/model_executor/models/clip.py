@@ -19,6 +19,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal.utils import (cached_get_tokenizer,
+                                   consecutive_placeholder_ranges,
                                    repeat_and_pad_placeholder_tokens)
 from vllm.sequence import SequenceData
 
@@ -49,14 +50,13 @@ def get_max_clip_image_tokens(hf_config: CLIPVisionConfig) -> int:
     return get_clip_image_feature_size(hf_config)
 
 
-def dummy_seq_data_for_clip(
-    hf_config: CLIPVisionConfig,
-    seq_len: int,
-    num_images: int,
-    *,
-    image_token_id: int,
-    image_feature_size_override: Optional[int] = None,
-):
+def dummy_seq_data_for_clip(hf_config: CLIPVisionConfig,
+                            seq_len: int,
+                            num_images: int,
+                            *,
+                            image_token_id: int,
+                            image_feature_size_override: Optional[int] = None,
+                            mm_key: str = "image"):
     if image_feature_size_override is None:
         image_feature_size = get_clip_image_feature_size(hf_config)
     else:
@@ -65,7 +65,11 @@ def dummy_seq_data_for_clip(
     return SequenceData.from_prompt_token_counts(
         (image_token_id, image_feature_size * num_images),
         (0, seq_len - image_feature_size * num_images),
-    )
+    ), {
+        mm_key:
+        consecutive_placeholder_ranges(num_items=num_images,
+                                       item_size=image_feature_size)
+    }
 
 
 def dummy_image_for_clip(
@@ -117,6 +121,11 @@ def input_processor_for_clip(
     if multi_modal_data is None or "image" not in multi_modal_data:
         return inputs
 
+    if "multi_modal_placeholders" in inputs and "image" in inputs[
+            "multi_modal_placeholders"]:
+        # The inputs already have placeholders.
+        return inputs
+
     tokenizer = cached_get_tokenizer(model_config.tokenizer)
 
     if image_feature_size_override is None:
@@ -130,7 +139,7 @@ def input_processor_for_clip(
     else:
         image_feature_size = image_feature_size_override
 
-    new_prompt, new_token_ids = repeat_and_pad_placeholder_tokens(
+    new_prompt, new_token_ids, ranges = repeat_and_pad_placeholder_tokens(
         tokenizer,
         inputs.get("prompt"),
         inputs["prompt_token_ids"],
@@ -141,7 +150,8 @@ def input_processor_for_clip(
     # NOTE: Create a defensive copy of the original inputs
     return token_inputs(prompt_token_ids=new_token_ids,
                         prompt=new_prompt,
-                        multi_modal_data=multi_modal_data)
+                        multi_modal_data=multi_modal_data,
+                        multi_modal_placeholders={"image": ranges})
 
 
 # Adapted from https://github.com/huggingface/transformers/blob/v4.39.0/src/transformers/models/clip/modeling_clip.py#L164 # noqa

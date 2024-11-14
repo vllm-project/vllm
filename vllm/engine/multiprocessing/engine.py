@@ -7,8 +7,7 @@ import cloudpickle
 import zmq
 
 from vllm import AsyncEngineArgs, SamplingParams
-from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig)
+from vllm.engine.llm_engine import LLMEngine
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
@@ -19,19 +18,10 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          RPCStartupRequest, RPCStartupResponse,
                                          RPCUProfileRequest)
 # yapf: enable
-from vllm.envs import VLLM_USE_V1
 from vllm.executor.gpu_executor import GPUExecutor
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.usage.usage_lib import UsageContext
-
-if VLLM_USE_V1:
-    from vllm.v1.engine.llm_engine import LLMEngine
-else:
-    from vllm.engine.llm_engine import LLMEngine
-
-CONFIG_TYPE = Union[ModelConfig, DecodingConfig, ParallelConfig,
-                    SchedulerConfig, LoRAConfig]
 
 logger = init_logger(__name__)
 
@@ -122,15 +112,13 @@ class MQLLMEngine:
         load_general_plugins()
 
         engine_config = engine_args.create_engine_config()
-
         executor_class = LLMEngine._get_executor_cls(engine_config)
 
-        use_async_sockets = (engine_config.model_config.use_async_output_proc
-                             and not VLLM_USE_V1)
+        use_async_sockets = engine_config.model_config.use_async_output_proc
 
         return cls(ipc_path=ipc_path,
                    use_async_sockets=use_async_sockets,
-                   **engine_config.to_dict(),
+                   vllm_config=engine_config,
                    executor_class=executor_class,
                    log_requests=not engine_args.disable_log_requests,
                    log_stats=not engine_args.disable_log_stats,
@@ -310,6 +298,17 @@ class MQLLMEngine:
     def _send_outputs(self, outputs: REQUEST_OUTPUTS_T):
         """Send List of RequestOutput to RPCClient."""
         if outputs:
+            try:
+                from ray.exceptions import RayTaskError
+
+                # RayTaskError might not pickelable here. We need to unpack the
+                # underlying exception as the real exception in the output.
+                if (isinstance(outputs, RPCError)
+                        and isinstance(outputs.exception, RayTaskError)):
+                    outputs.exception = outputs.exception.cause
+            except ImportError:
+                pass
+
             output_bytes = pickle.dumps(outputs)
             self.output_socket.send_multipart((output_bytes, ), copy=False)
 
@@ -348,16 +347,22 @@ class MQLLMEngine:
             self.engine.model_executor._run_workers("stop_profile")
 
 
+def signal_handler(*_) -> None:
+    raise KeyboardInterrupt("MQLLMEngine terminated")
+
+
 def run_mp_engine(engine_args: AsyncEngineArgs, usage_context: UsageContext,
-                  ipc_path: str):
+                  ipc_path: str, engine_alive):
+    try:
+        engine = MQLLMEngine.from_engine_args(engine_args=engine_args,
+                                              usage_context=usage_context,
+                                              ipc_path=ipc_path)
 
-    def signal_handler(*_) -> None:
-        # Interrupt server on sigterm
-        raise KeyboardInterrupt("MQLLMEngine terminated")
+        signal.signal(signal.SIGTERM, signal_handler)
 
-    signal.signal(signal.SIGTERM, signal_handler)
+        engine.start()
 
-    engine = MQLLMEngine.from_engine_args(engine_args=engine_args,
-                                          usage_context=usage_context,
-                                          ipc_path=ipc_path)
-    engine.start()
+    except BaseException as e:
+        logger.exception(e)
+        engine_alive.value = False
+        raise e

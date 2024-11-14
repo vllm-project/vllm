@@ -6,18 +6,21 @@ import os
 
 import torch
 from torch import nn
+from torch.library import Library
 
 from vllm.compilation.compile_context import set_compile_context
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.decorators import support_torch_compile
 from vllm.compilation.levels import CompilationLevel
-
-os.environ["VLLM_TORCH_COMPILE_LEVEL"] = str(CompilationLevel.PIECEWISE)
+from vllm.config import VllmConfig
+from vllm.utils import direct_register_custom_op
 
 global_counter = 0
 
+# create a library to hold the custom op
+silly_lib = Library("silly", "FRAGMENT")  # noqa
 
-@torch.library.custom_op("silly::attention", mutates_args=["out"])
+
 def silly_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
                     out: torch.Tensor) -> None:
     global global_counter
@@ -27,16 +30,28 @@ def silly_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
     out[0] += 1
 
 
-@silly_attention.register_fake
-def _(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
-      out: torch.Tensor) -> None:
+def silly_attention_fake(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
+                         out: torch.Tensor) -> None:
     return
+
+
+direct_register_custom_op(
+    op_name="attention",
+    op_func=silly_attention,
+    mutates_args=["out"],
+    fake_impl=silly_attention_fake,
+    target_lib=silly_lib,
+)
 
 
 @support_torch_compile
 class SillyModel(nn.Module):
 
-    def __init__(self) -> None:
+    def __init__(self,
+                 *,
+                 vllm_config: VllmConfig,
+                 prefix: str = '',
+                 **kwargs) -> None:
         super().__init__()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -62,13 +77,14 @@ class SillyModel(nn.Module):
 
 def test_simple_piecewise_compile():
 
-    model = SillyModel()
-
     directory = os.path.dirname(__file__)
     config = os.path.join(directory, "piecewise_compilation_config.json")
     os.environ["VLLM_TORCH_COMPILE_CONFIG"] = config
+    os.environ["VLLM_TORCH_COMPILE_LEVEL"] = str(CompilationLevel.PIECEWISE)
 
-    input_buffer = torch.randn(100).cuda()
+    model = SillyModel(vllm_config=VllmConfig(), prefix='')
+
+    inputs = torch.randn(100).cuda()
 
     with compilation_counter.expect(
             num_graphs_seen=1,  # one graph for the model
@@ -80,15 +96,15 @@ def test_simple_piecewise_compile():
     ):
 
         with set_compile_context([1, 2]):
-            model(input_buffer)
+            model(inputs)
 
-            model(input_buffer[:2])
-            model(input_buffer[:1])
+            model(torch.randn(2).cuda())
+            model(torch.randn(1).cuda())
 
-        input_buffer[:2].zero_()
+        input = torch.zeros(2).cuda()
         global global_counter
         global_counter = 0
-        output = model(input_buffer[:2])
+        output = model(input)
         assert global_counter == 2
         assert torch.allclose(output.cpu(), torch.tensor([3., 1.]))
 

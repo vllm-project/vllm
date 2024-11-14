@@ -17,7 +17,7 @@ MAX_PIXELS = "max_pixels"
 
 
 # Fixtures lazy import to avoid initializing CUDA during test collection
-# NOTE: Qwen2vl supports multiple input modalities, so it registers multiple
+# NOTE: Qwen2VL supports multiple input modalities, so it registers multiple
 # input mappers.
 @pytest.fixture()
 def image_input_mapper_for_qwen2_vl():
@@ -86,10 +86,17 @@ def test_qwen2_vl_dummy_data(dummy_data_for_qwen2_vl,
 
     # NOTE: video value is required, but isn't actually used
     # when making the dummy data except for error handling currently
-    seq_data, mm_data = dummy_data_for_qwen2_vl(qwen2_vl_context, seq_len, {
-        "image": 1,
-        "video": 0
-    }, **mm_processor_kwargs)
+    dummy_data = dummy_data_for_qwen2_vl(
+        ctx=qwen2_vl_context,
+        seq_len=seq_len,
+        mm_counts={
+            "image": 1,
+            "video": 0
+        },
+        **mm_processor_kwargs,
+    )
+    seq_data = dummy_data.seq_data
+    mm_data = dummy_data.multi_modal_data
 
     # Ensure we have the right number of placeholders for min/max pixel values
     assert seq_data.get_token_ids().count(image_token_id) == token_count

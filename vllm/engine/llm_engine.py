@@ -10,14 +10,12 @@ from typing import Sequence as GenericSequence
 from typing import Set, Type, Union, cast, overload
 
 import torch
-from typing_extensions import TypeIs, TypeVar
+from typing_extensions import TypeVar
 
 import vllm.envs as envs
-from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
-                         EngineConfig, LoadConfig, LoRAConfig, ModelConfig,
-                         ObservabilityConfig, ParallelConfig,
-                         PromptAdapterConfig, SchedulerConfig,
-                         SpeculativeConfig)
+from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
+                         ObservabilityConfig, ParallelConfig, SchedulerConfig,
+                         VllmConfig)
 from vllm.core.scheduler import (ScheduledSequenceGroup, Scheduler,
                                  SchedulerOutputs)
 from vllm.engine.arg_utils import EngineArgs
@@ -31,9 +29,9 @@ from vllm.entrypoints.openai.logits_processors import (
 from vllm.executor.executor_base import ExecutorBase
 from vllm.executor.gpu_executor import GPUExecutor
 from vllm.executor.ray_utils import initialize_ray_cluster
-from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs,
-                         EncoderDecoderInputs, InputRegistry, PromptType,
-                         TokensPrompt)
+from vllm.inputs import (INPUT_REGISTRY, InputRegistry, ProcessorInputs,
+                         PromptType, SingletonInputsAdapter)
+from vllm.inputs.parse import is_encoder_decoder_inputs, is_token_prompt
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.logits_process import get_bad_words_logits_processors
@@ -41,6 +39,7 @@ from vllm.lora.request import LoRARequest
 from vllm.model_executor.guided_decoding import (
     get_local_guided_decoding_logits_processor)
 from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.outputs import (EmbeddingRequestOutput, RequestOutput,
                           RequestOutputFactory)
 from vllm.pooling_params import PoolingParams
@@ -222,30 +221,36 @@ class LLMEngine:
 
     def __init__(
         self,
-        model_config: ModelConfig,
-        cache_config: CacheConfig,
-        parallel_config: ParallelConfig,
-        scheduler_config: SchedulerConfig,
-        device_config: DeviceConfig,
-        load_config: LoadConfig,
-        lora_config: Optional[LoRAConfig],
-        speculative_config: Optional[SpeculativeConfig],
-        decoding_config: Optional[DecodingConfig],
-        observability_config: Optional[ObservabilityConfig],
-        prompt_adapter_config: Optional[PromptAdapterConfig],
+        vllm_config: VllmConfig,
         executor_class: Type[ExecutorBase],
         log_stats: bool,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
         input_registry: InputRegistry = INPUT_REGISTRY,
+        mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         use_cached_outputs: bool = False,
     ) -> None:
+
+        # TODO: remove the local variables and use self.* throughout the class.
+        model_config = self.model_config = vllm_config.model_config
+        cache_config = self.cache_config = vllm_config.cache_config
+        lora_config = self.lora_config = vllm_config.lora_config
+        parallel_config = self.parallel_config = vllm_config.parallel_config
+        scheduler_config = self.scheduler_config = vllm_config.scheduler_config
+        device_config = self.device_config = vllm_config.device_config
+        speculative_config = self.speculative_config = vllm_config.speculative_config  # noqa
+        load_config = self.load_config = vllm_config.load_config
+        decoding_config = self.decoding_config = vllm_config.decoding_config or DecodingConfig(  # noqa
+        )
+        prompt_adapter_config = self.prompt_adapter_config = vllm_config.prompt_adapter_config  # noqa
+        observability_config = self.observability_config = vllm_config.observability_config or ObservabilityConfig(  # noqa
+        )
+
         logger.info(
             "Initializing an LLM engine (v%s) with config: "
             "model=%r, speculative_config=%r, tokenizer=%r, "
             "skip_tokenizer_init=%s, tokenizer_mode=%s, revision=%s, "
-            "override_neuron_config=%s, "
-            "rope_scaling=%r, rope_theta=%r, tokenizer_revision=%s, "
+            "override_neuron_config=%s, tokenizer_revision=%s, "
             "trust_remote_code=%s, dtype=%s, max_seq_len=%d, "
             "download_dir=%r, load_format=%s, tensor_parallel_size=%d, "
             "pipeline_parallel_size=%d, "
@@ -267,8 +272,6 @@ class LLMEngine:
             model_config.tokenizer_mode,
             model_config.revision,
             model_config.override_neuron_config,
-            model_config.rope_scaling,
-            model_config.rope_theta,
             model_config.tokenizer_revision,
             model_config.trust_remote_code,
             model_config.dtype,
@@ -334,24 +337,14 @@ class LLMEngine:
             model_config)
 
         self.input_preprocessor = InputPreprocessor(model_config,
-                                                    self.tokenizer)
+                                                    self.tokenizer,
+                                                    mm_registry)
 
         self.input_registry = input_registry
         self.input_processor = input_registry.create_input_processor(
             model_config)
 
-        self.model_executor = executor_class(
-            model_config=model_config,
-            cache_config=cache_config,
-            parallel_config=parallel_config,
-            scheduler_config=scheduler_config,
-            device_config=device_config,
-            lora_config=lora_config,
-            speculative_config=speculative_config,
-            load_config=load_config,
-            prompt_adapter_config=prompt_adapter_config,
-            observability_config=self.observability_config,
-        )
+        self.model_executor = executor_class(vllm_config=vllm_config, )
 
         if self.model_config.task != "embedding":
             self._initialize_kv_caches()
@@ -508,7 +501,7 @@ class LLMEngine:
 
     @classmethod
     def _get_executor_cls(cls,
-                          engine_config: EngineConfig) -> Type[ExecutorBase]:
+                          engine_config: VllmConfig) -> Type[ExecutorBase]:
         distributed_executor_backend = (
             engine_config.parallel_config.distributed_executor_backend)
         # Initialize the cluster and specify the executor class.
@@ -535,6 +528,14 @@ class LLMEngine:
         elif engine_config.device_config.device_type == "cpu":
             from vllm.executor.cpu_executor import CPUExecutor
             executor_class = CPUExecutor
+        elif engine_config.device_config.device_type == "hpu":
+            if distributed_executor_backend == "ray":
+                initialize_ray_cluster(engine_config.parallel_config)
+                from vllm.executor.ray_hpu_executor import RayHPUExecutor
+                executor_class = RayHPUExecutor
+            else:
+                from vllm.executor.hpu_executor import HPUExecutor
+                executor_class = HPUExecutor
         elif engine_config.device_config.device_type == "openvino":
             from vllm.executor.openvino_executor import OpenVINOExecutor
             executor_class = OpenVINOExecutor
@@ -582,7 +583,7 @@ class LLMEngine:
         executor_class = cls._get_executor_cls(engine_config)
         # Create the LLM engine.
         engine = cls(
-            **engine_config.to_dict(),
+            vllm_config=engine_config,
             executor_class=executor_class,
             log_stats=not engine_args.disable_log_stats,
             usage_context=usage_context,
@@ -645,7 +646,7 @@ class LLMEngine:
     def _add_processed_request(
         self,
         request_id: str,
-        processed_inputs: Union[DecoderOnlyInputs, EncoderDecoderInputs],
+        processed_inputs: ProcessorInputs,
         params: Union[SamplingParams, PoolingParams],
         arrival_time: float,
         lora_request: Optional[LoRARequest],
@@ -676,18 +677,19 @@ class LLMEngine:
         seq_id = next(self.seq_counter)
         eos_token_id = self.input_preprocessor.get_eos_token_id(lora_request)
 
-        seq = Sequence(seq_id, processed_inputs, block_size, eos_token_id,
+        if is_encoder_decoder_inputs(processed_inputs):
+            decoder_inputs = processed_inputs["decoder"]
+            encoder_inputs = processed_inputs["encoder"]
+        else:
+            decoder_inputs = processed_inputs
+            encoder_inputs = None
+
+        seq = Sequence(seq_id, decoder_inputs, block_size, eos_token_id,
                        lora_request, prompt_adapter_request)
 
-        encoder_seq = None
-        if 'encoder_prompt_token_ids' in processed_inputs:
-            encoder_seq = Sequence(seq_id,
-                                   processed_inputs,
-                                   block_size,
-                                   eos_token_id,
-                                   lora_request,
-                                   prompt_adapter_request,
-                                   from_decoder_prompt=False)
+        encoder_seq = (None if encoder_inputs is None else Sequence(
+            seq_id, encoder_inputs, block_size, eos_token_id, lora_request,
+            prompt_adapter_request))
 
         # Create a SequenceGroup based on SamplingParams or PoolingParams
         if isinstance(params, SamplingParams):
@@ -829,6 +831,13 @@ class LLMEngine:
             raise ValueError(f"Got priority {priority} but "
                              "Priority scheduling is not enabled.")
 
+        if isinstance(params, SamplingParams) \
+            and (params.guided_decoding or params.logits_processors) \
+            and self.scheduler_config.num_scheduler_steps > 1:
+            raise ValueError(
+                "Guided decoding and logits processors are not supported "
+                "in multi-step decoding")
+
         if arrival_time is None:
             arrival_time = time.time()
 
@@ -844,13 +853,6 @@ class LLMEngine:
             prompt_adapter_request=prompt_adapter_request,
         )
         processed_inputs = self.input_processor(preprocessed_inputs)
-
-        # This is a bit of a hack - copy the mm_processor_kwargs that were
-        # used in the input processor to the processed output, since these
-        # kwargs are presumed to be immutable and the values should be aligned
-        # between the input processor (here) and the input mapper.
-        processed_inputs["mm_processor_kwargs"] = preprocessed_inputs.get(
-            "mm_processor_kwargs")
 
         self._add_processed_request(
             request_id=request_id,
@@ -874,7 +876,7 @@ class LLMEngine:
         # This needs to happen before multimodal input pre-processing, which
         # may add dummy <image> tokens that aren't part of the tokenizer's
         # vocabulary.
-        if self._is_token_prompt(prompt):
+        if is_token_prompt(prompt):
             prompt_ids = prompt["prompt_token_ids"]
             if len(prompt_ids) == 0:
                 # Empty prompt check is handled later
@@ -883,10 +885,6 @@ class LLMEngine:
             if max_input_id > tokenizer.max_token_id:
                 raise ValueError(
                     "Token id {} is out of vocabulary".format(max_input_id))
-
-    @staticmethod
-    def _is_token_prompt(prompt: PromptType) -> TypeIs[TokensPrompt]:
-        return isinstance(prompt, dict) and "prompt_token_ids" in prompt
 
     def _create_sequence_group_with_sampling(
         self,
@@ -1544,8 +1542,8 @@ class LLMEngine:
                 seq_group.state.remaining_steps != ref_remaining_steps
                 for seq_group in seq_group_metadata_list[1:]
         ]):
-            raise AssertionError(("All running sequence groups should "
-                                  "have the same remaining steps."))
+            raise AssertionError("All running sequence groups should "
+                                 "have the same remaining steps.")
 
         return ref_remaining_steps > 0
 
@@ -1670,6 +1668,7 @@ class LLMEngine:
         # Iteration stats
         num_prompt_tokens_iter = 0
         num_generation_tokens_iter = 0
+        num_tokens_iter = 0
         time_to_first_tokens_iter: List[float] = []
         time_per_output_tokens_iter: List[float] = []
         num_preemption_iter = (0 if scheduler_outputs is None else
@@ -1678,6 +1677,10 @@ class LLMEngine:
         # Request stats
         #   Latency
         time_e2e_requests: List[float] = []
+        time_queue_requests: List[float] = []
+        time_inference_requests: List[float] = []
+        time_prefill_requests: List[float] = []
+        time_decode_requests: List[float] = []
         time_in_queue_requests: List[float] = []
         model_forward_time_requests: List[float] = []
         model_execute_time_requests: List[float] = []
@@ -1685,6 +1688,8 @@ class LLMEngine:
         num_prompt_tokens_requests: List[int] = []
         num_generation_tokens_requests: List[int] = []
         n_requests: List[int] = []
+        max_num_generation_tokens_requests: List[int] = []
+        max_tokens_requests: List[int] = []
         finished_reason_requests: List[str] = []
 
         # Lora requests
@@ -1774,6 +1779,18 @@ class LLMEngine:
                     # Latency timings
                     time_e2e_requests.append(now -
                                              seq_group.metrics.arrival_time)
+                    if (seq_group.metrics.first_scheduled_time is not None and
+                            seq_group.metrics.first_token_time is not None):
+                        time_queue_requests.append(
+                            seq_group.metrics.first_scheduled_time -
+                            seq_group.metrics.arrival_time)
+                        time_prefill_requests.append(
+                            seq_group.metrics.first_token_time -
+                            seq_group.metrics.first_scheduled_time)
+                        time_decode_requests.append(
+                            now - seq_group.metrics.first_token_time)
+                        time_inference_requests.append(
+                            now - seq_group.metrics.first_scheduled_time)
                     if seq_group.metrics.time_in_queue is not None:
                         time_in_queue_requests.append(
                             seq_group.metrics.time_in_queue)
@@ -1790,8 +1807,13 @@ class LLMEngine:
                         seq.get_output_len()
                         for seq in seq_group.get_finished_seqs()
                     ])
+                    max_num_generation_tokens_requests.append(
+                        max(seq.get_output_len()
+                            for seq in seq_group.get_seqs()))
                     if seq_group.sampling_params is not None:
                         n_requests.append(seq_group.sampling_params.n)
+                        max_tokens_requests.append(
+                            seq_group.sampling_params.max_tokens)
                     finished_reason_requests.extend([
                         SequenceStatus.get_finished_reason(seq.status)
                         for seq in seq_group.get_finished_seqs()
@@ -1806,7 +1828,8 @@ class LLMEngine:
             num_generation_tokens_iter = (
                 actual_num_batched_tokens - num_prompt_tokens_iter +
                 num_generation_tokens_from_prefill_groups)
-
+            num_tokens_iter = (num_generation_tokens_iter +
+                               num_prompt_tokens_iter)
         # Spec decode, if enabled, emits specialized metrics from the worker in
         # sampler output.
         if model_output and (model_output[0].spec_decode_worker_metrics
@@ -1832,6 +1855,7 @@ class LLMEngine:
             # Iteration stats
             num_prompt_tokens_iter=num_prompt_tokens_iter,
             num_generation_tokens_iter=num_generation_tokens_iter,
+            num_tokens_iter=num_tokens_iter,
             time_to_first_tokens_iter=time_to_first_tokens_iter,
             time_per_output_tokens_iter=time_per_output_tokens_iter,
             spec_decode_metrics=spec_decode_metrics,
@@ -1840,13 +1864,20 @@ class LLMEngine:
             # Request stats
             #   Latency
             time_e2e_requests=time_e2e_requests,
+            time_queue_requests=time_queue_requests,
+            time_inference_requests=time_inference_requests,
+            time_prefill_requests=time_prefill_requests,
+            time_decode_requests=time_decode_requests,
             time_in_queue_requests=time_in_queue_requests,
             model_forward_time_requests=model_forward_time_requests,
             model_execute_time_requests=model_execute_time_requests,
             #   Metadata
             num_prompt_tokens_requests=num_prompt_tokens_requests,
             num_generation_tokens_requests=num_generation_tokens_requests,
+            max_num_generation_tokens_requests=
+            max_num_generation_tokens_requests,
             n_requests=n_requests,
+            max_tokens_requests=max_tokens_requests,
             finished_reason_requests=finished_reason_requests,
             max_lora=str(max_lora_stat),
             waiting_lora_adapters=list(waiting_lora_adapters.keys()),
@@ -1974,17 +2005,17 @@ class LLMEngine:
     def is_encoder_decoder_model(self):
         return self.input_preprocessor.is_encoder_decoder_model()
 
-    def _validate_model_inputs(self, inputs: Union[DecoderOnlyInputs,
-                                                   EncoderDecoderInputs],
+    def _validate_model_inputs(self, inputs: ProcessorInputs,
                                lora_request: Optional[LoRARequest]):
-        if self.model_config.is_multimodal_model:
+        if is_encoder_decoder_inputs(inputs):
             # For encoder-decoder multimodal models, the max_prompt_len
             # restricts the decoder prompt length
-            prompt_ids = inputs.get("prompt_token_ids")
-        elif self.is_encoder_decoder_model():
-            prompt_ids = inputs.get("encoder_prompt_token_ids")
+            prompt_inputs = inputs["decoder" if self.model_config.
+                                   is_multimodal_model else "encoder"]
         else:
-            prompt_ids = inputs.get("prompt_token_ids")
+            prompt_inputs = inputs
+
+        prompt_ids = SingletonInputsAdapter(prompt_inputs).prompt_token_ids
 
         if prompt_ids is None or len(prompt_ids) == 0:
             raise ValueError("Prompt cannot be empty")
