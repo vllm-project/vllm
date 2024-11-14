@@ -62,8 +62,7 @@ TOOLS = [{
             "required": ["city", "state", "unit"]
         }
     },
-},
-{
+}, {
     "type": "function",
     "function": {
         "name": "rewrite",
@@ -80,40 +79,39 @@ TOOLS = [{
         }
     }
 }]
-MSGS = [
-        {
-        "role": "system",
-        "content": "You are an assistant."
-    },
-    {
-        "role": "user",
-        "content": "Could you please rewrite the below article? \n\n My English needs improvving, maybe I make erors."
-    },
-    {
-        "role": "assistant",
-        "content": "",
-        "tool_calls": [
-            {
-                "id": "bbc5b7ede",
-                "type": "function",
-                "function": {
-                    "name": "rewrite",
-                    "arguments": '{\"text\":\"My English needs improvving, maybe I make erors.\"}'
-                }
-            }
-        ]
-    },
-    {
-        "role": "tool",
-        "content": "{\"action\":\"rewrite\",\"outcome\":\"My English needs improving, maybe I make errors.\"}",
-        "tool_call_id": "bbc5b7ede",
-        "name": "rewrite"
-    },
-    {
-        "role": "assistant",
-        "content": "---\n\nMy English needs improving, maybe I make errors"
-    },
-    {
+MSGS = [{
+    "role": "system",
+    "content": "You are an assistant."
+}, {
+    "role":
+    "user",
+    "content":
+    "Could you please rewrite the below article? \n\n My English needs improvving, maybe I make erors."
+}, {
+    "role":
+    "assistant",
+    "content":
+    "",
+    "tool_calls": [{
+        "id": "bbc5b7ede",
+        "type": "function",
+        "function": {
+            "name":
+            "rewrite",
+            "arguments":
+            '{\"text\":\"My English needs improvving, maybe I make erors.\"}'
+        }
+    }]
+}, {
+    "role": "tool",
+    "content":
+    "{\"action\":\"rewrite\",\"outcome\":\"My English needs improving, maybe I make errors.\"}",
+    "tool_call_id": "bbc5b7ede",
+    "name": "rewrite"
+}, {
+    "role": "assistant",
+    "content": "---\n\nMy English needs improving, maybe I make errors"
+}, {
     "role":
     "user",
     "content": ("Can you tell me what the temperate"
@@ -236,10 +234,12 @@ def test_mistral_function_calling(
 
         model_output = outputs[0].outputs[0].text.strip()
         assert model_output.startswith(tool_parser.bot_token), model_output
-        parsed_message  = tool_parser.extract_tool_calls(model_output, None)
+        parsed_message = tool_parser.extract_tool_calls(model_output, None)
 
         assert parsed_message.tools_called
         assert parsed_message.tool_calls[0].id == "0UAqFzWsD"
-        assert parsed_message.tool_calls[0].function.name == "get_current_weather"
-        assert parsed_message.tool_calls[0].function.arguments == '{"city": "Dallas", "state": "TX", "unit": "fahrenheit"}'
+        assert parsed_message.tool_calls[
+            0].function.name == "get_current_weather"
+        assert parsed_message.tool_calls[
+            0].function.arguments == '{"city": "Dallas", "state": "TX", "unit": "fahrenheit"}'
         assert parsed_message.content is None
