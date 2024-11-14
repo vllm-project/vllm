@@ -21,6 +21,7 @@ class HPUPagedAttentionMetadata:
     block_mapping: Optional[torch.Tensor]
     block_usage: Optional[torch.Tensor]
     block_groups: Optional[torch.Tensor]
+    alibi_blocks: Optional[torch.Tensor]
 
 
 class HPUPagedAttention:
