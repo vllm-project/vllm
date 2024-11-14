@@ -16,6 +16,7 @@ include_directories("${CMAKE_SOURCE_DIR}/csrc")
 #
 # Check the compile flags
 #
+<<<<<<< HEAD
 if (CMAKE_SYSTEM_PROCESSOR STREQUAL "ppc64le")
     list(APPEND CXX_COMPILE_FLAGS
         "-fopenmp"
@@ -26,6 +27,17 @@ else()
         "-mf16c"
         "-DVLLM_CPU_EXTENSION")
 endif()
+=======
+
+if (NOT CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64")
+    list(APPEND CXX_COMPILE_FLAGS
+        "-mf16c"
+    )
+endif()
+list(APPEND CXX_COMPILE_FLAGS
+    "-fopenmp"
+    "-DVLLM_CPU_EXTENSION")
+>>>>>>> eca86e66 (Rebased and resolved merge conflicts)
 
 execute_process(COMMAND cat /proc/cpuinfo
                 RESULT_VARIABLE CPUINFO_RET
@@ -140,20 +152,7 @@ endif()
 
 message(STATUS "CPU extension compile flags: ${CXX_COMPILE_FLAGS}")
 
-<<<<<<< HEAD
-<<<<<<< HEAD
 list(APPEND LIBS numa)
-=======
-list(APPEND LIBS dnnl numa)
->>>>>>> ad80d348 (Enabled path for ARM machines)
-=======
-list(APPEND LIBS numa)
-
-# Appending the dnnl library for the AVX2 and AVX512, as it is not utilized by Power architecture.
-if (AVX2_FOUND OR AVX512_FOUND)
-    list(APPEND LIBS dnnl)
-endif()
->>>>>>> b424c9aa (Enabled path for ARM machines)
 
 #
 # _C extension
