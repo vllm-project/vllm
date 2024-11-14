@@ -1,0 +1,65 @@
+{{- bos_token }}
+
+{%- if custom_tools is defined %}
+    {%- set tools = custom_tools %}
+{%- endif %}
+{%- if not tools is defined %}
+    {%- set tools = none %}
+{%- endif %}
+
+{#- This block extracts the system message, so we can slot it into the right place. #}
+{%- if messages[0]['role'] == 'system' %}
+    {%- set system_message = messages[0]['content']|trim %}
+    {%- set messages = messages[1:] %}
+{%- else %}
+    {%- set system_message = "You are a helpful assistant with tool calling capabilities. Only reply with a tool call if the function exists in the library provided by the user. If it doesn't exist, just reply directly in natural language." %}
+{%- endif %}
+
+{{- "<|start_header_id|>system<|end_header_id|>\n\n" }}
+{%- if tools is not none and not tools_in_user_message %}
+    {{- "You are an expert in composing functions. You are given a question and a set of possible functions. Based on the question, you will need to make one or more function/tool calls to achieve the purpose.\n" }}
+    {{- "If none of the function can be used, point it out. If the given question lacks the parameters required by the function, also point it out.\n" }}
+    {{- "You should only return the function call in tools call sections.\n\n" }}
+    {{- "If you decide to invoke any of the function(s), you MUST put it in the format of [func_name1(params_name1=params_value1, params_name2=params_value2...), func_name2(params)]\n" }}
+    {{- "You SHOULD NOT include any other text in the response.\n" }}
+    {{- "Here is a list of functions in JSON format that you can invoke.\n" }}
+    {%- for t in tools %}
+        {{- t | tojson(indent=4) }}
+        {{- "\n\n" }}
+    {%- endfor %}
+    {{- "\n" }}
+{%- endif %}
+{{- system_message }}
+{{- "<|eot_id|>" }}
+
+{%- for message in messages %}
+    {%- if not (message.role == 'ipython' or message.role == 'tool' or 'tool_calls' in message) %}
+        {{- '<|start_header_id|>' + message['role'] + '<|end_header_id|>\n\n'+ message['content'] | trim + '<|eot_id|>' }}
+    {%- elif 'tool_calls' in message %}
+        {{- '<|start_header_id|>assistant<|end_header_id|>\n\n[' -}}
+        {%- for tool_call in message.tool_calls %}
+            {%- if tool_call.function is defined %}
+                {%- set tool_call = tool_call.function %}
+            {%- endif %}
+            {{- tool_call.name + '(' -}}
+            {%- for param in tool_call.arguments %}
+                {{- param + '=' -}}
+                {{- "%sr" | format(tool_call.arguments[param]) -}}
+                {% if not loop.last %}, {% endif %}
+            {%- endfor %}
+            {{- ')' -}}
+            {% if not loop.last %}, {% endif %}
+        {%- endfor %}
+        {{- ']<|eot_id|>' -}}
+    {%- elif message.role == "tool" or message.role == "ipython" %}
+        {{- "<|start_header_id|>ipython<|end_header_id|>\n\n" }}
+        {%- if message.content is mapping %}
+            {{- message.content | tojson }}
+        {%- else %}
+            {{- { "output": message.content } | tojson }}
+        {%- endif %}
+        {{- "<|eot_id|>" }}
+    {%- endif %}
+{%- endfor %}
+
+{{- '<|start_header_id|>assistant<|end_header_id|>\n\n' }}
