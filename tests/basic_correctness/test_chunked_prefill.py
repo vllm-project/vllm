@@ -7,7 +7,6 @@ prefill requests are chunked.
 Run `pytest tests/models/test_chunked_prefill.py`.
 """
 import os
-from contextlib import nullcontext
 
 import pytest
 
@@ -249,6 +248,9 @@ def test_with_prefix_caching(
             should_fail = chunk_size % 16 != 0 and enable
             check_result &= not should_fail
             outputs[enable] = []
+            for prompt in full_prompts:
+                outputs[enable] += vllm_model.generate_greedy([prompt],
+                                                              max_tokens)
             # Send the request one-by-one to ensure the cache is populated.
 
     if check_result:
