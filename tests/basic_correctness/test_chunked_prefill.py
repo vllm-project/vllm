@@ -248,10 +248,10 @@ def test_with_prefix_caching(
             should_fail = chunk_size % 16 != 0 and enable
             check_result &= not should_fail
             outputs[enable] = []
+            # Send the request one-by-one to ensure the cache is populated.
             for prompt in full_prompts:
                 outputs[enable] += vllm_model.generate_greedy([prompt],
                                                               max_tokens)
-            # Send the request one-by-one to ensure the cache is populated.
 
     if check_result:
         check_outputs_equal(
