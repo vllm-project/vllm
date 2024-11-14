@@ -486,7 +486,7 @@ def load_params_config(model: Union[str, Path],
             config_dict = {}
             for key, value in elem.items():
                 key = config_mapping.get(key, key)
-                config_dict[key] = recurse_elems(value, wrap_to_hf_config)
+                config_dict[key] = recurse_elems(value, wrap_to_hf_config=False)
             return PretrainedConfig(**config_dict)
         else:
             return elem
