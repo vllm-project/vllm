@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import AbstractSet, Mapping
+from typing import AbstractSet, Mapping, Optional
 
 
 @dataclass(frozen=True)
@@ -9,6 +9,18 @@ class _HfExamplesInfo:
 
     extras: Mapping[str, str] = field(default_factory=dict)
     """Extra models to use for testing this architecture."""
+
+    tokenizer: Optional[str] = None
+    """Set the tokenizer to load for this architecture."""
+
+    tokenizer_mode: str = "auto"
+    """Set the tokenizer type for this architecture."""
+
+    speculative_model: Optional[str] = None
+    """
+    The default model to use for testing this architecture, which is only used
+    for speculative decoding.
+    """
 
     is_available_online: bool = True
     """
@@ -55,10 +67,12 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "GPTNeoXForCausalLM": _HfExamplesInfo("EleutherAI/pythia-160m"),
     "GraniteForCausalLM": _HfExamplesInfo("ibm/PowerLM-3b"),
     "GraniteMoeForCausalLM": _HfExamplesInfo("ibm/PowerMoE-3b"),
-    "InternLMForCausalLM": _HfExamplesInfo("internlm/internlm-chat-7b"),
+    "InternLMForCausalLM": _HfExamplesInfo("internlm/internlm-chat-7b",
+                                           trust_remote_code=True),
     "InternLM2ForCausalLM": _HfExamplesInfo("internlm/internlm2-chat-7b",
-                                         trust_remote_code=True),
-    "InternLM2VEForCausalLM": _HfExamplesInfo("OpenGVLab/Mono-InternVL-2B"),
+                                            trust_remote_code=True),
+    "InternLM2VEForCausalLM": _HfExamplesInfo("OpenGVLab/Mono-InternVL-2B",
+                                              trust_remote_code=True),
     "JAISLMHeadModel": _HfExamplesInfo("inceptionai/jais-13b-chat"),
     "JambaForCausalLM": _HfExamplesInfo("ai21labs/AI21-Jamba-1.5-Mini"),
     "LlamaForCausalLM": _HfExamplesInfo("meta-llama/Meta-Llama-3-8B"),
@@ -99,25 +113,30 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Starcoder2ForCausalLM": _HfExamplesInfo("bigcode/starcoder2-3b"),
     "SolarForCausalLM": _HfExamplesInfo("upstage/solar-pro-preview-instruct"),
     "XverseForCausalLM": _HfExamplesInfo("xverse/XVERSE-7B-Chat",
+                                         is_available_online=False,
                                          trust_remote_code=True),
     # [Encoder-decoder]
     "BartModel": _HfExamplesInfo("facebook/bart-base"),
     "BartForConditionalGeneration": _HfExamplesInfo("facebook/bart-large-cnn"),
-    "Florence2ForConditionalGeneration": _HfExamplesInfo("Xenova/tiny-random-Florence2ForConditionalGeneration"),  # noqa: E501
+    # Florence-2 uses BartFastTokenizer which can't be loaded from AutoTokenizer
+    # Therefore, we borrow the BartTokenizer from the original Bart model
+    "Florence2ForConditionalGeneration": _HfExamplesInfo("microsoft/Florence-2-base",  # noqa: E501
+                                                         tokenizer="facebook/bart-base",
+                                                         trust_remote_code=True),  # noqa: E501
 }
 
 _EMBEDDING_EXAMPLE_MODELS = {
     # [Text-only]
-    "BertModel": _HfExamplesInfo("google-bert/bert-base-uncased"),
+    "BertModel": _HfExamplesInfo("BAAI/bge-base-en-v1.5"),
     "Gemma2Model": _HfExamplesInfo("BAAI/bge-multilingual-gemma2"),
     "MistralModel": _HfExamplesInfo("intfloat/e5-mistral-7b-instruct"),
     "Qwen2ForRewardModel": _HfExamplesInfo("Qwen/Qwen2.5-Math-RM-72B"),
     "Qwen2ForSequenceClassification": _HfExamplesInfo("jason9693/Qwen2.5-1.5B-apeach"),  # noqa: E501
     # [Multimodal]
-    "LlavaNextForConditionalGeneration": _HfExamplesInfo("royokong/e5-v"),  # noqa: E501
+    "LlavaNextForConditionalGeneration": _HfExamplesInfo("royokong/e5-v"),
     "Phi3VForCausalLM": _HfExamplesInfo("TIGER-Lab/VLM2Vec-Full",
                                          trust_remote_code=True),
-    "Qwen2VLForConditionalGeneration": _HfExamplesInfo("MrLight/dse-qwen2-2b-mrl-v1") # noqa: E501,
+    "Qwen2VLForConditionalGeneration": _HfExamplesInfo("MrLight/dse-qwen2-2b-mrl-v1"), # noqa: E501
 }
 
 _MULTIMODAL_EXAMPLE_MODELS = {
@@ -148,7 +167,8 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "PaliGemmaForConditionalGeneration": _HfExamplesInfo("google/paligemma-3b-pt-224"),  # noqa: E501
     "Phi3VForCausalLM": _HfExamplesInfo("microsoft/Phi-3-vision-128k-instruct",
                                         trust_remote_code=True),
-    "PixtralForConditionalGeneration": _HfExamplesInfo("mistralai/Pixtral-12B-2409"),  # noqa: E501
+    "PixtralForConditionalGeneration": _HfExamplesInfo("mistralai/Pixtral-12B-2409",  # noqa: E501
+                                                       tokenizer_mode="mistral"),
     "QWenLMHeadModel": _HfExamplesInfo("Qwen/Qwen-VL-Chat",
                                        extras={"text_only": "Qwen/Qwen-7B-Chat"},  # noqa: E501
                                        trust_remote_code=True),
@@ -160,9 +180,12 @@ _MULTIMODAL_EXAMPLE_MODELS = {
 }
 
 _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
-    "EAGLEModel": _HfExamplesInfo("abhigoyal/vllm-eagle-llama-68m-random"),
-    "MedusaModel": _HfExamplesInfo("abhigoyal/vllm-medusa-llama-68m-random"),
-    "MLPSpeculatorPreTrainedModel": _HfExamplesInfo("ibm-fms/llama-160m-accelerator"),  # noqa: E501
+    "EAGLEModel": _HfExamplesInfo("JackFram/llama-68m",
+                                  speculative_model="abhigoyal/vllm-eagle-llama-68m-random"),  # noqa: E501
+    "MedusaModel": _HfExamplesInfo("JackFram/llama-68m",
+                                   speculative_model="abhigoyal/vllm-medusa-llama-68m-random"),  # noqa: E501
+    "MLPSpeculatorPreTrainedModel": _HfExamplesInfo("JackFram/llama-160m",
+                                                    speculative_model="ibm-fms/llama-160m-accelerator"),  # noqa: E501
 }
 
 _EXAMPLE_MODELS = {

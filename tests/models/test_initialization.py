@@ -29,7 +29,7 @@ def test_can_initialize(model_arch):
             "num_local_experts": 2,
         })
 
-        return text_config
+        return hf_config
 
     # Avoid calling model.forward()
     def _initialize_kv_caches(self) -> None:
@@ -40,6 +40,10 @@ def test_can_initialize(model_arch):
                       _initialize_kv_caches):
         LLM(
             model_info.default,
+            tokenizer=model_info.tokenizer,
+            tokenizer_mode=model_info.tokenizer_mode,
+            speculative_model=model_info.speculative_model,
+            num_speculative_tokens=1,
             trust_remote_code=model_info.trust_remote_code,
             load_format="dummy",
             hf_overrides=hf_overrides,
