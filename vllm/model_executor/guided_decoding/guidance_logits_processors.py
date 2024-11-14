@@ -142,8 +142,8 @@ class GuidanceLogitsProcessor:
             # just return them immediately
             ff_token = self.pending_ff_tokens.pop(0)
             masked_logits = torch.zeros_like(logits,
-                                                dtype=logits.dtype,
-                                                device=logits.device)
+                                             dtype=logits.dtype,
+                                             device=logits.device)
             masked_logits[ff_token] = 200.0
             return masked_logits
 
@@ -166,9 +166,7 @@ class GuidanceLogitsProcessor:
                                     device=logits.device)
         else:
             mask = np.frombuffer(mask, dtype=np.uint8)
-            mask = torch.tensor(mask,
-                                dtype=logits.dtype,
-                                device=logits.device)
+            mask = torch.tensor(mask, dtype=logits.dtype, device=logits.device)
 
         if mask.shape[0] != logits.shape[0]:
             extra_tokens = logits.shape[0] - mask.shape[0]

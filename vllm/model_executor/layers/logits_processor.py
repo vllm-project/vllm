@@ -2,7 +2,7 @@
 import inspect
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Optional, Union
+from typing import Optional
 
 import torch
 import torch.nn as nn
@@ -129,8 +129,7 @@ def _prune_hidden_states(
         return hidden_states
 
 
-def _apply_logits_processors_per_seq(logits: torch.Tensor,
-                                    logits_row_idx: int,
+def _apply_logits_processors_per_seq(logits: torch.Tensor, logits_row_idx: int,
                                      logits_row: torch.Tensor,
                                      past_tokens_ids: list[int],
                                      prompt_tokens_ids: list[int],
