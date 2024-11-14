@@ -6,7 +6,7 @@ import pytest
 
 import copy
 from vllm import SamplingParams
-from vllm.entrypoints.openai.tool_parsers.mistral_tool_parser import MistralToolParser
+from vllm.entrypoints.openai.tool_parsers.mistral_tool_parser import MistralToolParser  # noqa
 
 from ...utils import check_logprobs_close
 
@@ -85,7 +85,7 @@ MSGS = [{
     "role":
     "user",
     "content":
-    "Could you please rewrite the below article? \n\n My English needs improvving, maybe I make erors."
+    "Could you please rewrite the below article? \n\n My English needs improvving, maybe I make erors."  # noqa
 }, {
     "role":
     "assistant",
@@ -104,7 +104,7 @@ MSGS = [{
 }, {
     "role": "tool",
     "content":
-    "{\"action\":\"rewrite\",\"outcome\":\"My English needs improving, maybe I make errors.\"}",
+    "{\"action\":\"rewrite\",\"outcome\":\"My English needs improving, maybe I make errors.\"}",  # noqa
     "tool_call_id": "bbc5b7ede",
     "name": "rewrite"
 }, {
@@ -240,5 +240,5 @@ def test_mistral_function_calling(
         assert parsed_message.tool_calls[
             0].function.name == "get_current_weather"
         assert parsed_message.tool_calls[
-            0].function.arguments == '{"city": "Dallas", "state": "TX", "unit": "fahrenheit"}'
+            0].function.arguments == '{"city": "Dallas", "state": "TX", "unit": "fahrenheit"}'  # noqa
         assert parsed_message.content is None
