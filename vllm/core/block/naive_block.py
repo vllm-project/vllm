@@ -1,5 +1,5 @@
 from collections import deque
-from typing import Dict, Deque, FrozenSet, Iterable, List, Optional, Tuple
+from typing import Deque, Dict, FrozenSet, Iterable, List, Optional, Tuple
 
 from vllm.core.block.common import (BlockPool, CopyOnWriteTracker, RefCounter,
                                     get_all_blocks_recursively)
