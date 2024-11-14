@@ -82,8 +82,13 @@ def bench_int8(dtype: torch.dtype, m: int, k: int, n: int, label: str,
 def bench_fp8(dtype: torch.dtype, m: int, k: int, n: int, label: str,
               sub_label: str) -> Iterable[TMeasurement]:
     assert dtype == torch.float8_e4m3fn
-    a_compressed, e, a, b = make_rand_sparse_tensors(torch.float8_e4m3fn, m, n, k)
 
+    # Create tensors
+    b_compressed, e, a, b = make_rand_sparse_tensors(torch.float8_e4m3fn, m, n, k)
+    aT = a.t()
+    bT = b.t()
+    bf16_a = a.to(dtype=torch.bfloat16)
+    bf16_bT = bT.to(dtype=torch.bfloat16)
     scale_a = torch.tensor(1.0, device="cuda", dtype=torch.float32)
     scale_b = torch.tensor(1.0, device="cuda", dtype=torch.float32)
     bias = torch.zeros((n, ), device="cuda", dtype=torch.bfloat16)
@@ -94,7 +99,7 @@ def bench_fp8(dtype: torch.dtype, m: int, k: int, n: int, label: str,
     timers.append(
         bench_fn(label, sub_label, "pytorch_bf16_bf16_bf16_matmul-no-scales",
                  torch.mm, a.to(dtype=torch.bfloat16, device="cuda"),
-                 b.to(dtype=torch.bfloat16, device="cuda")))
+                 bT.to(dtype=torch.bfloat16, device="cuda")))
 
     # pytorch impl: bf16 output, without fp8 fast accum
     timers.append(
@@ -103,7 +108,7 @@ def bench_fp8(dtype: torch.dtype, m: int, k: int, n: int, label: str,
                  "pytorch_fp8_fp8_bf16_scaled_mm",
                  torch._scaled_mm,
                  a,
-                 b,
+                 bT,
                  scale_a=scale_a,
                  scale_b=scale_b,
                  out_dtype=torch.bfloat16))
@@ -115,7 +120,7 @@ def bench_fp8(dtype: torch.dtype, m: int, k: int, n: int, label: str,
                  "pytorch_fp8_fp8_bf16_scaled_mm_fast_accum",
                  torch._scaled_mm,
                  a,
-                 b,
+                 bT,
                  scale_a=scale_a,
                  scale_b=scale_b,
                  out_dtype=torch.bfloat16,
@@ -128,7 +133,7 @@ def bench_fp8(dtype: torch.dtype, m: int, k: int, n: int, label: str,
                  "pytorch_fp8_fp8_fp16_scaled_mm",
                  torch._scaled_mm,
                  a,
-                 b,
+                 bT,
                  scale_a=scale_a,
                  scale_b=scale_b,
                  out_dtype=torch.float16))
@@ -140,7 +145,7 @@ def bench_fp8(dtype: torch.dtype, m: int, k: int, n: int, label: str,
                  "pytorch_fp8_fp8_fp16_scaled_mm_fast_accum",
                  torch._scaled_mm,
                  a,
-                 b,
+                 bT,
                  scale_a=scale_a,
                  scale_b=scale_b,
                  out_dtype=torch.float16,
@@ -149,24 +154,12 @@ def bench_fp8(dtype: torch.dtype, m: int, k: int, n: int, label: str,
     # cutlass impl: bf16 output
     timers.append(
         bench_fn(label, sub_label, "cutlass_fp8_fp8_bf16_scaled_sparse_mm",
-                 ops.cutlass_scaled_sparse_mm, a_compressed, e, b, scale_a, scale_b,
+                 ops.cutlass_scaled_sparse_mm, b_compressed, e, aT, scale_b, scale_a,
                  torch.bfloat16))
     # cutlass impl: fp16 output
     timers.append(
         bench_fn(label, sub_label, "cutlass_fp8_fp8_fp16_scaled_sparse_mm",
-                 ops.cutlass_scaled_sparse_mm, a_compressed, e, b, scale_a, scale_b, torch.float16))
-
-    # cutlass impl: bf16 output, with bias
-    timers.append(
-        bench_fn(label, sub_label, "cutlass_fp8_fp8_bf16_scaled_sparse_mm_bias",
-                 ops.cutlass_scaled_sparse_mm, a_compressed, e, b, scale_a, scale_b, torch.bfloat16,
-                 bias))
-
-    # cutlass impl: fp16 output, with bias
-    timers.append(
-        bench_fn(label, sub_label, "cutlass_fp8_fp8_fp16_scaled_sparse_mm_bias",
-                 ops.cutlass_scaled_sparse_mm, a_compressed, e, b, scale_a, scale_b, torch.float16,
-                 bias.to(dtype=torch.float16)))
+                 ops.cutlass_scaled_sparse_mm, b_compressed, e, aT, scale_b, scale_a, torch.float16))
 
     return timers
 
@@ -307,12 +300,12 @@ def bench_bf16(dtype: torch.dtype, m: int, k: int, n: int, label: str,
 
 def bench_v1(dtype: torch.dtype, m: int, k: int, n: int, label: str,
           sub_label: str) -> Iterable[TMeasurement]:
-    if dtype == torch.int8:
-        return bench_int8(dtype, m, k, n, label, sub_label)
+    # if dtype == torch.int8:
+    #     return bench_int8(dtype, m, k, n, label, sub_label)
     if dtype == torch.float8_e4m3fn:
         return bench_fp8(dtype, m, k, n, label, sub_label)
-    if dtype == torch.float16:
-        return bench_fp16(dtype, m, k, n, label, sub_label)
-    if dtype == torch.bfloat16:
-        return bench_bf16(dtype, m, k, n, label, sub_label)
+    # if dtype == torch.float16:
+    #     return bench_fp16(dtype, m, k, n, label, sub_label)
+    # if dtype == torch.bfloat16:
+    #     return bench_bf16(dtype, m, k, n, label, sub_label)
     raise ValueError("unsupported type")
