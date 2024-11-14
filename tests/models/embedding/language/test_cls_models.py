@@ -21,13 +21,13 @@ def test_classification_models(
     model: str,
     dtype: str,
 ) -> None:
+    with vllm_runner(model, dtype=dtype) as vllm_model:
+        vllm_outputs = vllm_model.classify(example_prompts)
+
     with hf_runner(model,
                    dtype=dtype,
                    auto_cls=AutoModelForSequenceClassification) as hf_model:
         hf_outputs = hf_model.classify(example_prompts)
-
-    with vllm_runner(model, dtype=dtype) as vllm_model:
-        vllm_outputs = vllm_model.classify(example_prompts)
 
     print(hf_outputs, vllm_outputs)
 
