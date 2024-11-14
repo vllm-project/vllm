@@ -391,7 +391,7 @@ class Idefics3SimpleMLP(nn.Module):
             output_size,
             bias=False,
             quant_config=quant_config,
-            prefix=f"{prefix}.proj",
+            prefix=maybe_prefix(prefix, "proj"),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -412,7 +412,7 @@ class Idefics3Connector(nn.Module):
         self.modality_projection = Idefics3SimpleMLP(
             config,
             quant_config,
-            prefix=f"{prefix}.modality_projection",
+            prefix=maybe_prefix(prefix, "modality_projection"),
         )
 
     def pixel_shuffle(self,
@@ -453,8 +453,10 @@ class Idefics3Model(nn.Module):
         self.config = config
         self.padding_idx = self.config.text_config.pad_token_id
         self.vocab_size = self.config.text_config.vocab_size
-        self.vision_model = Idefics3VisionTransformer(config.vision_config,
-                                                      quant_config)
+        self.vision_model = Idefics3VisionTransformer(
+            config.vision_config,
+            quant_config=quant_config,
+            prefix=maybe_prefix(prefix, "vision_model"))
         self.connector = Idefics3Connector(
             config,
             quant_config,
