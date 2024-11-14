@@ -646,6 +646,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         # For multi-step scheduling
         self.cached_step_outputs: List[torch.Tensor] = []
 
+        self.warmed_sampler_bs = []
+
     def _set_gc_threshold(self) -> None:
         # Read https://docs.python.org/3/library/gc.html#gc.set_threshold
         # for comprehensive description of gc generations.
@@ -1215,7 +1217,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         seq_group_metadata_list = seq_group_metadata_list.copy()
         if batch_size_padding > 0:
             dummy_seq_group_metadata = self.create_dummy_seq_group_metadata(
-                0, 0, is_prompt)
+                0, 0, is_prompt, temperature=0)
             seq_group_metadata_list.extend(dummy_seq_group_metadata
                                            for _ in range(batch_size_padding))
 
@@ -1388,8 +1390,9 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                                         group_id,
                                         seq_len,
                                         is_prompt,
-                                        lora_request=None):
-        sampling_params = SamplingParams(temperature=0)
+                                        lora_request=None,
+                                        temperature=0):
+        sampling_params = SamplingParams(temperature=temperature)
         num_blocks = math.ceil(seq_len / self.block_size)
         seq_len = max(seq_len, 1)
         if is_prompt:
@@ -1429,7 +1432,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                         is_prompt,
                         kv_caches,
                         is_pt_profiler_run=False,
-                        is_lora_profile_run=False) -> None:
+                        is_lora_profile_run=False,
+                        temperature=0) -> None:
         use_graphs = self._use_graphs(batch_size, seq_len, is_prompt)
         scenario_name = ("warmup_"
                          f"{'prompt' if is_prompt else 'decode'}_"
@@ -1468,7 +1472,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                     seq_len,
                     is_prompt,
                     lora_request=dummy_lora_requests_per_seq[i]
-                    if dummy_lora_requests_per_seq else None)
+                    if dummy_lora_requests_per_seq else None,
+                    temperature=temperature)
                 for i in range(batch_size)
             ]
         else:
@@ -1481,7 +1486,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                     b * self.block_size - 1,
                     is_prompt,
                     lora_request=dummy_lora_requests_per_seq[i]
-                    if dummy_lora_requests_per_seq else None)
+                    if dummy_lora_requests_per_seq else None,
+                    temperature=temperature)
                 for i, b in enumerate(blocks)
             ]
         torch.hpu.synchronize()
@@ -1567,7 +1573,14 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         for i, (batch_size, seq_len) in enumerate(reversed(buckets)):
             self.log_warmup('Prompt' if is_prompt else 'Decode', i,
                             len(buckets), batch_size, seq_len)
-            self.warmup_scenario(batch_size, seq_len, is_prompt, kv_caches)
+            self.warmup_scenario(batch_size, seq_len, is_prompt, kv_caches,
+                                 temperature=0)
+            
+            # Warm up random sampler once per batch size
+            if batch_size not in self.warmed_sampler_bs:
+                self.warmup_scenario(batch_size, seq_len, is_prompt, kv_caches,
+                                 temperature=1.0)
+                self.warmed_sampler_bs.append(batch_size)
 
     def warmup_graphs(self,
                       strategy,
