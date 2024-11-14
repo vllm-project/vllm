@@ -9,6 +9,7 @@ vLLM has been adapted to work on ARM64 CPUs with NEON support, leveraging the CP
 * Relevant runtime environment variables
 * Performance optimization tips
 
+It currently supports Float32 and BFloat16 datatypes.
 Contents:
 
 1. :ref:`Requirements <arm_backend_requirements>`
@@ -21,9 +22,8 @@ Requirements
 ------------
 
 * **Operating System**: Linux or macOS
-* **Docker**: Required if running on macOS
 * **Compiler**: gcc/g++ >= 12.3.0 (optional, but recommended)
-* **Instruction Set Architecture (ISA)**: NEON support and BF16 extension is required
+* **Instruction Set Architecture (ISA)**: NEON support is required
 
 .. _arm_backend_quick_start_dockerfile:
 
