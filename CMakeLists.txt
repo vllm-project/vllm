@@ -208,7 +208,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   FetchContent_Declare(
         cutlass
         GIT_REPOSITORY https://github.com/nvidia/cutlass.git
-        GIT_TAG 1dbae0329c6d907b72b373667b4d5716bae4415f
+        GIT_TAG 8aa95dbb888be6d81c6fbf7169718c5244b53227
         GIT_PROGRESS TRUE
 
         # Speed up CUTLASS download by retrieving only the specified GIT_TAG instead of the history.
