@@ -248,8 +248,11 @@ class Fp8LinearMethod(LinearMethodBase):
                 )
 
             # Pad the weight
-            if envs.VLLM_FP8_PADDING:
-                weight = F.pad(weight, (0, 256), "constant", 0)[..., :-256]
+            if envs.VLLM_FP8_PADDING and weight.stride(-1) == 1 \
+                and (weight.stride(-2) * weight.element_size()) % 512 == 0:
+                num_pad = 256 // weight.element_size()
+                weight = F.pad(weight, (0, num_pad), "constant",
+                               0)[..., :-num_pad]
                 torch.cuda.empty_cache()
 
             # Update layer with new values.
