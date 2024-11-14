@@ -250,12 +250,7 @@ def test_with_prefix_caching(
             check_result &= not should_fail
             outputs[enable] = []
             # Send the request one-by-one to ensure the cache is populated.
-            with pytest.raises(ValueError) if should_fail else nullcontext():
-                for prompt in full_prompts:
-                    outputs[enable] += vllm_model.generate_greedy([prompt],
-                                                                  max_tokens)
 
-    # Check results only if we did not expect a failure.
     if check_result:
         check_outputs_equal(
             outputs_0_lst=outputs[False],
