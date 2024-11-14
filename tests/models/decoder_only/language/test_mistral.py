@@ -2,11 +2,13 @@
 
 Run `pytest tests/models/test_mistral.py`.
 """
+import copy
+
 import pytest
 
-import copy
 from vllm import SamplingParams
-from vllm.entrypoints.openai.tool_parsers.mistral_tool_parser import MistralToolParser  # noqa
+from vllm.entrypoints.openai.tool_parsers.mistral_tool_parser import (  # noqa
+    MistralToolParser)
 
 from ...utils import check_logprobs_close
 
@@ -78,44 +80,51 @@ TOOLS = [{
         }
     }
 }]
-MSGS = [{
-    "role": "system",
-    "content": "You are an assistant."
-}, {
-    "role":
-    "user",
-    "content":
-    "Could you please rewrite the below article? \n\n My English needs improvving, maybe I make erors."  # noqa
-}, {
-    "role":
-    "assistant",
-    "content":
-    "",
-    "tool_calls": [{
-        "id": "bbc5b7ede",
-        "type": "function",
-        "function": {
-            "name":
-            "rewrite",
-            "arguments":
-            '{\"text\":\"My English needs improvving, maybe I make erors.\"}'
-        }
-    }]
-}, {
-    "role": "tool",
-    "content":
-    "{\"action\":\"rewrite\",\"outcome\":\"My English needs improving, maybe I make errors.\"}",  # noqa
-    "tool_call_id": "bbc5b7ede",
-    "name": "rewrite"
-}, {
-    "role": "assistant",
-    "content": "---\n\nMy English needs improving, maybe I make errors"
-}, {
-    "role":
-    "user",
-    "content": ("Can you tell me what the temperate"
-                " will be in Dallas, in fahrenheit?")
-}]
+MSGS = [
+    {
+        "role": "system",
+        "content": "You are an assistant."
+    },
+    {
+        "role":
+        "user",
+        "content":
+        "Could you please rewrite the below article? \n\n My English needs improvving, maybe I make erors."  # noqa
+    },
+    {
+        "role":
+        "assistant",
+        "content":
+        "",
+        "tool_calls": [{
+            "id": "bbc5b7ede",
+            "type": "function",
+            "function": {
+                "name":
+                "rewrite",
+                "arguments":
+                '{\"text\":\"My English needs improvving, maybe I make erors.\"}'
+            }
+        }]
+    },
+    {
+        "role": "tool",
+        "content":
+        "{\"action\":\"rewrite\",\"outcome\":\"My English needs improving, maybe I make errors.\"}",  # noqa
+        "tool_call_id": "bbc5b7ede",
+        "name": "rewrite"
+    },
+    {
+        "role": "assistant",
+        "content": "---\n\nMy English needs improving, maybe I make errors"
+    },
+    {
+        "role":
+        "user",
+        "content": ("Can you tell me what the temperate"
+                    " will be in Dallas, in fahrenheit?")
+    }
+]
 
 
 @pytest.mark.parametrize("model", MODELS)
