@@ -51,7 +51,8 @@ class Medusa(nn.Module):
         super().__init__()
         self.config = config
         self.blocks = nn.ModuleList([
-            ResidualBlock(config=config, hidden_size=self.config.hidden_size,
+            ResidualBlock(config=config,
+                          hidden_size=self.config.hidden_size,
                           num_layers=self.config.num_hidden_layers)
             for _ in range(self.config.num_heads)
         ])
