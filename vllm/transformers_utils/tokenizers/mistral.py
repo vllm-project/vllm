@@ -174,18 +174,29 @@ class MistralTokenizer:
                                          revision=revision)
         return tokenizer_file
 
-    # the following attributes are set to fit VLLM's design
+    # the following attributes are set to fit VLLM's design and are used
+    # by the guided structured output backends.
     @property
     def all_special_tokens_extended(self) -> List[str]:
-        return []
+        # tekken defines its own extended special tokens list
+        if hasattr(self.tokenizer, "SPECIAL_TOKENS"):
+            special_tokens = self.tokenizer.SPECIAL_TOKENS
+        else:
+            special_tokens = list(SpecialTokens)
+        return [
+            s.value if isinstance(s, SpecialTokens) else s
+            for s in special_tokens
+        ]
 
     @property
     def all_special_tokens(self) -> List[str]:
-        return []
+        return self.all_special_tokens_extended
 
     @property
     def all_special_ids(self) -> List[int]:
-        return []
+        return [
+            self.all_special_tokens.index(t) for t in self.all_special_tokens
+        ]
 
     @property
     def bos_token_id(self) -> int:
