@@ -9,7 +9,7 @@ from tqdm import tqdm
 from vllm import envs
 from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
                               BeamSearchSequence, get_beam_search_score)
-from vllm.engine.arg_utils import EngineArgs, TaskOption
+from vllm.engine.arg_utils import EngineArgs, HfOverrides, TaskOption
 from vllm.engine.llm_engine import LLMEngine
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          ChatTemplateContentFormatOption,
@@ -103,7 +103,9 @@ class LLM:
         disable_custom_all_reduce: See :class:`~vllm.config.ParallelConfig`
         disable_async_output_proc: Disable async output processing.
             This may result in lower performance.
-        hf_overrides: Arguments to be forwarded to the HuggingFace config.
+        hf_overrides: If a dictionary, contains arguments to be forwarded to the
+            HuggingFace config. If a callable, it is called to update the
+            HuggingFace config.
         **kwargs: Arguments for :class:`~vllm.EngineArgs`. (See
             :ref:`engine_args`)
 
@@ -158,7 +160,7 @@ class LLM:
         max_seq_len_to_capture: int = 8192,
         disable_custom_all_reduce: bool = False,
         disable_async_output_proc: bool = False,
-        hf_overrides: Optional[dict] = None,
+        hf_overrides: Optional[HfOverrides] = None,
         mm_processor_kwargs: Optional[Dict[str, Any]] = None,
         # After positional args are removed, move this right below `model`
         task: TaskOption = "auto",

@@ -12,7 +12,7 @@ from argparse import Namespace
 from contextlib import asynccontextmanager
 from functools import partial
 from http import HTTPStatus
-from typing import AsyncIterator, Optional, Set
+from typing import AsyncIterator, Optional, Set, Tuple
 
 import uvloop
 from fastapi import APIRouter, FastAPI, Request
@@ -58,7 +58,8 @@ from vllm.entrypoints.openai.serving_tokenization import (
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import FlexibleArgumentParser, get_open_zmq_ipc_path
+from vllm.utils import (FlexibleArgumentParser, get_open_zmq_ipc_path,
+                        is_valid_ipv6_address)
 from vllm.version import __version__ as VLLM_VERSION
 
 if envs.VLLM_USE_V1:
@@ -575,6 +576,18 @@ def init_app_state(
     )
 
 
+def create_server_socket(addr: Tuple[str, int]) -> socket.socket:
+    family = socket.AF_INET
+    if is_valid_ipv6_address(addr[0]):
+        family = socket.AF_INET6
+
+    sock = socket.socket(family=family, type=socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(addr)
+
+    return sock
+
+
 async def run_server(args, **uvicorn_kwargs) -> None:
     logger.info("vLLM API server version %s", VLLM_VERSION)
     logger.info("args: %s", args)
@@ -591,9 +604,8 @@ async def run_server(args, **uvicorn_kwargs) -> None:
     # workaround to make sure that we bind the port before the engine is set up.
     # This avoids race conditions with ray.
     # see https://github.com/vllm-project/vllm/issues/8204
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.bind((args.host or "", args.port))
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock_addr = (args.host or "", args.port)
+    sock = create_server_socket(sock_addr)
 
     def signal_handler(*_) -> None:
         # Interrupt server on sigterm while initializing
