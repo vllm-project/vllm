@@ -13,6 +13,7 @@ from ..utils import check_embeddings_close
         # [Encoder-only]
         pytest.param("BAAI/bge-base-en-v1.5",
                      marks=[pytest.mark.core_model, pytest.mark.cpu_model]),
+        pytest.param("intfloat/multilingual-e5-large"),
         # [Encoder-decoder]
         pytest.param("intfloat/e5-mistral-7b-instruct",
                      marks=[pytest.mark.core_model]),
