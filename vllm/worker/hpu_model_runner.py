@@ -793,7 +793,6 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             max=max(self.block_size,
                     self.max_num_seqs * max_decode_seq // self.block_size))
         self.graphed_buckets: Set[Any] = set()
-        self.warmed_sampler_bs: List[int] = []
 
         msg = ("Prompt bucket config (min, step, max_warmup) "
                f"bs:{self.bucketing_global_state.prompt_bs_bucket_cfg}, "
@@ -1572,15 +1571,6 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                             len(buckets), batch_size, seq_len)
             self.warmup_scenario(batch_size, seq_len, is_prompt, kv_caches)
 
-            # Random sampler warmup
-            if batch_size not in self.warmed_sampler_bs and not is_prompt:
-                self.warmup_scenario(batch_size,
-                                     seq_len,
-                                     is_prompt,
-                                     kv_caches,
-                                     temperature=1.0)
-                self.warmed_sampler_bs.append(batch_size)
-
     def warmup_graphs(self,
                       strategy,
                       buckets,
@@ -1604,6 +1594,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                 f'Unsupported graph allocation strategy: {strategy}')
         buckets = list(sorted(buckets, key=ordering))
         captured_all = True
+        warmed_random_sampler_bs: Set[int] = set()
         for idx, (batch_size, seq_len) in enumerate(buckets):
             # Graph memory usage is proportional to seq dimension in a batch
             batch_seq = batch_size * seq_len if is_prompt else batch_size
@@ -1617,7 +1608,13 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             self.graphed_buckets.add(graphed_bucket)
             self.log_warmup(phase, idx, num_candidates, batch_size, seq_len)
             with HabanaMemoryProfiler() as mem_prof:
-                self.warmup_scenario(batch_size, seq_len, is_prompt, kv_caches)
+                self.warmup_scenario(batch_size,
+                                     seq_len,
+                                     is_prompt,
+                                     kv_caches,
+                                     temperature=1.0 if batch_size not
+                                     in warmed_random_sampler_bs else 0)
+            warmed_random_sampler_bs.append(batch_size)
             used_mem = align_workers(mem_prof.consumed_device_memory,
                                      torch.distributed.ReduceOp.MAX)
             available_mem -= used_mem
