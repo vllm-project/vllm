@@ -16,7 +16,7 @@ steps:
   #   key: block-build-cu118-wheel
 
   - label: "Build wheel - CUDA 11.8"
-    depends_on: block-build-cu118-wheel
+    # depends_on: block-build-cu118-wheel
     agents:
       queue: cpu_queue
     commands:
