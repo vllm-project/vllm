@@ -2,7 +2,7 @@ import asyncio
 import codecs
 import json
 from abc import ABC, abstractmethod
-from collections import defaultdict
+from collections import defaultdict, deque
 from functools import lru_cache, partial
 from pathlib import Path
 from typing import (Any, Awaitable, Callable, Dict, Generic, Iterable, List,
@@ -207,15 +207,22 @@ def _iter_nodes_assign_var_or_elems(root: jinja2.nodes.Node, varname: str):
     # Global variable that is implicitly defined at the root
     yield root, varname
 
-    related_varnames: List[str] = [varname]
-    for assign_ast in root.find_all(jinja2.nodes.Assign):
-        lhs = assign_ast.target
-        rhs = assign_ast.node
+    # Iterative BFS
+    related_varnames = deque([varname])
+    while related_varnames:
+        related_varname = related_varnames.popleft()
 
-        if any(_is_var_or_elems_access(rhs, name) for name in related_varnames):
-            assert isinstance(lhs, jinja2.nodes.Name)
-            yield assign_ast, lhs.name
-            related_varnames.append(lhs.name)
+        for assign_ast in root.find_all(jinja2.nodes.Assign):
+            lhs = assign_ast.target
+            rhs = assign_ast.node
+
+            if _is_var_or_elems_access(rhs, related_varname):
+                assert isinstance(lhs, jinja2.nodes.Name)
+                yield assign_ast, lhs.name
+
+                # Avoid infinite looping for self-assignment
+                if lhs.name != related_varname:
+                    related_varnames.append(lhs.name)
 
 
 # NOTE: The proper way to handle this is to build a CFG so that we can handle
