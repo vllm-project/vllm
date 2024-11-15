@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Optional, Tuple
 
 import torch
 import torch.distributed
+import torch.nn as nn
 
 from vllm.config import CacheConfig, ModelConfig, ParallelConfig, VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
@@ -161,6 +162,9 @@ class Worker:
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
+
+    def get_model(self) -> nn.Module:
+        return self.model_runner.get_model()
 
     @torch.inference_mode()
     def execute_model(

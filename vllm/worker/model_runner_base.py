@@ -7,6 +7,7 @@ from typing import (TYPE_CHECKING, Any, Dict, Generic, Iterable, List,
                     Optional, Type, TypeVar)
 
 import torch
+import torch.nn as nn
 from torch import is_tensor
 
 from vllm.config import VllmConfig
@@ -263,6 +264,10 @@ class ModelRunnerBase(ABC, Generic[T]):
         request. This method may move data to the worker's local device. It is
         not allowed to communicate with other workers or devices.
         """
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_model(self) -> nn.Module:
         raise NotImplementedError
 
     @current_platform.inference_mode()

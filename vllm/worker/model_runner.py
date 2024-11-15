@@ -1150,6 +1150,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 fullgraph=envs.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
                 backend=backend)
 
+    def get_model(self) -> nn.Module:
+        return self.model
+
     def save_sharded_state(
         self,
         path: str,

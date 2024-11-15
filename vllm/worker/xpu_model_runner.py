@@ -419,6 +419,9 @@ class XPUModelRunner(ModelRunnerBase[ModelInputForXPUWithSamplingMetadata]):
         logger.info("Loading model weights took %.4f GB",
                     self.model_memory_usage / float(2**30))
 
+    def get_model(self) -> nn.Module:
+        return self.model
+
     @property
     def vocab_size(self) -> int:
         return self.model_config.get_vocab_size()

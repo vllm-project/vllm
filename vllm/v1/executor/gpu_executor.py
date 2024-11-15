@@ -1,6 +1,8 @@
 import os
 from typing import Optional, Tuple
 
+import torch.nn as nn
+
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils import get_distributed_init_method, get_ip, get_open_port
@@ -63,6 +65,9 @@ class GPUExecutor:
         logger.info("# GPU blocks: %d", num_gpu_blocks)
         self.worker.initialize_cache(num_gpu_blocks)
         self.worker.compile_or_warm_up_model()
+
+    def get_model(self) -> nn.Module:
+        return self.worker.get_model()
 
     def execute_model(
         self,

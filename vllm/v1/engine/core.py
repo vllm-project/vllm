@@ -7,6 +7,7 @@ from multiprocessing.process import BaseProcess
 from multiprocessing.sharedctypes import Synchronized
 from typing import Any, Iterator, List, Tuple, Type, Union
 
+import torch.nn as nn
 import zmq
 import zmq.asyncio
 from msgspec import msgpack
@@ -125,6 +126,9 @@ class EngineCore:
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, output)
         return engine_core_outputs
+
+    def get_model(self) -> nn.Module:
+        return self.model_executor.get_model()
 
 
 class EngineCoreProc(EngineCore):

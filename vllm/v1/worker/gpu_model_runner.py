@@ -413,6 +413,9 @@ class GPUModelRunner:
                 encoder_outputs.append(encoder_output[start_idx:end_idx])
         return encoder_outputs
 
+    def get_model(self) -> nn.Module:
+        return self.model
+
     @torch.inference_mode()
     def execute_model(
         self,

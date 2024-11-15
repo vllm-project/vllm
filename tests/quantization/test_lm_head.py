@@ -30,8 +30,7 @@ def test_lm_head(
     model, lm_head_quantized = model_lm_head_quant
     vllm_model = vllm_runner(model, dtype=torch.float16, max_model_len=2048)
 
-    lm_head_layer = (vllm_model.model.llm_engine.model_executor.driver_worker.
-                     model_runner.model.lm_head)
+    lm_head_layer = vllm_model.model.llm_engine.get_model().lm_head
 
     if lm_head_quantized:
         assert isinstance(

@@ -1,5 +1,7 @@
 from typing import List, Set, Tuple
 
+import torch.nn as nn
+
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -88,6 +90,9 @@ class NeuronExecutor(ExecutorBase):
     def list_prompt_adapters(self) -> Set[int]:
         raise NotImplementedError(
             "Soft prompt is currently not supported by the Neuron backend.")
+
+    def get_model(self) -> nn.Module:
+        return self.driver_worker.get_model()
 
     def check_health(self) -> None:
         # NeuronExecutor will always be healthy as long as

@@ -48,8 +48,7 @@ def test_models(
         vllm_outputs = vllm_model.encode(example_prompts)
         # This test is for verifying whether the model's extra_repr
         # can be printed correctly.
-        print(vllm_model.model.llm_engine.model_executor.driver_worker.
-              model_runner.model)
+        print(vllm_model.model.llm_engine.get_model())
 
     check_embeddings_close(
         embeddings_0_lst=hf_outputs,

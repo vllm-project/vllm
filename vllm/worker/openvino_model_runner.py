@@ -83,6 +83,9 @@ class OpenVINOModelRunner(ModelRunnerBase):
                                kv_cache_dtype=self.kv_cache_dtype,
                                ov_core=self.ov_core)
 
+    def get_model(self) -> nn.Module:
+        return self.model
+
     def _prepare_model_input(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],

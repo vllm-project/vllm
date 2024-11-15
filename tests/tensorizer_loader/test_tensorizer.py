@@ -51,13 +51,7 @@ def is_curl_installed():
 
 
 def get_torch_model(vllm_runner: VllmRunner):
-    return vllm_runner \
-        .model \
-        .llm_engine \
-        .model_executor \
-        .driver_worker \
-        .model_runner \
-        .model
+    return vllm_runner.model.llm_engine.get_model()
 
 
 def write_keyfile(keyfile_path: str):

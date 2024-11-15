@@ -3,6 +3,7 @@ from typing import List, Set, Tuple
 import openvino as ov
 import openvino.properties.hint as hints
 import torch
+import torch.nn as nn
 
 import vllm.envs as envs
 from vllm.config import CacheConfig, ModelConfig
@@ -112,6 +113,9 @@ class OpenVINOExecutor(ExecutorBase):
     def list_prompt_adapters(self) -> Set[int]:
         raise NotImplementedError(
             "Soft prompt is currently not supported by the OPENVINO backend.")
+
+    def get_model(self) -> nn.Module:
+        return self.driver_worker.get_model()
 
     def check_health(self) -> None:
         # OpenVINOExecutor will always be healthy as long as

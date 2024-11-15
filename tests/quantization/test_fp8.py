@@ -48,8 +48,7 @@ KV_CACHE_MODELS = [
 @pytest.mark.parametrize("model_id", KV_CACHE_MODELS)
 def test_kv_cache_model_load_and_run(vllm_runner, model_id: str):
     with vllm_runner(model_id, kv_cache_dtype="fp8") as llm:
-
-        model = llm.model.llm_engine.model_executor.driver_worker.model_runner.model  # noqa: E501
+        model = llm.model.llm_engine.get_model()
         attn = model.model.layers[0].self_attn.attn
         assert isinstance(attn.quant_method, Fp8KVCacheMethod)
         # NOTE: it is valid for scales to be 1.0 (default value), but we know
@@ -77,7 +76,7 @@ def test_load_fp16_model(vllm_runner, kv_cache_dtype: str, force_marlin: bool,
                      quantization="fp8",
                      kv_cache_dtype=kv_cache_dtype) as llm:
 
-        model = llm.model.llm_engine.model_executor.driver_worker.model_runner.model  # noqa: E501
+        model = llm.model.llm_engine.get_model()
         fc1 = model.model.decoder.layers[0].fc1
         assert isinstance(fc1.quant_method, Fp8LinearMethod)
         if kv_cache_dtype == "fp8":

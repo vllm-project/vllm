@@ -26,7 +26,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
 def test_compressed_tensors_w8a8_static_setup(vllm_runner, model_args):
     model_path, strategy, quant_type, shape_0, is_symmetric = model_args
     with vllm_runner(model_path, enforce_eager=True) as llm:
-        model = llm.model.llm_engine.model_executor.driver_worker.model_runner.model  # noqa: E501
+        model = llm.model.llm_engine.get_model()
         layer = model.model.layers[0]
 
         qkv_proj = layer.self_attn.qkv_proj
@@ -121,7 +121,7 @@ def test_compressed_tensors_no_enforce_eager(vllm_runner):
 def test_compressed_tensors_w8a8_dynamic_per_token(vllm_runner, model_args):
     model_path, strategy = model_args
     with vllm_runner(model_path, dtype=torch.float16) as llm:
-        model = llm.model.llm_engine.model_executor.driver_worker.model_runner.model  # noqa: E501
+        model = llm.model.llm_engine.get_model()
         layer = model.model.layers[0]
 
         qkv_proj = layer.self_attn.qkv_proj
@@ -144,7 +144,7 @@ def test_compressed_tensors_w8a8_dynamic_per_token(vllm_runner, model_args):
 def test_compressed_tensors_wNa16(vllm_runner, wNa16_args):
     model, strategy, group, pack_factor = wNa16_args
     with vllm_runner(model) as llm:
-        model = llm.model.llm_engine.model_executor.driver_worker.model_runner.model  # noqa: E501
+        model = llm.model.llm_engine.get_model()
         layer = model.model.layers[0]
 
         qkv_proj = layer.self_attn.qkv_proj
@@ -165,7 +165,7 @@ def test_compressed_tensors_wNa16(vllm_runner, wNa16_args):
 def test_compressed_tensors_w4a16_marlin24(vllm_runner):
     model_path = "nm-testing/llama7b-one-shot-2_4-w4a16-marlin24-t"
     with vllm_runner(model_path) as llm:
-        model = llm.model.llm_engine.model_executor.driver_worker.model_runner.model  # noqa: E501
+        model = llm.model.llm_engine.get_model()
         layer = model.model.layers[0]
 
         qkv_proj = layer.self_attn.qkv_proj
@@ -181,7 +181,7 @@ def test_compressed_tensors_w4a16_marlin24(vllm_runner):
 def test_compressed_tensors_fp8(vllm_runner):
     model_path = "nm-testing/Meta-Llama-3-8B-FP8-compressed-tensors-test"
     with vllm_runner(model_path) as llm:
-        model = llm.model.llm_engine.model_executor.driver_worker.model_runner.model  # noqa: E501
+        model = llm.model.llm_engine.get_model()
         layer = model.model.layers[0]
 
         qkv_proj = layer.self_attn.qkv_proj

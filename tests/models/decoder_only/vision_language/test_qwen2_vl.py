@@ -106,8 +106,7 @@ def batch_make_image_embeddings(
 
     # pixel values to embeddinds & grid_thws
     with torch.no_grad():
-        visual = llm.llm_engine.model_executor.driver_worker. \
-            model_runner.model.visual
+        visual = llm.llm_engine.get_model().visual
 
         pixel_values_on_device = pixel_values.to(visual.device,
                                                  dtype=visual.dtype)
@@ -188,8 +187,7 @@ def batch_make_video_embeddings(
 
     # pixel values to embeddinds & grid_thws
     with torch.no_grad():
-        visual = llm.llm_engine.model_executor.driver_worker.\
-            model_runner.model.visual
+        visual = llm.llm_engine.get_model().visual
 
         pixel_values_on_device = pixel_values.to(visual.device,
                                                  dtype=visual.dtype)

@@ -6,6 +6,7 @@ from abc import ABC, abstractmethod
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Type, Union
 
 import torch
+import torch.nn as nn
 
 from vllm.config import ObservabilityConfig, VllmConfig
 from vllm.distributed import broadcast_tensor_dict, get_pp_group, get_tp_group
@@ -85,6 +86,10 @@ class WorkerBase(ABC):
             output = self.execute_model(execute_model_req=None)
             if output is None:
                 return None
+
+    @abstractmethod
+    def get_model(self) -> nn.Module:
+        raise NotImplementedError
 
     @abstractmethod
     def execute_model(
@@ -308,6 +313,9 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         else:
             return self._get_worker_input_from_broadcast()
 
+    def get_model(self) -> nn.Module:
+        return self.model_runner.get_model()
+
     def execute_model(
         self,
         execute_model_req: Optional[ExecuteModelRequest] = None,
@@ -462,8 +470,11 @@ class WorkerWrapperBase:
             mod = importlib.import_module(self.worker_module_name)
             worker_class = getattr(mod, self.worker_class_name)
 
-        self.worker = worker_class(*args, **kwargs)
-        assert self.worker is not None
+        worker = worker_class(*args, **kwargs)
+        assert worker is not None
+
+        self.worker = worker
+        return worker
 
     def execute_method(self, method, *args, **kwargs):
         try:

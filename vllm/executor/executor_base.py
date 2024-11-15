@@ -1,6 +1,8 @@
 from abc import ABC, abstractmethod
 from typing import List, Optional, Set, Tuple
 
+import torch.nn as nn
+
 from vllm.config import VllmConfig
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
@@ -37,7 +39,7 @@ class ExecutorBase(ABC):
 
     @abstractmethod
     def _init_executor(self) -> None:
-        pass
+        raise NotImplementedError
 
     @abstractmethod
     def determine_num_available_blocks(self) -> Tuple[int, int]:
@@ -104,6 +106,10 @@ class ExecutorBase(ABC):
 
     @abstractmethod
     def list_prompt_adapters(self) -> Set[int]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_model(self) -> nn.Module:
         raise NotImplementedError
 
     @abstractmethod

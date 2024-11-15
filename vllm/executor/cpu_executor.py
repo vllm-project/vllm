@@ -2,6 +2,8 @@ import os
 from functools import partial
 from typing import Any, Awaitable, List, Optional, Set, Tuple, Union
 
+import torch.nn as nn
+
 import vllm.envs as envs
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig)
@@ -143,9 +145,7 @@ class CPUExecutor(ExecutorBase):
             kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=rank == 0,
         )
-        wrapper.init_worker(**kwargs)
-
-        return wrapper.worker
+        return wrapper.init_worker(**kwargs)
 
     def _run_workers(
         self,
@@ -275,6 +275,9 @@ class CPUExecutor(ExecutorBase):
             "pin_prompt_adapter",
             prompt_adapter_id,
         ))
+
+    def get_model(self) -> nn.Module:
+        return self.driver_worker.get_model()
 
     def check_health(self) -> None:
         """Raises an error if engine is unhealthy."""

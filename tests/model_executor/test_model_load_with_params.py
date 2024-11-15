@@ -46,8 +46,7 @@ def test_model_loading_with_params(vllm_runner):
         assert model_tokenizer.tokenizer_config["do_lower_case"]
         assert model_tokenizer.tokenizer.model_max_length == 512
 
-        model = model.model.llm_engine.model_executor\
-                     .driver_worker.model_runner.model
+        model = model.model.llm_engine.get_model()
         assert isinstance(model, BertEmbeddingModel)
         assert model._pooler.pooling_type == PoolingType.CLS
         assert model._pooler.normalize
@@ -84,8 +83,7 @@ def test_roberta_model_loading_with_params(vllm_runner):
         assert model_tokenizer.tokenizer_id == "intfloat/multilingual-e5-large"
         assert not model_tokenizer.tokenizer_config["do_lower_case"]
 
-        model = model.model.llm_engine.model_executor\
-                     .driver_worker.model_runner.model
+        model = model.model.llm_engine.get_model()
         assert isinstance(model, RobertaEmbeddingModel)
         assert model._pooler.pooling_type == PoolingType.MEAN
         assert model._pooler.normalize

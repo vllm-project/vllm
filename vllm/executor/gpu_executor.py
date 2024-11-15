@@ -1,5 +1,7 @@
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Type, Union
 
+import torch.nn as nn
+
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -21,8 +23,7 @@ def create_worker(worker_module_name: str, worker_class_name: str,
         worker_class_name=worker_class_name,
         worker_class_fn=worker_class_fn,
     )
-    wrapper.init_worker(**kwargs)
-    return wrapper.worker
+    return wrapper.init_worker(**kwargs)
 
 
 class GPUExecutor(ExecutorBase):
@@ -158,6 +159,9 @@ class GPUExecutor(ExecutorBase):
 
     def list_prompt_adapters(self) -> Set[int]:
         return self.driver_worker.list_prompt_adapters()
+
+    def get_model(self) -> nn.Module:
+        return self.driver_worker.get_model()
 
     def check_health(self) -> None:
         # GPUExecutor will always be healthy as long as

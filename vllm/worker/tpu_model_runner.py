@@ -142,6 +142,9 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         xm.wait_device_ops()
         self.model = ModelWrapper(model)
 
+    def get_model(self) -> nn.Module:
+        return self.model
+
     def _dummy_run(
         self,
         batch_size: int,

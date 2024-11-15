@@ -6,6 +6,8 @@ import contextlib
 import os
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+import torch.nn as nn
+
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -178,6 +180,9 @@ class HPUExecutor(ExecutorBase):
     def list_prompt_adapters(self) -> Set[int]:
         raise NotImplementedError(
             "Prompt Adapter is not implemented for HPU backend.")
+
+    def get_model(self) -> nn.Module:
+        return self.driver_worker.get_model()
 
     def check_health(self) -> None:
         # GPUExecutor will always be healthy as long as

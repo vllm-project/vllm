@@ -468,6 +468,9 @@ class CPUModelRunnerBase(ModelRunnerBase[TModelInputForCPU]):
     def load_model(self) -> None:
         self.model = get_model(vllm_config=self.vllm_config)
 
+    def get_model(self) -> nn.Module:
+        return self.model
+
     def _prepare_model_input_tensors(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
