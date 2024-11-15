@@ -63,14 +63,14 @@ class Pooler(nn.Module):
         return cls(
             pooling_type=PoolingType[pooler_config.pooling_type]
             if pooler_config.pooling_type is not None else pooling_type,
-            normalize=pooler_config.pooling_norm
-            if pooler_config.pooling_norm is not None else normalize,
-            softmax=pooler_config.pooling_softmax
-            if pooler_config.pooling_softmax is not None else softmax,
-            step_tag_id=pooler_config.pooling_step_tag_id
-            if pooler_config.pooling_step_tag_id is not None else step_tag_id,
-            returned_token_ids=pooler_config.pooling_returned_token_ids
-            if pooler_config.pooling_returned_token_ids is not None else
+            normalize=pooler_config.normalize
+            if pooler_config.normalize is not None else normalize,
+            softmax=pooler_config.softmax
+            if pooler_config.softmax is not None else softmax,
+            step_tag_id=pooler_config.step_tag_id
+            if pooler_config.step_tag_id is not None else step_tag_id,
+            returned_token_ids=pooler_config.returned_token_ids
+            if pooler_config.returned_token_ids is not None else
             returned_token_ids,
         )
 
