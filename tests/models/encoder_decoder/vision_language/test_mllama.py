@@ -233,6 +233,7 @@ def clear_cache():
 
 
 @large_gpu_test(min_gb=48)
+@pytest.mark.core_model
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize(
     "sizes",
@@ -278,6 +279,7 @@ def test_models_single_leading_image(hf_runner, vllm_runner, image_assets,
 
 
 @large_gpu_test(min_gb=48)
+@pytest.mark.core_model
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [128])
@@ -326,6 +328,7 @@ def test_models_multi_leading_images(hf_runner, vllm_runner, image_assets,
 
 
 @large_gpu_test(min_gb=48)
+@pytest.mark.core_model
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [128])

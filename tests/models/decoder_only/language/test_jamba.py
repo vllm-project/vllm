@@ -33,6 +33,10 @@ def test_models(
 
     with vllm_runner(model, dtype=dtype) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
+        # This test is for verifying whether the model's extra_repr
+        # can be printed correctly.
+        print(vllm_model.model.llm_engine.model_executor.driver_worker.
+              model_runner.model)
 
     for i in range(len(example_prompts)):
         hf_output_ids, hf_output_str = hf_outputs[i]
@@ -293,17 +297,3 @@ def test_jamba_distributed_produces_identical_generation(
         name_0="vllm_tp_1",
         name_1="vllm_tp_2",
     )
-
-
-@pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype", ["float"])
-def test_model_print(
-    vllm_runner,
-    model: str,
-    dtype: str,
-) -> None:
-    with vllm_runner(model, dtype=dtype) as vllm_model:
-        # This test is for verifying whether the model's extra_repr
-        # can be printed correctly.
-        print(vllm_model.model.llm_engine.model_executor.driver_worker.
-              model_runner.model)
