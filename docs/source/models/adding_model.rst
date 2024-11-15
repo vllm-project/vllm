@@ -104,9 +104,9 @@ Finally, register your :code:`*ForCausalLM` class to the :code:`_VLLM_MODELS` in
 6. Out-of-Tree Model Integration
 --------------------------------------------
 
-We also provide a way to integrate a model without modifying the vLLM codebase. Step 2, 3, 4 are still required, but you can skip step 1 and 5.
+We also provide a way to integrate a model without modifying the vLLM codebase. Step 2, 3, 4 are still required, but you can skip step 1 and 5, and then write a plugin to register your model. For more information, see :ref:`plugin_system`.
 
-Just add the following lines in your code:
+The code to register the model is:
 
 .. code-block:: python
 
@@ -126,4 +126,5 @@ If your model imports modules that initialize CUDA, consider instead lazy-import
     If your model is a multimodal model, make sure the model class implements the :class:`~vllm.model_executor.models.interfaces.SupportsMultiModal` interface.
     Read more about that :ref:`here <enabling_multimodal_inputs>`.
 
-The recommended way is to place these code snippets in a vLLM plugin, so that it works for various features of vLLM like distributed inference, and API server. For more information, see :ref:`plugin_system`.
+.. note::
+    Although you can directly put these code snippet in your script using ``vllm.LLM``, the recommended way is to place these code snippets in a vLLM plugin, so that it works for various features of vLLM like distributed inference, and API server.
