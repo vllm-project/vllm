@@ -292,10 +292,12 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
         # Determine the layer up to which we will initialize the vision tower
         if isinstance(vision_feature_layer, int):
             vision_hidden_size = config.vision_config.hidden_size
+            self.feature_sample_layers = None
         # Used for multimodal granite models to control encoder outputs
         elif isinstance(vision_feature_layer, (list, tuple)):
             vision_hidden_size = config.vision_config.hidden_size * len(
                 vision_feature_layer)
+            self.feature_sample_layers = vision_feature_layer
         else:
             raise TypeError(
                 f"vision_layer_feature type: {type(vision_feature_layer)}"
@@ -432,7 +434,8 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         # NOTE: we skip the step to select the vision feature layer since
         # this is already done inside the vision tower
-        image_features = vision_tower(pixel_values)
+        image_features = vision_tower(
+            pixel_values, feature_sample_layers=self.feature_sample_layers)
 
         return self._select_image_features(
             image_features,

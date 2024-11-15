@@ -33,7 +33,8 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.multimodal.inputs import PlaceholderRange
 from vllm.multimodal.utils import (cached_get_tokenizer,
-                                   consecutive_placeholder_ranges)
+                                   consecutive_placeholder_ranges,
+                                   resolve_visual_encoder_outputs)
 from vllm.sequence import IntermediateTensors, SequenceData
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.utils import is_list_of
@@ -950,13 +951,8 @@ class PixtralHFTransformer(nn.Module):
         *,
         num_hidden_layers_override: Optional[int] = None,
         prefix: str = "",
-        feature_sample_layers: Optional[list] = None,
     ) -> None:
         super().__init__()
-
-        # Feature sample layers need to be indices from 0 ->  # encoder layers
-        self.feature_sample_layers = (
-            feature_sample_layers if feature_sample_layers is not None else [])
 
         if num_hidden_layers_override is None:
             num_hidden_layers = config.num_hidden_layers
@@ -975,17 +971,19 @@ class PixtralHFTransformer(nn.Module):
         x: torch.Tensor,
         attention_mask: torch.Tensor,
         position_embeddings: torch.Tensor,
+        return_all_hidden_states: bool,
     ) -> torch.Tensor:
         hidden_states_pool = []
 
-        # Process the encoder layers, and save hidden states that are
-        # feature_sample_layers. Pixtral does not have post-norm, so we
-        # do not worry about it here.
-        for layer_idx, layer in enumerate(self.layers):
+        for layer in self.layers:
             x = layer(x, attention_mask, position_embeddings)
-            if layer_idx in self.feature_sample_layers:
+            if return_all_hidden_states:
                 hidden_states_pool.append(x)
-        return x, hidden_states_pool
+        # If we have multiple feature sample layers, we return all hidden
+        # states in order and grab the ones we need by index.
+        if return_all_hidden_states:
+            return hidden_states_pool
+        return x
 
 
 class PixtralHFVisionModel(nn.Module):
@@ -998,13 +996,10 @@ class PixtralHFVisionModel(nn.Module):
         num_hidden_layers_override: Optional[int] = None,
         require_post_norm: Optional[bool] = None,
         prefix: str = "",
-        feature_sample_layers: Optional[list] = None,
     ) -> None:
         super().__init__()
 
         self.config = config
-        self.feature_sample_layers = (
-            feature_sample_layers if feature_sample_layers is not None else [])
 
         self.patch_conv = nn.Conv2d(
             in_channels=config.num_channels,
@@ -1019,7 +1014,6 @@ class PixtralHFVisionModel(nn.Module):
             quant_config,
             num_hidden_layers_override=num_hidden_layers_override,
             prefix=f"{prefix}.transformer",
-            feature_sample_layers=feature_sample_layers,
         )
 
         num_hidden_layers = config.num_hidden_layers
@@ -1041,6 +1035,7 @@ class PixtralHFVisionModel(nn.Module):
     def forward(
         self,
         pixel_values: List[torch.Tensor],
+        feature_sample_layers: Optional[list[int]] = None,
     ) -> torch.Tensor:
         """
         Args:
@@ -1048,6 +1043,9 @@ class PixtralHFVisionModel(nn.Module):
                 in pixel_values. This means it will be a list of tensors
                 because multiple requests batched can have multiple images,
                 each with their own shape potentially
+            feature_sample_layers: Layer indices whose features should be
+                concatenated and used as the visual encoder output. If none
+                are provided, the last layer is used.
 
         Returns:
             image_features: tensor of token features for
@@ -1082,11 +1080,20 @@ class PixtralHFVisionModel(nn.Module):
                 [p.shape[-2] * p.shape[-1] for p in patch_embeds_list],
                 patch_embeds)
 
-        out, hs_pool = self.transformer(patch_embeds, attention_mask,
-                                        position_embedding)
+        return_all_hidden_states = feature_sample_layers is not None
+        out = self.transformer(
+            patch_embeds,
+            attention_mask,
+            position_embedding,
+            return_all_hidden_states=return_all_hidden_states,
+        )
 
-        if self.feature_sample_layers:
-            out = torch.cat(hs_pool, dim=-1)
+        out = resolve_visual_encoder_outputs(
+            out,
+            feature_sample_layers,
+            None,
+            len(self.transformer.layers),
+        )
 
         return out
 

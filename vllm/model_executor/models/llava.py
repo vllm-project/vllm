@@ -237,7 +237,7 @@ def _get_layer_index(feature_layer_index: int, num_hidden_layers: int) -> int:
             encoder.
     """
     if feature_layer_index < 0:
-        num_hidden_layers = num_hidden_layers + feature_layer_index + 1
+        return num_hidden_layers + feature_layer_index + 1
     return feature_layer_index + 1
 
 
@@ -250,23 +250,8 @@ def init_vision_tower_for_llava(
 ):
     vision_config = hf_config.vision_config
 
-    vision_feature_layer = hf_config.vision_feature_layer
-
     # Initialize the vision tower only up to the deepest required feature layer
     num_hidden_layers = _get_num_hidden_layers(hf_config)
-
-    if isinstance(vision_feature_layer, int):
-        feature_sample_layers = None
-    elif isinstance(vision_feature_layer, (list, tuple)):
-        feature_sample_layers = [
-            layer_idx if layer_idx >= 0 else
-            hf_config.vision_config.num_hidden_layers + layer_idx
-            for layer_idx in vision_feature_layer
-        ]
-    else:
-        raise TypeError(
-            f"vision_layer_feature type: {type(vision_feature_layer)}"
-            " is not supported")
 
     if isinstance(vision_config, CLIPVisionConfig):
         return CLIPVisionModel(
@@ -275,7 +260,6 @@ def init_vision_tower_for_llava(
             num_hidden_layers_override=num_hidden_layers,
             require_post_norm=require_post_norm,
             prefix=prefix,
-            feature_sample_layers=feature_sample_layers,
         )
     elif isinstance(vision_config, SiglipVisionConfig):
         return SiglipVisionModel(
@@ -284,7 +268,6 @@ def init_vision_tower_for_llava(
             num_hidden_layers_override=num_hidden_layers,
             require_post_norm=require_post_norm,
             prefix=prefix,
-            feature_sample_layers=feature_sample_layers,
         )
     elif isinstance(vision_config, PixtralVisionConfig):
         return PixtralHFVisionModel(
@@ -293,7 +276,6 @@ def init_vision_tower_for_llava(
             num_hidden_layers_override=num_hidden_layers,
             require_post_norm=require_post_norm,
             prefix=prefix,
-            feature_sample_layers=feature_sample_layers,
         )
 
     msg = f"Unsupported vision config: {type(vision_config)}"

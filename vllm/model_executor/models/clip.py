@@ -21,7 +21,8 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal.utils import (cached_get_tokenizer,
                                    consecutive_placeholder_ranges,
-                                   repeat_and_pad_placeholder_tokens)
+                                   repeat_and_pad_placeholder_tokens,
+                                   resolve_visual_encoder_outputs)
 from vllm.sequence import SequenceData
 
 from .utils import get_vit_attn_backend
@@ -371,15 +372,10 @@ class CLIPEncoder(nn.Module):
                  config: CLIPVisionConfig,
                  quant_config: Optional[QuantizationConfig] = None,
                  num_hidden_layers_override: Optional[int] = None,
-                 prefix: str = "",
-                 feature_sample_layers: Optional[list] = None) -> None:
+                 prefix: str = "") -> None:
         super().__init__()
 
         self.config = config
-
-        # Feature sample layers need to be indices from 0 ->  # encoder layers
-        self.feature_sample_layers = (
-            feature_sample_layers if feature_sample_layers is not None else [])
 
         if num_hidden_layers_override is None:
             num_hidden_layers = config.num_hidden_layers
@@ -393,16 +389,21 @@ class CLIPEncoder(nn.Module):
             for layer_idx in range(num_hidden_layers)
         ])
 
-    def forward(self, inputs_embeds: torch.Tensor):
+    def forward(
+        self, inputs_embeds: torch.Tensor, return_all_hidden_states: bool
+    ) -> Union[torch.Tensor, list[torch.Tensor]]:
         hidden_states_pool = []
         hidden_states = inputs_embeds
 
-        for layer_idx, encoder_layer in enumerate(self.layers):
+        for encoder_layer in self.layers:
             hidden_states = encoder_layer(hidden_states)
-            if layer_idx in self.feature_sample_layers:
+            if return_all_hidden_states:
                 hidden_states_pool.append(hidden_states)
-
-        return hidden_states, hidden_states_pool
+        # If we have multiple feature sample layers, we return all hidden
+        # states in order and grab the ones we need by index.
+        if return_all_hidden_states:
+            return hidden_states_pool
+        return hidden_states
 
 
 class CLIPVisionTransformer(nn.Module):
@@ -413,8 +414,7 @@ class CLIPVisionTransformer(nn.Module):
                  *,
                  num_hidden_layers_override: Optional[int] = None,
                  require_post_norm: Optional[bool] = None,
-                 prefix: str = "",
-                 feature_sample_layers: Optional[list] = None) -> None:
+                 prefix: str = "") -> None:
         super().__init__()
 
         self.config = config
@@ -425,15 +425,12 @@ class CLIPVisionTransformer(nn.Module):
         # NOTE: This typo of "layrnorm" is not fixed on purpose to match
         # the original transformers code and name of the model weights.
         self.pre_layrnorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
-        self.feature_sample_layers = (
-            feature_sample_layers if feature_sample_layers is not None else [])
 
         self.encoder = CLIPEncoder(
             config=config,
             quant_config=quant_config,
             num_hidden_layers_override=num_hidden_layers_override,
-            prefix=f"{prefix}.encoder",
-            feature_sample_layers=feature_sample_layers)
+            prefix=f"{prefix}.encoder")
 
         num_hidden_layers = config.num_hidden_layers
         if len(self.encoder.layers) > config.num_hidden_layers:
@@ -455,22 +452,27 @@ class CLIPVisionTransformer(nn.Module):
     def forward(
         self,
         pixel_values: torch.Tensor,
+        feature_sample_layers: Optional[list[int]] = None,
     ) -> torch.Tensor:
 
         hidden_states = self.embeddings(pixel_values)
         hidden_states = self.pre_layrnorm(hidden_states)
-        encoder_outputs, hs_pool = self.encoder(inputs_embeds=hidden_states)
 
-        if self.feature_sample_layers and self.post_layernorm is not None:
-            encoder_outputs = self.post_layernorm(encoder_outputs)
+        return_all_hidden_states = feature_sample_layers is not None
 
-        elif self.feature_sample_layers:
-            # Apply normalization if the last layer is one of the feature sample
-            # layers; otherwise don't, since it's not stacked into the output
-            if self.post_layernorm is not None and len(
-                    self.encoder.layers) - 1 in self.feature_sample_layers:
-                hs_pool[-1] = self.post_layernorm(encoder_outputs)
-            encoder_outputs = torch.cat(hs_pool, dim=-1)
+        # Produces either the last layer output or all of the hidden states,
+        # depending on if we have feature_sample_layers or not
+        encoder_outputs = self.encoder(
+            inputs_embeds=hidden_states,
+            return_all_hidden_states=return_all_hidden_states)
+
+        # Handle post-norm (if applicable) and stacks feature layers if needed
+        encoder_outputs = resolve_visual_encoder_outputs(
+            encoder_outputs,
+            feature_sample_layers,
+            self.post_layernorm,
+            len(self.encoder.layers),
+        )
 
         return encoder_outputs
 
@@ -486,19 +488,21 @@ class CLIPVisionModel(nn.Module):
                  *,
                  num_hidden_layers_override: Optional[int] = None,
                  require_post_norm: Optional[bool] = None,
-                 prefix: str = "",
-                 feature_sample_layers: Optional[list] = None) -> None:
+                 prefix: str = "") -> None:
         super().__init__()
         self.vision_model = CLIPVisionTransformer(
             config=config,
             quant_config=quant_config,
             num_hidden_layers_override=num_hidden_layers_override,
             require_post_norm=require_post_norm,
-            prefix=f"{prefix}.vision_model",
-            feature_sample_layers=feature_sample_layers)
+            prefix=f"{prefix}.vision_model")
 
-    def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
-        return self.vision_model(pixel_values)
+    def forward(
+            self,
+            pixel_values: torch.Tensor,
+            feature_sample_layers: Optional[list[int]] = None) -> torch.Tensor:
+        return self.vision_model(pixel_values,
+                                 feature_sample_layers=feature_sample_layers)
 
     @property
     def device(self):
