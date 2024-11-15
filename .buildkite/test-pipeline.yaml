@@ -313,14 +313,15 @@ steps:
 
 #####  models test  #####
 
-- label: Basic Models Test # 10min
+- label: Basic Models Test # 30min
   source_file_dependencies:
   - vllm/
   - tests/models
   commands:
     - pip install -e ./plugins/vllm_add_dummy_model
     - pytest -v -s models/test_oot_registration.py # it needs a clean process
-    - pytest -v -s models/*.py --ignore=models/test_oot_registration.py
+    - pytest -v -s models/test_registry.py
+    - pytest -v -s models/test_initialization.py
 
 - label: Language Models Test (Standard) # 42min
   #mirror_hardwares: [amd]
