@@ -9,9 +9,8 @@
 """
 import threading
 import time
-from collections import deque
 from concurrent.futures import ThreadPoolExecutor
-from typing import Deque, List, Optional, Union
+from typing import Dict, List, Optional, Union
 from copy import deepcopy
 
 import torch
@@ -69,6 +68,9 @@ class BrokenPipeException(Exception):
     def __init__(self, message):
         self.message = message
         super().__init__(self.message)
+    
+    
+Metadata = Dict[str, Optional[torch.Tensor]]
 
 
 class PyNcclPipe:
@@ -97,10 +99,8 @@ class PyNcclPipe:
             rank = self.kv_rank,
             world_size = self.kv_parallel_size
         )
-        # add a barrier to make sure all ranks are ready
+        # add a barrier to make sure the connection is initiated properly
         self.group.barrier()
-        self.metadata_send_func, self.metadata_recv_func = \
-            self._get_metadata_send_recv_impl(self.group)
         self.device_send_func, self.device_recv_func = \
             self._get_device_send_recv_impl(self.group)
         # set target rank
@@ -116,13 +116,6 @@ class PyNcclPipe:
 
         self.none_tensor = torch.tensor([NONE_INT], device=self.device)
 
-        # On-device tensors to be reused for recv
-        self.rcv_metadata_buffer = torch.zeros(self.METADATA_LENGTH,
-                                               dtype=self.METADATA_DTYPE,
-                                               device="cpu")
-
-    def _get_metadata_send_recv_impl(self, group: StatelessProcessGroup):
-        return group.send, group.recv
     
     def _get_device_send_recv_impl(self, group: StatelessProcessGroup):
         if self.config.kv_buffer_device == "cuda":
@@ -134,7 +127,7 @@ class PyNcclPipe:
             comm.disabled = False
             send, recv = comm.send, comm.recv
         else:
-            # use torch c10store for send / recv
+            # use cpu communication
             send = group.send
             recv = group.recv
 
@@ -146,7 +139,7 @@ class PyNcclPipe:
         else:
             return "cpu"
 
-    def _make_metadata(self, tensor: torch.Tensor) -> torch.Tensor:
+    def _make_metadata(self, tensor: Optional[torch.Tensor]) -> Metadata:
         """Create the metadata on based on the input tensor, and move it to GPU.
         The metadata's length is `TorchDistributedPipe.METADATA_LENGTH`.
 
@@ -165,19 +158,16 @@ class PyNcclPipe:
         Returns:
             - metadata: the metadata tensor, on self.device
         """
-        buffer = torch.empty(self.METADATA_LENGTH,
-                             dtype=self.METADATA_DTYPE,
-                             device="cpu")
-        buffer[0] = DTYPE2INT[tensor.dtype]
-        ndims = len(tensor.shape)
-        buffer[1] = len(tensor.shape)
-        buffer[2:2 + ndims] = torch.tensor(tensor.shape,
-                                           dtype=self.METADATA_DTYPE,
-                                           device="cpu")
-        return buffer.to(self.device)
+        if tensor is None:
+            return {"dtype": None, "shape": None}
+        else:
+            return {
+                "dtype": tensor.dtype,
+                "shape": tensor.shape
+            }
 
     def _prepare_recv_buffer(self,
-                             d_metadata_buffer: torch.Tensor) -> torch.Tensor:
+                             metadata: Metadata) -> torch.Tensor:
         """Create a buffer to receive the tensor based on the metadata.
 
         Parameters:
@@ -186,16 +176,13 @@ class PyNcclPipe:
         Returns:
             - buffer: the buffer tensor to receive the tensor, on self.device
         """
-        h_buffer = d_metadata_buffer.cpu().numpy()
-        dtype = INT2DTYPE[h_buffer[0]]
-        ndims = h_buffer[1]
-        shape = tuple(h_buffer[2:2 + ndims])
-        return torch.empty(shape, dtype=dtype, device=self.device)
+        return torch.empty(metadata["shape"], 
+                           dtype=metadata["dtype"], device=self.device)
 
-    def _send_metadata(self, d_metadata_buffer: torch.Tensor):
+    def _send_metadata(self, metadata):
         """Send the metadata buffer to the target rank.
         """
-        self.metadata_send_func(d_metadata_buffer, self.target_rank_for_send)
+        self.group.send_obj(metadata, self.target_rank_for_send)
 
     def _recv_metadata(self) -> torch.Tensor:
         """Receive the metadata buffer from the target rank.
@@ -208,14 +195,11 @@ class PyNcclPipe:
             race conditions during sending/receiving. Therefore, the metadata
             buffer can be reused
         """
-        self.metadata_recv_func(
-            self.rcv_metadata_buffer, 
+        return self.group.recv_obj(
             self.target_rank_for_recv
         )
 
-        return self.rcv_metadata_buffer
-
-    def _send_impl(self, tensor):
+    def _send_impl(self, tensor: Optional[torch.Tensor]) -> None:
         """
         The actual implementation of sending the tensor to the target rank.
         This function will first send the metadata, and then send the tensor.
@@ -226,9 +210,11 @@ class PyNcclPipe:
 
         metadata = self._make_metadata(tensor)
         self._send_metadata(metadata)
-        self.device_send_func(tensor.to(self.device), self.target_rank_for_send)
+        if tensor is not None:
+            self.device_send_func(tensor.to(self.device), 
+                                  self.target_rank_for_send)
 
-    def _recv_impl(self) -> torch.Tensor:
+    def _recv_impl(self) -> Optional[torch.Tensor]:
         """
         The actual implementation of receiving the tensor from the target rank.
         This function will first receive the metadata, then receive the tensor.
@@ -239,18 +225,24 @@ class PyNcclPipe:
             - buffer: the received tensor, on self.device
         """
         print('recv_metadata...')
-        d_metadata = self._recv_metadata()
-        print('recv metadata done, receiving tensor ...')
-        buffer = self._prepare_recv_buffer(d_metadata)
+        metadata = self._recv_metadata()
+        print('recv metadata done')
+        if metadata["dtype"] is None:
+            return None
+        print('receiving tensor ...')
+        buffer = self._prepare_recv_buffer(metadata)
         self.device_recv_func(buffer, self.target_rank_for_recv)
         print('recv tensor done.')
 
         return buffer
 
-    def send_tensor_wrapper(self, tensor):
+    def send_tensor_wrapper(
+        self, 
+        tensor: Optional[torch.Tensor],
+        tensor_size: int
+    ) -> None:
         try:
             """Wrapper for send_tensor_dict"""
-            tensor_size = tensor.element_size() * tensor.numel()
             self._send_impl(tensor)
 
             with self.buffer_size_lock:
@@ -277,13 +269,9 @@ class PyNcclPipe:
             self.transport_thread = ThreadPoolExecutor(max_workers=1)
 
         if tensor is None:
-            tensor = self.none_tensor
-
-        tensor_size = tensor.element_size() * tensor.numel()
-
-        assert (
-            0 < len(tensor.shape) < self.MAX_TENSOR_DIMENSIONS
-        ), f"Only support dimensions within 1-{self.MAX_TENSOR_DIMENSIONS}"
+            tensor_size = 0
+        else:
+            tensor_size = tensor.element_size() * tensor.numel()
 
         self.block_if_full()
 
@@ -293,6 +281,7 @@ class PyNcclPipe:
         self.transport_thread.submit(
             self.send_tensor_wrapper,
             tensor,
+            tensor_size,
         )
 
     def recv_tensor(self) -> Optional[torch.Tensor]:
@@ -312,15 +301,7 @@ class PyNcclPipe:
             traceback.print_exc()
             raise e
         
-        if tensor.numel() == 1:
-            print(tensor.item())
-            print(tensor.sum())
-            print(tensor)
-
-        if tensor.numel() == 1 and tensor.item() == NONE_INT:
-            return None
-        else:
-            return tensor
+        return tensor
 
     def close(self):
         """Close the pipe and release the resources."""

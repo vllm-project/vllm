@@ -37,14 +37,9 @@ def test_run(my_rank, pipe):
     assert torch.allclose(x, x2)
     assert torch.allclose(y, y2)
 
-    
-def barrier(my_rank):
-    torch.distributed.barrier()
 
 
 def stress_test(my_rank, pipe):
-
-    # barrier
 
     torch.distributed.barrier()
 
@@ -82,29 +77,18 @@ def stress_test(my_rank, pipe):
             pipe.send_tensor(tensors[3 * i + 1])
             pipe.send_tensor(tensors[3 * i + 2])
         else:
-            print('receiving x')
             x = pipe.recv_tensor()
-            print('receiving mean')
             mean = pipe.recv_tensor()
-            print('receiving std')
             std = pipe.recv_tensor()
-            try:
-                if x is None:
-                    assert mean is None
-                    assert std is None
-                else:
-                    assert torch.allclose(x, tensors[3 * i])
-                    assert x.mean() == mean[0]
-                    assert x.std() == std[0]
-            except Exception as e:
-                print("Error at iteration", i, "rank", my_rank)
-                print(x)
-                print(x.numel())
-                print(x.item() == -150886311)
-                raise e
             
-        if i == 80:
-            break
+            if x is None:
+                assert mean is None
+                assert std is None
+            else:
+                assert torch.allclose(x, tensors[3 * i])
+                assert x.mean() == mean[0]
+                assert x.std() == std[0]
+            
 
         torch.distributed.barrier()
 
@@ -177,7 +161,6 @@ if __name__ == "__main__":
     )
 
     test_run(my_rank, pipe)
-    # torch.distributed.barrier()
     stress_test(my_rank, pipe)
 
     # Use this function if you want to test the latency of pipe impl.
