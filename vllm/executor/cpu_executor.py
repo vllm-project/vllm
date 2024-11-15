@@ -71,10 +71,12 @@ class CPUExecutor(ExecutorBase):
         self.parallel_config = _verify_and_get_parallel_config(
             self.parallel_config)
 
-        if (self.scheduler_config.chunked_prefill_enabled
+        if ((self.scheduler_config.chunked_prefill_enabled
+             or self.cache_config.enable_prefix_caching)
                 and self.model_config.dtype == torch.half):
-            logger.warning("Chunked-prefill on the CPU backend only does not"
-                           " support fp16 for now, cast to bf16.")
+            logger.warning("chunked-prefill and prefix-cache on the CPU "
+                           "backend does not support fp16 for now,"
+                           " cast to bf16.")
             self.model_config.dtype = torch.bfloat16
 
 >>>>>>> 5980981e (fix test)

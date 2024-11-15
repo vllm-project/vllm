@@ -134,7 +134,8 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
         super().__init__()
         self.seq_group_metadata_list: List[SequenceGroupMetadata] = []
         self.runner = runner
-        self.chunked_prefill = runner.scheduler_config.chunked_prefill_enabled
+        self.chunked_prefill = (runner.scheduler_config.chunked_prefill_enabled
+                                or runner.cache_config.enable_prefix_caching)
         self.model_input_cls = self.runner._model_input_cls
         self.attn_backend = self.runner.attn_backend
         self.multi_modal_input_mapper = self.runner.multi_modal_input_mapper
@@ -284,6 +285,29 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
         context_len = seq_data.get_num_computed_tokens()
         if is_prompt:
             seq_len = min(seq_len, context_len + token_chunk_size)
+
+            # For prefix caching
+            prefix_cache_block_num = len(
+                seq_group_metadata.computed_block_nums)
+            if prefix_cache_block_num > 0:
+                prefix_cache_len = (prefix_cache_block_num *
+                                    self.runner.block_size)
+                if prefix_cache_len <= context_len:
+                    # We already passed the cache hit region,
+                    # so do normal computation.
+                    pass
+                elif context_len < prefix_cache_len < seq_len:
+                    # Partial hit. Compute the missing part.
+                    context_len = prefix_cache_len
+                    token_chunk_size = seq_len - context_len
+                elif seq_len <= prefix_cache_len:
+                    # Full hit. Only compute the last token to avoid
+                    # erroneous behavior. FIXME: Ideally we should directly
+                    # mark all tokens as computed in the scheduler and do not
+                    # schedule this sequence, so this case should not happen.
+                    context_len = seq_len - 1
+                    token_chunk_size = 1
+
             tokens = seq_data.get_token_ids()
             tokens = tokens[context_len:seq_len]
             token_positions = range(context_len, seq_len)
