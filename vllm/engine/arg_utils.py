@@ -272,10 +272,10 @@ class EngineArgs:
         parser.add_argument(
             '--allowed-local-media-path',
             type=str,
-            help="Allowing API requests to read local images or videos"
-            "from directories specified by the server file system."
-            "This is a security risk."
-            "Should only be enabled in trusted environments")
+            help="Allowing API requests to read local images or videos "
+            "from directories specified by the server file system. "
+            "This is a security risk. "
+            "Should only be enabled in trusted environments.")
         parser.add_argument('--download-dir',
                             type=nullable_str,
                             default=EngineArgs.download_dir,
@@ -340,7 +340,7 @@ class EngineArgs:
             'scaling factors. This should generally be supplied, when '
             'KV cache dtype is FP8. Otherwise, KV cache scaling factors '
             'default to 1.0, which may cause accuracy issues. '
-            'FP8_E5M2 (without scaling) is only supported on cuda version'
+            'FP8_E5M2 (without scaling) is only supported on cuda version '
             'greater than 11.8. On ROCm (AMD GPU), FP8_E4M3 is instead '
             'supported for common inference criteria.')
         parser.add_argument('--max-model-len',
@@ -446,9 +446,9 @@ class EngineArgs:
             'this argument can be seen as a virtual way to increase '
             'the GPU memory size. For example, if you have one 24 GB '
             'GPU and set this to 10, virtually you can think of it as '
-            'a 34 GB GPU. Then you can load a 13B model with BF16 weight,'
+            'a 34 GB GPU. Then you can load a 13B model with BF16 weight, '
             'which requires at least 26GB GPU memory. Note that this '
-            'requires fast CPU-GPU interconnect, as part of the model is'
+            'requires fast CPU-GPU interconnect, as part of the model is '
             'loaded from CPU memory to GPU memory on the fly in each '
             'model forward pass.')
         parser.add_argument(
@@ -467,7 +467,7 @@ class EngineArgs:
             '--num-gpu-blocks-override',
             type=int,
             default=None,
-            help='If specified, ignore GPU profiling result and use this number'
+            help='If specified, ignore GPU profiling result and use this number '
             'of GPU blocks. Used for testing preemption.')
         parser.add_argument('--max-num-batched-tokens',
                             type=int,
@@ -514,7 +514,7 @@ class EngineArgs:
         parser.add_argument('--hf-overrides',
                             type=json.loads,
                             default=EngineArgs.hf_overrides,
-                            help='Extra arguments for the HuggingFace config.'
+                            help='Extra arguments for the HuggingFace config. '
                             'This should be a JSON string that will be '
                             'parsed into a dictionary.')
         parser.add_argument('--enforce-eager',
@@ -572,7 +572,7 @@ class EngineArgs:
             '--mm-processor-kwargs',
             default=None,
             type=json.loads,
-            help=('Overrides for the multimodal input mapping/processing,'
+            help=('Overrides for the multimodal input mapping/processing, '
                   'e.g., image processor. For example: {"num_crops": 4}.'))
 
         # LoRA related configs
@@ -822,9 +822,9 @@ class EngineArgs:
             "of the provided names. The model name in the model "
             "field of a response will be the first name in this "
             "list. If not specified, the model name will be the "
-            "same as the `--model` argument. Noted that this name(s)"
+            "same as the `--model` argument. Noted that this name(s) "
             "will also be used in `model_name` tag content of "
-            "prometheus metrics, if multiple names provided, metrics"
+            "prometheus metrics, if multiple names provided, metrics "
             "tag will take the first one.")
         parser.add_argument('--qlora-adapter-name-or-path',
                             type=str,
