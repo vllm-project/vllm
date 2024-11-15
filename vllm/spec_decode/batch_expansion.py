@@ -353,6 +353,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         seq_data = seq_group_metadata.seq_data[seq_id]
         prompt_token_ids = seq_data.prompt_token_ids_array
         new_output_token_ids = [*seq_data.get_output_token_ids(), *token_ids]
+        mrope_position_delta = seq_data.mrope_position_delta
 
         new_seq_data_dict = {
             target_seq_id:
@@ -368,6 +369,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
         # the kv cache is filled by a previous batch in the batch expansion.
         for data in new_seq_data_dict.values():
             data.update_num_computed_tokens(data.get_len() - 1)
+            data.mrope_position_delta = mrope_position_delta
 
         return SequenceGroupMetadata(
             request_id=seq_group_metadata.request_id,
