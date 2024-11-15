@@ -1085,15 +1085,10 @@ class PixtralHFVisionModel(nn.Module):
             patch_embeds,
             attention_mask,
             position_embedding,
-            return_all_hidden_states=return_all_hidden_states,
-        )
+            return_all_hidden_states=return_all_hidden_states)
 
-        out = resolve_visual_encoder_outputs(
-            out,
-            feature_sample_layers,
-            None,
-            len(self.transformer.layers),
-        )
+        out = resolve_visual_encoder_outputs(out, feature_sample_layers, None,
+                                             self.config.num_hidden_layers)
 
         return out
 

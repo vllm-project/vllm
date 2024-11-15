@@ -397,7 +397,7 @@ def resolve_visual_encoder_outputs(
     encoder_outputs: Union[torch.Tensor, list[torch.Tensor]],
     feature_sample_layers: Optional[list[int]],
     post_layer_norm: Optional[torch.nn.LayerNorm],
-    num_layers: int,
+    max_possible_layers: int,
 ) -> torch.Tensor:
     """Given the outputs a visual encoder module that may correspond to the
     output of the last layer, or a list of hidden states to be stacked,
@@ -408,7 +408,7 @@ def resolve_visual_encoder_outputs(
         feature_sample_layers: Optional layer indices to grab from the encoder
             outputs; if provided, encoder outputs must be a list.
         post_layer_norm: Post norm to apply to the output of the encoder.
-        num_layers: Total of layers in the visual encoder.
+        max_possible_layers: Total layers in the fully loaded visual encoder.
 
     """
     if feature_sample_layers is None:
@@ -416,13 +416,18 @@ def resolve_visual_encoder_outputs(
             return post_layer_norm(encoder_outputs)
         return encoder_outputs
 
-    # Get the hidden states corresponding to the layer indices
+    # Get the hidden states corresponding to the layer indices.
+    # Negative values are relative to the full visual encoder,
+    # so offset them depending on how many layers were loaded.
+    offset = max_possible_layers - len(encoder_outputs)
     hs_pool = [
-        encoder_outputs[layer_idx] for layer_idx in feature_sample_layers
+        encoder_outputs[layer_idx]
+        if layer_idx >= 0 else encoder_outputs[layer_idx + offset]
+        for layer_idx in feature_sample_layers
     ]
 
     # Apply post-norm on the final hidden state if we are using it
-    uses_last_layer = ((num_layers - 1) in feature_sample_layers
+    uses_last_layer = ((len(hs_pool) - 1) in feature_sample_layers
                        or -1 in feature_sample_layers)
     if post_layer_norm is not None and uses_last_layer:
         hs_pool[-1] = post_layer_norm(encoder_outputs)

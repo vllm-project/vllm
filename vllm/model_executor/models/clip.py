@@ -468,11 +468,8 @@ class CLIPVisionTransformer(nn.Module):
 
         # Handle post-norm (if applicable) and stacks feature layers if needed
         encoder_outputs = resolve_visual_encoder_outputs(
-            encoder_outputs,
-            feature_sample_layers,
-            self.post_layernorm,
-            len(self.encoder.layers),
-        )
+            encoder_outputs, feature_sample_layers, self.post_layernorm,
+            self.config.num_hidden_layers)
 
         return encoder_outputs
 

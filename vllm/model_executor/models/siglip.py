@@ -570,11 +570,8 @@ class SiglipVisionTransformer(nn.Module):
 
         # Handle post-norm (if applicable) and stacks feature layers if needed
         encoder_outputs = resolve_visual_encoder_outputs(
-            encoder_outputs,
-            feature_sample_layers,
-            self.post_layernorm,
-            len(self.encoder.layers),
-        )
+            encoder_outputs, feature_sample_layers, self.post_layernorm,
+            self.config.num_hidden_layers)
 
         # TODO: add this back when pooled_output is used in inference.
         # if self.use_head:
