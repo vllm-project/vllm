@@ -11,7 +11,8 @@ import tempfile
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import Callable, Dict, List, Optional, Tuple, Type, TypeVar, Union
+from typing import (AbstractSet, Callable, Dict, List, Optional, Tuple, Type,
+                    TypeVar, Union)
 
 import cloudpickle
 import torch.nn as nn
@@ -303,8 +304,8 @@ class _ModelRegistry:
     # Keyed by model_arch
     models: Dict[str, _BaseRegisteredModel] = field(default_factory=dict)
 
-    def get_supported_archs(self) -> List[str]:
-        return list(self.models.keys())
+    def get_supported_archs(self) -> AbstractSet[str]:
+        return self.models.keys()
 
     def register_model(
         self,
