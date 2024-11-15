@@ -11,6 +11,8 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.gptq import GPTQLinearMethod
 from vllm.platforms import current_platform
 
+MIN_IPEX_VERSION = "2.5.0"
+
 
 class IPEXConfig(QuantizationConfig):
     """INT8 quantization config class using IPEX for the CPU/XPU backend,
@@ -128,15 +130,16 @@ class IPEXGPTQLinearMethod(GPTQLinearMethod):
 
         try:
             import intel_extension_for_pytorch as ipex
-            if ipex.__version__ < "2.5.0":
-                raise ImportError("intel_extension_for_pytorch version is "
-                                  "wrong. Please install "
-                                  "intel_extension_for_pytorch>=2.5.0.")
+            if ipex.__version__ < MIN_IPEX_VERSION:
+                raise ImportError(
+                    "intel_extension_for_pytorch version is "
+                    "wrong. Please install "
+                    f"intel_extension_for_pytorch>={MIN_IPEX_VERSION}.")
         except ImportError as err:
             raise ImportError(
                 "Please install "
-                "intel_extension_for_pytorch>=2.5.0 via "
-                "`pip install intel_extension_for_pytorch>=2.5.0`"
+                f"intel_extension_for_pytorch>={MIN_IPEX_VERSION} via "
+                f"`pip install intel_extension_for_pytorch>={MIN_IPEX_VERSION}`"
                 " to use IPEX-AWQ linear method.") from err
         # Using the compute dtype (lowp_mode) as INT8 to leverage instructions
         # with better performance.
@@ -193,15 +196,16 @@ class IPEXAWQLinearMethod(AWQLinearMethod):
 
         try:
             import intel_extension_for_pytorch as ipex
-            if ipex.__version__ < "2.5.0":
-                raise ImportError("intel_extension_for_pytorch version is "
-                                  "wrong. Please install "
-                                  "intel_extension_for_pytorch>=2.5.0.")
+            if ipex.__version__ < MIN_IPEX_VERSION:
+                raise ImportError(
+                    "intel_extension_for_pytorch version is "
+                    "wrong. Please install "
+                    f"intel_extension_for_pytorch>={MIN_IPEX_VERSION}.")
         except ImportError as err:
             raise ImportError(
                 "Please install "
-                "intel_extension_for_pytorch>=2.5.0 via "
-                "`pip install intel_extension_for_pytorch>=2.5.0`"
+                f"intel_extension_for_pytorch>={MIN_IPEX_VERSION} via "
+                f"`pip install intel_extension_for_pytorch>={MIN_IPEX_VERSION}`"
                 " to use IPEX-AWQ linear method.") from err
 
         # Using the compute dtype (lowp_mode) as INT8 to leverage instructions
