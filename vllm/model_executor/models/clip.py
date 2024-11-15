@@ -368,11 +368,13 @@ class CLIPEncoder(nn.Module):
         config: CLIPConfig
     """
 
-    def __init__(self,
-                 config: CLIPVisionConfig,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 num_hidden_layers_override: Optional[int] = None,
-                 prefix: str = "") -> None:
+    def __init__(
+        self,
+        config: CLIPVisionConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+        num_hidden_layers_override: Optional[int] = None,
+        prefix: str = "",
+    ) -> None:
         super().__init__()
 
         self.config = config
@@ -381,7 +383,6 @@ class CLIPEncoder(nn.Module):
             num_hidden_layers = config.num_hidden_layers
         else:
             num_hidden_layers = num_hidden_layers_override
-
         self.layers = nn.ModuleList([
             CLIPEncoderLayer(config=config,
                              quant_config=quant_config,
@@ -408,13 +409,15 @@ class CLIPEncoder(nn.Module):
 
 class CLIPVisionTransformer(nn.Module):
 
-    def __init__(self,
-                 config: CLIPVisionConfig,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 *,
-                 num_hidden_layers_override: Optional[int] = None,
-                 require_post_norm: Optional[bool] = None,
-                 prefix: str = "") -> None:
+    def __init__(
+        self,
+        config: CLIPVisionConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+        *,
+        num_hidden_layers_override: Optional[int] = None,
+        require_post_norm: Optional[bool] = None,
+        prefix: str = "",
+    ) -> None:
         super().__init__()
 
         self.config = config
@@ -479,13 +482,15 @@ class CLIPVisionModel(nn.Module):
     config_class = CLIPVisionConfig
     main_input_name = "pixel_values"
 
-    def __init__(self,
-                 config: CLIPVisionConfig,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 *,
-                 num_hidden_layers_override: Optional[int] = None,
-                 require_post_norm: Optional[bool] = None,
-                 prefix: str = "") -> None:
+    def __init__(
+        self,
+        config: CLIPVisionConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+        *,
+        num_hidden_layers_override: Optional[int] = None,
+        require_post_norm: Optional[bool] = None,
+        prefix: str = "",
+    ) -> None:
         super().__init__()
         self.vision_model = CLIPVisionTransformer(
             config=config,
@@ -495,11 +500,11 @@ class CLIPVisionModel(nn.Module):
             prefix=f"{prefix}.vision_model")
 
     def forward(
-            self,
-            pixel_values: torch.Tensor,
-            feature_sample_layers: Optional[list[int]] = None) -> torch.Tensor:
-        return self.vision_model(pixel_values,
-                                 feature_sample_layers=feature_sample_layers)
+        self,
+        pixel_values: torch.Tensor,
+        feature_sample_layers: Optional[list[int]] = None,
+    ) -> torch.Tensor:
+        return self.vision_model(pixel_values, feature_sample_layers)
 
     @property
     def device(self):
