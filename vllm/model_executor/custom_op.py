@@ -1,4 +1,3 @@
-from functools import lru_cache
 from typing import Dict, Type
 
 import torch.nn as nn
@@ -8,6 +7,7 @@ from vllm.config import CompilationLevel
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import print_warning_once
+from vllm.plugins import get_current_vllm_config
 
 logger = init_logger(__name__)
 
@@ -101,15 +101,17 @@ class CustomOp(nn.Module):
 
         return (CustomOp.default_on() or enabled) and not disabled
 
-    # On by default if VLLM_TORCH_COMPILE_LEVEL < CompilationLevel.PIECEWISE
-    # Specifying 'all' or 'none' in VLLM_CUSTOM_OPS takes precedence.
     @staticmethod
-    @lru_cache
     def default_on() -> bool:
+        """
+        On by default if level < CompilationLevel.PIECEWISE
+        Specifying 'all' or 'none' in VLLM_CUSTOM_OPS takes precedence.
+        """
+        vllm_config = get_current_vllm_config()
         count_none = envs.VLLM_CUSTOM_OPS.count("none")
         count_all = envs.VLLM_CUSTOM_OPS.count("all")
         assert count_none + count_all <= 1, "Can only specify 'none' or 'all'"
-        return envs.VLLM_TORCH_COMPILE_LEVEL < CompilationLevel.PIECEWISE and \
+        return vllm_config.compilation_config.level < CompilationLevel.PIECEWISE and \
             not count_none > 0 or count_all > 0
 
     # Dictionary of all custom ops (classes, indexed by registered name).
