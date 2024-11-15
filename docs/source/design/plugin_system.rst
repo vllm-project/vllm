@@ -1,3 +1,5 @@
+.. _plugin_system:
+
 vLLM's Plugin System
 =======================
 

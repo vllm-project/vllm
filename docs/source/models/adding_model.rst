@@ -126,16 +126,4 @@ If your model imports modules that initialize CUDA, consider instead lazy-import
     If your model is a multimodal model, make sure the model class implements the :class:`~vllm.model_executor.models.interfaces.SupportsMultiModal` interface.
     Read more about that :ref:`here <enabling_multimodal_inputs>`.
 
-If you are running api server with :code:`vllm serve <args>`, you can wrap the entrypoint with the following code:
-
-.. code-block:: python
-
-    from vllm import ModelRegistry
-    from your_code import YourModelForCausalLM
-    ModelRegistry.register_model("YourModelForCausalLM", YourModelForCausalLM)
-
-    if __name__ == '__main__':
-        import runpy
-        runpy.run_module('vllm.entrypoints.openai.api_server', run_name='__main__')
-
-Save the above code in a file and run it with :code:`python your_file.py <args>`.
+The recommended way is to place these code snippets in a vLLM plugin, so that it works for various features of vLLM like distributed inference, and API server. For more information, see :ref:`plugin_system`.
