@@ -31,6 +31,21 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+_PAD_SLOT_ID = 1_000_000_000
+
+@dataclass
+class PrefillData:
+    request_ids: List
+    token_ids: List
+    position_ids: List
+    attn_metadata: List
+
+    def zipped(self):
+        return zip(self.request_ids,
+                   self.token_ids,
+                   self.position_ids, 
+                   self.attn_metadata)
+
 class TPUModelRunner:
 
     def __init__(
@@ -49,8 +64,6 @@ class TPUModelRunner:
         self.speculative_config = vllm_config.speculative_config
         self.prompt_adapter_config = vllm_config.prompt_adapter_config
         self.observability_config = vllm_config.observability_config
-
-        print(f"{self.scheduler_config.max_num_seqs=}")
 
         model_config = self.model_config
         cache_config = self.cache_config
@@ -77,9 +90,7 @@ class TPUModelRunner:
         self.num_kv_heads = model_config.get_num_kv_heads(parallel_config)
         self.head_size = model_config.get_head_size()
 
-        # Lazy initialization
-        # self.model: nn.Module  # Set after load_model
-        # List[k_cache, v_cache]s
+        # List[k_cache, v_cache]
         self.kv_caches: List[Tuple[torch.Tensor, torch.Tensor]] = []
 
         # Request states.
@@ -93,12 +104,11 @@ class TPUModelRunner:
             pin_memory=self.pin_memory,
         )
 
-        self.input_ids = torch.zeros(self.max_num_tokens,
-                                     dtype=torch.int32,
-                                     device=self.device)
-        self.positions = torch.zeros(self.max_num_tokens,
-                                     dtype=torch.int64,
-                                     device=self.device)
+        self.prefill_positions = torch.Tensor(
+            range(self.max_model_len),
+            dtype=torch.int64,
+            device="cpu",
+        )
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         # Remove stopped requests from the cached states.
@@ -164,148 +174,196 @@ class TPUModelRunner:
 
         # Update the cached states of the resumed requests.
         for req_data in scheduler_output.scheduled_resumed_reqs:
-            req_id = req_data.req_id
-            req_state = self.requests[req_id]
-
-            req_state.block_ids = req_data.block_ids
-            req_state.num_computed_tokens = req_data.num_computed_tokens
-            req_ids_to_add.append(req_id)
-
-        # Add the new or resumed requests to the persistent batch.
-        # The smaller empty indices are filled first.
-        removed_req_indices = sorted(removed_req_indices, reverse=True)
-        for req_id in req_ids_to_add:
-            req_state = self.requests[req_id]
-            if removed_req_indices:
-                # Fill the empty index.
-                req_index = removed_req_indices.pop()
-            else:
-                # Append to the end.
-                req_index = None
-            self.input_batch.add_request(req_state, req_index)
+            # TODO: handle preemption.
+            assert False
 
         # Condense the batched states if there are empty indices.
+        removed_req_indices = sorted(removed_req_indices, reverse=True)
         if removed_req_indices:
             self.input_batch.condense(removed_req_indices)
+
+        # Add the new or resumed requests to the persistent batch.
+        # These are added at the end after the bacth is condensed.
+        self.num_prefills = len(req_ids_to_add)
+        for req_id in req_ids_to_add:
+            req_state = self.requests[req_id]
+            self.input_batch.add_request(req_state, None)
+
 
     def _prepare_inputs(self, scheduler_output: "SchedulerOutput"):
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
+
         num_reqs = self.input_batch.num_reqs
-        assert num_reqs > 0
+        num_decodes = self.input_batch.num_decodes
+        num_prefills = self.input_batch.num_prefills
+        
+        assert num_decodes + num_prefills > 0
 
-        # OPTIMIZATION: Start copying the block table first.
-        # This way, we can overlap the copy with the following CPU operations.
-        self.input_batch.block_table[:num_reqs].copy_(
-            self.input_batch.block_table_cpu_tensor[:num_reqs],
-            non_blocking=True)
-
+        
         # Get the number of scheduled tokens for each request.
         # TODO: The Python loop can be slow. Optimize.
         num_scheduled_tokens = []
         max_num_scheduled_tokens = 0
-        for req_id in self.input_batch.req_ids[:num_reqs]:
+        for idx, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
             num_tokens = scheduler_output.num_scheduled_tokens[req_id]
             num_scheduled_tokens.append(num_tokens)
             max_num_scheduled_tokens = max(max_num_scheduled_tokens,
                                            num_tokens)
+            
+            # Assert Decodes Are Decodes.
+            if idx < num_decodes:
+                assert num_scheduled_tokens == 1
+
         num_scheduled_tokens = np.array(num_scheduled_tokens, dtype=np.int32)
         assert max_num_scheduled_tokens > 0
 
-        # Get request indices.
-        # E.g., [2, 5, 3] -> [0, 0, 1, 1, 1, 1, 1, 2, 2, 2]
-        indices = np.arange(num_reqs)
-        req_indices = np.repeat(indices, num_scheduled_tokens)
 
-        # Get batched arange.
-        # E.g., [2, 5, 3] -> [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
-        arange_matrix = np.tile(np.arange(max_num_scheduled_tokens),
-                                (num_reqs, 1))
-        mask = arange_matrix < num_scheduled_tokens[:, np.newaxis]
-        arange = arange_matrix[mask]
+        # PREFILLS
+        prefill_request_ids = []
+        prefill_token_ids = []
+        prefill_position_ids = []
+        prefill_attn_metadata = []
 
-        # Get positions.
-        positions = torch.empty((total_num_scheduled_tokens, ),
-                                dtype=torch.int32,
-                                device="cpu",
-                                pin_memory=self.pin_memory)
-        positions_np = positions.numpy()
-        np.add(self.input_batch.num_computed_tokens_cpu[req_indices],
-               arange,
-               out=positions_np)
+        for prefill_idx in range(num_decodes, num_prefills + num_decodes):
+            
+            # Pad to power of 2.
+            prefill_len = num_scheduled_tokens[prefill_idx]
+            padded_prefill_len = _get_padded_prefill_len(prefill_len)
+            assert padded_prefill_len < self.max_model_len
+            token_ids = self.input_batch.token_ids_cpu[prefill_idx, :padded_prefill_len]
+            positions = self.prefill_positions[:padded_prefill_len]
 
-        # Get token indices.
-        # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
-        # -> [0, 1, M, M + 1, M + 2, M + 3, M + 4, 2 * M, 2 * M + 1, 2 * M + 2]
-        # where M is the max_model_len.
-        token_indices = positions_np + req_indices * self.max_model_len
-        token_indices = torch.from_numpy(token_indices)
-        input_ids = torch.empty((total_num_scheduled_tokens, ),
-                                dtype=torch.int32,
-                                device="cpu",
-                                pin_memory=self.pin_memory)
-        torch.index_select(torch.from_numpy(
-            self.input_batch.token_ids_cpu).flatten(),
-                           0,
-                           token_indices,
-                           out=input_ids)
+            # Block number / offsets for every token.
+            block_numbers = self.input_batch.block_table_cpu_tensor[prefill_idx, positions // self.block_size]
+            block_offsets = positions % self.block_size
+            slot_mapping = block_numbers * self.block_size + block_offsets
+            slot_mapping[prefill_len:] = _PAD_SLOT_ID
+            
+            attn_metadata = PallasAttentionMetadata(
+                is_prompt=True,
+                slot_mapping=slot_mapping.to(self.device),
+                block_tables=None,
+                context_lens=None,
+            )
 
-        # Calculate the slot mapping.
-        block_numbers = self.input_batch.block_table_cpu_tensor.flatten()[
-            token_indices // self.block_size]
-        block_offsets = token_indices % self.block_size
-        slot_mapping = torch.empty((total_num_scheduled_tokens, ),
-                                   dtype=torch.int32,
-                                   device="cpu",
-                                   pin_memory=self.pin_memory)
-        torch.add(block_numbers * self.block_size,
-                  block_offsets,
-                  out=slot_mapping)
+            prefill_request_ids.append(self.input_batch.req_ids[prefill_idx])
+            prefill_token_ids.append(token_ids.to(self.device))
+            prefill_position_ids.append(positions.to(self.device))
+            prefill_attn_metadata.append(attn_metadata)
 
-        # Prepare the attention metadata.
-        query_start_loc = torch.empty((num_reqs + 1, ),
-                                      dtype=torch.int32,
-                                      device="cpu",
-                                      pin_memory=self.pin_memory)
-        query_start_loc_np = query_start_loc.numpy()
-        query_start_loc_np[0] = 0
-        np.cumsum(num_scheduled_tokens, out=query_start_loc_np[1:])
-
-        seq_lens = (self.input_batch.num_computed_tokens_cpu[:num_reqs] +
-                    num_scheduled_tokens)
-        max_seq_len = seq_lens.max()
-        seq_start_loc = torch.empty((num_reqs + 1, ),
-                                    dtype=torch.int32,
-                                    device="cpu",
-                                    pin_memory=self.pin_memory)
-        seq_start_loc_np = seq_start_loc.numpy()
-        seq_start_loc_np[0] = 0
-        np.cumsum(seq_lens, out=seq_start_loc_np[1:])
-
-        self.input_ids[:total_num_scheduled_tokens].copy_(input_ids,
-                                                          non_blocking=True)
-        self.positions[:total_num_scheduled_tokens].copy_(positions,
-                                                          non_blocking=True)
-
-        query_start_loc = query_start_loc.to(self.device, non_blocking=True)
-        seq_start_loc = seq_start_loc.to(self.device, non_blocking=True)
-        slot_mapping = slot_mapping.to(self.device, non_blocking=True).long()
-        attn_metadata = PallasAttentionMetadata(
-            num_actual_tokens=total_num_scheduled_tokens,
-            max_query_len=max_num_scheduled_tokens,
-            query_start_loc=query_start_loc,
-            max_seq_len=max_seq_len,
-            seq_start_loc=seq_start_loc,
-            block_table=self.input_batch.block_table[:num_reqs],
-            slot_mapping=slot_mapping,
+        prefill_data = PrefillData(
+            request_ids=prefill_request_ids,
+            token_ids=prefill_token_ids,
+            position_ids=prefill_position_ids,
+            attn_metadata=prefill_attn_metadata,
         )
-        # NOTE(woosuk): Due to chunked prefills, there can be at most 1 partial
-        # request in the batch. While we should not sample any token from this
-        # partial request, we do so for simplicity. We will ignore the sampled
-        # token from the partial request.
-        # TODO: Support prompt logprobs.
-        logits_indices = query_start_loc[1:] - 1
-        return attn_metadata, logits_indices
+
+        return prefill_data, None
+
+        # DECODES
+
+
+        # OPTIMIZATION: Start copying the block table first.
+        # This way, we can overlap the copy with the following CPU operations.
+        # self.input_batch.block_table[:num_decodes].copy_(
+        #     self.input_batch.block_table_cpu_tensor[:num_decodes],
+        #     non_blocking=True)
+
+        # # Get request indices.
+        # # E.g., [2, 5, 3] -> [0, 0, 1, 1, 1, 1, 1, 2, 2, 2]
+        # indices = np.arange(num_reqs)
+        # req_indices = np.repeat(indices, num_scheduled_tokens)
+
+        # # Get batched arange.
+        # # E.g., [2, 5, 3] -> [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
+        # arange_matrix = np.tile(np.arange(max_num_scheduled_tokens),
+        #                         (num_reqs, 1))
+        # mask = arange_matrix < num_scheduled_tokens[:, np.newaxis]
+        # arange = arange_matrix[mask]
+
+        # # Get positions.
+        # positions = torch.empty((total_num_scheduled_tokens, ),
+        #                         dtype=torch.int32,
+        #                         device="cpu",
+        #                         pin_memory=self.pin_memory)
+        # positions_np = positions.numpy()
+        # np.add(self.input_batch.num_computed_tokens_cpu[req_indices],
+        #        arange,
+        #        out=positions_np)
+
+        # # Get token indices.
+        # # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
+        # # -> [0, 1, M, M + 1, M + 2, M + 3, M + 4, 2 * M, 2 * M + 1, 2 * M + 2]
+        # # where M is the max_model_len.
+        # token_indices = positions_np + req_indices * self.max_model_len
+        # token_indices = torch.from_numpy(token_indices)
+        # input_ids = torch.empty((total_num_scheduled_tokens, ),
+        #                         dtype=torch.int32,
+        #                         device="cpu",
+        #                         pin_memory=self.pin_memory)
+        # torch.index_select(torch.from_numpy(
+        #     self.input_batch.token_ids_cpu).flatten(),
+        #                    0,
+        #                    token_indices,
+        #                    out=input_ids)
+
+        # # Calculate the slot mapping.
+        # block_numbers = self.input_batch.block_table_cpu_tensor.flatten()[
+        #     token_indices // self.block_size]
+        # block_offsets = token_indices % self.block_size
+        # slot_mapping = torch.empty((total_num_scheduled_tokens, ),
+        #                            dtype=torch.int32,
+        #                            device="cpu",
+        #                            pin_memory=self.pin_memory)
+        # torch.add(block_numbers * self.block_size,
+        #           block_offsets,
+        #           out=slot_mapping)
+
+        # # Prepare the attention metadata.
+        # query_start_loc = torch.empty((num_reqs + 1, ),
+        #                               dtype=torch.int32,
+        #                               device="cpu",
+        #                               pin_memory=self.pin_memory)
+        # query_start_loc_np = query_start_loc.numpy()
+        # query_start_loc_np[0] = 0
+        # np.cumsum(num_scheduled_tokens, out=query_start_loc_np[1:])
+
+        # seq_lens = (self.input_batch.num_computed_tokens_cpu[:num_reqs] +
+        #             num_scheduled_tokens)
+        # max_seq_len = seq_lens.max()
+        # seq_start_loc = torch.empty((num_reqs + 1, ),
+        #                             dtype=torch.int32,
+        #                             device="cpu",
+        #                             pin_memory=self.pin_memory)
+        # seq_start_loc_np = seq_start_loc.numpy()
+        # seq_start_loc_np[0] = 0
+        # np.cumsum(seq_lens, out=seq_start_loc_np[1:])
+
+        # self.input_ids[:total_num_scheduled_tokens].copy_(input_ids,
+        #                                                   non_blocking=True)
+        # self.positions[:total_num_scheduled_tokens].copy_(positions,
+        #                                                   non_blocking=True)
+
+        # query_start_loc = query_start_loc.to(self.device, non_blocking=True)
+        # seq_start_loc = seq_start_loc.to(self.device, non_blocking=True)
+        # slot_mapping = slot_mapping.to(self.device, non_blocking=True).long()
+        # attn_metadata = PallasAttentionMetadata(
+        #     num_actual_tokens=total_num_scheduled_tokens,
+        #     max_query_len=max_num_scheduled_tokens,
+        #     query_start_loc=query_start_loc,
+        #     max_seq_len=max_seq_len,
+        #     seq_start_loc=seq_start_loc,
+        #     block_table=self.input_batch.block_table[:num_reqs],
+        #     slot_mapping=slot_mapping,
+        # )
+        # # NOTE(woosuk): Due to chunked prefills, there can be at most 1 partial
+        # # request in the batch. While we should not sample any token from this
+        # # partial request, we do so for simplicity. We will ignore the sampled
+        # # token from the partial request.
+        # # TODO: Support prompt logprobs.
+        # logits_indices = query_start_loc[1:] - 1
+        # return attn_metadata, logits_indices
 
     def _prepare_sampling(
         self,
@@ -328,34 +386,29 @@ class TPUModelRunner:
         scheduler_output: "SchedulerOutput",
     ) -> ModelRunnerOutput:
         self._update_states(scheduler_output)
-        attn_metadata, logits_indices = self._prepare_inputs(scheduler_output)
-        num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
-        if True:
-            # Use piecewise CUDA graphs.
-            # Add padding to the batch size.
-            num_input_tokens = self._get_padded_batch_size(
-                num_scheduled_tokens)
-        else:
-            # Eager mode.
-            num_input_tokens = num_scheduled_tokens
+        prefill_data, decode_data = self._prepare_inputs(scheduler_output)
 
-        with set_forward_context(attn_metadata):
-            hidden_states = self.model(
-                input_ids=self.input_ids[:num_input_tokens],
-                positions=self.positions[:num_input_tokens],
-                kv_caches=self.kv_caches,
-                attn_metadata=None,
-            )
-        hidden_states = hidden_states[:num_scheduled_tokens]
-        hidden_states = hidden_states[logits_indices]
-        logits = self.model.compute_logits(hidden_states, None)
+        for req_id, token_ids, position_ids, attn_metadata in prefill_data.zipped():
+            token_id = self.model(token_ids,
+                                  position_ids,
+                                  attn_metadata)
 
-        # Sample the next token and get logprobs if needed.
-        sampling_metadata = self._prepare_sampling(scheduler_output)
-        sampler_output = self.model.sample(
-            logits=logits,
-            sampling_metadata=sampling_metadata,
-        )
+            req_state = self.requests[req_id]
+            seq_len = (req_state.num_computed_tokens + 
+                       scheduler_output.num_scheduled_tokens[req_id])
+
+            # No chunked prefill so far.
+            assert seq_len == req_state.num_tokens
+            # Append the sampled token to the output token ids.
+            req_idx = self.input_batch.req_id_to_index[req_id]
+            self.input_batch.token_ids_cpu[req_idx, seq_len] = token_id
+            req_state.output_token_ids.append(token_id)
+            
+            
+            
+
+
+    
 
         # NOTE: CPU-GPU synchronization happens here.
         sampled_token_ids = sampler_output.sampled_token_ids.cpu()
@@ -381,14 +434,7 @@ class TPUModelRunner:
                     # This relies on cuda-specific torch-internal impl details
                     generator.set_offset(generator.get_offset() - 4)
 
-        if sampler_output.logprob_token_ids is None:
-            logprob_token_ids = None
-        else:
-            logprob_token_ids = sampler_output.logprob_token_ids.cpu()
-        if sampler_output.logprobs is None:
-            logprobs = None
-        else:
-            logprobs = sampler_output.logprobs.cpu()
+
         model_runner_output = ModelRunnerOutput(
             req_ids=self.input_batch.req_ids[:num_reqs],
             req_id_to_index=self.input_batch.req_id_to_index,
@@ -672,6 +718,8 @@ class InputBatch:
         self.num_logprobs: Dict[str, int] = {}
         self.prompt_logprob_reqs: Set[str] = set()
 
+        self.num_prefills = 0
+
     def add_request(
         self,
         request: "CachedRequestState",
@@ -815,6 +863,10 @@ class InputBatch:
     @property
     def num_reqs(self) -> int:
         return len(self.req_id_to_index)
+
+    @property
+    def num_decodes(self) -> int:
+        return self.num_reqs - self.num_prefills
 
     @property
     def all_greedy(self) -> bool:
