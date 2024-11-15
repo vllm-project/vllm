@@ -19,7 +19,8 @@ class ResidualBlock(nn.Module):
         super().__init__()
 
         self.layers = nn.ModuleList([
-            nn.Linear(hidden_size, hidden_size,
+            nn.Linear(hidden_size,
+                      hidden_size,
                       bias=getattr(config, "medusa_fc_bias", False))
             for _ in range(num_layers)
         ])
