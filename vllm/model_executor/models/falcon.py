@@ -250,6 +250,9 @@ class FalconDecoderLayer(nn.Module):
         self.mlp = FalconMLP(config, quant_config)
         self.config = config
 
+        if (not hasattr(config, "num_ln_in_parallel_attn")):
+            config.num_ln_in_parallel_attn = None
+
         if (config.num_ln_in_parallel_attn is None
                 and config.new_decoder_architecture):
             config.num_ln_in_parallel_attn = 2
