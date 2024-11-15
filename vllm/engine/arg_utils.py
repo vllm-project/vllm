@@ -11,12 +11,11 @@ import vllm.envs as envs
 from vllm.config import (CacheConfig, ConfigFormat, DecodingConfig,
                          DeviceConfig, HfOverrides, LoadConfig, LoadFormat,
                          LoRAConfig, ModelConfig, ObservabilityConfig,
-                         ParallelConfig, PromptAdapterConfig, SchedulerConfig,
-                         SpeculativeConfig, TaskOption, TokenizerPoolConfig,
-                         VllmConfig)
+                         ParallelConfig, PoolerConfig, PromptAdapterConfig,
+                         SchedulerConfig, SpeculativeConfig, TaskOption,
+                         TokenizerPoolConfig, VllmConfig)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
-from vllm.model_executor.layers.pooler import PoolingType
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.platforms import current_platform
 from vllm.transformers_utils.utils import check_gguf_file
@@ -187,15 +186,10 @@ class EngineArgs:
     otlp_traces_endpoint: Optional[str] = None
     collect_detailed_traces: Optional[str] = None
     disable_async_output_proc: bool = False
-    override_neuron_config: Optional[Dict[str, Any]] = None
     scheduling_policy: Literal["fcfs", "priority"] = "fcfs"
 
-    # Pooling configuration.
-    pooling_type: Optional[str] = None
-    pooling_norm: Optional[bool] = None
-    pooling_softmax: Optional[bool] = None
-    pooling_step_tag_id: Optional[int] = None
-    pooling_returned_token_ids: Optional[List[int]] = None
+    override_neuron_config: Optional[Dict[str, Any]] = None
+    override_pooler_config: Optional[PoolerConfig] = None
 
     def __post_init__(self):
         if not self.tokenizer:
@@ -859,12 +853,6 @@ class EngineArgs:
             default=EngineArgs.disable_async_output_proc,
             help="Disable async output processing. This may result in "
             "lower performance.")
-        parser.add_argument(
-            '--override-neuron-config',
-            type=json.loads,
-            default=None,
-            help="Override or set neuron device configuration. "
-            "e.g. {\"cast_logits_dtype\": \"bloat16\"}.'")
 
         parser.add_argument(
             '--scheduling-policy',
@@ -877,56 +865,17 @@ class EngineArgs:
             'arrival deciding any ties).')
 
         parser.add_argument(
-            '--pooling-type',
-            choices=[pt.name for pt in PoolingType],
+            '--override-neuron-config',
+            type=json.loads,
             default=None,
-            help='Used to configure the pooling method in the embedding model.'
-        )
-
-        parser.add_argument('--pooling-norm',
-                            default=None,
-                            action='store_true',
-                            help="Used to determine whether to normalize "
-                            "the pooled data in the embedding model.")
-
-        parser.add_argument('--no-pooling-norm',
-                            default=None,
-                            action='store_false',
-                            dest='pooling_norm',
-                            help="Used to determine whether to normalize "
-                            "the pooled data in the embedding model.")
-
-        parser.add_argument('--pooling-softmax',
-                            default=None,
-                            action='store_true',
-                            help="Used to determine whether to softmax "
-                            "the pooled data in the embedding model.")
-
-        parser.add_argument('--no-pooling-softmax',
-                            default=None,
-                            action='store_false',
-                            dest='pooling_softmax',
-                            help="Used to determine whether to softmax "
-                            "the pooled data in the embedding model.")
-
+            help="Override or set neuron device configuration. "
+            "e.g. {\"cast_logits_dtype\": \"bloat16\"}.'")
         parser.add_argument(
-            '--pooling-step-tag-id',
-            type=int,
+            '--override-pooler-config',
+            type=PoolerConfig.from_json,
             default=None,
-            help="When pooling-step-tag-id is not -1, it indicates "
-            "that the score corresponding to the step-tag-ids in the "
-            "generated sentence should be returned. Otherwise, it "
-            "returns the scores for all tokens.")
-
-        parser.add_argument(
-            '--pooling-returned-token-ids',
-            nargs='+',
-            type=int,
-            default=None,
-            help="pooling-returned-token-ids represents a list of "
-            "indices for the vocabulary dimensions to be extracted, "
-            "such as the token IDs of good_token and bad_token in "
-            "the math-shepherd-mistral-7b-prm model.")
+            help="Override or set the pooling method in the embedding model. "
+            "e.g. {\"pooling_type\": \"mean\", \"normalize\": false}.'")
 
         return parser
 
@@ -967,14 +916,10 @@ class EngineArgs:
             served_model_name=self.served_model_name,
             limit_mm_per_prompt=self.limit_mm_per_prompt,
             use_async_output_proc=not self.disable_async_output_proc,
-            override_neuron_config=self.override_neuron_config,
             config_format=self.config_format,
             mm_processor_kwargs=self.mm_processor_kwargs,
-            pooling_type=self.pooling_type,
-            pooling_norm=self.pooling_norm,
-            pooling_softmax=self.pooling_softmax,
-            pooling_step_tag_id=self.pooling_step_tag_id,
-            pooling_returned_token_ids=self.pooling_returned_token_ids,
+            override_neuron_config=self.override_neuron_config,
+            override_pooler_config=self.override_pooler_config,
         )
 
     def create_load_config(self) -> LoadConfig:
