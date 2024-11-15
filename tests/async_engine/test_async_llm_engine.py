@@ -12,11 +12,11 @@ import torch
 
 from vllm import SamplingParams
 from vllm.config import ParallelConfig
+from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.engine.async_llm_engine import AsyncEngineArgs, AsyncLLMEngine
 from vllm.outputs import RequestOutput as RealRequestOutput
 from vllm.sampling_params import RequestOutputKind
 
-from ..conftest import cleanup
 from ..utils import wait_for_gpu_memory_to_clear
 
 
@@ -157,7 +157,7 @@ async def async_engine():
         engine.shutdown_background_loop()
         del engine
         await asyncio.sleep(0.1)
-        cleanup()
+        cleanup_dist_env_and_memory()
 
 
 @pytest.fixture()

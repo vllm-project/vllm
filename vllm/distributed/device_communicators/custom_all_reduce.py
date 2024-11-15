@@ -1,5 +1,6 @@
+import ctypes
 from contextlib import contextmanager
-from typing import Any, List, Optional, Union
+from typing import List, Optional, Union
 
 import torch
 import torch.distributed as dist
@@ -7,6 +8,7 @@ from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
+from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
 from vllm.distributed.device_communicators.custom_all_reduce_utils import (
     gpu_p2p_access_check)
 from vllm.distributed.parallel_state import in_the_same_node_as
@@ -145,18 +147,14 @@ class CustomAllreduce:
             return
 
         self.disabled = False
-        # buffers memory are owned by this Python class and passed to C++
-        # meta data composes of two parts: meta data for synchronization
-        # (256 bytes) and a temporary buffer for storing intermediate
-        # allreduce results.
-        self.meta = torch.zeros(ops.meta_size() + max_size,
-                                dtype=torch.uint8,
-                                device=self.device)
+        # Buffers memory are owned by this Python class and passed to C++.
+        # Meta data composes of two parts: meta data for synchronization and a
+        # temporary buffer for storing intermediate allreduce results.
+        self.meta_ptrs = self.create_shared_buffer(ops.meta_size() + max_size,
+                                                   group=group)
         # This is a pre-registered IPC buffer. In eager mode, input tensors
         # are first copied into this buffer before allreduce is performed
-        self.buffer = torch.empty(max_size,
-                                  dtype=torch.uint8,
-                                  device=self.device)
+        self.buffer_ptrs = self.create_shared_buffer(max_size, group=group)
         # This is a buffer for storing the tuples of pointers pointing to
         # IPC buffers from all ranks. Each registered tuple has size of
         # 8*world_size bytes where world_size is at most 8. Allocating 8MB
@@ -168,11 +166,43 @@ class CustomAllreduce:
         self.max_size = max_size
         self.rank = rank
         self.world_size = world_size
-        handles, offsets = self._get_ipc_meta(self.meta)
         self.full_nvlink = full_nvlink
-        self._ptr = ops.init_custom_ar(self.meta, self.rank_data, handles,
-                                       offsets, rank, self.full_nvlink)
-        self.register_buffer(self.buffer)
+        self._ptr = ops.init_custom_ar(self.meta_ptrs, self.rank_data, rank,
+                                       self.full_nvlink)
+        ops.register_buffer(self._ptr, self.buffer_ptrs)
+
+    @staticmethod
+    def create_shared_buffer(
+            size_in_bytes: int,
+            group: Optional[ProcessGroup] = None) -> List[int]:
+        """
+        Creates a shared buffer and returns a list of pointers
+        representing the buffer on all processes in the group.
+        """
+        lib = CudaRTLibrary()
+        pointer = lib.cudaMalloc(size_in_bytes)
+        handle = lib.cudaIpcGetMemHandle(pointer)
+        world_size = dist.get_world_size(group=group)
+        rank = dist.get_rank(group=group)
+        handles = [None] * world_size
+        dist.all_gather_object(handles, handle, group=group)
+
+        pointers: List[int] = []
+        for i, h in enumerate(handles):
+            if i == rank:
+                pointers.append(pointer.value)  # type: ignore
+            else:
+                pointers.append(
+                    lib.cudaIpcOpenMemHandle(h).value)  # type: ignore
+
+        return pointers
+
+    @staticmethod
+    def free_shared_buffer(pointers: List[int],
+                           group: Optional[ProcessGroup] = None) -> None:
+        rank = dist.get_rank(group=group)
+        lib = CudaRTLibrary()
+        lib.cudaFree(ctypes.c_void_p(pointers[rank]))
 
     @contextmanager
     def capture(self):
@@ -189,48 +219,24 @@ class CustomAllreduce:
             if not self.disabled:
                 self.register_graph_buffers()
 
-    def _get_ipc_meta(self, inp: torch.Tensor):
-        data = inp.untyped_storage()._share_cuda_()
-        shard_data = (
-            data[1],  # ipc handle to base ptr
-            data[3],  # offset of base ptr
-        )
-        return self._gather_ipc_meta(shard_data)
-
-    def _gather_ipc_meta(self, shard_data):
-        # Note: don't use `[[None]] * self.world_size` here
-        # because it will create a list of the same reference
-        all_data: List[Optional[Any]] = [[None]
-                                         for i in range(self.world_size)]
-        all_data[self.rank][0] = shard_data
-
-        ranks = dist.get_process_group_ranks(group=self.group)
-        ranks.sort()
+    def register_graph_buffers(self):
+        handle, offset = ops.get_graph_buffer_ipc_meta(self._ptr)
+        logger.info("Registering %d cuda graph addresses", len(offset))
+        # We cannot directly use `dist.all_gather_object` here
+        # because it is incompatible with `gloo` backend under inference mode.
+        # see https://github.com/pytorch/pytorch/issues/126032 for details.
+        all_data = [[None, None]
+                    for _ in range(dist.get_world_size(group=self.group))]
+        all_data[self.rank] = [handle, offset]
+        ranks = sorted(dist.get_process_group_ranks(group=self.group))
         for i, rank in enumerate(ranks):
             dist.broadcast_object_list(all_data[i],
                                        src=rank,
                                        group=self.group,
                                        device="cpu")
-
-        # we cannot directly use `dist.all_gather_object` here
-        # because it is incompatible with `gloo` backend under inference mode.
-        # see https://github.com/pytorch/pytorch/issues/126032 for details.
-
-        handles = []
-        offsets = []
-        for i in range(len(all_data)):
-            handles.append(all_data[i][0][0])  # type: ignore
-            offsets.append(all_data[i][0][1])  # type: ignore
-        return handles, offsets
-
-    def register_buffer(self, inp: torch.Tensor):
-        handles, offsets = self._get_ipc_meta(inp)
-        ops.register_buffer(self._ptr, inp, handles, offsets)
-
-    def register_graph_buffers(self):
-        handle, offset = ops.get_graph_buffer_ipc_meta(self._ptr)
-        handles, offsets = self._gather_ipc_meta((bytes(handle), offset))
-        logger.info("Registering %d cuda graph addresses", len(offset))
+        # Unpack list of tuples to tuple of lists.
+        handles = [d[0] for d in all_data]  # type: ignore
+        offsets = [d[1] for d in all_data]  # type: ignore
         ops.register_graph_buffers(self._ptr, handles, offsets)
 
     def should_custom_ar(self, inp: torch.Tensor):
@@ -248,45 +254,50 @@ class CustomAllreduce:
             return inp_size < self.max_size
         return False
 
-    # all reduce, assuming inp tensor is IPC registered with register_buffer,
-    # or, in the context of cuda graphs, register_graph_buffers
-    def all_reduce_reg(self, inp: torch.Tensor, out: torch.Tensor = None):
+    def all_reduce(self,
+                   inp: torch.Tensor,
+                   *,
+                   out: torch.Tensor = None,
+                   registered: bool = False):
+        """Performs an out-of-place all reduce.
+        
+        If registered is True, this assumes inp's pointer is already
+        IPC-registered. Otherwise, inp is first copied into a pre-registered
+        buffer.
+        """
         if out is None:
             out = torch.empty_like(inp)
-        ops.all_reduce_reg(self._ptr, inp, out)
-        return out
-
-    # all reduce, assuming inp tensor is NOT IPC registered
-    def all_reduce_unreg(self, inp: torch.Tensor, out: torch.Tensor = None):
-        if out is None:
-            out = torch.empty_like(inp)
-        ops.all_reduce_unreg(self._ptr, inp, self.buffer, out)
+        if registered:
+            ops.all_reduce(self._ptr, inp, out, 0, 0)
+        else:
+            ops.all_reduce(self._ptr, inp, out, self.buffer_ptrs[self.rank],
+                           self.max_size)
         return out
 
     def custom_all_reduce(self, input: torch.Tensor) -> Optional[torch.Tensor]:
-        # when custom allreduce is disabled, this will be None
+        """The main allreduce API that provides support for cuda graph."""
+        # When custom allreduce is disabled, this will be None.
         if self.disabled or not self.should_custom_ar(input):
             return None
         if self._IS_CAPTURING:
             if torch.cuda.is_current_stream_capturing():
-                return self.all_reduce_reg(input)
+                return self.all_reduce(input, registered=True)
             else:
-                # if warm up, mimic the allocation pattern
-                # since custom allreduce is out-of-place
+                # If warm up, mimic the allocation pattern since custom
+                # allreduce is out-of-place.
                 return torch.empty_like(input)
         else:
-            # note: outside of cuda graph context,
-            # custom allreduce incurs a cost of cudaMemcpy, which should
-            # be small(<=1% of overall latency) compared to the performance
-            # gains of using custom kernels
-            return self.all_reduce_unreg(input)
-
-        return None
+            # Note: outside of cuda graph context, custom allreduce incurs a
+            # cost of cudaMemcpy, which should be small (<=1% of overall
+            # latency) compared to the performance gain of using custom kernels
+            return self.all_reduce(input, registered=False)
 
     def close(self):
         if not self.disabled and self._ptr:
             ops.dispose(self._ptr)
             self._ptr = 0
+            self.free_shared_buffer(self.meta_ptrs)
+            self.free_shared_buffer(self.buffer_ptrs)
 
     def __del__(self):
         self.close()

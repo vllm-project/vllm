@@ -21,14 +21,17 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 _PARTITION_SIZE_ROCM = 512
-_ON_NAVI = "gfx1" in torch.cuda.get_device_properties("cuda").gcnArchName
+_GPU_ARCH = torch.cuda.get_device_properties("cuda").gcnArchName
+_ON_NAVI = "gfx1" in _GPU_ARCH
+_ON_MI250_MI300 = any(arch in _GPU_ARCH
+                      for arch in ["gfx90a", "gfx940", "gfx941", "gfx942"])
 
 
 class ROCmFlashAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "rocm-flash-attn"
+        return "ROCM_FLASH"
 
     @staticmethod
     def get_impl_cls() -> Type["ROCmFlashAttentionImpl"]:
@@ -147,6 +150,8 @@ class ROCmFlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
             num_prefill_tokens=self.num_prefill_tokens,
             num_decode_tokens=0,
             slot_mapping=self.slot_mapping[:self.num_prefill_tokens],
+            multi_modal_placeholder_index_maps=self.
+            multi_modal_placeholder_index_maps,
             seq_lens=self.seq_lens[:self.num_prefills],
             seq_lens_tensor=self.seq_lens_tensor[:self.num_prefills],
             max_query_len=self.max_query_len,
@@ -175,6 +180,7 @@ class ROCmFlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
             num_prefill_tokens=0,
             num_decode_tokens=self.num_decode_tokens,
             slot_mapping=self.slot_mapping[self.num_prefill_tokens:],
+            multi_modal_placeholder_index_maps=None,
             seq_lens=None,
             seq_lens_tensor=self.seq_lens_tensor[self.num_prefills:],
             max_query_len=None,
@@ -186,6 +192,12 @@ class ROCmFlashAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
             block_tables=self.block_tables[self.num_prefills:],
             use_cuda_graph=self.use_cuda_graph,
         )
+        # Batch may be composed of prefill|decodes, adjust query start indices
+        # to refer to the start of decodes when the two are split apart.
+        # E.g. in tokens:[3 prefills|6 decodes], query_start_loc=[3,9] => [0,6].
+        if self._cached_decode_metadata.query_start_loc is not None:
+            qs = self._cached_decode_metadata.query_start_loc
+            self._cached_decode_metadata.query_start_loc = qs - qs[0]
         return self._cached_decode_metadata
 
     def advance_step(self,
@@ -662,7 +674,8 @@ def _use_rocm_custom_paged_attention(qtype: torch.dtype, head_size: int,
                                      block_size: int, gqa_ratio: int,
                                      max_seq_len: int) -> bool:
     # rocm custom page attention not support on navi (gfx1*)
-    return (not _ON_NAVI and (qtype == torch.half or qtype == torch.bfloat16)
+    return (_ON_MI250_MI300 and not _ON_NAVI
+            and (qtype == torch.half or qtype == torch.bfloat16)
             and (head_size == 64 or head_size == 128)
             and (block_size == 16 or block_size == 32)
             and (gqa_ratio >= 1 and gqa_ratio <= 16) and max_seq_len <= 32768)

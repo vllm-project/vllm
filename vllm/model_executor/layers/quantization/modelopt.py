@@ -68,9 +68,6 @@ class ModelOptFp8Config(QuantizationConfig):
             return ModelOptFp8KVCacheMethod(self)
         return None
 
-    def get_scaled_act_names(self) -> List[str]:
-        return []
-
 
 class ModelOptFp8KVCacheMethod(BaseKVCacheMethod):
     """
@@ -141,8 +138,11 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
             layer.register_parameter("input_scale", scale)
 
     def process_weights_after_loading(self, layer: Module) -> None:
-        max_w_scale, weight = requantize_with_max_scale(
-            layer.weight, layer.weight_scale, layer.logical_widths)
+        weight = layer.weight
+        max_w_scale = layer.weight_scale.max()
+        if not (layer.weight_scale == layer.weight_scale[0]).all():
+            max_w_scale, weight = requantize_with_max_scale(
+                layer.weight, layer.weight_scale, layer.logical_widths)
         layer.weight = Parameter(weight.t(), requires_grad=False)
         layer.weight_scale = Parameter(max_w_scale, requires_grad=False)
         layer.input_scale = Parameter(layer.input_scale.max(),

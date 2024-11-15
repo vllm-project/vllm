@@ -1,7 +1,7 @@
 import itertools
 from dataclasses import dataclass, field
-from typing import (Any, Dict, Iterable, List, Literal, Mapping, Optional,
-                    Protocol, Tuple, Union, overload)
+from typing import (Any, Callable, Dict, Iterable, List, Literal, Mapping,
+                    Optional, Protocol, Tuple, Union, overload)
 
 import torch
 import torch.nn as nn
@@ -11,17 +11,13 @@ from transformers import PretrainedConfig
 import vllm.envs as envs
 from vllm.attention.selector import (_Backend, backend_name_to_enum,
                                      get_global_forced_attn_backend)
-from vllm.config import (CacheConfig, LoRAConfig, MultiModalConfig,
-                         SchedulerConfig)
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.model_loader.loader import build_model
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models import ModelRegistry
-from vllm.multimodal.base import NestedTensors
+from vllm.multimodal import MultiModalPlaceholderMap, NestedTensors
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.utils import is_cpu, is_pin_memory_available
+from vllm.utils import is_pin_memory_available
 
 logger = init_logger(__name__)
 
@@ -79,6 +75,9 @@ class AutoWeightsLoader:
 
     Similarly, the weight loading logic for individual parameters can be
     overridden by defining a ``weight_loader`` method.
+
+    Detailed weight loading information can be viewed by setting the
+    environment variable ``VLLM_LOGGING_LEVEL=DEBUG``.
     """
 
     def __init__(
@@ -136,19 +135,26 @@ class AutoWeightsLoader:
             weight_qualname = self._get_qualname(base_prefix, weight_name)
 
             if self._can_skip(weight_qualname):
+                logger.debug("Skipping weight %s", weight_qualname)
+
                 continue
 
             if weight_name != "":
-                if not self._can_ignore_unexpected(weight_qualname):
-                    raise ValueError(
-                        f"Attempted to load nested weight '{weight_qualname}' "
-                        f"into a single parameter '{base_prefix}'")
+                if self._can_ignore_unexpected(weight_qualname):
+                    logger.debug("Ignoring weight %s", weight_qualname)
 
-                continue
+                    continue
+
+                raise ValueError(
+                    f"Attempted to load nested weight '{weight_qualname}' "
+                    f"into a single parameter '{base_prefix}'")
 
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
             weight_loader(param, weight_data)
+
+            logger.debug("Loaded weight %s with shape %s", weight_qualname,
+                         param.shape)
 
             yield weight_qualname
 
@@ -175,21 +181,41 @@ class AutoWeightsLoader:
         for child_prefix, child_weights in self._groupby_prefix(weights):
             prefix = self._get_qualname(base_prefix, child_prefix)
 
-            if self._can_skip(prefix):
-                continue
-
             if child_prefix in child_modules:
+                if self._can_skip(prefix + "."):
+                    logger.debug("Skipping module %s", prefix)
+
+                    continue
+
                 yield from self._load_module(prefix,
                                              child_modules[child_prefix],
                                              child_weights)
             elif child_prefix in child_params:
+                if self._can_skip(prefix):
+                    logger.debug("Skipping param %s", prefix)
+
+                    continue
+
                 yield from self._load_param(prefix, child_params[child_prefix],
                                             child_weights)
             else:
-                if not self._can_ignore_unexpected(prefix):
-                    msg = (f"There is no module or parameter named '{prefix}' "
-                           f"in {type(self.module).__name__}")
-                    raise ValueError(msg)
+                can_skip_module = self._can_skip(prefix + ".")
+                can_skip_param = self._can_skip(prefix)
+                if can_skip_module or can_skip_param:
+                    logger.debug("Skipping missing %s", prefix)
+
+                    continue
+
+                can_ignore_module = self._can_ignore_unexpected(prefix + ".")
+                can_ignore_param = self._can_ignore_unexpected(prefix)
+                if can_ignore_module or can_ignore_param:
+                    logger.debug("Ignoring missing %s", prefix)
+
+                    continue
+
+                msg = (f"There is no module or parameter named '{prefix}' "
+                       f"in {type(self.module).__name__}")
+                raise ValueError(msg)
 
     def load_weights(
         self,
@@ -206,28 +232,16 @@ class AutoWeightsLoader:
 
 def init_vllm_registered_model(
     hf_config: PretrainedConfig,
-    cache_config: Optional[CacheConfig],
-    quant_config: Optional[QuantizationConfig],
-    *,
-    lora_config: Optional[LoRAConfig] = None,
-    multimodal_config: Optional[MultiModalConfig] = None,
-    scheduler_config: Optional[SchedulerConfig] = None,
+    vllm_config: VllmConfig,
+    prefix: str = "",
 ) -> nn.Module:
     """
     Helper function to initialize an inner model registered to vLLM,
     based on the arguments passed to the outer vLLM model.
     """
-    model_class, _ = ModelRegistry.resolve_model_cls(hf_config.architectures)
-
-    return build_model(
-        model_class,
-        hf_config,
-        cache_config,
-        quant_config,
-        lora_config=lora_config,
-        multimodal_config=multimodal_config,
-        scheduler_config=scheduler_config,
-    )
+    from vllm.model_executor.model_loader.loader import _initialize_model
+    vllm_config = vllm_config.with_hf_config(hf_config)
+    return _initialize_model(vllm_config, prefix)
 
 
 @overload
@@ -294,10 +308,27 @@ def _embedding_count_expression(embeddings: NestedTensors) -> str:
         _embedding_count_expression(inner) for inner in embeddings)
 
 
-def merge_multimodal_embeddings(input_ids: torch.Tensor,
-                                inputs_embeds: torch.Tensor,
-                                multimodal_embeddings: NestedTensors,
-                                placeholder_token_id: int) -> torch.Tensor:
+def merge_multimodal_embeddings_from_map(
+        inputs_embeds: torch.Tensor, multimodal_embeddings: NestedTensors,
+        placeholder_map: MultiModalPlaceholderMap.IndexMap) -> torch.Tensor:
+    """
+    Merge ``multimodal_embeddings`` into ``inputs_embeds`` using the provided 
+    placeholder map .
+
+    Note:
+        This updates ``inputs_embeds`` in place.
+    """
+    flattened_embeddings = _flatten_embeddings(multimodal_embeddings)
+    inputs_embeds[placeholder_map.dest] = flattened_embeddings[
+        placeholder_map.src]
+    return inputs_embeds
+
+
+def _merge_multimodal_embeddings(
+    inputs_embeds: torch.Tensor,
+    is_multimodal: torch.Tensor,
+    multimodal_embeddings: NestedTensors,
+) -> torch.Tensor:
     """
     Merge ``multimodal_embeddings`` into ``inputs_embeds`` by overwriting the
     positions in ``inputs_embeds`` corresponding to placeholder tokens in
@@ -306,8 +337,7 @@ def merge_multimodal_embeddings(input_ids: torch.Tensor,
     Note:
         This updates ``inputs_embeds`` in place.
     """
-    mask = (input_ids == placeholder_token_id)
-    num_expected_tokens = mask.sum().item()
+    num_expected_tokens = is_multimodal.sum().item()
     assert isinstance(num_expected_tokens, int)
 
     flattened = _flatten_embeddings(multimodal_embeddings)
@@ -317,8 +347,68 @@ def merge_multimodal_embeddings(input_ids: torch.Tensor,
             f"Attempted to assign {expr} = {flattened.shape[0]} "
             f"multimodal tokens to {num_expected_tokens} placeholders")
 
-    inputs_embeds[mask] = flattened
+    inputs_embeds[is_multimodal] = flattened
     return inputs_embeds
+
+
+def embed_multimodal(
+    input_ids: torch.Tensor,
+    multimodal_token_id: int,
+    get_text_embeds: Callable[[torch.Tensor], torch.Tensor],
+    get_multimodal_embeds: Callable[[torch.Tensor], Union[torch.Tensor,
+                                                          List[torch.Tensor]]],
+) -> torch.Tensor:
+    """
+    Embed token IDs and multimodal inputs and combine their embeddings.
+
+    ``multimodal_token_id`` is used to determine whether a token ID should
+    be embedded using ``get_text_embeds`` or ``get_multimodal_embeds``.
+
+    Compared to ``merge_multimodal_embeddings`, this avoids running
+    ``get_text_embeds`` on ``input_ids[input_ids == multimodal_token_id]``
+    which causes issues when the placeholder token ID exceeds the
+    vocabulary size of the language model.
+    """
+    is_multimodal = input_ids == multimodal_token_id
+    is_text = ~is_multimodal
+
+    text_embeds = get_text_embeds(input_ids[is_text])
+    multimodal_embeds = get_multimodal_embeds(input_ids[is_multimodal])
+
+    merged_embeds = torch.empty(
+        (input_ids.shape[0], text_embeds.shape[1]),
+        dtype=text_embeds.dtype,
+        device=text_embeds.device,
+    )
+
+    merged_embeds[is_text] = text_embeds
+
+    return _merge_multimodal_embeddings(
+        merged_embeds,
+        is_multimodal,
+        multimodal_embeds,
+    )
+
+
+def merge_multimodal_embeddings(
+    input_ids: torch.Tensor,
+    inputs_embeds: torch.Tensor,
+    multimodal_embeddings: NestedTensors,
+    placeholder_token_id: int,
+) -> torch.Tensor:
+    """
+    Merge ``multimodal_embeddings`` into ``inputs_embeds`` by overwriting the
+    positions in ``inputs_embeds`` corresponding to placeholder tokens in
+    ``input_ids``.
+
+    Note:
+        This updates ``inputs_embeds`` in place.
+    """
+    return _merge_multimodal_embeddings(
+        inputs_embeds,
+        (input_ids == placeholder_token_id),
+        multimodal_embeddings,
+    )
 
 
 class LayerFn(Protocol):
@@ -474,7 +564,7 @@ def make_empty_intermediate_tensors_factory(keys: List[str], hidden_size: int):
 
 class LLMWrapper(nn.Module):
     """
-    To align with the key names of LoRA trained with PEFT, we need to add an 
+    To align with the key names of LoRA trained with PEFT, we need to add an
     additional layer to the llm's implementation.
     """
 
@@ -515,8 +605,21 @@ def get_vit_attn_backend() -> _Backend:
                     "so we use xformers backend instead. You can run "
                     "`pip install flash-attn` to use flash-attention backend.")
                 selected_backend = _Backend.XFORMERS
-        elif is_cpu():
+        elif current_platform.is_cpu():
             selected_backend = _Backend.TORCH_SDPA
         else:
             selected_backend = _Backend.XFORMERS
     return selected_backend
+
+
+def maybe_prefix(prefix: str, name: str) -> str:
+    """Add a prefix to a name if the prefix is non-empty.
+
+    Args:
+        prefix: The prefix to add. If empty, no prefix will be added.
+        name: The name to potentially prefix.
+
+    Returns:
+        The string "prefix.name" if prefix was non-empty, otherwise just "name".
+    """
+    return name if not prefix else f"{prefix}.{name}"

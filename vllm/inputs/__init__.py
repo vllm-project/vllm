@@ -1,9 +1,11 @@
 from .data import (DecoderOnlyInputs, EncoderDecoderInputs,
-                   ExplicitEncoderDecoderPrompt, PromptType, SingletonInputs,
-                   SingletonPrompt, TextPrompt, TokenInputs, TokensPrompt,
+                   ExplicitEncoderDecoderPrompt, ProcessorInputs, PromptType,
+                   SingletonInputs, SingletonInputsAdapter, SingletonPrompt,
+                   TextPrompt, TokenInputs, TokensPrompt,
                    build_explicit_enc_dec_prompt, to_enc_dec_tuple_list,
                    token_inputs, zip_enc_dec_prompts)
-from .registry import InputContext, InputRegistry
+from .registry import (DummyData, InputContext, InputProcessingContext,
+                       InputRegistry)
 
 INPUT_REGISTRY = InputRegistry()
 """
@@ -22,14 +24,18 @@ __all__ = [
     "ExplicitEncoderDecoderPrompt",
     "TokenInputs",
     "token_inputs",
-    "SingletonInputs",
     "DecoderOnlyInputs",
     "EncoderDecoderInputs",
+    "ProcessorInputs",
+    "SingletonInputs",
+    "SingletonInputsAdapter",
     "build_explicit_enc_dec_prompt",
     "to_enc_dec_tuple_list",
     "zip_enc_dec_prompts",
     "INPUT_REGISTRY",
+    "DummyData",
     "InputContext",
+    "InputProcessingContext",
     "InputRegistry",
 ]
 

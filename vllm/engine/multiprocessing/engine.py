@@ -1,16 +1,13 @@
 import pickle
 import signal
-import threading
-import time
 from contextlib import contextmanager
 from typing import Iterator, List, Optional, Union
 
 import cloudpickle
 import zmq
 
-from vllm import AsyncEngineArgs, LLMEngine, SamplingParams
-from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig)
+from vllm import AsyncEngineArgs, SamplingParams
+from vllm.engine.llm_engine import LLMEngine
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
@@ -21,14 +18,10 @@ from vllm.engine.multiprocessing import (ENGINE_DEAD_ERROR, IPC_DATA_EXT,
                                          RPCStartupRequest, RPCStartupResponse,
                                          RPCUProfileRequest)
 # yapf: enable
-from vllm.envs import VLLM_RPC_TIMEOUT
 from vllm.executor.gpu_executor import GPUExecutor
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.usage.usage_lib import UsageContext
-
-CONFIG_TYPE = Union[ModelConfig, DecodingConfig, ParallelConfig,
-                    SchedulerConfig, LoRAConfig]
 
 logger = init_logger(__name__)
 
@@ -103,20 +96,6 @@ class MQLLMEngine:
         # Error state.
         self._errored_with: Optional[BaseException] = None
 
-        # Heartbeat thread
-        self.heartbeat_thread = threading.Thread(target=self._heartbeat_loop,
-                                                 daemon=True)
-        self._heartbeat_stop_event = threading.Event()
-        # The heartbeat needs to be faster than what the client will wait for
-        # The VLLM_RPC_TIMEOUT duration is in ms, and we need one in seconds
-        self.heartbeat_interval_seconds = VLLM_RPC_TIMEOUT / 5000.0
-
-        self._last_alive_time = time.time()
-        # The heartbeats can tolerate a long period of the engine chugging
-        # away at a generation request.
-        # The VLLM_RPC_TIMEOUT duration is in ms, and we need one in seconds
-        self.last_alive_threshold = VLLM_RPC_TIMEOUT * 3.0 / 1000.0
-
     @property
     def dead_error(self) -> BaseException:
         if self._errored_with is not None:
@@ -133,25 +112,23 @@ class MQLLMEngine:
         load_general_plugins()
 
         engine_config = engine_args.create_engine_config()
-
         executor_class = LLMEngine._get_executor_cls(engine_config)
 
-        return cls(
-            ipc_path=ipc_path,
-            use_async_sockets=engine_config.model_config.use_async_output_proc,
-            **engine_config.to_dict(),
-            executor_class=executor_class,
-            log_requests=not engine_args.disable_log_requests,
-            log_stats=not engine_args.disable_log_stats,
-            usage_context=usage_context)
+        use_async_sockets = engine_config.model_config.use_async_output_proc
+
+        return cls(ipc_path=ipc_path,
+                   use_async_sockets=use_async_sockets,
+                   vllm_config=engine_config,
+                   executor_class=executor_class,
+                   log_requests=not engine_args.disable_log_requests,
+                   log_stats=not engine_args.disable_log_stats,
+                   usage_context=usage_context)
 
     def start(self):
         try:
             try:
                 logger.debug("Starting Startup Loop.")
                 self.run_startup_loop()
-                logger.debug("Starting heartbeat thread")
-                self.heartbeat_thread.start()
                 logger.debug("Starting Engine Loop.")
                 self.run_engine_loop()
             except Exception as e:
@@ -165,7 +142,6 @@ class MQLLMEngine:
     def cleanup(self):
         """Cleanup zeromq state on shutdown."""
         # Closes all sockets and destroys context.
-        self._heartbeat_stop_event.set()
         self.ctx.destroy(linger=0)
         del self.engine
 
@@ -204,11 +180,12 @@ class MQLLMEngine:
         """Core busy loop of the LLMEngine."""
 
         while True:
-            self._alive()
             if not self.engine.has_unfinished_requests():
                 # Poll until there is work to do.
                 while self.input_socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
-                    self._alive()
+                    # When there's no work, check on engine health and send
+                    # health status back to client
+                    self._health_check()
                     self.engine.do_log_stats()
                     logger.debug("Waiting for new requests in engine loop.")
 
@@ -307,36 +284,31 @@ class MQLLMEngine:
         if self.log_requests:
             logger.info("Aborted request %s.", request.request_id)
 
-    def _heartbeat_loop(self):
-        while not self._heartbeat_stop_event.wait(
-                timeout=self.heartbeat_interval_seconds):
-            # Loops until the stop event is set
-            self._heartbeat()
-
-        logger.debug("Exiting MQLLMEngine heartbeat thread")
-
-    def _heartbeat(self):
+    def _health_check(self):
         # Send unhealthy if engine has already errored
         if self._errored_with is not None:
             self._send_unhealthy(self._errored_with)
-
-        # Check for life of the main loop
-        elif time.time() - self._last_alive_time > self.last_alive_threshold:
-            self._send_unhealthy(RuntimeError("Engine loop has died"))
-
-        else:
-            # Otherwise- check health of the engine
-            # self.engine.check_health() raises on unhealthy
-            try:
-                self.engine.check_health()
-                self._send_healthy()
-            except Exception as e:
-                self._set_errored(e)
-                self._send_unhealthy(e)
+        try:
+            self.engine.check_health()
+            self._send_healthy()
+        except Exception as e:
+            self._set_errored(e)
+            self._send_unhealthy(e)
 
     def _send_outputs(self, outputs: REQUEST_OUTPUTS_T):
         """Send List of RequestOutput to RPCClient."""
         if outputs:
+            try:
+                from ray.exceptions import RayTaskError
+
+                # RayTaskError might not pickelable here. We need to unpack the
+                # underlying exception as the real exception in the output.
+                if (isinstance(outputs, RPCError)
+                        and isinstance(outputs.exception, RayTaskError)):
+                    outputs.exception = outputs.exception.cause
+            except ImportError:
+                pass
+
             output_bytes = pickle.dumps(outputs)
             self.output_socket.send_multipart((output_bytes, ), copy=False)
 
@@ -362,9 +334,6 @@ class MQLLMEngine:
         if self._errored_with is None:
             self._errored_with = e
 
-    def _alive(self):
-        self._last_alive_time = time.time()
-
     def start_profile(self) -> None:
         if type(self.engine.model_executor) is GPUExecutor:
             self.engine.model_executor.start_profile()
@@ -378,16 +347,22 @@ class MQLLMEngine:
             self.engine.model_executor._run_workers("stop_profile")
 
 
+def signal_handler(*_) -> None:
+    raise KeyboardInterrupt("MQLLMEngine terminated")
+
+
 def run_mp_engine(engine_args: AsyncEngineArgs, usage_context: UsageContext,
-                  ipc_path: str):
+                  ipc_path: str, engine_alive):
+    try:
+        engine = MQLLMEngine.from_engine_args(engine_args=engine_args,
+                                              usage_context=usage_context,
+                                              ipc_path=ipc_path)
 
-    def signal_handler(*_) -> None:
-        # Interrupt server on sigterm
-        raise KeyboardInterrupt("MQLLMEngine terminated")
+        signal.signal(signal.SIGTERM, signal_handler)
 
-    signal.signal(signal.SIGTERM, signal_handler)
+        engine.start()
 
-    engine = MQLLMEngine.from_engine_args(engine_args=engine_args,
-                                          usage_context=usage_context,
-                                          ipc_path=ipc_path)
-    engine.start()
+    except BaseException as e:
+        logger.exception(e)
+        engine_alive.value = False
+        raise e
