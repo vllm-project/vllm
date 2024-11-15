@@ -18,11 +18,9 @@ class CompressedTensors24(CompressedTensorsScheme):
         self.quantized = True  # toggle based on the case we're running
         self.compressed = False  # toggle based on the case we're running
 
-
-
     @classmethod
     def get_min_capability(cls) -> int:
-        return 80
+        return 90
 
     def create_weights(self, layer: torch.nn.Module, input_size: int,
                     output_partition_sizes: List[int],
@@ -31,15 +29,6 @@ class CompressedTensors24(CompressedTensorsScheme):
                     **kwargs):
         layer.logical_widths = output_partition_sizes
         self.params_dtype=params_dtype
-
-        # weights_dtype = params_dtype
-        # weights = ModelWeightParameter(data=torch.empty(
-        #     sum(output_partition_sizes),
-        #     input_size_per_partition // 2,
-        #     dtype=weights_dtype),
-        #     input_dim=1,
-        #     output_dim=0,
-        #     weight_loader=weight_loader)
 
         # parameter to store uncompressed weight or decompressed weight
         weight = ModelWeightParameter(
@@ -88,8 +77,12 @@ class CompressedTensors24(CompressedTensorsScheme):
         :return: The output tensor of the layer 
         """
 
+        PAD_MULTIPLE = 16
+        remainder = x.shape[0] % 16
+        pad_size = PAD_MULTIPLE - remainder if remainder > 0 else 0
+
         q_input, input_scale = ops.scaled_fp8_quant(
-            x, use_per_token_if_dynamic=True)
+            x, pad_to_multiple=PAD_MULTIPLE, use_per_token_if_dynamic=True)
 
         out = ops.cutlass_scaled_sparse_mm(
             a=layer.weight,
@@ -101,7 +94,13 @@ class CompressedTensors24(CompressedTensorsScheme):
             bias=bias
         )
 
-        return out.t().contiguous()
+        out = out.t()
+        if pad_size > 0:
+            out = out[:-pad_size,:].contiguous()
+        else:
+            out = out.contiguous()
+        
+        return out
 
 def quantize_with_max_scale(
         weight: torch.Tensor, weight_scale: torch.Tensor,
