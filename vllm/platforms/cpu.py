@@ -53,11 +53,6 @@ class CpuPlatform(Platform):
 
         cache_config = vllm_config.cache_config
 
-        if cache_config.enable_prefix_caching:
-            logger.warning(
-                "Prefix caching is not supported on CPU, disable it.")
-            cache_config.enable_prefix_caching = False
-
         kv_cache_space = envs.VLLM_CPU_KVCACHE_SPACE
 
         if kv_cache_space >= 0:
@@ -74,10 +69,10 @@ class CpuPlatform(Platform):
                 f" {kv_cache_space}, expect a positive integer value.")
 
         scheduler_config = vllm_config.scheduler_config
-        if scheduler_config.chunked_prefill_enabled:
-            logger.warning(
-                "Chunked prefill is not supported on CPU, disable it.")
-            scheduler_config.chunked_prefill_enabled = False
+        if (scheduler_config.chunked_prefill_enabled and model_config.dtype == torch.half):
+            logger.warning("Chunked-prefill on the CPU backend only does not"
+                           " support fp16 for now, cast to bf16.")
+            model_config.dtype = torch.bfloat16
 
         parallel_config = vllm_config.parallel_config
         if (parallel_config.distributed_executor_backend is not None

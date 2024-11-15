@@ -429,8 +429,6 @@ class CPUModelRunnerBase(ModelRunnerBase[TModelInputForCPU]):
         **kwargs,
     ):
         ModelRunnerBase.__init__(self, vllm_config)
-        # Currently, CPU worker doesn't support chunked prefill.
-        assert self.scheduler_config.chunked_prefill_enabled is False
         model_config = self.model_config
         cache_config = self.cache_config
 
