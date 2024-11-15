@@ -745,11 +745,10 @@ class Scheduler:
                     seq_group, SequenceStatus.SWAPPED, enable_chunking,
                     budget))
 
-            if (num_new_tokens_uncached + num_new_tokens_cached == 0
-                    or not budget.can_schedule(
-                        num_new_tokens=num_new_tokens_uncached,
-                        num_new_seqs=num_new_seqs,
-                    )):
+            if num_new_tokens_uncached == 0 or not budget.can_schedule(
+                    num_new_tokens=num_new_tokens_uncached,
+                    num_new_seqs=num_new_seqs,
+            ):
                 break
 
             if lora_int_id > 0 and curr_loras is not None:
@@ -985,7 +984,7 @@ class Scheduler:
                 break
 
             num_new_seqs = seq_group.get_max_num_running_seqs()
-            if num_new_tokens == 0 or not budget.can_schedule(
+            if num_new_tokens_uncached == 0 or not budget.can_schedule(
                     num_new_tokens=num_new_tokens_uncached,
                     num_new_seqs=num_new_seqs,
             ):
@@ -1727,6 +1726,13 @@ class Scheduler:
 
             num_uncached_new_tokens += num_uncached_new_tokens_seq
             num_cached_new_tokens += num_cached_new_tokens_seq
+
+        if num_uncached_new_tokens == 0 and num_cached_new_tokens > 0:
+            # For a fully cached hit sequence, we actually need to recompute the
+            # last token. So we need at least 1 uncached token to schedule.
+            # See ModelRunner._compute_for_prefix_cache_hit for more details.
+            num_uncached_new_tokens = 1
+            num_cached_new_tokens -= 1
 
         if enable_chunking and len(seqs) == 1:
             # Chunk if a running request cannot fit in the given budget.

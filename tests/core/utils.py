@@ -1,12 +1,15 @@
 import time
-from typing import List, Optional
+from collections import defaultdict
+from typing import Any, Dict, List, Optional
 from typing import Sequence as GenericSequence
 from typing import Tuple
 
 from vllm import SamplingParams
+from vllm.core.scheduler import Scheduler, SchedulerOutputs
 from vllm.inputs import EncoderDecoderInputs, token_inputs
 from vllm.lora.request import LoRARequest
-from vllm.sequence import Logprob, Sequence, SequenceGroup
+from vllm.sequence import (Logprob, Sequence, SequenceGroup,
+                           SequenceGroupMetadata)
 
 
 def create_dummy_prompt(
@@ -217,3 +220,27 @@ def append_new_token_seq_group(token_chunk_size, seq_group, token_id: int):
     seq_group.update_num_computed_tokens(token_chunk_size)
     for seq in seq_group.get_seqs():
         seq.append_token_id(token_id, {token_id: Logprob(token_id)})
+
+
+class SchedulerProxy:
+    """
+    A proxy class to forward calls to the scheduler.
+    """
+
+    def __init__(self, scheduler: Scheduler):
+        self.scheduler_ = scheduler
+        self.call_history: Dict[str, List[Any]] = defaultdict(list)
+
+    def __getattr__(self, name: str) -> Any:
+
+        def wrapper(*args, **kwargs):
+            result = getattr(self.scheduler_, name)(*args, **kwargs)
+            self.call_history[name].append((args, kwargs, result))
+            return result
+
+        return wrapper
+
+    def last_schedule_ret(
+        self, ) -> Tuple[List[SequenceGroupMetadata], SchedulerOutputs, Any]:
+        _, _, ret = self.call_history["schedule"][-1]
+        return ret
