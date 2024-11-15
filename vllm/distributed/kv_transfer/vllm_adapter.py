@@ -37,19 +37,6 @@ from vllm.sequence import IntermediateTensors
 logger = init_logger(__name__)
 
 
-# several flags used for indicating the role of current vLLM worker
-IS_DISTRIBUTED_KV_INSTANCE: Optional[bool] = None
-IS_KV_PRODUCER: Optional[bool] = None
-IS_KV_CONSUMER: Optional[bool] = None
-
-
-def set_kv_transfer_attribute(config):
-    global IS_DISTRIBUTED_KV_INSTANCE, IS_KV_PRODUCER, IS_KV_CONSUMER
-
-    IS_DISTRIBUTED_KV_INSTANCE = config.is_distributed_kv_instance
-    IS_KV_PRODUCER = config.is_kv_producer
-    IS_KV_CONSUMER = config.is_kv_consumer
-
 
 class KV_transfer_agent:
     """
@@ -62,7 +49,6 @@ class KV_transfer_agent:
 
     def __init__(
         self,
-        group_ranks: List[List[int]],
         local_rank: int,
         config,
     ):

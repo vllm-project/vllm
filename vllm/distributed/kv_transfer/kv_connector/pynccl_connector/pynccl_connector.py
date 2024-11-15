@@ -19,7 +19,7 @@ from torch.distributed import Backend
 
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
 from vllm.distributed.kv_transfer.kv_connector.pynccl_connector.pynccl_pipe \
-    import PyncclPipe
+    import PyNcclPipe
 from vllm.distributed.kv_transfer.kv_connector.pynccl_connector.lookup_buffer \
     import LookupBuffer
 from vllm.logger import init_logger
@@ -32,93 +32,63 @@ logger = init_logger(__name__)
 
 
             
-class TorchDistributedConnector(KVConnectorBase):
+class PyNcclConnector(KVConnectorBase):
     
     def __init__(
         self,
-        group_ranks: List[List[int]],
         local_rank: int,
         config: KVTransferConfig,
     ):
 
         self.lookup_buffer_size = self.kv_buffer_size
 
-        self.send_buffer: Optional[TorchDistributedBuffer] = None
-        self.recv_buffer: Optional[TorchDistributedBuffer] = None
-        
-        device2backend = {
-            "cpu": "gloo",
-            "gpu": "nccl",
-        }
+        self.send_buffer: Optional[LookupBuffer] = None
+        self.recv_buffer: Optional[LookupBuffer] = None
+
+        # 2 pipes for every rank in the world
+        port_offset_base = 2 * config.rank
+
 
         # In disaggregated prefill, the prefill vLLM only uses send pipe
         # and the decode vLLM only uses recv pipe
-        # In remote KV cache store, vLLM will use both send pipe and recv pipe
-        # So we build both send pipe and recv pipe for simplicity.
         if config.is_kv_producer:
 
-            self.send_pipe = TorchDistributedPipe(
-                group_ranks,
-                local_rank,
-                device2backend[config.kv_device],
-                self.kv_buffer_size, 
+            self.send_data_pipe = PyNcclPipe(
+                local_rank=local_rank,
+                config=config,
+                port_offset=port_offset_base,
             )
-            self.send_signal_pipe = TorchDistributedPipe(
-                group_ranks,
-                local_rank,
-                "gloo",
-                self.kv_buffer_size,
+            self.send_signal_pipe = PyNcclPipe(
+                local_rank=local_rank,
+                config=config,
+                port_offset=port_offset_base + 1,
+                device="cpu",
             )
-            self.recv_pipe = TorchDistributedPipe(
-                group_ranks,
-                local_rank,
-                device2backend[config.kv_device],
-                self.kv_buffer_size,
-            )
-            self.recv_signal_pipe = TorchDistributedPipe(
-                group_ranks,
-                local_rank,
-                "gloo",
-                self.kv_buffer_size
-            )
+            self.send_buffer = LookupBuffer(
+                self.send_signal_pipe, 
+                self.send_data_pipe,
+                config.kv_buffer_size)
              
         else:
 
             # the current vLLM instance is KV consumer, so it needs to connect
             # its recv pipe to the send pipe of KV producder
-
-            self.recv_pipe = TorchDistributedPipe(
-                group_ranks,
-                local_rank,
-                device2backend[config.kv_device],
-                self.kv_buffer_size, 
+            self.recv_data_pipe = PyNcclPipe(
+                local_rank=local_rank,
+                config=config,
+                port_offset=port_offset_base,
             )
-            self.recv_signal_pipe = TorchDistributedPipe(
-                group_ranks,
-                local_rank,
-                "gloo",
-                self.kv_buffer_size,
+            self.recv_signal_pipe = PyNcclPipe(
+                local_rank=local_rank,
+                config=config,
+                port_offset=port_offset_base + 1,
+                device="cpu",
             )
-            self.send_pipe = TorchDistributedPipe(
-                group_ranks,
-                local_rank,
-                device2backend[config.kv_device],
-                self.kv_buffer_size,
+            self.recv_buffer = LookupBuffer(
+                self.recv_signal_pipe, 
+                self.recv_data_pipe,
+                config.kv_buffer_size
             )
-            self.send_signal_pipe = TorchDistributedPipe(
-                group_ranks,
-                local_rank,
-                "gloo",
-                self.kv_buffer_size
-            )
-
-        self.send_buffer = TorchDistributedBuffer(self.send_signal_pipe,
-                                                  self.send_pipe,
-                                                  self.lookup_buffer_size)
-        self.recv_buffer = TorchDistributedBuffer(self.recv_signal_pipe,
-                                                  self.recv_pipe,
-                                                  self.lookup_buffer_size)
-        self.tensor_device = config.kv_device
             
             
     def select(
