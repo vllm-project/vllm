@@ -6,28 +6,23 @@ steps:
       - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=12.1.0 --tag vllm-ci:build-image --target build --progress plain ."
       - "mkdir artifacts"
       - "docker run --rm -v $(pwd)/artifacts:/artifacts_host vllm-ci:build-image bash -c 'cp -r dist /artifacts_host && chmod -R a+rw /artifacts_host'"
-      # rename the files to change linux -> manylinux1
-      - "for f in artifacts/dist/*.whl; do mv -- \"$$f\" \"$${f/linux/manylinux1}\"; done"
-      - "mv artifacts/dist/$(ls artifacts/dist) artifacts/dist/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl"
-      - "aws s3 cp artifacts/dist/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl s3://vllm-wheels/$BUILDKITE_COMMIT/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl"
-      - "aws s3 cp artifacts/dist/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl s3://vllm-wheels/nightly/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl"
+      - "bash .buildkite/upload-wheels.sh"
     env:
       DOCKER_BUILDKIT: "1"
 
-  - block: "Build CUDA 11.8 wheel"
-    key: block-build-cu118-wheel
-  
+  # Note(simon): We can always build CUDA 11.8 wheel to ensure the build is working.
+  # However, this block can be uncommented to save some compute hours.
+  # - block: "Build CUDA 11.8 wheel"
+  #   key: block-build-cu118-wheel
+
   - label: "Build wheel - CUDA 11.8"
-    depends_on: block-build-cu118-wheel
+    # depends_on: block-build-cu118-wheel
     agents:
       queue: cpu_queue
     commands:
       - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=11.8.0 --tag vllm-ci:build-image --target build --progress plain ."
       - "mkdir artifacts"
       - "docker run --rm -v $(pwd)/artifacts:/artifacts_host vllm-ci:build-image bash -c 'cp -r dist /artifacts_host && chmod -R a+rw /artifacts_host'"
-      # rename the files to change linux -> manylinux1
-      - "for f in artifacts/dist/*.whl; do mv -- \"$$f\" \"$${f/linux/manylinux1}\"; done"
-      - "aws s3 cp --recursive artifacts/dist s3://vllm-wheels/$BUILDKITE_COMMIT/"
-      - "aws s3 cp --recursive artifacts/dist s3://vllm-wheels/nightly/"
+      - "bash .buildkite/upload-wheels.sh"
     env:
       DOCKER_BUILDKIT: "1"
