@@ -689,7 +689,6 @@ def scaled_fp8_quant(
     input: torch.Tensor,
     scale: Optional[torch.Tensor] = None,
     num_token_padding: Optional[int] = None,
-    pad_to_multiple: Optional[int] = None,
     scale_ub: Optional[torch.Tensor] = None,
     use_per_token_if_dynamic: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -721,16 +720,8 @@ def scaled_fp8_quant(
     shape: Union[Tuple[int, int], torch.Size] = input.shape
     # For rocm, the output fp8 dtype is torch.float_e3m3fnuz
     out_dtype: torch.dtype = torch.float8_e4m3fnuz \
-            if current_platform.is_rocm() else torch.float8_e4m3fn
-    if pad_to_multiple:
-        assert not num_token_padding
-        remainder = input.shape[0] % pad_to_multiple
-        delta = 0
-        if remainder > 0:
-            delta = pad_to_multiple - remainder
-        shape = (input.shape[0] + delta, input.shape[1])
+            if current_platform.is_rocm() else torch.float8_e4m3f
     if num_token_padding:
-        assert not pad_to_multiple
         shape = (max(num_token_padding, input.shape[0]), shape[1])
     output = torch.empty(shape, device=input.device, dtype=out_dtype)
 

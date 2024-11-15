@@ -1,13 +1,11 @@
+from typing import List, Callable, Optional
+import torch
+
+from compressed_tensors.compressors import ModelCompressor
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
 from vllm.model_executor.parameter import ModelWeightParameter, ChannelQuantScaleParameter
-import torch
-from typing import List, Callable, Optional
-from compressed_tensors.compressors import ModelCompressor
-from torch.nn import Parameter
-from vllm.model_executor.layers.quantization.utils.marlin_utils_test_24 import sparse_semi_structured_to_dense_cutlass, sparse_semi_structured_from_dense_cutlass
 from vllm import _custom_ops as ops
-from typing import Tuple
 
 __all__ = ["CompressedTensors24"]
 
@@ -78,12 +76,18 @@ class CompressedTensors24(CompressedTensorsScheme):
         """
 
         PAD_MULTIPLE = 16
-        remainder = x.shape[0] % 16
+        remainder = x.shape[0] % 16        
         pad_size = PAD_MULTIPLE - remainder if remainder > 0 else 0
+        if pad_size > 0:
 
+            input = torch.nn.functional.pad(x, (0,0,0,pad_size), value=0)
+        else:
+            input = x
+    
         q_input, input_scale = ops.scaled_fp8_quant(
-            x, pad_to_multiple=PAD_MULTIPLE, use_per_token_if_dynamic=True)
-
+            input, use_per_token_if_dynamic=True)
+    
+        # print(f"{q_input.shape=}")
         out = ops.cutlass_scaled_sparse_mm(
             a=layer.weight,
             e=layer.meta,
@@ -99,7 +103,7 @@ class CompressedTensors24(CompressedTensorsScheme):
             out = out[:-pad_size,:].contiguous()
         else:
             out = out.contiguous()
-        
+
         return out
 
 
