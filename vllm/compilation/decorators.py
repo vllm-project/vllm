@@ -4,7 +4,7 @@ from typing import Dict, List, Optional, Union
 import torch
 
 import vllm.envs as envs
-from vllm.compilation.levels import CompilationLevel
+from vllm.compilation.config import CompilationLevel
 from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
 from vllm.config import VllmConfig
 from vllm.logger import init_logger

@@ -19,7 +19,7 @@ from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.attention.backends.abstract import AttentionState
 from vllm.attention.backends.utils import CommonAttentionState
 from vllm.compilation.compile_context import set_compile_context
-from vllm.compilation.levels import CompilationLevel
+from vllm.compilation.config import CompilationLevel
 from vllm.config import VllmConfig
 from vllm.core.scheduler import SchedulerOutputs
 from vllm.distributed import get_pp_group

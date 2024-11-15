@@ -3,7 +3,7 @@ import os
 import torch
 
 import vllm.envs as envs
-from vllm.compilation.levels import CompilationLevel
+from vllm.compilation.config import CompilationLevel
 from vllm.plugins import set_torch_compile_backend
 
 from .interface import Platform, PlatformEnum

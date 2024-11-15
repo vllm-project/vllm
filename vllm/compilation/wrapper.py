@@ -9,7 +9,7 @@ import torch
 
 import vllm.envs as envs
 
-from .levels import CompilationLevel
+from .config import CompilationLevel
 
 
 class TorchCompileWrapperWithCustomDispatcher:

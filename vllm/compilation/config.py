@@ -11,11 +11,21 @@ from .compile_context import get_compile_context
 
 logger = init_logger(__name__)
 
+# constants for the levels of the compilation process
+
+
+class CompilationLevel:
+    NO_COMPILATION = 0
+    DYNAMO_AS_IS = 1
+    DYNAMO_ONCE = 2
+    PIECEWISE = 3
+
 
 class CompilationConfig(BaseModel):
     """
     Configuration for compilation.
-    It has two parts:
+    It has three parts:
+    - Compilation levels:
     - CudaGraph capture:
         - use_cudagraph: whether to use cudagraph inside compilation.
             - False: cudagraph inside compilation is not used.

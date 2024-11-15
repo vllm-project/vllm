@@ -15,10 +15,9 @@ from torch import nn
 from torch.library import Library
 
 from vllm.compilation.compile_context import set_compile_context
-from vllm.compilation.config import CompilationConfig
+from vllm.compilation.config import CompilationConfig, CompilationLevel
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.decorators import support_torch_compile
-from vllm.compilation.levels import CompilationLevel
 from vllm.config import VllmConfig
 from vllm.plugins import set_compilation_config
 from vllm.utils import direct_register_custom_op

@@ -4,7 +4,7 @@ from typing import Dict, Type
 import torch.nn as nn
 
 import vllm.envs as envs
-from vllm.compilation.levels import CompilationLevel
+from vllm.compilation.config import CompilationLevel
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import print_warning_once
