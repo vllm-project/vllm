@@ -16,7 +16,7 @@ from ..utils import check_embeddings_close
         pytest.param("intfloat/multilingual-e5-large"),
         # [Encoder-decoder]
         pytest.param("intfloat/e5-mistral-7b-instruct",
-                     marks=[pytest.mark.core_model]),
+                     marks=[pytest.mark.core_model, pytest.mark.cpu_model]),
         pytest.param("BAAI/bge-multilingual-gemma2",
                      marks=[pytest.mark.core_model]),
         pytest.param("ssmits/Qwen2-7B-Instruct-embed-base"),

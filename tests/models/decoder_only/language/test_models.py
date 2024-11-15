@@ -7,13 +7,11 @@ import pytest
 from ...utils import check_logprobs_close
 
 
-@pytest.mark.core_model
-@pytest.mark.cpu_model
 @pytest.mark.parametrize(
     "model",
     [
         pytest.param(
-            "facebook/opt-125m",  # opt
+            "bigscience/bloom-560m",  # bloom - testing alibi slopes
             marks=[pytest.mark.core_model, pytest.mark.cpu_model],
         ),
         pytest.param(
@@ -24,21 +22,7 @@ from ...utils import check_logprobs_close
         pytest.param("bigcode/tiny_starcoder_py"),  # gpt_bigcode
         pytest.param("EleutherAI/pythia-70m"),  # gpt_neox
         pytest.param(
-            "bigscience/bloom-560m",  # bloom - testing alibi slopes
-            marks=[pytest.mark.core_model, pytest.mark.cpu_model],
-        ),
-        pytest.param(
-            "microsoft/phi-2",  # phi
-            marks=[pytest.mark.core_model, pytest.mark.cpu_model],
-        ),
-        pytest.param("stabilityai/stablelm-3b-4e1t"),  # stablelm
-        pytest.param("bigcode/starcoder2-3b"),  # starcoder2
-        pytest.param(
             "google/gemma-1.1-2b-it",  # gemma
-            marks=[pytest.mark.core_model, pytest.mark.cpu_model],
-        ),
-        pytest.param(
-            "Qwen/Qwen2.5-0.5B-Instruct",  # qwen2
             marks=[pytest.mark.core_model, pytest.mark.cpu_model],
         ),
         pytest.param(
@@ -50,6 +34,20 @@ from ...utils import check_logprobs_close
             # fused_moe not supported on CPU
             marks=[pytest.mark.core_model],
         ),
+        pytest.param(
+            "facebook/opt-125m",  # opt
+            marks=[pytest.mark.core_model, pytest.mark.cpu_model],
+        ),
+        pytest.param(
+            "microsoft/phi-2",  # phi
+            marks=[pytest.mark.core_model],
+        ),
+        pytest.param(
+            "Qwen/Qwen2.5-0.5B-Instruct",  # qwen2
+            marks=[pytest.mark.core_model],
+        ),
+        pytest.param("stabilityai/stablelm-3b-4e1t"),  # stablelm
+        pytest.param("bigcode/starcoder2-3b"),  # starcoder2
     ])
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [32])
