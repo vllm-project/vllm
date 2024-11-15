@@ -1,6 +1,6 @@
 import os
 
-from vllm.compilation.config import CompilationLevel
+from vllm.config import CompilationLevel
 
 from ..utils import compare_two_settings
 

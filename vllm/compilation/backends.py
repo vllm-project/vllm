@@ -10,10 +10,10 @@ import torch
 import torch.fx as fx
 
 import vllm.envs as envs
+from vllm.config import CompilationConfig, CompilationLevel
 from vllm.logger import init_logger
 from vllm.utils import combine_fx_passes, weak_ref_tensors
 
-from .config import CompilationConfig, CompilationLevel
 from .counter import compilation_counter
 from .fusion import FusionPass
 from .reshapes import RedundantReshapesPass

@@ -4,8 +4,7 @@ from typing import TYPE_CHECKING, Callable, Optional, Union
 import vllm.envs as envs
 
 if TYPE_CHECKING:
-    from vllm.compilation.config import CompilationConfig
-    from vllm.config import VllmConfig
+    from vllm.config import CompilationConfig, VllmConfig
 else:
     CompilationConfig = None
     VllmConfig = None

@@ -10,8 +10,7 @@ import torch.nn as nn
 
 from vllm import envs
 from vllm.compilation.compile_context import set_compile_context
-from vllm.compilation.config import CompilationConfig, CompilationLevel
-from vllm.config import VllmConfig
+from vllm.config import CompilationConfig, CompilationLevel, VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.logger import init_logger

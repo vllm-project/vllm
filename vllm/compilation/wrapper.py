@@ -8,8 +8,7 @@ from typing import Callable, List, Optional
 import torch
 
 import vllm.envs as envs
-
-from .config import CompilationLevel
+from vllm.config import CompilationLevel
 
 
 class TorchCompileWrapperWithCustomDispatcher:

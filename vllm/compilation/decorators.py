@@ -4,9 +4,8 @@ from typing import Dict, List, Optional, Union
 import torch
 
 import vllm.envs as envs
-from vllm.compilation.config import CompilationLevel
 from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
-from vllm.config import VllmConfig
+from vllm.config import CompilationLevel, VllmConfig
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
 from vllm.utils import supports_dynamo
