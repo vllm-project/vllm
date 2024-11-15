@@ -113,7 +113,6 @@ class CompressedTensors24(CompressedTensorsScheme):
             bias=bias
         )
 
-
         # if not self.quantized:
         #     return semi_structured_dense_sparse_T_gemm(
         #         a_dense=x, 
