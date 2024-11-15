@@ -2,14 +2,11 @@ import os
 import random
 from pathlib import Path
 
-import hipbsolidxgemm
 import pandas as pd
-import rocsolidxgemm
 import torch
 import torch.nn.functional as F
 
-rocsolidxgemm.rocb_create_extension()
-hipbsolidxgemm.hipb_create_extension()
+import vllm._gradlib_C  # noqa: F401
 
 rtol = 1e-5
 atol = 1
@@ -54,10 +51,9 @@ class Gemm:
         self.rocblas_decode = rocblas_decode
 
     def find_hipblas_sols(self):
-        sols = hipbsolidxgemm.hipb_findallsols(self.inp,
-                                               self.weights.t(),
-                                               bias=self.bias,
-                                               out_dtype=self.outdtype)
+        sols = torch.ops._gradlib_C.hipb_findallsols(self.inp,
+                                                     self.weights.t(),
+                                                     self.bias, self.outdtype)
         print('M N K bias dtype',
               self.m,
               self.n,
@@ -82,13 +78,12 @@ class Gemm:
         else:
             ref = F.linear(self.inp, self.weights, self.bias)
         if libtype == 'hipblaslt':
-            c = hipbsolidxgemm.hipb_mm(self.inp,
-                                       self.weights.t(),
-                                       solidx,
-                                       bias=self.bias,
-                                       out_dtype=self.outdtype)
+            c = torch.ops._gradlib_C.hipb_mm(self.inp, self.weights.t(),
+                                             solidx, self.bias, self.outdtype,
+                                             None, None, None)
         elif libtype == 'rocblas':
-            c = rocsolidxgemm.rocb_mm(self.inp, self.weights.t(), solidx)
+            c = torch.ops._gradlib_C.rocb_mm(self.inp, self.weights.t(),
+                                             solidx)
             if self.bias is not None:
                 c += self.bias
         if torch.allclose(c.to(self.outdtype),
@@ -110,17 +105,13 @@ class Gemm:
     def hipb_time_sol(self, solidx, cold_iters=2, warm_iters=10):
         #print('>>>hipbtime',solidx)
         for i in range(cold_iters):
-            hipbsolidxgemm.hipb_mm(self.inp,
-                                   self.weights.t(),
-                                   solidx,
-                                   out_dtype=self.outdtype)
+            torch.ops._gradlib_C.hipb_mm(self.inp, self.weights.t(), solidx,
+                                         None, self.outdtype, None, None, None)
         self.start.record()
         for i in range(warm_iters):
-            hipbsolidxgemm.hipb_mm(self.inp,
-                                   self.weights2[random.randint(
-                                       0, self.nb - 1)].t(),
-                                   solidx,
-                                   out_dtype=self.outdtype)
+            torch.ops._gradlib_C.hipb_mm(
+                self.inp, self.weights2[random.randint(0, self.nb - 1)].t(),
+                solidx, None, self.outdtype, None, None, None)
         self.end.record()
         torch.cuda.synchronize()
         gtime = self.start.elapsed_time(self.end) / warm_iters
@@ -151,10 +142,10 @@ class Gemm:
     def rocb_time_sol(self, solidx, cold_iters=2, warm_iters=10):
 
         def rocb_mm_bias(inp, w, solidx, bias):
-            return rocsolidxgemm.rocb_mm(inp, w, solidx) + bias
+            return torch.ops._gradlib_C.rocb_mm(inp, w, solidx) + bias
 
         def rocb_mm_nobias(inp, w, solidx, _):
-            return rocsolidxgemm.rocb_mm(inp, w, solidx)
+            return torch.ops._gradlib_C.rocb_mm(inp, w, solidx)
 
         rocb_fun = rocb_mm_bias if self.bias is not None else rocb_mm_nobias
         for _ in range(cold_iters):
@@ -173,7 +164,8 @@ class Gemm:
         return gtime
 
     def find_rocblas_sols(self):
-        sols = rocsolidxgemm.rocb_findallsols(self.inp, self.weights.t())
+        sols = torch.ops._gradlib_C.rocb_findallsols(self.inp,
+                                                     self.weights.t())
         print('M N K dtype',
               self.m,
               self.n,

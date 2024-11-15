@@ -508,6 +508,24 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     ARCHITECTURES ${VLLM_GPU_ARCHES}
     USE_SABI 3
     WITH_SOABI)
+
+  #
+  # _gradlib_C extension
+  #
+  set(VLLM_GRADLIB_EXT_SRC
+    "csrc/gradlib/torch_bindings.cpp"
+    "csrc/gradlib/hipbsolgemm.cu"
+    "csrc/gradlib/rocsolgemm.cu")
+
+  define_gpu_extension_target(
+    _gradlib_C
+    DESTINATION vllm
+    LANGUAGE ${VLLM_GPU_LANG}
+    SOURCES ${VLLM_GRADLIB_EXT_SRC}
+    COMPILE_FLAGS ${VLLM_GPU_FLAGS}
+    ARCHITECTURES ${VLLM_GPU_ARCHES}
+    USE_SABI 3
+    WITH_SOABI)
 endif()
 
 # vllm-flash-attn currently only supported on CUDA

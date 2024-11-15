@@ -18,6 +18,3 @@ export MAX_JOBS=32
 
 # Build
 $python_executable setup.py bdist_wheel --dist-dir=dist
-cd gradlib
-$python_executable setup.py bdist_wheel --dist-dir=dist
-cd ..

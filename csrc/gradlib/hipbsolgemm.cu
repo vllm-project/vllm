@@ -6,7 +6,6 @@
 // __HIP_NO_HALF_CONVERSIONS__ #endif
 
 #include <torch/torch.h>
-#include <torch/extension.h>
 #include <ATen/ATen.h>
 #include <ATen/autocast_mode.h>
 #include <ATen/cuda/CUDABlas.h>
@@ -119,7 +118,7 @@ std::map<at::ScalarType, hipDataType> dtype_map{
 }  // namespace
 
 // find all hipblaslt solutions for given gemm problem
-std::vector<int> hipblasLtMatmul_findallsols_wrapper(
+std::vector<int64_t> hipblasLtMatmul_findallsols_wrapper(
     hipblasLtHandle_t handle, hipblasOperation_t op_A, hipblasOperation_t op_B,
     int m, int n, int k, const void* alpha, const void* a, int lda,
     const void* b, int ldb, const void* beta, void* c, int ldc,
@@ -163,7 +162,7 @@ std::vector<int> hipblasLtMatmul_findallsols_wrapper(
       handle, hipblaslt_ext::GemmType::HIPBLASLT_GEMM, op_A, op_B, intype,
       intype, outtype, outtype, HIPBLAS_COMPUTE_32F, heuristicResult));
 
-  std::vector<int> algoIndex;
+  std::vector<int64_t> algoIndex;
   int returned_algo_count = heuristicResult.size();
   // for (int i = 0; i < returnedAlgoCount; i++) {
   for (int i = 0; i < returned_algo_count; i++) {
@@ -290,12 +289,12 @@ hipblasStatus_t hipblasLtMatmul_sol_wrapper(
 }
 /////////////////////////////////////////////////////////////////////////////////////////////////////////
 torch::Tensor hipb_mm(const torch::Tensor& mat1, const torch::Tensor& mat2,
-                      const int solution_index,
-                      at::optional<torch::Tensor> bias = at::nullopt,
-                      at::optional<py::object> out_dtype = at::nullopt,
-                      at::optional<torch::Tensor> scale1 = at::nullopt,
-                      at::optional<torch::Tensor> scale2 = at::nullopt,
-                      at::optional<torch::Tensor> scaleOut = at::nullopt) {
+                      const int64_t solution_index,
+                      at::optional<torch::Tensor> bias,
+                      at::optional<c10::ScalarType> out_dtype,
+                      at::optional<torch::Tensor> scale1,
+                      at::optional<torch::Tensor> scale2,
+                      at::optional<torch::Tensor> scaleOut) {
   auto mat1_strides{mat1.strides()};
   auto mat2_strides{mat2.strides()};
   auto mat1_sizes{mat1.sizes()};
@@ -309,10 +308,7 @@ torch::Tensor hipb_mm(const torch::Tensor& mat1, const torch::Tensor& mat2,
               "mat1 dim 1 must match mat2 dim 0");
 
   auto inDtype{mat1.options().dtype().toScalarType()};
-  auto outDtype{
-      out_dtype.has_value()
-          ? torch::python::detail::py_object_to_dtype(out_dtype.value())
-          : inDtype};
+  auto outDtype{out_dtype.has_value() ? out_dtype.value() : inDtype};
   auto options{at::TensorOptions().dtype(outDtype).device(at::kCUDA)};
   auto result{torch::empty({mat1_sizes[0], mat2_sizes[1]}, options)};
 
@@ -392,10 +388,10 @@ torch::Tensor hipb_mm(const torch::Tensor& mat1, const torch::Tensor& mat2,
 }
 
 // find all hipblas solutions and return them to python land
-std::vector<int> hipb_findallsols(
+std::vector<int64_t> hipb_findallsols(
     const torch::Tensor& mat1, const torch::Tensor& mat2,
     at::optional<torch::Tensor> bias = at::nullopt,
-    at::optional<py::object> out_dtype = at::nullopt) {
+    at::optional<c10::ScalarType> out_dtype = at::nullopt) {
   auto mat1_strides{mat1.strides()};
   auto mat2_strides{mat2.strides()};
   auto mat1_sizes{mat1.sizes()};
@@ -408,10 +404,7 @@ std::vector<int> hipb_findallsols(
               "mat1 dim 1 must match mat2 dim 0");
 
   auto inType{mat1.options().dtype().toScalarType()};
-  auto outType{
-      out_dtype.has_value()
-          ? torch::python::detail::py_object_to_dtype(out_dtype.value())
-          : inType};
+  auto outType{out_dtype.has_value() ? out_dtype.value() : inType};
 
   auto options{at::TensorOptions().dtype(outType).device(at::kCUDA)};
   auto result{torch::empty({mat1_sizes[0], mat2_sizes[1]}, options)};
@@ -503,18 +496,4 @@ void hipb_destroy_extension() {
 
   // CHECK_HIP_ERROR(hipEventDestroy(start));
   // CHECK_HIP_ERROR(hipEventDestroy(stop));
-}
-
-/////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("hipb_create_extension", &hipb_create_extension, "create_extension");
-  m.def("hipb_destroy_extension", &hipb_destroy_extension, "destroy_extension");
-  m.def("hipb_mm", &hipb_mm, "hipb_mm", py::arg("mat1"), py::arg("mat2"),
-        py::arg("solution_index"), py::arg("bias") = at::nullopt,
-        py::arg("out_dtype") = at::nullopt, py::arg("scale1") = at::nullopt,
-        py::arg("scale2") = at::nullopt, py::arg("scaleOut") = at::nullopt);
-  m.def("hipb_findallsols", &hipb_findallsols, "hipb_findallsols",
-        py::arg("mat1"), py::arg("mat2"), py::arg("bias") = at::nullopt,
-        py::arg("out_dtype") = at::nullopt);
 }

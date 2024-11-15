@@ -1,13 +1,13 @@
 import sys
 
-import hipbsolidxgemm
 import pandas as pd
-import rocsolidxgemm
 import torch
 import torch.nn.functional as F
 
-rocsolidxgemm.rocb_create_extension()
-hipbsolidxgemm.hipb_create_extension()
+import vllm._gradlib_C  # noqa: F401
+
+torch.ops._gradlib_C.rocb_create_extension()
+torch.ops._gradlib_C.hipb_create_extension()
 
 
 class TunedGemm:
@@ -38,9 +38,10 @@ class TunedGemm:
                                          n=inp.shape[0],
                                          k=inp.shape[1])
         if soltype == 1:
-            out = hipbsolidxgemm.hipb_mm(inp, weights.t(), solidx)
+            out = torch.ops._gradlib_C.hipb_mm(inp, weights.t(), solidx, None,
+                                               None, None, None, None)
         elif soltype == 2:
-            out = rocsolidxgemm.rocb_mm(inp, weights.t(), solidx)
+            out = torch.ops._gradlib_C.rocb_mm(inp, weights.t(), solidx)
         else:
             out = F.linear(inp, weights)
         return out

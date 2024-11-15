@@ -4,14 +4,13 @@ import os
 from pathlib import Path
 
 import torch  # isort: split
-import hipbsolidxgemm
 import pandas as pd
-import rocsolidxgemm
 
+import vllm._gradlib_C  # noqa: F401
 from gradlib.GemmTuner import GemmTuner
 
-rocsolidxgemm.rocb_create_extension()
-hipbsolidxgemm.hipb_create_extension()
+torch.ops._gradlib_C.rocb_create_extension()
+torch.ops._gradlib_C.hipb_create_extension()
 
 
 def generate_mk_sets(model_dir, tp=1):
