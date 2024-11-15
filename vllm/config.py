@@ -1,8 +1,9 @@
 import enum
 import json
-from dataclasses import dataclass, field
-from typing import (TYPE_CHECKING, Any, ClassVar, Dict, Final, List, Literal,
-                    Mapping, Optional, Set, Tuple, Type, Union)
+import warnings
+from dataclasses import dataclass, field, replace
+from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Dict, Final, List,
+                    Literal, Mapping, Optional, Set, Tuple, Type, Union)
 
 import torch
 from transformers import PretrainedConfig
@@ -17,7 +18,7 @@ from vllm.transformers_utils.config import (ConfigFormat, get_config,
                                             get_hf_image_processor_config,
                                             get_hf_text_config)
 from vllm.utils import (GiB_bytes, cuda_device_count_stateless, get_cpu_memory,
-                        print_warning_once)
+                        identity, print_warning_once)
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
@@ -40,6 +41,9 @@ TaskOption = Literal["auto", "generate", "embedding"]
 
 # "draft" is only used internally for speculative decoding
 _Task = Literal["generate", "embedding", "draft"]
+
+HfOverrides = Union[Dict[str, Any], Callable[[PretrainedConfig],
+                                             PretrainedConfig]]
 
 
 class ModelConfig:
@@ -109,28 +113,19 @@ class ModelConfig:
             the model name will be the same as `model`.
         limit_mm_per_prompt: Maximum number of data instances per modality
             per prompt. Only applicable for multimodal models.
+        config_format: The config format which shall be loaded.
+            Defaults to 'auto' which defaults to 'hf'.
+        hf_overrides: If a dictionary, contains arguments to be forwarded to the
+            HuggingFace config. If a callable, it is called to update the
+            HuggingFace config.
+        mm_processor_kwargs: Arguments to be forwarded to the model's processor
+            for multi-modal data, e.g., image processor.
         override_neuron_config: Initialize non default neuron config or
             override default neuron config that are specific to Neuron devices,
             this argument will be used to configure the neuron config that
             can not be gathered from the vllm arguments.
-        config_format: The config format which shall be loaded.
-            Defaults to 'auto' which defaults to 'hf'.
-        mm_processor_kwargs: Arguments to be forwarded to the model's processor
-            for multi-modal data, e.g., image processor.
-        pooling_type: Used to configure the pooling method in the embedding 
-            model.
-        pooling_norm: Used to determine whether to normalize the pooled 
-            data in the embedding model.
-        pooling_softmax: Used to determine whether to softmax the pooled 
-            data in the embedding model.
-        pooling_step_tag_id: When pooling_step_tag_id is not -1, it indicates 
-            that the score corresponding to the pooling_step_tag_id in the 
-            generated sentence should be returned. Otherwise, it returns 
-            the scores for all tokens.
-        pooling_returned_token_ids: pooling_returned_token_ids represents a 
-            list of indices for the vocabulary dimensions to be extracted, 
-            such as the token IDs of good_token and bad_token in the 
-            math-shepherd-mistral-7b-prm model.
+        override_pooling_config: Initialize non default pooling config or
+            override default pooling config for the embedding model.
     """
 
     def __init__(
@@ -160,15 +155,12 @@ class ModelConfig:
             served_model_name: Optional[Union[str, List[str]]] = None,
             limit_mm_per_prompt: Optional[Mapping[str, int]] = None,
             use_async_output_proc: bool = True,
-            override_neuron_config: Optional[Dict[str, Any]] = None,
             config_format: ConfigFormat = ConfigFormat.AUTO,
             chat_template_text_format: str = "string",
+            hf_overrides: Optional[HfOverrides] = None,
             mm_processor_kwargs: Optional[Dict[str, Any]] = None,
-            pooling_type: Optional[str] = None,
-            pooling_norm: Optional[bool] = None,
-            pooling_softmax: Optional[bool] = None,
-            pooling_step_tag_id: Optional[int] = None,
-            pooling_returned_token_ids: Optional[List[int]] = None) -> None:
+            override_neuron_config: Optional[Dict[str, Any]] = None,
+            override_pooler_config: Optional["PoolerConfig"] = None) -> None:
         self.model = model
         self.tokenizer = tokenizer
         self.tokenizer_mode = tokenizer_mode
@@ -177,8 +169,30 @@ class ModelConfig:
         self.seed = seed
         self.revision = revision
         self.code_revision = code_revision
-        self.rope_scaling = rope_scaling
-        self.rope_theta = rope_theta
+
+        if hf_overrides is None:
+            hf_overrides = {}
+
+        if callable(hf_overrides):
+            hf_overrides_kw = {}
+            hf_overrides_fn = hf_overrides
+        else:
+            hf_overrides_kw = hf_overrides
+            hf_overrides_fn = identity
+
+        if rope_scaling is not None:
+            hf_override: Dict[str, Any] = {"rope_scaling": rope_scaling}
+            hf_overrides_kw.update(hf_override)
+            msg = ("`--rope-scaling` will be removed in a future release. "
+                   f"'Please instead use `--hf-overrides '{hf_override!r}'`")
+            warnings.warn(DeprecationWarning(msg), stacklevel=2)
+        if rope_theta is not None:
+            hf_override = {"rope_theta": rope_theta}
+            hf_overrides_kw.update(hf_override)
+            msg = ("`--rope-theta` will be removed in a future release. "
+                   f"'Please instead use `--hf-overrides '{hf_override!r}'`")
+            warnings.warn(DeprecationWarning(msg), stacklevel=2)
+
         # The tokenizer version is consistent with the model version by default.
         if tokenizer_revision is None:
             self.tokenizer_revision = revision
@@ -192,9 +206,11 @@ class ModelConfig:
         self.disable_sliding_window = disable_sliding_window
         self.skip_tokenizer_init = skip_tokenizer_init
 
-        self.hf_config = get_config(self.model, trust_remote_code, revision,
-                                    code_revision, rope_scaling, rope_theta,
-                                    config_format)
+        hf_config = get_config(self.model, trust_remote_code, revision,
+                               code_revision, config_format, **hf_overrides_kw)
+        hf_config = hf_overrides_fn(hf_config)
+        self.hf_config = hf_config
+
         self.hf_text_config = get_hf_text_config(self.hf_config)
         self.hf_image_processor_config = get_hf_image_processor_config(
             self.model, revision)
@@ -247,13 +263,7 @@ class ModelConfig:
         supported_tasks, task = self._resolve_task(task, self.hf_config)
         self.supported_tasks = supported_tasks
         self.task: Final = task
-        self.pooler_config = self._init_pooler_config(
-            pooling_type,
-            pooling_norm,
-            pooling_softmax,
-            pooling_step_tag_id,
-            pooling_returned_token_ids,
-        )
+        self.pooler_config = self._init_pooler_config(override_pooler_config)
 
         self._verify_quantization()
         self._verify_cuda_graph()
@@ -274,19 +284,21 @@ class ModelConfig:
 
     def _init_pooler_config(
         self,
-        pooling_type: Optional[str] = None,
-        pooling_norm: Optional[bool] = None,
-        pooling_softmax: Optional[bool] = None,
-        pooling_step_tag_id: Optional[int] = None,
-        pooling_returned_token_ids: Optional[List[int]] = None
+        override_pooler_config: Optional["PoolerConfig"],
     ) -> Optional["PoolerConfig"]:
+
         if self.task == "embedding":
-            return PoolerConfig(
-                pooling_type=pooling_type,
-                pooling_norm=pooling_norm,
-                pooling_softmax=pooling_softmax,
-                pooling_step_tag_id=pooling_step_tag_id,
-                pooling_returned_token_ids=pooling_returned_token_ids)
+            user_config = override_pooler_config or PoolerConfig()
+
+            base_config = get_pooling_config(self.model, self.revision)
+            if base_config is not None:
+                # Only set values that are not overridden by the user
+                for k, v in base_config.items():
+                    if getattr(user_config, k) is None:
+                        setattr(user_config, k, v)
+
+            return user_config
+
         return None
 
     def _init_attention_free(self) -> bool:
@@ -1777,13 +1789,43 @@ class MultiModalConfig:
 
 @dataclass
 class PoolerConfig:
-    """Controls the behavior of pooler in embedding model"""
+    """Controls the behavior of output pooling in embedding models."""
 
     pooling_type: Optional[str] = None
-    pooling_norm: Optional[bool] = None
-    pooling_softmax: Optional[bool] = None
-    pooling_step_tag_id: Optional[int] = None
-    pooling_returned_token_ids: Optional[List[int]] = None
+    """
+    The pooling method of the embedding model. This should be a key in
+    :class:`vllm.model_executor.layers.pooler.PoolingType`.
+    """
+
+    normalize: Optional[bool] = None
+    """
+    Whether to normalize the pooled outputs. Usually, this should be set to
+    ``True`` for embedding outputs.
+    """
+
+    softmax: Optional[bool] = None
+    """
+    Whether to apply softmax to the pooled outputs. Usually, this should be set
+    to ``True`` for classification outputs.
+    """
+
+    step_tag_id: Optional[int] = None
+    """
+    If set, only the score corresponding to the ``step_tag_id`` in the 
+    generated sentence should be returned. Otherwise, the scores for all tokens
+    are returned.
+    """
+
+    returned_token_ids: Optional[List[int]] = None
+    """
+    A list of indices for the vocabulary dimensions to be extracted, 
+    such as the token IDs of ``good_token`` and ``bad_token`` in the 
+    ``math-shepherd-mistral-7b-prm`` model.
+    """
+
+    @staticmethod
+    def from_json(json_str: str) -> "PoolerConfig":
+        return PoolerConfig(**json.loads(json_str))
 
 
 _STR_DTYPE_TO_TORCH_DTYPE = {

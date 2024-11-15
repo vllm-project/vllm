@@ -4,6 +4,7 @@ import copy
 import dataclasses
 import fnmatch
 import glob
+import inspect
 import json
 import math
 import os
@@ -88,11 +89,39 @@ def device_loading_context(module: torch.nn.Module,
 logger = init_logger(__name__)
 
 
-def _initialize_model(vllm_config: VllmConfig) -> nn.Module:
+def _initialize_model(vllm_config: VllmConfig, prefix: str = "") -> nn.Module:
     """Initialize a model with the given configurations."""
     model_config = vllm_config.model_config
     model_class, _ = get_model_architecture(model_config)
-    return model_class(vllm_config=vllm_config)
+    signatures = inspect.signature(model_class.__init__)
+    all_params = [param.name for param in signatures.parameters.values()]
+    if "vllm_config" in all_params and "prefix" in all_params:
+        # new-style model class
+        return model_class(vllm_config=vllm_config, prefix=prefix)
+    msg = ("vLLM model class should accept `vllm_config` and `prefix` as "
+           "input arguments. Possibly you have an old-style model class"
+           " registered from out of tree and it is used for new vLLM version. "
+           "Check https://docs.vllm.ai/en/latest/design/class_hierarchy.html "
+           "for the design and update the model class accordingly.")
+    logger.warning(msg)
+    logger.warning(
+        "Trying to guess the arguments for old-style model class %s",
+        model_class)
+    # try to be compatible with old-style model class
+    kwargs = {}
+    if "prefix" in all_params:
+        kwargs["prefix"] = prefix
+    if "config" in all_params:
+        kwargs["config"] = model_config.hf_config
+    if "cache_config" in all_params:
+        kwargs["cache_config"] = vllm_config.cache_config
+    if "quant_config" in all_params:
+        kwargs["quant_config"] = vllm_config.quant_config
+    if "lora_config" in all_params:
+        kwargs["lora_config"] = vllm_config.lora_config
+    if "scheduler_config" in all_params:
+        kwargs["scheduler_config"] = vllm_config.scheduler_config
+    return model_class(**kwargs)
 
 
 class BaseModelLoader(ABC):
@@ -991,7 +1020,13 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
         param_dict = dict(model.named_parameters())
         stacked_quant_state_dict: Dict[str, Dict[int, Any]] = {}
+        # TODO: Change this lazy import to normal import
+        # after the checks are updated to run on a new version
+        from vllm.model_executor.models.utils import is_pp_missing_parameter
         for quant_param_name in quant_state_dict:
+            if is_pp_missing_parameter(quant_param_name, model):
+                continue
+
             non_stacked_param_name = quant_param_name
 
             shard_index = 0

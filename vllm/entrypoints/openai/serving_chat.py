@@ -30,6 +30,7 @@ from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.sequence import Logprob
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
+from vllm.transformers_utils.tokenizers import maybe_serialize_tool_calls
 from vllm.utils import iterate_with_cancellation
 
 logger = init_logger(__name__)
@@ -74,6 +75,11 @@ class OpenAIServingChat(OpenAIServing):
         self.tool_parser: Optional[Callable[[AnyTokenizer], ToolParser]] = None
         if self.enable_auto_tools:
             try:
+                if (tool_parser == "pythonic" and
+                        model_config.model.startswith("meta-llama/Llama-3.2")):
+                    logger.warning(
+                        "Llama3.2 models may struggle to emit valid pythonic"
+                        " tool calls")
                 self.tool_parser = ToolParserManager.get_tool_parser(
                     tool_parser)
             except Exception as e:
@@ -121,6 +127,12 @@ class OpenAIServingChat(OpenAIServing):
             if request.tool_choice == "required":
                 return self.create_error_response(
                     "tool_choice = \"required\" is not supported!")
+
+            # because of issues with pydantic we need to potentially
+            # re-serialize the tool_calls field of the request
+            # for more info: see comment in `maybe_serialize_tool_calls`
+            if isinstance(tokenizer, MistralTokenizer):
+                maybe_serialize_tool_calls(request)
 
             if (request.tool_choice == "auto" and
                     not (self.enable_auto_tools and tool_parser is not None)
