@@ -11,6 +11,7 @@ from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.engine import EngineCoreOutput
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
+from vllm.lora.request import LoRARequest
 
 if TYPE_CHECKING:
     from vllm.multimodal import MultiModalKwargs
@@ -30,8 +31,6 @@ class Scheduler:
         self.scheduler_config = scheduler_config
         self.cache_config = cache_config
         self.lora_config = lora_config
-        # TODO: Support LoRA.
-        assert lora_config is None, "V1 does not support LoRA yet."
 
         num_gpu_blocks = cache_config.num_gpu_blocks
         assert isinstance(num_gpu_blocks, int) and num_gpu_blocks > 0
@@ -170,6 +169,15 @@ class Scheduler:
                     self.encoder_cache_manager.allocate(request, i)
                 encoder_budget = new_encoder_budget
 
+        #  Record the LoRAs in scheduled_running_reqs 
+        requested_loras: set[int] = set()
+        if self.lora_config:
+            requested_loras =  \
+                set(req.lora_request.lora_int_id \
+                        for req in scheduled_running_reqs \
+                            if req.lora_request and req.lora_request.lora_int_id > 0)
+            assert len(requested_loras) <= self.lora_config.max_loras
+
         # Next, schedule the WAITING requests.
         if not preempted_reqs:
             while self.waiting:
@@ -181,6 +189,17 @@ class Scheduler:
                     break
 
                 request = self.waiting[0]
+
+                # Check that adding the request still respects the max_loras
+                # constraint.
+                if self.lora_config and request.lora_request:
+                    req_lora_id = request.lora_request.lora_int_id
+                    if len(requested_loras) == self.lora_config.max_loras and \
+                        req_lora_id not in requested_loras:
+                        # cannot schedule
+                        break
+                    requested_loras.add(req_lora_id)
+
                 # Get already-cached tokens.
                 computed_blocks = self.kv_cache_manager.get_computed_blocks(
                     request)
@@ -513,6 +532,7 @@ class NewRequestData:
     sampling_params: SamplingParams
     block_ids: List[int]
     num_computed_tokens: int
+    lora_request: Optional[LoRARequest]
 
     @classmethod
     def from_request(
@@ -530,6 +550,7 @@ class NewRequestData:
             sampling_params=request.sampling_params,
             block_ids=block_ids,
             num_computed_tokens=num_computed_tokens,
+            lora_request=request.lora_request,
         )
 
 
