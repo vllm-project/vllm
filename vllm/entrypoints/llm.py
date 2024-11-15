@@ -9,7 +9,8 @@ from tqdm import tqdm
 from vllm import envs
 from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
                               BeamSearchSequence, get_beam_search_score)
-from vllm.engine.arg_utils import EngineArgs, HfOverrides, TaskOption
+from vllm.engine.arg_utils import (EngineArgs, HfOverrides, PoolerConfig,
+                                   TaskOption)
 from vllm.engine.llm_engine import LLMEngine
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
                                          apply_hf_chat_template,
@@ -162,11 +163,7 @@ class LLM:
         mm_processor_kwargs: Optional[Dict[str, Any]] = None,
         # After positional args are removed, move this right below `model`
         task: TaskOption = "auto",
-        pooling_type: Optional[str] = None,
-        pooling_norm: Optional[bool] = None,
-        pooling_softmax: Optional[bool] = None,
-        pooling_step_tag_id: Optional[int] = None,
-        pooling_returned_token_ids: Optional[List[int]] = None,
+        override_pooler_config: Optional[PoolerConfig] = None,
         **kwargs,
     ) -> None:
         '''
@@ -202,11 +199,7 @@ class LLM:
             disable_async_output_proc=disable_async_output_proc,
             hf_overrides=hf_overrides,
             mm_processor_kwargs=mm_processor_kwargs,
-            pooling_type=pooling_type,
-            pooling_norm=pooling_norm,
-            pooling_softmax=pooling_softmax,
-            pooling_step_tag_id=pooling_step_tag_id,
-            pooling_returned_token_ids=pooling_returned_token_ids,
+            override_pooler_config=override_pooler_config,
             **kwargs,
         )
         # Logic to switch between engines is done at runtime instead of import
