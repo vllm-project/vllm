@@ -467,8 +467,8 @@ class EngineArgs:
             '--num-gpu-blocks-override',
             type=int,
             default=None,
-            help='If specified, ignore GPU profiling result and use this number '
-            'of GPU blocks. Used for testing preemption.')
+            help='If specified, ignore GPU profiling result and use this number'
+            ' of GPU blocks. Used for testing preemption.')
         parser.add_argument('--max-num-batched-tokens',
                             type=int,
                             default=EngineArgs.max_num_batched_tokens,
