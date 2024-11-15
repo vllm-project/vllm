@@ -8,10 +8,12 @@ from unittest.mock import MagicMock, patch
 import openai
 import pytest
 import torch
+from huggingface_hub import snapshot_download
 from tensorizer import EncryptionParams
 
 from vllm import SamplingParams
 from vllm.engine.arg_utils import EngineArgs
+# yapf conflicts with isort for this docstring
 # yapf: disable
 from vllm.model_executor.model_loader.tensorizer import (TensorizerConfig,
                                                          TensorSerializer,
@@ -20,13 +22,14 @@ from vllm.model_executor.model_loader.tensorizer import (TensorizerConfig,
                                                          open_stream,
                                                          serialize_vllm_model,
                                                          tensorize_vllm_model)
+# yapf: enable
+from vllm.utils import import_from_path
 
 from ..conftest import VllmRunner
-from ..utils import RemoteOpenAIServer
+from ..utils import VLLM_PATH, RemoteOpenAIServer
 from .conftest import retry_until_skip
 
-# yapf conflicts with isort for this docstring
-
+EXAMPLES_PATH = VLLM_PATH / "examples"
 
 prompts = [
     "Hello, my name is",
@@ -94,8 +97,8 @@ def test_can_deserialize_s3(vllm_runner):
                          num_readers=1,
                          s3_endpoint="object.ord1.coreweave.com",
                      )) as loaded_hf_model:
-        deserialized_outputs = loaded_hf_model.generate(prompts,
-                                                        sampling_params)
+        deserialized_outputs = loaded_hf_model.generate(
+            prompts, sampling_params)
         # noqa: E501
 
         assert deserialized_outputs
@@ -111,23 +114,21 @@ def test_deserialized_encrypted_vllm_model_has_same_outputs(
 
         outputs = vllm_model.generate(prompts, sampling_params)
 
-        config_for_serializing = TensorizerConfig(
-            tensorizer_uri=model_path,
-            encryption_keyfile=key_path
-        )
+        config_for_serializing = TensorizerConfig(tensorizer_uri=model_path,
+                                                  encryption_keyfile=key_path)
         serialize_vllm_model(get_torch_model(vllm_model),
                              config_for_serializing)
 
     config_for_deserializing = TensorizerConfig(tensorizer_uri=model_path,
                                                 encryption_keyfile=key_path)
 
-    with vllm_runner(
-            model_ref,
-            load_format="tensorizer",
-            model_loader_extra_config=config_for_deserializing) as loaded_vllm_model:  # noqa: E501
+    with vllm_runner(model_ref,
+                     load_format="tensorizer",
+                     model_loader_extra_config=config_for_deserializing
+                     ) as loaded_vllm_model:  # noqa: E501
 
-        deserialized_outputs = loaded_vllm_model.generate(prompts,
-                                                          sampling_params)
+        deserialized_outputs = loaded_vllm_model.generate(
+            prompts, sampling_params)
         # noqa: E501
 
         assert outputs == deserialized_outputs
@@ -156,14 +157,14 @@ def test_deserialized_hf_model_has_same_outputs(hf_runner, vllm_runner,
 
 
 def test_vllm_model_can_load_with_lora(vllm_runner, tmp_path):
-    from huggingface_hub import snapshot_download
-
-    from examples.multilora_inference import (create_test_prompts,
-                                              process_requests)
+    multilora_inference = import_from_path(
+        "examples.multilora_inference",
+        EXAMPLES_PATH / "multilora_inference.py",
+    )
 
     model_ref = "meta-llama/Llama-2-7b-hf"
     lora_path = snapshot_download(repo_id="yard1/llama-2-7b-sql-lora-test")
-    test_prompts = create_test_prompts(lora_path)
+    test_prompts = multilora_inference.create_test_prompts(lora_path)
 
     # Serialize model before deserializing and binding LoRA adapters
     with vllm_runner(model_ref, ) as vllm_model:
@@ -186,7 +187,8 @@ def test_vllm_model_can_load_with_lora(vllm_runner, tmp_path):
             max_num_seqs=50,
             max_model_len=1000,
     ) as loaded_vllm_model:
-        process_requests(loaded_vllm_model.model.llm_engine, test_prompts)
+        multilora_inference.process_requests(
+            loaded_vllm_model.model.llm_engine, test_prompts)
 
         assert loaded_vllm_model
 
@@ -217,8 +219,11 @@ def test_openai_apiserver_with_tensorizer(vllm_runner, tmp_path):
 
     ## Start OpenAI API server
     openai_args = [
-        "--dtype", "float16", "--load-format",
-        "tensorizer", "--model-loader-extra-config",
+        "--dtype",
+        "float16",
+        "--load-format",
+        "tensorizer",
+        "--model-loader-extra-config",
         json.dumps(model_loader_extra_config),
     ]
 
@@ -251,8 +256,7 @@ def test_raise_value_error_on_invalid_load_format(vllm_runner):
     torch.cuda.empty_cache()
 
 
-@pytest.mark.skipif(torch.cuda.device_count() < 2,
-                    reason="Requires 2 GPUs")
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="Requires 2 GPUs")
 def test_tensorizer_with_tp_path_without_template(vllm_runner):
     with pytest.raises(ValueError):
         model_ref = "EleutherAI/pythia-1.4b"
@@ -271,10 +275,9 @@ def test_tensorizer_with_tp_path_without_template(vllm_runner):
         )
 
 
-@pytest.mark.skipif(torch.cuda.device_count() < 2,
-                    reason="Requires 2 GPUs")
-def test_deserialized_encrypted_vllm_model_with_tp_has_same_outputs(vllm_runner,
-                                                                    tmp_path):
+@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="Requires 2 GPUs")
+def test_deserialized_encrypted_vllm_model_with_tp_has_same_outputs(
+        vllm_runner, tmp_path):
     model_ref = "EleutherAI/pythia-1.4b"
     # record outputs from un-sharded un-tensorized model
     with vllm_runner(
@@ -313,11 +316,10 @@ def test_deserialized_encrypted_vllm_model_with_tp_has_same_outputs(vllm_runner,
             disable_custom_all_reduce=True,
             enforce_eager=True,
             model_loader_extra_config=tensorizer_config) as loaded_vllm_model:
-        deserialized_outputs = loaded_vllm_model.generate(prompts,
-                                                          sampling_params)
+        deserialized_outputs = loaded_vllm_model.generate(
+            prompts, sampling_params)
 
     assert outputs == deserialized_outputs
-
 
 
 @retry_until_skip(3)
@@ -337,8 +339,8 @@ def test_vllm_tensorized_model_has_same_outputs(vllm_runner, tmp_path):
     with vllm_runner(model_ref,
                      load_format="tensorizer",
                      model_loader_extra_config=config) as loaded_vllm_model:
-        deserialized_outputs = loaded_vllm_model.generate(prompts,
-                                                          sampling_params)
+        deserialized_outputs = loaded_vllm_model.generate(
+            prompts, sampling_params)
         # noqa: E501
 
         assert outputs == deserialized_outputs
