@@ -156,6 +156,5 @@ class ToolParserManager:
             import_from_path(module_name, plugin_path)
         except Exception:
             logger.exception("Failed to load module '%s' from %s.",
-                             module_name,
-                             plugin_path)
+                             module_name, plugin_path)
             return
