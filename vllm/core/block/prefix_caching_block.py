@@ -1,6 +1,9 @@
 """Token blocks."""
+import sys
+from bisect import bisect_left
 from os.path import commonprefix
-from typing import Dict, FrozenSet, Iterable, List, Optional, Set, Tuple
+from typing import (Callable, Dict, FrozenSet, Iterable, List, Optional, Set,
+                    Tuple)
 
 from vllm.core.block.common import (CacheMetricData, CopyOnWriteTracker,
                                     get_all_blocks_recursively)
@@ -641,13 +644,11 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             # We only consider the blocks that are marked as computed.
             return self.block_is_computed(cached_block_id)
 
-        def _bisect_left(a, x, key) -> int:
-            import sys
-            from bisect import bisect_left
+        def _bisect_left(a, x, key: Callable[[PrefixHash], bool]) -> int:
 
             # python <= 3.10 don't have the key argument
             if sys.version_info < (3, 10):
-                a = [_block_is_cached(x) for x in a]
+                a = [key(e) for e in a]
                 return bisect_left(a, x)
             else:
                 return bisect_left(a, x, key=key)
