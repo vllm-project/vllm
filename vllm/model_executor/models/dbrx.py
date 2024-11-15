@@ -405,7 +405,8 @@ class DbrxForCausalLM(nn.Module, SupportsPP):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
 
         expert_params_mapping = [(
             "w13_weight" if weight_name in ["w1", "v1"] else "w2_weight",

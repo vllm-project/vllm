@@ -19,7 +19,7 @@
 """Inference-only Jais model compatible with HuggingFace weights."""
 
 import math
-from typing import Iterable, List, Optional, Tuple, Union
+from typing import Iterable, List, Optional, Set, Tuple, Union
 
 import torch
 from torch import nn
@@ -340,8 +340,10 @@ class JAISLMHeadModel(nn.Module, SupportsPP):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         params_dict = dict(self.named_parameters(remove_duplicate=False))
+        loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
             if "lm_head.weight" in name:
                 # GPT-2 ties the weights of the embedding layer and the final
@@ -372,3 +374,5 @@ class JAISLMHeadModel(nn.Module, SupportsPP):
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
             weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params

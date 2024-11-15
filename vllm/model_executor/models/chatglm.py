@@ -3,7 +3,8 @@
 """Inference-only ChatGLM model compatible with THUDM weights."""
 from argparse import Namespace
 from array import array
-from typing import Dict, Iterable, List, Mapping, Optional, Set, Tuple, TypedDict
+from typing import (Dict, Iterable, List, Mapping, Optional, Set, Tuple,
+                    TypedDict)
 
 import torch
 from PIL import Image
@@ -645,7 +646,8 @@ class ChatGLMForCausalLM(nn.Module, SupportsLoRA, SupportsPP,
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]) -> Set[str]:
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         # Merge two ColumnParallelLinear into one MergedColumnParallelLinear
         merged_weights_dict: Dict[str, Dict[str, Optional[torch.Tensor]]] = {
             "transformer.vision.linear_proj.merged_proj.weight": {
