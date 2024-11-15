@@ -166,14 +166,14 @@ TEXT_GENERATION_MODELS = {
     "mistralai/Mixtral-8x7B-Instruct-v0.1": PPTestSettings.fast(tp_base=4),
     "mosaicml/mpt-7b": PPTestSettings.fast(),
     "nvidia/Minitron-8B-Base": PPTestSettings.fast(),
-    "allenai/OLMoE-1B-7B-0924-Instruct": PPTestSettings.fast(),
     "allenai/OLMo-1B-hf": PPTestSettings.fast(),
+    "allenai/OLMoE-1B-7B-0924-Instruct": PPTestSettings.fast(),
     "facebook/opt-iml-max-1.3b": PPTestSettings.fast(),
     "OrionStarAI/Orion-14B-Chat": PPTestSettings.fast(trust_remote_code=True),
-    "microsoft/phi-2": PPTestSettings.fast(),
-    "microsoft/Phi-3.5-MoE-instruct": PPTestSettings.detailed(trust_remote_code=True, multi_node_only=True, load_format="dummy", hf_overrides='{"num_hidden_layers": 4, "hidden_size": 512, "intermediate_size": 800, "num_attention_heads": 4, "num_key_value_heads": 1}'),  # noqa: E501
-    "microsoft/Phi-3-small-8k-instruct": PPTestSettings.fast(trust_remote_code=True),  # noqa: E501
     "adept/persimmon-8b-chat": PPTestSettings.fast(),
+    "microsoft/phi-2": PPTestSettings.fast(),
+    "microsoft/Phi-3-small-8k-instruct": PPTestSettings.fast(trust_remote_code=True),  # noqa: E501
+    "microsoft/Phi-3.5-MoE-instruct": PPTestSettings.detailed(trust_remote_code=True, multi_node_only=True, load_format="dummy", hf_overrides='{"num_hidden_layers": 4, "hidden_size": 512, "intermediate_size": 800, "num_attention_heads": 4, "num_key_value_heads": 1}'),  # noqa: E501
     "Qwen/Qwen-7B-Chat": PPTestSettings.fast(trust_remote_code=True),
     "Qwen/Qwen2-7B-Instruct": PPTestSettings.fast(),
     "Qwen/Qwen1.5-MoE-A2.7B-Chat": PPTestSettings.fast(),
