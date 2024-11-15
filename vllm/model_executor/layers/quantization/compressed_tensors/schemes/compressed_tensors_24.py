@@ -1,6 +1,6 @@
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
-from vllm.model_executor.parameter import ModelWeightParameter, PerTensorScaleParameter
+from vllm.model_executor.parameter import ModelWeightParameter, ChannelQuantScaleParameter
 import torch
 from typing import List, Callable, Optional
 from compressed_tensors.compressors import ModelCompressor
@@ -37,79 +37,34 @@ class CompressedTensors24(CompressedTensorsScheme):
                     params_dtype: torch.dtype, weight_loader: Callable,
                     **kwargs):
         layer.logical_widths = output_partition_sizes
-        weights_dtype = params_dtype
-        weights = ModelWeightParameter(data=torch.empty(
-            sum(output_partition_sizes),
-            input_size_per_partition // 2,
-            dtype=weights_dtype),
-            input_dim=1,
-            output_dim=0,
-            weight_loader=weight_loader)
+        self.params_dtype=params_dtype
+
+        # weights_dtype = params_dtype
+        # weights = ModelWeightParameter(data=torch.empty(
+        #     sum(output_partition_sizes),
+        #     input_size_per_partition // 2,
+        #     dtype=weights_dtype),
+        #     input_dim=1,
+        #     output_dim=0,
+        #     weight_loader=weight_loader)
 
         # parameter to store uncompressed weight or decompressed weight
-        weight_unpacked = ModelWeightParameter(data=torch.empty(
-            sum(output_partition_sizes),
-            input_size_per_partition,
-            dtype=weights_dtype),
+        weight = ModelWeightParameter(
+            data=torch.empty(sum(output_partition_sizes),
+                             input_size_per_partition,
+                             dtype=torch.float8_e4m3fn),
             input_dim=1,
             output_dim=0,
             weight_loader=weight_loader)
-        
-        if self.quantized:
 
-            # assume per tensor static quantization
-            weight_scale = PerTensorScaleParameter(data=torch.empty(
-                    len(output_partition_sizes), dtype=torch.float),
-                                                    weight_loader=weight_loader)
+        weight_scale = ChannelQuantScaleParameter(
+            data=torch.empty((sum(output_partition_sizes), 1),
+                             dtype=torch.float32),
+                             output_dim=0,
+                             weight_loader=weight_loader)
 
-            weight_zero_point = PerTensorScaleParameter(data=torch.empty(
-                len(output_partition_sizes), dtype=torch.float8_e4m3fn),
-                                                weight_loader=weight_loader)
-            
-            
-            input_scale = PerTensorScaleParameter(data=torch.empty(
-                    len(output_partition_sizes), dtype=torch.float),
-                                                    weight_loader=weight_loader)
-            
-            input_zero_point = PerTensorScaleParameter(data=torch.empty(
-                len(output_partition_sizes), dtype=torch.float8_e4m3fn),
-                                                weight_loader=weight_loader)
-
-
-            layer.register_parameter("weight_scale", weight_scale)
-            layer.register_parameter("input_scale", input_scale)
-            layer.register_parameter("input_zero_point", input_zero_point)
-            layer.register_parameter("weight_zero_point", weight_zero_point)
-    
-        if self.compressed:
-            # store compression specific things to be used
-            # later during decompression
-
-            bits_per_weight_element = weights.itemsize * 8 
-            meta_dtype = torch.int32 if bits_per_weight_element == 8 else torch.int16
-
-            meta_input_size = (
-                input_size_per_partition // 32
-                if bits_per_weight_element == 8
-                else input_size_per_partition // 16
-            )
-            meta = ModelWeightParameter(data=torch.empty(
-                sum(output_partition_sizes), 
-                meta_input_size,
-                dtype=meta_dtype),
-                input_dim=1,
-                output_dim=0,
-                weight_loader=weight_loader)
-
-            # TODO: replace weight_packed name, with something
-            # more meaningful, like sparse24_packed, this will
-            # require changes on compressed_tensors side
-
-            layer.register_parameter("weight_packed", weights)
-            layer.register_parameter("meta", meta)
-
-        layer.register_parameter("weight", weight_unpacked)
-        
+        layer.register_parameter("weight_scale", weight_scale)
+        layer.register_parameter("weight", weight)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         """
@@ -118,77 +73,11 @@ class CompressedTensors24(CompressedTensorsScheme):
 
         :param layer: The layer with the weights to be processed
         """
+
+        w_compressed, meta = ops.cutlass_compress_entry(layer.weight)
+        layer.weight = torch.nn.Parameter(w_compressed)
+        layer.meta = torch.nn.Parameter(meta)
         
-        # TODO: right now this is hard coded for 24 compressor
-        # replace by a better way to identify targetted params
-        # using COMPRESSION_PARAMS defined by sparse compressors
-        # and decompress the weights accordingly
-        if self.compressed and hasattr(layer, "weight_packed"):
-            # TODO: this name will also be changed to sparse24_packed
-            weight_packed_data = layer.weight_packed.data
-            meta = layer.meta.data
-
-            qkv_sizes = [2048, 256, 256]
-            gate_up_sizes = [5632, 5632]
-            split_weights = None 
-            split_meta = None
-
-            def _process_split(input_weight, input_meta):
-                weight_data = {
-                    "weight_packed": input_weight,
-                    "meta": input_meta
-                }
-                decompress = self.model_compressor.sparsity_compressor.decompress_weight(weight_data)
-                return decompress
-
-            print(self.layer_name)
-            if "qkv" in self.layer_name:
-                split_weights = torch.split(weight_packed_data, qkv_sizes)
-                split_meta = torch.split(meta, qkv_sizes)
-            elif "gate_up" in self.layer_name:
-                split_weights = torch.split(weight_packed_data, gate_up_sizes)
-                split_meta = torch.split(meta, gate_up_sizes)
-            
-            if split_weights:
-                all_compress = []
-                for i in range(len(split_weights)):
-                    print(split_weights[i].shape, split_meta[i].shape)
-                    compress_i = _process_split(split_weights[i], split_meta[i])
-                    all_compress.append(compress_i)
-                
-                compressed = torch.cat(all_compress)
-                compressed = compress_to_torch_sparse_semi_structured_mat(compressed)
-            else:
-                decompress = _process_split(weight_packed_data, meta)
-                compressed = compress_to_torch_sparse_semi_structured_mat(decompress)
-            
-            layer.weight = Parameter(compressed, requires_grad=False)
-            
-        else:
-            # uncompressed case
-            # quantize the weights to fp8 and store them
-
-            dq_weight = layer.weight.data
-            weight_scale = layer.weight_scale.data
-
-            if len(weight_scale) != 1:
-                # needed for cases where modules are merged
-                # to reduce the number of scales to one
-                scale, q_weight = quantize_with_max_scale(
-                    dq_weight, weight_scale, layer.logical_widths
-                )
-            else:
-                # if modules are not merged, we can directly
-                # use the scale provided, and quantize the weights
-                q_weight, scale = ops.scaled_fp8_quant(dq_weight, weight_scale)
-
-            layer.weight_scale = Parameter(scale, requires_grad=False)
-
-            # Temporary check to ensure that the weights are 2:4 sparse
-            assert check_24(q_weight), "Not 2:4 sparse"
-            
-            compressed = compress_to_torch_sparse_semi_structured_mat(q_weight)
-            layer.weight = Parameter(compressed, requires_grad=False)
 
     def apply_weights(self,
                       layer: torch.nn.Module,
@@ -212,42 +101,55 @@ class CompressedTensors24(CompressedTensorsScheme):
         return result.t().contiguous()
         """
 
-        if not self.quantized:
-            return semi_structured_dense_sparse_T_gemm(
-                a_dense=x, 
-                b_T_packed=layer.weight.data
-            )
-        
-        input_scale = layer.input_scale.data
-        weight_scale = layer.weight_scale.data
-        weight = layer.weight.data
-
-        # Quantize the input tensor to fp8
-        # can use the max scale for the input tensor
-        # as the merged modules have a same scale
-        # repeated for all the partitions
-        input_scale = input_scale.max()
         q_input, input_scale = ops.scaled_fp8_quant(x, input_scale)
-        
-        if q_input.is_contiguous():
-            # Make q_input non-contiguous
-            # as expected by the kernel
-            q_input = q_input.t().contiguous().t()
-
-
-        assert not q_input.is_contiguous(), "Input is contiguous, the Kernel expects non-contiguous input"
-        output =  semi_structured_dense_sparse_T_gemm_scaled(
-            a_dense=q_input,
-            b_T_packed=weight,
-            scale_a=input_scale,
-            scale_b=weight_scale,
+        breakpoint()
+        return ops.cutlass_scaled_sparse_mm(
+            a=layer.weight,
+            e=layer.meta,
+            b=q_input,
+            scale_a=layer.weight_scale,
+            scale_b=input_scale,
+            out_dtype=self.params_dtype,
             bias=bias
         )
-        output = output.to(x.dtype)
-        print()
-        print(f"{self.layer_name} executed")
-        print("\t", "Input shape:", x.shape, "weight shape:", weight.shape, "output shape:", output.shape)
-        return output
+
+
+        # if not self.quantized:
+        #     return semi_structured_dense_sparse_T_gemm(
+        #         a_dense=x, 
+        #         b_T_packed=layer.weight.data
+        #     )
+        
+        # input_scale = layer.input_scale.data
+        # weight_scale = layer.weight_scale.data
+        # weight = layer.weight.data
+
+        # # Quantize the input tensor to fp8
+        # # can use the max scale for the input tensor
+        # # as the merged modules have a same scale
+        # # repeated for all the partitions
+        # input_scale = input_scale.max()
+        # q_input, input_scale = ops.scaled_fp8_quant(x, input_scale)
+        
+        # if q_input.is_contiguous():
+        #     # Make q_input non-contiguous
+        #     # as expected by the kernel
+        #     q_input = q_input.t().contiguous().t()
+
+
+        # assert not q_input.is_contiguous(), "Input is contiguous, the Kernel expects non-contiguous input"
+        # output =  semi_structured_dense_sparse_T_gemm_scaled(
+        #     a_dense=q_input,
+        #     b_T_packed=weight,
+        #     scale_a=input_scale,
+        #     scale_b=weight_scale,
+        #     bias=bias
+        # )
+        # output = output.to(x.dtype)
+        # print()
+        # print(f"{self.layer_name} executed")
+        # print("\t", "Input shape:", x.shape, "weight shape:", weight.shape, "output shape:", output.shape)
+        # return output
 
 
 def quantize_with_max_scale(
