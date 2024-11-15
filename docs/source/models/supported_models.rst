@@ -345,6 +345,9 @@ Text Embedding
   Some model architectures support both generation and embedding tasks.
   In this case, you have to pass :code:`--task embedding` to run the model in embedding mode.
 
+.. tip::
+  You can override the model's pooling method by passing :code:`--override-pooler-config`.
+
 Reward Modeling
 ---------------
 
@@ -364,7 +367,7 @@ Reward Modeling
     - ✅︎
 
 .. note::
-    As an interim measure, these models are supported via Embeddings API. See `this RFC <https://github.com/vllm-project/vllm/issues/8967>`_ for upcoming changes.
+    As an interim measure, these models are supported in both offline and online inference via Embeddings API.
 
 Classification
 ---------------
@@ -385,7 +388,7 @@ Classification
     - ✅︎
 
 .. note::
-    As an interim measure, these models are supported via Embeddings API. It will be supported via Classification API in the future (no reference APIs exist now).
+    As an interim measure, these models are supported in both offline and online inference via Embeddings API.
 
 
 Multimodal Language Models
@@ -599,6 +602,9 @@ Multimodal Embedding
 .. important::
   Some model architectures support both generation and embedding tasks.
   In this case, you have to pass :code:`--task embedding` to run the model in embedding mode.
+
+.. tip::
+  You can override the model's pooling method by passing :code:`--override-pooler-config`.
 
 Model Support Policy
 =====================
