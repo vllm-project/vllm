@@ -322,7 +322,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "bool silu_activation,"
       "int pad_slot_id) -> ()");
   ops.impl("causal_conv1d_fwd", torch::kCUDA, &causal_conv1d_fwd);
-
 #endif
 
   // Quantized GEMM for GPTQ.
