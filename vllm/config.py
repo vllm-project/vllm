@@ -2056,10 +2056,8 @@ class ObservabilityConfig:
                 f"installed. Original error:\n{otel_import_error_traceback}")
 
 
-# constants for the levels of the compilation process
-
-
 class CompilationLevel:
+    # constants for the levels of the compilation process
     NO_COMPILATION = 0
     DYNAMO_AS_IS = 1
     DYNAMO_ONCE = 2
@@ -2245,6 +2243,8 @@ class VllmConfig:
     observability_config: Optional[ObservabilityConfig] = None
     prompt_adapter_config: Optional[PromptAdapterConfig] = None
     quant_config: Optional[QuantizationConfig] = None
+    compilation_config: CompilationConfig = field(default=None,
+                                                  init=True)  # type: ignore
 
     @staticmethod
     def _get_quantization_config(
@@ -2304,6 +2304,10 @@ class VllmConfig:
             self.model_config is not None and self.load_config is not None:
             self.quant_config = VllmConfig._get_quantization_config(
                 self.model_config, self.load_config)
+
+        self.compilation_config = CompilationConfig.select_and_init_config()
+
+        current_platform.check_and_update_config(self)
 
     def __str__(self):
         return ("model=%r, speculative_config=%r, tokenizer=%r, "

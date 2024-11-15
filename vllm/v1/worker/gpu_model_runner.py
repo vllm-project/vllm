@@ -8,7 +8,6 @@ import torch
 import torch.distributed
 import torch.nn as nn
 
-from vllm import envs
 from vllm.compilation.compile_context import set_compile_context
 from vllm.config import CompilationConfig, CompilationLevel, VllmConfig
 from vllm.forward_context import set_forward_context
@@ -97,9 +96,10 @@ class GPUModelRunner:
             pin_memory=self.pin_memory,
         )
 
-        self.use_cuda_graph = (envs.VLLM_TORCH_COMPILE_LEVEL
-                               == CompilationLevel.PIECEWISE
-                               and not self.model_config.enforce_eager)
+        self.use_cuda_graph = (
+            self.vllm_config.compilation_config.compilation_level
+            == CompilationLevel.PIECEWISE
+            and not self.model_config.enforce_eager)
         # TODO(woosuk): Provide an option to tune the max cudagraph batch size.
         self.cudagraph_batch_sizes = [1, 2, 4] + [i for i in range(8, 513, 8)]
         self.positions = torch.zeros(self.max_num_tokens,
