@@ -720,7 +720,7 @@ def scaled_fp8_quant(
     shape: Union[Tuple[int, int], torch.Size] = input.shape
     # For rocm, the output fp8 dtype is torch.float_e3m3fnuz
     out_dtype: torch.dtype = torch.float8_e4m3fnuz \
-            if current_platform.is_rocm() else torch.float8_e4m3f
+            if current_platform.is_rocm() else torch.float8_e4m3fn
     if num_token_padding:
         shape = (max(num_token_padding, input.shape[0]), shape[1])
     output = torch.empty(shape, device=input.device, dtype=out_dtype)
