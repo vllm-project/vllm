@@ -406,6 +406,7 @@ class FalconForCausalLM(nn.Module, SupportsPP):
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         self.config = config
+        self.config.num_ln_in_parallel_attn = None
         self.quant_config = quant_config
         self.transformer = FalconModel(vllm_config=vllm_config,
                                        prefix=maybe_prefix(
