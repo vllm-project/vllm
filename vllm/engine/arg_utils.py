@@ -607,7 +607,7 @@ class EngineArgs:
             '--lora-dtype',
             type=str,
             default=EngineArgs.lora_dtype,
-            choices=['auto', 'float16', 'bfloat16', 'float32'],
+            choices=['auto', 'float16', 'bfloat16'],
             help=('Data type for LoRA. If auto, will default to '
                   'base model dtype.'))
         parser.add_argument(
