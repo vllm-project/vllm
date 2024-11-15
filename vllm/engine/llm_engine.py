@@ -2002,9 +2002,6 @@ class LLMEngine:
                     SpanAttributes.LLM_LATENCY_TIME_IN_MODEL_EXECUTE,
                     metrics.model_execute_time)
 
-    def is_encoder_decoder_model(self):
-        return self.input_preprocessor.is_encoder_decoder_model()
-
     def _validate_model_inputs(self, inputs: ProcessorInputs,
                                lora_request: Optional[LoRARequest]):
         if is_encoder_decoder_inputs(inputs):

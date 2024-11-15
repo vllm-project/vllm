@@ -67,7 +67,7 @@ class InputPreprocessor:
         model config is unavailable.
         '''
 
-        if not self.is_encoder_decoder_model():
+        if not self.model_config.is_encoder_decoder:
             print_warning_once("Using None for decoder start token id because "
                                "this is not an encoder/decoder model.")
             return None
@@ -632,7 +632,7 @@ class InputPreprocessor:
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> ProcessorInputs:
         """Preprocess the input prompt."""
-        if self.is_encoder_decoder_model():
+        if self.model_config.is_encoder_decoder:
             # Encoder-decoder model requires special mapping of
             # input prompts to encoder & decoder
             return self._process_encoder_decoder_prompt(
@@ -660,7 +660,7 @@ class InputPreprocessor:
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> ProcessorInputs:
         """Async version of :meth:`preprocess`."""
-        if self.is_encoder_decoder_model():
+        if self.model_config.is_encoder_decoder:
             # Encoder-decoder model requires special mapping of
             # input prompts to encoder & decoder
             return await self._process_encoder_decoder_prompt_async(
@@ -679,6 +679,3 @@ class InputPreprocessor:
             lora_request=lora_request,
             prompt_adapter_request=prompt_adapter_request,
         )
-
-    def is_encoder_decoder_model(self):
-        return self.model_config.is_encoder_decoder
