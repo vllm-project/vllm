@@ -281,11 +281,11 @@ class FusionPass(InductorPass):
         self.dump_graph(graph, "before_fusion")
 
         count = self.patterns.apply(graph)
-        logger.info("Replaced %s patterns", count)
+        logger.debug("Replaced %s patterns", count)
         self.dump_graph(graph, "after_pattern_match")
 
         # Manually process multi-output matches (and run DCE)
         self.process_matches(graph)
-        logger.info("Post-processed %s matches", len(self.matches))
+        logger.debug("Post-processed %s matches", len(self.matches))
         self.dump_graph(graph, "after_fusion")
         self.matches.clear()
