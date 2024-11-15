@@ -1577,7 +1577,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                                  temperature=0)
             
             # Warm up random sampler once per batch size
-            if batch_size not in self.warmed_sampler_bs:
+            if batch_size not in self.warmed_sampler_bs and not is_prompt:
                 self.warmup_scenario(batch_size, seq_len, is_prompt, kv_caches,
                                  temperature=1.0)
                 self.warmed_sampler_bs.append(batch_size)
