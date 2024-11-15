@@ -1614,7 +1614,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                                      kv_caches,
                                      temperature=1.0 if batch_size not
                                      in warmed_random_sampler_bs else 0)
-            warmed_random_sampler_bs.append(batch_size)
+            warmed_random_sampler_bs.add(batch_size)
             used_mem = align_workers(mem_prof.consumed_device_memory,
                                      torch.distributed.ReduceOp.MAX)
             available_mem -= used_mem
