@@ -277,7 +277,7 @@ class CPUExecutor(ExecutorBase):
         ))
 
     def get_model(self) -> nn.Module:
-        return self.driver_worker.get_model()
+        return self.driver_method_invoker(self.driver_worker, "get_model")
 
     def check_health(self) -> None:
         """Raises an error if engine is unhealthy."""
