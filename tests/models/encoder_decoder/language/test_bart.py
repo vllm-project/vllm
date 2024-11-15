@@ -14,8 +14,6 @@ from ....conftest import (DecoderPromptType, ExplicitEncoderDecoderPrompt,
 from ....utils import multi_gpu_test
 from ...utils import check_logprobs_close
 
-MODELS = ["facebook/bart-base", "facebook/bart-large-cnn"]
-
 
 def vllm_to_hf_output(
     vllm_output: Tuple[List[int], str, Optional[SampleLogprobs]],
