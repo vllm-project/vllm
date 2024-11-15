@@ -171,13 +171,12 @@ def _is_var_access(node: jinja2.nodes.Node, varname: str) -> bool:
 
 def _is_attr_access(node: jinja2.nodes.Node, varname: str, key: str) -> bool:
     if isinstance(node, jinja2.nodes.Getitem):
-        return (node.ctx == "load" and _is_var_access(node.node, varname)
+        return (_is_var_access(node.node, varname)
                 and isinstance(node.arg, jinja2.nodes.Const)
                 and node.arg.value == key)
 
     if isinstance(node, jinja2.nodes.Getattr):
-        return (node.ctx == "load" and _is_var_access(node.node, varname)
-                and node.attr == key)
+        return _is_var_access(node.node, varname) and node.attr == key
 
     return False
 
