@@ -1,4 +1,4 @@
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, List, Optional, Set, Tuple
 
 import torch
 from torch import nn
@@ -20,7 +20,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.sequence import IntermediateTensors, PoolerOutput
 
-from .utils import maybe_prefix
+from .utils import AutoWeightsLoader, maybe_prefix
 
 
 class BertEmbedding(nn.Module):
@@ -335,7 +335,8 @@ class BertModel(nn.Module):
 
         return self.encoder(hidden_states, kv_caches, attn_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "query", "q"),
@@ -344,6 +345,7 @@ class BertModel(nn.Module):
         ]
 
         params_dict = dict(self.named_parameters())
+        loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
             if "pooler" in name:
                 continue
@@ -366,6 +368,8 @@ class BertModel(nn.Module):
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params
 
 
 class BertEmbeddingModel(nn.Module):
@@ -414,4 +418,5 @@ class BertEmbeddingModel(nn.Module):
         return self._pooler(hidden_states, pooling_metadata)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        self.model.load_weights(weights)
+        loader = AutoWeightsLoader(self)
+        loader.load_weights(weights)

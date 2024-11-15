@@ -419,7 +419,8 @@ class GemmaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -464,3 +465,4 @@ class GemmaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             logger.warning(
                 "Some weights are not initialized from checkpoints: %s",
                 unloaded_params)
+        return loaded_params
