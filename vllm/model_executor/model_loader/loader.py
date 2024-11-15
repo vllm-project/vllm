@@ -953,13 +953,11 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
             yield weight_name, processed_weight
 
-    def _get_support_modules(self, model: nn.Module):
+    def _get_support_modules(self, model: nn.Module) -> None:
 
         class ModuleSource(str, enum.Enum):
-            # Applicable for `ReplicatedLinear`
-            FROM_TARGET = "no shard"
-            # Applicable for `RowParallelLinear`
-            FROM_VLLM = "sharded by column"
+            FROM_TARGET = "come from self.target_modules"
+            FROM_MODEL = "come from model"
 
         def convert_mapping(original_dict):
             new_dict = {}
@@ -992,7 +990,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                                 if any(t in name for t in self.target_modules))
         else:
             # All vllm linear modules support quantization.
-            module_candidate = ((name, module, ModuleSource.FROM_VLLM)
+            module_candidate = ((name, module, ModuleSource.FROM_MODEL)
                                 for name, module in model.named_modules())
 
         for name, module, moudle_source in module_candidate:
@@ -1022,7 +1020,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                         replaced_name = qual_name.replace(
                             last_name, replaced_name)
                         self.support_modules[replaced_name] = ModuleProperty(
-                            replaced_name, ShardMethod.SHARD_BY_COLUMN)
+                            replaced_name, ShardMethod.SHARD_BY_ROW)
                 else:
                     self.support_modules[qual_name] = ModuleProperty(
                         qual_name, ShardMethod.SHARD_BY_ROW)
