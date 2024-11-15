@@ -263,12 +263,12 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
     def _build_input_data(self):
         for seq_group_metadata in self.seq_group_metadata_list:
             for seq_id, seq_data in seq_group_metadata.seq_data.items():
+                self._compute_input_tokens(self.input_data, seq_group_metadata,
+                                           seq_data, seq_id)
                 if (seq_group_metadata.is_prompt
                         and seq_group_metadata.multi_modal_data):
                     self._compute_multi_modal_input(seq_group_metadata,
                                                     seq_data)
-                self._compute_input_tokens(self.input_data, seq_group_metadata,
-                                           seq_data, seq_id)
 
     def _compute_input_tokens(self, data: ModelInputData,
                               seq_group_metadata: SequenceGroupMetadata,
@@ -377,10 +377,8 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
     def _compute_multi_modal_input(self,
                                    seq_group_metadata: SequenceGroupMetadata,
                                    seq_data: SequenceData):
-        assert not self.chunked_prefill, \
-            "multi-model on CPU does not support chunked-prefill."
         computed_len = seq_data.get_num_computed_tokens()
-        seq_len = seq_data.get_len()
+        seq_len = self.input_data.seq_lens[-1]
 
         # NOTE: mm_data only includes the subset of multi-modal items that
         # intersect with the current prefill positions.
@@ -400,6 +398,9 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
 
         # special processing for mrope position deltas.
         if self.runner.model_config.uses_mrope:
+            assert not self.chunked_prefill, \
+                "MROPE on CPU does not support chunked-prefill."
+
             image_grid_thw = mm_kwargs.get("image_grid_thw", None)
             video_grid_thw = mm_kwargs.get("video_grid_thw", None)
             assert image_grid_thw is not None or video_grid_thw is not None, (
