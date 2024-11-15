@@ -646,8 +646,6 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         # For multi-step scheduling
         self.cached_step_outputs: List[torch.Tensor] = []
 
-        self.warmed_sampler_bs = []
-
     def _set_gc_threshold(self) -> None:
         # Read https://docs.python.org/3/library/gc.html#gc.set_threshold
         # for comprehensive description of gc generations.
@@ -795,6 +793,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             max=max(self.block_size,
                     self.max_num_seqs * max_decode_seq // self.block_size))
         self.graphed_buckets: Set[Any] = set()
+        self.warmed_sampler_bs: List[int] = []
 
         msg = ("Prompt bucket config (min, step, max_warmup) "
                f"bs:{self.bucketing_global_state.prompt_bs_bucket_cfg}, "
@@ -1473,8 +1472,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                     is_prompt,
                     lora_request=dummy_lora_requests_per_seq[i]
                     if dummy_lora_requests_per_seq else None,
-                    temperature=temperature)
-                for i in range(batch_size)
+                    temperature=temperature) for i in range(batch_size)
             ]
         else:
             # FIXME: seq_len is actually number of blocks
@@ -1487,8 +1485,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                     is_prompt,
                     lora_request=dummy_lora_requests_per_seq[i]
                     if dummy_lora_requests_per_seq else None,
-                    temperature=temperature)
-                for i, b in enumerate(blocks)
+                    temperature=temperature) for i, b in enumerate(blocks)
             ]
         torch.hpu.synchronize()
         profiler = None
@@ -1574,10 +1571,14 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             self.log_warmup('Prompt' if is_prompt else 'Decode', i,
                             len(buckets), batch_size, seq_len)
             self.warmup_scenario(batch_size, seq_len, is_prompt, kv_caches)
-            
+
+            # Random sampler warmup
             if batch_size not in self.warmed_sampler_bs and not is_prompt:
-                self.warmup_scenario(batch_size, seq_len, is_prompt, kv_caches,
-                                 temperature=1.0)
+                self.warmup_scenario(batch_size,
+                                     seq_len,
+                                     is_prompt,
+                                     kv_caches,
+                                     temperature=1.0)
                 self.warmed_sampler_bs.append(batch_size)
 
     def warmup_graphs(self,
