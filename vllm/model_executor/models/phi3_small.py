@@ -397,8 +397,8 @@ class Phi3SmallForCausalLM(nn.Module, SupportsPP):
         else:
             self.dummy_token_indices = None
 
-    def get_input_embeddings(self):
-        return self.model.embed_tokens
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.get_input_embeddings(input_ids)
 
     def set_input_embeddings(self, value):
         self.model.embed_tokens = value
@@ -433,6 +433,7 @@ class Phi3SmallForCausalLM(nn.Module, SupportsPP):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         output_hidden_states = self.model(
             input_ids=input_ids,
@@ -440,6 +441,7 @@ class Phi3SmallForCausalLM(nn.Module, SupportsPP):
             kv_caches=kv_caches,
             attn_metadata=attn_metadata,
             intermediate_tensors=intermediate_tensors,
+            inputs_embeds=inputs_embeds,
         )
         output_hidden_states = output_hidden_states
         return output_hidden_states
