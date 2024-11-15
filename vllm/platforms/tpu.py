@@ -1,18 +1,17 @@
 import os
+from typing import TYPE_CHECKING
 
 import torch
 
-import vllm.envs as envs
 from vllm.config import CompilationLevel
 from vllm.plugins import set_torch_compile_backend
 
 from .interface import Platform, PlatformEnum
 
-if "VLLM_TORCH_COMPILE_LEVEL" not in os.environ:
-    os.environ["VLLM_TORCH_COMPILE_LEVEL"] = str(CompilationLevel.DYNAMO_ONCE)
-
-assert envs.VLLM_TORCH_COMPILE_LEVEL < CompilationLevel.PIECEWISE,\
-     "TPU does not support Inductor."
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
+else:
+    VllmConfig = None
 
 set_torch_compile_backend("openxla")
 
@@ -31,3 +30,11 @@ class TpuPlatform(Platform):
     @classmethod
     def inference_mode(cls):
         return torch.no_grad()
+
+    @classmethod
+    def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+        compilation_config = vllm_config.compilation_config
+        if "VLLM_TORCH_COMPILE_LEVEL" not in os.environ:
+            compilation_config.level = CompilationLevel.DYNAMO_ONCE
+        assert compilation_config.level < CompilationLevel.PIECEWISE,\
+            "TPU does not support Inductor."

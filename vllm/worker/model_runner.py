@@ -1140,7 +1140,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     "provided. Defaulting to scaling factors of 1.0. "
                     "This may lead to less accurate results!")
 
-        if self.vllm_config.compilation_config.compilation_level ==\
+        if self.vllm_config.compilation_config.level ==\
             CompilationLevel.DYNAMO_AS_IS and supports_dynamo():
             from vllm.plugins import get_torch_compile_backend
             backend = get_torch_compile_backend() or "eager"

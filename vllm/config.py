@@ -2069,7 +2069,7 @@ class CompilationConfig(BaseModel):
     Configuration for compilation.
     It has three parts:
     - Compilation levels:
-        - compilation_level: the level of compilation.
+        - level: the level of compilation.
             - 0: no compilation.
             - 1: dynamo as is.
             - 2: dynamo once.
@@ -2131,7 +2131,7 @@ class CompilationConfig(BaseModel):
         sufficient for most cases. It might be beneficial to compile for
         certain small batchsizes, where inductor is good at optimizing.
     """
-    compilation_level: int = 0
+    level: int = 0
 
     use_inductor: bool = True
     inductor_specialize_for_cudagraph_no_more_than: Optional[int] = None
@@ -2154,7 +2154,7 @@ class CompilationConfig(BaseModel):
     capture_sizes: List[int] = PrivateAttr
 
     def model_post_init(self, __context: Any) -> None:
-        self.compilation_level = envs.VLLM_TORCH_COMPILE_LEVEL
+        self.level = envs.VLLM_TORCH_COMPILE_LEVEL
 
         for k, v in self.inductor_passes.items():
             if not isinstance(v, str):
