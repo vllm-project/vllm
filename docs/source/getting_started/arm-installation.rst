@@ -9,7 +9,7 @@ vLLM has been adapted to work on ARM64 CPUs with NEON support, leveraging the CP
 * Relevant runtime environment variables
 * Performance optimization tips
 
-It currently supports Float32 and BFloat16 datatypes.
+ARM CPU backend currently supports Float32, FP16 and BFloat16 datatypes.
 Contents:
 
 1. :ref:`Requirements <arm_backend_requirements>`
