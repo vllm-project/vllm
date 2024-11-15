@@ -77,8 +77,8 @@ def test_registry_is_pp(model_arch, is_pp, init_cuda):
 
 
 def test_hf_registry_coverage():
-    untested_archs = (HF_EXAMPLE_MODELS.get_supported_archs() -
-                      set(ModelRegistry.get_supported_archs()))
+    untested_archs = (ModelRegistry.get_supported_archs() -
+                      HF_EXAMPLE_MODELS.get_supported_archs())
 
     assert not untested_archs, (
         "Please add the following architectures to "
