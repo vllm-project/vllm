@@ -1,5 +1,3 @@
-import importlib
-import importlib.util
 import os
 from functools import cached_property
 from typing import Callable, Dict, List, Optional, Sequence, Type, Union
@@ -154,7 +152,7 @@ class ToolParserManager:
         """
         module_name = os.path.splitext(os.path.basename(plugin_path))[0]
 
-        try
+        try:
             import_from_path(module_name, plugin_path)
         except Exception:
             logger.error("load %s from %s failed.", module_name, plugin_path)

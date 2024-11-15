@@ -5,8 +5,8 @@ import datetime
 import enum
 import gc
 import getpass
-import inspect
 import importlib.util
+import inspect
 import ipaddress
 import os
 import socket
@@ -1550,7 +1550,7 @@ def import_from_path(module_name: str, file_path: Union[str, os.PathLike]):
     spec = importlib.util.spec_from_file_location(module_name, file_path)
     if spec is None:
         raise ModuleNotFoundError(f"No module named '{module_name}'")
-    
+
     assert spec.loader is not None
 
     module = importlib.util.module_from_spec(spec)
