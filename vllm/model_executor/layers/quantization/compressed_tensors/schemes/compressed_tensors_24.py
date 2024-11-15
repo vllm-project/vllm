@@ -5,13 +5,6 @@ import torch
 from typing import List, Callable, Optional
 from compressed_tensors.compressors import ModelCompressor
 from torch.nn import Parameter
-from vllm.model_executor.layers.sparsity.utils.cusparse_2_4_utils import (
-    compress_to_torch_sparse_semi_structured_mat,
-    semi_structured_dense_sparse_T_gemm,
-    semi_structured_sparse_dense_gemm_scaled,
-    semi_structured_dense_sparse_T_gemm_scaled,
-    )
-from torch.sparse import to_sparse_semi_structured
 from vllm.model_executor.layers.quantization.utils.marlin_utils_test_24 import sparse_semi_structured_to_dense_cutlass, sparse_semi_structured_from_dense_cutlass
 from vllm import _custom_ops as ops
 from typing import Tuple
@@ -75,8 +68,8 @@ class CompressedTensors24(CompressedTensorsScheme):
         """
 
         w_compressed, meta = ops.cutlass_compress_entry(layer.weight)
-        layer.weight = torch.nn.Parameter(w_compressed)
-        layer.meta = torch.nn.Parameter(meta)
+        layer.weight = torch.nn.Parameter(w_compressed, requires_grad=False)
+        layer.meta = torch.nn.Parameter(meta, requires_grad=False)
         
 
     def apply_weights(self,
@@ -95,61 +88,20 @@ class CompressedTensors24(CompressedTensorsScheme):
         :return: The output tensor of the layer 
         """
 
-        """ debugging code
-        a_sparse = to_sparse_semi_structured(layer.weight)
-        result = torch.mm(a_sparse, x.t().contiguous())
-        return result.t().contiguous()
-        """
+        q_input, input_scale = ops.scaled_fp8_quant(
+            x, use_per_token_if_dynamic=True)
 
-        q_input, input_scale = ops.scaled_fp8_quant(x, input_scale)
-        breakpoint()
-        return ops.cutlass_scaled_sparse_mm(
+        out = ops.cutlass_scaled_sparse_mm(
             a=layer.weight,
             e=layer.meta,
-            b=q_input,
+            b=q_input.t(),
             scale_a=layer.weight_scale,
             scale_b=input_scale,
             out_dtype=self.params_dtype,
             bias=bias
         )
 
-        # if not self.quantized:
-        #     return semi_structured_dense_sparse_T_gemm(
-        #         a_dense=x, 
-        #         b_T_packed=layer.weight.data
-        #     )
-        
-        # input_scale = layer.input_scale.data
-        # weight_scale = layer.weight_scale.data
-        # weight = layer.weight.data
-
-        # # Quantize the input tensor to fp8
-        # # can use the max scale for the input tensor
-        # # as the merged modules have a same scale
-        # # repeated for all the partitions
-        # input_scale = input_scale.max()
-        # q_input, input_scale = ops.scaled_fp8_quant(x, input_scale)
-        
-        # if q_input.is_contiguous():
-        #     # Make q_input non-contiguous
-        #     # as expected by the kernel
-        #     q_input = q_input.t().contiguous().t()
-
-
-        # assert not q_input.is_contiguous(), "Input is contiguous, the Kernel expects non-contiguous input"
-        # output =  semi_structured_dense_sparse_T_gemm_scaled(
-        #     a_dense=q_input,
-        #     b_T_packed=weight,
-        #     scale_a=input_scale,
-        #     scale_b=weight_scale,
-        #     bias=bias
-        # )
-        # output = output.to(x.dtype)
-        # print()
-        # print(f"{self.layer_name} executed")
-        # print("\t", "Input shape:", x.shape, "weight shape:", weight.shape, "output shape:", output.shape)
-        # return output
-
+        return out.t().contiguous()
 
 def quantize_with_max_scale(
         weight: torch.Tensor, weight_scale: torch.Tensor,
