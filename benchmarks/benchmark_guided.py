@@ -128,6 +128,7 @@ SCHEMA = {
     ["userId", "personalInfo", "address", "accountStatus", "registrationDate"]
 }
 
+
 def run_vllm(
     requests: List[tuple[str, int, int]],
     engine_args: EngineArgs,
@@ -158,6 +159,7 @@ def run_vllm(
     llm.generate(prompts, sampling_params, use_tqdm=True)
     end = time.perf_counter()
     return end - start
+
 
 async def run_vllm_async(
     requests: List[tuple[str, int, int]],
@@ -226,6 +228,7 @@ async def run_vllm_async(
         end = time.perf_counter()
         return end - start
 
+
 def main(args: argparse.Namespace):
     print(args)
     random.seed(args.seed)
@@ -233,7 +236,7 @@ def main(args: argparse.Namespace):
     # Synthesize a prompt with the given input length.
     tokenizer = AutoTokenizer.from_pretrained(
         args.tokenizer, trust_remote_code=args.trust_remote_code)
-    prompt = f"Generate an example of a user profile given the following schema: {json.dumps(SCHEMA)}"
+    prompt = f"Generate an example of a user profile given the following schema: {json.dumps(SCHEMA)}"  # noqa: E501
     input_len = len(tokenizer(prompt).input_ids)
     print(f"Input length of the prompt: {input_len} tokens")
     requests = [(prompt, input_len, args.output_len)
@@ -262,8 +265,7 @@ def main(args: argparse.Namespace):
 
     total_num_tokens = sum(prompt_len + output_len
                            for _, prompt_len, output_len in requests)
-    total_output_tokens = sum(output_len
-                              for _, _, output_len in requests)
+    total_output_tokens = sum(output_len for _, _, output_len in requests)
     print(f"Throughput: {len(requests) / elapsed_time:.2f} requests/s, "
           f"{total_num_tokens / elapsed_time:.2f} total tokens/s, "
           f"{total_output_tokens / elapsed_time:.2f} output tokens/s")
@@ -279,6 +281,7 @@ def main(args: argparse.Namespace):
         }
         with open(args.output_json, "w") as f:
             json.dump(results, f, indent=4)
+
 
 if __name__ == "__main__":
     parser = FlexibleArgumentParser(description="Benchmark guided decoding.")
@@ -296,10 +299,11 @@ if __name__ == "__main__":
                         type=int,
                         default=10,
                         help="Number of prompts to process.")
-    parser.add_argument('--output-json',
-                        type=str,
-                        default=None,
-                        help='Path to save the throughput results in JSON format.')
+    parser.add_argument(
+        '--output-json',
+        type=str,
+        default=None,
+        help='Path to save the throughput results in JSON format.')
     parser.add_argument("--async-engine",
                         action='store_true',
                         default=False,
