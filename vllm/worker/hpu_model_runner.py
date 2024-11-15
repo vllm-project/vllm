@@ -1573,10 +1573,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         for i, (batch_size, seq_len) in enumerate(reversed(buckets)):
             self.log_warmup('Prompt' if is_prompt else 'Decode', i,
                             len(buckets), batch_size, seq_len)
-            self.warmup_scenario(batch_size, seq_len, is_prompt, kv_caches,
-                                 temperature=0)
+            self.warmup_scenario(batch_size, seq_len, is_prompt, kv_caches)
             
-            # Warm up random sampler once per batch size
             if batch_size not in self.warmed_sampler_bs and not is_prompt:
                 self.warmup_scenario(batch_size, seq_len, is_prompt, kv_caches,
                                  temperature=1.0)
