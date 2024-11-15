@@ -4,8 +4,11 @@ import random
 import torch
 from tqdm import tqdm
 
-import vllm.distributed.kv_transfer.kv_lookup_buffer.simple_buffer as sklb
-import vllm.distributed.kv_transfer.kv_pipe.torch_distributed_pipe as tdp
+import vllm.distributed.kv_transfer.kv_connector.pynccl_connector.pynccl_pipe \
+    as pnp 
+import vllm.distributed.kv_transfer.kv_connector.pynccl_connector.lookup_buffer\
+    as lb
+from vllm.config import ParallelConfig
 
 # TODO: the test depends on a lot of fields in the current implementation.
 # We should have standard interface instead direct field access
@@ -17,6 +20,8 @@ def test_run(my_rank, buffer, device):
     if my_rank == 0:
         assert buffer.buffer_size == 0
         assert len(buffer.buffer) == 0
+        
+    print("My rank: %d, device: %s" % (my_rank, device))
 
     # insert
     tokens = torch.tensor([1, 2, 3]).to(device)
@@ -108,24 +113,53 @@ def stress_test(my_rank, buf, device):
 
 
 if __name__ == "__main__":
-
+    
+    
     my_rank = int(os.environ['RANK'])
 
-    torch.distributed.init_process_group(init_method="tcp://127.0.0.1:23456",
-                                         world_size=2,
-                                         rank=my_rank)
-
+    torch.distributed.init_process_group(
+        backend='gloo',
+        init_method='tcp://localhost:12398',
+        world_size=2,
+        rank=my_rank,
+    )
+    
     print("initialized! My rank is %d" % my_rank)
+    
 
-    pipe = tdp.TorchDistributedPipe([[0, 1]], my_rank, "nccl")
-    cpu_pipe = tdp.TorchDistributedPipe([[0, 1]], my_rank, "gloo")
-    buffer = sklb.SimpleKVLookupBuffer(cpu_pipe, pipe, 170000)
+    config = ParallelConfig(
+        1,
+        1,
+        kv_connector='PyNcclConnector',
+        kv_buffer_device='cuda',
+        kv_buffer_size=1e9,
+        kv_rank=my_rank,
+        kv_role="kv_both", # this arg doesn't matter in this test
+        kv_parallel_size=2,
+        kv_ip="127.0.0.1",
+        kv_port=12345,
+    )
 
-    test_run(my_rank, buffer, pipe.device)
+    data_pipe = pnp.PyNcclPipe(
+        local_rank=my_rank,
+        config=config,
+        device="cuda",
+        port_offset=0,
+    )
+    cpu_pipe = pnp.PyNcclPipe(
+        local_rank=my_rank,
+        config=config,
+        device="cpu",
+        port_offset=1,
+    )
 
-    stress_test(my_rank, buffer, pipe.device)
+    buffer = lb.LookupBuffer(cpu_pipe, data_pipe, 170000)
+
+    test_run(my_rank, buffer, data_pipe.device)
+
+    stress_test(my_rank, buffer, data_pipe.device)
 
     buffer.close()
-    pipe.close()
+    data_pipe.close()
     cpu_pipe.close()
     print('Done')

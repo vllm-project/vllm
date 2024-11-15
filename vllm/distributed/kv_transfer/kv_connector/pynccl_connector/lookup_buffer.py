@@ -17,11 +17,9 @@ from copy import deepcopy
 import torch
 from torch.distributed import Backend
 
-from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
-from vllm.distributed.kv_transfer.kv_connector.pynccl_connector.pynccl_pipe \
-    import PyncclPipe
+import vllm.distributed.kv_transfer.kv_connector.pynccl_connector.pynccl_pipe \
+    as pnp 
 from vllm.logger import init_logger
-from vllm.config import KVTransferConfig
 
 
 
@@ -31,8 +29,8 @@ logger = init_logger(__name__)
 class LookupBuffer:
 
     def __init__(self, 
-                 signal_pipe: PyncclPipe,
-                 data_pipe: PyncclPipe,
+                 signal_pipe: pnp.PyNcclPipe,
+                 data_pipe: pnp.PyNcclPipe,
                  buffer_size_thresh: float):
         """
         signal_pipe: on CPU 
@@ -54,7 +52,7 @@ class LookupBuffer:
         self.data_pipe = data_pipe
         self.request_handling_thread: Optional[threading.Thread] = None
 
-        self.normal_signal = torch.tensor([0])
+        self.normal_signal = torch.tensor([0], device="cpu")
         self.end_signal = None
 
     def _matches(self, tokens_roi_sender: List[torch.Tensor],
@@ -91,6 +89,8 @@ class LookupBuffer:
 
         assert tensor is not None, "Use self.data_pipe.send(None) instead"
         self.buffer_size -= tensor.element_size() * tensor.numel()
+        if tensor.dtype == torch.bool:
+            tensor = tensor.float()
         self.data_pipe.send_tensor(tensor)
 
     def _get_element_size(self, data: Optional[Union[List, torch.Tensor]]):
@@ -142,6 +142,7 @@ class LookupBuffer:
                 input_tokens = self.data_pipe.recv_tensor()
 
                 roi = self.data_pipe.recv_tensor()
+                roi = (roi > 0.5)
                 tokens_roi_recver = [input_tokens, roi]
 
                 matched_length = 0
@@ -195,10 +196,14 @@ class LookupBuffer:
 
         self.signal_pipe.send_tensor(self.normal_signal)
         self.data_pipe.send_tensor(input_tokens)
-        self.data_pipe.send_tensor(roi)
+        self.data_pipe.send_tensor(roi.float())
 
         input_tokens = self.data_pipe.recv_tensor()
         roi = self.data_pipe.recv_tensor()
+        if roi is not None:
+            # convert from float tensor to bool tensor
+            # as PyNccl does not support sending bool tensor
+            roi = (roi > 0.5)
         key = self.data_pipe.recv_tensor()
         value = self.data_pipe.recv_tensor()
         hidden = self.data_pipe.recv_tensor()
