@@ -65,7 +65,7 @@ class MLPSpeculator(nn.Module):
     https://huggingface.co/ibm-fms and https://huggingface.co/ibm-granite
     """
 
-    def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config
         self.n_predict = config.n_predict
