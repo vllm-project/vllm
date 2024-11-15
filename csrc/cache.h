@@ -19,15 +19,21 @@ void reshape_and_cache(torch::Tensor& key, torch::Tensor& value,
                        torch::Tensor& key_cache, torch::Tensor& value_cache,
                        torch::Tensor& slot_mapping,
                        const std::string& kv_cache_dtype, const double k_scale,
-                       const double v_scale);
+                       const double v_scale,
+                       const int64_t quant_group,
+                       torch::Tensor& k_scaling_factor, 
+                       torch::Tensor& v_scaling_factor);
 
 void reshape_and_cache_flash(torch::Tensor& key, torch::Tensor& value,
                              torch::Tensor& key_cache,
                              torch::Tensor& value_cache,
                              torch::Tensor& slot_mapping,
                              const std::string& kv_cache_dtype,
-                             const double k_scale, const double v_scale);
-
+                             const double k_scale, const double v_scale,
+                             const int64_t quant_group,
+                             torch::Tensor& k_scaling_factor, 
+                             torch::Tensor& v_scaling_factor);
+ 
 // Just for unittest
 void convert_fp8(torch::Tensor& dst_cache, torch::Tensor& src_cache,
                  const double scale, const std::string& kv_cache_dtype);

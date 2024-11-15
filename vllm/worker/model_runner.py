@@ -13,6 +13,7 @@ import numpy as np
 import torch
 import torch.distributed
 import torch.nn as nn
+import json
 
 import vllm.envs as envs
 from vllm.attention import AttentionMetadata, get_attn_backend
@@ -992,6 +993,8 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         self.pin_memory = is_pin_memory_available()
 
         self.kv_cache_dtype = kv_cache_dtype
+        self.kv_quant_params = self.load_kv_quant_params(model_config, self.cache_config.kv_quant_params_path) if self.kv_cache_dtype == "int8" else None
+        self.cache_config.kv_quant_params = self.kv_quant_params
         self.sliding_window = model_config.get_sliding_window()
         self.block_size = cache_config.block_size
         self.max_seq_len_to_capture = self.model_config.max_seq_len_to_capture
@@ -1068,6 +1071,81 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
               SamplingMetadataCache() \
                 if self.parallel_config.pipeline_parallel_size == 1 else None
 
+    def load_kv_quant_params(self, model_config,
+                             kv_quant_params_path: str) -> List[List[float]]:
+        if model_config is None:
+            return None
+        # Remove it when all models support kv cache int8.
+        architectures = model_config.hf_config.architectures
+        for arch in architectures:
+            if arch not in ["LlamaForCausalLM", "LLaMAForCausalLM","ChatGLMModel"]:
+                raise ValueError(
+                    "KV CACHE INT8 is not supported for model "
+                    f"architectures {arch} for now. Supported architectures: "
+                    "LlamaForCausalLM, LLaMAForCausalLM.")
+        num_layers = model_config.hf_config.num_hidden_layers
+        kv_quant_params = []
+        if kv_quant_params_path is not None:
+            k_scale: Dict[int, Dict[int, float]]
+            v_scale: Dict[int, Dict[int, float]]
+            k_zero_point: Dict[int, Dict[int, float]]
+            v_zero_point: Dict[int, Dict[int, float]]
+            with open(kv_quant_params_path) as f:
+                context = {
+                    "model_type": model_config.hf_text_config.model_type,
+                    "num_hidden_layers": num_layers,
+                }
+                schema_dct = json.load(f)
+                if context:
+                    model_type = context.get("model_type", None)
+                    model_type_schema = schema_dct["model_type"]
+                    if model_type is not None:
+                        assert model_type == schema_dct["model_type"], (
+                            f"Model type is {model_type} but loaded "
+                            f"scaling factors belonging to different "
+                            f"model type {model_type_schema}!")
+                k_scale = schema_dct["kv_cache"]["scaling_factor"]["k_scale"]
+                v_scale = schema_dct["kv_cache"]["scaling_factor"]["v_scale"]
+                k_zero_point = schema_dct["kv_cache"]["scaling_factor"]["k_zero_point"]
+                v_zero_point = schema_dct["kv_cache"]["scaling_factor"]["v_zero_point"]
+                if type(k_scale["0"]) == float:
+                    k_scale_param = list(k_scale.values())
+                    kv_quant_params.append(k_scale_param)
+                    v_scale_param = list(v_scale.values())
+                    kv_quant_params.append(v_scale_param)
+                    k_zero_point_param = list(k_zero_point.values())
+                    kv_quant_params.append(k_zero_point_param)
+                    v_zero_point_param = list(v_zero_point.values())
+                    kv_quant_params.append(v_zero_point_param)
+                elif type(k_scale["0"]) == dict:
+                    k_scale_param = []
+                    for key in k_scale:
+                        k_scale_param.append(list(k_scale[key].values()))
+                        # for n in list(k_scale[key].values()):
+                        #     k_scale_param.append(n)
+                    # print("k_scale_param ", k_scale_param)
+                    kv_quant_params.append(k_scale_param)
+                    v_scale_param = []
+                    for key in v_scale:
+                        v_scale_param.append(list(v_scale[key].values()))
+                        # for n in list(v_scale[key].values()):
+                        #     v_scale_param.append(n)
+                    kv_quant_params.append(v_scale_param)
+                    k_zero_point_param = []
+                    for key in k_zero_point:
+                        k_zero_point_param.append(list(k_zero_point[key].values()))
+                        # for n in list(k_zero_point[key].values()):
+                        #     k_zero_point_param.append(n)
+                    kv_quant_params.append(k_zero_point_param)
+                    v_zero_point_param = []
+                    for key in v_zero_point:
+                        v_zero_point_param.append(list(v_zero_point[key].values()))
+                        # for n in list(v_zero_point[key].values()):
+                        #     v_zero_point_param.append(n)
+                    kv_quant_params.append(v_zero_point_param)
+                # print("kv_quant_params ", len(kv_quant_params))
+        return kv_quant_params
+
     def load_model(self) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)
         with DeviceMemoryProfiler() as m:
@@ -1138,6 +1216,35 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             else:
                 logger.warning(
                     "Using FP8 KV cache but no scaling factors "
+                    "provided. Defaulting to scaling factors of 1.0. "
+                    "This may lead to less accurate results!")
+
+        if self.kv_cache_dtype == "int8" and current_platform.is_rocm():
+            # Currently only ROCm accepts kv-cache scaling factors
+            # via quantization_param_path and this will be deprecated
+            # in the future.
+            if self.model_config.quantization_param_path is not None:
+                if callable(getattr(self.model, "load_kv_cache_scales", None)):
+                    warnings.warn(
+                        "Loading kv cache scaling factor from JSON is "
+                        "deprecated and will be removed. Please include "
+                        "kv cache scaling factors in the model checkpoint.",
+                        FutureWarning,
+                        stacklevel=2)
+                    # print("$$$$$$$$$$$$$$$$$$$$$$$$$ I am here model_runner load kv_cache scaling factor $$$$$$$$$$$$$$$$$$$$$$$$$")
+                    # print("self.model_config.quantization_param_path ",self.model_config.quantization_param_path)
+                    self.model.load_kv_cache_scales(
+                        self.model_config.quantization_param_path)
+                    logger.info("Loaded KV cache scaling factors from %s",
+                                self.model_config.quantization_param_path)
+                else:
+                    raise RuntimeError(
+                        "Using int8 KV cache and scaling factors provided but "
+                        "model %s does not support loading scaling factors.",
+                        self.model.__class__)
+            else:
+                logger.warning(
+                    "Using int8 KV cache but no scaling factors "
                     "provided. Defaulting to scaling factors of 1.0. "
                     "This may lead to less accurate results!")
 

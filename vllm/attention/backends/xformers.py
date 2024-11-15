@@ -414,6 +414,9 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         value: Optional[torch.Tensor],
         kv_cache: torch.Tensor,
         attn_metadata: "XFormersMetadata",
+        quant_group: Optional[int],
+        k_scaling_factor: torch.Tensor,
+        v_scaling_factor: torch.Tensor,
         k_scale: float = 1.0,
         v_scale: float = 1.0,
         attn_type: AttentionType = AttentionType.DECODER,
@@ -525,7 +528,10 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                                                     value_cache,
                                                     updated_slot_mapping,
                                                     self.kv_cache_dtype,
-                                                    k_scale, v_scale)
+                                                    k_scale, v_scale,
+                                                    quant_group,
+                                                    k_scaling_factor,
+                                                    v_scaling_factor,)
         (num_prefill_query_tokens, num_prefill_kv_tokens,
         num_decode_query_tokens) = \
             get_num_prefill_decode_query_kv_tokens(attn_metadata, attn_type)
@@ -579,6 +585,9 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                     self.sliding_window,
                     k_scale,
                     v_scale,
+                    quant_group,
+                    k_scaling_factor,
+                    v_scaling_factor,
                 )
                 assert output[:num_prefill_query_tokens].shape == out.shape
                 output[:num_prefill_query_tokens] = out
@@ -606,6 +615,9 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 self.alibi_slopes,
                 k_scale,
                 v_scale,
+                quant_group,
+                k_scaling_factor,
+                v_scaling_factor,
             )
 
         # Reshape the output tensor.

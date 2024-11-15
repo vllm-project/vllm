@@ -99,6 +99,9 @@ class EngineArgs:
     config_format: ConfigFormat = ConfigFormat.AUTO
     dtype: str = 'auto'
     kv_cache_dtype: str = 'auto'
+    kv_quant_group: Optional[int] = 0
+    kv_quant_params: Optional[list[float]] = None
+    kv_quant_params_path: Optional[str] = None
     quantization_param_path: Optional[str] = None
     seed: int = 0
     max_model_len: Optional[int] = None
@@ -333,11 +336,28 @@ class EngineArgs:
         parser.add_argument(
             '--kv-cache-dtype',
             type=str,
-            choices=['auto', 'fp8', 'fp8_e5m2', 'fp8_e4m3'],
+            choices=['auto', 'fp8', 'fp8_e5m2', 'fp8_e4m3', 'int8'],
             default=EngineArgs.kv_cache_dtype,
             help='Data type for kv cache storage. If "auto", will use model '
             'data type. CUDA 11.8+ supports fp8 (=fp8_e4m3) and fp8_e5m2. '
             'ROCm (AMD GPU) supports fp8 (=fp8_e4m3)')
+        parser.add_argument(
+            '--kv-quant-group',
+            type=int,
+            default=EngineArgs.kv_quant_group,
+            help='kv cache quantizaiton group when kv cache dtype is int8.')
+        parser.add_argument(
+            '--kv-quant-params-path',
+            type=nullable_str,
+            default=EngineArgs.kv_quant_params_path,
+            help='Path to scales and zero points of kv cache quantizaiton '
+            'when kv cache dtype is int8.')
+        parser.add_argument(
+            '--kv-quant-params',
+            type=nullable_str,
+            default=EngineArgs.kv_quant_params,
+            help='scales and zero points of kv cache quantizaiton '
+            'when kv cache dtype is int8.')
         parser.add_argument(
             '--quantization-param-path',
             type=nullable_str,
@@ -1027,6 +1047,9 @@ class EngineArgs:
             gpu_memory_utilization=self.gpu_memory_utilization,
             swap_space=self.swap_space,
             cache_dtype=self.kv_cache_dtype,
+            kv_quant_params = self.kv_quant_params,
+            kv_quant_params_path = self.kv_quant_params_path,
+            kv_quant_group = self.kv_quant_group,
             is_attention_free=model_config.is_attention_free,
             num_gpu_blocks_override=self.num_gpu_blocks_override,
             sliding_window=model_config.get_sliding_window(),

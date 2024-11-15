@@ -71,6 +71,9 @@ class PagedAttention:
         kv_cache_dtype: str,
         k_scale: float,
         v_scale: float,
+        quant_group: Optional[int],
+        k_scaling_factor: torch.Tensor,
+        v_scaling_factor: torch.Tensor,
     ) -> None:
         ops.reshape_and_cache(
             key,
@@ -81,6 +84,9 @@ class PagedAttention:
             kv_cache_dtype,
             k_scale,
             v_scale,
+            quant_group,
+            k_scaling_factor,
+            v_scaling_factor,
         )
 
     @staticmethod
@@ -97,6 +103,9 @@ class PagedAttention:
         alibi_slopes: Optional[torch.Tensor],
         k_scale: float,
         v_scale: float,
+        quant_group: Optional[int],
+        k_scaling_factor: torch.Tensor,
+        v_scaling_factor: torch.Tensor,
         tp_rank: int = 0,
         blocksparse_local_blocks: int = 0,
         blocksparse_vert_stride: int = 0,
@@ -143,6 +152,9 @@ class PagedAttention:
                 kv_cache_dtype,
                 k_scale,
                 v_scale,
+                quant_group,
+                k_scaling_factor,
+                v_scaling_factor,
                 tp_rank,
                 blocksparse_local_blocks,
                 blocksparse_vert_stride,
@@ -181,6 +193,9 @@ class PagedAttention:
                 kv_cache_dtype,
                 k_scale,
                 v_scale,
+                quant_group,
+                k_scaling_factor,
+                v_scaling_factor,
                 tp_rank,
                 blocksparse_local_blocks,
                 blocksparse_vert_stride,
@@ -206,6 +221,9 @@ class PagedAttention:
         sliding_window: Optional[int],
         k_scale: float,
         v_scale: float,
+        quant_group: Optional[int],
+        k_scaling_factor: torch.Tensor,
+        v_scaling_factor: torch.Tensor,
     ) -> torch.Tensor:
         output = torch.empty_like(query)
         context_attention_fwd(
@@ -224,6 +242,9 @@ class PagedAttention:
             max_query_len,
             k_scale,
             v_scale,
+            quant_group,
+            k_scaling_factor,
+            v_scaling_factor,
             alibi_slopes,
             sliding_window,
         )

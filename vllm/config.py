@@ -728,6 +728,9 @@ class CacheConfig:
         gpu_memory_utilization: float,
         swap_space: float,
         cache_dtype: str,
+        kv_quant_group: Optional[int] = None,
+        kv_quant_params: Optional[list[float]] = None,
+        kv_quant_params_path: Optional[str] = None,
         is_attention_free: bool = False,
         num_gpu_blocks_override: Optional[int] = None,
         sliding_window: Optional[int] = None,
@@ -739,6 +742,9 @@ class CacheConfig:
         self.swap_space_bytes = swap_space * GiB_bytes
         self.num_gpu_blocks_override = num_gpu_blocks_override
         self.cache_dtype = cache_dtype
+        self.kv_quant_group = kv_quant_group
+        self.kv_quant_params = kv_quant_params
+        self.kv_quant_params_path = kv_quant_params_path
         self.is_attention_free = is_attention_free
         self.sliding_window = sliding_window
         self.enable_prefix_caching = enable_prefix_caching
@@ -769,6 +775,12 @@ class CacheConfig:
         elif self.cache_dtype in ("fp8", "fp8_e4m3", "fp8_e5m2"):
             logger.info(
                 "Using fp8 data type to store kv cache. It reduces the GPU "
+                "memory footprint and boosts the performance. "
+                "Meanwhile, it may cause accuracy drop without a proper "
+                "scaling factor")
+        elif self.cache_dtype == "int8":
+            logger.info(
+                "Using int8 data type to store kv cache. It reduces the GPU "
                 "memory footprint and boosts the performance. "
                 "Meanwhile, it may cause accuracy drop without a proper "
                 "scaling factor")

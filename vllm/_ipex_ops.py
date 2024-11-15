@@ -205,6 +205,9 @@ class ipex_ops:
         kv_cache_dtype: str,
         k_scale: float,
         v_scale: float,
+        quant_group: Optional[int],
+        k_scaling_factor: torch.Tensor,
+        v_scaling_factor: torch.Tensor,
     ) -> None:
         assert kv_cache_dtype == "auto"
         ipex.llm.modules.PagedAttention.reshape_and_cache(

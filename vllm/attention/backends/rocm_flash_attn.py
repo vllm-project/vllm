@@ -412,6 +412,9 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: ROCmFlashAttentionMetadata,
+        quant_group: Optional[int],
+        k_scaling_factor: torch.Tensor,
+        v_scaling_factor: torch.Tensor,
         k_scale: float = 1.0,
         v_scale: float = 1.0,
         attn_type: AttentionType = AttentionType.DECODER,
@@ -459,6 +462,9 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 self.kv_cache_dtype,
                 k_scale,
                 v_scale,
+                quant_group,
+                k_scaling_factor,
+                v_scaling_factor,
             )
 
         num_prefill_tokens = attn_metadata.num_prefill_tokens
