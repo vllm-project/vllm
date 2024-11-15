@@ -41,17 +41,24 @@ class PyNcclPipe:
     MAX_TENSOR_DIMENSIONS = 14
     METADATA_DTYPE = torch.int64
 
-    def __init__(self, local_rank: int, config: ParallelConfig):
+    def __init__(self, 
+                 local_rank: int, 
+                 config: ParallelConfig,
+                 device: Optional[str] = None,
+                 port_offset: int = 0):
         self.config = config
         self.local_rank = local_rank
         self.kv_rank = self.config.kv_rank
         self.kv_parallel_size = self.config.kv_parallel_size
-        self.device = self._select_device()
+        if device is None:
+            self.device = self._select_device(self.config.kv_buffer_device)
+        else:
+            self.device = self._select_device(device)
 
         # build distributed connection and send/recv implementation
         self.group = StatelessProcessGroup.create(
             host=self.config.kv_ip,
-            port=self.config.kv_port,
+            port=self.config.kv_port + port_offset,
             rank=self.kv_rank,
             world_size=self.kv_parallel_size,
         )
@@ -71,7 +78,7 @@ class PyNcclPipe:
 
 
     def _get_device_send_recv_impl(self, group: StatelessProcessGroup):
-        if self.config.kv_buffer_device == "cuda":
+        if self.device.type == "cuda":
             # use PyNCCL for send / recv
             comm = PyNcclCommunicator(group, device=self.local_rank)
             comm.disabled = False
@@ -83,11 +90,11 @@ class PyNcclPipe:
 
         return send, recv
 
-    def _select_device(self):
-        if self.config.kv_buffer_device == "cuda":
+    def _select_device(self, device: str):
+        if device == "cuda":
             return torch.device(f"cuda:{self.local_rank}")
         else:
-            return "cpu"
+            return torch.device("cpu")
 
     def _make_metadata(self, tensor: Optional[torch.Tensor]) -> Metadata:
         """
@@ -243,6 +250,7 @@ class PyNcclPipe:
         except Exception as e:
             logger.error("Encountering exception in KV receiving thread")
             logger.error("%s", e)
+            logger.error("My device: %s", self.device)
             import traceback
             traceback.print_exc()
             raise e
