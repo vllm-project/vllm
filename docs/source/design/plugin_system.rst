@@ -32,10 +32,9 @@ vLLM's plugin system uses the standard Python ``entry_points`` mechanism. This m
     def register():
         from vllm import ModelRegistry
 
-        def register():
-            if "MyLlava" not in ModelRegistry.get_supported_archs():
-                ModelRegistry.register_model("MyLlava",
-                                             "vllm_add_dummy_model.my_llava:MyLlava")
+        if "MyLlava" not in ModelRegistry.get_supported_archs():
+            ModelRegistry.register_model("MyLlava",
+                                            "vllm_add_dummy_model.my_llava:MyLlava")
 
 For more information on adding entry points to your package, please check the `official documentation <https://setuptools.pypa.io/en/latest/userguide/entry_point.html>`__.
 
