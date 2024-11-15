@@ -1217,7 +1217,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         seq_group_metadata_list = seq_group_metadata_list.copy()
         if batch_size_padding > 0:
             dummy_seq_group_metadata = self.create_dummy_seq_group_metadata(
-                0, 0, is_prompt, temperature=0)
+                0, 0, is_prompt)
             seq_group_metadata_list.extend(dummy_seq_group_metadata
                                            for _ in range(batch_size_padding))
 

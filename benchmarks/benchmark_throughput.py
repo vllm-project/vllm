@@ -151,9 +151,7 @@ def run_vllm(
 
     if not use_beam_search:
         start = time.perf_counter()
-        #llm.start_profile()
         llm.generate(prompts, sampling_params, use_tqdm=True)
-        #llm.stop_profile()
         end = time.perf_counter()
     else:
         prompts = [request.prompt for request in requests]
