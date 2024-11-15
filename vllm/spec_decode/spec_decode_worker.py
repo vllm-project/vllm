@@ -4,6 +4,7 @@ from functools import cached_property
 from typing import Any, Dict, List, Optional, Set, Tuple, Type
 
 import torch
+import torch.nn as nn
 
 from vllm.config import ParallelConfig, SpeculativeConfig, VllmConfig
 from vllm.distributed.communication_op import broadcast_tensor_dict
@@ -383,6 +384,9 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                                             num_cpu_blocks=num_cpu_blocks)
         self.proposer_worker.initialize_cache(num_gpu_blocks=num_gpu_blocks,
                                               num_cpu_blocks=num_cpu_blocks)
+
+    def get_model(self) -> nn.Module:
+        return self.scorer_worker.get_model()
 
     @torch.inference_mode()
     def execute_model(
