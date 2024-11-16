@@ -391,7 +391,10 @@ class VllmBackend:
     sym_tensor_indices: List[int]
     input_buffers: List[torch.Tensor]
 
-    def __init__(self, post_grad_passes: Sequence[Callable] = ()):
+    def __init__(
+        self,
+        compilation_configs: CompilationConfig,
+    ):
         global global_graph_pool
         if global_graph_pool is None:
             global_graph_pool = torch.cuda.graph_pool_handle()
@@ -400,10 +403,12 @@ class VllmBackend:
         # streams, it might not be safe to share a global pool.
         # only investigate this when we use multiple streams
         self.graph_pool = global_graph_pool
-        self.post_grad_passes = post_grad_passes
+        self.post_grad_passes = []
 
         self.sym_tensor_indices = []
         self.input_buffers = []
+
+        self.compilation_configs = compilation_configs
 
         # `torch.compile` is JIT compiled, so we don't need to
         # do anything here
@@ -439,7 +444,7 @@ class VllmBackend:
         # config is read now, because only here can
         # we get the sizes to capture for cudagraph
         # from compilation context
-        self.compilation_configs = CompilationConfig.select_and_init_config()
+        self.compilation_configs.init_during_runtime()
         self.add_passes_to_config()
 
         self.split_gm, self.piecewise_graphs = split_graph(
@@ -687,4 +692,6 @@ def select_default_backend(level: int) -> Union[str, Callable]:
         return backend_str
     assert level == CompilationLevel.PIECEWISE
 
-    return VllmBackend()
+    from vllm.plugins import get_current_vllm_config
+    compilation_config = get_current_vllm_config().compilation_config
+    return VllmBackend(compilation_config)

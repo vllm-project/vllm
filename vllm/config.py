@@ -2232,7 +2232,6 @@ class CompilationConfig(BaseModel):
             config = predefined_config if predefined_config is not None else (
                 CompilationConfig())
 
-        config.init_during_runtime()
         return config
 
 
