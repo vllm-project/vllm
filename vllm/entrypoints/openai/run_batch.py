@@ -222,6 +222,7 @@ async def main(args):
         prompt_adapters=None,
         request_logger=request_logger,
         chat_template=None,
+        chat_template_content_format="auto",
         enable_prompt_tokens_details=args.enable_prompt_tokens_details,
     ) if model_config.task == "generate" else None
     openai_serving_embedding = OpenAIServingEmbedding(
@@ -230,6 +231,7 @@ async def main(args):
         base_model_paths,
         request_logger=request_logger,
         chat_template=None,
+        chat_template_content_format="auto",
     ) if model_config.task == "embedding" else None
 
     tracker = BatchProgressTracker()
