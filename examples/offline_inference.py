@@ -1,9 +1,10 @@
 from dataclasses import asdict
 
+from transformers import AutoTokenizer
+
 from vllm import LLM, SamplingParams
 from vllm.engine.arg_utils import EngineArgs
 from vllm.utils import FlexibleArgumentParser
-from transformers import AutoTokenizer
 
 
 def get_prompts(args):
