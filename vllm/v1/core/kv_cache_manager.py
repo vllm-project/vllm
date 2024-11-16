@@ -37,7 +37,6 @@ class KVCacheManager:
         # N new empty blocks.
         self.num_preallocate_tokens = num_preallocate_tokens
         self.num_preallocate_blocks = cdiv(num_preallocate_tokens, block_size)
-        self.num_preallocate_blocks = 0
 
         # A Block pool of all kv-cache blocks.
         self.block_pool: List[KVCacheBlock] = [

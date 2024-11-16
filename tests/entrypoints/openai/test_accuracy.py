@@ -61,12 +61,14 @@ def run_test(more_args):
         )
 
         measured_value = results["results"][TASK][FILTER]
+        print(f"{measured_value=}")
         assert (measured_value - RTOL < EXPECTED_VALUE
                 and measured_value + RTOL > EXPECTED_VALUE
                 ), f"Expected: {EXPECTED_VALUE} |  Measured: {measured_value}"
 
 
-@pytest.mark.skipif(not current_platform.is_cuda() and not current_platform.is_tpu(),
+@pytest.mark.skipif(not current_platform.is_cuda() and 
+                    not current_platform.is_tpu(),
                     reason="V1 currently only supported on CUDA")
 def test_lm_eval_accuracy_v1_engine(monkeypatch):
     """Run with the V1 Engine."""
