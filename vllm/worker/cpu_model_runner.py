@@ -493,6 +493,15 @@ class CPUModelRunnerBase(ModelRunnerBase[TModelInputForCPU]):
 
         return builder.build()  # type: ignore
 
+    # sampler property will be used by spec_decode_worker
+    @property
+    def sampler(self):
+        return self.model.sampler
+
+    @property
+    def vocab_size(self) -> int:
+        return self.model_config.get_vocab_size()
+
 
 class CPUModelRunner(CPUModelRunnerBase[ModelInputForCPUWithSamplingMetadata]):
     _model_input_cls: Type[ModelInputForCPUWithSamplingMetadata] = (
@@ -588,12 +597,3 @@ class CPUModelRunner(CPUModelRunnerBase[ModelInputForCPUWithSamplingMetadata]):
 
     def generate_proposals(self, *args, **kwargs):
         return self.model.generate_proposals(*args, **kwargs)
-
-    # sampler property will be used by spec_decode_worker
-    @property
-    def sampler(self):
-        return self.model.sampler
-
-    @property
-    def vocab_size(self) -> int:
-        return self.model_config.get_vocab_size()

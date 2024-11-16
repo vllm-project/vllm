@@ -128,7 +128,7 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         distributed_init_method: str,
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
-        model_runner_cls: Optional[Type[CPUModelRunnerBase]] = None,
+        model_runner_cls: Optional[Type[CPUModelRunner]] = None,
     ) -> None:
         WorkerBase.__init__(self, vllm_config=vllm_config)
 
