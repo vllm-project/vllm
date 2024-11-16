@@ -158,7 +158,6 @@ class Scheduler:
                     break
             
                 num_new_tokens = min(num_new_tokens, token_budget)
-
                 assert num_new_tokens > 0
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request, num_new_tokens, computed_blocks)
