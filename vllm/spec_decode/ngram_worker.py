@@ -151,6 +151,19 @@ class NGramWorker(NonLLMProposerWorkerBase):
         return self._proposer.get_spec_proposals(
             execute_model_req, seq_ids_with_bonus_token_in_last_step)
 
+    def ngram_speculation(self, prediction_content: str) -> List[str]:
+        """Generate n-gram speculations based on the prediction content."""
+        # Tokenize the prediction content
+        tokens = prediction_content.split()
+        ngram_speculations = []
+
+        # Generate n-grams
+        for n in range(1, len(tokens) + 1):
+            ngrams = zip(*[tokens[i:] for i in range(n)])
+            ngram_speculations.extend([' '.join(ngram) for ngram in ngrams])
+
+        return ngram_speculations
+
     def _raise_if_unsupported(
         self,
         execute_model_req: ExecuteModelRequest,

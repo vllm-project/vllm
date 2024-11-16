@@ -514,6 +514,15 @@ class _AsyncLLMEngine(LLMEngine):
             priority=priority,
         )
 
+        # Tokenize the "prediction" content
+        if "prediction" in preprocessed_inputs:
+            prediction_content = preprocessed_inputs["prediction"]["content"]
+            tokenized_prediction = prediction_content.split()
+            # Pass the prediction content to ngram speculation
+            ngram_speculations = self.ngram_speculation(prediction_content)
+            # Add the ngram speculations to the processed inputs
+            processed_inputs["ngram_speculations"] = ngram_speculations
+
     async def check_health_async(self) -> None:
         if self.tokenizer:
             self.tokenizer.check_health()

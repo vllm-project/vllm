@@ -354,6 +354,25 @@ async def create_chat_completion(request: ChatCompletionRequest,
     elif isinstance(generator, ChatCompletionResponse):
         return JSONResponse(content=generator.model_dump())
 
+    # Handle the "prediction" field
+    if request.prediction:
+        prediction_content = request.prediction.content
+        # Tokenize the prediction content
+        tokenized_prediction = prediction_content.split()
+        # Pass the prediction content to ngram speculation
+        ngram_speculations = handler.ngram_speculation(prediction_content)
+        # Add the ngram speculations to the response
+        response = ChatCompletionResponse(
+            id=generator.id,
+            object=generator.object,
+            created=generator.created,
+            model=generator.model,
+            choices=generator.choices,
+            usage=generator.usage,
+            ngram_speculations=ngram_speculations
+        )
+        return JSONResponse(content=response.model_dump())
+
     return StreamingResponse(content=generator, media_type="text/event-stream")
 
 

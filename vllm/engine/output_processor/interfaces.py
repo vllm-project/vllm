@@ -70,3 +70,8 @@ class SequenceGroupOutputProcessor(ABC):
                                outputs: List[SequenceGroupOutput]) -> None:
         """Update prompt logprobs received from outputs to seq_group."""
         pass
+
+    @abstractmethod
+    def process_prediction(self, prediction: str) -> None:
+        """Process the prediction content."""
+        pass
