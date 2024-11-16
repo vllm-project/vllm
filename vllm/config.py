@@ -2319,7 +2319,9 @@ class VllmConfig:
             self.quant_config = VllmConfig._get_quantization_config(
                 self.model_config, self.load_config)
 
-        self.compilation_config = CompilationConfig.select_and_init_config()
+        if self.compilation_config is None:
+            self.compilation_config = CompilationConfig.select_and_init_config(
+            )
 
         current_platform.check_and_update_config(self)
 
