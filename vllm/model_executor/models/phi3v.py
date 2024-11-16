@@ -15,7 +15,7 @@
 import itertools
 import re
 from functools import cached_property, lru_cache
-from typing import (Any, Dict, Iterable, List, Literal, Mapping, Optional,
+from typing import (Any, Dict, Iterable, List, Literal, Mapping, Optional, Set,
                     Tuple, TypedDict, Union)
 
 import numpy as np
@@ -744,7 +744,8 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     ) -> Optional[PoolerOutput]:
         return self._pooler(hidden_states, pooling_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         hf_to_vllm_mapper = WeightsMapper(
             orig_to_new_prefix={
                 "model.vision_embed_tokens.wte": "embed_tokens",
@@ -761,3 +762,4 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         # so we detect it this way
         if "embed_tokens" not in autoloaded_weights:
             self.embed_tokens = self.language_model.model.embed_tokens
+        return autoloaded_weights + {"embed_tokens"}

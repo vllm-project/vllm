@@ -252,10 +252,11 @@ class Florence2ForConditionalGeneration(nn.Module):
     ) -> SamplerOutput:
         return self.language_model.sample(logits, sampling_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         skip_prefixes = [
             'image_projection', "vision_tower", "image_proj_norm",
             "image_pos_embed", "visual_temporal_embed"
         ]
         loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
-        loader.load_weights(weights)
+        return loader.load_weights(weights)

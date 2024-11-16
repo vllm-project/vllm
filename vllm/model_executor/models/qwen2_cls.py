@@ -4,7 +4,7 @@
 # Copyright 2024 The Qwen team.
 # Copyright 2023 The vLLM team.
 """Inference-only Qwen2-Classification model compatible with HF weights."""
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, List, Optional, Set, Tuple
 
 import torch
 from torch import nn
@@ -64,7 +64,7 @@ class Qwen2ForSequenceClassification(nn.Module, SupportsLoRA, SupportsPP):
                                        config.num_labels,
                                        quant_config=quant_config,
                                        input_is_parallel=False,
-                                       bias=False,
+                                       bias=True,
                                        prefix=maybe_prefix(prefix, "score"))
         self._pooler = Pooler.from_config_with_defaults(
             pooler_config,
@@ -92,7 +92,8 @@ class Qwen2ForSequenceClassification(nn.Module, SupportsLoRA, SupportsPP):
     ) -> Optional[PoolerOutput]:
         return self._pooler(hidden_states, pooling_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         loader = AutoWeightsLoader(self,
                                    ignore_unexpected_prefixes=["lm_head."])
-        loader.load_weights(weights)
+        return loader.load_weights(weights)
