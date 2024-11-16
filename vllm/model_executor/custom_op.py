@@ -86,7 +86,7 @@ class CustomOp(nn.Module):
     def enabled(cls) -> bool:
         # if no name, then it was not registered
         compilation_config = get_current_vllm_config().compilation_config
-        custom_op = compilation_config.custom_op
+        custom_ops = compilation_config.custom_ops
         if not hasattr(cls, "name"):
             print_warning_once(
                 f"Custom op {cls.__name__} was not registered, "
@@ -94,8 +94,8 @@ class CustomOp(nn.Module):
                 f"It will be enabled/disabled based on the global settings.")
             return CustomOp.default_on()
 
-        enabled = f"+{cls.name}" in custom_op
-        disabled = f"-{cls.name}" in custom_op
+        enabled = f"+{cls.name}" in custom_ops
+        disabled = f"-{cls.name}" in custom_ops
         assert not (enabled
                     and disabled), f"Cannot enable and disable {cls.name}"
 
