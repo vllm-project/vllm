@@ -515,7 +515,7 @@ class GPUModelRunner:
             # and avoid any potential issues with the inductor.
             set_compilation_config(
                 CompilationConfig(
-                    custom_ops="none",
+                    custom_ops=["none"],
                     use_cudagraph=True,
                     non_cudagraph_ops=["vllm.unified_v1_flash_attention"],
                     use_inductor=True,
