@@ -1,3 +1,5 @@
+.. _class_hierarchy:
+
 vLLM's Class Hierarchy
 =======================
 
