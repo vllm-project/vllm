@@ -102,11 +102,11 @@ This method should load the weights from the HuggingFace's checkpoint file and a
 Finally, register your :code:`*ForCausalLM` class to the :code:`_VLLM_MODELS` in `vllm/model_executor/models/registry.py <https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/registry.py>`_.
 
 6. Out-of-Tree Model Integration
---------------------------------------------
+--------------------------------
 
-We also provide a way to integrate a model without modifying the vLLM codebase. Step 2, 3, 4 are still required, but you can skip step 1 and 5.
+You can integrate a model without modifying the vLLM codebase. Steps 2, 3, and 4 are still required, but you can skip steps 1 and 5. Instead, write a plugin to register your model. For general introduction of the plugin system, see :ref:`plugin_system`.
 
-Just add the following lines in your code:
+To register the model, use the following code:
 
 .. code-block:: python
 
@@ -114,7 +114,7 @@ Just add the following lines in your code:
     from your_code import YourModelForCausalLM
     ModelRegistry.register_model("YourModelForCausalLM", YourModelForCausalLM)
 
-If your model imports modules that initialize CUDA, consider instead lazy-importing it to avoid an error like :code:`RuntimeError: Cannot re-initialize CUDA in forked subprocess`:
+If your model imports modules that initialize CUDA, consider lazy-importing it to avoid errors like :code:`RuntimeError: Cannot re-initialize CUDA in forked subprocess`:
 
 .. code-block:: python
 
@@ -123,19 +123,8 @@ If your model imports modules that initialize CUDA, consider instead lazy-import
     ModelRegistry.register_model("YourModelForCausalLM", "your_code:YourModelForCausalLM")
 
 .. important::
-    If your model is a multimodal model, make sure the model class implements the :class:`~vllm.model_executor.models.interfaces.SupportsMultiModal` interface.
+    If your model is a multimodal model, ensure the model class implements the :class:`~vllm.model_executor.models.interfaces.SupportsMultiModal` interface.
     Read more about that :ref:`here <enabling_multimodal_inputs>`.
 
-If you are running api server with :code:`vllm serve <args>`, you can wrap the entrypoint with the following code:
-
-.. code-block:: python
-
-    from vllm import ModelRegistry
-    from your_code import YourModelForCausalLM
-    ModelRegistry.register_model("YourModelForCausalLM", YourModelForCausalLM)
-
-    if __name__ == '__main__':
-        import runpy
-        runpy.run_module('vllm.entrypoints.openai.api_server', run_name='__main__')
-
-Save the above code in a file and run it with :code:`python your_file.py <args>`.
+.. note::
+    Although you can directly put these code snippets in your script using ``vllm.LLM``, the recommended way is to place these snippets in a vLLM plugin. This ensures compatibility with various vLLM features like distributed inference and the API server.
