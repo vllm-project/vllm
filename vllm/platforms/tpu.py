@@ -8,10 +8,9 @@ from vllm.plugins import set_torch_compile_backend
 from .interface import Platform, PlatformEnum
 
 if TYPE_CHECKING:
-    from vllm.config import CompilationLevel, VllmConfig
+    from vllm.config import VllmConfig
 else:
     VllmConfig = None
-    CompilationLevel = None
 
 set_torch_compile_backend("openxla")
 
@@ -33,6 +32,7 @@ class TpuPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+        from vllm.config import CompilationLevel
         compilation_config = vllm_config.compilation_config
         if "VLLM_TORCH_COMPILE_LEVEL" not in os.environ:
             compilation_config.level = CompilationLevel.DYNAMO_ONCE
