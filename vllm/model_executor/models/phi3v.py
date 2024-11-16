@@ -762,4 +762,5 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         # so we detect it this way
         if "embed_tokens" not in autoloaded_weights:
             self.embed_tokens = self.language_model.model.embed_tokens
-        return autoloaded_weights + {"embed_tokens"}
+            autoloaded_weights.add("embed_tokens")
+        return autoloaded_weights
