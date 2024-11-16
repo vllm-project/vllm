@@ -176,7 +176,7 @@ class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree):
         self.sampler = get_sampler()
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.get_input_embeddings(input_ids)
+        return self.backbone.get_input_embeddings(input_ids)
 
     def forward(self,
                 input_ids: torch.Tensor,
