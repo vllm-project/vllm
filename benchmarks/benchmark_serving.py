@@ -251,6 +251,19 @@ def sample_hf_requests(
                     "url": f"data:image/jpeg;base64,{image_base64}"
                 },
             }
+        elif "image" in data and isinstance(data["image"], str):
+            if (data["image"].startswith("http://") or \
+                data["image"].startswith("file://")):
+                image_url = data["image"]
+            else:
+                image_url = f"file://{data['image']}"
+
+            mm_content = {
+                "type": "image_url",
+                "image_url": {
+                    "url": image_url
+                },
+            }
         else:
             mm_content = None
 
