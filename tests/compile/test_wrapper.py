@@ -19,7 +19,7 @@ class MyWrapper(TorchCompileWrapperWithCustomDispatcher):
     def __init__(self, model):
         self.model = model
         compiled_callable = torch.compile(self.forward, backend="eager")
-        super().__init__(compiled_callable, level=CompilationLevel.DYNAMO_ONCE)
+        super().__init__(compiled_callable, compilation_level=CompilationLevel.DYNAMO_ONCE)
 
     def forward(self, x: torch.Tensor, cache: Optional[torch.Tensor] = None):
         # this is the function to be compiled
