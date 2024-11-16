@@ -3,15 +3,15 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from vllm.config import CompilationLevel
 from vllm.plugins import set_torch_compile_backend
 
 from .interface import Platform, PlatformEnum
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.config import CompilationLevel, VllmConfig
 else:
     VllmConfig = None
+    CompilationLevel = None
 
 set_torch_compile_backend("openxla")
 
