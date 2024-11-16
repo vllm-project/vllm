@@ -49,6 +49,13 @@ class PrefillData:
                    self.token_ids,
                    self.position_ids, 
                    self.attn_metadata)
+@dataclass
+class DecodeData:
+    num_decodes: int
+    token_ids: torch.Tensor
+    position_ids: torch.Tensor
+    attn_metadata: PallasAttentionMetadata
+    
 
 class TPUModelRunner:
 
@@ -203,7 +210,6 @@ class TPUModelRunner:
         
         assert num_decodes + num_prefills > 0
 
-        
         # Get the number of scheduled tokens for each request.
         # TODO: The Python loop can be slow. Optimize.
         num_scheduled_tokens = []
@@ -216,13 +222,12 @@ class TPUModelRunner:
             
             # Assert Decodes Are Decodes.
             if idx < num_decodes:
-                assert num_scheduled_tokens == 1
+                assert num_tokens == 1
 
         num_scheduled_tokens = np.array(num_scheduled_tokens, dtype=np.int32)
         assert max_num_scheduled_tokens > 0
 
-
-        # PREFILLS
+        ######################### PREFILLS #########################
         prefill_request_ids = []
         prefill_prompt_lens = []
         prefill_token_ids = []
@@ -269,111 +274,66 @@ class TPUModelRunner:
             attn_metadata=prefill_attn_metadata,
         )
 
-        return prefill_data, None
+        if num_decodes == 0:
+            return prefill_data, None
+        
+        ######################### DECODES #########################
 
-        # DECODES
+        # PAD FOR STATIC SHAPE
+        batch_size = _get_padded_batch_size(num_decodes)
 
+        # INDEX FOR EACH SEQUENCE (current location).
+        index = torch.tensor(self.input_batch.num_computed_tokens_cpu[:num_decodes],
+                             dtype=torch.int64).reshape(-1,1)
 
-        # OPTIMIZATION: Start copying the block table first.
-        # This way, we can overlap the copy with the following CPU operations.
-        # self.input_batch.block_table[:num_decodes].copy_(
-        #     self.input_batch.block_table_cpu_tensor[:num_decodes],
-        #     non_blocking=True)
+        # TOKEN_IDS
+        token_ids = torch.zeros((batch_size, 1), dtype=torch.int32)
+        token_ids[:num_decodes] = torch.gather(
+            input=torch.tensor(self.input_batch.token_ids_cpu),
+            dim=1,
+            index=index,
+        )
+        
+        # POSITION_IDS
+        position_ids = torch.zeros((batch_size, 1),
+                                   dtype=torch.int64)
+        position_ids[:num_decodes] = index
 
-        # # Get request indices.
-        # # E.g., [2, 5, 3] -> [0, 0, 1, 1, 1, 1, 1, 2, 2, 2]
-        # indices = np.arange(num_reqs)
-        # req_indices = np.repeat(indices, num_scheduled_tokens)
+        # SLOT_MAPPING
+        slot_mapping = torch.full(
+            (batch_size, 1),
+            _PAD_SLOT_ID,
+            dtype=torch.int64,
+        )
+        block_number = torch.gather(
+            input=self.input_batch.block_table_cpu_tensor[:num_decodes],
+            dim=1,
+            index=(index // self.block_size)
+        )
+        block_offset = index % self.block_size
+        slot_mapping[:num_decodes] = (block_number + block_offset)
 
-        # # Get batched arange.
-        # # E.g., [2, 5, 3] -> [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
-        # arange_matrix = np.tile(np.arange(max_num_scheduled_tokens),
-        #                         (num_reqs, 1))
-        # mask = arange_matrix < num_scheduled_tokens[:, np.newaxis]
-        # arange = arange_matrix[mask]
+        # BLOCK_TABLE
+        self.input_batch.block_table[:batch_size].copy_(
+            self.input_batch.block_table_cpu_tensor[:batch_size])
+        
+        # CONTEXT_LENS
+        context_lens = torch.zeros(batch_size, dtype=torch.int32)
+        context_lens[:num_decodes] = (index.reshape(-1) + 1)
+        
+        decode_data = DecodeData(
+            num_decodes=num_decodes,
+            token_ids=token_ids.to(self.device),
+            position_ids=position_ids.to(self.device),
+            attn_metadata=PallasAttentionMetadata(
+                is_prompt=False,
+                slot_mapping=slot_mapping.to(self.device),
+                block_tables=self.input_batch.block_table[:batch_size],
+                context_lens=context_lens.to(self.device),
+            )
+        )
 
-        # # Get positions.
-        # positions = torch.empty((total_num_scheduled_tokens, ),
-        #                         dtype=torch.int32,
-        #                         device="cpu",
-        #                         pin_memory=self.pin_memory)
-        # positions_np = positions.numpy()
-        # np.add(self.input_batch.num_computed_tokens_cpu[req_indices],
-        #        arange,
-        #        out=positions_np)
-
-        # # Get token indices.
-        # # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
-        # # -> [0, 1, M, M + 1, M + 2, M + 3, M + 4, 2 * M, 2 * M + 1, 2 * M + 2]
-        # # where M is the max_model_len.
-        # token_indices = positions_np + req_indices * self.max_model_len
-        # token_indices = torch.from_numpy(token_indices)
-        # input_ids = torch.empty((total_num_scheduled_tokens, ),
-        #                         dtype=torch.int32,
-        #                         device="cpu",
-        #                         pin_memory=self.pin_memory)
-        # torch.index_select(torch.from_numpy(
-        #     self.input_batch.token_ids_cpu).flatten(),
-        #                    0,
-        #                    token_indices,
-        #                    out=input_ids)
-
-        # # Calculate the slot mapping.
-        # block_numbers = self.input_batch.block_table_cpu_tensor.flatten()[
-        #     token_indices // self.block_size]
-        # block_offsets = token_indices % self.block_size
-        # slot_mapping = torch.empty((total_num_scheduled_tokens, ),
-        #                            dtype=torch.int32,
-        #                            device="cpu",
-        #                            pin_memory=self.pin_memory)
-        # torch.add(block_numbers * self.block_size,
-        #           block_offsets,
-        #           out=slot_mapping)
-
-        # # Prepare the attention metadata.
-        # query_start_loc = torch.empty((num_reqs + 1, ),
-        #                               dtype=torch.int32,
-        #                               device="cpu",
-        #                               pin_memory=self.pin_memory)
-        # query_start_loc_np = query_start_loc.numpy()
-        # query_start_loc_np[0] = 0
-        # np.cumsum(num_scheduled_tokens, out=query_start_loc_np[1:])
-
-        # seq_lens = (self.input_batch.num_computed_tokens_cpu[:num_reqs] +
-        #             num_scheduled_tokens)
-        # max_seq_len = seq_lens.max()
-        # seq_start_loc = torch.empty((num_reqs + 1, ),
-        #                             dtype=torch.int32,
-        #                             device="cpu",
-        #                             pin_memory=self.pin_memory)
-        # seq_start_loc_np = seq_start_loc.numpy()
-        # seq_start_loc_np[0] = 0
-        # np.cumsum(seq_lens, out=seq_start_loc_np[1:])
-
-        # self.input_ids[:total_num_scheduled_tokens].copy_(input_ids,
-        #                                                   non_blocking=True)
-        # self.positions[:total_num_scheduled_tokens].copy_(positions,
-        #                                                   non_blocking=True)
-
-        # query_start_loc = query_start_loc.to(self.device, non_blocking=True)
-        # seq_start_loc = seq_start_loc.to(self.device, non_blocking=True)
-        # slot_mapping = slot_mapping.to(self.device, non_blocking=True).long()
-        # attn_metadata = PallasAttentionMetadata(
-        #     num_actual_tokens=total_num_scheduled_tokens,
-        #     max_query_len=max_num_scheduled_tokens,
-        #     query_start_loc=query_start_loc,
-        #     max_seq_len=max_seq_len,
-        #     seq_start_loc=seq_start_loc,
-        #     block_table=self.input_batch.block_table[:num_reqs],
-        #     slot_mapping=slot_mapping,
-        # )
-        # # NOTE(woosuk): Due to chunked prefills, there can be at most 1 partial
-        # # request in the batch. While we should not sample any token from this
-        # # partial request, we do so for simplicity. We will ignore the sampled
-        # # token from the partial request.
-        # # TODO: Support prompt logprobs.
-        # logits_indices = query_start_loc[1:] - 1
-        # return attn_metadata, logits_indices
+        return prefill_data, decode_data
 
     def _prepare_sampling(
         self,
@@ -396,19 +356,59 @@ class TPUModelRunner:
         scheduler_output: "SchedulerOutput",
     ) -> ModelRunnerOutput:
         self._update_states(scheduler_output)
-        prefill_data, _ = self._prepare_inputs(scheduler_output)
-        for req_id, prompt_len, token_ids, position_ids, attn_metadata in prefill_data.zipped():
+
+        prefill_data, decode_data = self._prepare_inputs(scheduler_output)
+
+        num_reqs = self.input_batch.num_reqs
+        sampled_token_ids = torch.empty(num_reqs, dtype=torch.int32)
+
+        ########## DECODES ##########
+        num_decodes = 0
+        if decode_data:
+            num_decodes = decode_data.num_decodes
+
+            selected_token_ids = self.model(
+                decode_data.token_ids,
+                decode_data.position_ids,
+                decode_data.attn_metadata,
+                self.kv_caches,
+                is_prompt=False
+            )
+
+            breakpoint()
+            token_ids = selected_token_ids[:num_decodes].cpu()
+            sampled_token_ids_list = token_ids.tolist()
+            sampled_token_ids[:num_decodes] = token_ids
+
+            for i, req_id in enumerate(self.input_batch.req_ids[:decode_data.num_decodes]):
+                req_state = self.requests[req_id]
+                
+                # NO CHUNKED PREFILL
+                assert scheduler_output.num_scheduled_tokens[req_id] == 1
+                seq_len = (req_state.num_computed_tokens +
+                           scheduler_output.num_scheduled_tokens[req_id])
+                assert seq_len == req_state.num_tokens
+
+                token_id = sampled_token_ids_list[i]
+                self.input_batch.token_ids_cpu[i, seq_len] = token_id
+                req_state.output_token_ids.append(token_id)
+
+        ########## PREFILLS ##########
+        for idx, (req_id, prompt_len, 
+                  token_ids, position_ids, 
+                  attn_metadata) in enumerate(prefill_data.zipped()):
+            
             # [padded_prompt_len]
             selected_token_ids = self.model(
                 token_ids,
                 position_ids,
                 attn_metadata,
                 self.kv_caches,
-                is_prompt=True)
+                is_prompt=True
+            )
             # TODO: move this into the model.
             token_id = selected_token_ids[prompt_len - 1].cpu()
-            breakpoint()
-
+            sampled_token_ids[num_decodes + idx] = token_id
             req_state = self.requests[req_id]
 
             # TODO: prefix caching.
@@ -425,41 +425,14 @@ class TPUModelRunner:
             self.input_batch.token_ids_cpu[req_idx, seq_len] = token_id
             req_state.output_token_ids.append(token_id)
 
-            breakpoint()
-
-        # # NOTE: CPU-GPU synchronization happens here.
-        # sampled_token_ids = sampler_output.sampled_token_ids.cpu()
-        # sampled_token_ids_list = sampled_token_ids.tolist()
-        # # TODO(woosuk): The following loop can be slow since it iterates over
-        # # the requests one by one. Optimize.
-        # num_reqs = self.input_batch.num_reqs
-        # for i, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
-        #     req_state = self.requests[req_id]
-        #     seq_len = (req_state.num_computed_tokens +
-        #                scheduler_output.num_scheduled_tokens[req_id])
-        #     assert seq_len <= req_state.num_tokens
-        #     if seq_len == req_state.num_tokens:
-        #         # Append the sampled token to the output token ids.
-        #         token_id = sampled_token_ids_list[i]
-        #         self.input_batch.token_ids_cpu[i, seq_len] = token_id
-        #         req_state.output_token_ids.append(token_id)
-        #     else:
-        #         # Ignore the sampled token from the partial request.
-        #         # Rewind the generator state as if the token was not sampled.
-        #         generator = self.input_batch.generators.get(i)
-        #         if generator is not None:
-        #             # This relies on cuda-specific torch-internal impl details
-        #             generator.set_offset(generator.get_offset() - 4)
-
-
-        # model_runner_output = ModelRunnerOutput(
-        #     req_ids=self.input_batch.req_ids[:num_reqs],
-        #     req_id_to_index=self.input_batch.req_id_to_index,
-        #     sampled_token_ids_cpu=sampled_token_ids,
-        #     logprob_token_ids_cpu=logprob_token_ids,
-        #     logprobs_cpu=logprobs,
-        # )
-        # return model_runner_output
+        model_runner_output = ModelRunnerOutput(
+            req_ids=self.input_batch.req_ids[:num_reqs],
+            req_id_to_index=self.input_batch.req_id_to_index,
+            sampled_token_ids_cpu=sampled_token_ids,
+            logprob_token_ids_cpu=None,
+            logprobs_cpu=None,
+        )
+        return model_runner_output
 
     def load_model(self) -> None:
 
@@ -932,7 +905,6 @@ class ModelWrapper(TorchCompileWrapperWithCustomDispatcher):
         # 1: for prompt
         # 2: for decode
         # dispatch to the compiled code directly, skip PyTorch
-        print(f"{is_prompt=}")
         if is_prompt:
             with self.dispatch_to_code(1):
                 return self.forward(*args, **kwargs)
@@ -991,6 +963,15 @@ class ModelWrapper(TorchCompileWrapperWithCustomDispatcher):
         argmax_token_ids = torch.argmax(logits, dim=-1, keepdim=True)
         return argmax_token_ids.squeeze(dim=1)
 
+
+def _get_padded_batch_size(batch_size: int) -> int:
+    # The GMM Pallas kernel requires num_tokens * topk to be a multiple of 16.
+    # To meet this requirement in the simplest way, we set the minimal batch
+    # size to 8.
+    if batch_size <= 8:
+        return 8
+    else:
+        return ((batch_size + 15) // 16) * 16
 
 def _get_padded_prefill_len(x: int) -> int:
     # NOTE(woosuk): The pallas FlashAttention kernel requires the sequence

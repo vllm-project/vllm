@@ -417,6 +417,11 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             block_tables=block_tables,
             context_lens=context_lens,
         )
+
+        print(f"{input_tokens.shape=}")
+        print(f"{input_positions.shape=}")
+        print(f"{attn_metadata.slot_mapping.shape=}")
+        print(f"{attn_metadata.context_lens.shape=}")
         return input_tokens, input_positions, attn_metadata, input_lens
 
     def _prepare_sample(
