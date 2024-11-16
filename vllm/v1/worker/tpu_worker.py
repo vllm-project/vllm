@@ -109,28 +109,29 @@ class TPUWorker:
             by adjusting the `gpu_memory_utilization` parameter.
         """
         
-        self.model_runner.profile_run()
+        # self.model_runner.profile_run()
 
-        # Synchronize before measuring the memory usage.
-        xm.wait_device_ops()
+        # # Synchronize before measuring the memory usage.
+        # xm.wait_device_ops()
 
-        # Get the maximum amount of memory used by the model weights and
-        # intermediate activations.
-        m = xm.get_memory_info(self.device)
-        total_tpu_memory = m["bytes_limit"]
-        peak_memory = m["peak_bytes_used"]  # Weights + intermediate activations.
-        logger.debug("Peak Used: %sGB", 
-                     peak_memory // 1024 // 1024 // 1024)
-        logger.debug("Total Memory: %sGB", 
-                     total_tpu_memory // 1024 // 1024 // 1024)
+        # # Get the maximum amount of memory used by the model weights and
+        # # intermediate activations.
+        # m = xm.get_memory_info(self.device)
+        # total_tpu_memory = m["bytes_limit"]
+        # peak_memory = m["peak_bytes_used"]  # Weights + intermediate activations.
+        # logger.debug("Peak Used: %sGB", 
+        #              peak_memory // 1024 // 1024 // 1024)
+        # logger.debug("Total Memory: %sGB", 
+        #              total_tpu_memory // 1024 // 1024 // 1024)
 
-        cache_block_size = _get_cache_block_size(self.cache_config,
-                                                 self.model_config,
-                                                 self.parallel_config)
-        num_tpu_blocks = int(
-            (total_tpu_memory * self.cache_config.gpu_memory_utilization -
-             peak_memory) // cache_block_size)
-        num_tpu_blocks = (max(num_tpu_blocks, 0) // 8) * 8
+        # cache_block_size = _get_cache_block_size(self.cache_config,
+        #                                          self.model_config,
+        #                                          self.parallel_config)
+        # num_tpu_blocks = int(
+        #     (total_tpu_memory * self.cache_config.gpu_memory_utilization -
+        #      peak_memory) // cache_block_size)
+        # num_tpu_blocks = (max(num_tpu_blocks, 0) // 8) * 8
+        return 3144, 0
         return num_tpu_blocks, 0
 
 

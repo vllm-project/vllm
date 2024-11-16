@@ -35,6 +35,9 @@ logger = init_logger(__name__)
 # FIXME(woosuk): Find a more reliable way to prevent possible bugs.
 _PAD_SLOT_ID = 1_000_000_000
 
+from transformers import AutoTokenizer
+tok = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-3B-Instruct")
+
 @dataclass
 class PrefillData:
     request_ids: List
@@ -250,7 +253,7 @@ class TPUModelRunner:
             block_numbers = self.input_batch.block_table_cpu_tensor[prefill_idx, positions // self.block_size].reshape(1,-1)
             block_offsets = positions % self.block_size
             slot_mapping = block_numbers * self.block_size + block_offsets
-            slot_mapping[prompt_len:] = _PAD_SLOT_ID
+            slot_mapping[:, prompt_len:] = _PAD_SLOT_ID
             slot_mapping = slot_mapping.long()
             
             attn_metadata = PallasAttentionMetadata(
@@ -265,6 +268,7 @@ class TPUModelRunner:
             prefill_token_ids.append(token_ids)
             prefill_position_ids.append(positions.to(self.device))
             prefill_attn_metadata.append(attn_metadata)
+
 
         prefill_data = PrefillData(
             request_ids=prefill_request_ids,
@@ -310,12 +314,12 @@ class TPUModelRunner:
             dim=1,
             index=(index // self.block_size)
         )
-        block_offset = index % self.block_size
-        slot_mapping[:num_decodes] = (block_number + block_offset)
+        block_offsets = index % self.block_size
+        slot_mapping[:num_decodes] = (block_number * self.block_size + block_offsets)
 
         # BLOCK_TABLE
-        self.input_batch.block_table[:batch_size].copy_(
-            self.input_batch.block_table_cpu_tensor[:batch_size])
+        # cannot do a _copy - silently fails (cry)
+        block_table = self.input_batch.block_table_cpu_tensor[:batch_size]
         
         # CONTEXT_LENS
         context_lens = torch.zeros(batch_size, dtype=torch.int32)
@@ -328,7 +332,7 @@ class TPUModelRunner:
             attn_metadata=PallasAttentionMetadata(
                 is_prompt=False,
                 slot_mapping=slot_mapping.to(self.device),
-                block_tables=self.input_batch.block_table[:batch_size],
+                block_tables=block_table.to(self.device),
                 context_lens=context_lens.to(self.device),
             )
         )
@@ -356,9 +360,7 @@ class TPUModelRunner:
         scheduler_output: "SchedulerOutput",
     ) -> ModelRunnerOutput:
         self._update_states(scheduler_output)
-
         prefill_data, decode_data = self._prepare_inputs(scheduler_output)
-
         num_reqs = self.input_batch.num_reqs
         sampled_token_ids = torch.empty(num_reqs, dtype=torch.int32)
 
@@ -374,8 +376,12 @@ class TPUModelRunner:
                 self.kv_caches,
                 is_prompt=False
             )
-
-            # breakpoint()
+            # print(decode_data.token_ids)
+            # print(decode_data.position_ids)
+            # print(decode_data.attn_metadata)
+            # print(tok.decode(self.requests["0"].output_token_ids))
+            # # breakpoint()
+            
             token_ids = selected_token_ids[:num_decodes].cpu()
             sampled_token_ids_list = token_ids.tolist()
             sampled_token_ids[:num_decodes] = token_ids
@@ -397,8 +403,9 @@ class TPUModelRunner:
         for idx, (req_id, prompt_len, 
                   token_ids, position_ids, 
                   attn_metadata) in enumerate(prefill_data.zipped()):
-            
+
             # [padded_prompt_len]
+            # breakpoint()
             selected_token_ids = self.model(
                 token_ids,
                 position_ids,
@@ -406,8 +413,14 @@ class TPUModelRunner:
                 self.kv_caches,
                 is_prompt=True
             )
+
+            # print(token_ids)
+            # print(position_ids)
+            # print(attn_metadata)
+            # breakpoint()
+
             # TODO: move this into the model.
-            token_id = selected_token_ids[prompt_len - 1].cpu()
+            token_id = selected_token_ids[prompt_len - 1].cpu().item()
             sampled_token_ids[num_decodes + idx] = token_id
             req_state = self.requests[req_id]
 
@@ -653,9 +666,9 @@ class InputBatch:
         self.req_ids: List[Optional[str]] = [None] * max_num_reqs
         self.req_id_to_index: Dict[str, int] = {}
 
-        self.token_ids_cpu = np.empty((max_num_reqs, max_model_len),
+        self.token_ids_cpu = np.zeros((max_num_reqs, max_model_len),
                                       dtype=np.int32)
-        self.num_computed_tokens_cpu = np.empty(max_num_reqs, dtype=np.int32)
+        self.num_computed_tokens_cpu = np.zeros(max_num_reqs, dtype=np.int32)
 
         # Attention-related.
         self.block_table = torch.zeros((max_num_reqs, max_num_blocks_per_req),
@@ -930,7 +943,7 @@ class ModelWrapper(TorchCompileWrapperWithCustomDispatcher):
         """
 
         # Skip this in memory profiling at initialization.
-        if kv_caches[0][0].numel() != 0:
+        if kv_caches[0][0].numel() > 0:
             # index_copy_(slot_mapping) only works when the inserted dimension
             # is 0. However, the KV cache in the Pallas backend has the shape
             # [num_kv_heads, num_blocks, block_size, head_size]. To make it

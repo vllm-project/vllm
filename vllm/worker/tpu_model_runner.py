@@ -418,10 +418,6 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             context_lens=context_lens,
         )
 
-        print(f"{input_tokens.shape=}")
-        print(f"{input_positions.shape=}")
-        print(f"{attn_metadata.slot_mapping.shape=}")
-        print(f"{attn_metadata.context_lens.shape=}")
         return input_tokens, input_positions, attn_metadata, input_lens
 
     def _prepare_sample(
@@ -585,6 +581,10 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                                               model_input.num_samples,
                                               kv_caches,
                                               is_prompt=True)
+                print(f"{token_ids=}")
+                print(f"{position_ids=}")
+                print(f"{attn_metadata=}")
+                # breakpoint()
                 next_token_ids.append(output_token_ids[0])
                 start_idx = end_idx
 
@@ -629,6 +629,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             input_lens = model_input.input_lens.to(self.device)
             for i in range(num_steps):
                 slot_mapping = attn_metadata.slot_mapping
+
                 output_token_ids = self.model(token_ids,
                                               position_ids,
                                               attn_metadata,
@@ -638,6 +639,10 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                                               model_input.num_samples,
                                               kv_caches,
                                               is_prompt=False)
+                print(f"{token_ids=}")
+                print(f"{position_ids=}")
+                print(f"{attn_metadata=}")
+                # breakpoint()
                 self.cached_step_outputs.append(output_token_ids)
 
                 if i < num_steps - 1:
@@ -769,7 +774,7 @@ class ModelWrapper(TorchCompileWrapperWithCustomDispatcher):
         logits = self.model.compute_logits(hidden_states, sampling_metadata)
 
         # Argmax sampling.
-        argmax_token_ids = torch.argmax(logits, dim=-1, keepdim=True)
+        argmax_token_ids = torch.argmax(logits, dim=-1, keepdim=True)    
         argmax_token_ids = argmax_token_ids.repeat(1, num_samples)
 
         # Zero temperature means greedy decoding. Avoid division by zero.

@@ -127,8 +127,10 @@ class PallasAttentionImpl(AttentionImpl):
             query: shape = [batch_size, seq_len, num_heads * head_size]
             key: shape = [batch_size, seq_len, num_kv_heads * head_size]
             value: shape = [batch_size, seq_len, num_kv_heads * head_size]
-            kv_cache = [2, num_kv_heads, num_blocks, block_size, head_size]
-                NOTE: kv_cache will be an empty tensor for profiling run
+            kv_cache[0] = [num_kv_heads, num_blocks, block_size, head_size]
+            kv_cache[1] = [num_kv_heads, num_blocks, block_size, head_size]
+                NOTE: kv_cache[0] and kv_cache[1] will be an empty tensor 
+                with shape [0] for profiling run.
             attn_metadata: Metadata for attention.
         Returns:
             shape = [batch_size, seq_len, num_heads * head_size]
@@ -143,9 +145,6 @@ class PallasAttentionImpl(AttentionImpl):
                                       "are not implemented for "
                                       "PallasAttentionImpl")
 
-        # Empty KV cache when profiling (skip write to cache).
-        is_profiling = kv_cache[0].numel() == 0
-
         # Unpack
         batch_size, seq_len, hidden_size = query.shape
         query = query.view(batch_size, seq_len, self.num_heads, self.head_size)
@@ -154,7 +153,7 @@ class PallasAttentionImpl(AttentionImpl):
                            self.head_size)
 
         # Write to KV cache.
-        if not is_profiling:
+        if kv_cache[0].numel() > 0:
             slot_mapping = attn_metadata.slot_mapping
             key_cache = kv_cache[0]
             value_cache = kv_cache[1]
@@ -187,7 +186,7 @@ class PallasAttentionImpl(AttentionImpl):
             output = output.permute(0, 2, 1, 3)
         else:
             # Decoding run.
-            assert not is_profiling
+            assert kv_cache[0].numel() > 0
             query = query.squeeze(dim=1)
             pages_per_compute_block = 16  # TODO(woosuk): Tune this value.
 
