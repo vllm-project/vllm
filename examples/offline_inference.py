@@ -51,11 +51,12 @@ def main(args):
                                      max_tokens=args.output_len)
 
     # Create an LLM.
-    # The default model is 'facebook/opt-125m', ensured by the default parameters of EngineArgs
+    # The default model is 'facebook/opt-125m'
     engine_args = EngineArgs.from_cli_args(args)
     llm = LLM(**asdict(engine_args))
 
-    # Generate texts from the prompts. The output is a list of RequestOutput objects
+    # Generate texts from the prompts.
+    # The output is a list of RequestOutput objects
     # that contain the prompt, generated text, and other information.
     outputs = llm.generate(prompts, sampling_params)
     # Print the outputs.
@@ -71,7 +72,7 @@ if __name__ == '__main__':
         "--batch-size",
         type=int,
         default=4,
-        help="Batch size for inference, default is lenght of sample prompts")
+        help="Batch size for inference, default is length of sample prompts")
     parser.add_argument("--input-len",
                         type=int,
                         default=None,
