@@ -190,8 +190,8 @@ class Hermes2ProToolParser(ToolParser):
                 diff = self.prev_tool_call_arr[self.current_tool_id].get(
                     "arguments")
                 if diff:
-                    diff = json.dumps(diff).replace(
-                        self.streamed_args_for_tool[self.current_tool_id], "")
+                    diff = diff.encode('utf-8').decode('unicode_escape') if diff is str else diff
+                    diff = json.dumps(diff, ensure_ascii=False)[len(self.streamed_args_for_tool[self.current_tool_id]):]
                     logger.debug(
                         "Finishing tool and found diff that had not "
                         "been streamed yet: %s", diff)
@@ -313,16 +313,19 @@ class Hermes2ProToolParser(ToolParser):
                 logger.debug("Searching for diff between\n%s", cur_args_json)
                 logger.debug("and\n%s", prev_args_json)
                 argument_diff = extract_intermediate_diff(
-                    cur_args_json, prev_args_json)
-                logger.debug("got argument diff %s", argument_diff)
+                    cur_args_json.encode('utf-8').decode('unicode_escape'), self.streamed_args_for_tool[self.current_tool_id]) if len(cur_args_json.encode('utf-8').decode('unicode_escape')) > len(self.streamed_args_for_tool[self.current_tool_id]) else ''
+                
+                if isinstance(delta_text, str) and len(delta_text.rstrip())>=1 and delta_text.rstrip()[-1] == '}':
+                    argument_diff = argument_diff.rstrip()[:-1]
+                    delta_text = delta_text.rstrip()[:-1]
                 delta = DeltaMessage(tool_calls=[
                     DeltaToolCall(index=self.current_tool_id,
                                   function=DeltaFunctionCall(
-                                      arguments=argument_diff).model_dump(
+                                      arguments=delta_text).model_dump(
                                           exclude_none=True))
                 ])
                 self.streamed_args_for_tool[self.current_tool_id] \
-                    += argument_diff
+                    += delta_text
 
             # handle saving the state for the current tool into
             # the "prev" list for use in diffing for the next iteration
