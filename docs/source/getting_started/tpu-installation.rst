@@ -44,15 +44,18 @@ Requirements
 Provision Cloud TPUs
 ====================
 
-You can provision Cloud TPUs using the `Cloud TPU API <https://cloud.google.com/tpu/docs/reference/rest>`_` 
-or the `queued resources <https://cloud.google.com/tpu/docs/queued-resources>`_` 
-API. This section shows how to create TPUs using the queued resource API. 
-For more information about using the Cloud TPU API, see `Create a Cloud TPU using the Create Node API <https://cloud.google.com/tpu/docs/managing-tpus-tpu-vm#create-node-api>`_. 
-`Queued resources <https://cloud.devsite.corp.google.com/tpu/docs/queued-resources>`_
-enable you to request Cloud TPU resources in a queued manner. When you request 
-queued resources, the request is added to a queue maintained by the Cloud TPU 
-service. When the requested resource becomes available, it's assigned to your 
-Google Cloud project for your immediate exclusive use. 
+You can provision Cloud TPUs using the `Cloud TPU API <https://cloud.google.com/tpu/docs/reference/rest>`_ 
+or the `queued resources <https://cloud.google.com/tpu/docs/queued-resources>`_ 
+API. This section shows how to create TPUs using the queued resource API. For 
+more information about using the Cloud TPU API, see `Create a Cloud TPU using the Create Node API <https://cloud.google.com/tpu/docs/managing-tpus-tpu-vm#create-node-api>`_. 
+Queued resources enable you to request Cloud TPU resources in a queued manner. 
+When you request queued resources, the request is added to a queue maintained by 
+the Cloud TPU service. When the requested resource becomes available, it's 
+assigned to your Google Cloud project for your immediate exclusive use. 
+
+.. note::
+   In all of the following commands, replace the ALL CAPS parameter names with 
+   appropriate values. See the parameter descriptions table for more information.
 
 Provision a Cloud TPU with the queued resource API
 --------------------------------------------------
@@ -68,6 +71,7 @@ Create a TPU v5e with 4 TPU chips:
     --runtime-version RUNTIME_VERSION \
     --service-account SERVICE_ACCOUNT
 
+   
 .. list-table:: Parameter descriptions
     :header-rows: 1
 
@@ -81,12 +85,13 @@ Create a TPU v5e with 4 TPU chips:
     * - PROJECT_ID
       - Your Google Cloud project
     * - ZONE
-      - The `zone <https://cloud.google.com/tpu/docs/regions-zones>`_ where you 
-        want to create your Cloud TPU.
+      - The GCP zone where you want to create your Cloud TPU. The value you use 
+        depends on the version of TPUs you are using. For more information, see 
+        `TPU regions and zones <https://cloud.google.com/tpu/docs/regions-zones>`_ 
     * - ACCELERATOR_TYPE
-      - The TPU version you want to use. Specify the TPU version, followed by a 
-        '-' and the number of TPU cores. For example `v5e-4` specifies a v5e TPU 
-        with 4 cores. For more information, see `TPU versions <https://cloud.devsite.corp.google.com/tpu/docs/system-architecture-tpu-vm#versions>`_.
+      - The TPU version you want to use. Specify the TPU version, for example 
+        `v5litepod-4` specifies a v5e TPU with 4 cores. For more information, 
+        see `TPU versions <https://cloud.devsite.corp.google.com/tpu/docs/system-architecture-tpu-vm#versions>`_.
     * - RUNTIME_VERSION
       - The TPU VM runtime version to use. For more information see `TPU VM images <https://cloud.google.com/tpu/docs/runtimes>`_.
     * - SERVICE_ACCOUNT
@@ -98,7 +103,15 @@ Connect to your TPU using SSH:
 
 .. code-block:: bash
 
-    gcloud compute tpus tpu-vm ssh TPU_NAME
+    gcloud compute tpus tpu-vm ssh TPU_NAME --zone ZONE
+
+Install Miniconda
+
+.. code-block:: bash
+
+    wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
+    bash Miniconda3-latest-Linux-x86_64.sh
+    source ~/.bashrc
 
 Create and activate a Conda environment for vLLM:
 
@@ -162,9 +175,11 @@ Run the Docker image with the following command:
 
 .. note::
 
-    Since TPU relies on XLA which requires static shapes, vLLM bucketizes the possible input shapes and compiles an XLA graph for each different shape.
-    The compilation time may take 20~30 minutes in the first run.
-    However, the compilation time reduces to ~5 minutes afterwards because the XLA graphs are cached in the disk (in :code:`VLLM_XLA_CACHE_PATH` or :code:`~/.cache/vllm/xla_cache` by default).
+    Since TPU relies on XLA which requires static shapes, vLLM bucketizes the 
+    possible input shapes and compiles an XLA graph for each shape. The 
+    compilation time may take 20~30 minutes in the first run. However, the 
+    compilation time reduces to ~5 minutes afterwards because the XLA graphs are 
+    cached in the disk (in :code:`VLLM_XLA_CACHE_PATH` or :code:`~/.cache/vllm/xla_cache` by default).
 
 .. tip::
 
@@ -173,7 +188,8 @@ Run the Docker image with the following command:
     .. code-block:: console
 
         from torch._C import *  # noqa: F403
-        ImportError: libopenblas.so.0: cannot open shared object file: No such file or directory
+        ImportError: libopenblas.so.0: cannot open shared object file: No such 
+        file or directory
 
 
     Install OpenBLAS with the following command:

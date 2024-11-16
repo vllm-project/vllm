@@ -9,8 +9,8 @@ CORE_RANGE=${CORE_RANGE:-48-95}
 NUMA_NODE=${NUMA_NODE:-1}
 
 # Try building the docker image
-numactl -C $CORE_RANGE -N $NUMA_NODE docker build -t cpu-test -f Dockerfile.cpu .
-numactl -C $CORE_RANGE -N $NUMA_NODE docker build --build-arg VLLM_CPU_DISABLE_AVX512="true" -t cpu-test-avx2 -f Dockerfile.cpu .
+numactl -C "$CORE_RANGE" -N "$NUMA_NODE" docker build -t cpu-test -f Dockerfile.cpu .
+numactl -C "$CORE_RANGE" -N "$NUMA_NODE" docker build --build-arg VLLM_CPU_DISABLE_AVX512="true" -t cpu-test-avx2 -f Dockerfile.cpu .
 
 # Setup cleanup
 remove_docker_container() { docker rm -f cpu-test cpu-test-avx2 || true; }
@@ -18,10 +18,10 @@ trap remove_docker_container EXIT
 remove_docker_container
 
 # Run the image, setting --shm-size=4g for tensor parallel.
-docker run -itd --entrypoint /bin/bash -v ~/.cache/huggingface:/root/.cache/huggingface --cpuset-cpus=$CORE_RANGE  \
- --cpuset-mems=$NUMA_NODE --privileged=true --network host -e HF_TOKEN --env VLLM_CPU_KVCACHE_SPACE=4 --shm-size=4g --name cpu-test cpu-test
-docker run -itd --entrypoint /bin/bash -v ~/.cache/huggingface:/root/.cache/huggingface --cpuset-cpus=$CORE_RANGE \
- --cpuset-mems=$NUMA_NODE --privileged=true --network host -e HF_TOKEN --env VLLM_CPU_KVCACHE_SPACE=4 --shm-size=4g --name cpu-test-avx2 cpu-test-avx2
+docker run -itd --entrypoint /bin/bash -v ~/.cache/huggingface:/root/.cache/huggingface --cpuset-cpus="$CORE_RANGE"  \
+ --cpuset-mems="$NUMA_NODE" --privileged=true --network host -e HF_TOKEN --env VLLM_CPU_KVCACHE_SPACE=4 --shm-size=4g --name cpu-test cpu-test
+docker run -itd --entrypoint /bin/bash -v ~/.cache/huggingface:/root/.cache/huggingface --cpuset-cpus="$CORE_RANGE" \
+ --cpuset-mems="$NUMA_NODE" --privileged=true --network host -e HF_TOKEN --env VLLM_CPU_KVCACHE_SPACE=4 --shm-size=4g --name cpu-test-avx2 cpu-test-avx2
 
 function cpu_tests() {
   set -e
@@ -38,9 +38,9 @@ function cpu_tests() {
       decord einops librosa peft Pillow sentence-transformers soundfile \
       transformers_stream_generator matplotlib datamodel_code_generator
     pip install torchvision --index-url https://download.pytorch.org/whl/cpu
-    pytest -v -s tests/models/embedding/language
-    pytest -v -s tests/models/encoder_decoder/language
-    pytest -v -s tests/models/decoder_only/language/test_models.py
+    pytest -v -s tests/models/decoder_only/language -m cpu_model
+    pytest -v -s tests/models/embedding/language -m cpu_model
+    pytest -v -s tests/models/encoder_decoder/language -m cpu_model
     pytest -v -s tests/models/decoder_only/audio_language -m cpu_model
     pytest -v -s tests/models/decoder_only/vision_language -m cpu_model"
 

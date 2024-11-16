@@ -37,6 +37,7 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.pooler import Pooler, PoolingType
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
@@ -44,8 +45,9 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
+from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import IntermediateTensors
+from vllm.sequence import IntermediateTensors, PoolerOutput
 
 from .interfaces import SupportsLoRA, SupportsPP
 from .utils import (AutoWeightsLoader, PPMissingLayer, is_pp_missing_parameter,
@@ -247,6 +249,18 @@ class Qwen2Model(nn.Module):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
+        # TODO (@robertgshaw2): see if this can be moved out
+        if (cache_config.sliding_window is not None
+                and hasattr(config, "max_window_layers")):
+            raise ValueError("Sliding window for some but all layers is not "
+                             "supported. This model uses sliding window "
+                             "but `max_window_layers` = {} is less than "
+                             "`num_hidden_layers` = {}. Please open an issue "
+                             "to discuss this feature.".format(
+                                 config.max_window_layers,
+                                 config.num_hidden_layers,
+                             ))
+
         self.config = config
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
@@ -409,20 +423,9 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         lora_config = vllm_config.lora_config
-        # TODO (@robertgshaw2): see if this can be moved out
-        if (cache_config.sliding_window is not None
-                and hasattr(config, "max_window_layers")):
-            raise ValueError("Sliding window for some but all layers is not "
-                             "supported. This model uses sliding window "
-                             "but `max_window_layers` = {} is less than "
-                             "`num_hidden_layers` = {}. Please open an issue "
-                             "to discuss this feature.".format(
-                                 config.max_window_layers,
-                                 config.num_hidden_layers,
-                             ))
+        pooler_config = vllm_config.model_config.pooler_config
 
         self.config = config
         self.lora_config = lora_config
@@ -442,6 +445,15 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = get_sampler()
+
+        # The same model class supports both language generation and embedding
+        # because the architecture name is the same
+        self._pooler = Pooler.from_config_with_defaults(
+            pooler_config,
+            pooling_type=PoolingType.LAST,
+            normalize=True,
+            softmax=False)
+
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
@@ -479,10 +491,84 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
+    def pooler(
+        self,
+        hidden_states: torch.Tensor,
+        pooling_metadata: PoolingMetadata,
+    ) -> Optional[PoolerOutput]:
+        return self._pooler(hidden_states, pooling_metadata)
+
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=(["lm_head."]
                            if self.config.tie_word_embeddings else None),
         )
+        loader.load_weights(weights)
+
+
+class Qwen2EmbeddingModel(nn.Module, SupportsLoRA, SupportsPP):
+    packed_modules_mapping = {
+        "qkv_proj": [
+            "q_proj",
+            "k_proj",
+            "v_proj",
+        ],
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+    }
+
+    # LoRA specific attributes
+    supported_lora_modules = [
+        "qkv_proj",
+        "o_proj",
+        "gate_up_proj",
+        "down_proj",
+    ]
+    embedding_modules = {}
+    embedding_padding_modules = []
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        super().__init__()
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
+        lora_config = vllm_config.lora_config
+        pooler_config = vllm_config.model_config.pooler_config
+
+        self.config = config
+        self.lora_config = lora_config
+
+        self.quant_config = quant_config
+        self.model = Qwen2Model(vllm_config=vllm_config,
+                                prefix=maybe_prefix(prefix, "model"))
+
+        self._pooler = Pooler.from_config_with_defaults(
+            pooler_config,
+            pooling_type=PoolingType.MEAN,
+            normalize=True,
+            softmax=False)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        kv_caches: List[torch.Tensor],
+        attn_metadata: AttentionMetadata,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+    ) -> torch.Tensor:
+        return self.model(input_ids, positions, kv_caches, attn_metadata,
+                          intermediate_tensors)
+
+    def pooler(
+        self,
+        hidden_states: torch.Tensor,
+        pooling_metadata: PoolingMetadata,
+    ) -> Optional[PoolerOutput]:
+        return self._pooler(hidden_states, pooling_metadata)
+
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+        loader = AutoWeightsLoader(self,
+                                   ignore_unexpected_prefixes=["lm_head."])
         loader.load_weights(weights)
