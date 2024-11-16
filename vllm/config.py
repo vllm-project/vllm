@@ -2068,7 +2068,7 @@ class CompilationConfig(BaseModel):
     """
     Configuration for compilation.
     It has three parts:
-    - Compilation levels:
+    - Top-level Compilation control:
         - level: the level of compilation.
             - 0: no compilation.
             - 1: dynamo as is.
@@ -2123,12 +2123,12 @@ class CompilationConfig(BaseModel):
             name because the config uses json format. If we pass the config
             from Python, functions can also be passed directly via Python object
             constructor, e.g. `CompilationConfig(inductor_passes={"a": func})`
-    - Custom inductor passes:
-        - dump_graph_stages: list of stages for which we want to dump the graph.
-            Each pass defines its own stages (before, after, maybe in-between).
-        - dump_graph_dir: directory to dump the graph. Default is .
-        - enable_fusion: whether to enable the custom fusion pass.
-            TODO better pass enabling system.
+        - custom inductor passes:
+            - dump_graph_stages: list of stages for which we want to dump the graph.
+                Each pass defines its own stages (before, after, maybe in-between).
+            - dump_graph_dir: directory to dump the graph. Default is .
+            - enable_fusion: whether to enable the custom fusion pass.
+                TODO better pass enabling system.
     
     Why we have different sizes for cudagraph and inductor:
     - cudagraph: a cudagraph captured for a specific size can only be used
