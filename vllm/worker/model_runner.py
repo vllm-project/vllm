@@ -700,6 +700,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                         spatial_merge_size=hf_config.vision_config.
                         spatial_merge_size,
                         context_len=inter_data.context_lens[seq_idx],
+                        seq_len=inter_data.seq_lens[seq_idx],
                     )
 
                 seq_data.mrope_position_delta = mrope_position_delta
