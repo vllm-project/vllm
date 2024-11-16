@@ -229,7 +229,7 @@ class AutoWeightsLoader:
             weights = mapper.apply(weights)
 
         autoloaded_weights = set(self._load_module("", self.module, weights))
-        if (weights_not_loaded := autoloaded_weights - self.weights_to_load):
+        if (weights_not_loaded := self.weights_to_load - autoloaded_weights):
             logger.warning(
                 "Following weights were not initialized from checkpoint: %s",
                 weights_not_loaded)
