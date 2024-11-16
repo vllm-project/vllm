@@ -2,7 +2,6 @@ from typing import Dict, Type
 
 import torch.nn as nn
 
-from vllm.config import CompilationLevel
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.plugins import get_current_vllm_config
@@ -108,6 +107,7 @@ class CustomOp(nn.Module):
         On by default if level < CompilationLevel.PIECEWISE
         Specifying 'all' or 'none' in custom_op takes precedence.
         """
+        from vllm.config import CompilationLevel
         compilation_config = get_current_vllm_config().compilation_config
         custom_op = compilation_config.custom_op
         count_none = custom_op.count("none")
