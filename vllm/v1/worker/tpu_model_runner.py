@@ -296,7 +296,7 @@ class TPUModelRunner:
         
         # POSITION_IDS
         position_ids = torch.zeros((batch_size, 1),
-                                   dtype=torch.int64)
+                                   dtype=torch.int32)
         position_ids[:num_decodes] = index
 
         # SLOT_MAPPING
