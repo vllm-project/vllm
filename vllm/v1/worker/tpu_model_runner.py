@@ -111,7 +111,7 @@ class TPUModelRunner:
         self.prefill_positions = torch.tensor(
             range(self.max_model_len),
             device="cpu",
-        ).to(torch.int64).reshape(1,-1)
+        ).to(torch.int32).reshape(1,-1)
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         # Remove stopped requests from the cached states.
@@ -246,6 +246,7 @@ class TPUModelRunner:
             block_offsets = positions % self.block_size
             slot_mapping = block_numbers * self.block_size + block_offsets
             slot_mapping[prompt_len:] = _PAD_SLOT_ID
+            slot_mapping = slot_mapping.long()
             
             attn_metadata = PallasAttentionMetadata(
                 is_prompt=True,
@@ -549,7 +550,6 @@ class TPUModelRunner:
                    kv_caches,
                    is_prompt=is_prompt)
 
-
     def profile_run(self) -> None:
         """Profile to measure peak memory during forward pass."""
 
@@ -589,7 +589,6 @@ class TPUModelRunner:
             while True:
                 self._dummy_run(batch_size, seq_len, self.kv_caches, is_prompt=True)
                 xm.wait_device_ops()
-                xm.mark_step()
                 logger.info("batch_size: %d, seq_len: %d", batch_size, seq_len)
                 break
                 if seq_len >= self.model_config.max_model_len:
@@ -609,7 +608,6 @@ class TPUModelRunner:
         while True:
             self._dummy_run(batch_size, seq_len, self.kv_caches, is_prompt=False)
             xm.wait_device_ops()
-            xm.mark_step()
             logger.info("batch_size: %d, seq_len: %d", batch_size, seq_len)
 
             if batch_size >= self.scheduler_config.max_num_seqs:
@@ -947,7 +945,7 @@ class ModelWrapper(TorchCompileWrapperWithCustomDispatcher):
         token_ids: torch.Tensor,
         position_ids: torch.Tensor,
         attn_metadata: PallasAttentionMetadata,
-        kv_caches: List[torch.Tensor],
+        kv_caches: List[Tuple[torch.Tensor, torch.Tensor]],
     ) -> torch.Tensor:
         """Executes the forward pass of the model and samples the next token.
 
@@ -960,8 +958,7 @@ class ModelWrapper(TorchCompileWrapperWithCustomDispatcher):
         """
 
         # Skip this in memory profiling at initialization.
-        is_profiling = kv_caches[0][0].numel() == 0
-        if not is_profiling:
+        if kv_caches[0][0].numel() != 0:
             # index_copy_(slot_mapping) only works when the inserted dimension
             # is 0. However, the KV cache in the Pallas backend has the shape
             # [num_kv_heads, num_blocks, block_size, head_size]. To make it

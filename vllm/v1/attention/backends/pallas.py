@@ -44,8 +44,8 @@ class PallasAttentionMetadata:
 
     is_prompt: bool
     slot_mapping: torch.Tensor
-    block_tables: Optional[torch.Tensor]
-    context_lens: Optional[torch.Tensor]
+    block_tables: Optional[torch.Tensor] = None
+    context_lens: Optional[torch.Tensor] = None
 
 
 class PallasAttentionImpl(AttentionImpl):
