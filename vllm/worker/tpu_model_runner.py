@@ -675,8 +675,9 @@ class ModelWrapper(TorchCompileWrapperWithCustomDispatcher):
                                           backend="openxla",
                                           fullgraph=True,
                                           dynamic=False)
-        super().__init__(compiled_callable,
-                         compilation_level=vllm_config.compilation_config.level)
+        super().__init__(
+            compiled_callable,
+            compilation_level=vllm_config.compilation_config.level)
 
     def __call__(self, *args, is_prompt: bool, **kwargs):
         if len(self.compiled_codes) < 3 or not self.use_custom_dispatcher:
