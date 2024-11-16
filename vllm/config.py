@@ -2074,6 +2074,15 @@ class CompilationConfig(BaseModel):
             - 1: dynamo as is.
             - 2: dynamo once.
             - 3: piecewise compilation.
+        - custom_ops: fine-grained control over which custom ops to enable/disable.
+            Use 'all' to enable all, 'none' to disable all.
+            Also specify a list of custom op names to enable (prefixed with a '+'),
+            or disable (prefixed with a '-').
+            Examples:
+                - 'all,-op1' to enable all except op1
+                - 'none,+op1,+op2' to enable only op1 and op2
+            By default, all custom ops are enabled when running without Inductor
+                and disabled when running with Inductor (compile_level >= Inductor).
     - CudaGraph capture:
         - use_cudagraph: whether to use cudagraph inside compilation.
             - False: cudagraph inside compilation is not used.
@@ -2130,8 +2139,9 @@ class CompilationConfig(BaseModel):
         static shapes. However, we find the general shape compilation is
         sufficient for most cases. It might be beneficial to compile for
         certain small batchsizes, where inductor is good at optimizing.
-    """
+    """ # noqa
     level: int = 0
+    custom_ops: List[str] = Field(default_factory=list)
 
     use_inductor: bool = True
     inductor_specialize_for_cudagraph_no_more_than: Optional[int] = None
@@ -2155,6 +2165,10 @@ class CompilationConfig(BaseModel):
 
     def model_post_init(self, __context: Any) -> None:
         self.level = envs.VLLM_TORCH_COMPILE_LEVEL
+
+        count_none = self.custom_ops.count("none")
+        count_all = self.custom_ops.count("all")
+        assert count_none + count_all <= 1, "Can only specify 'none' or 'all'"
 
         for k, v in self.inductor_passes.items():
             if not isinstance(v, str):

@@ -2,12 +2,11 @@ from typing import Dict, Type
 
 import torch.nn as nn
 
-import vllm.envs as envs
 from vllm.config import CompilationLevel
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import print_warning_once
 from vllm.plugins import get_current_vllm_config
+from vllm.utils import print_warning_once
 
 logger = init_logger(__name__)
 
@@ -87,6 +86,8 @@ class CustomOp(nn.Module):
     @classmethod
     def enabled(cls) -> bool:
         # if no name, then it was not registered
+        compilation_config = get_current_vllm_config().compilation_config
+        custom_op = compilation_config.custom_op
         if not hasattr(cls, "name"):
             print_warning_once(
                 f"Custom op {cls.__name__} was not registered, "
@@ -94,8 +95,8 @@ class CustomOp(nn.Module):
                 f"It will be enabled/disabled based on the global settings.")
             return CustomOp.default_on()
 
-        enabled = f"+{cls.name}" in envs.VLLM_CUSTOM_OPS
-        disabled = f"-{cls.name}" in envs.VLLM_CUSTOM_OPS
+        enabled = f"+{cls.name}" in custom_op
+        disabled = f"-{cls.name}" in custom_op
         assert not (enabled
                     and disabled), f"Cannot enable and disable {cls.name}"
 
@@ -105,13 +106,13 @@ class CustomOp(nn.Module):
     def default_on() -> bool:
         """
         On by default if level < CompilationLevel.PIECEWISE
-        Specifying 'all' or 'none' in VLLM_CUSTOM_OPS takes precedence.
+        Specifying 'all' or 'none' in custom_op takes precedence.
         """
-        vllm_config = get_current_vllm_config()
-        count_none = envs.VLLM_CUSTOM_OPS.count("none")
-        count_all = envs.VLLM_CUSTOM_OPS.count("all")
-        assert count_none + count_all <= 1, "Can only specify 'none' or 'all'"
-        return vllm_config.compilation_config.level < CompilationLevel.PIECEWISE and \
+        compilation_config = get_current_vllm_config().compilation_config
+        custom_op = compilation_config.custom_op
+        count_none = custom_op.count("none")
+        count_all = custom_op.count("all")
+        return compilation_config.level < CompilationLevel.PIECEWISE and \
             not count_none > 0 or count_all > 0
 
     # Dictionary of all custom ops (classes, indexed by registered name).

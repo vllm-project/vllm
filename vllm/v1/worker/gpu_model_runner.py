@@ -1,4 +1,3 @@
-import os
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
@@ -514,9 +513,9 @@ class GPUModelRunner:
             # CUDA graphs do not work properly with the custom CUDA kernels.
             # FIXME(woosuk): Disable inductor to reduce the compilation time
             # and avoid any potential issues with the inductor.
-            os.environ["VLLM_CUSTOM_OPS"] = "none"
             set_compilation_config(
                 CompilationConfig(
+                    custom_ops="none",
                     use_cudagraph=True,
                     non_cudagraph_ops=["vllm.unified_v1_flash_attention"],
                     use_inductor=True,
