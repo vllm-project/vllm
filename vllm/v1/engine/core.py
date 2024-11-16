@@ -44,8 +44,9 @@ class EngineCore:
             # vllm_config.scheduler_config.max_num_batched_tokens = 8192
             pass
         elif usage_context == UsageContext.OPENAI_API_SERVER:
-            vllm_config.scheduler_config.max_num_seqs = 1024
-            vllm_config.scheduler_config.max_num_batched_tokens = 2048
+            # vllm_config.scheduler_config.max_num_seqs = 1024
+            # vllm_config.scheduler_config.max_num_batched_tokens = 2048
+            pass
 
         # TODO (ywang96): Enable APC by default when VLM supports it.
         if not vllm_config.model_config.is_multimodal_model:

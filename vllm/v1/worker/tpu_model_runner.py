@@ -1,4 +1,3 @@
-import os
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
@@ -9,12 +8,9 @@ import torch
 import torch.distributed
 import torch.nn as nn
 import torch_xla.core.xla_model as xm
-import torch_xla.runtime as xr
 
-from vllm.compilation.levels import CompilationLevel
 from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
 from vllm.config import VllmConfig
-from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import MultiModalDataDict
@@ -32,11 +28,9 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 # Here we utilize the behavior that out-of-bound index is ignored.
-# FIXME(woosuk): Find a more reliable way to prevent possible bugs.
+# FIXME: Find a more reliable way to prevent possible bugs.
 _PAD_SLOT_ID = 1_000_000_000
 
-from transformers import AutoTokenizer
-tok = AutoTokenizer.from_pretrained("meta-llama/Llama-3.2-3B-Instruct")
 
 @dataclass
 class PrefillData:
@@ -187,15 +181,20 @@ class TPUModelRunner:
 
         # Update the cached states of the resumed requests.
         for req_data in scheduler_output.scheduled_resumed_reqs:
-            # TODO: handle preemption.
-            assert False
+            req_id = req_data.req_id
+            req_state = self.requests[req_id]
 
+            req_state.block_ids = req_data.block_ids
+            req_state.num_computed_tokens = req_data.num_computed_tokens
+            req_ids_to_add.append(req_id)
+
+        # THIS MOVES ALL THE DECODES TO THE FIRST N IN BATCH.
         # Condense the batched states if there are empty indices.
         removed_req_indices = sorted(removed_req_indices, reverse=True)
         if removed_req_indices:
             self.input_batch.condense(removed_req_indices)
 
-        # Add the new or resumed requests to the persistent batch.
+        # ALL THE PREFILLS ARE THE LAST M IN THE BATCH.
         # These are added at the end after the bacth is condensed.
         self.input_batch.num_prefills = len(req_ids_to_add)
         for req_id in req_ids_to_add:
@@ -226,8 +225,7 @@ class TPUModelRunner:
             # Assert Decodes Are Decodes.
             if idx < num_decodes:
                 assert num_tokens == 1
-
-        num_scheduled_tokens = np.array(num_scheduled_tokens, dtype=np.int32)
+        
         assert max_num_scheduled_tokens > 0
 
         ######################### PREFILLS #########################
@@ -241,7 +239,7 @@ class TPUModelRunner:
             # Pad to power of 2.
             prompt_len = num_scheduled_tokens[prefill_idx]
             padded_prompt_len = _get_padded_prefill_len(prompt_len)
-            assert padded_prompt_len < self.max_model_len
+            assert padded_prompt_len <= self.max_model_len
 
             token_ids = torch.tensor(
                 self.input_batch.token_ids_cpu[prefill_idx, :padded_prompt_len].reshape(1,-1),
@@ -376,11 +374,6 @@ class TPUModelRunner:
                 self.kv_caches,
                 is_prompt=False
             )
-            # print(decode_data.token_ids)
-            # print(decode_data.position_ids)
-            # print(decode_data.attn_metadata)
-            # print(tok.decode(self.requests["0"].output_token_ids))
-            # # breakpoint()
             
             token_ids = selected_token_ids[:num_decodes].cpu()
             sampled_token_ids_list = token_ids.tolist()
@@ -405,7 +398,6 @@ class TPUModelRunner:
                   attn_metadata) in enumerate(prefill_data.zipped()):
 
             # [padded_prompt_len]
-            # breakpoint()
             selected_token_ids = self.model(
                 token_ids,
                 position_ids,
@@ -413,18 +405,14 @@ class TPUModelRunner:
                 self.kv_caches,
                 is_prompt=True
             )
-
-            # print(token_ids)
-            # print(position_ids)
-            # print(attn_metadata)
-            # breakpoint()
-
             # TODO: move this into the model.
             token_id = selected_token_ids[prompt_len - 1].cpu().item()
             sampled_token_ids[num_decodes + idx] = token_id
             req_state = self.requests[req_id]
 
             # TODO: prefix caching.
+            if req_state.num_computed_tokens > 0:
+                breakpoint()
             assert req_state.num_computed_tokens == 0
             seq_len = (req_state.num_computed_tokens + 
                        scheduler_output.num_scheduled_tokens[req_id])
@@ -576,7 +564,6 @@ class TPUModelRunner:
                 self._dummy_run(batch_size, seq_len, self.kv_caches, is_prompt=True)
                 xm.wait_device_ops()
                 logger.info("batch_size: %d, seq_len: %d", batch_size, seq_len)
-                break
                 if seq_len >= self.model_config.max_model_len:
                     break
                 num_tokens = batch_size * seq_len

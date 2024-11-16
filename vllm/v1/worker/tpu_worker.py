@@ -109,6 +109,8 @@ class TPUWorker:
             by adjusting the `gpu_memory_utilization` parameter.
         """
         
+        return 3144, 0
+
         # self.model_runner.profile_run()
 
         # # Synchronize before measuring the memory usage.
@@ -131,7 +133,6 @@ class TPUWorker:
         #     (total_tpu_memory * self.cache_config.gpu_memory_utilization -
         #      peak_memory) // cache_block_size)
         # num_tpu_blocks = (max(num_tpu_blocks, 0) // 8) * 8
-        return 3144, 0
         return num_tpu_blocks, 0
 
 
