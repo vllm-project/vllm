@@ -31,17 +31,21 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+# Here we utilize the behavior that out-of-bound index is ignored.
+# FIXME(woosuk): Find a more reliable way to prevent possible bugs.
 _PAD_SLOT_ID = 1_000_000_000
 
 @dataclass
 class PrefillData:
     request_ids: List
+    prompt_lens: List
     token_ids: List
     position_ids: List
     attn_metadata: List
 
     def zipped(self):
         return zip(self.request_ids,
+                   self.prompt_lens,
                    self.token_ids,
                    self.position_ids, 
                    self.attn_metadata)
@@ -104,11 +108,10 @@ class TPUModelRunner:
             pin_memory=self.pin_memory,
         )
 
-        self.prefill_positions = torch.Tensor(
+        self.prefill_positions = torch.tensor(
             range(self.max_model_len),
-            dtype=torch.int64,
             device="cpu",
-        )
+        ).to(torch.int64).reshape(1,-1)
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         # Remove stopped requests from the cached states.
@@ -184,7 +187,7 @@ class TPUModelRunner:
 
         # Add the new or resumed requests to the persistent batch.
         # These are added at the end after the bacth is condensed.
-        self.num_prefills = len(req_ids_to_add)
+        self.input_batch.num_prefills = len(req_ids_to_add)
         for req_id in req_ids_to_add:
             req_state = self.requests[req_id]
             self.input_batch.add_request(req_state, None)
@@ -221,24 +224,28 @@ class TPUModelRunner:
 
         # PREFILLS
         prefill_request_ids = []
+        prefill_prompt_lens = []
         prefill_token_ids = []
         prefill_position_ids = []
         prefill_attn_metadata = []
 
         for prefill_idx in range(num_decodes, num_prefills + num_decodes):
-            
             # Pad to power of 2.
-            prefill_len = num_scheduled_tokens[prefill_idx]
-            padded_prefill_len = _get_padded_prefill_len(prefill_len)
-            assert padded_prefill_len < self.max_model_len
-            token_ids = self.input_batch.token_ids_cpu[prefill_idx, :padded_prefill_len]
-            positions = self.prefill_positions[:padded_prefill_len]
+            prompt_len = num_scheduled_tokens[prefill_idx]
+            padded_prompt_len = _get_padded_prefill_len(prompt_len)
+            assert padded_prompt_len < self.max_model_len
+
+            token_ids = torch.tensor(
+                self.input_batch.token_ids_cpu[prefill_idx, :padded_prompt_len].reshape(1,-1),
+                device=self.device
+            )
+            positions = self.prefill_positions[:, :padded_prompt_len]
 
             # Block number / offsets for every token.
-            block_numbers = self.input_batch.block_table_cpu_tensor[prefill_idx, positions // self.block_size]
+            block_numbers = self.input_batch.block_table_cpu_tensor[prefill_idx, positions // self.block_size].reshape(1,-1)
             block_offsets = positions % self.block_size
             slot_mapping = block_numbers * self.block_size + block_offsets
-            slot_mapping[prefill_len:] = _PAD_SLOT_ID
+            slot_mapping[prompt_len:] = _PAD_SLOT_ID
             
             attn_metadata = PallasAttentionMetadata(
                 is_prompt=True,
@@ -248,12 +255,14 @@ class TPUModelRunner:
             )
 
             prefill_request_ids.append(self.input_batch.req_ids[prefill_idx])
-            prefill_token_ids.append(token_ids.to(self.device))
+            prefill_prompt_lens.append(prompt_len)
+            prefill_token_ids.append(token_ids)
             prefill_position_ids.append(positions.to(self.device))
             prefill_attn_metadata.append(attn_metadata)
 
         prefill_data = PrefillData(
             request_ids=prefill_request_ids,
+            prompt_lens=prefill_prompt_lens,
             token_ids=prefill_token_ids,
             position_ids=prefill_position_ids,
             attn_metadata=prefill_attn_metadata,
@@ -386,63 +395,70 @@ class TPUModelRunner:
         scheduler_output: "SchedulerOutput",
     ) -> ModelRunnerOutput:
         self._update_states(scheduler_output)
-        prefill_data, decode_data = self._prepare_inputs(scheduler_output)
-
-        for req_id, token_ids, position_ids, attn_metadata in prefill_data.zipped():
-            token_id = self.model(token_ids,
-                                  position_ids,
-                                  attn_metadata)
+        prefill_data, _ = self._prepare_inputs(scheduler_output)
+        for req_id, prompt_len, token_ids, position_ids, attn_metadata in prefill_data.zipped():
+            # [padded_prompt_len]
+            selected_token_ids = self.model(
+                token_ids,
+                position_ids,
+                attn_metadata,
+                self.kv_caches,
+                is_prompt=True)
+            # TODO: move this into the model.
+            token_id = selected_token_ids[prompt_len - 1].cpu()
+            breakpoint()
 
             req_state = self.requests[req_id]
+
+            # TODO: prefix caching.
+            assert req_state.num_computed_tokens == 0
             seq_len = (req_state.num_computed_tokens + 
                        scheduler_output.num_scheduled_tokens[req_id])
 
-            # No chunked prefill so far.
+            # TODO: chunked prefill.
             assert seq_len == req_state.num_tokens
+            assert prompt_len == seq_len
+
             # Append the sampled token to the output token ids.
             req_idx = self.input_batch.req_id_to_index[req_id]
             self.input_batch.token_ids_cpu[req_idx, seq_len] = token_id
             req_state.output_token_ids.append(token_id)
-            
-            
-            
+
+            breakpoint()
+
+        # # NOTE: CPU-GPU synchronization happens here.
+        # sampled_token_ids = sampler_output.sampled_token_ids.cpu()
+        # sampled_token_ids_list = sampled_token_ids.tolist()
+        # # TODO(woosuk): The following loop can be slow since it iterates over
+        # # the requests one by one. Optimize.
+        # num_reqs = self.input_batch.num_reqs
+        # for i, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
+        #     req_state = self.requests[req_id]
+        #     seq_len = (req_state.num_computed_tokens +
+        #                scheduler_output.num_scheduled_tokens[req_id])
+        #     assert seq_len <= req_state.num_tokens
+        #     if seq_len == req_state.num_tokens:
+        #         # Append the sampled token to the output token ids.
+        #         token_id = sampled_token_ids_list[i]
+        #         self.input_batch.token_ids_cpu[i, seq_len] = token_id
+        #         req_state.output_token_ids.append(token_id)
+        #     else:
+        #         # Ignore the sampled token from the partial request.
+        #         # Rewind the generator state as if the token was not sampled.
+        #         generator = self.input_batch.generators.get(i)
+        #         if generator is not None:
+        #             # This relies on cuda-specific torch-internal impl details
+        #             generator.set_offset(generator.get_offset() - 4)
 
 
-    
-
-        # NOTE: CPU-GPU synchronization happens here.
-        sampled_token_ids = sampler_output.sampled_token_ids.cpu()
-        sampled_token_ids_list = sampled_token_ids.tolist()
-        # TODO(woosuk): The following loop can be slow since it iterates over
-        # the requests one by one. Optimize.
-        num_reqs = self.input_batch.num_reqs
-        for i, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
-            req_state = self.requests[req_id]
-            seq_len = (req_state.num_computed_tokens +
-                       scheduler_output.num_scheduled_tokens[req_id])
-            assert seq_len <= req_state.num_tokens
-            if seq_len == req_state.num_tokens:
-                # Append the sampled token to the output token ids.
-                token_id = sampled_token_ids_list[i]
-                self.input_batch.token_ids_cpu[i, seq_len] = token_id
-                req_state.output_token_ids.append(token_id)
-            else:
-                # Ignore the sampled token from the partial request.
-                # Rewind the generator state as if the token was not sampled.
-                generator = self.input_batch.generators.get(i)
-                if generator is not None:
-                    # This relies on cuda-specific torch-internal impl details
-                    generator.set_offset(generator.get_offset() - 4)
-
-
-        model_runner_output = ModelRunnerOutput(
-            req_ids=self.input_batch.req_ids[:num_reqs],
-            req_id_to_index=self.input_batch.req_id_to_index,
-            sampled_token_ids_cpu=sampled_token_ids,
-            logprob_token_ids_cpu=logprob_token_ids,
-            logprobs_cpu=logprobs,
-        )
-        return model_runner_output
+        # model_runner_output = ModelRunnerOutput(
+        #     req_ids=self.input_batch.req_ids[:num_reqs],
+        #     req_id_to_index=self.input_batch.req_id_to_index,
+        #     sampled_token_ids_cpu=sampled_token_ids,
+        #     logprob_token_ids_cpu=logprob_token_ids,
+        #     logprobs_cpu=logprobs,
+        # )
+        # return model_runner_output
 
     def load_model(self) -> None:
 
@@ -573,8 +589,9 @@ class TPUModelRunner:
             while True:
                 self._dummy_run(batch_size, seq_len, self.kv_caches, is_prompt=True)
                 xm.wait_device_ops()
+                xm.mark_step()
                 logger.info("batch_size: %d, seq_len: %d", batch_size, seq_len)
-
+                break
                 if seq_len >= self.model_config.max_model_len:
                     break
                 num_tokens = batch_size * seq_len
@@ -592,6 +609,7 @@ class TPUModelRunner:
         while True:
             self._dummy_run(batch_size, seq_len, self.kv_caches, is_prompt=False)
             xm.wait_device_ops()
+            xm.mark_step()
             logger.info("batch_size: %d, seq_len: %d", batch_size, seq_len)
 
             if batch_size >= self.scheduler_config.max_num_seqs:
@@ -916,6 +934,7 @@ class ModelWrapper(TorchCompileWrapperWithCustomDispatcher):
         # 1: for prompt
         # 2: for decode
         # dispatch to the compiled code directly, skip PyTorch
+        print(f"{is_prompt=}")
         if is_prompt:
             with self.dispatch_to_code(1):
                 return self.forward(*args, **kwargs)
@@ -971,12 +990,9 @@ class ModelWrapper(TorchCompileWrapperWithCustomDispatcher):
         hidden_states = hidden_states.flatten(0, 1)
         logits = self.model.compute_logits(hidden_states, None)
 
-        # Argmax sampling.
+        # Greedy sampling.
         argmax_token_ids = torch.argmax(logits, dim=-1, keepdim=True)
-        num_samples = 1
-        argmax_token_ids = argmax_token_ids.repeat(1, num_samples)
-
-        return argmax_token_ids
+        return argmax_token_ids.squeeze(dim=1)
 
 
 def _get_padded_prefill_len(x: int) -> int:
