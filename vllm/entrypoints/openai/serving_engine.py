@@ -11,14 +11,16 @@ from typing_extensions import Annotated
 
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
+# yapf conflicts with isort for this block
+# yapf: disable
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
+                                         ChatTemplateContentFormatOption,
                                          ConversationMessage,
                                          apply_hf_chat_template,
                                          apply_mistral_chat_template,
-                                         parse_chat_messages_futures)
+                                         parse_chat_messages_futures,
+                                         resolve_chat_template_content_format)
 from vllm.entrypoints.logger import RequestLogger
-# yapf conflicts with isort for this block
-# yapf: disable
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               CompletionRequest,
                                               DetokenizeRequest,
@@ -426,7 +428,8 @@ class OpenAIServing:
         request: ChatLikeRequest,
         tokenizer: AnyTokenizer,
         messages: List[ChatCompletionMessageParam],
-        chat_template: Optional[str] = None,
+        chat_template: Optional[str],
+        chat_template_content_format: ChatTemplateContentFormatOption,
         add_generation_prompt: bool = True,
         continue_final_message: bool = False,
         tool_dicts: Optional[List[Dict[str, Any]]] = None,
@@ -437,10 +440,16 @@ class OpenAIServing:
         add_special_tokens: bool = False,
     ) -> Tuple[List[ConversationMessage], Sequence[RequestPrompt],
                List[TokensPrompt]]:
+        resolved_content_format = resolve_chat_template_content_format(
+            chat_template,
+            chat_template_content_format,
+            tokenizer,
+        )
         conversation, mm_data_future = parse_chat_messages_futures(
             messages,
             self.model_config,
             tokenizer,
+            content_format=resolved_content_format,
         )
 
         _chat_template_kwargs: Dict[str, Any] = dict(

@@ -1,8 +1,8 @@
-from typing import List, Optional, Union
+from typing import Final, List, Optional, Union
 
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.chat_utils import load_chat_template
+from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.logger import RequestLogger
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -33,7 +33,8 @@ class OpenAIServingTokenization(OpenAIServing):
         lora_modules: Optional[List[LoRAModulePath]],
         request_logger: Optional[RequestLogger],
         chat_template: Optional[str],
-    ):
+        chat_template_content_format: ChatTemplateContentFormatOption,
+    ) -> None:
         super().__init__(engine_client=engine_client,
                          model_config=model_config,
                          base_model_paths=base_model_paths,
@@ -41,12 +42,8 @@ class OpenAIServingTokenization(OpenAIServing):
                          prompt_adapters=None,
                          request_logger=request_logger)
 
-        # If this is None we use the tokenizer's default chat template
-        # the list of commonly-used chat template names for HF named templates
-        hf_chat_templates: List[str] = ['default', 'tool_use']
-        self.chat_template = chat_template \
-            if chat_template in hf_chat_templates \
-            else load_chat_template(chat_template)
+        self.chat_template = chat_template
+        self.chat_template_content_format: Final = chat_template_content_format
 
     async def create_tokenize(
         self,
@@ -75,9 +72,12 @@ class OpenAIServingTokenization(OpenAIServing):
                     request,
                     tokenizer,
                     request.messages,
-                    chat_template=self.chat_template,
+                    chat_template=request.chat_template or self.chat_template,
+                    chat_template_content_format=self.
+                    chat_template_content_format,
                     add_generation_prompt=request.add_generation_prompt,
                     continue_final_message=request.continue_final_message,
+                    chat_template_kwargs=request.chat_template_kwargs,
                     add_special_tokens=request.add_special_tokens,
                 )
             else:

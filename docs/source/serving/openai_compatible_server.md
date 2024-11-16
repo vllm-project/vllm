@@ -172,12 +172,20 @@ completion = client.chat.completions.create(
   ]
 )
 ```
-Most chat templates for LLMs expect the `content` to be a `string` but there are some newer models like
-`meta-llama/Llama-Guard-3-1B` that expect the content to be parsed with the new OpenAI spec. In order to choose which
-format the content needs to be parsed in by vLLM, please use the `--chat-template-text-format` argument to specify
-between `string` or `openai`. The default value is `string` and vLLM internally converts both spec formats to match
-this, unless explicitly specified.
 
+Most chat templates for LLMs expect the `content` field to be a string, but there are some newer models like 
+`meta-llama/Llama-Guard-3-1B` that expect the content to be formatted according to the OpenAI schema in the
+request. vLLM provides best-effort support to detect this automatically, which is logged as a string like
+*"Detected the chat template content format to be..."*, and internally converts incoming requests to match
+the detected format, which can be one of:
+
+- `"string"`: A string.
+  - Example: `"Hello world"`
+- `"openai"`: A list of dictionaries, similar to OpenAI schema.
+  - Example: `[{"type": "text", "text": "Hello world!"}]`
+
+If the result is not what you expect, you can set the `--chat-template-content-format` CLI argument
+to override which format to use.
 
 ## Command line arguments for the server
 

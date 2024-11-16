@@ -29,6 +29,7 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.multiprocessing.client import MQLLMEngineClient
 from vllm.engine.multiprocessing.engine import run_mp_engine
 from vllm.engine.protocol import EngineClient
+from vllm.entrypoints.chat_utils import load_chat_template
 from vllm.entrypoints.launcher import serve_http
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.cli_args import (make_arg_parser,
@@ -529,6 +530,9 @@ def init_app_state(
     state.engine_client = engine_client
     state.log_stats = not args.disable_log_stats
 
+    resolved_chat_template = load_chat_template(args.chat_template)
+    logger.info("Using supplied chat template:\n%s", resolved_chat_template)
+
     state.openai_serving_chat = OpenAIServingChat(
         engine_client,
         model_config,
@@ -537,7 +541,8 @@ def init_app_state(
         lora_modules=args.lora_modules,
         prompt_adapters=args.prompt_adapters,
         request_logger=request_logger,
-        chat_template=args.chat_template,
+        chat_template=resolved_chat_template,
+        chat_template_content_format=args.chat_template_content_format,
         return_tokens_as_token_ids=args.return_tokens_as_token_ids,
         enable_auto_tools=args.enable_auto_tool_choice,
         tool_parser=args.tool_call_parser,
@@ -557,7 +562,8 @@ def init_app_state(
         model_config,
         base_model_paths,
         request_logger=request_logger,
-        chat_template=args.chat_template,
+        chat_template=resolved_chat_template,
+        chat_template_content_format=args.chat_template_content_format,
     ) if model_config.task == "embedding" else None
     state.openai_serving_tokenization = OpenAIServingTokenization(
         engine_client,
@@ -565,7 +571,8 @@ def init_app_state(
         base_model_paths,
         lora_modules=args.lora_modules,
         request_logger=request_logger,
-        chat_template=args.chat_template,
+        chat_template=resolved_chat_template,
+        chat_template_content_format=args.chat_template_content_format,
     )
 
 
