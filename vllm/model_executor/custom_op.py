@@ -109,9 +109,9 @@ class CustomOp(nn.Module):
         """
         from vllm.config import CompilationLevel
         compilation_config = get_current_vllm_config().compilation_config
-        custom_op = compilation_config.custom_op
-        count_none = custom_op.count("none")
-        count_all = custom_op.count("all")
+        custom_ops = compilation_config.custom_ops
+        count_none = custom_ops.count("none")
+        count_all = custom_ops.count("all")
         return compilation_config.level < CompilationLevel.PIECEWISE and \
             not count_none > 0 or count_all > 0
 
