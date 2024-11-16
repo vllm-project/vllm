@@ -20,7 +20,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.sequence import IntermediateTensors, PoolerOutput
 
-from .utils import AutoWeightsLoader, maybe_prefix
+from .utils import maybe_prefix
 
 
 class BertEmbedding(nn.Module):
@@ -417,6 +417,6 @@ class BertEmbeddingModel(nn.Module):
     ) -> Optional[PoolerOutput]:
         return self._pooler(hidden_states, pooling_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        loader = AutoWeightsLoader(self)
-        loader.load_weights(weights)
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
+        return self.model.load_weights(weights)
