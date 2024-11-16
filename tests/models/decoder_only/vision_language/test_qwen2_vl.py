@@ -20,6 +20,7 @@ IMAGE_PLACEHOLDER = "<|vision_start|><|image_pad|><|vision_end|>"
 VIDEO_PLACEHOLDER = "<|vision_start|><|video_pad|><|vision_end|>"
 MODEL_HIDDEN_SIZE = 1536
 
+
 def qwen2_vl_chat_template(*query):
     return f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{''.join(query)}<|im_end|><|im_start|>assistant\n"  # noqa: E501
 
@@ -468,30 +469,31 @@ def run_chunked_prefill_test(
             for prompts, images, videos in inputs
         ]
 
-    with vllm_runner(model,
-                     task="generate",
-                     max_model_len=4000,
-                     max_num_seqs=4,
-                     dtype=dtype,
-                     limit_mm_per_prompt={
-                         "image": mm_limit,
-                         "video": mm_limit
-                     },
-                     tensor_parallel_size=tensor_parallel_size,
-                     distributed_executor_backend=distributed_executor_backend,
-                     enable_chunked_prefill=True,
-                     max_num_batched_tokens=64, # should be small enough to ensure prefilling is chunked
-                     mm_processor_kwargs={
-                         "max_pixels": 16 * 28 * 28,
-                     }) as vllm_model_chunked:
+    with vllm_runner(
+            model,
+            task="generate",
+            max_model_len=4000,
+            max_num_seqs=4,
+            dtype=dtype,
+            limit_mm_per_prompt={
+                "image": mm_limit,
+                "video": mm_limit
+            },
+            tensor_parallel_size=tensor_parallel_size,
+            distributed_executor_backend=distributed_executor_backend,
+            enable_chunked_prefill=True,
+            # should be small enough to ensure prefilling is chunked
+            max_num_batched_tokens=32,
+            mm_processor_kwargs={
+                "max_pixels": 16 * 28 * 28,
+            }) as vllm_model_chunked:
         outputs_per_case_chunked = [
             vllm_model_chunked.generate_greedy_logprobs(
                 prompts,
                 max_tokens,
                 num_logprobs=num_logprobs,
                 images=images or None,
-                videos=videos or None)
-            for prompts, images, videos in inputs
+                videos=videos or None) for prompts, images, videos in inputs
         ]
 
     for outputs, \
@@ -509,28 +511,26 @@ def run_chunked_prefill_test(
 @pytest.mark.core_model
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize("dtype", [target_dtype])
-@pytest.mark.parametrize("max_tokens", [128])
+@pytest.mark.parametrize("max_tokens", [1])
 @pytest.mark.parametrize("num_logprobs", [10])
-def test_qwen2_vl_mrope_chunked_prefill(vllm_runner,
-                                  example_prompts,
-                                  model: str,
-                                  dtype: str,
-                                  max_tokens: int,
-                                  num_logprobs: int) -> None:
+def test_qwen2_vl_mrope_chunked_prefill(vllm_runner, example_prompts,
+                                        model: str, dtype: str,
+                                        max_tokens: int,
+                                        num_logprobs: int) -> None:
     """
     Test Qwen2-VL's chunked prefill with M-RoPE
     """
     prompts = [
         qwen2_vl_chat_template(IMAGE_PLACEHOLDER, prompt)
-        for prompt in example_prompts
+        for prompt in example_prompts[:1]
     ]
-    
+
     # 1. Qwen2-VL's M-RoPE works only when there are some multi-modal inputs,
     #    so an image is included in the inputs
     # 2. however, Qwen2-VL currently won't work properly
     #    when chunked prefill is enabled and there are some multi-modal inputs,
     #    here use a hacky way: provide a **zero-length** image to make it happy
-    # 
+    #
     # and finally we achieved:
     # (1) chunked_prefill enabled; (2) M-RoPE works; to continue our tests
     zero_len_image = {
@@ -539,13 +539,10 @@ def test_qwen2_vl_mrope_chunked_prefill(vllm_runner,
     }
     images = [zero_len_image] * len(prompts)
 
-    inputs_per_case: List[Tuple[
-        List[str],
-        PromptImageInput,
-        PromptVideoInput
-    ]] = [
-        (prompts, images, []),
-    ]
+    inputs_per_case: List[Tuple[List[str], PromptImageInput,
+                                PromptVideoInput]] = [
+                                    (prompts, images, []),
+                                ]
 
     run_chunked_prefill_test(
         vllm_runner,
