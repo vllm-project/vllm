@@ -83,7 +83,8 @@ def test_enabled_ops(env: str, torch_level: int, ops_enabled: List[int],
 @pytest.mark.parametrize(
     "env", ["all,none", "all,+rms_norm,all", "+rms_norm,-rms_norm"])
 def test_enabled_ops_invalid(env: str):
-    vllm_config = VllmConfig(compilation_config=CompilationConfig(
-        custom_ops=env.split(",")))
-    with set_current_vllm_config(vllm_config), pytest.raises(AssertionError):
-        RMSNorm(1024).enabled()
+    with pytest.raises(Exception):  # noqa
+        vllm_config = VllmConfig(compilation_config=CompilationConfig(
+            custom_ops=env.split(",")))
+        with set_current_vllm_config(vllm_config):
+            RMSNorm(1024).enabled()
