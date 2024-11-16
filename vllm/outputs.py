@@ -5,6 +5,7 @@ from typing import Sequence as GenericSequence
 from typing import Union
 
 from vllm.lora.request import LoRARequest
+from vllm.multimodal.inputs import MultiModalPlaceholderDict
 from vllm.sampling_params import RequestOutputKind
 from vllm.sequence import (PromptLogprobs, RequestMetrics, SampleLogprobs,
                            SequenceGroup, SequenceGroupBase, SequenceStatus)
@@ -95,6 +96,7 @@ class RequestOutput:
         request_id: str,
         prompt: Optional[str],
         prompt_token_ids: Optional[List[int]],
+        multi_modal_placeholders: MultiModalPlaceholderDict,
         prompt_logprobs: Optional[PromptLogprobs],
         outputs: List[CompletionOutput],
         finished: bool,
@@ -107,6 +109,7 @@ class RequestOutput:
         self.request_id = request_id
         self.prompt = prompt
         self.prompt_token_ids = prompt_token_ids
+        self.mutli_modal_placeholders = multi_modal_placeholders
         self.prompt_logprobs = prompt_logprobs
         self.outputs = outputs
         self.finished = finished
@@ -141,6 +144,7 @@ class RequestOutput:
             request_id=request_id,
             prompt=prompt,
             prompt_token_ids=prompt_token_ids,
+            multi_modal_placeholders=MultiModalPlaceholderDict(),
             prompt_logprobs=None,  # TODO
             outputs=[completion_output],
             finished=finished,
@@ -154,8 +158,7 @@ class RequestOutput:
         finished = seq_group.is_finished()
 
         if seq_group.request_id in seq_id_to_seq_group:
-            group: SequenceGroupBase = seq_id_to_seq_group[
-                seq_group.request_id]
+            group: SequenceGroupBase = seq_id_to_seq_group[seq_group.request_id]
             if finished:
                 group.finish_seq(seq_group)
             assembled_seq_group = group.maybe_assemble_group(seq_group)
@@ -198,8 +201,8 @@ class RequestOutput:
         # num_cached_tokens should be the same for all the sequences
         num_cached_tokens = None
         for i, seq in enumerate(top_n_seqs):
-            output_text = seq.get_output_text_to_return(
-                text_buffer_length, delta)
+            output_text = seq.get_output_text_to_return(text_buffer_length,
+                                                        delta)
 
             output_token_ids = seq.get_output_token_ids_to_return(delta)
             num_output_tokens = 1 if isinstance(output_token_ids,
@@ -276,7 +279,8 @@ class RequestOutput:
         seq_group.set_finished_time(finished_time)
 
         init_args = (seq_group.request_id, prompt, prompt_token_ids,
-                     prompt_logprobs, outputs, finished, seq_group.metrics,
+                     seq_group.multi_modal_placeholders, prompt_logprobs,
+                     outputs, finished, seq_group.metrics,
                      seq_group.lora_request, encoder_prompt,
                      encoder_prompt_token_ids, num_cached_tokens)
 
@@ -293,6 +297,7 @@ class RequestOutput:
         return (f"RequestOutput(request_id={self.request_id}, "
                 f"prompt={self.prompt!r}, "
                 f"prompt_token_ids={self.prompt_token_ids}, "
+                f"multi_modal_placeholders={self.mutli_modal_placeholders}, "
                 f"encoder_prompt={self.encoder_prompt!r}, "
                 f"encoder_prompt_token_ids={self.encoder_prompt_token_ids}, "
                 f"prompt_logprobs={self.prompt_logprobs}, "
