@@ -10,7 +10,8 @@ from fastapi import Request
 
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.chat_utils import ConversationMessage, load_chat_template
+from vllm.entrypoints.chat_utils import (ChatTemplateContentFormatOption,
+                                         ConversationMessage)
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionLogProb, ChatCompletionLogProbs,
@@ -30,6 +31,7 @@ from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.sequence import Logprob
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
+from vllm.transformers_utils.tokenizers import maybe_serialize_tool_calls
 from vllm.utils import iterate_with_cancellation
 
 logger = init_logger(__name__)
@@ -37,20 +39,23 @@ logger = init_logger(__name__)
 
 class OpenAIServingChat(OpenAIServing):
 
-    def __init__(self,
-                 engine_client: EngineClient,
-                 model_config: ModelConfig,
-                 base_model_paths: List[BaseModelPath],
-                 response_role: str,
-                 *,
-                 lora_modules: Optional[List[LoRAModulePath]],
-                 prompt_adapters: Optional[List[PromptAdapterPath]],
-                 request_logger: Optional[RequestLogger],
-                 chat_template: Optional[str],
-                 return_tokens_as_token_ids: bool = False,
-                 enable_auto_tools: bool = False,
-                 tool_parser: Optional[str] = None,
-                 enable_prompt_tokens_details: bool = False):
+    def __init__(
+        self,
+        engine_client: EngineClient,
+        model_config: ModelConfig,
+        base_model_paths: List[BaseModelPath],
+        response_role: str,
+        *,
+        lora_modules: Optional[List[LoRAModulePath]],
+        prompt_adapters: Optional[List[PromptAdapterPath]],
+        request_logger: Optional[RequestLogger],
+        chat_template: Optional[str],
+        chat_template_content_format: ChatTemplateContentFormatOption,
+        return_tokens_as_token_ids: bool = False,
+        enable_auto_tools: bool = False,
+        tool_parser: Optional[str] = None,
+        enable_prompt_tokens_details: bool = False,
+    ) -> None:
         super().__init__(engine_client=engine_client,
                          model_config=model_config,
                          base_model_paths=base_model_paths,
@@ -60,8 +65,8 @@ class OpenAIServingChat(OpenAIServing):
                          return_tokens_as_token_ids=return_tokens_as_token_ids)
 
         self.response_role = response_role
-        self.use_tool_use_model_template = False
-        self.chat_template = load_chat_template(chat_template)
+        self.chat_template = chat_template
+        self.chat_template_content_format: Final = chat_template_content_format
 
         # set up tool use
         self.enable_auto_tools: bool = enable_auto_tools
@@ -119,6 +124,7 @@ class OpenAIServingChat(OpenAIServing):
             ) = self._maybe_get_adapters(request)
 
             tokenizer = await self.engine_client.get_tokenizer(lora_request)
+
             tool_parser = self.tool_parser
 
             # validation for OpenAI tools
@@ -127,41 +133,11 @@ class OpenAIServingChat(OpenAIServing):
                 return self.create_error_response(
                     "tool_choice = \"required\" is not supported!")
 
-            # NOTE: There is currently a bug in pydantic where attributes
-            # declared as iterables are replaced in in the instances by
-            # pydantic-core ValidatorIterator instance. In particular, this
-            # affects tool_calls defined in ChatCompletionAssistantMessageParam
-            # model:
-            # see:
-            #   - https://github.com/pydantic/pydantic/issues/9467
-            # As a result, tool_calls from assistant messages are never
-            # deserialized in the request object if the tool_calls iterator is
-            # not consumed. This affect messages passed to the MistralTokenizer
-            # since no chat template is applied and therefore the tools_calls
-            # iterator is not directly consumed.
-            # Issue is tracked on Pydantic side, with resolution planned for
-            # v2.11 release. In the meantime, the official workaround is to
-            # consume the iterator so the tool_calls are correctly deserialized
-            # in the OpenAI ChatCompletionAssistantMessageParam object
-            # https://github.com/pydantic/pydantic/issues/9467#issuecomment-2442097291 # noqa: E501
-            # Official Pydantic Issues:
-            #   - https://github.com/pydantic/pydantic/issues/9541
-            # TODO: remove when pydantic v2.11 is released
+            # because of issues with pydantic we need to potentially
+            # re-serialize the tool_calls field of the request
+            # for more info: see comment in `maybe_serialize_tool_calls`
             if isinstance(tokenizer, MistralTokenizer):
-                for i, message in enumerate(request.messages):
-                    if message.get("role") == 'assistant':
-                        tool_calls_validator = message.get(
-                            "tool_calls", ().__iter__())
-                        validated_tool_calls = []
-                        while True:
-                            try:
-                                tool_call = next(
-                                    tool_calls_validator)  # type: ignore
-                                validated_tool_calls.append(tool_call)
-                            except StopIteration:
-                                break
-                        request.messages[i][
-                            "tool_calls"] = validated_tool_calls
+                maybe_serialize_tool_calls(request)
 
             if (request.tool_choice == "auto" and
                     not (self.enable_auto_tools and tool_parser is not None)
@@ -186,6 +162,7 @@ class OpenAIServingChat(OpenAIServing):
                 tokenizer,
                 request.messages,
                 chat_template=request.chat_template or self.chat_template,
+                chat_template_content_format=self.chat_template_content_format,
                 add_generation_prompt=request.add_generation_prompt,
                 continue_final_message=request.continue_final_message,
                 tool_dicts=tool_dicts,
