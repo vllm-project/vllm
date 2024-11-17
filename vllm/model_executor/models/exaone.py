@@ -479,6 +479,9 @@ class ExaoneForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self.make_empty_intermediate_tensors = (
             self.transformer.make_empty_intermediate_tensors)
 
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.get_input_embeddings(input_ids)
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -486,9 +489,11 @@ class ExaoneForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         model_output = self.transformer(input_ids, positions, kv_caches,
-                                        attn_metadata, intermediate_tensors)
+                                        attn_metadata, intermediate_tensors,
+                                        inputs_embeds)
         return model_output
 
     def compute_logits(
