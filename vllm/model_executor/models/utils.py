@@ -223,7 +223,6 @@ class AutoWeightsLoader:
         weights: Iterable[Tuple[str, torch.Tensor]],
         *,
         mapper: Optional[WeightsMapper] = None,
-        strict: bool = True,
     ) -> Set[str]:
         if mapper is not None:
             weights = mapper.apply(weights)
