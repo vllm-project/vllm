@@ -224,12 +224,17 @@ class AutoWeightsLoader:
         weights: Iterable[Tuple[str, torch.Tensor]],
         *,
         mapper: Optional[WeightsMapper] = None,
+        strict: bool = True,
     ) -> Set[str]:
         if mapper is not None:
             weights = mapper.apply(weights)
 
         autoloaded_weights = set(self._load_module("", self.module, weights))
         if (weights_not_loaded := self.weights_to_load - autoloaded_weights):
+            if strict:
+                raise ValueError(
+                    "Following weights were not initialized from checkpoint: "
+                    f"{weights_not_loaded}")
             logger.warning(
                 "Following weights were not initialized from checkpoint: %s",
                 weights_not_loaded)
