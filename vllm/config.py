@@ -2161,6 +2161,10 @@ class CompilationConfig(BaseModel):
     compile_sizes: List[int] = PrivateAttr
     capture_sizes: List[int] = PrivateAttr
 
+    # keep track of enabled and disabled custom ops
+    enabled_custom_ops: Set[str] = PrivateAttr
+    disabled_custom_ops: Set[str] = PrivateAttr
+
     def model_post_init(self, __context: Any) -> None:
         self.level = envs.VLLM_TORCH_COMPILE_LEVEL
 
@@ -2181,6 +2185,9 @@ class CompilationConfig(BaseModel):
             func_name = names[-1]
             func = __import__(module).__dict__[func_name]
             self.inductor_compile_config[k] = func
+
+        self.enabled_custom_ops = set()
+        self.disabled_custom_ops = set()
 
     def init_during_runtime(self):
         """To complete the initialization of config,
