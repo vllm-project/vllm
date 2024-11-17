@@ -50,7 +50,8 @@ class BertEmbedding(nn.Module):
     def forward(
         self,
         input_ids: torch.Tensor,
-        position_ids: Optional[torch.Tensor] = None,
+        seq_lens: torch.Tensor,
+        position_ids: torch.Tensor,
         token_type_ids: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         input_shape = input_ids.size()
@@ -355,9 +356,12 @@ class BertModel(nn.Module):
         if inputs_embeds is not None:
             hidden_states = inputs_embeds
         else:
-            hidden_states = self.embeddings(input_ids=input_ids,
-                                            position_ids=position_ids,
-                                            token_type_ids=token_type_ids)
+            assert hasattr(attn_metadata, "seq_lens_tensor")
+            hidden_states = self.embeddings(
+                input_ids=input_ids,
+                seq_lens=attn_metadata.seq_lens_tensor,
+                position_ids=position_ids,
+                token_type_ids=token_type_ids)
         return self.encoder(hidden_states, kv_caches, attn_metadata)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
@@ -370,7 +374,7 @@ class BertModel(nn.Module):
 
         params_dict = dict(self.named_parameters())
         for name, loaded_weight in weights:
-            if self.pooler is None:
+            if self.pooler is None and "pooler" in name:
                 continue
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
@@ -482,8 +486,7 @@ class BertForSequenceClassification(nn.Module):
         def weight_filter():
             for name, weight in weights:
                 if name.startswith("bert."):
-                    yield (name[5:], weight)
-                    #bert_weights.append((name[5:], weight))
+                    yield (name[len("bert."):], weight)
                 else:
                     self_weights.append((name, weight))
 

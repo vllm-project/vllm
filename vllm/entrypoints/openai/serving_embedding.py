@@ -291,6 +291,6 @@ class OpenAIServingEmbedding(OpenAIServing):
 
         engine_prompt = TokensPrompt(
             prompt_token_ids=prompt_inputs["input_ids"],
-            token_type_ids=prompt_inputs["token_type_ids"])
+            token_type_ids=prompt_inputs.get("token_type_ids"))
 
         return conversation, [request_prompt], [engine_prompt]
