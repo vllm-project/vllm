@@ -2209,7 +2209,7 @@ class CompilationConfig(BaseModel):
         # merge with the config use_inductor
         assert self.level == CompilationLevel.PIECEWISE
         from vllm.compilation.backends import VllmBackend
-        return VllmBackend(self.compilation_config)
+        return VllmBackend(self)
 
     def init_during_runtime(self):
         """To complete the initialization of config,
