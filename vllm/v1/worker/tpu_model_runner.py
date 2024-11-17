@@ -257,10 +257,6 @@ class TPUModelRunner:
                     context_lens=None,
                 ))
 
-            print(f"PREFILL {token_ids.shape=}")
-            print(f"PREFILL {positions.shape=}")
-            print(f"PREFILL {slot_mapping.shape=}")
-
         return PrefillInputData(
             request_ids=prefill_request_ids,
             prompt_lens=prefill_prompt_lens,
@@ -318,12 +314,6 @@ class TPUModelRunner:
 
         # CONTEXT_LENS [batch_size]
         context_lens = (positions.reshape(-1) + 1)
-
-        print(f"{token_ids.shape=}")
-        print(f"{positions.shape=}")
-        print(f"{slot_mapping.shape=}")
-        print(f"{block_table.shape=}")
-        print(f"{context_lens.shape=}")
 
         # CPU<>TPU sync happens here.
         return DecodeInputData(num_decodes=num_decodes,
