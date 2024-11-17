@@ -117,6 +117,7 @@ class TPUModelRunner:
             device="cpu",
         ).to(torch.int32).reshape(1,-1)
 
+
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         # Remove stopped requests from the cached states.
         # Keep the states of the pre-empted requests.
@@ -215,58 +216,72 @@ class TPUModelRunner:
         # Get the number of scheduled tokens for each request.
         # TODO: The Python loop can be slow. Optimize.
         num_scheduled_tokens = []
-        max_num_scheduled_tokens = 0
         for idx, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
             num_tokens = scheduler_output.num_scheduled_tokens[req_id]
             num_scheduled_tokens.append(num_tokens)
-            max_num_scheduled_tokens = max(max_num_scheduled_tokens,
-                                           num_tokens)
             
             # Assert Decodes Are Decodes.
             if idx < num_decodes:
                 assert num_tokens == 1
-        
-        assert max_num_scheduled_tokens > 0
 
         ######################### PREFILLS #########################
+        # Prefills run separately, each with shape [1, padded_prompt_len],
+        # due to lack of variable length flashattention.
+        #   
+        # Due to static shapes, prefills are padded to the nearest power
+        # of two, such that we can avoid recompilation.
+
         prefill_request_ids = []
         prefill_prompt_lens = []
         prefill_token_ids = []
         prefill_position_ids = []
         prefill_attn_metadata = []
 
-        for prefill_idx in range(num_decodes, num_prefills + num_decodes):
-            # Pad to power of 2.
-            prompt_len = num_scheduled_tokens[prefill_idx]
+        # DECODES are the first num_decodes REQUESTS.
+        # PREFILLS are the next num_reqs - num_decodes REQUESTS.
+        for idx in range(num_decodes, num_reqs):
+            prefill_request_ids.append(self.input_batch.req_ids[idx])
+
+            # STATIC SHAPE: prefills are padded to the next power of 2.
+            prompt_len = num_scheduled_tokens[idx]
             padded_prompt_len = _get_padded_prefill_len(prompt_len)
+            prefill_prompt_lens.append(prompt_len)
             assert padded_prompt_len <= self.max_model_len
 
-            token_ids = torch.tensor(
-                self.input_batch.token_ids_cpu[prefill_idx, :padded_prompt_len].reshape(1,-1),
-                device=self.device
+            # TOKEN_IDS.
+            prefill_token_ids.append(
+                torch.from_numpy(
+                    self.input_batch.token_ids_cpu[idx:idx+1, :padded_prompt_len]
+                ).to(self.device)
             )
-            positions = self.prefill_positions[:, :padded_prompt_len]
 
-            # Block number / offsets for every token.
-            block_numbers = self.input_batch.block_table_cpu_tensor[prefill_idx, positions // self.block_size].reshape(1,-1)
+            # POSITIONS.
+            positions = self.prefill_positions[:, :padded_prompt_len]
+            prefill_position_ids.append(
+                positions.to(self.device)
+            )
+
+            # SLOT_MAPPING.
+            # The "slot" is the "physical index" of a token in the KV cache.
+            # We look up the block_idx in the block table (logical <> physical map)
+            # to compute this.
+            block_numbers = self.input_batch.block_table_cpu_tensor[idx, positions // self.block_size].reshape(1,-1)
             block_offsets = positions % self.block_size
             slot_mapping = block_numbers * self.block_size + block_offsets
+            # Set an out of range value for the padding tokens so that they
+            # are ignored when inserting into the KV cache.
             slot_mapping[:, prompt_len:] = _PAD_SLOT_ID
             slot_mapping = slot_mapping.long()
             
-            attn_metadata = PallasAttentionMetadata(
-                is_prompt=True,
-                slot_mapping=slot_mapping.to(self.device),
-                block_tables=None,
-                context_lens=None,
+            # ATTN_METADATA.
+            prefill_attn_metadata.append(
+                PallasAttentionMetadata(
+                    is_prompt=True,
+                    slot_mapping=slot_mapping.to(self.device),
+                    block_tables=None,
+                    context_lens=None,
+                )
             )
-
-            prefill_request_ids.append(self.input_batch.req_ids[prefill_idx])
-            prefill_prompt_lens.append(prompt_len)
-            prefill_token_ids.append(token_ids)
-            prefill_position_ids.append(positions.to(self.device))
-            prefill_attn_metadata.append(attn_metadata)
-
 
         prefill_data = PrefillData(
             request_ids=prefill_request_ids,
@@ -280,53 +295,58 @@ class TPUModelRunner:
             return prefill_data, None
         
         ######################### DECODES #########################
+        # Decodes run as one single padded batch with shape [batch, 1]
+        #
+        # We need to set _PAD_SLOT_ID for the padding tokens in the 
+        # slot_mapping, such that the attention KV cache insertion
+        # logic knows to ignore those indicies. Otherwise, the 
+        # padding data can be dummy since we have a causal mask.
 
-        # PAD FOR STATIC SHAPE
-        batch_size = _get_padded_batch_size(num_decodes)
+        # PAD FOR STATIC SHAPES.
+        padded_batch_size = _get_padded_batch_size(num_decodes)
+        
+        # POSITIONS. [batch, 1]
+        # We slice at the end, since we use the positions for gathering.
+        positions = torch.from_numpy(
+            self.input_batch.num_computed_tokens_cpu.reshape(-1,1)
+        )
+        index = positions.to(torch.int64)
+        positions = positions[:padded_batch_size]
 
-        # INDEX FOR EACH SEQUENCE (current location).
-        index = torch.tensor(self.input_batch.num_computed_tokens_cpu[:num_decodes],
-                             dtype=torch.int64).reshape(-1,1)
-
-        # TOKEN_IDS
-        token_ids = torch.zeros((batch_size, 1), dtype=torch.int32)
-        token_ids[:num_decodes] = torch.gather(
-            input=torch.tensor(self.input_batch.token_ids_cpu),
+        # TOKEN_IDS. [batch, 1]
+        token_ids = torch.gather(
+            input=torch.from_numpy(self.input_batch.token_ids_cpu),
             dim=1,
             index=index,
-        )
-        
-        # POSITION_IDS
-        position_ids = torch.zeros((batch_size, 1),
-                                   dtype=torch.int32)
-        position_ids[:num_decodes] = index
+        )[:padded_batch_size]
 
-        # SLOT_MAPPING
-        slot_mapping = torch.full(
-            (batch_size, 1),
-            _PAD_SLOT_ID,
-            dtype=torch.int64,
-        )
+        # SLOT_MAPPING [batch, 1]
+        # The "slot" is the "physical index" of a token in the KV cache.
+        # We look up the block_idx in the block table (logical <> physical map)
+        # to compute this.
         block_number = torch.gather(
-            input=self.input_batch.block_table_cpu_tensor[:num_decodes],
+            input=self.input_batch.block_table_cpu_tensor,
             dim=1,
             index=(index // self.block_size)
         )
         block_offsets = index % self.block_size
-        slot_mapping[:num_decodes] = (block_number * self.block_size + block_offsets)
+        slot_mapping = block_number * self.block_size + block_offsets
+        # Set an out of range value for the padding tokens so that they
+        # are ignored when inserting into the KV cache.
+        slot_mapping[-num_decodes:] = _PAD_SLOT_ID
+        slot_mapping = slot_mapping[:padded_batch_size]
 
-        # BLOCK_TABLE
-        # cannot do a _copy - silently fails (cry)
-        block_table = self.input_batch.block_table_cpu_tensor[:batch_size]
+        # BLOCK_TABLE [batch, max_num_blocks_per_req]
+        block_table = self.input_batch.block_table_cpu_tensor[:padded_batch_size]
         
-        # CONTEXT_LENS
-        context_lens = torch.zeros(batch_size, dtype=torch.int32)
-        context_lens[:num_decodes] = (index.reshape(-1) + 1)
+        # CONTEXT_LENS [batch_size]
+        context_lens = (positions.reshape(-1) + 1)      
         
+        # CPU<>TPU sync happens here.
         decode_data = DecodeData(
             num_decodes=num_decodes,
             token_ids=token_ids.to(self.device),
-            position_ids=position_ids.to(self.device),
+            position_ids=positions.to(self.device),
             attn_metadata=PallasAttentionMetadata(
                 is_prompt=False,
                 slot_mapping=slot_mapping.to(self.device),
