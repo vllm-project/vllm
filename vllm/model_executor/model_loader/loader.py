@@ -336,8 +336,9 @@ class DefaultModelLoader(BaseModelLoader):
                 self._get_all_weights(model_config, model))
             # We only enable strict check for non-quantiized models
             # that have loaded weights tracking currently.
-            if model_config.quantization is None and loaded_weights is not None:
-                weights_not_loaded = weights_to_load - loaded_weights
+            weights_not_loaded = weights_to_load - loaded_weights
+            if model_config.quantization is None and weights_not_loaded:
+                
                 raise ValueError(
                     "Following weights were not initialized from checkpoint: "
                     f"{weights_not_loaded}")
