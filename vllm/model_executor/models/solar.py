@@ -502,6 +502,7 @@ class SolarForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                                         default_weight_loader)
                 loaded_weight = loaded_weight[0]
                 weight_loader(param, loaded_weight)
+                loaded_params.add(scale_name)
                 continue
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
