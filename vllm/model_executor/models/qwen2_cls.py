@@ -64,7 +64,7 @@ class Qwen2ForSequenceClassification(nn.Module, SupportsLoRA, SupportsPP):
                                        config.num_labels,
                                        quant_config=quant_config,
                                        input_is_parallel=False,
-                                       bias=True,
+                                       bias=False,
                                        prefix=maybe_prefix(prefix, "score"))
         self._pooler = Pooler.from_config_with_defaults(
             pooler_config,
