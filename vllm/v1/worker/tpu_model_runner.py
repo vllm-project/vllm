@@ -1,7 +1,6 @@
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
-from unittest.mock import patch
 
 import numpy as np
 import torch
@@ -15,8 +14,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import MultiModalDataDict
 from vllm.sampling_params import SamplingParams, SamplingType
-from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, cdiv,
-                        is_pin_memory_available)
+from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, cdiv, is_pin_memory_available
 from vllm.v1.attention.backends.pallas import (PallasAttentionBackend,
                                                PallasAttentionMetadata)
 from vllm.v1.outputs import ModelRunnerOutput
@@ -33,7 +31,8 @@ _PAD_SLOT_ID = 1_000_000_000
 
 
 @dataclass
-class PrefillData:
+class PrefillInputData:
+
     request_ids: List
     prompt_lens: List
     token_ids: List
@@ -46,11 +45,12 @@ class PrefillData:
 
 
 @dataclass
-class DecodeData:
+class DecodeInputData:
+
     num_decodes: int
-    token_ids: torch.Tensor
-    position_ids: torch.Tensor
-    attn_metadata: PallasAttentionMetadata
+    token_ids: Optional[torch.Tensor] = None
+    position_ids: Optional[torch.Tensor] = None
+    attn_metadata: PallasAttentionMetadata = None
 
 
 class TPUModelRunner:
@@ -200,33 +200,13 @@ class TPUModelRunner:
             req_state = self.requests[req_id]
             self.input_batch.add_request(req_state, None)
 
-    def _prepare_inputs(self, scheduler_output: "SchedulerOutput"):
-        total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
-        assert total_num_scheduled_tokens > 0
-
-        num_reqs = self.input_batch.num_reqs
-        num_decodes = self.input_batch.num_decodes
-        num_prefills = self.input_batch.num_prefills
-
-        assert num_decodes + num_prefills > 0
-
-        # Get the number of scheduled tokens for each request.
-        # TODO: The Python loop can be slow. Optimize.
-        num_scheduled_tokens = []
-        for idx, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
-            num_tokens = scheduler_output.num_scheduled_tokens[req_id]
-            num_scheduled_tokens.append(num_tokens)
-
-            # Assert Decodes Are Decodes.
-            if idx < num_decodes:
-                assert num_tokens == 1
-
-        ######################### PREFILLS #########################
-        # Prefills run separately, each with shape [1, padded_prompt_len],
-        # due to lack of variable length flashattention.
-        #
-        # Due to static shapes, prefills are padded to the nearest power
-        # of two, such that we can avoid recompilation.
+    def _prepare_prefill_inputs(
+        self,
+        num_scheduled_tokens: List[int],
+    ) -> PrefillInputData:
+        # Prefills run separately, each with shape [1, prompt_len],
+        # due to lack of variable length flashattention, so we
+        # create a list that will be used in execute_model()
 
         prefill_request_ids = []
         prefill_prompt_lens = []
@@ -236,6 +216,8 @@ class TPUModelRunner:
 
         # DECODES are the first num_decodes REQUESTS.
         # PREFILLS are the next num_reqs - num_decodes REQUESTS.
+        num_reqs = self.input_batch.num_reqs
+        num_decodes = self.input_batch.num_decodes
         for idx in range(num_decodes, num_reqs):
             prefill_request_ids.append(self.input_batch.req_ids[idx])
 
@@ -246,11 +228,9 @@ class TPUModelRunner:
             assert padded_prompt_len <= self.max_model_len
 
             # TOKEN_IDS.
-            prefill_token_ids.append(
-                torch.from_numpy(
-                    self.input_batch.token_ids_cpu[idx:idx +
-                                                   1, :padded_prompt_len]).to(
-                                                       self.device))
+            token_ids = torch.from_numpy(self.input_batch.token_ids_cpu[
+                idx, :padded_prompt_len].reshape(-1, 1))
+            prefill_token_ids.append(token_ids.to(self.device))
 
             # POSITIONS.
             positions = self.prefill_positions[:, :padded_prompt_len]
@@ -258,7 +238,7 @@ class TPUModelRunner:
 
             # SLOT_MAPPING.
             # The "slot" is the "physical index" of a token in the KV cache.
-            # We look up the block_idx in the block table (logical <> physical map)
+            # Look up the block_idx in the block table (logical<>physical map)
             # to compute this.
             block_numbers = self.input_batch.block_table_cpu_tensor[
                 idx, positions // self.block_size].reshape(1, -1)
@@ -278,7 +258,7 @@ class TPUModelRunner:
                     context_lens=None,
                 ))
 
-        prefill_data = PrefillData(
+        return PrefillInputData(
             request_ids=prefill_request_ids,
             prompt_lens=prefill_prompt_lens,
             token_ids=prefill_token_ids,
@@ -286,16 +266,16 @@ class TPUModelRunner:
             attn_metadata=prefill_attn_metadata,
         )
 
-        if num_decodes == 0:
-            return prefill_data, None
-
-        ######################### DECODES #########################
+    def _prepare_decode_inputs(self, num_decodes: int) -> DecodeInputData:
         # Decodes run as one single padded batch with shape [batch, 1]
         #
         # We need to set _PAD_SLOT_ID for the padding tokens in the
         # slot_mapping, such that the attention KV cache insertion
         # logic knows to ignore those indicies. Otherwise, the
         # padding data can be dummy since we have a causal mask.
+
+        if num_decodes == 0:
+            return DecodeInputData(num_decodes=0)
 
         # PAD FOR STATIC SHAPES.
         padded_batch_size = _get_padded_batch_size(num_decodes)
@@ -316,7 +296,7 @@ class TPUModelRunner:
 
         # SLOT_MAPPING [batch, 1]
         # The "slot" is the "physical index" of a token in the KV cache.
-        # We look up the block_idx in the block table (logical <> physical map)
+        # Look up the block_idx in the block table (logical<>physical map)
         # to compute this.
         block_number = torch.gather(
             input=self.input_batch.block_table_cpu_tensor,
@@ -337,17 +317,41 @@ class TPUModelRunner:
         context_lens = (positions.reshape(-1) + 1)
 
         # CPU<>TPU sync happens here.
-        decode_data = DecodeData(num_decodes=num_decodes,
-                                 token_ids=token_ids.to(self.device),
-                                 position_ids=positions.to(self.device),
-                                 attn_metadata=PallasAttentionMetadata(
-                                     is_prompt=False,
-                                     slot_mapping=slot_mapping.to(self.device),
-                                     block_tables=block_table.to(self.device),
-                                     context_lens=context_lens.to(self.device),
-                                 ))
+        return DecodeInputData(num_decodes=num_decodes,
+                               token_ids=token_ids.to(self.device),
+                               position_ids=positions.to(self.device),
+                               attn_metadata=PallasAttentionMetadata(
+                                   is_prompt=False,
+                                   slot_mapping=slot_mapping.to(self.device),
+                                   block_tables=block_table.to(self.device),
+                                   context_lens=context_lens.to(self.device),
+                               ))
 
-        return prefill_data, decode_data
+    def _prepare_inputs(
+        self, scheduler_output: "SchedulerOutput"
+    ) -> Tuple[PrefillInputData, Optional[DecodeInputData]]:
+
+        total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
+        assert total_num_scheduled_tokens > 0
+
+        num_reqs = self.input_batch.num_reqs
+        num_decodes = self.input_batch.num_decodes
+
+        # Get the number of scheduled tokens for each request.
+        # TODO: The Python loop can be slow. Optimize.
+        num_scheduled_tokens = []
+        for idx, req_id in enumerate(self.input_batch.req_ids[:num_reqs]):
+            num_tokens = scheduler_output.num_scheduled_tokens[req_id]
+            num_scheduled_tokens.append(num_tokens)
+
+            # Assert Decodes Are Decodes.
+            if idx < num_decodes:
+                assert num_tokens == 1
+
+        return (
+            self._prepare_prefill_inputs(num_scheduled_tokens),
+            self._prepare_decode_inputs(num_decodes),
+        )
 
     def _prepare_sampling(
         self,
@@ -373,11 +377,11 @@ class TPUModelRunner:
         num_reqs = self.input_batch.num_reqs
         sampled_token_ids = torch.empty(num_reqs, dtype=torch.int32)
 
-        ########## DECODES ##########
-        num_decodes = 0
-        if decode_data:
-            num_decodes = decode_data.num_decodes
+        ######################### DECODES #########################
+        # Decodes run as one single padded batch with shape [batch, 1]
+        if decode_data.num_decodes > 0:
 
+            # FORWARD.
             selected_token_ids = self.model(decode_data.token_ids,
                                             decode_data.position_ids,
                                             decode_data.attn_metadata,
@@ -385,16 +389,17 @@ class TPUModelRunner:
                                             is_prompt=False)
 
             # NOTE: TPU<>CPU sync happens here.
-            # It is important to call .cpu() first to avoid compilation on hotpath.
-            token_ids = selected_token_ids.cpu()[:num_decodes]
+            # We need to call .cpu() first to avoid recompilation.
+            token_ids = selected_token_ids.cpu()[:decode_data.num_decodes]
             sampled_token_ids_list = token_ids.tolist()
-            sampled_token_ids[:num_decodes] = token_ids
+            sampled_token_ids[:decode_data.num_decodes] = token_ids
 
+            # UPDATE REQUEST STATE.
             for i, req_id in enumerate(
                     self.input_batch.req_ids[:decode_data.num_decodes]):
                 req_state = self.requests[req_id]
 
-                # NO CHUNKED PREFILL
+                # TODO: ASSERT NO CHUNKED PREFILL.
                 assert scheduler_output.num_scheduled_tokens[req_id] == 1
                 seq_len = (req_state.num_computed_tokens +
                            scheduler_output.num_scheduled_tokens[req_id])
@@ -404,34 +409,33 @@ class TPUModelRunner:
                 self.input_batch.token_ids_cpu[i, seq_len] = token_id
                 req_state.output_token_ids.append(token_id)
 
-        ########## PREFILLS ##########
+        ######################### PREFILLS #########################
         for idx, (req_id, prompt_len, token_ids, position_ids,
                   attn_metadata) in enumerate(prefill_data.zipped()):
 
-            # [padded_prompt_len]
+            # FORWARD.
             selected_token_ids = self.model(token_ids,
                                             position_ids,
                                             attn_metadata,
                                             self.kv_caches,
                                             is_prompt=True)
+
             # NOTE: TPU<>CPU sync happens here.
-            # It is important to call .cpu() first to avoid compilation on hotpath.
+            # We need to call .cpu() first to avoid recompilation.
             token_id = selected_token_ids.cpu()[prompt_len - 1].item()
-            sampled_token_ids[num_decodes + idx] = token_id
+            sampled_token_ids[decode_data.num_decodes + idx] = token_id
             req_state = self.requests[req_id]
 
-            # TODO: prefix caching.
-            if req_state.num_computed_tokens > 0:
-                breakpoint()
+            # TODO: ASSERT NO PREFIX CACHING.
             assert req_state.num_computed_tokens == 0
             seq_len = (req_state.num_computed_tokens +
                        scheduler_output.num_scheduled_tokens[req_id])
 
-            # TODO: chunked prefill.
+            # TODO: ASSERT NO CHUNKED PREFILL.
             assert seq_len == req_state.num_tokens
             assert prompt_len == seq_len
 
-            # Append the sampled token to the output token ids.
+            # UPDATE REQUEST STATE.
             req_idx = self.input_batch.req_id_to_index[req_id]
             self.input_batch.token_ids_cpu[req_idx, seq_len] = token_id
             req_state.output_token_ids.append(token_id)
@@ -605,15 +609,6 @@ class TPUModelRunner:
                             dtype=self.kv_cache_dtype,
                             device=self.device),
             ))
-
-    def _get_padded_batch_size(self, batch_size: int) -> Optional[int]:
-        # The GMM Pallas kernel requires num_tokens * topk to be a multiple of 16.
-        # To meet this requirement in the simplest way, we set the minimal batch
-        # size to 8 (== MIN_BATCH_SIZE).
-        if batch_size <= 8:
-            return 8
-        else:
-            return ((batch_size + 15) // 16) * 16
 
 
 @dataclass

@@ -8,10 +8,10 @@ import torch_xla.core.xla_model as xm
 import torch_xla.runtime as xr
 
 import vllm.envs as envs
+from vllm.config import CacheConfig, ModelConfig, ParallelConfig, VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.logger import init_logger
-from vllm.config import CacheConfig, ModelConfig, ParallelConfig, VllmConfig
 from vllm.model_executor import set_random_seed
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size
 from vllm.v1.outputs import ModelRunnerOutput
@@ -114,9 +114,9 @@ class TPUWorker:
         # intermediate activations.
         m = xm.get_memory_info(self.device)
         total_tpu_memory = m["bytes_limit"]
-        peak_memory = m["peak_bytes_used"]  # Weights + intermediate activations.
-        logger.debug("Peak Used: %sGB",
-                     peak_memory // 1024 // 1024 // 1024)
+        peak_memory = m[
+            "peak_bytes_used"]  # Weights + intermediate activations.
+        logger.debug("Peak Used: %sGB", peak_memory // 1024 // 1024 // 1024)
         logger.debug("Total Memory: %sGB",
                      total_tpu_memory // 1024 // 1024 // 1024)
 

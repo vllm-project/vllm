@@ -6,7 +6,7 @@ import torch
 import torch_xla
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionMetadata, AttentionType)
+                                              AttentionType)
 
 
 class PallasAttentionBackend(AttentionBackend):
