@@ -1,11 +1,11 @@
 import logging
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Callable, Optional, Union
 
 import vllm.envs as envs
 
 if TYPE_CHECKING:
-    from vllm.compilation.config import CompilationConfig
-    from vllm.config import VllmConfig
+    from vllm.config import CompilationConfig, VllmConfig
 else:
     CompilationConfig = None
     VllmConfig = None
@@ -72,3 +72,29 @@ def set_compilation_config(config: Optional[CompilationConfig]):
 
 def get_compilation_config() -> Optional[CompilationConfig]:
     return _compilation_config
+
+
+_current_vllm_config: Optional[VllmConfig] = None
+
+
+@contextmanager
+def set_current_vllm_config(vllm_config: VllmConfig):
+    """
+    Temporarily set the current VLLM config.
+    Used during model initialization.
+    We save the current VLLM config in a global variable,
+    so that all modules can access it, e.g. custom ops
+    can access the VLLM config to determine how to dispatch.
+    """
+    global _current_vllm_config
+    old_vllm_config = _current_vllm_config
+    try:
+        _current_vllm_config = vllm_config
+        yield
+    finally:
+        _current_vllm_config = old_vllm_config
+
+
+def get_current_vllm_config() -> VllmConfig:
+    assert _current_vllm_config is not None, "Current VLLM config is not set."
+    return _current_vllm_config
