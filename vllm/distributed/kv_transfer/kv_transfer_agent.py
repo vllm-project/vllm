@@ -52,8 +52,9 @@ class KV_transfer_agent:
         local_rank: int,
         config,
     ):
-
-        assert self.config.is_distributed_kv_instance, "KV cache transfer "\
+        
+        self.config = config
+        assert self.config.is_kv_transfer_instance, "KV cache transfer "\
             "agent should only be used when kv_connector is set."
 
         self.connector = KVConnectorFactory.create_connector(config)

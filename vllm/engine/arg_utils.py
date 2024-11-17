@@ -1232,6 +1232,7 @@ class EngineArgs:
             decoding_config=decoding_config,
             observability_config=observability_config,
             prompt_adapter_config=prompt_adapter_config,
+            kv_transfer_config=kv_transfer_config,
         )
 
 

@@ -143,7 +143,9 @@ class Worker(LocalOrDistributedWorkerBase):
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")
         # Initialize the distributed environment.
-        init_worker_distributed_environment(self.parallel_config, self.rank,
+        init_worker_distributed_environment(self.parallel_config, 
+                                            self.kv_transfer_config,
+                                            self.rank,
                                             self.distributed_init_method,
                                             self.local_rank)
         # Set random seed.
@@ -460,11 +462,11 @@ def init_worker_distributed_environment(
 
     init_distributed_environment(parallel_config.world_size, rank,
                                  distributed_init_method, local_rank)
-
+    
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
                                       parallel_config.pipeline_parallel_size)
 
-    ensure_kv_transfer_initialized(local_rank, kv_transfer_config)
+    ensure_kv_transfer_initialized(kv_transfer_config)
 
 
 def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype):

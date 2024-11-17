@@ -30,7 +30,9 @@ CUDA_VISIBLE_DEVICES=0 python3 \
     --max-model-len 10000 \
     --gpu-memory-utilization 0.8 \
     --kv-connector PyNcclConnector \
-    --kv-role kv_producer &
+    --kv-role kv_producer \
+    --kv-rank 0 \
+    --kv-parallel-size 2 &
 
 # decoding instance, which is the KV consumer
 CUDA_VISIBLE_DEVICES=1 python3 \
@@ -40,7 +42,9 @@ CUDA_VISIBLE_DEVICES=1 python3 \
     --max-model-len 10000 \
     --gpu-memory-utilization 0.8 \
     --kv-connector PyNcclConnector \
-    --kv-role kv_consumer &
+    --kv-role kv_consumer \
+    --kv-rank 1 \
+    --kv-parallel-size 2 &
 
 # wait until prefill and decode instances are ready
 wait_for_server 8100

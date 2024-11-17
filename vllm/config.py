@@ -1,3 +1,4 @@
+import copy
 import enum
 import json
 import warnings
@@ -16,9 +17,10 @@ from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.model_executor.models import ModelRegistry
 from vllm.platforms import current_platform
 from vllm.tracing import is_otel_available, otel_import_error_traceback
-from vllm.transformers_utils.config import (ConfigFormat, get_config,
-                                            get_hf_image_processor_config,
-                                            get_hf_text_config)
+from vllm.transformers_utils.config import (
+    ConfigFormat, get_config, get_hf_image_processor_config,
+    get_hf_text_config, get_pooling_config,
+    get_sentence_transformer_tokenizer_config, is_encoder_decoder, uses_mrope)
 from vllm.utils import (GiB_bytes, cuda_device_count_stateless, get_cpu_memory,
                         identity, print_warning_once)
 
@@ -79,9 +81,6 @@ class ModelConfig:
         code_revision: The specific revision to use for the model code on
             Hugging Face Hub. It can be a branch name, a tag name, or a
             commit id. If unspecified, will use the default version.
-        rope_scaling: Dictionary containing the scaling configuration for the
-            RoPE embeddings. When using this flag, don't update
-            `max_position_embeddings` to the expected new maximum.
         tokenizer_revision: The specific tokenizer version to use. It can be a
             branch name, a tag name, or a commit id. If unspecified, will use
             the default version.
@@ -113,7 +112,7 @@ class ModelConfig:
             matches the model name exposed via the APIs. If multiple model
             names provided, the first name will be used. If not specified,
             the model name will be the same as `model`.
-        limit_mm_per_prompt: Maximum number of data instances per modality
+        limit_mm_per_prompt: Maximum number of data items per modality
             per prompt. Only applicable for multimodal models.
         config_format: The config format which shall be loaded.
             Defaults to 'auto' which defaults to 'hf'.
@@ -142,7 +141,7 @@ class ModelConfig:
             allowed_local_media_path: str = "",
             revision: Optional[str] = None,
             code_revision: Optional[str] = None,
-            rope_scaling: Optional[dict] = None,
+            rope_scaling: Optional[Dict[str, Any]] = None,
             rope_theta: Optional[float] = None,
             tokenizer_revision: Optional[str] = None,
             max_model_len: Optional[int] = None,
@@ -213,6 +212,7 @@ class ModelConfig:
         self.hf_config = hf_config
 
         self.hf_text_config = get_hf_text_config(self.hf_config)
+        self.encoder_config = self._get_encoder_config()
         self.hf_image_processor_config = get_hf_image_processor_config(
             self.model, revision)
         self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
@@ -244,7 +244,8 @@ class ModelConfig:
             max_model_len=max_model_len,
             disable_sliding_window=self.disable_sliding_window,
             sliding_window_len=self.get_hf_config_sliding_window(),
-            spec_target_max_model_len=spec_target_max_model_len)
+            spec_target_max_model_len=spec_target_max_model_len,
+            encoder_config=self.encoder_config)
         self.served_model_name = get_served_model_name(model,
                                                        served_model_name)
         self.multimodal_config = self._init_multimodal_config(
@@ -281,6 +282,10 @@ class ModelConfig:
                              "multimodal models.")
 
         return None
+
+    def _get_encoder_config(self):
+        return get_sentence_transformer_tokenizer_config(
+            self.model, self.revision)
 
     def _init_pooler_config(
         self,
@@ -679,12 +684,13 @@ class ModelConfig:
         return self.multimodal_config
 
     @property
-    def is_encoder_decoder_model(self) -> bool:
+    def is_encoder_decoder(self) -> bool:
         """Extract the HF encoder/decoder model flag."""
-        return getattr(
-            self.hf_config, "is_encoder_decoder",
-            False) or (hasattr(self.hf_config, "text_config") and getattr(
-                self.hf_config.text_config, "is_encoder_decoder", False))
+        return is_encoder_decoder(self.hf_config)
+
+    @property
+    def uses_mrope(self) -> bool:
+        return uses_mrope(self.hf_config)
 
     @property
     def is_multimodal_model(self) -> bool:
@@ -933,9 +939,12 @@ class ParallelConfig:
             https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-nsight-profiler.
         placement_group: ray distributed model workers placement group.
         distributed_executor_backend: Backend to use for distributed model
-            workers, either "ray" or "mp" (multiprocessing). If either
-            pipeline_parallel_size or tensor_parallel_size is greater than 1,
-            will default to "ray" if Ray is installed or "mp" otherwise.
+            workers, either "ray" or "mp" (multiprocessing). If the product
+            of pipeline_parallel_size and tensor_parallel_size is less than
+            or equal to the number of GPUs available, "mp" will be used to
+            keep processing on a single host. Otherwise, this will default
+            to "ray" if Ray is installed and fail otherwise. Note that tpu
+            and hpu only support Ray for distributed inference.
     """
 
     def __init__(
@@ -975,6 +984,13 @@ class ParallelConfig:
             if self.distributed_executor_backend != "ray":
                 raise ValueError(
                     "TPU backend only supports Ray for distributed inference.")
+
+        if current_platform.is_hpu() and self.world_size > 1:
+            if self.distributed_executor_backend is None:
+                self.distributed_executor_backend = "ray"
+            if self.distributed_executor_backend != "ray":
+                raise ValueError(
+                    "HPU backend only supports Ray for distributed inference.")
 
         if self.distributed_executor_backend is None and self.world_size > 1:
             # We use multiprocessing by default if world_size fits on the
@@ -1028,7 +1044,7 @@ class ParallelConfig:
         if self.use_ray:
             from vllm.executor import ray_utils
             ray_utils.assert_ray_available()
-        if is_hip():
+        if current_platform.is_rocm():
             self.disable_custom_all_reduce = True
             logger.info(
                 "Disabled the custom all-reduce kernel because it is not "
@@ -1306,13 +1322,6 @@ class SpeculativeConfig:
                              "speculative decoding is > 1, but got "
                              f"{speculative_disable_by_batch_size=}")
 
-        # Reminder: Please update docs/source/serving/compatibility_matrix.rst
-        # If the feature combo become valid
-        if enable_chunked_prefill:
-            raise ValueError(
-                "Speculative decoding and chunked prefill are "
-                f"currently mutually exclusive ({enable_chunked_prefill=}).")
-
         # TODO: The user should be able to specify revision/max model len
         # for the draft model. It is not currently supported.
         draft_revision = None
@@ -1378,6 +1387,29 @@ class SpeculativeConfig:
                         "This speculative model supports a maximum of "
                         f"num_speculative_tokens={n_predict}, but "
                         f"{num_speculative_tokens=} was provided.")
+
+            if enable_chunked_prefill and draft_hf_config.model_type in (
+                    "medusa", "mlp_speculator", "eagle"):
+                raise ValueError(
+                    "Chunked prefill and hidden-state based draft models are "
+                    "not compatible.")
+
+            speculative_draft_tensor_parallel_size = \
+                SpeculativeConfig._verify_and_get_draft_model_tensor_parallel_size(
+                    target_parallel_config,
+                    speculative_draft_tensor_parallel_size,
+                    draft_hf_config
+            )
+
+            if (enable_chunked_prefill and \
+                 speculative_draft_tensor_parallel_size != 1):
+                # TODO - Investigate why the error reported in
+                # https://github.com/vllm-project/vllm/pull/9291#issuecomment-2463266258
+                # is happening and re-enable it.
+                raise ValueError(
+                    "Chunked prefill and speculative decoding can be enabled "
+                    "simultaneously only for draft models with tensor "
+                    "parallel size 1.")
 
             draft_model_config.max_model_len = (
                 SpeculativeConfig._maybe_override_draft_max_model_len(
@@ -1457,15 +1489,16 @@ class SpeculativeConfig:
         )
 
     @staticmethod
-    def create_draft_parallel_config(
-        target_parallel_config: ParallelConfig,
-        speculative_draft_tensor_parallel_size: Optional[int],
-        draft_hf_config: PretrainedConfig,
-    ) -> ParallelConfig:
-        """Create a parallel config for use by the draft worker.
-
-        This is mostly a copy of the target parallel config, except the tp_size.
+    def _verify_and_get_draft_model_tensor_parallel_size(
+            target_parallel_config: ParallelConfig,
+            speculative_draft_tensor_parallel_size: Optional[int],
+            draft_hf_config: PretrainedConfig) -> int:
         """
+        Verifies and adjusts the tensor parallel size for a draft model
+        specified using speculative_draft_tensor_parallel_size.
+        """
+        # If speculative_draft_tensor_parallel_size is unset then set it
+        # appropriately else verify that it is set correctly.
         if speculative_draft_tensor_parallel_size is None:
             if draft_hf_config.model_type == "mlp_speculator":
                 speculative_draft_tensor_parallel_size = 1
@@ -1481,7 +1514,18 @@ class SpeculativeConfig:
             raise ValueError(
                 f"{speculative_draft_tensor_parallel_size=} cannot be "
                 f"other value than 1 or target model tensor_parallel_size")
+        return speculative_draft_tensor_parallel_size
 
+    @staticmethod
+    def create_draft_parallel_config(
+        target_parallel_config: ParallelConfig,
+        speculative_draft_tensor_parallel_size: int,
+        draft_hf_config: PretrainedConfig,
+    ) -> ParallelConfig:
+        """Create a parallel config for use by the draft worker.
+
+        This is mostly a copy of the target parallel config, except the tp_size.
+        """
         draft_parallel_config = ParallelConfig(
             pipeline_parallel_size=target_parallel_config.
             pipeline_parallel_size,
@@ -1631,6 +1675,7 @@ class LoRAConfig:
     # This is a constant.
     lora_vocab_padding_size: ClassVar[int] = 256
     long_lora_scaling_factors: Optional[Tuple[float]] = None
+    bias_enabled: bool = False
 
     def __post_init__(self):
         # Setting the maximum rank to 256 should be able to satisfy the vast
@@ -1828,6 +1873,7 @@ def _get_and_verify_max_len(
     disable_sliding_window: bool,
     sliding_window_len: Optional[Union[int, List[Optional[int]]]],
     spec_target_max_model_len: Optional[int] = None,
+    encoder_config: Optional[Any] = None,
 ) -> int:
     """Get and verify the model's maximum length."""
     derived_max_model_len = float("inf")
@@ -1910,6 +1956,9 @@ def _get_and_verify_max_len(
                     "original_max_position_embeddings"]
             derived_max_model_len *= scaling_factor
 
+    if encoder_config and "max_seq_length" in encoder_config:
+        derived_max_model_len = encoder_config["max_seq_length"]
+
     # If the user specified a max length, make sure it is smaller than the
     # derived length from the HF model config.
     if max_model_len is None:
@@ -1983,7 +2032,6 @@ class DecodingConfig:
             raise ValueError(f"Invalid guided_decoding_backend '{backend},"
                              f"must be one of {valid_guided_backends}")
 
-
 @dataclass
 class ObservabilityConfig:
     """Configuration for observability."""
@@ -2020,27 +2068,35 @@ class KVTransferConfig:
     kv_port: int = 14579
     
     @property
-    def is_distributed_kv_instance(self) -> bool:
-        return self.kv_transfer_role in ["kv_producer", "kv_consumer", "kv_both"]
+    def is_kv_transfer_instance(self) -> bool:
+        return self.kv_connector is not None and \
+            self.kv_role in ["kv_producer", "kv_consumer", "kv_both"]
+
+    @property
+    def need_kv_parallel_group(self) -> bool:
+        # for those database-based connector, vLLM does not need to create
+        # parallel group, and in that case the kv parallel size will be 1.
+        return self.kv_connector is not None and self.kv_parallel_size > 1
     
     @property
     def is_kv_producer(self) -> bool:
-        return self.kv_transfer_role in ["kv_producer", "kv_both"]
+        return self.kv_connector is not None and \
+            self.kv_role in ["kv_producer", "kv_both"]
     
     @property
     def is_kv_consumer(self) -> bool:
-        return self.kv_transfer_role in ["kv_consumer", "kv_both"]
+        return self.kv_connector is not None and \
+            self.kv_role in ["kv_consumer", "kv_both"]
 
         
     def __post_init__(self):
 
         if self.kv_connector not in [None, 
-                                     "PyNcclConnector",
-                                     "LMCacheConnector"]:
+                                     "PyNcclConnector"]:
             raise ValueError(f"Unsupported kv_connector: {self.kv_connector}. "
                              f"Supported connectors are "
-                             f"`PyNcclConnector` and "
-                             f"`LMCacheConnector`")
+                             f"`PyNcclConnector`.")
+
 
         if self.kv_role not in [None, 
                                 "kv_producer", 
@@ -2241,13 +2297,15 @@ class VllmConfig:
     simplifies passing around the distinct configurations in the codebase.
     """
 
-    model_config: ModelConfig
-    cache_config: CacheConfig
-    parallel_config: ParallelConfig
-    scheduler_config: SchedulerConfig
-    device_config: DeviceConfig
-    load_config: LoadConfig
-    kv_transfer_config: KVTransferConfig
+    model_config: ModelConfig = field(default=None, init=True)  # type: ignore
+    cache_config: CacheConfig = field(default=None, init=True)  # type: ignore
+    parallel_config: ParallelConfig = field(default=None,
+                                            init=True)  # type: ignore
+    scheduler_config: SchedulerConfig = field(default=None,
+                                              init=True)  # type: ignore
+    device_config: DeviceConfig = field(default=None,
+                                        init=True)  # type: ignore
+    load_config: LoadConfig = field(default=None, init=True)  # type: ignore
     lora_config: Optional[LoRAConfig] = None
     speculative_config: Optional[SpeculativeConfig] = None
     decoding_config: Optional[DecodingConfig] = None
@@ -2256,6 +2314,8 @@ class VllmConfig:
     quant_config: Optional[QuantizationConfig] = None
     compilation_config: CompilationConfig = field(default=None,
                                                   init=True)  # type: ignore
+    kv_transfer_config: KVTransferConfig = field(default=None,
+                                                 init=True) # type: ignore
 
     @staticmethod
     def _get_quantization_config(
@@ -2285,14 +2345,23 @@ class VllmConfig:
             return quant_config
         return None
 
+    def with_hf_config(self, hf_config: PretrainedConfig) -> "VllmConfig":
+        model_config = copy.deepcopy(self.model_config)
+        model_config.hf_config = hf_config
+
+        return replace(self, model_config=model_config)
+
     def __post_init__(self):
         """Verify configs are valid & consistent with each other.
         """
-        self.model_config.verify_async_output_proc(self.parallel_config,
-                                                   self.speculative_config,
-                                                   self.device_config)
-        self.model_config.verify_with_parallel_config(self.parallel_config)
-        self.cache_config.verify_with_parallel_config(self.parallel_config)
+        if self.model_config is not None:
+            self.model_config.verify_async_output_proc(self.parallel_config,
+                                                       self.speculative_config,
+                                                       self.device_config)
+            self.model_config.verify_with_parallel_config(self.parallel_config)
+
+        if self.cache_config is not None:
+            self.cache_config.verify_with_parallel_config(self.parallel_config)
 
         if self.lora_config:
             self.lora_config.verify_with_model_config(self.model_config)
