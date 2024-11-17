@@ -7,6 +7,7 @@ import time
 from typing import List, Optional
 
 import torch
+# import torch_xla.debug.metrics as met
 import uvloop
 from PIL import Image
 from tqdm import tqdm
@@ -149,6 +150,8 @@ def run_vllm(
 
     use_beam_search = False
 
+    # met.clear_all()
+
     if not use_beam_search:
         start = time.perf_counter()
         llm.generate(prompts, sampling_params, use_tqdm=True)
@@ -168,6 +171,10 @@ def run_vllm(
                 ignore_eos=True,
             ))
         end = time.perf_counter()
+    
+    # print(met.metrics_report())
+    # print(met.short_metrics_report())
+
     return end - start
 
 

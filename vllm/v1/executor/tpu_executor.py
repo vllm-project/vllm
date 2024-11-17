@@ -8,6 +8,7 @@ from vllm.v1.worker.tpu_worker import TPUWorker
 
 logger = init_logger(__name__)
 
+# import torch_xla.debug.profiler as xp
 
 class TPUExecutor:
 
@@ -27,6 +28,8 @@ class TPUExecutor:
         self.worker = self._create_worker()
         self.worker.initialize()
         self.worker.load_model()
+
+        # self.server = xp.start_server(9012)
 
     def _create_worker(
         self,
@@ -67,6 +70,7 @@ class TPUExecutor:
         self,
         scheduler_output,
     ) -> ModelRunnerOutput:
+        # xp.trace_detached('localhost:9012', "./profiles")
         output = self.worker.execute_model(scheduler_output)
         return output
 

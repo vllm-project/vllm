@@ -375,7 +375,8 @@ class TPUModelRunner:
                 is_prompt=False
             )
             
-            token_ids = selected_token_ids[:num_decodes].cpu()
+            # NOTE: TPU<>CPU sync happens here.
+            token_ids = selected_token_ids.cpu()[:num_decodes]
             sampled_token_ids_list = token_ids.tolist()
             sampled_token_ids[:num_decodes] = token_ids
 
@@ -405,8 +406,8 @@ class TPUModelRunner:
                 self.kv_caches,
                 is_prompt=True
             )
-            # TODO: move this into the model.
-            token_id = selected_token_ids[prompt_len - 1].cpu().item()
+            # NOTE: TPU<>CPU sync happens here.
+            token_id = selected_token_ids.cpu()[prompt_len - 1].item()
             sampled_token_ids[num_decodes + idx] = token_id
             req_state = self.requests[req_id]
 
