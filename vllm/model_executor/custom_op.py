@@ -64,9 +64,10 @@ class CustomOp(nn.Module):
         compilation_config = get_current_vllm_config().compilation_config
         enabled = self.enabled()
         if enabled:
-            compilation_config.enabled_custom_ops.add(self.__class__.name)
+            compilation_config.enabled_custom_ops.update([self.__class__.name])
         else:
-            compilation_config.disabled_custom_ops.add(self.__class__.name)
+            compilation_config.disabled_custom_ops.update(
+                [self.__class__.name])
 
         if not enabled:
             return self.forward_native
