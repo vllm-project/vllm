@@ -168,7 +168,6 @@ def run_vllm(
                 ignore_eos=True,
             ))
         end = time.perf_counter()
-
     return end - start
 
 
