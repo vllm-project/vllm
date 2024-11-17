@@ -42,9 +42,9 @@ from vllm.model_executor.model_loader.weight_utils import (
     runai_safetensors_weights_iterator, safetensors_weights_iterator)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
+from vllm.plugins import set_current_vllm_config
 from vllm.transformers_utils.s3_utils import glob as s3_glob
 from vllm.transformers_utils.s3_utils import is_s3
-from vllm.plugins import set_current_vllm_config
 from vllm.utils import is_pin_memory_available
 
 
