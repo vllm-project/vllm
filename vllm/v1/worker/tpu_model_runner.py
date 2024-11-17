@@ -376,6 +376,7 @@ class TPUModelRunner:
             )
             
             # NOTE: TPU<>CPU sync happens here.
+            # It is important to call .cpu() first to avoid compilation on hotpath.
             token_ids = selected_token_ids.cpu()[:num_decodes]
             sampled_token_ids_list = token_ids.tolist()
             sampled_token_ids[:num_decodes] = token_ids
@@ -407,6 +408,7 @@ class TPUModelRunner:
                 is_prompt=True
             )
             # NOTE: TPU<>CPU sync happens here.
+            # It is important to call .cpu() first to avoid compilation on hotpath.
             token_id = selected_token_ids.cpu()[prompt_len - 1].item()
             sampled_token_ids[num_decodes + idx] = token_id
             req_state = self.requests[req_id]
