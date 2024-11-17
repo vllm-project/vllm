@@ -97,6 +97,10 @@ class EmbeddingModelRunner(
             model_forward_end = torch.cuda.Event(enable_timing=True)
             model_forward_start.record()
 
+        cross_enc_kwargs = {}
+        if model_input.token_types is not None:
+            cross_enc_kwargs["token_types"] = model_input.token_types
+
         with set_forward_context(model_input.attn_metadata):
             hidden_or_intermediate_states = model_executable(
                 input_ids=model_input.input_tokens,
@@ -105,7 +109,8 @@ class EmbeddingModelRunner(
                 attn_metadata=model_input.attn_metadata,
                 intermediate_tensors=intermediate_tensors,
                 **MultiModalKwargs.as_kwargs(multi_modal_kwargs,
-                                             device=self.device))
+                                             device=self.device),
+                **cross_enc_kwargs)
 
         if (self.observability_config is not None
                 and self.observability_config.collect_model_forward_time):
@@ -134,10 +139,20 @@ class EmbeddingModelRunner(
         if not self.is_driver_worker:
             return []
 
-        return [
-            self.model.pooler(hidden_states=hidden_or_intermediate_states,
-                              pooling_metadata=model_input.pooling_metadata)
-        ]
+        if self.model_config.task == "cross_encoding":
+            return [
+                self.model.classification_output(
+                    hidden_states=hidden_or_intermediate_states,
+                    pooling_metadata=model_input.pooling_metadata)
+            ]
+        elif self.model_config.task == "embedding":
+            return [
+                self.model.pooler(
+                    hidden_states=hidden_or_intermediate_states,
+                    pooling_metadata=model_input.pooling_metadata)
+            ]
+        else:
+            raise AssertionError("Invalid task for EmbeddingModelRunner")
 
     def make_model_input_from_broadcasted_tensor_dict(
             self,

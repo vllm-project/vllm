@@ -40,6 +40,7 @@ class RobertaEmbedding(nn.Module):
         self,
         input_ids: torch.Tensor,
         position_ids: Optional[torch.Tensor] = None,
+        token_type_ids: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         input_shape = input_ids.size()
 
@@ -56,11 +57,12 @@ class RobertaEmbedding(nn.Module):
         # Position embeddings.
         position_embeddings = self.position_embeddings(position_ids)
 
-        # Token type embeddings. (TODO: move off hotpath?)
-        token_type_embeddings = self.token_type_embeddings(
-            torch.zeros(input_shape,
-                        dtype=torch.long,
-                        device=inputs_embeds.device))
+        if token_type_ids is None:
+            token_type_ids = torch.zeros(input_shape,
+                                         dtype=torch.long,
+                                         device=inputs_embeds.device)
+
+        token_type_embeddings = self.token_type_embeddings(token_type_ids)
 
         embeddings = inputs_embeds + token_type_embeddings + position_embeddings
         embeddings = self.LayerNorm(embeddings)

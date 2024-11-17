@@ -558,7 +558,7 @@ def init_app_state(
         base_model_paths,
         request_logger=request_logger,
         chat_template=args.chat_template,
-    ) if model_config.task == "embedding" else None
+    ) if model_config.task in ["embedding", "cross_encoding"] else None
     state.openai_serving_tokenization = OpenAIServingTokenization(
         engine_client,
         model_config,

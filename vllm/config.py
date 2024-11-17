@@ -42,7 +42,7 @@ _MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS = 5120
 TaskOption = Literal["auto", "generate", "embedding"]
 
 # "draft" is only used internally for speculative decoding
-_Task = Literal["generate", "embedding", "draft"]
+_Task = Literal["generate", "cross_encoding", "embedding", "draft"]
 
 HfOverrides = Union[Dict[str, Any], Callable[[PretrainedConfig],
                                              PretrainedConfig]]
@@ -337,6 +337,8 @@ class ModelConfig:
             # in case the model supports multiple of them
             "generate": ModelRegistry.is_text_generation_model(architectures),
             "embedding": ModelRegistry.is_embedding_model(architectures),
+            "cross_encoding":
+            ModelRegistry.is_cross_encoder_model(architectures),
         }
         supported_tasks_lst: List[_Task] = [
             task for task, is_supported in task_support.items() if is_supported
@@ -509,7 +511,7 @@ class ModelConfig:
 
         # Async postprocessor is not necessary with embedding mode
         # since there is no token generation
-        if self.task == "embedding":
+        if self.task in ["embedding", "cross_encoding"]:
             self.use_async_output_proc = False
 
         # Reminder: Please update docs/source/serving/compatibility_matrix.rst

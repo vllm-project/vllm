@@ -75,7 +75,7 @@ class Worker(LocalOrDistributedWorkerBase):
         ModelRunnerClass: Type[GPUModelRunnerBase] = ModelRunner
         if model_runner_cls is not None:
             ModelRunnerClass = model_runner_cls
-        elif model_config.task == "embedding":
+        elif model_config.task in ["cross_encoding", "embedding"]:
             ModelRunnerClass = EmbeddingModelRunner
         elif self.model_config.is_encoder_decoder:
             ModelRunnerClass = EncoderDecoderModelRunner
