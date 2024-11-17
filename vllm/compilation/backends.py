@@ -2,15 +2,14 @@ import copy
 import dataclasses
 import operator
 from contextlib import ExitStack
-from typing import (Any, Callable, Dict, List, Optional, Sequence, Set, Tuple,
-                    Union)
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 from unittest.mock import patch
 
 import torch
 import torch.fx as fx
 
 import vllm.envs as envs
-from vllm.config import CompilationConfig, CompilationLevel
+from vllm.config import CompilationConfig
 from vllm.logger import init_logger
 from vllm.utils import combine_fx_passes, weak_ref_tensors
 

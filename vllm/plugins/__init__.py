@@ -1,6 +1,6 @@
 import logging
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Callable, Optional, Union
+from typing import TYPE_CHECKING, Optional
 
 import vllm.envs as envs
 

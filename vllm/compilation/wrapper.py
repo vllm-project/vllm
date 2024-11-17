@@ -32,9 +32,6 @@ class TorchCompileWrapperWithCustomDispatcher:
             # default compilation settings
             # compiling the forward method
 
-            # choose the compile backend
-
-            # if the user has set the backend, use it
             from vllm.plugins import get_current_vllm_config
             backend = get_current_vllm_config(
             ).compilation_config.init_backend()

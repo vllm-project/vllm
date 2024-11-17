@@ -21,14 +21,8 @@ from vllm.transformers_utils.config import (
     ConfigFormat, get_config, get_hf_image_processor_config,
     get_hf_text_config, get_pooling_config,
     get_sentence_transformer_tokenizer_config, is_encoder_decoder, uses_mrope)
-from vllm.utils import (
-    GiB_bytes,
-    cuda_device_count_stateless,
-    get_cpu_memory,
-    identity,
-    print_warning_once,
-    resolve_obj_by_qualname,
-)
+from vllm.utils import (GiB_bytes, cuda_device_count_stateless, get_cpu_memory,
+                        identity, print_warning_once, resolve_obj_by_qualname)
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
