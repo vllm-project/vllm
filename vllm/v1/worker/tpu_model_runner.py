@@ -305,7 +305,7 @@ class TPUModelRunner:
         slot_mapping = block_number * self.block_size + block_offsets
         # Set an out of range value for the padding tokens so that they
         # are ignored when inserting into the KV cache.
-        slot_mapping[-num_decodes:] = _PAD_SLOT_ID
+        slot_mapping[num_decodes:] = _PAD_SLOT_ID
         slot_mapping = slot_mapping[:padded_batch_size]
 
         # BLOCK_TABLE [batch, max_num_blocks_per_req]
