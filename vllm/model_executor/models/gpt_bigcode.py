@@ -231,7 +231,7 @@ class GPTBigCodeModel(nn.Module):
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if get_pp_group().is_first_rank:
-            if inputs_embeds is not None:
+            if inputs_embeds is None:
                 inputs_embeds = self.get_input_embeddings(input_ids)
             hidden_states = inputs_embeds + self.wpe(position_ids)
         else:
