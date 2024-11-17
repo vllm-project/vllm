@@ -10,6 +10,7 @@ logger = init_logger(__name__)
 
 # import torch_xla.debug.profiler as xp
 
+
 class TPUExecutor:
 
     def __init__(self, vllm_config: VllmConfig) -> None:
@@ -32,11 +33,10 @@ class TPUExecutor:
         # self.server = xp.start_server(9012)
 
     def _create_worker(
-        self,
-        local_rank: int = 0,
-        rank: int = 0,
-        distributed_init_method: Optional[str] = None
-    ) -> TPUWorker:
+            self,
+            local_rank: int = 0,
+            rank: int = 0,
+            distributed_init_method: Optional[str] = None) -> TPUWorker:
         """Return worker init args for a given rank."""
 
         if distributed_init_method is None:

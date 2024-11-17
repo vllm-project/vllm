@@ -1225,7 +1225,7 @@ class DeviceConfig:
         # Some device types require processing inputs on CPU
         if self.device_type in ["neuron", "openvino"]:
             self.device = torch.device("cpu")
-        # Device initialization should happen after initializing the 
+        # Device initialization should happen after initializing the
         # distributed runtime.
         elif self.device_type in ["tpu"]:
             self.device = None

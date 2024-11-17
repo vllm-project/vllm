@@ -22,14 +22,11 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+
 class TPUWorker:
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        local_rank: int,
-        rank: int,
-        distributed_init_method: str
-    ):
+
+    def __init__(self, vllm_config: VllmConfig, local_rank: int, rank: int,
+                 distributed_init_method: str):
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
@@ -41,7 +38,7 @@ class TPUWorker:
         self.speculative_config = vllm_config.speculative_config
         self.prompt_adapter_config = vllm_config.prompt_adapter_config
         self.observability_config = vllm_config.observability_config
-        
+
         self.local_rank = local_rank
         self.rank = rank
         self.distributed_init_method = distributed_init_method
@@ -91,10 +88,9 @@ class TPUWorker:
         per_rank_path = os.path.join(envs.VLLM_XLA_CACHE_PATH,
                                      f"tp{world_size}_rank{rank}")
         xr.initialize_cache(per_rank_path, readonly=False)
-    
+
     def load_model(self):
         self.model_runner.load_model()
-
 
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         """Profiles the peak memory usage of the model to determine how many
@@ -108,33 +104,30 @@ class TPUWorker:
             You may limit the usage of GPU memory
             by adjusting the `gpu_memory_utilization` parameter.
         """
-        
-        return 3144, 0
 
-        # self.model_runner.profile_run()
+        self.model_runner.profile_run()
 
-        # # Synchronize before measuring the memory usage.
-        # xm.wait_device_ops()
+        # Synchronize before measuring the memory usage.
+        xm.wait_device_ops()
 
-        # # Get the maximum amount of memory used by the model weights and
-        # # intermediate activations.
-        # m = xm.get_memory_info(self.device)
-        # total_tpu_memory = m["bytes_limit"]
-        # peak_memory = m["peak_bytes_used"]  # Weights + intermediate activations.
-        # logger.debug("Peak Used: %sGB", 
-        #              peak_memory // 1024 // 1024 // 1024)
-        # logger.debug("Total Memory: %sGB", 
-        #              total_tpu_memory // 1024 // 1024 // 1024)
+        # Get the maximum amount of memory used by the model weights and
+        # intermediate activations.
+        m = xm.get_memory_info(self.device)
+        total_tpu_memory = m["bytes_limit"]
+        peak_memory = m["peak_bytes_used"]  # Weights + intermediate activations.
+        logger.debug("Peak Used: %sGB",
+                     peak_memory // 1024 // 1024 // 1024)
+        logger.debug("Total Memory: %sGB",
+                     total_tpu_memory // 1024 // 1024 // 1024)
 
-        # cache_block_size = _get_cache_block_size(self.cache_config,
-        #                                          self.model_config,
-        #                                          self.parallel_config)
-        # num_tpu_blocks = int(
-        #     (total_tpu_memory * self.cache_config.gpu_memory_utilization -
-        #      peak_memory) // cache_block_size)
-        # num_tpu_blocks = (max(num_tpu_blocks, 0) // 8) * 8
+        cache_block_size = _get_cache_block_size(self.cache_config,
+                                                 self.model_config,
+                                                 self.parallel_config)
+        num_tpu_blocks = int(
+            (total_tpu_memory * self.cache_config.gpu_memory_utilization -
+             peak_memory) // cache_block_size)
+        num_tpu_blocks = (max(num_tpu_blocks, 0) // 8) * 8
         return num_tpu_blocks, 0
-
 
     def initialize_cache(self, num_tpu_blocks: int) -> None:
         """Allocate TPU and CPU KV cache with the specified number of blocks."""
@@ -143,7 +136,7 @@ class TPUWorker:
             raise ValueError("No available memory for the cache blocks. "
                              "Try increasing `gpu_memory_utilization` when "
                              "initializing the engine.")
-    
+
         max_seq_len = self.cache_config.block_size * num_tpu_blocks
         max_model_len = self.model_config.max_model_len
         if max_model_len > max_seq_len:
@@ -161,10 +154,10 @@ class TPUWorker:
         xm.mark_step()
         xm.wait_device_ops()
         m = xm.get_memory_info(self.device)
-        peak_memory = m["peak_bytes_used"]  # Weights + intermediate activations.
-        logger.debug("Peak GB Used Post KV Cache: %sGB", 
+        peak_memory = m[
+            "peak_bytes_used"]  # Weights + intermediate activations.
+        logger.debug("Peak GB Used Post KV Cache: %sGB",
                      peak_memory // 1024 // 1024 // 1024)
-
 
     def compile_or_warm_up_model(self) -> None:
         if not self.model_config.enforce_eager:
@@ -173,7 +166,6 @@ class TPUWorker:
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
-
 
     def execute_model(
         self,

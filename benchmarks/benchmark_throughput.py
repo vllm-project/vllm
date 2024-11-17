@@ -171,7 +171,7 @@ def run_vllm(
                 ignore_eos=True,
             ))
         end = time.perf_counter()
-    
+
     # print(met.metrics_report())
     # print(met.short_metrics_report())
 
