@@ -3,10 +3,10 @@ import torch
 from compressed_tensors.quantization import FP8_DTYPE
 
 import vllm.envs as envs
-from vllm.compilation.config import CompilationConfig
 from vllm.compilation.fusion import (FusionPass, find_auto_fn,
                                      find_auto_fn_maybe)
 from vllm.compilation.reshapes import RedundantReshapesPass
+from vllm.config import CompilationConfig
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     apply_fp8_linear)

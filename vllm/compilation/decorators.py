@@ -3,10 +3,8 @@ from typing import Dict, List, Optional, Union
 
 import torch
 
-import vllm.envs as envs
-from vllm.compilation.levels import CompilationLevel
 from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
-from vllm.config import VllmConfig
+from vllm.config import CompilationLevel, VllmConfig
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
 from vllm.utils import supports_dynamo
@@ -126,12 +124,14 @@ def _support_torch_compile(cls: type,
         old_init(self, vllm_config=vllm_config, prefix=prefix, **kwargs)
         # for CompilationLevel.DYNAMO_AS_IS , the upper level model runner
         # will handle the compilation, so we don't need to do anything here.
-        self.do_not_compile = envs.VLLM_TORCH_COMPILE_LEVEL in [
+        self.do_not_compile = \
+            vllm_config.compilation_config.level in [
             CompilationLevel.NO_COMPILATION, CompilationLevel.DYNAMO_AS_IS
         ] or not supports_dynamo()
         if self.do_not_compile:
             return
-        TorchCompileWrapperWithCustomDispatcher.__init__(self)
+        TorchCompileWrapperWithCustomDispatcher.__init__(
+            self, compilation_level=vllm_config.compilation_config.level)
 
     cls.__init__ = __init__  # type: ignore
 

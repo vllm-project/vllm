@@ -5,7 +5,7 @@ import tempfile
 
 import depyf
 
-from vllm.compilation.levels import CompilationLevel
+from vllm.config import CompilationLevel
 
 # disable custom dispatcher, let Dynamo takes over
 # all the control

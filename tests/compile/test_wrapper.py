@@ -3,6 +3,7 @@ from typing import Optional
 import torch
 
 from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
+from vllm.config import CompilationLevel
 
 
 class MyMod(torch.nn.Module):
@@ -18,7 +19,8 @@ class MyWrapper(TorchCompileWrapperWithCustomDispatcher):
     def __init__(self, model):
         self.model = model
         compiled_callable = torch.compile(self.forward, backend="eager")
-        super().__init__(compiled_callable)
+        super().__init__(compiled_callable,
+                         compilation_level=CompilationLevel.DYNAMO_ONCE)
 
     def forward(self, x: torch.Tensor, cache: Optional[torch.Tensor] = None):
         # this is the function to be compiled

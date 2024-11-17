@@ -69,7 +69,6 @@ if TYPE_CHECKING:
     VLLM_SKIP_P2P_CHECK: bool = False
     VLLM_TORCH_COMPILE_LEVEL: int = 0
     VLLM_TORCH_COMPILE_CONFIG: Optional[str] = None
-    VLLM_CUSTOM_OPS: List[str] = []
     VLLM_DISABLED_KERNELS: List[str] = []
     VLLM_USE_V1: bool = False
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = False
@@ -216,18 +215,6 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # Path to the config file for torch compile
     "VLLM_TORCH_COMPILE_CONFIG":
     lambda: os.environ.get("VLLM_TORCH_COMPILE_CONFIG", None),
-
-    # Fine-grained control over which custom ops to enable/disable.
-    # Use 'all' to enable all, 'none' to disable all.
-    # Also specify a list of custom op names to enable (prefixed with a '+'),
-    # or disable (prefixed with a '-').
-    # Examples:
-    # - 'all,-op1' to enable all except op1
-    # - 'none,+op1,+op2' to enable only op1 and op2
-    # By default, all custom ops are enabled when running without Inductor
-    # and disabled when running with Inductor (compile_level >= Inductor).
-    "VLLM_CUSTOM_OPS":
-    lambda: os.environ.get("VLLM_CUSTOM_OPS", "").replace(" ", "").split(","),
 
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id

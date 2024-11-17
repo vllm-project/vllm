@@ -11,8 +11,8 @@ from torch.library import Library
 from vllm.compilation.compile_context import set_compile_context
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.decorators import support_torch_compile
-from vllm.compilation.levels import CompilationLevel
-from vllm.config import VllmConfig
+from vllm.config import CompilationLevel, VllmConfig
+from vllm.plugins import set_current_vllm_config
 from vllm.utils import direct_register_custom_op
 
 global_counter = 0
@@ -82,7 +82,9 @@ def test_simple_piecewise_compile():
     os.environ["VLLM_TORCH_COMPILE_CONFIG"] = config
     os.environ["VLLM_TORCH_COMPILE_LEVEL"] = str(CompilationLevel.PIECEWISE)
 
-    model = SillyModel(vllm_config=VllmConfig(), prefix='')
+    vllm_config = VllmConfig()
+    with set_current_vllm_config(vllm_config):
+        model = SillyModel(vllm_config=vllm_config, prefix='')
 
     inputs = torch.randn(100).cuda()
 

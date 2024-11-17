@@ -6,8 +6,8 @@ from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor.pattern_matcher import (Match, PatternMatcherPass,
                                              fwd_only, register_replacement)
 
-from vllm.compilation.config import CompilationConfig
 from vllm.compilation.inductor_pass import InductorPass
+from vllm.config import CompilationConfig
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
