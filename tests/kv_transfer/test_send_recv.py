@@ -7,7 +7,7 @@ from tqdm import tqdm
 
 import vllm.distributed.kv_transfer.kv_connector.pynccl_connector.pynccl_pipe \
     as pnp 
-from vllm.config import ParallelConfig
+from vllm.config import KVTransferConfig
 
 
 def test_run(my_rank, pipe):
@@ -142,9 +142,7 @@ if __name__ == "__main__":
     )
     
 
-    config = ParallelConfig(
-        1,
-        1,
+    config = KVTransferConfig(
         kv_connector='PyNcclConnector',
         kv_buffer_device='cuda',
         kv_buffer_size=1e9,

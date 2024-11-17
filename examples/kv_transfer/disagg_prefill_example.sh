@@ -4,7 +4,6 @@
 # and then transfer the KV cache between them.
 
 export VLLM_HOST_IP=$(hostname -I | awk '{print $1}')
-export VLLM_PORT=12345
 
 # install quart first -- required for disagg prefill proxy serve
 if python3 -c "import quart" &> /dev/null; then
@@ -24,20 +23,24 @@ wait_for_server() {
 }
 
 # prefilling instance, which is the KV producer
-VLLM_DISTRIBUTED_KV_ROLE=producer CUDA_VISIBLE_DEVICES=0 python3 \
+CUDA_VISIBLE_DEVICES=0 python3 \
     -m vllm.entrypoints.openai.api_server \
     --model meta-llama/Meta-Llama-3.1-8B-Instruct \
     --port 8100 \
     --max-model-len 10000 \
-    --gpu-memory-utilization 0.8 &
+    --gpu-memory-utilization 0.8 \
+    --kv-connector PyNcclConnector \
+    --kv-role kv_producer &
 
 # decoding instance, which is the KV consumer
-VLLM_DISTRIBUTED_KV_ROLE=consumer CUDA_VISIBLE_DEVICES=1 python3 \
+CUDA_VISIBLE_DEVICES=1 python3 \
     -m vllm.entrypoints.openai.api_server \
     --model meta-llama/Meta-Llama-3.1-8B-Instruct \
     --port 8200 \
     --max-model-len 10000 \
-    --gpu-memory-utilization 0.8 &
+    --gpu-memory-utilization 0.8 \
+    --kv-connector PyNcclConnector \
+    --kv-role kv_consumer &
 
 # wait until prefill and decode instances are ready
 wait_for_server 8100

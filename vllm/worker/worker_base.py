@@ -44,6 +44,7 @@ class WorkerBase(ABC):
         self.speculative_config = vllm_config.speculative_config
         self.prompt_adapter_config = vllm_config.prompt_adapter_config
         self.observability_config = vllm_config.observability_config
+        self.kv_transfer_config = vllm_config.kv_transfer_config
 
     @abstractmethod
     def init_device(self) -> None:
@@ -369,7 +370,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         # output is List[SamplerOutput]
         return output
 
-    def _execute_model_spmd(
+    def _execute_model_spmdt(
         self,
         execute_model_req: ExecuteModelRequest,
         intermediate_tensors: Optional[IntermediateTensors] = None

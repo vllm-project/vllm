@@ -21,7 +21,7 @@ from torch.distributed import Backend
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 from vllm.logger import init_logger
-from vllm.config import ParallelConfig
+from vllm.config import KVTransferConfig
 
 logger = init_logger(__name__)
 
@@ -43,7 +43,7 @@ class PyNcclPipe:
 
     def __init__(self, 
                  local_rank: int, 
-                 config: ParallelConfig,
+                 config: KVTransferConfig,
                  device: Optional[str] = None,
                  port_offset: int = 0):
         self.config = config

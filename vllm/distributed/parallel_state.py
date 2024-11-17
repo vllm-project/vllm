@@ -7,9 +7,8 @@ It takes over the control of the distributed environment from PyTorch.
 The typical workflow is:
 
 - call `init_distributed_environment` to initialize the distributed environment.
-- call `initialize_model_parallel` or `ensure_model_parallel_initialized` to 
- initialize the model parallel groups and disaggregated prefill parallel 
- groups.
+- call `initialize_model_parallel` or `ensure_model_parallel_initialized` to
+ initialize the model parallel groups.
 
 - any code dealing with the distributed stuff
 
@@ -23,7 +22,6 @@ If you only need to use the distributed environment without model/pipeline
 import contextlib
 import gc
 import pickle
-import time
 import weakref
 from collections import namedtuple
 from contextlib import contextmanager, nullcontext
@@ -32,7 +30,6 @@ from multiprocessing import shared_memory
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from unittest.mock import patch
 
-from numpy import product
 import torch
 import torch.distributed
 from torch.distributed import Backend, ProcessGroup
@@ -41,8 +38,7 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op, supports_custom_op
-
-import vllm.distributed.kv_transfer.vllm_adapter as dist_kv
+import vllm.distributed.kv_transfer.kv_transfer_agent as dist_kv
 
 
 @dataclass
@@ -885,10 +881,10 @@ def get_world_group() -> GroupCoordinator:
     return _WORLD
 
 
-def init_world_group(ranks: List[List[int]], local_rank: int,
+def init_world_group(ranks: List[int], local_rank: int,
                      backend: str) -> GroupCoordinator:
     return GroupCoordinator(
-        group_ranks=ranks,
+        group_ranks=[ranks],
         local_rank=local_rank,
         torch_distributed_backend=backend,
         use_pynccl=False,
@@ -947,13 +943,14 @@ def get_pp_group() -> GroupCoordinator:
 # kept for backward compatibility
 get_pipeline_model_parallel_group = get_pp_group
 
-_DISAGG: Optional[dist_kv.KV_transfer_agent] = None
+
+_KV_TRANSFER: Optional[dist_kv.KV_transfer_agent] = None
 
 
-def get_disagg_group() -> dist_kv.KV_transfer_agent:
-    assert _DISAGG is not None, (
-        "disaggregated prefill parallel group is not initialized")
-    return _DISAGG
+def get_kv_transfer_group() -> dist_kv.KV_transfer_agent:
+    assert _KV_TRANSFER is not None, (
+        "disaggregated KV cache transfer parallel group is not initialized")
+    return _KV_TRANSFER
 
 
 @contextmanager
@@ -986,7 +983,6 @@ def set_custom_all_reduce(enable: bool):
     _ENABLE_CUSTOM_ALL_REDUCE = enable
 
 
-
 def init_distributed_environment(
     world_size: int = -1,
     rank: int = -1,
@@ -1003,30 +999,11 @@ def init_distributed_environment(
             "distributed_init_method must be provided when initializing "
             "distributed environment")
         # this backend is used for WORLD
-
-        # offset world size and rank in disaggregated prefill scenario
-        maybe_disagg_world_size = world_size
-        maybe_disagg_rank = rank
-        if dist_kv.IS_DISTRIBUTED_KV_INSTANCE:
-            maybe_disagg_world_size = world_size * 2
-            logger.debug("Distributed KV transfer enabled.")
-            if dist_kv.IS_KV_PRODUCER:
-                # for prefill, the ranks are [0, world_size)
-                logger.debug("rank %d is KV producer.", rank)
-                maybe_disagg_rank = rank
-            else:
-                # this is decode instance.
-                # offset global rank by tp * pp (which is world_size)
-                maybe_disagg_rank = rank + world_size
-                logger.debug("rank %d is KV consumer, adjust it to %d", rank,
-                             maybe_disagg_rank)
-
         torch.distributed.init_process_group(
             backend=backend,
             init_method=distributed_init_method,
-            world_size=maybe_disagg_world_size,
-            rank=maybe_disagg_rank)
-        logger.debug("torch.distributed initialized")
+            world_size=world_size,
+            rank=rank)
     # set the local rank
     # local_rank is not available in torch ProcessGroup,
     # see https://github.com/pytorch/pytorch/issues/122816
@@ -1037,29 +1014,16 @@ def init_distributed_environment(
             local_rank = envs.LOCAL_RANK
         else:
             local_rank = rank
-
     global _WORLD
     if _WORLD is None:
-        # in single node single process the world size can be -1
-        # need to infer the world size from torch.distributed.get_world_size()
-        torch_dist_world_size = torch.distributed.get_world_size()
-        if dist_kv.IS_DISTRIBUTED_KV_INSTANCE:
-            # two vLLM instances in the world
-            # so this vLLM instance's world size is half of torch's world size
-            torch_dist_world_size = torch_dist_world_size // 2
-        ranks = [[i for i in range(torch_dist_world_size)]]
-
+        ranks = list(range(torch.distributed.get_world_size()))
         _WORLD = init_world_group(ranks, local_rank, backend)
-        logger.debug("_WORLD initialized for rank %d",
-                     torch.distributed.get_rank())
-        time.sleep(5)
     else:
         assert _WORLD.world_size == torch.distributed.get_world_size(), (
             "world group already initialized with a different world size")
 
 
 def initialize_model_parallel(
-    kv_transfer_parallel_size: int = 1,
     tensor_model_parallel_size: int = 1,
     pipeline_model_parallel_size: int = 1,
     backend: Optional[str] = None,
@@ -1085,39 +1049,17 @@ def initialize_model_parallel(
     are on the same DGX box. For example if we are using 2 DGX-1 boxes
     with a total of 16 GPUs, rank 0 to 7 belong to the first box and
     ranks 8 to 15 belong to the second box.
-
-
-    Disaggregated prefill will also init its process group using this function.
-    Changes:
-        - vLLM world size: unchanged (tp * pp)
-        - torch.distributed.get_world_size():
-            - 2 * tp * pp
-            - Why: both prefill vLLM and decode vLLM is in the world
-        - Global rank:
-            - [0, tp * pp) for prefill
-            - [tp * pp, 2 * tp * pp) for decode
-        - Parallel groups
-            - Extend _WORLD, _TP and _PP using 
-              `include_decoding_groups_if_disagg_enabled`
-            - Add a new parallel group `_DISAGG` for disaggregated prefill
-                - [ [0, tp * pp], [1, tp * pp + 1], .. ]
-        - Local rank: unchanged
     """
-
     # Get world size and rank. Ensure some consistencies.
     assert torch.distributed.is_initialized()
     world_size: int = torch.distributed.get_world_size()
     backend = backend or torch.distributed.get_backend(
         get_world_group().device_group)
 
-    if (world_size != product([
-        kv_transfer_parallel_size,
-        tensor_model_parallel_size,
-        pipeline_model_parallel_size,
-    ])):
+    if (world_size !=
+            tensor_model_parallel_size * pipeline_model_parallel_size):
         raise RuntimeError(
             f"world_size ({world_size}) is not equal to "
-            f"kv_transfer_parallel_size ({kv_transfer_parallel_size}) x "
             f"tensor_model_parallel_size ({tensor_model_parallel_size}) x "
             f"pipeline_model_parallel_size ({pipeline_model_parallel_size})")
 
@@ -1132,13 +1074,13 @@ def initialize_model_parallel(
             range(i * tensor_model_parallel_size,
                   (i + 1) * tensor_model_parallel_size))
         group_ranks.append(ranks)
+
     # message queue broadcaster is only used in tensor model parallel group
     _TP = init_model_parallel_group(group_ranks,
                                     get_world_group().local_rank,
                                     backend,
                                     use_message_queue_broadcaster=True,
                                     group_name="tp")
-    logger.debug("_TP initialized for rank %d", torch.distributed.get_rank())
 
     # Build the pipeline model-parallel groups.
     num_pipeline_model_parallel_groups: int = (world_size //
@@ -1156,23 +1098,22 @@ def initialize_model_parallel(
                                     backend,
                                     use_custom_allreduce=False,
                                     group_name="pp")
-    logger.debug("_PP initialized for rank %d", torch.distributed.get_rank())
 
-    if dist_kv.IS_DISTRIBUTED_KV_INSTANCE:
-        global _DISAGG
-        logger.debug("Disaggregated prefill enabled, create _DISAGG group")
-        group_ranks = []
-        for i in range(world_size):
-            # prefill local rank: i
-            # decode global rank: i + world_size
-            group_ranks.append([i, i + world_size])
-        logger.debug("Distributed group is %s", str(group_ranks))
-        _DISAGG = dist_kv.KV_transfer_agent(
-            group_ranks=group_ranks,
+
+def ensure_kv_transfer_initialized(
+    config: "KVTransferConfig"
+) -> None:
+    """
+    Initialize KV cache transfer parallel group.
+    """
+
+    global _KV_TRANSFER
+    if config.is_distributed_kv_instance and _KV_TRANSFER is None:
+        _KV_TRANSFER = dist_kv.KV_transfer_agent(
             local_rank=get_world_group().local_rank,
+            config=config
         )
-        logger.debug("_DISAGG initialized for rank %d",
-                     torch.distributed.get_rank())
+
 
 
 def ensure_model_parallel_initialized(
@@ -1215,7 +1156,7 @@ _TP_STATE_PATCHED = False
 def patch_tensor_parallel_group(tp_group: GroupCoordinator):
     """Patch the tp group temporarily until this function ends.
 
-    This method is for draft workers of speculative decode to run draft model
+    This method is for draft workers of speculative decoding to run draft model
     with different tp degree from that of target model workers.
 
     Args:
@@ -1257,11 +1198,6 @@ def destroy_model_parallel():
     if _PP:
         _PP.destroy()
     _PP = None
-
-    global _DISAGG
-    if _DISAGG:
-        _DISAGG.destroy()
-    _DISAGG = None
 
 
 def destroy_distributed_environment():

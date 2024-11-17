@@ -1,6 +1,5 @@
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Type, Union
 
-import vllm.distributed.kv_transfer.vllm_adapter as dist_kv
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -49,7 +48,7 @@ class GPUExecutor(ExecutorBase):
         if distributed_init_method is None:
             distributed_init_method = get_distributed_init_method(
                 get_ip(),
-                get_open_port(force=dist_kv.IS_DISTRIBUTED_KV_INSTANCE))
+                get_open_port())
         return dict(
             vllm_config=self.vllm_config,
             local_rank=local_rank,

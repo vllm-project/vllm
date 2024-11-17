@@ -7,8 +7,9 @@ import torch
 import torch.distributed
 
 import vllm.envs as envs
-from vllm.config import ParallelConfig, VllmConfig
+from vllm.config import ParallelConfig, VllmConfig, KVTransferConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
+                              ensure_kv_transfer_initialized,
                               init_distributed_environment,
                               set_custom_all_reduce)
 from vllm.logger import init_logger
@@ -449,6 +450,7 @@ class Worker(LocalOrDistributedWorkerBase):
 
 def init_worker_distributed_environment(
     parallel_config: ParallelConfig,
+    kv_transfer_config: KVTransferConfig,
     rank: int,
     distributed_init_method: Optional[str] = None,
     local_rank: int = -1,
@@ -461,6 +463,8 @@ def init_worker_distributed_environment(
 
     ensure_model_parallel_initialized(parallel_config.tensor_parallel_size,
                                       parallel_config.pipeline_parallel_size)
+
+    ensure_kv_transfer_initialized(local_rank, kv_transfer_config)
 
 
 def _check_if_gpu_supports_dtype(torch_dtype: torch.dtype):

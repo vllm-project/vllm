@@ -8,7 +8,7 @@ import vllm.distributed.kv_transfer.kv_connector.pynccl_connector.pynccl_pipe \
     as pnp 
 import vllm.distributed.kv_transfer.kv_connector.pynccl_connector.lookup_buffer\
     as lb
-from vllm.config import ParallelConfig
+from vllm.config import KVTransferConfig
 
 # TODO: the test depends on a lot of fields in the current implementation.
 # We should have standard interface instead direct field access
@@ -127,9 +127,7 @@ if __name__ == "__main__":
     print("initialized! My rank is %d" % my_rank)
     
 
-    config = ParallelConfig(
-        1,
-        1,
+    config = KVTransferConfig(
         kv_connector='PyNcclConnector',
         kv_buffer_device='cuda',
         kv_buffer_size=1e9,

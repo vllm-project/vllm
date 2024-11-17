@@ -13,14 +13,13 @@ from vllm.config import (CacheConfig, ConfigFormat, DecodingConfig,
                          LoRAConfig, ModelConfig, ObservabilityConfig,
                          ParallelConfig, PoolerConfig, PromptAdapterConfig,
                          SchedulerConfig, SpeculativeConfig, TaskOption,
-                         TokenizerPoolConfig, VllmConfig)
+                         TokenizerPoolConfig, KVTransferConfig, VllmConfig)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.platforms import current_platform
 from vllm.transformers_utils.utils import check_gguf_file
 from vllm.utils import FlexibleArgumentParser, StoreBoolean
-import vllm.distributed.kv_transfer.vllm_adapter as dist_kv
 
 if TYPE_CHECKING:
     from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
@@ -109,7 +108,6 @@ class EngineArgs:
     distributed_executor_backend: Optional[Union[str,
                                                  Type[ExecutorBase]]] = None
     # number of P/D disaggregation (or other disaggregation) workers
-    kv_disagg_parapllel_size: int = 1
     pipeline_parallel_size: int = 1
     tensor_parallel_size: int = 1
     max_parallel_loading_workers: Optional[int] = None
@@ -196,10 +194,13 @@ class EngineArgs:
 
     # P/D disaggregation coonfiguration
     kv_connector: Optional[str] = None
-    kv_buffer_size: Optional[int] = None
-    kv_buffer_device: Optional[str] = None
-    kv_disagg_role: Optional[str] = None
-    kv_disagg_device: Optional[str] = None
+    kv_buffer_size: Optional[int] = 1e9
+    kv_buffer_device: Optional[str] = "gpu"
+    kv_role: Optional[str] = None
+    kv_rank: Optional[str] = None
+    kv_parallel_size: int = 1
+    kv_ip: str = "127.0.0.1"
+    kv_port: int = 14579
 
     def __post_init__(self):
         if not self.tokenizer:
@@ -888,35 +889,27 @@ class EngineArgs:
             "e.g. {\"pooling_type\": \"mean\", \"normalize\": false}.'")
 
         parser.add_argument(
-            '--kv-disagg-parallel-size',
-            '-kdp',
+            '--kv-parallel-size',
             type=int,
-            default=1
+            default=EngineArgs.kv_parallel_size,
+            help="The number of parallel instances for KV cache transfer. "
+            "For PyNcclConnector, this should be >1."
         )
 
         parser.add_argument(
             '--kv-connector',
             type=str,
             default=None,
-            choices=["TorchDistributedConnector", "LMCacheConnector"],
+            choices=["PyNcclConnector"],
             help="The KV connector for vLLM to transmit KV caches between vLLM"
             " instances.")
 
         parser.add_argument(
             '--kv-buffer-size',
             type=float,
-            default=None,
+            default=EngineArgs.kv_buffer_size,
             help="The buffer size for TorchDistributedConnector. Measured in "
             "number of bytes. Recommended value: 1e9 (about 1GB)."
-        )
-
-        parser.add_argument(
-            '--kv-disagg-role',
-            type=str,
-            default=None,            
-            choices=["kv_producer", "kv_consumer", "both"],
-            help="Whether this vLLM instance produces, consumes KV cache, or "
-            "both. Choices are 'kv_producer', 'kv_consumer', and 'both'."
         )
 
         parser.add_argument(
@@ -927,6 +920,40 @@ class EngineArgs:
             help="The device used by kv connector to buffer the KV cache. Can "
             "be CPU or GPU. Recommended value: CPU."
         )
+
+        parser.add_argument(
+            '--kv-role',
+            type=str,
+            default=None,            
+            choices=["kv_producer", "kv_consumer", "both"],
+            help="Whether this vLLM instance produces, consumes KV cache, or "
+            "both. Choices are 'kv_producer', 'kv_consumer', and 'both'."
+        )
+
+        parser.add_argument(
+            '--kv-rank',
+            type=int,
+            default=None,
+            help="The rank of this vLLM instance in the KV cache transfer."
+            " Typicall value: 0 for prefill instance, 1 for decode instance."
+        )
+
+        parser.add_argument(
+            '--kv-ip',
+            type=str,
+            default=EngineArgs.kv_ip,
+            help="The IP address of the KV cache producer."
+        )
+
+        
+        parser.add_argument(
+            '--kv-port',
+            type=int,
+            default=EngineArgs.kv_port,
+            help="The port of the KV cache producer."
+        )
+
+        
 
         return parser
 
@@ -1030,7 +1057,6 @@ class EngineArgs:
             cpu_offload_gb=self.cpu_offload_gb,
         )
         parallel_config = ParallelConfig(
-            kv_disagg_parallel_size=self.kv_disagg_parallel_size,
             pipeline_parallel_size=self.pipeline_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,
             worker_use_ray=self.worker_use_ray,
@@ -1043,14 +1069,17 @@ class EngineArgs:
             ),
             ray_workers_use_nsight=self.ray_workers_use_nsight,
             distributed_executor_backend=self.distributed_executor_backend,
+        )
+        kv_transfer_config = KVTransferConfig(
+            kv_parallel_size=self.kv_parallel_size,
             kv_connector=self.kv_connector,
             kv_buffer_size=self.kv_buffer_size,
             kv_buffer_device=self.kv_buffer_device,
-            kv_disagg_role=self.kv_transfer_role,
-            kv_disagg_rank=self.kv_disagg_rank,
+            kv_role=self.kv_role,
+            kv_rank=self.kv_rank,
+            kv_ip=self.kv_ip,
+            kv_port=self.kv_port,
         )
-        # set the kv cache transfer condition check variables
-        dist_kv.set_kv_transfer_attribute(parallel_config)
 
         max_model_len = model_config.max_model_len
         use_long_context = max_model_len > 32768
