@@ -684,14 +684,3 @@ class PiecewiseBackend:
 
         entry.cudagraph.replay()
         return entry.output
-
-
-def select_default_backend(level: int) -> Union[str, Callable]:
-    if level in [CompilationLevel.DYNAMO_AS_IS, CompilationLevel.DYNAMO_ONCE]:
-        backend_str = "eager"
-        return backend_str
-    assert level == CompilationLevel.PIECEWISE
-
-    from vllm.plugins import get_current_vllm_config
-    compilation_config = get_current_vllm_config().compilation_config
-    return VllmBackend(compilation_config)
