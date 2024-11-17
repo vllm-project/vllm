@@ -66,6 +66,10 @@ class CPUEmbeddingModelRunner(
 
         hidden_states = model_executable(**execute_model_kwargs)
 
+        # Only perform pooling in the driver worker.
+        if not self.is_driver_worker:
+            return []
+
         return [
             self.model.pooler(hidden_states=hidden_states,
                               pooling_metadata=model_input.pooling_metadata)
