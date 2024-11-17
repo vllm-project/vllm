@@ -90,7 +90,6 @@ class AutoWeightsLoader:
         super().__init__()
 
         self.module = module
-        self.weights_to_load = {name for name, _ in module.named_parameters()}
         self.skip_prefixes = skip_prefixes or []
         self.ignore_unexpected_prefixes = ignore_unexpected_prefixes or []
 
@@ -230,14 +229,6 @@ class AutoWeightsLoader:
             weights = mapper.apply(weights)
 
         autoloaded_weights = set(self._load_module("", self.module, weights))
-        if (weights_not_loaded := self.weights_to_load - autoloaded_weights):
-            if strict:
-                raise ValueError(
-                    "Following weights were not initialized from checkpoint: "
-                    f"{weights_not_loaded}")
-            logger.warning(
-                "Following weights were not initialized from checkpoint: %s",
-                weights_not_loaded)
         return autoloaded_weights
 
 
