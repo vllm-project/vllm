@@ -499,6 +499,5 @@ class Gemma2EmbeddingModel(nn.Module, SupportsPP):
     ) -> Optional[PoolerOutput]:
         return self._pooler(hidden_states, pooling_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
-        return self.model.load_weights(weights)
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+        self.model.load_weights(weights)
