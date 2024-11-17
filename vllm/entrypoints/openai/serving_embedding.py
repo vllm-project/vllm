@@ -1,7 +1,7 @@
 import asyncio
 import base64
 import time
-from typing import (Annotated, Any, AsyncGenerator, Dict, List, Literal,
+from typing import (Annotated, Any, AsyncGenerator, Dict, Final, List, Literal,
                     Optional, Sequence, Tuple, Union, cast)
 
 import numpy as np
@@ -12,8 +12,8 @@ from typing_extensions import assert_never
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
+                                         ChatTemplateContentFormatOption,
                                          ConversationMessage,
-                                         load_chat_template,
                                          parse_chat_messages_futures)
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (EmbeddingChatRequest,
@@ -87,7 +87,8 @@ class OpenAIServingEmbedding(OpenAIServing):
         *,
         request_logger: Optional[RequestLogger],
         chat_template: Optional[str],
-    ):
+        chat_template_content_format: ChatTemplateContentFormatOption,
+    ) -> None:
         super().__init__(engine_client=engine_client,
                          model_config=model_config,
                          base_model_paths=base_model_paths,
@@ -95,7 +96,8 @@ class OpenAIServingEmbedding(OpenAIServing):
                          prompt_adapters=None,
                          request_logger=request_logger)
 
-        self.chat_template = load_chat_template(chat_template)
+        self.chat_template = chat_template
+        self.chat_template_content_format: Final = chat_template_content_format
 
     async def create_embedding(
         self,
@@ -171,6 +173,8 @@ class OpenAIServingEmbedding(OpenAIServing):
                         request.messages,
                         chat_template=request.chat_template
                         or self.chat_template,
+                        chat_template_content_format=self.
+                        chat_template_content_format,
                         add_generation_prompt=request.add_generation_prompt,
                         continue_final_message=request.continue_final_message,
                         truncate_prompt_tokens=truncate_prompt_tokens,
@@ -259,10 +263,7 @@ class OpenAIServingEmbedding(OpenAIServing):
                List[TokensPrompt]]:
 
         conversation, mm_data_future = parse_chat_messages_futures(
-            messages,
-            self.model_config,
-            tokenizer,
-        )
+            messages, self.model_config, tokenizer, "string")
         await mm_data_future
 
         if len(conversation) != 2:

@@ -1,9 +1,14 @@
 import enum
 import random
-from typing import NamedTuple, Optional, Tuple, Union
+from typing import TYPE_CHECKING, NamedTuple, Optional, Tuple, Union
 
 import numpy as np
 import torch
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
+else:
+    VllmConfig = None
 
 
 class PlatformEnum(enum.Enum):
@@ -128,6 +133,19 @@ class Platform:
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
+
+    @classmethod
+    def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+        """
+        Check and update the configuration for the current platform.
+
+        It can raise an exception if the configuration is not compatible with
+        the current platform, or it can update the configuration to make it
+        compatible with the current platform.
+
+        The config is passed by reference, so it can be modified in place.
+        """
+        pass
 
 
 class UnspecifiedPlatform(Platform):
