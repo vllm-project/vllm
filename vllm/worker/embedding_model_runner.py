@@ -139,20 +139,10 @@ class EmbeddingModelRunner(
         if not self.is_driver_worker:
             return []
 
-        if self.model_config.task == "cross_encoding":
-            return [
-                self.model.classification_output(
-                    hidden_states=hidden_or_intermediate_states,
-                    pooling_metadata=model_input.pooling_metadata)
-            ]
-        elif self.model_config.task == "embedding":
-            return [
-                self.model.pooler(
-                    hidden_states=hidden_or_intermediate_states,
-                    pooling_metadata=model_input.pooling_metadata)
-            ]
-        else:
-            raise AssertionError("Invalid task for EmbeddingModelRunner")
+        return [
+            self.model.pooler(hidden_states=hidden_or_intermediate_states,
+                              pooling_metadata=model_input.pooling_metadata)
+        ]
 
     def make_model_input_from_broadcasted_tensor_dict(
             self,

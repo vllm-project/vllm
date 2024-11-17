@@ -9,7 +9,8 @@ from vllm.utils import supports_kw
 
 if TYPE_CHECKING:
     from vllm.config import LoRAConfig, MultiModalConfig, SchedulerConfig
-    from vllm.sequence import IntermediateTensors
+    from vllm.model_executor.pooling_metadata import PoolingMetadata
+    from vllm.sequence import IntermediateTensors, PoolerOutput
 
 logger = init_logger(__name__)
 
@@ -350,3 +351,57 @@ def is_attention_free(
         return isinstance(model, _IsAttentionFreeType)
 
     return isinstance(model, IsAttentionFree)
+
+
+@runtime_checkable
+class SupportsCrossEncoding(Protocol):
+
+    def pooler(
+        self,
+        hidden_states: torch.Tensor,
+        pooling_metadata: "PoolingMetadata",
+    ) -> "PoolerOutput":
+        """Only called on TP rank 0."""
+
+    def forward(
+        self,
+        *,
+        token_types: torch.Tensor,
+    ) -> torch.Tensor:
+        ...
+
+
+@overload
+def supports_cross_encoding(
+        model: Type[object]) -> TypeIs[Type[SupportsCrossEncoding]]:
+    ...
+
+
+@overload
+def supports_cross_encoding(model: object) -> TypeIs[SupportsCrossEncoding]:
+    ...
+
+
+def _supports_token_types(model: Union[Type[object], object]) -> bool:
+    model_forward = getattr(model, "forward", None)
+    if not callable(model_forward):
+        return False
+
+    return supports_kw(model_forward, "token_type_ids")
+
+
+def _supports_cross_encoding(
+    model: Union[Type[object], object],
+) -> Union[TypeIs[Type[SupportsCrossEncoding]], TypeIs[SupportsCrossEncoding]]:
+
+    if isinstance(model, type):
+        return isinstance(model, SupportsCrossEncoding)
+
+    return isinstance(model, SupportsCrossEncoding)
+
+
+def supports_cross_encoding(
+    model: Union[Type[object], object],
+) -> Union[TypeIs[Type[SupportsCrossEncoding]], TypeIs[SupportsCrossEncoding]]:
+
+    return _supports_cross_encoding(model) and _supports_token_types(model)

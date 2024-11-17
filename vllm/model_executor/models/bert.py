@@ -501,7 +501,7 @@ class BertForSequenceClassification(nn.Module):
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
 
-    def classification_output(
+    def pooler(
         self,
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
@@ -538,7 +538,7 @@ class BertForSequenceClassification(nn.Module):
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
-        token_types: Optional[torch.Tensor] = None,
+        token_type_ids: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         return self.bert(input_ids=input_ids,
                          position_ids=positions,
@@ -546,4 +546,4 @@ class BertForSequenceClassification(nn.Module):
                          inputs_embeds=inputs_embeds,
                          intermediate_tensors=intermediate_tensors,
                          attn_metadata=attn_metadata,
-                         token_type_ids=token_types)
+                         token_type_ids=token_type_ids)

@@ -146,7 +146,7 @@ class OpenAIServingEmbedding(OpenAIServing):
                 raise NotImplementedError("Prompt adapter is not supported "
                                           "for embedding models")
 
-            if self.model_config.task == "cross_encoding":
+            if self.model_config.is_cross_encoder:
                 if isinstance(request, EmbeddingChatRequest):
                     (
                         _,

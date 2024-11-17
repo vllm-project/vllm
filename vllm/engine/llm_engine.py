@@ -344,7 +344,7 @@ class LLMEngine:
 
         self.model_executor = executor_class(vllm_config=vllm_config, )
 
-        if self.model_config.task not in ["embedding", "cross_encoding"]:
+        if self.model_config.task != "embedding":
             self._initialize_kv_caches()
 
         # If usage stat is enabled, collect relevant info.
@@ -1171,7 +1171,8 @@ class LLMEngine:
                         else:
                             seq_group.metrics.model_execute_time = (
                                 o.model_execute_time)
-            if self.model_config.task in ["embedding", "cross_encoding"]:
+
+            if self.model_config.task == "embedding":
                 self._process_sequence_group_outputs(seq_group, output)
             else:
                 self.output_processor.process_prompt_logprob(seq_group, output)

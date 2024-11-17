@@ -173,38 +173,3 @@ def is_embedding_model(
         return isinstance(model, VllmModelForEmbedding)
 
     return isinstance(model, VllmModelForEmbedding)
-
-
-@runtime_checkable
-class VllmModelForCrossEncoding(VllmModel[C_co, T], Protocol[C_co, T]):
-
-    def classification_output(
-        self,
-        hidden_states: T,
-        pooling_metadata: "PoolingMetadata",
-    ) -> "PoolerOutput":
-        """Only called on TP rank 0."""
-
-
-@overload
-def is_cross_encoder_model(
-        model: Type[object]) -> TypeIs[Type[VllmModelForCrossEncoding]]:
-    ...
-
-
-@overload
-def is_cross_encoder_model(model: object) -> TypeIs[VllmModelForCrossEncoding]:
-    ...
-
-
-def is_cross_encoder_model(
-    model: Union[Type[object], object],
-) -> Union[TypeIs[Type[VllmModelForCrossEncoding]],
-           TypeIs[VllmModelForCrossEncoding]]:
-    if not is_vllm_model(model):
-        return False
-
-    if isinstance(model, type):
-        return isinstance(model, VllmModelForCrossEncoding)
-
-    return isinstance(model, VllmModelForCrossEncoding)

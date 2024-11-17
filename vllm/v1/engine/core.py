@@ -52,9 +52,7 @@ class EngineCore:
         if not vllm_config.model_config.is_multimodal_model:
             vllm_config.cache_config.enable_prefix_caching = True
 
-        assert vllm_config.model_config.task not in [
-            "embedding", "cross_encoding"
-        ]
+        assert vllm_config.model_config.task != "embedding"
 
         logger.info("Initializing an LLM engine (v%s) with config: %s",
                     VLLM_VERSION, vllm_config)
