@@ -1,7 +1,5 @@
 from dataclasses import asdict
 
-from transformers import AutoTokenizer
-
 from vllm import LLM, SamplingParams
 from vllm.engine.arg_utils import EngineArgs
 from vllm.utils import FlexibleArgumentParser
@@ -16,26 +14,9 @@ def get_prompts(args):
         "The future of AI is",
     ]
 
-    # if user specifies input-len, generate fake fixed-length prompts
-    # The code is copied from benchmark_throughput.py
-    if args.input_len is not None:
-        tokenizer = AutoTokenizer.from_pretrained(
-            args.tokenizer, trust_remote_code=args.trust_remote_code)
-
-        for i in range(-10, 10):
-            prompt = "hi " * (args.input_len + i)
-            tokenized_prompt = tokenizer(prompt).input_ids
-            if len(tokenized_prompt) == args.input_len:
-                break
-        else:
-            raise ValueError(
-                f"Failed to synthesize a prompt with {args.input_len} tokens.")
-
-        prompts = [prompt for _ in range(args.batch_size)]
-
-    if args.batch_size != len(prompts):
+    if args.num_prompts != len(prompts):
         prompts = (prompts *
-                   ((args.batch_size // len(prompts)) + 1))[:args.batch_size]
+                   ((args.num_prompts // len(prompts)) + 1))[:args.num_prompts]
 
     return prompts
 
@@ -49,7 +30,7 @@ def main(args):
                                      temperature=args.temperature,
                                      top_p=args.top_p,
                                      top_k=args.top_k,
-                                     max_tokens=args.output_len)
+                                     max_tokens=args.max_tokens)
 
     # Create an LLM.
     # The default model is 'facebook/opt-125m'
@@ -69,19 +50,14 @@ def main(args):
 
 if __name__ == '__main__':
     parser = FlexibleArgumentParser()
-    parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=4,
-        help="Batch size for inference, default is length of sample prompts")
-    parser.add_argument("--input-len",
+    parser.add_argument("--num-prompts",
                         type=int,
-                        default=None,
-                        help="Use fake fixed-length prompt as input if set")
-    parser.add_argument("--output-len",
+                        default=4,
+                        help="Number of prompts used for inference")
+    parser.add_argument("--max-tokens",
                         type=int,
                         default=16,
-                        help="Output length for sampling")
+                        help="Generated output length for sampling")
     parser.add_argument('--n',
                         type=int,
                         default=1,
@@ -101,6 +77,4 @@ if __name__ == '__main__':
 
     EngineArgs.add_cli_args(parser)
     args = parser.parse_args()
-    if args.tokenizer is None:
-        args.tokenizer = args.model
     main(args)
