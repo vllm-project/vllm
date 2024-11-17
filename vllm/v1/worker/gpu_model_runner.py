@@ -1,4 +1,3 @@
-import os
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
@@ -8,11 +7,8 @@ import torch
 import torch.distributed
 import torch.nn as nn
 
-from vllm import envs
 from vllm.compilation.compile_context import set_compile_context
-from vllm.compilation.config import CompilationConfig
-from vllm.compilation.levels import CompilationLevel
-from vllm.config import VllmConfig
+from vllm.config import CompilationConfig, CompilationLevel, VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.logger import init_logger
@@ -99,7 +95,7 @@ class GPUModelRunner:
             pin_memory=self.pin_memory,
         )
 
-        self.use_cuda_graph = (envs.VLLM_TORCH_COMPILE_LEVEL
+        self.use_cuda_graph = (self.vllm_config.compilation_config.level
                                == CompilationLevel.PIECEWISE
                                and not self.model_config.enforce_eager)
         # TODO(woosuk): Provide an option to tune the max cudagraph batch size.
@@ -517,9 +513,9 @@ class GPUModelRunner:
             # CUDA graphs do not work properly with the custom CUDA kernels.
             # FIXME(woosuk): Disable inductor to reduce the compilation time
             # and avoid any potential issues with the inductor.
-            os.environ["VLLM_CUSTOM_OPS"] = "none"
             set_compilation_config(
                 CompilationConfig(
+                    custom_ops=["none"],
                     use_cudagraph=True,
                     non_cudagraph_ops=["vllm.unified_v1_flash_attention"],
                     use_inductor=True,

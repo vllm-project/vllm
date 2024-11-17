@@ -3,7 +3,7 @@ from typing import Dict, List, Optional
 
 import pytest
 
-from vllm.compilation.levels import CompilationLevel
+from vllm.config import CompilationLevel
 from vllm.utils import cuda_device_count_stateless
 
 from ..utils import compare_all_settings
