@@ -54,12 +54,12 @@ class HeadMajorColumnParallelLinear(MergedColumnParallelLinear):
         return load_column_parallel_weight(param, loaded_weight)
 
 
-@torch.compile
+@torch.compile(dynamic=True)
 def quick_gelu(x):
     return x * torch.sigmoid(1.702 * x)
 
 
-@torch.compile
+@torch.compile(dynamic=True)
 def gegelu(input, limit: Optional[float] = None):
     a_gelu, a_linear = input[..., ::2], input[..., 1::2]
     if limit is not None:
