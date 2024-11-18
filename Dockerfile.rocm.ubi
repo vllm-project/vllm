@@ -114,14 +114,12 @@ RUN cd /opt/rocm/share/amd_smi && \
 
 FROM rocm_devel AS build_flashattention
 
-# only required when not using triton backend
 ARG FA_GFX_ARCHS="gfx90a;gfx942"
-ARG FLASH_ATTENTION_USE_TRITON_ROCM="TRUE"
-# FA_BRANCH is the HEAD of main_perf branch as of Sep 4 2024 which includes triton backend support, see https://github.com/Dao-AILab/flash-attention/pull/1203
-ARG FA_BRANCH="75b5360"
+
+# the FA_BRANCH commit belongs to the ROCm/flash-attention fork, `main_perf` branch
+ARG FA_BRANCH="3cea2fb"
 ARG MAX_JOBS
 ENV MAX_JOBS=${MAX_JOBS}
-ENV FLASH_ATTENTION_USE_TRITON_ROCM=${FLASH_ATTENTION_USE_TRITON_ROCM}
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=cache,target=/workspace/build \
@@ -134,7 +132,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install cmake ninja packaging && \
     env \
         GPU_ARCHS="${FA_GFX_ARCHS}" \
-        BUILD_TARGET="rocm" \
         python3 setup.py bdist_wheel --dist-dir=/install
 
 ##################################################################################################
@@ -238,7 +235,7 @@ ENV HF_HUB_OFFLINE=1 \
     # Silences the HF Tokenizers warning
     TOKENIZERS_PARALLELISM=false  \
     RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES=1 \
-    FLASH_ATTENTION_USE_TRITON_ROCM="TRUE" \
+    VLLM_USE_TRITON_FLASH_ATTN=0 \
     OUTLINES_CACHE_DIR=/tmp/outlines \
     NUMBA_CACHE_DIR=/tmp/numba \
     TRITON_CACHE_DIR=/tmp/triton
