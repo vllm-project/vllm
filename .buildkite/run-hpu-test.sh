@@ -13,4 +13,4 @@ trap remove_docker_container EXIT
 remove_docker_container
 
 # Run the image and launch offline inference
-docker run --runtime=habana --name=hpu-test --network=host -e VLLM_SKIP_WARMUP=true --entrypoint="" hpu-test-env python3 examples/offline_inference.py
+docker run --runtime=habana --name=hpu-test --network=host -e HABANA_VISIBLE_DEVICES=all -e VLLM_SKIP_WARMUP=true --entrypoint="" hpu-test-env python3 examples/offline_inference.py

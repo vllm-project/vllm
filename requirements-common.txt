@@ -17,7 +17,7 @@ pillow  # Required for image processing
 prometheus_client >= 0.18.0
 prometheus-fastapi-instrumentator >= 7.0.0
 tiktoken >= 0.6.0  # Required for DBRX tokenizer
-lm-format-enforcer == 0.10.6
+lm-format-enforcer >= 0.10.9, < 0.11
 outlines >= 0.0.43, < 0.1
 typing_extensions >= 4.10
 filelock >= 3.10.4 # filelock starts to support `mode` argument from 3.10.4
@@ -26,9 +26,9 @@ pyzmq
 msgspec
 gguf == 0.10.0
 importlib_metadata
-mistral_common[opencv] >= 1.4.4
+mistral_common[opencv] >= 1.5.0
 pyyaml
 six>=1.16.0; python_version > '3.11' # transitive dependency of pandas that needs to be the latest version for python 3.12
 setuptools>=74.1.1; python_version > '3.11' # Setuptools is used by triton, we need to ensure a modern version is installed for 3.12+ so that it does not try to import distutils, which was removed in 3.12
 einops # Required for Qwen2-VL.
-compressed-tensors == 0.7.1 # required for compressed-tensors
+compressed-tensors == 0.8.0 # required for compressed-tensors

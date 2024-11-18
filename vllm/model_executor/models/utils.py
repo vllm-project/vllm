@@ -1,7 +1,7 @@
 import itertools
 from dataclasses import dataclass, field
 from typing import (Any, Callable, Dict, Iterable, List, Literal, Mapping,
-                    Optional, Protocol, Tuple, Union, overload)
+                    Optional, Protocol, Set, Tuple, Union, overload)
 
 import torch
 import torch.nn as nn
@@ -14,8 +14,7 @@ from vllm.attention.selector import (_Backend, backend_name_to_enum,
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models import ModelRegistry
-from vllm.multimodal.base import MultiModalPlaceholderMap, NestedTensors
+from vllm.multimodal import MultiModalPlaceholderMap, NestedTensors
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils import is_pin_memory_available
@@ -173,8 +172,9 @@ class AutoWeightsLoader:
         if module != self.module:
             module_load_weights = getattr(module, "load_weights", None)
             if callable(module_load_weights):
-                module_load_weights(weights)
-                return
+                loaded_params = module_load_weights(weights)
+                yield from map(lambda x: self._get_qualname(base_prefix, x),
+                               loaded_params)
 
         child_modules = dict(module.named_children())
         child_params = dict(module.named_parameters(recurse=False))
@@ -223,11 +223,11 @@ class AutoWeightsLoader:
         weights: Iterable[Tuple[str, torch.Tensor]],
         *,
         mapper: Optional[WeightsMapper] = None,
-    ) -> List[str]:
+    ) -> Set[str]:
         if mapper is not None:
             weights = mapper.apply(weights)
 
-        autoloaded_weights = list(self._load_module("", self.module, weights))
+        autoloaded_weights = set(self._load_module("", self.module, weights))
         return autoloaded_weights
 
 
@@ -240,12 +240,9 @@ def init_vllm_registered_model(
     Helper function to initialize an inner model registered to vLLM,
     based on the arguments passed to the outer vLLM model.
     """
-    model_class, _ = ModelRegistry.resolve_model_cls(hf_config.architectures)
-
-    return model_class(
-        vllm_config=vllm_config.with_hf_config(hf_config),
-        prefix=prefix,
-    )
+    from vllm.model_executor.model_loader.loader import _initialize_model
+    vllm_config = vllm_config.with_hf_config(hf_config)
+    return _initialize_model(vllm_config, prefix)
 
 
 @overload

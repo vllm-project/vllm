@@ -1,11 +1,11 @@
 import logging
-from typing import TYPE_CHECKING, Callable, Optional, Union
+from contextlib import contextmanager
+from typing import TYPE_CHECKING, Optional
 
 import vllm.envs as envs
 
 if TYPE_CHECKING:
-    from vllm.compilation.config import CompilationConfig
-    from vllm.config import VllmConfig
+    from vllm.config import CompilationConfig, VllmConfig
 else:
     CompilationConfig = None
     VllmConfig = None
@@ -27,28 +27,27 @@ def load_general_plugins():
     allowed_plugins = envs.VLLM_PLUGINS
 
     discovered_plugins = entry_points(group='vllm.general_plugins')
+    if len(discovered_plugins) == 0:
+        logger.info("No plugins found.")
+        return
+    logger.info("Available plugins:")
     for plugin in discovered_plugins:
-        logger.info("Found general plugin: %s", plugin.name)
+        logger.info("name=%s, value=%s, group=%s", plugin.name, plugin.value,
+                    plugin.group)
+    if allowed_plugins is None:
+        logger.info("all available plugins will be loaded.")
+        logger.info("set environment variable VLLM_PLUGINS to control"
+                    " which plugins to load.")
+    else:
+        logger.info("plugins to load: %s", allowed_plugins)
+    for plugin in discovered_plugins:
         if allowed_plugins is None or plugin.name in allowed_plugins:
             try:
                 func = plugin.load()
                 func()
-                logger.info("Loaded general plugin: %s", plugin.name)
+                logger.info("plugin %s loaded.", plugin.name)
             except Exception:
-                logger.exception("Failed to load general plugin: %s",
-                                 plugin.name)
-
-
-_torch_compile_backend: Optional[Union[Callable, str]] = None
-
-
-def set_torch_compile_backend(backend: Union[Callable, str]):
-    global _torch_compile_backend
-    _torch_compile_backend = backend
-
-
-def get_torch_compile_backend() -> Optional[Union[Callable, str]]:
-    return _torch_compile_backend
+                logger.exception("Failed to load plugin %s", plugin.name)
 
 
 _compilation_config: Optional[CompilationConfig] = None
@@ -61,3 +60,29 @@ def set_compilation_config(config: Optional[CompilationConfig]):
 
 def get_compilation_config() -> Optional[CompilationConfig]:
     return _compilation_config
+
+
+_current_vllm_config: Optional[VllmConfig] = None
+
+
+@contextmanager
+def set_current_vllm_config(vllm_config: VllmConfig):
+    """
+    Temporarily set the current VLLM config.
+    Used during model initialization.
+    We save the current VLLM config in a global variable,
+    so that all modules can access it, e.g. custom ops
+    can access the VLLM config to determine how to dispatch.
+    """
+    global _current_vllm_config
+    old_vllm_config = _current_vllm_config
+    try:
+        _current_vllm_config = vllm_config
+        yield
+    finally:
+        _current_vllm_config = old_vllm_config
+
+
+def get_current_vllm_config() -> VllmConfig:
+    assert _current_vllm_config is not None, "Current VLLM config is not set."
+    return _current_vllm_config
