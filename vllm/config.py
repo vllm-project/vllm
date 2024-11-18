@@ -1091,6 +1091,9 @@ class SchedulerConfig:
                  max_num_batched_tokens: Optional[int],
                  max_num_seqs: int,
                  max_model_len: int,
+                 max_num_partial_prefills: int = 1,
+                 max_long_partial_prefills: int = 1,
+                 long_prefill_threshold: float = 0.04,
                  num_lookahead_slots: int = 0,
                  delay_factor: float = 0.0,
                  enable_chunked_prefill: bool = False,
@@ -1131,6 +1134,10 @@ class SchedulerConfig:
                 )
 
         self.max_num_batched_tokens = max_num_batched_tokens
+        self.max_num_partial_prefills = max_num_partial_prefills
+        self.max_long_partial_prefills = max_long_partial_prefills
+        self.long_prefill_token_threshold = int(max_model_len *
+                                                long_prefill_threshold)
 
         if enable_chunked_prefill:
             logger.info(
