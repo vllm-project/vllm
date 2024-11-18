@@ -201,7 +201,6 @@ WORKDIR /home/vllm
 
 ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
 
-
 FROM vllm-openai as vllm-grpc-adapter
 
 USER root
@@ -209,7 +208,12 @@ USER root
 RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,from=build,src=/workspace/dist,target=/workspace/dist \
-    HOME=/root uv pip install $(echo dist/*.whl)'[tensorizer]' vllm-tgis-adapter==0.5.3
+    uv pip install $(echo /workspace/dist/*.whl)'[tensorizer]'  --verbose && \
+    uv pip install \
+        "git+https://github.com/opendatahub-io/vllm-tgis-adapter@ibm-20241106-adapter" --verbose
+
+RUN --mount=type=bind,from=build,src=/workspace/dist,target=/workspace/dist \
+    echo "Local dir and dist:" && pwd && ls -l /workspace/dist
 
 ENV GRPC_PORT=8033 \
     PORT=8000 \
