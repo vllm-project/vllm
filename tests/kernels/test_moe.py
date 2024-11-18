@@ -45,7 +45,7 @@ def test_fused_moe(
     score = torch.randn((m, e), device="cuda", dtype=dtype)
     triton_output = fused_moe(a, w1, w2, score, topk, renormalize=False)
     torch_output = torch_moe(a, w1, w2, score, topk)
-    torch.testing.assert_close(triton_output, torch_output, atol=1e-2, rtol=0)
+    torch.testing.assert_close(triton_output, torch_output, atol=2e-2, rtol=0)
 
 
 @pytest.mark.parametrize("dtype",

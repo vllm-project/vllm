@@ -1,5 +1,5 @@
 from functools import cached_property
-from typing import (Iterable, List, Literal, Mapping, Optional, Protocol,
+from typing import (Iterable, List, Literal, Mapping, Optional, Protocol, Set,
                     Tuple, TypedDict, Union)
 
 import torch
@@ -259,7 +259,7 @@ def init_vision_tower_for_llava(
 @INPUT_REGISTRY.register_input_processor(input_processor_for_llava)
 class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
 
-    def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
 
         config = vllm_config.model_config.hf_config
@@ -547,6 +547,7 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
     ) -> Optional[SamplerOutput]:
         return self.language_model.sample(logits, sampling_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         loader = AutoWeightsLoader(self)
-        loader.load_weights(weights)
+        return loader.load_weights(weights)

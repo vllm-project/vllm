@@ -1,5 +1,5 @@
 import math
-from typing import Iterable, List, Tuple
+from typing import Iterable, List, Set, Tuple
 
 import torch
 import torch.nn as nn
@@ -65,7 +65,7 @@ class MLPSpeculator(nn.Module):
     https://huggingface.co/ibm-fms and https://huggingface.co/ibm-granite
     """
 
-    def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
         config = vllm_config.model_config.hf_config
         self.n_predict = config.n_predict
@@ -188,11 +188,15 @@ class MLPSpeculator(nn.Module):
 
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         params_dict = dict(self.named_parameters())
+        loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
             param = params_dict.get(name.replace("speculator.", ""))
             if param is not None:
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
+                loaded_params.add(name)
+        return loaded_params
