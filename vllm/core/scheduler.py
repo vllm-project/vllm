@@ -1213,8 +1213,10 @@ class Scheduler:
         # this allows us to go through the `no_spec` path in
         # `spec_decode_worker.py`
         all_prefills = (len(scheduled_seq_groups) == num_prefill_groups)
-        num_lookahead_slots = (0 if all_prefills else
-                               running_scheduled.num_lookahead_slots)
+        num_lookahead_slots = (0 if
+                               (all_prefills
+                                and not self.scheduler_config.is_multi_step)
+                               else running_scheduled.num_lookahead_slots)
         return SchedulerOutputs(
             scheduled_seq_groups=scheduled_seq_groups,
             num_prefill_groups=num_prefill_groups,
