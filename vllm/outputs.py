@@ -297,7 +297,7 @@ class RequestOutput:
             request_output = seq_group.cached_request_output
             request_output.__init__(**init_kwargs)  # type: ignore
         else:
-            request_output = cls(**init_kwargs)
+            request_output = cls(**init_kwargs)  # type: ignore
 
         return request_output
 
