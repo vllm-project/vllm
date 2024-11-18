@@ -5,7 +5,7 @@ from typing import Callable, Iterable
 import torch
 import torch.utils.benchmark as TBenchmark
 from torch.utils.benchmark import Measurement as TMeasurement
-from utils import make_rand_sparse_tensors
+from utils import make_rand_sparse_tensors, to_fp16
 
 import vllm._custom_ops as ops
 
@@ -87,11 +87,16 @@ def bench_fp8(dtype: torch.dtype, m: int, k: int, n: int, label: str,
     b_compressed, e, a, b = make_rand_sparse_tensors(torch.float8_e4m3fn, m, n, k)
     aT = a.t()
     bT = b.t()
-    bf16_a = a.to(dtype=torch.bfloat16)
-    bf16_bT = bT.to(dtype=torch.bfloat16)
     scale_a = torch.tensor(1.0, device="cuda", dtype=torch.float32)
     scale_b = torch.tensor(1.0, device="cuda", dtype=torch.float32)
     bias = torch.zeros((n, ), device="cuda", dtype=torch.bfloat16)
+
+    out = ops.cutlass_scaled_sparse_mm(b_compressed, e, aT, scale_b, scale_a, torch.float16)
+    out_ref = ops.cutlass_scaled_mm(a, bT, scale_a, scale_b, torch.float16)
+
+    if not torch.allclose(out.t(), out_ref):
+        print("Incorrect result")
+        exit()
 
     timers = []
 

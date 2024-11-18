@@ -374,18 +374,22 @@ struct cutlass_3x_gemm {
 
   using Epilogue = Epilogue_<ElementAcc, ElementD, EpilogueDescriptor>;
 
-  using StrideD = Stride<int64_t, Int<1>, Int<0>>;
+  using StrideD = Stride<Int<1>, int64_t, Int<0>>;
   using ElementC = void;
   using StrideC = StrideD;
 
   using EVTCompute = typename Epilogue::EVTCompute;
 
+  static constexpr int AlignmentA  = 128 / cutlass::sizeof_bits<ElementAB>::value;
+  static constexpr int AlignmentB  = 128 / cutlass::sizeof_bits<ElementAB>::value;
+  static constexpr int AlignmentCD  = 128 / cutlass::sizeof_bits<ElementD>::value;
+
   using CollectiveEpilogue =
       typename cutlass::epilogue::collective::CollectiveBuilder<
           cutlass::arch::Sm90, cutlass::arch::OpClassTensorOp, TileShape,
           ClusterShape, cutlass::epilogue::collective::EpilogueTileAuto,
-          ElementAcc, float, ElementC, StrideC, 4, ElementD, StrideD, 4,
-          EpilogueSchedule, EVTCompute>::CollectiveOp;
+          ElementAcc, ElementAcc, ElementC, StrideC, AlignmentCD, ElementD,
+          StrideD, AlignmentCD, EpilogueSchedule, EVTCompute>::CollectiveOp;
 
   static constexpr size_t CEStorageSize =
       sizeof(typename CollectiveEpilogue::SharedStorage);
@@ -396,8 +400,8 @@ struct cutlass_3x_gemm {
   using CollectiveMainloop =
       typename cutlass::gemm::collective::CollectiveBuilder<
           cutlass::arch::Sm90, cutlass::arch::OpClassSparseTensorOp, 
-          ElementAB, cutlass::layout::RowMajor, 32, 
-          ElementAB, cutlass::layout::ColumnMajor, 16, 
+          ElementAB, cutlass::layout::RowMajor, AlignmentA, 
+          ElementAB, cutlass::layout::ColumnMajor, AlignmentB, 
           ElementAcc, TileShape, ClusterShape,
           Stages,
           KernelSchedule>::CollectiveOp;
@@ -419,25 +423,26 @@ void cutlass_sparse_gemm_caller(torch::Tensor& out, torch::Tensor const& a,
 
   int32_t m = a.size(0);
   int32_t n = b.size(1);
-  int32_t k = a.size(1);
+  int32_t k = b.size(0);
 
   int64_t lda = a.stride(0);
   int64_t ldb = b.stride(1);
-  int64_t ldc = out.stride(0);
+  int64_t ldc = out.stride(1);
 
-  using StrideA = Stride<int64_t, Int<1>, int64_t>;
-  using StrideB = Stride<int64_t, Int<1>, int64_t>;
-  using StrideC = typename Gemm::StrideC;
+  // using StrideB = Stride<int64_t, Int<1>, int64_t>;
+  // using StrideC = typename Gemm::StrideC;
 
-  StrideA a_stride{lda, Int<1>{}, 0};
+  using LayoutA = typename Gemm::GemmKernel::CollectiveMainloop::LayoutA;
+  using LayoutE = typename Gemm::GemmKernel::CollectiveMainloop::LayoutE;
+  using StrideB = typename Gemm::GemmKernel::StrideB;
+  using StrideC = typename Gemm::GemmKernel::StrideC;
+  using StrideD = typename Gemm::GemmKernel::StrideD;
+
   StrideB b_stride{ldb, Int<1>{}, 0};
-  StrideC c_stride{ldc, Int<1>{}, Int<0>{}};
+  StrideC c_stride{Int<1>{}, ldc, Int<0>{}};
 
   using GemmKernel = typename Gemm::GemmKernel;
   typename GemmKernel::ProblemShape prob_shape{m, n, k, 1};
-
-  using LayoutA = typename GemmKernel::CollectiveMainloop::LayoutA;
-  using LayoutE = typename GemmKernel::CollectiveMainloop::LayoutE;
 
   using ElementE = typename GemmKernel::CollectiveMainloop::ElementE;
   using SparseConfig = typename GemmKernel::CollectiveMainloop::SparseConfig;
@@ -513,10 +518,10 @@ struct sm90_fp8_config_default {
   // M in (128, inf)
   static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
   using KernelSchedule =
-      cutlass::gemm::KernelTmaWarpSpecializedPingpongFP8FastAccum;
+      cutlass::gemm::KernelTmaWarpSpecializedFP8FastAccum;
   using EpilogueSchedule = typename cutlass::epilogue::TmaWarpSpecialized;
-  using TileShape = Shape<_128, _128, _128>;
-  using ClusterShape = Shape<_2, _1, _1>;
+  using TileShape = Shape<_128,_128,_128>;
+  using ClusterShape = Shape<_1,_2,_1>;
   using Cutlass3xGemm =
       cutlass_3x_gemm<InType, OutType, Epilogue, TileShape, ClusterShape,
                       KernelSchedule, EpilogueSchedule, float>;
@@ -530,7 +535,7 @@ struct sm90_fp8_config_M64 {
   using KernelSchedule =
       cutlass::gemm::KernelTmaWarpSpecializedPingpongFP8FastAccum;
   using EpilogueSchedule = typename cutlass::epilogue::TmaWarpSpecializedCooperative;
-  using TileShape = Shape<_64, _64, _256>;
+  using TileShape = Shape<_128, _64, _256>;
   using ClusterShape = Shape<_1, _1, _1>;
 
   using TileSchedule = cutlass::gemm::PersistentScheduler;

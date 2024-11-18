@@ -553,7 +553,7 @@ def cutlass_scaled_sparse_mm(a: torch.Tensor,
 
     m = a.shape[0]
     n = b.shape[1]
-    out = torch.empty((m, n), dtype=out_dtype, device=a.device)
+    out = torch.empty((n, m), dtype=out_dtype, device=a.device).t()
 
     torch.ops._C.cutlass_scaled_sparse_mm(out, a, e, b, scale_a, scale_b, bias)
 
