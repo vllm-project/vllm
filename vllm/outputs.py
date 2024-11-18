@@ -278,20 +278,26 @@ class RequestOutput:
         finished_time = time.time() if finished else None
         seq_group.set_finished_time(finished_time)
 
-        init_args = (seq_group.request_id, prompt, prompt_token_ids,
-                     prompt_logprobs, outputs, finished, seq_group.metrics,
-                     seq_group.lora_request, encoder_prompt,
-                     encoder_prompt_token_ids, num_cached_tokens)
         init_kwargs = {
+            "request_id": seq_group.request_id,
+            "prompt": prompt,
+            "prompt_token_ids": prompt_token_ids,
+            "prompt_logprobs": prompt_logprobs,
+            "outputs": outputs,
+            "finished": finished,
+            "metrics": seq_group.metrics,
+            "lora_request": seq_group.lora_request,
+            "encoder_prompt": encoder_prompt,
+            "encoder_prompt_token_ids": encoder_prompt_token_ids,
+            "num_cached_tokens": num_cached_tokens,
             "multi_modal_placeholders": seq_group.multi_modal_placeholders
         }
 
         if use_cache:
             request_output = seq_group.cached_request_output
-            request_output.__init__(*init_args, **init_kwargs)  # type: ignore
-
+            request_output.__init__(**init_kwargs)  # type: ignore
         else:
-            request_output = cls(*init_args, **init_kwargs)
+            request_output = cls(**init_kwargs)
 
         return request_output
 
