@@ -17,7 +17,6 @@ from transformers import AutoProcessor
 
 from vllm import (EngineArgs, LLMEngine, RequestOutput, SamplingParams,
                   TextPrompt, TokensPrompt)
-from vllm.logger import init_logger
 from vllm.multimodal import MultiModalDataBuiltins
 from vllm.multimodal.inputs import PlaceholderRange
 from vllm.sequence import Logprob, SampleLogprobs
@@ -27,8 +26,6 @@ from ...utils import check_logprobs_close
 
 if TYPE_CHECKING:
     from _typeshed import StrPath
-
-logger = init_logger(__name__)
 
 MODELS = ["mistralai/Pixtral-12B-2409"]
 IMG_URLS = [
