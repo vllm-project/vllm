@@ -674,6 +674,8 @@ class ChatGLMBaseModel(nn.Module, SupportsLoRA, SupportsPP,
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, combined_weight)
+                loaded_params.add(combined_name)
+        return loaded_params
 
 
 class ChatGLM(ChatGLMBaseModel):
@@ -696,7 +698,8 @@ class ChatGLM(ChatGLMBaseModel):
 class ChatGLMV(ChatGLMBaseModel):
     packed_modules_mapping = {
         "query_key_value": ["query_key_value"],
-        "dense_h_to_4h": ["dense_h_to_4h"]
+        "dense_h_to_4h": ["dense_h_to_4h"],
+        "merged_proj": ["gate_proj", "dense_h_to_4h"]
     }
     # LoRA specific attributes
     supported_lora_modules = [
@@ -707,7 +710,7 @@ class ChatGLMV(ChatGLMBaseModel):
         # vision
         "fc1",
         "fc2",
-        "gate_proj",
+        "merged_proj",
         "linear_proj"
     ]
 
