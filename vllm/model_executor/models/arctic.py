@@ -1,5 +1,5 @@
 """Inference-only Snowflake Arctic model."""
-from typing import Iterable, List, Optional, Tuple, Union
+from typing import Iterable, List, Optional, Set, Tuple, Union
 
 import torch
 from torch import nn
@@ -480,7 +480,8 @@ class ArcticForCausalLM(nn.Module, SupportsPP):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -518,6 +519,7 @@ class ArcticForCausalLM(nn.Module, SupportsPP):
                         ("ws", f"experts.{expert_id}.w3.weight", expert_id))
 
         params_dict = dict(self.named_parameters())
+        loaded_params: Set[str] = set()
 
         logger.info(
             "It will take ~10 minutes loading from the 16-bit weights. "
@@ -573,3 +575,5 @@ class ArcticForCausalLM(nn.Module, SupportsPP):
                         weight_loader = getattr(param, "weight_loader",
                                                 default_weight_loader)
                         weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params
