@@ -1,5 +1,5 @@
 """Test model set-up and inference for quantized HF models supported
- on the CPU backend using IPEX (including AWQ).
+ on the CPU/GPU backend using IPEX (including AWQ/GPTQ).
  
  Validating the configuration and printing results for manual checking.
 
@@ -11,13 +11,15 @@ import pytest
 from vllm.platforms import current_platform
 
 MODELS = [
-    "casperhansen/llama-3-8b-instruct-awq",
+    "AMead10/Llama-3.2-1B-Instruct-AWQ",
+    "shuyuej/Llama-3.2-1B-Instruct-GPTQ",  # with g_idx
 ]
 DTYPE = ["bfloat16"]
 
 
-@pytest.mark.skipif(not current_platform.is_cpu(),
-                    reason="only supports the CPU backend.")
+@pytest.mark.skipif(not current_platform.is_cpu()
+                    and not current_platform.is_xpu(),
+                    reason="only supports Intel CPU/XPU backend.")
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", DTYPE)
 def test_ipex_quant(vllm_runner, model, dtype):

@@ -23,6 +23,7 @@ from vllm.model_executor.parameter import (ChannelQuantScaleParameter,
                                            PackedColumnParameter,
                                            PackedvLLMParameter,
                                            RowvLLMParameter)
+from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
 logger = init_logger(__name__)
@@ -133,6 +134,9 @@ class GPTQMarlinConfig(QuantizationConfig):
         group_size = quant_config.get("group_size")
         sym = quant_config.get("sym")
         desc_act = quant_config.get("desc_act")
+
+        if not current_platform.is_cuda():
+            return False
 
         if quant_method != "gptq":
             return False
