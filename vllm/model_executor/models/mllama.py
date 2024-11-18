@@ -32,8 +32,6 @@ from transformers.models.mllama.processing_mllama import (
 
 import vllm.distributed.parallel_state as ps
 from vllm.attention import Attention, AttentionMetadata, AttentionType
-from vllm.attention.backends.flash_attn import FlashAttentionMetadata
-from vllm.attention.backends.xformers import XFormersMetadata
 from vllm.attention.ops.paged_attn import PagedAttention
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
@@ -53,6 +51,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader, maybe_remap_kv_scale_name)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.platforms import current_platform
 from vllm.sequence import SequenceData
 from vllm.utils import is_list_of
 
@@ -829,21 +828,7 @@ class MllamaTextCrossAttention(nn.Module):
     ) -> torch.Tensor:
         # Skip writing kv-cache for the initial profiling run.
         if len(kv_cache.shape) > 1:
-            if isinstance(attn_metadata, FlashAttentionMetadata):
-                cached_k = torch.cat([k[s:e] for s, e in kv_range_for_decode])
-                cached_v = torch.cat([v[s:e] for s, e in kv_range_for_decode])
-                torch.ops._C_cache_ops.reshape_and_cache_flash(
-                    cached_k,
-                    cached_v,
-                    kv_cache[0],
-                    kv_cache[1],
-                    attn_metadata.
-                    cross_slot_mapping,  # type: ignore[union-attr]
-                    "auto",
-                    1.0,
-                    1.0,
-                )
-            elif isinstance(attn_metadata, XFormersMetadata):
+            if current_platform.is_rocm():
                 key_cache, value_cache = PagedAttention.split_kv_cache(
                     kv_cache, self.num_local_key_value_heads, self.head_dim)
                 cached_k = torch.cat([k[s:e] for s, e in kv_range_for_decode])
@@ -852,10 +837,42 @@ class MllamaTextCrossAttention(nn.Module):
                     cached_k, cached_v, key_cache, value_cache,
                     attn_metadata.cross_slot_mapping, "auto", 1.0, 1.0)
             else:
-                raise ValueError(
-                    f"Unsupported AttentionMetadata {type(attn_metadata)} "
-                    f"class found. Expected the AttentionMetadata to "
-                    f"be either XFormersMetadata or FlashAttentionMetadata.")
+                from vllm.attention.backends.flash_attn import (
+                    FlashAttentionMetadata)
+                from vllm.attention.backends.xformers import XFormersMetadata
+                if isinstance(attn_metadata, FlashAttentionMetadata):
+                    cached_k = torch.cat(
+                        [k[s:e] for s, e in kv_range_for_decode])
+                    cached_v = torch.cat(
+                        [v[s:e] for s, e in kv_range_for_decode])
+                    torch.ops._C_cache_ops.reshape_and_cache_flash(
+                        cached_k,
+                        cached_v,
+                        kv_cache[0],
+                        kv_cache[1],
+                        attn_metadata.
+                        cross_slot_mapping,  # type: ignore[union-attr]
+                        "auto",
+                        1.0,
+                        1.0,
+                    )
+                elif isinstance(attn_metadata, XFormersMetadata):
+                    key_cache, value_cache = PagedAttention.split_kv_cache(
+                        kv_cache, self.num_local_key_value_heads,
+                        self.head_dim)
+                    cached_k = torch.cat(
+                        [k[s:e] for s, e in kv_range_for_decode])
+                    cached_v = torch.cat(
+                        [v[s:e] for s, e in kv_range_for_decode])
+                    PagedAttention.write_to_paged_cache(
+                        cached_k, cached_v, key_cache, value_cache,
+                        attn_metadata.cross_slot_mapping, "auto", 1.0, 1.0)
+                else:
+                    raise ValueError(
+                        f"Unsupported AttentionMetadata {type(attn_metadata)} "
+                        f"class found. Expected the AttentionMetadata to "
+                        f"be either XFormersMetadata or FlashAttentionMetadata."
+                    )
 
         # We have to call torch.sdpa for prefill when using a
         # custom cross-attention mask. Because the mask is not a

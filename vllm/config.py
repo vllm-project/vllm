@@ -22,7 +22,7 @@ from vllm.transformers_utils.config import (
     get_hf_text_config, get_pooling_config,
     get_sentence_transformer_tokenizer_config, is_encoder_decoder, uses_mrope)
 from vllm.utils import (GiB_bytes, cuda_device_count_stateless, get_cpu_memory,
-                        is_mi250, identity, print_warning_once,
+                        identity, is_mi250, print_warning_once,
                         resolve_obj_by_qualname)
 
 if TYPE_CHECKING:
@@ -1641,8 +1641,8 @@ class SpeculativeConfig:
                              "typical_acceptance_sampler.")
 
         if (self.draft_token_acceptance_method != 'rejection_sampler'
-                and self.draft_token_acceptance_method
-                != 'typical_acceptance_sampler'):
+                and self.draft_token_acceptance_method !=
+                'typical_acceptance_sampler'):
             raise ValueError(
                 "Expected draft_token_acceptance_method to be either "
                 "rejection_sampler or typical_acceptance_sampler. Instead it "
