@@ -144,7 +144,7 @@ h11==0.14.0
     # via httpcore
 hiredis==3.0.0
     # via tensorizer
-httpcore==1.0.6
+httpcore==1.0.7
     # via httpx
 httpx==0.27.2
     # via -r requirements-test.in
@@ -588,7 +588,7 @@ xxhash==3.5.0
     # via
     #   datasets
     #   evaluate
-yarl==1.17.1
+yarl==1.17.2
     # via aiohttp
 zipp==3.20.2
     # via importlib-resources
