@@ -222,8 +222,8 @@ class InternParallelAttention(nn.Module):
             out = F.scaled_dot_product_attention(q, k, v, scale=self.scale)
             out = out.transpose(1, 2)
 
-        x = x.view(B, N, -1)
-        x, _ = self.proj(x)
+        out = out.view(B, N, -1)
+        out, _ = self.proj(out)
         return x
 
 
