@@ -922,9 +922,9 @@ class MRotaryEmbedding(RotaryEmbedding):
                 torch.arange(text_len).view(1, -1).expand(3, -1) + st_idx)
 
         llm_positions = torch.cat(llm_pos_ids_list, dim=1).reshape(3, -1)
-        llm_positions = llm_positions[:, context_len:seq_len]
         mrope_position_delta = (llm_positions.max() + 1 -
                                 len(input_tokens)).item()
+        llm_positions = llm_positions[:, context_len:seq_len]
 
         return llm_positions.tolist(), mrope_position_delta
 
