@@ -10,7 +10,7 @@ Prerequisites
 Before you begin, ensure that you have the following:
 
 - A running Kubernetes cluster
-- NVIDIA Kubernetes Device Plugin (`k8s-device-plugin`): This can be found at `https://github.com/NVIDIA/k8s-device-plugin/`
+- NVIDIA/ROCm Kubernetes Device Plugin (`k8s-device-plugin`): This can be found at `https://github.com/NVIDIA/k8s-device-plugin/` or `https://github.com/ROCm/k8s-device-plugin` 
 - Available GPU resources in your cluster
 
 Deployment Steps
