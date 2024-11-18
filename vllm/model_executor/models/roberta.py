@@ -10,6 +10,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.bert import BertEmbeddingModel, BertModel
+from vllm.model_executor.models.interfaces import SupportsCrossEncoding
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.model_executor.pooling_metadata import (PoolingMetadata,
                                                   PoolingTensors)
@@ -150,7 +151,7 @@ class RobertaEmbeddingModel(BertEmbeddingModel):
                          embedding_class=RobertaEmbedding)
 
 
-class RobertaForSequenceClassification(nn.Module):
+class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding):
     """A model that uses Roberta to provide embedding functionalities.
 
    This class encapsulates the BertModel and provides an interface for

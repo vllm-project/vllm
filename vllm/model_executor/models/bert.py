@@ -17,6 +17,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.interfaces import SupportsCrossEncoding
 from vllm.model_executor.pooling_metadata import (PoolingMetadata,
                                                   PoolingTensors)
 from vllm.sequence import (EmbeddingSequenceGroupOutput, IntermediateTensors,
@@ -424,14 +425,12 @@ class BertEmbeddingModel(nn.Module):
         intermediate_tensors: Optional[IntermediateTensors] = None,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        hidden_states = self.model(input_ids=input_ids,
-                                   position_ids=positions,
-                                   kv_caches=kv_caches,
-                                   inputs_embeds=inputs_embeds,
-                                   intermediate_tensors=intermediate_tensors,
-                                   attn_metadata=attn_metadata)
-
-        return hidden_states
+        return self.model(input_ids=input_ids,
+                          position_ids=positions,
+                          kv_caches=kv_caches,
+                          inputs_embeds=inputs_embeds,
+                          intermediate_tensors=intermediate_tensors,
+                          attn_metadata=attn_metadata)
 
     def pooler(
         self,
@@ -457,7 +456,7 @@ class BertEmbeddingModel(nn.Module):
                                                 softmax=False)
 
 
-class BertForSequenceClassification(nn.Module):
+class BertForSequenceClassification(nn.Module, SupportsCrossEncoding):
     """A model that uses Bert to provide embedding functionalities.
 
    This class encapsulates the BertModel and provides an interface for

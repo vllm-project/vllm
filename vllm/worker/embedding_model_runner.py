@@ -99,7 +99,7 @@ class EmbeddingModelRunner(
 
         cross_enc_kwargs = {}
         if model_input.token_types is not None:
-            cross_enc_kwargs["token_types"] = model_input.token_types
+            cross_enc_kwargs["token_type_ids"] = model_input.token_types
 
         with set_forward_context(model_input.attn_metadata):
             hidden_or_intermediate_states = model_executable(

@@ -516,7 +516,8 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
         inter_data.context_lens[seq_idx] = context_len
         inter_data.input_tokens[seq_idx].extend(tokens)
         inter_data.input_positions[seq_idx].extend(range(context_len, seq_len))
-        inter_data.token_types[seq_idx].extend(token_types)
+        inter_data.token_types[seq_idx].extend(
+            token_types if token_types else [])
         inter_data.query_lens[seq_idx] = seq_len - context_len
 
         if seq_data.mrope_position_delta is not None:
