@@ -3,16 +3,12 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from vllm.plugins import set_torch_compile_backend
-
 from .interface import Platform, PlatformEnum
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 else:
     VllmConfig = None
-
-set_torch_compile_backend("openxla")
 
 
 class TpuPlatform(Platform):
@@ -38,3 +34,6 @@ class TpuPlatform(Platform):
             compilation_config.level = CompilationLevel.DYNAMO_ONCE
         assert compilation_config.level < CompilationLevel.PIECEWISE,\
             "TPU does not support Inductor."
+
+        if compilation_config.backend == "":
+            compilation_config.backend = "openxla"
