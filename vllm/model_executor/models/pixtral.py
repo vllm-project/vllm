@@ -30,6 +30,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.utils import merge_multimodal_embeddings
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
+from vllm.multimodal.inputs import PlaceholderRange
 from vllm.multimodal.utils import (cached_get_tokenizer,
                                    consecutive_placeholder_ranges)
 from vllm.sequence import IntermediateTensors, SequenceData
@@ -773,15 +774,28 @@ def input_processor_for_pixtral_hf(
         replace_tokens[-1] = image_end_id
         replace_tokens_list.append(replace_tokens)
 
+    reverse_offsets: List[int] = []
     # Backward iteration for replacement without affecting known indices
     for placeholder_idx, replace_tokens in zip(reversed(placeholder_indices),
                                                reversed(replace_tokens_list)):
+        reverse_offsets.append(
+            len(new_token_ids) - placeholder_idx + len(replace_tokens))
         new_token_ids[placeholder_idx:placeholder_idx + 1] = replace_tokens
+
+    placeholder_ranges: List[PlaceholderRange] = []
+    for reverse_offset, replace_tokens in zip(reversed(reverse_offsets),
+                                              replace_tokens_list):
+        placeholder_ranges.append(
+            PlaceholderRange(
+                offset=len(new_token_ids) - reverse_offset,
+                length=len(replace_tokens),
+            ))
 
     # NOTE: Create a defensive copy of the original inputs
     return token_inputs(prompt_token_ids=new_token_ids,
                         prompt=new_prompt,
-                        multi_modal_data=multi_modal_data)
+                        multi_modal_data=multi_modal_data,
+                        multi_modal_placeholders={"image": placeholder_ranges})
 
 
 class PixtralHFMLP(nn.Module):
