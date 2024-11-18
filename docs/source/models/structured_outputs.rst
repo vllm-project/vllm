@@ -10,7 +10,7 @@ This document shows you some examples of the different options that are availabl
 Online Inference (OpenAI API)
 -----------------------------
 
-You can generate structured outputs using the OpenAI’s `Completions <https://platform.openai.com/docs/api-reference/completions>`_ and `Chat <https://platform.openai.com/docs/api-reference/chat>`_  API.
+You can generate structured outputs using the OpenAI's `Completions <https://platform.openai.com/docs/api-reference/completions>`_ and `Chat <https://platform.openai.com/docs/api-reference/chat>`_  API.
 
 The following parameters are supported, which must be added as extra parameters:
 
@@ -137,6 +137,96 @@ It works by using a context free EBNF grammar, which for example we can use to d
 
 The complete code of the examples can be found on `examples/openai_chat_completion_structured_outputs.py <https://github.com/vllm-project/vllm/blob/main/examples/openai_chat_completion_structured_outputs.py>`_.
 
+Experimental Automatic Parsing (OpenAI API)
+--------------------------------------------
+
+This section covers the OpenAI beta wrapper over the `client.chat.completions.create()` method that provides richer integrations with Python specific types.
+
+At the time of writing (`openai==1.54.4`), this is a "beta" feature in the OpenAI client library. Code reference can be found here: https://github.com/openai/openai-python/blob/52357cff50bee57ef442e94d78a0de38b4173fc2/src/openai/resources/beta/chat/completions.py#L100-L104
+
+Here is a simple example demonstrating how to get structured output using Pydantic models:
+
+.. code-block:: python
+
+    from pydantic import BaseModel
+    from openai import OpenAI
+
+
+    class Info(BaseModel):
+        name: str
+        age: int
+
+
+    client = OpenAI(base_url="http://0.0.0.0:8000/v1", api_key="dummy")
+    completion = client.beta.chat.completions.parse(
+        model="meta-llama/Llama-3.1-8B-Instruct",
+        messages=[
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": "My name is Cameron, I'm 28. What's my name and age?"},
+        ],
+        response_format=Info,
+        extra_body=dict(guided_decoding_backend="outlines"),
+    )
+
+    message = completion.choices[0].message
+    print(message)
+    assert message.parsed
+    print("Name:", message.parsed.name)
+    print("Age:", message.parsed.age)
+
+Output:
+.. code-block:: console
+
+    ParsedChatCompletionMessage[Testing](content='{"name": "Cameron", "age": 28}', refusal=None, role='assistant', audio=None, function_call=None, tool_calls=[], parsed=Testing(name='Cameron', age=28))
+    Name: Cameron
+    Age: 28
+
+
+Here is a more complex example using nested Pydantic models to handle a step-by-step math solution:
+
+.. code-block:: python
+
+    from typing import List
+    from pydantic import BaseModel
+    from openai import OpenAI
+
+
+    class Step(BaseModel):
+        explanation: str
+        output: str
+
+
+    class MathResponse(BaseModel):
+        steps: List[Step]
+        final_answer: str
+
+
+    client = OpenAI(base_url="http://0.0.0.0:8000/v1", api_key="dummy")
+    completion = client.beta.chat.completions.parse(
+        model="meta-llama/Llama-3.1-8B-Instruct",
+        messages=[
+            {"role": "system", "content": "You are a helpful expert math tutor."},
+            {"role": "user", "content": "Solve 8x + 31 = 2."},
+        ],
+        response_format=MathResponse,
+        extra_body=dict(guided_decoding_backend="outlines"),
+    )
+
+    message = completion.choices[0].message
+    print(message)
+    assert message.parsed
+    for i, step in enumerate(message.parsed.steps):
+        print(f"Step #{i}:", step)
+    print("Answer:", message.parsed.final_answer)
+
+Output:
+.. code-block:: console
+
+    ParsedChatCompletionMessage[MathResponse](content='{ "steps": [{ "explanation": "First, let\'s isolate the term with the variable \'x\'. To do this, we\'ll subtract 31 from both sides of the equation.", "output": "8x + 31 - 31 = 2 - 31"}, { "explanation": "By subtracting 31 from both sides, we simplify the equation to 8x = -29.", "output": "8x = -29"}, { "explanation": "Next, let\'s isolate \'x\' by dividing both sides of the equation by 8.", "output": "8x / 8 = -29 / 8"}], "final_answer": "x = -29/8" }', refusal=None, role='assistant', audio=None, function_call=None, tool_calls=[], parsed=MathResponse(steps=[Step(explanation="First, let's isolate the term with the variable 'x'. To do this, we'll subtract 31 from both sides of the equation.", output='8x + 31 - 31 = 2 - 31'), Step(explanation='By subtracting 31 from both sides, we simplify the equation to 8x = -29.', output='8x = -29'), Step(explanation="Next, let's isolate 'x' by dividing both sides of the equation by 8.", output='8x / 8 = -29 / 8')], final_answer='x = -29/8'))
+    Step #0: explanation="First, let's isolate the term with the variable 'x'. To do this, we'll subtract 31 from both sides of the equation." output='8x + 31 - 31 = 2 - 31'
+    Step #1: explanation='By subtracting 31 from both sides, we simplify the equation to 8x = -29.' output='8x = -29'
+    Step #2: explanation="Next, let's isolate 'x' by dividing both sides of the equation by 8." output='8x / 8 = -29 / 8'
+    Answer: x = -29/8
 
 Offline Inference
 -----------------
