@@ -144,6 +144,8 @@ This section covers the OpenAI beta wrapper over the ``client.chat.completions.c
 
 At the time of writing (``openai==1.54.4``), this is a "beta" feature in the OpenAI client library. Code reference can be found `here <https://github.com/openai/openai-python/blob/52357cff50bee57ef442e94d78a0de38b4173fc2/src/openai/resources/beta/chat/completions.py#L100-L104>`_.
 
+For the following examples, vLLM was setup using ``vllm serve meta-llama/Llama-3.1-8B-Instruct``
+
 Here is a simple example demonstrating how to get structured output using Pydantic models:
 
 .. code-block:: python
