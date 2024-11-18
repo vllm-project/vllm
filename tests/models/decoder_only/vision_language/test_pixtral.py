@@ -6,7 +6,6 @@ import json
 import uuid
 from dataclasses import asdict
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
-from transformers import AutoProcessor
 
 import pytest
 from mistral_common.multimodal import download_image
@@ -14,6 +13,7 @@ from mistral_common.protocol.instruct.messages import ImageURLChunk
 from mistral_common.protocol.instruct.request import ChatCompletionRequest
 from mistral_common.tokens.tokenizers.mistral import MistralTokenizer
 from mistral_common.tokens.tokenizers.multimodal import image_from_chunk
+from transformers import AutoProcessor
 
 from vllm import (EngineArgs, LLMEngine, RequestOutput, SamplingParams,
                   TokensPrompt, TextPrompt)
