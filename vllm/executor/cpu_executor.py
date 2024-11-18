@@ -2,14 +2,6 @@ import os
 from functools import partial
 from typing import Any, Awaitable, List, Optional, Set, Tuple, Union
 
-<<<<<<< HEAD
-=======
-import torch
-
-import vllm.envs as envs
-from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
-                         SchedulerConfig)
->>>>>>> 5980981e (fix test)
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.executor.multiproc_worker_utils import (ProcessWorkerWrapper,
                                                   ResultHandler, WorkerMonitor)
@@ -62,24 +54,6 @@ class CPUExecutor(ExecutorBase):
         os.environ["LOCAL_WORLD_SIZE"] = str(
             self.parallel_config.tensor_parallel_size)
 
-<<<<<<< HEAD
-=======
-        self.model_config = _verify_and_get_model_config(self.model_config)
-        self.cache_config = _verify_and_get_cache_config(self.cache_config)
-        self.scheduler_config = _verify_and_get_scheduler_config(
-            self.scheduler_config)
-        self.parallel_config = _verify_and_get_parallel_config(
-            self.parallel_config)
-
-        if ((self.scheduler_config.chunked_prefill_enabled
-             or self.cache_config.enable_prefix_caching)
-                and self.model_config.dtype == torch.half):
-            logger.warning("chunked-prefill and prefix-cache on the CPU "
-                           "backend does not support fp16 for now,"
-                           " cast to bf16.")
-            self.model_config.dtype = torch.bfloat16
-
->>>>>>> 5980981e (fix test)
         # Multiprocessing-based executor does not support multi-node setting.
         # Since it only works for single node, we can use the loopback address
         # 127.0.0.1 for communication.

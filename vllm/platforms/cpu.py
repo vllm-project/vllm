@@ -69,7 +69,9 @@ class CpuPlatform(Platform):
                 f" {kv_cache_space}, expect a positive integer value.")
 
         scheduler_config = vllm_config.scheduler_config
-        if (scheduler_config.chunked_prefill_enabled and model_config.dtype == torch.half):
+        if ((scheduler_config.chunked_prefill_enabled
+             or cache_config.enable_prefix_caching)
+                and model_config.dtype == torch.half):
             logger.warning("Chunked-prefill on the CPU backend only does not"
                            " support fp16 for now, cast to bf16.")
             model_config.dtype = torch.bfloat16
