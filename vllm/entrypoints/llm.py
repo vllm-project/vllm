@@ -853,6 +853,10 @@ class LLM:
             raise ValueError("Your model does not support the cross encoding")
 
         tokenizer = self.llm_engine.get_tokenizer()
+        
+        if isinstance(tokenizer, MistralTokenizer):
+            raise ValueError(
+                "MistralTokenizer not supported for cross-encoding")
 
         # the tokenizer for models such as
         # "cross-encoder/ms-marco-MiniLM-L-6-v2" doesn't support passing
