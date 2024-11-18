@@ -9,6 +9,8 @@ on:
   pull_request:
     branches:
       - main
+    paths:
+      - "docs/**"
 
 jobs:
   sphinx-lint:
