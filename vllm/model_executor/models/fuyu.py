@@ -16,7 +16,8 @@
 """ PyTorch Fuyu model."""
 import math
 from array import array
-from typing import Iterable, List, Literal, Mapping, Optional, Tuple, TypedDict
+from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,
+                    TypedDict)
 
 import torch
 import torch.nn as nn
@@ -354,6 +355,7 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         next_tokens = self.language_model.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         loader = AutoWeightsLoader(self)
-        loader.load_weights(weights)
+        return loader.load_weights(weights)
