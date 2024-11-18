@@ -158,7 +158,8 @@ class RequestOutput:
         finished = seq_group.is_finished()
 
         if seq_group.request_id in seq_id_to_seq_group:
-            group: SequenceGroupBase = seq_id_to_seq_group[seq_group.request_id]
+            group: SequenceGroupBase = seq_id_to_seq_group[
+                seq_group.request_id]
             if finished:
                 group.finish_seq(seq_group)
             assembled_seq_group = group.maybe_assemble_group(seq_group)
@@ -201,8 +202,8 @@ class RequestOutput:
         # num_cached_tokens should be the same for all the sequences
         num_cached_tokens = None
         for i, seq in enumerate(top_n_seqs):
-            output_text = seq.get_output_text_to_return(text_buffer_length,
-                                                        delta)
+            output_text = seq.get_output_text_to_return(
+                text_buffer_length, delta)
 
             output_token_ids = seq.get_output_token_ids_to_return(delta)
             num_output_tokens = 1 if isinstance(output_token_ids,
