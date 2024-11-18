@@ -224,7 +224,7 @@ class InternParallelAttention(nn.Module):
 
         out = out.view(B, N, -1)
         out, _ = self.proj(out)
-        return x
+        return out
 
 
 class InternSdpaAttention(nn.Module):
