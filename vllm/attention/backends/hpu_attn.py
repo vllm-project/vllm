@@ -221,6 +221,7 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
                     matmul_qk_op=self.matmul_qk,
                     softmax_op=self.softmax,
                     matmul_av_op=self.matmul_av,
+                    valid_seq_lengths=attn_metadata.seq_lens_tensor,
                 )
             else:
                 # TODO: enable FusedSDPA
