@@ -206,7 +206,10 @@ class BlipAttention(nn.Module):
         self.num_heads_per_partition = divide(self.num_heads, self.tp_size)
 
         # Detect attention implementation.
-        self.attn_backend = get_vit_attn_backend()
+        self.attn_backend = get_vit_attn_backend(support_fa=False)
+        if self.attn_backend not in {_Backend.TORCH_SDPA, _Backend.XFORMERS}:
+            raise RuntimeError(
+                f"BLIP does not support {self.attn_backend} backend now.")
 
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
         return tensor.view(bsz, seq_len, self.num_heads,
@@ -231,7 +234,7 @@ class BlipAttention(nn.Module):
                                          self.num_heads_per_partition,
                                          self.head_dim)
 
-        if self.attn_backend in (_Backend.XFORMERS, _Backend.FLASH_ATTN):
+        if self.attn_backend == _Backend.XFORMERS:
             from xformers import ops as xops
 
             out = xops.memory_efficient_attention_forward(query_states,

@@ -183,7 +183,10 @@ class InternParallelAttention(nn.Module):
             prefix=f"{prefix}.proj",
         )
 
-        self.attn_backend = get_vit_attn_backend()
+        self.attn_backend = get_vit_attn_backend(support_fa=False)
+        if self.attn_backend not in {_Backend.TORCH_SDPA, _Backend.XFORMERS}:
+            raise RuntimeError(
+                f"InternViT does not support {self.attn_backend} backend now.")
 
     def _apply_qk_norm(self, q: torch.Tensor, k: torch.Tensor):
         if self.tp_size > 1:
@@ -210,7 +213,7 @@ class InternParallelAttention(nn.Module):
         k = k.view(B, N, self.num_heads_per_partition, self.head_dim)
         v = v.view(B, N, self.num_heads_per_partition, self.head_dim)
 
-        if self.attn_backend in (_Backend.XFORMERS, _Backend.FLASH_ATTN):
+        if self.attn_backend == _Backend.XFORMERS:
             from xformers import ops as xops
 
             out = xops.memory_efficient_attention_forward(q,

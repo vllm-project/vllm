@@ -290,7 +290,10 @@ class SiglipAttention(nn.Module):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.num_heads_per_partition = divide(self.num_heads, self.tp_size)
 
-        self.attn_backend = get_vit_attn_backend()
+        self.attn_backend = get_vit_attn_backend(support_fa=False)
+        if self.attn_backend not in {_Backend.TORCH_SDPA, _Backend.XFORMERS}:
+            raise RuntimeError(
+                f"SIGLIP does not support {self.attn_backend} backend now.")
 
     def forward(
         self,
@@ -312,7 +315,7 @@ class SiglipAttention(nn.Module):
                                          self.num_heads_per_partition,
                                          self.head_dim)
 
-        if self.attn_backend in (_Backend.XFORMERS, _Backend.FLASH_ATTN):
+        if self.attn_backend == _Backend.XFORMERS:
             from xformers import ops as xops
 
             out = xops.memory_efficient_attention_forward(query_states,

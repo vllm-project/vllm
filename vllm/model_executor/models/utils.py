@@ -587,10 +587,11 @@ class LLMWrapper(nn.Module):
         return llm(*args, **kwargs)
 
 
-def get_vit_attn_backend() -> _Backend:
+def get_vit_attn_backend(support_fa: bool = False) -> _Backend:
     """
     Get the available attention backend for Vision Transformer.
     """
+    # TODO(Isotr0py): Remove `support_fa` after support FA for all ViTs attn.
     selected_backend: Optional[_Backend] = get_global_forced_attn_backend()
     if selected_backend is None:
         backend_by_env_var: Optional[str] = envs.VLLM_ATTENTION_BACKEND
@@ -599,7 +600,7 @@ def get_vit_attn_backend() -> _Backend:
     if selected_backend is None:
         # For Volta and Turing GPUs, use xformers instead.
         device_available = current_platform.has_device_capability(80)
-        if device_available:
+        if device_available and support_fa:
             from transformers.utils import is_flash_attn_2_available
             if is_flash_attn_2_available():
                 selected_backend = _Backend.FLASH_ATTN
