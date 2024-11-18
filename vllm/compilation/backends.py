@@ -2,15 +2,14 @@ import copy
 import dataclasses
 import operator
 from contextlib import ExitStack
-from typing import (Any, Callable, Dict, List, Optional, Sequence, Set, Tuple,
-                    Union)
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 from unittest.mock import patch
 
 import torch
 import torch.fx as fx
 
 import vllm.envs as envs
-from vllm.config import CompilationConfig, CompilationLevel
+from vllm.config import CompilationConfig
 from vllm.logger import init_logger
 from vllm.utils import combine_fx_passes, weak_ref_tensors
 
@@ -684,14 +683,3 @@ class PiecewiseBackend:
 
         entry.cudagraph.replay()
         return entry.output
-
-
-def select_default_backend(level: int) -> Union[str, Callable]:
-    if level in [CompilationLevel.DYNAMO_AS_IS, CompilationLevel.DYNAMO_ONCE]:
-        backend_str = "eager"
-        return backend_str
-    assert level == CompilationLevel.PIECEWISE
-
-    from vllm.plugins import get_current_vllm_config
-    compilation_config = get_current_vllm_config().compilation_config
-    return VllmBackend(compilation_config)
