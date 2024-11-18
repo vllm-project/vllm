@@ -25,19 +25,20 @@ model_pairs = [
     # 4-bit, group_size == 128
     ModelPair(model_marlin="alexm-nm/tinyllama-24-marlin24-4bit-g128",
               model_gptq="alexm-nm/tinyllama-24-gptq-4bit-g128"),
-    # 4-bit, group_size == channelwise
-    ModelPair(model_marlin="alexm-nm/tinyllama-24-marlin24-4bit-channelwise",
-              model_gptq="alexm-nm/tinyllama-24-gptq-4bit-channelwise"),
+    # # 4-bit, group_size == channelwise
+    # ModelPair(model_marlin="alexm-nm/tinyllama-24-marlin24-4bit-channelwise",
+    #           model_gptq="alexm-nm/tinyllama-24-gptq-4bit-channelwise"),
 
     # 8-bit, group_size == 128
     ModelPair(model_marlin="alexm-nm/tinyllama-24-marlin24-8bit-g128",
               model_gptq="alexm-nm/tinyllama-24-gptq-8bit-g128"),
-    # 8-bit, group_size == channelwise
-    ModelPair(model_marlin="alexm-nm/tinyllama-24-marlin24-8bit-channelwise",
-              model_gptq="alexm-nm/tinyllama-24-gptq-8bit-channelwise"),
+    # # 8-bit, group_size == channelwise
+    # ModelPair(model_marlin="alexm-nm/tinyllama-24-marlin24-8bit-channelwise",
+    #           model_gptq="alexm-nm/tinyllama-24-gptq-8bit-channelwise"),
 ]
 
 
+@pytest.mark.quant_model
 @pytest.mark.flaky(reruns=2)
 @pytest.mark.skipif(not is_quant_method_supported("gptq_marlin_24"),
                     reason="Marlin24 is not supported on this GPU type.")

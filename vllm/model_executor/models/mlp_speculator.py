@@ -1,16 +1,16 @@
 import math
-from typing import Iterable, List, Tuple
+from typing import Iterable, List, Set, Tuple
 
 import torch
 import torch.nn as nn
 
+from vllm.config import VllmConfig
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.transformers_utils.configs import MLPSpeculatorConfig
 
 SQRT2 = 2**0.5
 
@@ -37,7 +37,7 @@ class MLPSpeculatorLayerNorm(nn.Module):
         eps=1e-06,
         elementwise_scale_and_shift=True,
     ):
-        super(MLPSpeculatorLayerNorm, self).__init__()
+        super().__init__()
         self.elementwise_scale_and_shift = elementwise_scale_and_shift
         if self.elementwise_scale_and_shift:
             self.weight = nn.Parameter(torch.empty(normalized_shape))
@@ -65,8 +65,9 @@ class MLPSpeculator(nn.Module):
     https://huggingface.co/ibm-fms and https://huggingface.co/ibm-granite
     """
 
-    def __init__(self, config: MLPSpeculatorConfig, **kwargs) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
+        config = vllm_config.model_config.hf_config
         self.n_predict = config.n_predict
         self.vocab_size = config.vocab_size
         self.emb_dim = config.emb_dim
@@ -137,7 +138,7 @@ class MLPSpeculator(nn.Module):
         self.config = config
         self.logits_processor = LogitsProcessor(config.vocab_size,
                                                 config.vocab_size, 1.0)
-        self.sampler = Sampler()
+        self.sampler = get_sampler()
 
     def generate_proposals(
         self,
@@ -187,11 +188,15 @@ class MLPSpeculator(nn.Module):
 
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         params_dict = dict(self.named_parameters())
+        loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
             param = params_dict.get(name.replace("speculator.", ""))
             if param is not None:
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
+                loaded_params.add(name)
+        return loaded_params

@@ -9,10 +9,7 @@ import torch
 import triton
 import triton.language as tl
 
-from vllm.triton_utils import libentry
 
-
-@libentry()
 @triton.jit
 def _sgmv_shrink_kernel(
     input_ptr,

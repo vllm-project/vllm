@@ -7,10 +7,7 @@ import torch
 import torch.distributed
 
 import vllm.envs as envs
-from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, LoRAConfig,
-                         ModelConfig, ObservabilityConfig, ParallelConfig,
-                         PromptAdapterConfig, SchedulerConfig,
-                         SpeculativeConfig)
+from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment,
                               set_custom_all_reduce)
@@ -27,7 +24,8 @@ from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.embedding_model_runner import EmbeddingModelRunner
 from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
 from vllm.worker.model_runner import GPUModelRunnerBase, ModelRunner
-from vllm.worker.worker_base import LocalOrDistributedWorkerBase, WorkerInput
+from vllm.worker.worker_base import (LocalOrDistributedWorkerBase, WorkerBase,
+                                     WorkerInput)
 
 logger = init_logger(__name__)
 
@@ -42,46 +40,31 @@ class Worker(LocalOrDistributedWorkerBase):
 
     def __init__(
         self,
-        model_config: ModelConfig,
-        parallel_config: ParallelConfig,
-        scheduler_config: SchedulerConfig,
-        device_config: DeviceConfig,
-        cache_config: CacheConfig,
-        load_config: LoadConfig,
+        vllm_config: VllmConfig,
         local_rank: int,
         rank: int,
         distributed_init_method: str,
-        lora_config: Optional[LoRAConfig] = None,
-        speculative_config: Optional[SpeculativeConfig] = None,
-        prompt_adapter_config: Optional[PromptAdapterConfig] = None,
         is_driver_worker: bool = False,
         model_runner_cls: Optional[Type[GPUModelRunnerBase]] = None,
-        observability_config: Optional[ObservabilityConfig] = None,
     ) -> None:
-        self.model_config = model_config
-        self.parallel_config = parallel_config
+        WorkerBase.__init__(self, vllm_config)
         self.parallel_config.rank = rank
-        self.scheduler_config = scheduler_config
-        self.device_config = device_config
-        self.cache_config = cache_config
         self.local_rank = local_rank
         self.rank = rank
         self.distributed_init_method = distributed_init_method
-        self.lora_config = lora_config
-        self.load_config = load_config
-        self.prompt_adapter_config = prompt_adapter_config
         self.is_driver_worker = is_driver_worker
-        if parallel_config and is_driver_worker:
-            assert rank % parallel_config.tensor_parallel_size == 0, \
+        if is_driver_worker:
+            assert rank % self.parallel_config.tensor_parallel_size == 0, \
                    "Driver worker should be rank 0 of tensor parallel group."
         if self.model_config.trust_remote_code:
             # note: lazy import to avoid importing torch before initializing
             from vllm.utils import init_cached_hf_modules
             init_cached_hf_modules()
-        self.observability_config = observability_config
 
         # Return hidden states from target model if the draft model is an
         # mlp_speculator
+        speculative_config = self.speculative_config
+        model_config = self.model_config
         speculative_args = {} if speculative_config is None \
             or (speculative_config.draft_model_config.model ==
                 model_config.model) \
@@ -94,20 +77,12 @@ class Worker(LocalOrDistributedWorkerBase):
             ModelRunnerClass = model_runner_cls
         elif model_config.task == "embedding":
             ModelRunnerClass = EmbeddingModelRunner
-        elif self._is_encoder_decoder_model():
+        elif self.model_config.is_encoder_decoder:
             ModelRunnerClass = EncoderDecoderModelRunner
         self.model_runner: GPUModelRunnerBase = ModelRunnerClass(
-            model_config,
-            parallel_config,
-            scheduler_config,
-            device_config,
-            cache_config,
-            load_config=load_config,
-            lora_config=self.lora_config,
+            vllm_config=self.vllm_config,
             kv_cache_dtype=self.cache_config.cache_dtype,
             is_driver_worker=is_driver_worker,
-            prompt_adapter_config=prompt_adapter_config,
-            observability_config=observability_config,
             **speculative_args,
         )
         # Uninitialized cache engine. Will be initialized by
@@ -143,9 +118,6 @@ class Worker(LocalOrDistributedWorkerBase):
         if self.profiler is None:
             raise RuntimeError("Profiler is not enabled.")
         self.profiler.stop()
-
-    def _is_encoder_decoder_model(self):
-        return self.model_config.is_encoder_decoder_model
 
     def init_device(self) -> None:
         if self.device_config.device.type == "cuda":
@@ -260,7 +232,7 @@ class Worker(LocalOrDistributedWorkerBase):
         logger.info(
             "Memory profiling results: total_gpu_memory=%.2fGiB"
             " initial_memory_usage=%.2fGiB peak_torch_memory=%.2fGiB"
-            " memory_usage_post_profile=%.2fGib"
+            " memory_usage_post_profile=%.2fGiB"
             " non_torch_memory=%.2fGiB kv_cache_size=%.2fGiB"
             " gpu_memory_utilization=%.2f", total_gpu_memory / (1024**3),
             (total_gpu_memory - free_memory_pre_profile) / (1024**3),

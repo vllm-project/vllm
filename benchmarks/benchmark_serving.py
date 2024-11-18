@@ -53,6 +53,8 @@ try:
 except ImportError:
     from argparse import ArgumentParser as FlexibleArgumentParser
 
+MILLISECONDS_TO_SECONDS_CONVERSION = 1000
+
 
 @dataclass
 class BenchmarkMetrics:
@@ -60,6 +62,7 @@ class BenchmarkMetrics:
     total_input: int
     total_output: int
     request_throughput: float
+    request_goodput: float
     output_throughput: float
     total_token_throughput: float
     mean_ttft_ms: float
@@ -248,6 +251,19 @@ def sample_hf_requests(
                     "url": f"data:image/jpeg;base64,{image_base64}"
                 },
             }
+        elif "image" in data and isinstance(data["image"], str):
+            if (data["image"].startswith("http://") or \
+                data["image"].startswith("file://")):
+                image_url = data["image"]
+            else:
+                image_url = f"file://{data['image']}"
+
+            mm_content = {
+                "type": "image_url",
+                "image_url": {
+                    "url": image_url
+                },
+            }
         else:
             mm_content = None
 
@@ -294,8 +310,33 @@ def sample_random_requests(
 async def get_request(
     input_requests: List[Tuple[str, int, int]],
     request_rate: float,
+    burstiness: float = 1.0,
 ) -> AsyncGenerator[Tuple[str, int, int], None]:
+    """
+    Asynchronously generates requests at a specified rate 
+    with OPTIONAL burstiness.
+    
+    Args:
+        input_requests: 
+            A list of input requests, each represented as a tuple.
+        request_rate: 
+            The rate at which requests are generated (requests/s).
+        burstiness (optional): 
+            The burstiness factor of the request generation. 
+            Only takes effect when request_rate is not inf.
+            Default value is 1, which follows a Poisson process.
+            Otherwise, the request intervals follow a gamma distribution.
+            A lower burstiness value (0 < burstiness < 1) results 
+            in more bursty requests, while a higher burstiness value 
+            (burstiness > 1) results in a more uniform arrival of requests.
+    """
     input_requests = iter(input_requests)
+
+    # Calculate scale parameter theta to maintain the desired request_rate.
+    assert burstiness > 0, (
+        f"A positive burstiness factor is expected, but given {burstiness}.")
+    theta = 1.0 / (request_rate * burstiness)
+
     for request in input_requests:
         yield request
 
@@ -303,8 +344,9 @@ async def get_request(
             # If the request rate is infinity, then we don't need to wait.
             continue
 
-        # Sample the request interval from the exponential distribution.
-        interval = np.random.exponential(1.0 / request_rate)
+        # Sample the request interval from the gamma distribution.
+        # If burstiness is 1, it follows exponential distribution.
+        interval = np.random.gamma(shape=burstiness, scale=theta)
         # The next request will be sent after the interval.
         await asyncio.sleep(interval)
 
@@ -316,12 +358,15 @@ def calculate_metrics(
     tokenizer: PreTrainedTokenizerBase,
     selected_percentile_metrics: List[str],
     selected_percentiles: List[float],
+    gootput_config_dict: Dict[str, float],
 ) -> Tuple[BenchmarkMetrics, List[int]]:
     actual_output_lens: List[int] = []
     total_input = 0
     completed = 0
+    good_completed = 0
     itls: List[float] = []
     tpots: List[float] = []
+    all_tpots: List[float] = []
     ttfts: List[float] = []
     e2els: List[float] = []
     for i in range(len(outputs)):
@@ -335,15 +380,41 @@ def calculate_metrics(
                           add_special_tokens=False).input_ids)
             actual_output_lens.append(output_len)
             total_input += input_requests[i][1]
+            tpot = 0
             if output_len > 1:
-                tpots.append(
-                    (outputs[i].latency - outputs[i].ttft) / (output_len - 1))
+                tpot = (outputs[i].latency - outputs[i].ttft) / (output_len -
+                                                                 1)
+                tpots.append(tpot)
+            # Note: if output_len <= 1, we regard tpot as 0 for goodput
+            all_tpots.append(tpot)
             itls += outputs[i].itl
             ttfts.append(outputs[i].ttft)
             e2els.append(outputs[i].latency)
             completed += 1
         else:
             actual_output_lens.append(0)
+
+    if gootput_config_dict:
+        valid_metrics = []
+        slo_values = []
+
+        if "ttft" in gootput_config_dict:
+            valid_metrics.append(ttfts)
+            slo_values.append(gootput_config_dict["ttft"] /
+                              MILLISECONDS_TO_SECONDS_CONVERSION)
+        if "tpot" in gootput_config_dict:
+            valid_metrics.append(all_tpots)
+            slo_values.append(gootput_config_dict["tpot"] /
+                              MILLISECONDS_TO_SECONDS_CONVERSION)
+        if "e2el" in gootput_config_dict:
+            valid_metrics.append(e2els)
+            slo_values.append(gootput_config_dict["e2el"] /
+                              MILLISECONDS_TO_SECONDS_CONVERSION)
+
+        for req_metric in zip(*valid_metrics):
+            is_good_req = all([s >= r for s, r in zip(slo_values, req_metric)])
+            if is_good_req:
+                good_completed += 1
 
     if completed == 0:
         warnings.warn(
@@ -355,6 +426,7 @@ def calculate_metrics(
         total_input=total_input,
         total_output=sum(actual_output_lens),
         request_throughput=completed / dur_s,
+        request_goodput=good_completed / dur_s,
         output_throughput=sum(actual_output_lens) / dur_s,
         total_token_throughput=(total_input + sum(actual_output_lens)) / dur_s,
         mean_ttft_ms=np.mean(ttfts or 0) *
@@ -373,9 +445,9 @@ def calculate_metrics(
         median_itl_ms=np.median(itls or 0) * 1000,
         percentiles_itl_ms=[(p, np.percentile(itls or 0, p) * 1000)
                             for p in selected_percentiles],
-        mean_e2el_ms=np.median(e2els or 0) * 1000,
+        mean_e2el_ms=np.mean(e2els or 0) * 1000,
         std_e2el_ms=np.std(e2els or 0) * 1000,
-        median_e2el_ms=np.mean(e2els or 0) * 1000,
+        median_e2el_ms=np.median(e2els or 0) * 1000,
         percentiles_e2el_ms=[(p, np.percentile(e2els or 0, p) * 1000)
                              for p in selected_percentiles],
     )
@@ -393,11 +465,13 @@ async def benchmark(
     logprobs: Optional[int],
     best_of: int,
     request_rate: float,
+    burstiness: float,
     disable_tqdm: bool,
     profile: bool,
     selected_percentile_metrics: List[str],
     selected_percentiles: List[str],
     ignore_eos: bool,
+    gootput_config_dict: Dict[str, float],
     max_concurrency: Optional[int],
 ):
     if backend in ASYNC_REQUEST_FUNCS:
@@ -446,7 +520,13 @@ async def benchmark(
         if profile_output.success:
             print("Profiler started")
 
+    if burstiness == 1.0:
+        distribution = "Poisson process"
+    else:
+        distribution = "Gamma distribution"
+
     print(f"Traffic request rate: {request_rate}")
+    print(f"Burstiness factor: {burstiness} ({distribution})")
     print(f"Maximum request concurrency: {max_concurrency}")
 
     pbar = None if disable_tqdm else tqdm(total=len(input_requests))
@@ -468,7 +548,7 @@ async def benchmark(
 
     benchmark_start_time = time.perf_counter()
     tasks: List[asyncio.Task] = []
-    async for request in get_request(input_requests, request_rate):
+    async for request in get_request(input_requests, request_rate, burstiness):
         prompt, prompt_len, output_len, mm_content = request
         request_func_input = RequestFuncInput(model=model_id,
                                               prompt=prompt,
@@ -512,6 +592,7 @@ async def benchmark(
         tokenizer=tokenizer,
         selected_percentile_metrics=selected_percentile_metrics,
         selected_percentiles=selected_percentiles,
+        gootput_config_dict=gootput_config_dict,
     )
 
     print("{s:{c}^{n}}".format(s=' Serving Benchmark Result ', n=50, c='='))
@@ -523,6 +604,9 @@ async def benchmark(
                                  metrics.total_output))
     print("{:<40} {:<10.2f}".format("Request throughput (req/s):",
                                     metrics.request_throughput))
+    if gootput_config_dict:
+        print("{:<40} {:<10.2f}".format("Request goodput (req/s):",
+                                        metrics.request_goodput))
     print("{:<40} {:<10.2f}".format("Output token throughput (tok/s):",
                                     metrics.output_throughput))
     print("{:<40} {:<10.2f}".format("Total Token throughput (tok/s):",
@@ -534,6 +618,8 @@ async def benchmark(
         "total_input_tokens": metrics.total_input,
         "total_output_tokens": metrics.total_output,
         "request_throughput": metrics.request_throughput,
+        "request_goodput:":
+        metrics.request_goodput if gootput_config_dict else None,
         "output_throughput": metrics.output_throughput,
         "total_token_throughput": metrics.total_token_throughput,
         "input_lens": [output.prompt_len for output in outputs],
@@ -585,6 +671,41 @@ async def benchmark(
     print("=" * 50)
 
     return result
+
+
+def check_goodput_args(args):
+    # Check and parse goodput arguments
+    gootput_config_dict = {}
+    VALID_NAMES = ["ttft", "tpot", "e2el"]
+    if args.goodput:
+        gootput_config_dict = parse_goodput(args.goodput)
+        for slo_name, slo_val in gootput_config_dict.items():
+            if slo_name not in VALID_NAMES:
+                raise ValueError(
+                    f"Invalid metric name found, {slo_name}: {slo_val}. "
+                    "The service level objective name should be one of "
+                    f"{str(VALID_NAMES)}. ")
+            if slo_val < 0:
+                raise ValueError(
+                    f"Invalid value found, {slo_name}: {slo_val}. "
+                    "The service level objective value should be "
+                    "non-negative.")
+    return gootput_config_dict
+
+
+def parse_goodput(slo_pairs):
+    gootput_config_dict = {}
+    try:
+        for slo_pair in slo_pairs:
+            slo_name, slo_val = slo_pair.split(":")
+            gootput_config_dict[slo_name] = float(slo_val)
+    except ValueError as err:
+        raise argparse.ArgumentTypeError(
+            "Invalid format found for service level objectives. "
+            "Specify service level objectives for goodput as \"KEY:VALUE\" "
+            "pairs, where the key is a metric name, and the value is a "
+            "number in milliseconds.") from err
+    return gootput_config_dict
 
 
 def main(args: argparse.Namespace):
@@ -681,6 +802,8 @@ def main(args: argparse.Namespace):
     else:
         raise ValueError(f"Unknown dataset: {args.dataset_name}")
 
+    gootput_config_dict = check_goodput_args(args)
+
     benchmark_result = asyncio.run(
         benchmark(
             backend=backend,
@@ -692,6 +815,7 @@ def main(args: argparse.Namespace):
             logprobs=args.logprobs,
             best_of=args.best_of,
             request_rate=args.request_rate,
+            burstiness=args.burstiness,
             disable_tqdm=args.disable_tqdm,
             profile=args.profile,
             selected_percentile_metrics=args.percentile_metrics.split(","),
@@ -699,6 +823,7 @@ def main(args: argparse.Namespace):
                 float(p) for p in args.metric_percentiles.split(",")
             ],
             ignore_eos=args.ignore_eos,
+            gootput_config_dict=gootput_config_dict,
             max_concurrency=args.max_concurrency,
         ))
 
@@ -729,6 +854,7 @@ def main(args: argparse.Namespace):
         # Traffic
         result_json["request_rate"] = (
             args.request_rate if args.request_rate < float("inf") else "inf")
+        result_json["burstiness"] = args.burstiness
         result_json["max_concurrency"] = args.max_concurrency
 
         # Merge with benchmark result
@@ -844,8 +970,20 @@ if __name__ == "__main__":
         default=float("inf"),
         help="Number of requests per second. If this is inf, "
         "then all the requests are sent at time 0. "
-        "Otherwise, we use Poisson process to synthesize "
-        "the request arrival times.",
+        "Otherwise, we use Poisson process or gamma distribution "
+        "to synthesize the request arrival times.",
+    )
+    parser.add_argument(
+        "--burstiness",
+        type=float,
+        default=1.0,
+        help="Burstiness factor of the request generation. "
+        "Only take effect when request_rate is not inf. "
+        "Default value is 1, which follows Poisson process. "
+        "Otherwise, the request intervals follow a gamma distribution. "
+        "A lower burstiness value (0 < burstiness < 1) results in more "
+        "bursty requests. A higher burstiness value (burstiness > 1) "
+        "results in a more uniform arrival of requests.",
     )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
@@ -915,6 +1053,17 @@ if __name__ == "__main__":
         "Default value is \"99\". "
         "Use \"--percentile-metrics\" to select metrics.",
     )
+    parser.add_argument(
+        "--goodput",
+        nargs="+",
+        required=False,
+        help="Specify service level objectives for goodput as \"KEY:VALUE\" "
+        "pairs, where the key is a metric name, and the value is in "
+        "milliseconds. Multiple \"KEY:VALUE\" pairs can be provided, "
+        "separated by spaces. Allowed request level metric names are "
+        "\"ttft\", \"tpot\", \"e2el\". For more context on the definition of "
+        "goodput, refer to DistServe paper: https://arxiv.org/pdf/2401.09670 "
+        "and the blog: https://hao-ai-lab.github.io/blogs/distserve")
 
     # group for dataset specific arguments
     sonnet_group = parser.add_argument_group("sonnet dataset options")

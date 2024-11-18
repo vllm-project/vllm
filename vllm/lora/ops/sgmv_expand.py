@@ -9,10 +9,7 @@ import torch
 import triton
 import triton.language as tl
 
-from vllm.triton_utils import libentry
 
-
-@libentry()
 @triton.jit
 def _sgmv_expand_kernel(
     input_ptr,
@@ -91,7 +88,10 @@ def _sgmv_expand_kernel(
     c_mask = (offset_cm[:, None] <
               (cur_seq_start + M)) & (offset_cn[None, :] < N)
     if ADD_INPUTS:
-        tiled_out = tl.load(c_ptr, mask=c_mask)
+        # explicitly pass in other=None to tell triton that masked values
+        # can be uninitialized. This is OK because the later tl.store operation
+        # uses the same mask, eliminating the risk of garbage values propagating
+        tiled_out = tl.load(c_ptr, mask=c_mask, other=None)
         tiled_c += tiled_out
     tl.store(c_ptr, tiled_c, mask=c_mask)
 

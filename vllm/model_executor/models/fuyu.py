@@ -1,4 +1,3 @@
-# coding=utf-8
 # adapted from https://github.com/huggingface/transformers/blob/v4.39.3/src/transformers/models/fuyu/modeling_fuyu.py
 # Copyright 2023 The vLLM team.
 # Copyright 2023 HuggingFace Inc. team. All rights reserved.
@@ -17,32 +16,34 @@
 """ PyTorch Fuyu model."""
 import math
 from array import array
-from typing import Iterable, List, Literal, Mapping, Optional, Tuple, TypedDict
+from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,
+                    TypedDict)
 
 import torch
 import torch.nn as nn
 import torch.utils.checkpoint
 from PIL import Image
-from transformers import FuyuConfig, FuyuImageProcessor
+from transformers import FuyuImageProcessor
 
 from vllm.attention import AttentionMetadata
-from vllm.config import CacheConfig, MultiModalConfig
-from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, InputContext,
-                         token_inputs)
+from vllm.config import VllmConfig
+from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
+                         InputContext, token_inputs)
 from vllm.model_executor.layers.linear import ColumnParallelLinear
-from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.models.persimmon import PersimmonForCausalLM
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.base import MultiModalInputs
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.multimodal.image import cached_get_image_processor
-from vllm.multimodal.utils import cached_get_tokenizer
+from vllm.multimodal.utils import (cached_get_tokenizer,
+                                   consecutive_placeholder_ranges)
 from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
                            SequenceData)
+from vllm.utils import is_list_of
 
 from .interfaces import SupportsMultiModal, SupportsPP
-from .utils import AutoWeightsLoader, flatten_bn, merge_multimodal_embeddings
+from .utils import (AutoWeightsLoader, flatten_bn, maybe_prefix,
+                    merge_multimodal_embeddings)
 
 # Cannot find the following 2 numbers from hf config.
 _IMAGE_TOKEN_ID = 71011
@@ -103,7 +104,11 @@ def dummy_seq_data_for_fuyu(ctx: InputContext, seq_len: int, num_images: int):
     token_ids = array(VLLM_TOKEN_ID_ARRAY_TYPE, image_token_ids) * num_images
     token_ids += array(VLLM_TOKEN_ID_ARRAY_TYPE,
                        [0]) * (seq_len - image_feature_size * num_images)
-    return SequenceData(token_ids)
+    return SequenceData(token_ids), {
+        "image":
+        consecutive_placeholder_ranges(num_items=num_images,
+                                       item_size=image_feature_size)
+    }
 
 
 def dummy_image_for_fuyu(
@@ -119,15 +124,15 @@ def dummy_image_for_fuyu(
 def dummy_data_for_fuyu(ctx: InputContext, seq_len: int,
                         mm_counts: Mapping[str, int]):
     num_images = mm_counts["image"]
-    seq_data = dummy_seq_data_for_fuyu(ctx, seq_len, num_images)
+    seq_data, ranges = dummy_seq_data_for_fuyu(ctx, seq_len, num_images)
     mm_data = dummy_image_for_fuyu(num_images,
                                    image_width=MAX_IMAGE_FEATURE_SIZE_WIDTH,
                                    image_height=MAX_IMAGE_FEATURE_SIZE_HEIGHT)
-    return seq_data, mm_data
+    return DummyData(seq_data, mm_data, ranges)
 
 
 def _fuyu_image_preprocess(image_processor: FuyuImageProcessor,
-                           data: Image.Image):
+                           data: List[Image.Image]):
     image_encoding = image_processor.preprocess(data, return_tensors="pt")
     batch_images = torch.stack([img[0] for img in image_encoding["images"]
                                 ]).unsqueeze(1)
@@ -158,8 +163,10 @@ def input_processor_for_fuyu(ctx: InputContext, inputs: DecoderOnlyInputs):
     model_config = ctx.model_config
     image_data = multi_modal_data["image"]
     new_multi_modal_data = {}
+    image_list = image_data if isinstance(image_data, list) else [image_data]
+
     # process image data
-    if isinstance(image_data, Image.Image):
+    if is_list_of(image_list, Image.Image):
         # Fuyu's image_processor can also finish token padding
         image_processor: FuyuImageProcessor = cached_get_image_processor(
             model_config.model)
@@ -171,7 +178,7 @@ def input_processor_for_fuyu(ctx: InputContext, inputs: DecoderOnlyInputs):
         ])
         new_multi_modal_data["image"] = image_patches
 
-    elif isinstance(image_data, torch.Tensor):
+    elif is_list_of(image_list, torch.Tensor):
         raise NotImplementedError("Embeddings input is not supported yet")
     else:
         raise TypeError(f"Invalid image type: {type(image_data)}")
@@ -198,19 +205,20 @@ def input_processor_for_fuyu(ctx: InputContext, inputs: DecoderOnlyInputs):
 
 def input_mapper_for_fuyu(ctx: InputContext, data: object):
     model_config = ctx.model_config
-    if isinstance(data, Image.Image):
+    data_list = data if isinstance(data, list) else [data]
+    if is_list_of(data_list, Image.Image):
         # Fuyu's image_processor can also finish token padding
         image_processor: FuyuImageProcessor = cached_get_image_processor(
             model_config.model)
 
-        model_image_input = _fuyu_image_preprocess(image_processor, data)
+        model_image_input = _fuyu_image_preprocess(image_processor, data_list)
         data = torch.stack([
             image_patch[0]
             for image_patch in model_image_input["image_patches"]
         ])
 
     # image has been processed with prompt in input processor
-    return MultiModalInputs({"pixel_values": data})
+    return MultiModalKwargs({"pixel_values": data})
 
 
 @MULTIMODAL_REGISTRY.register_image_input_mapper(input_mapper_for_fuyu)
@@ -219,12 +227,11 @@ def input_mapper_for_fuyu(ctx: InputContext, data: object):
 @INPUT_REGISTRY.register_input_processor(input_processor_for_fuyu)
 class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
-    def __init__(self,
-                 config: FuyuConfig,
-                 multimodal_config: MultiModalConfig,
-                 cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
+        multimodal_config = vllm_config.model_config.multimodal_config
         self.config = config
         self.multimodal_config = multimodal_config
 
@@ -239,9 +246,10 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             quant_config=quant_config,
             gather_output=True,
         )
-        self.language_model = PersimmonForCausalLM(config.text_config,
-                                                   cache_config=cache_config,
-                                                   quant_config=quant_config)
+        self.language_model = PersimmonForCausalLM(
+            vllm_config=vllm_config.with_hf_config(config.text_config),
+            prefix=maybe_prefix(prefix, "language_model"),
+        )
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
 
@@ -347,6 +355,7 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         next_tokens = self.language_model.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         loader = AutoWeightsLoader(self)
-        loader.load_weights(weights)
+        return loader.load_weights(weights)

@@ -27,7 +27,6 @@ class RMSNorm(CustomOp):
         self.variance_epsilon = eps
         self.variance_size_override = (None if var_hidden_size == hidden_size
                                        else var_hidden_size)
-
         self.weight = nn.Parameter(torch.ones(hidden_size))
 
     def forward_native(
@@ -92,6 +91,25 @@ class RMSNorm(CustomOp):
             self.variance_epsilon,
         )
         return out
+
+    def forward_hpu(
+        self,
+        x: torch.Tensor,
+        residual: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+        from vllm_hpu_extension.ops import HPUFusedRMSNorm
+        if HPUFusedRMSNorm is None:
+            return self.forward_native(x, residual)
+        if residual is not None:
+            orig_shape = x.shape
+            residual += x.view(residual.shape)
+            # Note: HPUFusedRMSNorm requires 3D tensors as inputs
+            x = HPUFusedRMSNorm.apply(residual, self.weight,
+                                      self.variance_epsilon)
+            return x.view(orig_shape), residual
+
+        x = HPUFusedRMSNorm.apply(x, self.weight, self.variance_epsilon)
+        return x
 
     def forward_xpu(
         self,
