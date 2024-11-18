@@ -22,21 +22,34 @@ import torch
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
-from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionMetadata,
-                                              AttentionMetadataBuilder,
-                                              AttentionState, AttentionType)
-from vllm.attention.backends.utils import (PAD_SLOT_ID, compute_slot_mapping,
-                                           compute_slot_mapping_start_idx,
-                                           is_block_tables_empty)
+from vllm.attention.backends.abstract import (
+    AttentionBackend,
+    AttentionImpl,
+    AttentionMetadata,
+    AttentionMetadataBuilder,
+    AttentionState,
+    AttentionType,
+)
+from vllm.attention.backends.utils import (
+    PAD_SLOT_ID,
+    compute_slot_mapping,
+    compute_slot_mapping_start_idx,
+    is_block_tables_empty,
+)
 from vllm.attention.ops.paged_attn import PagedAttention
 from vllm.forward_context import get_forward_context
-from vllm.utils import (async_tensor_h2d, direct_register_custom_op,
-                        get_kv_cache_torch_dtype, make_tensor_with_pad)
+from vllm.utils import (
+    async_tensor_h2d,
+    direct_register_custom_op,
+    get_kv_cache_torch_dtype,
+    make_tensor_with_pad,
+)
 
 if TYPE_CHECKING:
-    from vllm.worker.model_runner import (ModelInputForGPUBuilder,
-                                          ModelInputForGPUWithSamplingMetadata)
+    from vllm.worker.model_runner import (
+        ModelInputForGPUBuilder,
+        ModelInputForGPUWithSamplingMetadata,
+    )
 
 
 class FlashInferBackend(AttentionBackend):
@@ -758,8 +771,7 @@ class FlashInferImpl(AttentionImpl):
             alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
         self.alibi_slopes = alibi_slopes
         if sliding_window is not None:
-            raise ValueError("Sliding window is not supported in FlashInfer.")
-        self.sliding_window = (-1, -1)
+            self.sliding_window = sliding_window
         self.kv_cache_dtype = kv_cache_dtype
         self.logits_soft_cap = logits_soft_cap
 
