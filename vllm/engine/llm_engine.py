@@ -16,6 +16,8 @@ import vllm.envs as envs
 from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
                          ObservabilityConfig, ParallelConfig, SchedulerConfig,
                          VllmConfig)
+from vllm.core.block_manager import SelfAttnBlockSpaceManager
+from vllm.core.placeholder_block_space_manager import PlaceholderBlockSpaceManager
 from vllm.core.scheduler import (ScheduledSequenceGroup, Scheduler,
                                  SchedulerOutputs)
 from vllm.engine.arg_utils import EngineArgs
@@ -59,7 +61,7 @@ from vllm.transformers_utils.tokenizer_group import (
     BaseTokenizerGroup, init_tokenizer_from_configs)
 from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
                                   usage_message)
-from vllm.utils import Counter, Device, deprecate_kwargs, weak_bind
+from vllm.utils import Counter, Device, deprecate_kwargs, weak_bind, weak_bind_with_ret
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -133,6 +135,15 @@ class SchedulerContext:
                        is_first_step_output=is_first_step_output,
                        skip=[]))
 
+    def is_any_finished(self) -> bool:
+        return self.scheduler_outputs.is_any_finished()
+
+    def get_running_reqs(self) -> int:
+        running_seqs = 0
+        for scheduled_seq_group in self.scheduler_outputs.scheduled_seq_groups:
+            running_seqs += len(scheduled_seq_group.
+                                seq_group.get_seqs(status=SequenceStatus.RUNNING))
+        return running_seqs
 
 class LLMEngine:
     """An LLM engine that receives requests and generates texts.
@@ -414,6 +425,15 @@ class LLMEngine:
                 self.parallel_config.pipeline_parallel_size,
                 self.async_callbacks[v_id]
                 if self.model_config.use_async_output_proc else None)
+            for v_id in range(self.parallel_config.pipeline_parallel_size)
+        ]
+
+        multi_step_modify = weak_bind_with_ret(self._verify_and_add_multi_step)
+
+        self.multi_step_modify_callback = [
+            partial(multi_step_modify,
+                    block_manager=self.scheduler[v_id].block_manager,
+                    ctx=self.scheduler_contexts[v_id])
             for v_id in range(self.parallel_config.pipeline_parallel_size)
         ]
 
@@ -1437,11 +1457,14 @@ class LLMEngine:
                 finished_requests_ids=finished_requests_ids,
                 # We use ExecuteModelRequest to pass the last sampled_token_ids
                 # to each of the non-last PP stages for in-place prepare_input.
-                last_sampled_token_ids=last_sampled_token_ids)
+                last_sampled_token_ids=last_sampled_token_ids,
+                has_pending_reqs=self.scheduler[virtual_engine].has_pending_seqs())
 
             if allow_async_output_proc:
                 execute_model_req.async_callback = self.async_callbacks[
                     virtual_engine]
+                execute_model_req.multi_step_modify_callback \
+                    = self.multi_step_modify_callback[virtual_engine]
 
             outputs = self.model_executor.execute_model(
                 execute_model_req=execute_model_req)
@@ -2079,3 +2102,36 @@ class LLMEngine:
                 sampling_params.logits_processors.extend(logits_processors)
 
         return sampling_params
+
+    def _verify_and_add_multi_step(self,
+                                   block_manager: Union[
+                                       SelfAttnBlockSpaceManager, PlaceholderBlockSpaceManager],
+                                   ctx: SchedulerContext) -> bool:
+        """ Callback for NRNS to determine if the multi-step can increase and
+        then execute the increment.
+        If the block is enough for the increment, add the lookahead_slots of each seq,
+        and also update the num_steps of each seq_group_metadata.
+        Return true when the increment succeeds,
+        """
+        if len(ctx.output_queue) == 0:
+            return False
+        scheduler_step = ctx.seq_group_metadata_list[0].state.num_steps
+        # if multi-step is 1, the multi-step is off, just return false.
+        if scheduler_step == 1:
+            return False
+        sequence_groups = [scheduled_seq_group.seq_group for scheduled_seq_group
+                           in ctx.scheduler_outputs.scheduled_seq_groups]
+
+        # For prefill + enable_chunked, num_lookahead_slots = scheduler_step,
+        # For Decode, num_lookahead_slots = scheduler_step - 1.
+        # Here consider the worst case, assume num_lookahead_slots = scheduler_step,
+        # Thus the new num_lookahead_slots should be num_lookahead_slots + 1
+        if block_manager.can_add_slots(seq_groups=sequence_groups,
+                                       num_lookahead_slots=scheduler_step+1):
+            for sequence_group in sequence_groups:
+                for seq in sequence_group.seqs:
+                    block_manager.add_lookahead_slots(seq, scheduler_step+1)
+            for seq_group_metadata in ctx.seq_group_metadata_list:
+                seq_group_metadata.add_step()
+            return True
+        return False

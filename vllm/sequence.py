@@ -607,6 +607,9 @@ class SequenceGroupState(msgspec.Struct,
     def remaining_steps(self) -> int:
         return self.num_steps - self.current_step
 
+    def add_step(self):
+        self.num_steps = self.num_steps + 1
+
 
 class SequenceGroup:
     """A group of sequences that are generated from the same prompt.
@@ -964,6 +967,10 @@ class SequenceGroupMetadata(
         # step.
         return self.is_prompt and self.do_sample
 
+    def add_step(self):
+        if self.state is not None:
+            self.state.add_step()
+
     def get_first_seq_id(self) -> int:
         # This is an efficient way of fetching the seq_id when
         # we know this SequenceGroup has only one sequence.
@@ -1265,6 +1272,13 @@ class ExecuteModelRequest(
     last_sampled_token_ids: Optional[torch.Tensor] = None
     # Async callback
     async_callback: Optional[Callable] = None
+    multi_step_modify_callback: Optional[Callable[..., bool]] = None
+    has_pending_reqs: bool = True
+
+    def add_step(self):
+        if self.seq_group_metadata_list is not None:
+            for seq_group_metadata in self.seq_group_metadata_list:
+                seq_group_metadata.add_step()
 
     @property
     def is_first_multi_step(self) -> bool:

@@ -21,6 +21,7 @@ from vllm.worker.model_runner_base import (
     BroadcastableModelInput, _init_attn_metadata_from_tensor_dict,
     _init_frozen_model_input_from_tensor_dict,
     _init_sampling_metadata_from_tensor_dict)
+from ..config import CacheConfig
 
 from ..model_executor.model_loader.tensorizer import TensorizerConfig
 
@@ -54,13 +55,19 @@ def completion_seq_group_output_builder():
 class PythonizationCache:
 
     def __init__(self):
-        self.cached_seq_output = PyObjectCache(seq_output_builder)
+        # I set the initila size here manually by the size of gpu block(21494)
+        # TODO: set the initial_size by the cache_config.num_gpu_blocks
+        self.cached_seq_output = PyObjectCache(seq_output_builder, 22000 * 16)
         self.cached_completion_seq_group_output = PyObjectCache(
-            completion_seq_group_output_builder)
+            completion_seq_group_output_builder, 20000 * 16)
 
     def reset(self):
         self.cached_seq_output.reset()
         self.cached_completion_seq_group_output.reset()
+
+    def get_remain_cache(self) -> int:
+        return min(self.cached_seq_output.get_remain_index(),
+                   self.cached_completion_seq_group_output.get_remain_index())
 
 
 @dataclass
@@ -159,6 +166,7 @@ class StatefulModelInput(BroadcastableModelInput):
     num_seqs: int = -1
     num_queries: int = -1
     num_single_step_prefills: int = 0
+    has_pending_reqs: bool = True
 
     def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
         assert self.frozen_model_input is not None
@@ -405,10 +413,13 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
                 break
 
     def _final_process_outputs(self, model_input: StatefulModelInput,
-                               output_proc_callback: Optional[Callable]):
+                               output_proc_callback: Optional[Callable],
+                               multi_step_modify_callback: Optional[Callable[..., bool]],
+                               pythonization_cache: Optional[PythonizationCache] = None):
         assert model_input.frozen_model_input is not None
 
-        has_async_callback = output_proc_callback is not None
+        has_async_output_proc_callback = output_proc_callback is not None
+        has_async_multi_step_modify_callback = multi_step_modify_callback is not None
 
         outputs = []
         for step_num, output in enumerate(model_input.cached_outputs):
@@ -419,8 +430,31 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
             # For async case:
             #   -- Invoke callback, pythonize, add to callback queue and repeat
             #   -- For last output, just add to callback queue
-            if has_async_callback:
+            if has_async_output_proc_callback:
                 assert output_proc_callback is not None
+
+                ctx = output_proc_callback.keywords["ctx"]
+                # The boundary conditions to execute modification of multi-step:
+                #   1. only one step remain
+                #   2. no finished reqs
+                #   3. no waiting or swapped reqs
+                #   4. pythonization_cache has enough space for new step
+                # Here we limit the max scheduler_step by the PythonizationCache.
+                # While the initial size of cache is 128(PyObjectCache.__init__),
+                # once the output_size of multi-step is greater than 128,The growth of cache
+                # will be triggered, which doubles the cache_size.
+                # The cost of object allocations is larger than that of scheduler,
+                # thus we limit the multi-step by remaining size of PythonizationCache.
+                # TODO: Add udf PythonizationCache initial size
+                if (has_async_multi_step_modify_callback
+                        and is_last_step
+                        and not ctx.is_any_finished()
+                        and not model_input.has_pending_reqs
+                        and pythonization_cache.get_remain_cache() > ctx.get_running_reqs()):
+                    if multi_step_modify_callback():
+                        # if the multi-step has been modified,
+                        # just return as current step is no longer the last step
+                        return outputs
 
                 # Invoke callback before pythonize (to overlap with GPU)
                 output_proc_callback()
@@ -433,8 +467,6 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
                     # For non last step, add to callback queue to chain
                     # callbacks=>pythonize pairs (for GPU overlap)
                     if not is_last_step:
-                        ctx = output_proc_callback.keywords[  # type: ignore
-                            "ctx"]  # type: ignore
                         ctx.append_output(
                             outputs=[output.sampler_output],
                             seq_group_metadata_list=ctx.
@@ -584,7 +616,11 @@ class MultiStepModelRunner(GPUModelRunnerBase[StatefulModelInput]):
         # Pythonize the output and block if needed since it is the last step
         if model_input.is_last_step:
             outputs = self._final_process_outputs(
-                model_input, model_input.base_output_proc_callback)
+                model_input, model_input.base_output_proc_callback,
+                model_input.frozen_model_input.multi_step_modify_callback,
+                self.pythonization_cache)
+            if not outputs:
+                return output
             if self.pythonization_cache:
                 self.pythonization_cache.reset()
             return outputs

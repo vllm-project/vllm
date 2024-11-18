@@ -46,6 +46,7 @@ class MultiStepWorker(Worker):
         assert self.is_driver_worker
         virtual_engine = execute_model_req.virtual_engine
         is_first_multi_step = execute_model_req.is_first_multi_step
+        has_pending_reqs = execute_model_req.has_pending_reqs
         if is_first_multi_step:
             # on first step we prepare the worker input and model input normally
             worker_input: WorkerInput = self.prepare_worker_input(
@@ -59,7 +60,8 @@ class MultiStepWorker(Worker):
             if execute_model_req.async_callback:
                 model_input.frozen_model_input = dataclasses.replace(  # type: ignore
                     model_input.frozen_model_input,
-                    async_callback=execute_model_req.async_callback)
+                    async_callback=execute_model_req.async_callback,
+                    multi_step_modify_callback=execute_model_req.multi_step_modify_callback)
         else:
             # on subsequent steps we reuse the worker input and model input
             multi_step_state = self.multi_step_states[virtual_engine]
@@ -75,6 +77,7 @@ class MultiStepWorker(Worker):
 
         model_input.is_first_multi_step = is_first_multi_step
         model_input.is_last_step = execute_model_req.is_last_step
+        model_input.has_pending_reqs = has_pending_reqs
 
         if not is_first_multi_step:
             # we broadcast the last sampled token ids to all TP workers so they

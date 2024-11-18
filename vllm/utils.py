@@ -281,12 +281,12 @@ class PyObjectCache:
     across scheduler iterations.
     """
 
-    def __init__(self, obj_builder):
+    def __init__(self, obj_builder, init_size: int = 128):
         self._obj_builder = obj_builder
         self._index = 0
 
         self._obj_cache = []
-        for _ in range(128):
+        for _ in range(init_size):
             self._obj_cache.append(self._obj_builder())
 
     def _grow_cache(self):
@@ -312,6 +312,9 @@ class PyObjectCache:
         """Makes all cached-objects available for the next scheduler iteration.
         """
         self._index = 0
+
+    def get_remain_index(self) -> int:
+        return len(self._obj_cache) - self._index
 
 
 @lru_cache(maxsize=None)
@@ -1158,6 +1161,19 @@ def weak_bind(bound_method: Callable[..., Any], ) -> Callable[..., None]:
     def weak_bound(*args, **kwargs) -> None:
         if inst := ref():
             unbound(inst, *args, **kwargs)
+
+    return weak_bound
+
+def weak_bind_with_ret(bound_method: Callable[..., Any], ) -> Callable[..., Any]:
+    """Make an instance method with return that weakly references
+    its associated instance and no-ops once that
+    instance is collected."""
+    ref = weakref.ref(bound_method.__self__)  # type: ignore[attr-defined]
+    unbound = bound_method.__func__  # type: ignore[attr-defined]
+
+    def weak_bound(*args, **kwargs) -> Any:
+        if inst := ref():
+            return unbound(inst, *args, **kwargs)
 
     return weak_bound
 

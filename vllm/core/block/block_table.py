@@ -189,6 +189,16 @@ class BlockTable:
                 self._allocator.allocate_mutable_block(
                     prev_block=self._blocks[-1], device=device))
 
+    def has_enough_empty_slots(self, num_empty_slots: int) -> bool:
+        """Return if the BlockTable has at least the specified number of
+        empty slots available.
+        """
+        # Currently the block table only supports
+        # appending tokens to GPU blocks.
+        assert self._is_allocated
+
+        return self._num_empty_slots >= num_empty_slots
+
     def fork(self) -> "BlockTable":
         """Creates a new BlockTable instance with a copy of the blocks from the
         current instance.

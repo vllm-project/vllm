@@ -165,6 +165,11 @@ class SchedulerOutputs:
         return (not self.scheduled_seq_groups and not self.blocks_to_swap_in
                 and not self.blocks_to_swap_out and not self.blocks_to_copy)
 
+    def is_any_finished(self) -> bool:
+        return (not self.scheduled_seq_groups or
+                any(sg.seq_group.is_finished()
+                    for sg in self.scheduled_seq_groups))
+
     def _sort_by_lora_ids(self):
         self.scheduled_seq_groups = sorted(
             self.scheduled_seq_groups,
@@ -491,6 +496,9 @@ class Scheduler:
     def has_unfinished_seqs(self) -> bool:
         return len(self.waiting) != 0 or len(self.running) != 0 or len(
             self.swapped) != 0
+
+    def has_pending_seqs(self) -> bool:
+        return len(self.waiting) != 0 or len(self.swapped) != 0
 
     def get_prefix_cache_hit_rate(self, device: Device) -> float:
         return self.block_manager.get_prefix_cache_hit_rate(device)
@@ -1231,7 +1239,7 @@ class Scheduler:
             num_lookahead_slots=num_lookahead_slots,
             running_queue_size=len(self.running),
             preempted=(len(running_scheduled.preempted) +
-                       len(running_scheduled.swapped_out)),
+                       len(running_scheduled.swapped_out))
         )
 
     def _schedule(self) -> SchedulerOutputs:

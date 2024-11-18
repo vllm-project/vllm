@@ -1,5 +1,5 @@
 """A block manager that manages token blocks."""
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 from typing import Sequence as GenericSequence
 from typing import Tuple
 
@@ -226,6 +226,27 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
             Device.GPU)
         return num_touched_blocks <= num_free_gpu_blocks
 
+    def can_add_slots(self, seq_groups: Union[SequenceGroup, List[SequenceGroup]],
+                      num_lookahead_slots: int) -> bool:
+        """ If the empty slot is less then lookahead_slots, a new block should be allocated.
+        Determine if there is enough space in GPU KV cache for the num_lookahead_slots.
+        """
+
+        if not isinstance(seq_groups,list):
+            seq_groups = [seq_groups]
+
+        num_touched_blocks = 0
+        for seq_group in seq_groups:
+            for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
+                block_table = self.block_tables[seq.seq_id]
+
+                num_touched_blocks += 0 if (
+                    block_table.has_enough_empty_slots(num_lookahead_slots)) else 1
+
+        num_free_gpu_blocks = self.block_allocator.get_num_free_blocks(
+            Device.GPU)
+        return num_touched_blocks <= num_free_gpu_blocks
+
     def append_slots(
         self,
         seq: Sequence,
@@ -242,6 +263,10 @@ class SelfAttnBlockSpaceManager(BlockSpaceManager):
         # Return any new copy-on-writes.
         new_cows = self.block_allocator.clear_copy_on_writes()
         return new_cows
+
+    def add_lookahead_slots(self, seq: Sequence, num_lookahead_slots: int):
+        block_table = self.block_tables[seq.seq_id]
+        block_table.ensure_num_empty_slots(num_lookahead_slots)
 
     def free(self, seq: Sequence) -> None:
         seq_id = seq.seq_id
