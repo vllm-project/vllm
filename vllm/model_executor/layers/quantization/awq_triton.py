@@ -42,7 +42,7 @@ def awq_dequantize_kernel(
     result_masks = result_masks_y[:, None] & result_masks_x[None, :]
 
     # Load the weights.
-    iweights = tl.load(qweight_ptr + offsets, masks)
+    iweights = tl.load(qweight_ptr + offsets, masks, 0.0)
     iweights = tl.interleave(iweights, iweights)
     iweights = tl.interleave(iweights, iweights)
     iweights = tl.interleave(iweights, iweights)
@@ -71,7 +71,7 @@ def awq_dequantize_kernel(
     zero_masks = zero_masks_y[:, None] & zero_masks_x[None, :]
 
     # Load the zeros.
-    zeros = tl.load(zeros_ptr + zero_offsets, zero_masks)
+    zeros = tl.load(zeros_ptr + zero_offsets, zero_masks, 0.0)
     zeros = tl.interleave(zeros, zeros)
     zeros = tl.interleave(zeros, zeros)
     zeros = tl.interleave(zeros, zeros)
@@ -91,7 +91,7 @@ def awq_dequantize_kernel(
     scale_masks = scale_masks_y[:, None] & scale_masks_x[None, :]
 
     # Load the scales.
-    scales = tl.load(scales_ptr + scale_offsets, scale_masks)
+    scales = tl.load(scales_ptr + scale_offsets, scale_masks, 0.0)
     scales = tl.broadcast_to(scales, (BLOCK_SIZE_Y, BLOCK_SIZE_X * 8))
 
     # Dequantize.
@@ -165,10 +165,10 @@ def awq_gemm_kernel(a_ptr, b_ptr, c_ptr, zeros_ptr, scales_ptr, M, N, K,
     for k in range(0, tl.cdiv(K, BLOCK_SIZE_K * SPLIT_K)):
         masks_k = offsets_k < K
         masks_a = masks_am[:, None] & masks_k[None, :]
-        a = tl.load(a_ptrs, mask=masks_a)
+        a = tl.load(a_ptrs, mask=masks_a, other=0.0)
 
         masks_b = masks_k[:, None] & masks_bn[None, :]
-        b = tl.load(b_ptrs, mask=masks_b)
+        b = tl.load(b_ptrs, mask=masks_b, other=0.0)
         b = tl.interleave(b, b)
         b = tl.interleave(b, b)
         b = tl.interleave(b, b)
@@ -181,7 +181,7 @@ def awq_gemm_kernel(a_ptr, b_ptr, c_ptr, zeros_ptr, scales_ptr, M, N, K,
         masks_zk = offsets_szk < K // group_size
         masks_z = masks_zk[:, None] & masks_zn[None, :]
         zeros_ptrs = zeros_ptr + offsets_z
-        zeros = tl.load(zeros_ptrs, mask=masks_z)
+        zeros = tl.load(zeros_ptrs, mask=masks_z, other=0.0)
         zeros = tl.interleave(zeros, zeros)
         zeros = tl.interleave(zeros, zeros)
         zeros = tl.interleave(zeros, zeros)
@@ -191,7 +191,7 @@ def awq_gemm_kernel(a_ptr, b_ptr, c_ptr, zeros_ptr, scales_ptr, M, N, K,
         masks_sk = offsets_szk < K // group_size
         masks_s = masks_sk[:, None] & masks_sn[None, :]
         scales_ptrs = scales_ptr + offsets_s
-        scales = tl.load(scales_ptrs, mask=masks_s)
+        scales = tl.load(scales_ptrs, mask=masks_s, other=0.0)
         scales = tl.broadcast_to(scales, (BLOCK_SIZE_K, BLOCK_SIZE_N))
 
         b = (b >> shifts) & 0xF
