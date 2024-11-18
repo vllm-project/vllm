@@ -4,13 +4,13 @@ import copy
 import dataclasses
 import fnmatch
 import glob
+import inspect
 import json
 import math
 import os
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
-from typing import (Any, Dict, Generator, Iterable, List, Optional, Tuple,
-                    Type, cast)
+from typing import Any, Dict, Generator, Iterable, List, Optional, Tuple, cast
 
 import gguf
 import huggingface_hub
@@ -18,20 +18,17 @@ import numpy as np
 import torch
 from huggingface_hub import HfApi, hf_hub_download
 from torch import nn
-from transformers import AutoModelForCausalLM, PretrainedConfig
+from transformers import AutoModelForCausalLM
 from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 
-from vllm.config import (CacheConfig, LoadConfig, LoadFormat, LoRAConfig,
-                         ModelConfig, MultiModalConfig, ParallelConfig,
-                         PoolerConfig, SchedulerConfig, VllmConfig)
+from vllm.config import (LoadConfig, LoadFormat, ModelConfig, ParallelConfig,
+                         VllmConfig)
 from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (ReplicatedLinear,
                                                RowParallelLinear)
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
 from vllm.model_executor.model_loader.tensorizer import (
     TensorizerConfig, is_vllm_tensorized, load_with_tensorizer,
     serialize_vllm_model, tensorizer_weights_iterator)
@@ -43,10 +40,9 @@ from vllm.model_executor.model_loader.weight_utils import (
     get_gguf_extra_tensor_names, gguf_quant_weights_iterator,
     initialize_dummy_weights, np_cache_weights_iterator, pt_weights_iterator,
     safetensors_weights_iterator)
-from vllm.model_executor.models import (has_inner_state, supports_lora,
-                                        supports_multimodal)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
+from vllm.plugins import set_current_vllm_config
 from vllm.utils import is_fake_hpu, is_pin_memory_available
 
 
@@ -94,85 +90,41 @@ def device_loading_context(module: torch.nn.Module,
 logger = init_logger(__name__)
 
 
-def _get_model_initialization_kwargs(
-        model_class: Type[nn.Module],
-        lora_config: Optional[LoRAConfig],
-        multimodal_config: Optional[MultiModalConfig],
-        scheduler_config: Optional[SchedulerConfig] = None,
-        pooler_config: Optional[PoolerConfig] = None) -> Dict[str, Any]:
-    """Get extra kwargs for model initialization."""
-    extra_kwargs: Dict[str, Any] = {}
-
-    if supports_lora(model_class):
-        # lora_config=None is used to disable LoRA
-        extra_kwargs["lora_config"] = lora_config
-    elif lora_config:
-        raise ValueError(
-            f"Model {model_class.__name__} does not support LoRA, "
-            "but LoRA is enabled. Support for this model may "
-            "be added in the future. If this is important to you, "
-            "please open an issue on github.")
-
-    if supports_multimodal(model_class):
-        assert multimodal_config is not None
-
-        extra_kwargs["multimodal_config"] = multimodal_config
-
-    if has_inner_state(model_class) and scheduler_config:
-        extra_kwargs["scheduler_config"] = scheduler_config
-    if pooler_config:
-        extra_kwargs["pooler_config"] = pooler_config
-    return extra_kwargs
-
-
-def build_model(model_class: Type[nn.Module],
-                vllm_config: Optional[VllmConfig],
-                hf_config: PretrainedConfig,
-                cache_config: Optional[CacheConfig],
-                quant_config: Optional[QuantizationConfig],
-                *,
-                lora_config: Optional[LoRAConfig],
-                multimodal_config: Optional[MultiModalConfig],
-                scheduler_config: Optional[SchedulerConfig],
-                prefix: Optional[str] = None,
-                pooler_config: Optional[PoolerConfig] = None) -> nn.Module:
-    extra_kwargs = _get_model_initialization_kwargs(model_class, lora_config,
-                                                    multimodal_config,
-                                                    scheduler_config,
-                                                    pooler_config)
-    if prefix:
-        extra_kwargs["prefix"] = prefix
-
-    # TODO: unify all the module initialization code
-    # to only take the `VllmConfig` object as input
-    from vllm.plugins import set_vllm_config
-    set_vllm_config(vllm_config)
-
-    return model_class(config=hf_config,
-                       cache_config=cache_config,
-                       quant_config=quant_config,
-                       **extra_kwargs)
-
-
-def _initialize_model(vllm_config: VllmConfig) -> nn.Module:
+def _initialize_model(vllm_config: VllmConfig, prefix: str = "") -> nn.Module:
     """Initialize a model with the given configurations."""
     model_config = vllm_config.model_config
-    lora_config = vllm_config.lora_config
-    scheduler_config = vllm_config.scheduler_config
-    cache_config = vllm_config.cache_config
     model_class, _ = get_model_architecture(model_config)
-
-    return build_model(
-        model_class,
-        vllm_config,
-        model_config.hf_config,
-        cache_config=cache_config,
-        quant_config=vllm_config.quant_config,
-        lora_config=lora_config,
-        multimodal_config=model_config.multimodal_config,
-        scheduler_config=scheduler_config,
-        pooler_config=model_config.pooler_config,
-    )
+    signatures = inspect.signature(model_class.__init__)
+    all_params = [param.name for param in signatures.parameters.values()]
+    if "vllm_config" in all_params and "prefix" in all_params:
+        # new-style model class
+        with set_current_vllm_config(vllm_config):
+            return model_class(vllm_config=vllm_config, prefix=prefix)
+    msg = ("vLLM model class should accept `vllm_config` and `prefix` as "
+           "input arguments. Possibly you have an old-style model class"
+           " registered from out of tree and it is used for new vLLM version. "
+           "Check https://docs.vllm.ai/en/latest/design/class_hierarchy.html "
+           "for the design and update the model class accordingly.")
+    logger.warning(msg)
+    logger.warning(
+        "Trying to guess the arguments for old-style model class %s",
+        model_class)
+    # try to be compatible with old-style model class
+    kwargs = {}
+    if "prefix" in all_params:
+        kwargs["prefix"] = prefix
+    if "config" in all_params:
+        kwargs["config"] = model_config.hf_config
+    if "cache_config" in all_params:
+        kwargs["cache_config"] = vllm_config.cache_config
+    if "quant_config" in all_params:
+        kwargs["quant_config"] = vllm_config.quant_config
+    if "lora_config" in all_params:
+        kwargs["lora_config"] = vllm_config.lora_config
+    if "scheduler_config" in all_params:
+        kwargs["scheduler_config"] = vllm_config.scheduler_config
+    with set_current_vllm_config(vllm_config):
+        return model_class(**kwargs)
 
 
 class BaseModelLoader(ABC):
@@ -386,7 +338,17 @@ class DefaultModelLoader(BaseModelLoader):
                 model = _initialize_model(vllm_config=vllm_config)
 
             logger.info("Loading weights on %s...", self.load_config.device)
-            model.load_weights(self._get_all_weights(model_config, model))
+            weights_to_load = {name for name, _ in model.named_parameters()}
+            loaded_weights = model.load_weights(
+                self._get_all_weights(model_config, model))
+            # We only enable strict check for non-quantiized models
+            # that have loaded weights tracking currently.
+            if model_config.quantization is None and loaded_weights is not None:
+                weights_not_loaded = weights_to_load - loaded_weights
+                if weights_not_loaded:
+                    raise ValueError(
+                        "Following weights were not initialized from "
+                        f"checkpoint: {weights_not_loaded}")
 
             for _, module in model.named_modules():
                 quant_method = getattr(module, "quant_method", None)
@@ -490,24 +452,18 @@ class TensorizerLoader(BaseModelLoader):
 
         device_config = vllm_config.device_config
         model_config = vllm_config.model_config
-        lora_config = vllm_config.lora_config
-        cache_config = vllm_config.cache_config
 
         with set_default_torch_dtype(model_config.dtype):
             with torch.device(device_config.device):
                 model_class = get_model_architecture(model_config)[0]
-                quant_config = vllm_config.quant_config
-                extra_kwargs = _get_model_initialization_kwargs(
-                    model_class, lora_config, model_config.multimodal_config)
-                extra_kwargs["quant_config"] = quant_config
-                extra_kwargs["cache_config"] = cache_config
 
                 tensorizer_config = copy.copy(self.tensorizer_config)
                 tensorizer_config.model_class = model_class
                 tensorizer_config.hf_config = model_config.hf_config
                 tensorizer_config.dtype = model_config.dtype
 
-                model = load_with_tensorizer(tensorizer_config, **extra_kwargs)
+                model = load_with_tensorizer(tensorizer_config,
+                                             vllm_config=vllm_config)
         return model.eval()
 
     def download_model(self, model_config: ModelConfig) -> None:
@@ -1081,7 +1037,13 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
         param_dict = dict(model.named_parameters())
         stacked_quant_state_dict: Dict[str, Dict[int, Any]] = {}
+        # TODO: Change this lazy import to normal import
+        # after the checks are updated to run on a new version
+        from vllm.model_executor.models.utils import is_pp_missing_parameter
         for quant_param_name in quant_state_dict:
+            if is_pp_missing_parameter(quant_param_name, model):
+                continue
+
             non_stacked_param_name = quant_param_name
 
             shard_index = 0

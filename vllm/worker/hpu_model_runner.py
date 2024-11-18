@@ -40,7 +40,7 @@ from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.sampling_metadata import SequenceGroupToSample
 from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
-                             MultiModalInputs)
+                             MultiModalKwargs)
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (CompletionSequenceGroupOutput, IntermediateTensors,
                            Logprob, SequenceData, SequenceGroupMetadata,
@@ -276,6 +276,19 @@ def gather_list(input, indices, v):
 
 def flatten(in_list):
     return list(itertools.chain(*in_list))
+
+
+def modify_decoder_layer(module: torch.nn.Module, suffix="DecoderLayer"):
+    if module.__class__.__name__.endswith(suffix):
+
+        def forward_hook(module, args, output):
+            htorch.core.mark_step()
+            return output
+
+        module.register_forward_hook(forward_hook)
+
+    for child_name, child_module in module.named_children():
+        modify_decoder_layer(child_module)
 
 
 class HpuModelAdapter:
@@ -743,6 +756,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             elif not is_fake_hpu():
                 self.model = self.model.to("hpu")
                 htcore.mark_step()
+            modify_decoder_layer(self.model)
             torch.hpu.synchronize()
 
             with HabanaMemoryProfiler() as m_wrap:
@@ -823,7 +837,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
         context_lens: List[int] = []
         query_lens: List[int] = []
         prefix_block_tables: List[List[int]] = []
-        multi_modal_inputs_list: List[MultiModalInputs] = []
+        multi_modal_kwargs_list: List[MultiModalKwargs] = []
 
         if len(seq_group_metadata_list) == 0:
             return PreparePromptMetadata.empty()
@@ -884,7 +898,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             mm_data = seq_group_metadata.multi_modal_data
             if mm_data:
                 mm_kwargs = self.multi_modal_input_mapper(mm_data)
-                multi_modal_inputs_list.append(mm_kwargs)
+                multi_modal_kwargs_list.append(mm_kwargs)
 
             if seq_group_metadata.block_tables is None:
                 # During memory profiling, the block tables are not initialized
@@ -1022,7 +1036,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             multi_modal_placeholder_index_maps=
             None  # FIXME(kzawora): mutli-modality will not work here
         )
-        multi_modal_kwargs = MultiModalInputs.batch(multi_modal_inputs_list)
+        multi_modal_kwargs = MultiModalKwargs.batch(multi_modal_kwargs_list)
 
         return PreparePromptMetadata(input_tokens=input_tokens,
                                      input_positions=input_positions,

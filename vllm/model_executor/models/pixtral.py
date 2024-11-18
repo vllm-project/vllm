@@ -1,7 +1,7 @@
 from dataclasses import dataclass, fields
 from functools import cached_property
 from itertools import tee
-from typing import Iterable, List, Mapping, Optional, Tuple, Union
+from typing import Iterable, List, Mapping, Optional, Set, Tuple, Union
 
 import numpy
 import torch
@@ -9,14 +9,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 from mistral_common.protocol.instruct.messages import ImageChunk
 from PIL import Image
-from transformers import PixtralVisionConfig, PretrainedConfig
+from transformers import PixtralVisionConfig
 from transformers.models.pixtral.image_processing_pixtral import (
     _num_image_tokens)
 from transformers.models.pixtral.modeling_pixtral import (
     PixtralRotaryEmbedding, apply_rotary_pos_emb, position_ids_in_meshgrid)
 
 from vllm.attention import AttentionMetadata
-from vllm.config import CacheConfig, ModelConfig, MultiModalConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
                          InputContext, token_inputs)
 from vllm.model_executor.layers.activation import get_act_and_mul_fn
@@ -25,12 +25,12 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.utils import merge_multimodal_embeddings
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.base import MultiModalInputs
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
+from vllm.multimodal.inputs import PlaceholderRange
 from vllm.multimodal.utils import (cached_get_tokenizer,
                                    consecutive_placeholder_ranges)
 from vllm.sequence import IntermediateTensors, SequenceData
@@ -38,7 +38,7 @@ from vllm.transformers_utils.processor import cached_get_processor
 from vllm.utils import is_list_of
 
 from .interfaces import SupportsMultiModal, SupportsPP
-from .utils import init_vllm_registered_model
+from .utils import init_vllm_registered_model, maybe_prefix
 
 try:
     from xformers import ops as xops
@@ -94,8 +94,8 @@ def dummy_data_for_pixtral(ctx: InputContext, seq_len: int,
 
 
 def input_mapper_for_pixtral(ctx: InputContext,
-                             data: object) -> MultiModalInputs:
-    """Maps the input data to its MultiModalInputs (if any).
+                             data: object) -> MultiModalKwargs:
+    """Maps the input data to its MultiModalKwargs (if any).
 
     Args:
         ctx: Context of the loaded model.
@@ -103,7 +103,7 @@ def input_mapper_for_pixtral(ctx: InputContext,
             to pixel_values in .forward() for a visual QWenLMHeadModel model.
 
     Returns:
-        MultiModalInputs containing the stacked normalized images tensor or
+        MultiModalKwargs containing the stacked normalized images tensor or
         image embeddings.
     """
     # Early exit if we have provided an image to a language only Qwen model
@@ -121,7 +121,7 @@ def input_mapper_for_pixtral(ctx: InputContext,
                                                     dtype=torch.float16)
         images.append(image)
 
-    return MultiModalInputs({"images": images})
+    return MultiModalKwargs({"images": images})
 
 
 def input_processor_for_pixtral(ctx: InputContext, inputs: DecoderOnlyInputs):
@@ -152,13 +152,10 @@ def input_processor_for_pixtral(ctx: InputContext, inputs: DecoderOnlyInputs):
 class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
                                       SupportsPP):
 
-    def __init__(self,
-                 config: PretrainedConfig,
-                 multimodal_config: MultiModalConfig,
-                 cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-
+        config = vllm_config.model_config.hf_config
+        multimodal_config = vllm_config.model_config.multimodal_config
         self.config = config
         self.multimodal_config = multimodal_config
 
@@ -174,9 +171,8 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
         # init MistralForCausalLM
         self.language_model = init_vllm_registered_model(
             config.text_config,
-            cache_config,
-            quant_config,
-            prefix="language_model")
+            vllm_config=vllm_config,
+            prefix=maybe_prefix(prefix, "language_model"))
 
         self.vision_encoder = VisionTransformer(self.vision_args)
         self.vision_language_adapter = VisionLanguageAdapter(
@@ -190,7 +186,7 @@ class PixtralForConditionalGeneration(nn.Module, SupportsMultiModal,
         if hasattr(self.language_model, "sampler"):
             return self.language_model.sampler
 
-        return Sampler()
+        return get_sampler()
 
     def forward(
         self,
@@ -778,15 +774,28 @@ def input_processor_for_pixtral_hf(
         replace_tokens[-1] = image_end_id
         replace_tokens_list.append(replace_tokens)
 
+    reverse_offsets: List[int] = []
     # Backward iteration for replacement without affecting known indices
     for placeholder_idx, replace_tokens in zip(reversed(placeholder_indices),
                                                reversed(replace_tokens_list)):
+        reverse_offsets.append(
+            len(new_token_ids) - placeholder_idx + len(replace_tokens))
         new_token_ids[placeholder_idx:placeholder_idx + 1] = replace_tokens
+
+    placeholder_ranges: List[PlaceholderRange] = []
+    for reverse_offset, replace_tokens in zip(reversed(reverse_offsets),
+                                              replace_tokens_list):
+        placeholder_ranges.append(
+            PlaceholderRange(
+                offset=len(new_token_ids) - reverse_offset,
+                length=len(replace_tokens),
+            ))
 
     # NOTE: Create a defensive copy of the original inputs
     return token_inputs(prompt_token_ids=new_token_ids,
                         prompt=new_prompt,
-                        multi_modal_data=multi_modal_data)
+                        multi_modal_data=multi_modal_data,
+                        multi_modal_placeholders={"image": placeholder_ranges})
 
 
 class PixtralHFMLP(nn.Module):
@@ -1058,7 +1067,8 @@ class PixtralHFVisionModel(nn.Module):
 
     # (TODO) Add prefix argument for filtering out weights to be loaded
     #        ref: https://github.com/vllm-project/vllm/pull/7186#discussion_r1734163986
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             (".qkv_proj", ".q_proj", "q"),
@@ -1068,6 +1078,7 @@ class PixtralHFVisionModel(nn.Module):
             (".gate_up_proj", ".up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
+        loaded_params: Set[str] = set()
         layer_count = len(self.transformer.layers)
 
         for name, loaded_weight in weights:
@@ -1080,8 +1091,8 @@ class PixtralHFVisionModel(nn.Module):
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
                     continue
-
-                param = params_dict[name.replace(weight_name, param_name)]
+                name = name.replace(weight_name, param_name)
+                param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
                 break
@@ -1090,3 +1101,5 @@ class PixtralHFVisionModel(nn.Module):
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params

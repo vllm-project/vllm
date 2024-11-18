@@ -1,16 +1,13 @@
 import math
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, List, Optional, Set, Tuple
 
 import torch
 import torch.nn as nn
-from transformers import PretrainedConfig
 
 from vllm.attention import AttentionMetadata
-from vllm.config import CacheConfig
+from vllm.config import VllmConfig
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.bart import (BartDecoder, BartEncoder,
                                              BartParallelLMHead,
@@ -23,11 +20,13 @@ from .utils import AutoWeightsLoader
 
 class Florence2LanguageModel(nn.Module):
 
-    def __init__(self,
-                 config: PretrainedConfig,
-                 cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+
         self.config = config
 
         self.padding_idx = config.pad_token_id
@@ -93,15 +92,14 @@ class Florence2LanguageModel(nn.Module):
 
 class Florence2LanguageForConditionalGeneration(nn.Module):
 
-    def __init__(self,
-                 config: PretrainedConfig,
-                 cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+
+        config = vllm_config.model_config.hf_config
+
         self.config = config
-        self.model = Florence2LanguageModel(config,
-                                            cache_config=cache_config,
-                                            quant_config=quant_config)
+        self.model = Florence2LanguageModel(vllm_config=vllm_config,
+                                            prefix=prefix)
         embed_scale = math.sqrt(
             config.d_model) if config.scale_embedding else 1.0
 
@@ -112,7 +110,7 @@ class Florence2LanguageForConditionalGeneration(nn.Module):
 
         self.logits_processor = LogitsProcessor(self.vocab_size,
                                                 config.vocab_size)
-        self.sampler = Sampler()
+        self.sampler = get_sampler()
 
     def forward(
         self,
@@ -158,7 +156,8 @@ class Florence2LanguageForConditionalGeneration(nn.Module):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -167,12 +166,13 @@ class Florence2LanguageForConditionalGeneration(nn.Module):
         ]
 
         params_dict = dict(self.named_parameters())
+        loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
                     continue
-
-                param = params_dict[name.replace(weight_name, param_name)]
+                name = name.replace(weight_name, param_name)
+                param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
                 break
@@ -185,21 +185,21 @@ class Florence2LanguageForConditionalGeneration(nn.Module):
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params
 
 
 class Florence2ForConditionalGeneration(nn.Module):
 
-    def __init__(self,
-                 config: PretrainedConfig,
-                 cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        config = vllm_config.model_config.hf_config
 
         # TODO(Isotr0py): Add vision backbone
         self.language_model = Florence2LanguageForConditionalGeneration(
-            config=config.text_config,
-            cache_config=cache_config,
-            quant_config=quant_config)
+            vllm_config=vllm_config.with_hf_config(config.text_config),
+            prefix=prefix,
+        )
 
     @property
     def sampler(self):
@@ -252,10 +252,11 @@ class Florence2ForConditionalGeneration(nn.Module):
     ) -> SamplerOutput:
         return self.language_model.sample(logits, sampling_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         skip_prefixes = [
             'image_projection', "vision_tower", "image_proj_norm",
             "image_pos_embed", "visual_temporal_embed"
         ]
         loader = AutoWeightsLoader(self, skip_prefixes=skip_prefixes)
-        loader.load_weights(weights)
+        return loader.load_weights(weights)

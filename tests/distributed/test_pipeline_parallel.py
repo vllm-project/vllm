@@ -32,6 +32,8 @@ class PPTestOptions(NamedTuple):
     multi_node_only: bool
     trust_remote_code: bool
     tokenizer_mode: Optional[str]
+    load_format: Optional[str] = None
+    hf_overrides: Optional[str] = None
 
 
 @dataclass
@@ -50,6 +52,8 @@ class PPTestSettings:
         task: TaskOption = "auto",
         trust_remote_code: bool = False,
         tokenizer_mode: Optional[str] = None,
+        load_format: Optional[str] = None,
+        hf_overrides: Optional[str] = None,
     ):
         return PPTestSettings(
             parallel_setups=[
@@ -78,7 +82,9 @@ class PPTestSettings:
             task=task,
             test_options=PPTestOptions(multi_node_only=multi_node_only,
                                        trust_remote_code=trust_remote_code,
-                                       tokenizer_mode=tokenizer_mode),
+                                       tokenizer_mode=tokenizer_mode,
+                                       load_format=load_format,
+                                       hf_overrides=hf_overrides),
         )
 
     @staticmethod
@@ -90,6 +96,8 @@ class PPTestSettings:
         multi_node_only: bool = False,
         trust_remote_code: bool = False,
         tokenizer_mode: Optional[str] = None,
+        load_format: Optional[str] = None,
+        hf_overrides: Optional[str] = None,
     ):
         return PPTestSettings(
             parallel_setups=[
@@ -102,7 +110,9 @@ class PPTestSettings:
             task=task,
             test_options=PPTestOptions(multi_node_only=multi_node_only,
                                        trust_remote_code=trust_remote_code,
-                                       tokenizer_mode=tokenizer_mode),
+                                       tokenizer_mode=tokenizer_mode,
+                                       load_format=load_format,
+                                       hf_overrides=hf_overrides),
         )
 
     def iter_params(self, model_name: str):
@@ -156,15 +166,14 @@ TEXT_GENERATION_MODELS = {
     "mistralai/Mixtral-8x7B-Instruct-v0.1": PPTestSettings.fast(tp_base=4),
     "mosaicml/mpt-7b": PPTestSettings.fast(),
     "nvidia/Minitron-8B-Base": PPTestSettings.fast(),
-    "allenai/OLMoE-1B-7B-0924-Instruct": PPTestSettings.fast(),
     "allenai/OLMo-1B-hf": PPTestSettings.fast(),
+    "allenai/OLMoE-1B-7B-0924-Instruct": PPTestSettings.fast(),
     "facebook/opt-iml-max-1.3b": PPTestSettings.fast(),
     "OrionStarAI/Orion-14B-Chat": PPTestSettings.fast(trust_remote_code=True),
-    "microsoft/phi-2": PPTestSettings.fast(),
-    "microsoft/Phi-3-mini-4k-instruct": PPTestSettings.detailed(trust_remote_code=True, multi_node_only=True),  # noqa: E501
-    "microsoft/Phi-3-small-8k-instruct": PPTestSettings.fast(trust_remote_code=True),  # noqa: E501
-    "microsoft/Phi-3.5-MoE-instruct": PPTestSettings.fast(trust_remote_code=True),  # noqa: E501
     "adept/persimmon-8b-chat": PPTestSettings.fast(),
+    "microsoft/phi-2": PPTestSettings.fast(),
+    "microsoft/Phi-3-small-8k-instruct": PPTestSettings.fast(trust_remote_code=True),  # noqa: E501
+    "microsoft/Phi-3.5-MoE-instruct": PPTestSettings.detailed(trust_remote_code=True, multi_node_only=True, load_format="dummy", hf_overrides='{"num_hidden_layers": 4, "hidden_size": 512, "intermediate_size": 800, "num_attention_heads": 4, "num_key_value_heads": 1}'),  # noqa: E501
     "Qwen/Qwen-7B-Chat": PPTestSettings.fast(trust_remote_code=True),
     "Qwen/Qwen2-7B-Instruct": PPTestSettings.fast(),
     "Qwen/Qwen1.5-MoE-A2.7B-Chat": PPTestSettings.fast(),
@@ -214,9 +223,9 @@ MULTIMODAL_MODELS = {
 # NOTE: You can update this on your local machine to run specific tests
 TEST_MODELS = [
     # [LANGUAGE GENERATION]
+    "microsoft/Phi-3.5-MoE-instruct",
     "meta-llama/Meta-Llama-3-8B",
     "ibm/PowerLM-3b",
-    "microsoft/Phi-3-mini-4k-instruct",
     # [LANGUAGE EMBEDDING]
     "intfloat/e5-mistral-7b-instruct",
     "BAAI/bge-multilingual-gemma2",
@@ -238,7 +247,8 @@ def _compare_tp(
     method: Literal["generate", "encode"],
 ):
     tp_size, pp_size, eager_mode, chunked_prefill = parallel_setup
-    multi_node_only, trust_remote_code, tokenizer_mode = test_options
+    multi_node_only, trust_remote_code, tokenizer_mode, \
+        load_format, hf_overrides = test_options
 
     if num_gpus_available < tp_size * pp_size:
         pytest.skip(f"Need at least {tp_size} x {pp_size} GPUs")
@@ -267,6 +277,10 @@ def _compare_tp(
         common_args.append("--trust-remote-code")
     if tokenizer_mode:
         common_args.extend(["--tokenizer-mode", tokenizer_mode])
+    if load_format:
+        common_args.extend(["--load-format", load_format])
+    if hf_overrides:
+        common_args.extend(["--hf-overrides", hf_overrides])
 
     if (distributed_backend == "ray" and tp_size == 2 and pp_size == 2
             and chunked_prefill):

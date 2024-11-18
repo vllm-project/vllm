@@ -1,5 +1,5 @@
 from functools import cached_property
-from typing import (Any, Dict, Iterable, List, Literal, Mapping, Optional,
+from typing import (Any, Dict, Iterable, List, Literal, Mapping, Optional, Set,
                     Tuple, TypedDict, Union)
 
 import torch
@@ -9,7 +9,7 @@ from torch import nn
 from transformers import ChameleonConfig, ChameleonVQVAEConfig
 
 from vllm.attention import Attention, AttentionMetadata
-from vllm.config import CacheConfig, MultiModalConfig
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
                          InputContext, token_inputs)
@@ -21,7 +21,7 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import (
@@ -37,7 +37,8 @@ from vllm.utils import print_warning_once
 
 from .interfaces import SupportsMultiModal, SupportsPP
 from .utils import (is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, make_layers)
+                    make_empty_intermediate_tensors_factory, make_layers,
+                    maybe_prefix)
 
 # These configs are not part of the model config but the preprocessor
 # and processor files, so we hardcode them in the model file for now.
@@ -831,14 +832,13 @@ class ChameleonImageVocabularyMapping:
 
 class ChameleonModel(nn.Module):
 
-    def __init__(
-        self,
-        config: ChameleonConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+
         self.config = config
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
@@ -924,17 +924,14 @@ class ChameleonModel(nn.Module):
 class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
                                         SupportsPP):
 
-    def __init__(
-        self,
-        config: ChameleonConfig,
-        multimodal_config: MultiModalConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-    ) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        config = vllm_config.model_config.hf_config
+        multimodal_config = vllm_config.model_config.multimodal_config
         self.config = config
         self.multimodal_config = multimodal_config
-        self.model = ChameleonModel(config, cache_config, quant_config)
+        self.model = ChameleonModel(vllm_config=vllm_config,
+                                    prefix=maybe_prefix(prefix, "model"))
         self.unpadded_vocab_size = config.vocab_size
         self.lm_head = ParallelLMHead(
             self.unpadded_vocab_size,
@@ -946,7 +943,7 @@ class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
         logit_scale = getattr(config, "logit_scale", 1.0)
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size, logit_scale)
-        self.sampler = Sampler()
+        self.sampler = get_sampler()
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
@@ -1037,7 +1034,8 @@ class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             (".qkv_proj", ".q_proj", "q"),
@@ -1047,6 +1045,7 @@ class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
             (".gate_up_proj", ".up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
+        loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -1114,3 +1113,5 @@ class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params

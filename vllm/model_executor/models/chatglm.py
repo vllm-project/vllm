@@ -3,7 +3,8 @@
 """Inference-only ChatGLM model compatible with THUDM weights."""
 from argparse import Namespace
 from array import array
-from typing import Dict, Iterable, List, Mapping, Optional, Tuple, TypedDict
+from typing import (Dict, Iterable, List, Mapping, Optional, Set, Tuple,
+                    TypedDict)
 
 import torch
 from PIL import Image
@@ -11,7 +12,7 @@ from torch import nn
 from torch.nn import LayerNorm
 
 from vllm.attention import Attention, AttentionMetadata
-from vllm.config import CacheConfig, LoRAConfig, MultiModalConfig
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
                          InputContext, token_inputs)
@@ -24,14 +25,14 @@ from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.glm4_vision_encoder import EVA2CLIPModel
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalInputs
-from vllm.multimodal.base import MultiModalData
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.inputs import MultiModalData, MultiModalKwargs
 from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
                            SequenceData)
@@ -39,7 +40,8 @@ from vllm.transformers_utils.configs import ChatGLMConfig
 
 from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsPP
 from .utils import (is_pp_missing_parameter,
-                    make_empty_intermediate_tensors_factory, make_layers)
+                    make_empty_intermediate_tensors_factory, make_layers,
+                    maybe_prefix)
 
 logger = init_logger(__name__)
 
@@ -74,7 +76,7 @@ def mm_input_mapper_for_glmv(
         raise
     pixel_values = raw_batch_data['images']
 
-    return MultiModalInputs({'pixel_values': pixel_values})
+    return MultiModalKwargs({'pixel_values': pixel_values})
 
 
 def merge_glm_vision_embeddings(
@@ -481,13 +483,12 @@ class GLMTransformer(nn.Module):
 
 class ChatGLMModel(nn.Module):
 
-    def __init__(
-        self,
-        config: ChatGLMConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-    ):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
 
         self.config = config
 
@@ -593,16 +594,12 @@ class ChatGLMForCausalLM(nn.Module, SupportsLoRA, SupportsPP,
     embedding_modules = {}
     embedding_padding_modules = []
 
-    def __init__(
-        self,
-        config: ChatGLMConfig,
-        multimodal_config: MultiModalConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        lora_config: Optional[LoRAConfig] = None,
-    ):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
+        lora_config = vllm_config.lora_config
+        multimodal_config = vllm_config.model_config.multimodal_config
         self.config = config
         self.lora_config = lora_config
         self.multimodal_config = multimodal_config
@@ -610,13 +607,15 @@ class ChatGLMForCausalLM(nn.Module, SupportsLoRA, SupportsPP,
         self.quant_config = quant_config
         self.max_position_embeddings = getattr(config, "max_sequence_length",
                                                8192)
-        self.transformer = ChatGLMModel(config, cache_config, quant_config)
+        self.transformer = ChatGLMModel(vllm_config=vllm_config,
+                                        prefix=maybe_prefix(
+                                            prefix, "transformer"))
         if self.config.tie_word_embeddings:
             self.transformer.output_layer.weight = (
                 self.transformer.embedding.weight)
         self.lm_head = self.transformer.output_layer
         self.logits_processor = LogitsProcessor(config.padded_vocab_size)
-        self.sampler = Sampler()
+        self.sampler = get_sampler()
 
     def forward(self,
                 input_ids: torch.Tensor,
@@ -647,7 +646,8 @@ class ChatGLMForCausalLM(nn.Module, SupportsLoRA, SupportsPP,
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         # Merge two ColumnParallelLinear into one MergedColumnParallelLinear
         merged_weights_dict: Dict[str, Dict[str, Optional[torch.Tensor]]] = {
             "transformer.vision.linear_proj.merged_proj.weight": {
@@ -657,6 +657,7 @@ class ChatGLMForCausalLM(nn.Module, SupportsLoRA, SupportsPP,
         }
 
         params_dict = dict(self.named_parameters(remove_duplicate=False))
+        loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
             is_weight_to_be_merge = False
             for _, merged_weight_dict in merged_weights_dict.items():
@@ -679,6 +680,7 @@ class ChatGLMForCausalLM(nn.Module, SupportsLoRA, SupportsPP,
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
             weight_loader(param, loaded_weight)
+            loaded_params.add(name)
 
         for combined_name, merged_weight_dict in merged_weights_dict.items():
             if combined_name in params_dict:
@@ -688,3 +690,5 @@ class ChatGLMForCausalLM(nn.Module, SupportsLoRA, SupportsPP,
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, combined_weight)
+                loaded_params.add(combined_name)
+        return loaded_params

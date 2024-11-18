@@ -16,6 +16,7 @@ class PoolingType(IntEnum):
     ALL = 1
     CLS = 2
     STEP = 3
+    MEAN = 4
 
 
 class Pooler(nn.Module):
@@ -27,7 +28,7 @@ class Pooler(nn.Module):
     3. Returns structured results as `PoolerOutput`.
 
     Attributes:
-        pooling_type: The type of pooling to use (LAST, ALL, CLS).
+        pooling_type: The type of pooling to use.
         normalize: Whether to normalize the pooled data.
     """
 
@@ -62,14 +63,14 @@ class Pooler(nn.Module):
         return cls(
             pooling_type=PoolingType[pooler_config.pooling_type]
             if pooler_config.pooling_type is not None else pooling_type,
-            normalize=pooler_config.pooling_norm
-            if pooler_config.pooling_norm is not None else normalize,
-            softmax=pooler_config.pooling_softmax
-            if pooler_config.pooling_softmax is not None else softmax,
-            step_tag_id=pooler_config.pooling_step_tag_id
-            if pooler_config.pooling_step_tag_id is not None else step_tag_id,
-            returned_token_ids=pooler_config.pooling_returned_token_ids
-            if pooler_config.pooling_returned_token_ids is not None else
+            normalize=pooler_config.normalize
+            if pooler_config.normalize is not None else normalize,
+            softmax=pooler_config.softmax
+            if pooler_config.softmax is not None else softmax,
+            step_tag_id=pooler_config.step_tag_id
+            if pooler_config.step_tag_id is not None else step_tag_id,
+            returned_token_ids=pooler_config.returned_token_ids
+            if pooler_config.returned_token_ids is not None else
             returned_token_ids,
         )
 
@@ -93,29 +94,45 @@ class Pooler(nn.Module):
             pooled_data = hidden_states[last_token_flat_indices]
         elif self.pooling_type == PoolingType.ALL:
             offset = 0
-            pooled_data = []
+            pooled_data_lst = []
             for prompt_len in prompt_lens:
-                pooled_data.append(hidden_states[offset:offset + prompt_len])
+                pooled_data_i = hidden_states[offset:offset + prompt_len]
+
+                pooled_data_lst.append(pooled_data_i)
                 offset += prompt_len
+
+            pooled_data = torch.stack(pooled_data_lst)
+        elif self.pooling_type == PoolingType.MEAN:
+            # Calculate mean pooling
+            cumsum = torch.cumsum(hidden_states, dim=0)
+            start_indices = torch.cat([
+                torch.tensor([0], device=hidden_states.device),
+                torch.cumsum(prompt_lens[:-1], dim=0)
+            ])
+            end_indices = torch.cumsum(prompt_lens, dim=0)
+            pooled_data = (
+                cumsum[end_indices - 1] - cumsum[start_indices] +
+                hidden_states[start_indices]) / prompt_lens.unsqueeze(1)
         elif self.pooling_type == PoolingType.STEP:
-            if self.returned_token_ids is not None and len(
-                    self.returned_token_ids) > 0:
-                logits = hidden_states[:,
-                                       self.returned_token_ids].softmax(dim=-1)
-            else:
-                logits = hidden_states.softmax(dim=-1)
+            returned_token_ids = self.returned_token_ids
+            if returned_token_ids is not None and len(returned_token_ids) > 0:
+                hidden_states = hidden_states[:, returned_token_ids]
+
+            step_tag_id = self.step_tag_id
+
             offset = 0
-            pooled_data = []
+            pooled_data_lst = []
             for prompt_len, seq_data_i in zip(
                     prompt_lens, pooling_metadata.seq_data.values()):
-                if self.step_tag_id is None:
-                    pooled_data.append(logits[offset:offset + prompt_len])
-                else:
-                    step_idxs = torch.tensor(
-                        seq_data_i.prompt_token_ids) == self.step_tag_id
-                    pooled_data.append(logits[offset:offset +
-                                              prompt_len][step_idxs])
+                pooled_data_i = hidden_states[offset:offset + prompt_len]
+                if step_tag_id is not None:
+                    token_ids = torch.tensor(seq_data_i.prompt_token_ids)
+                    pooled_data_i = pooled_data_i[token_ids == step_tag_id]
+
                 offset += prompt_len
+                pooled_data_lst.append(pooled_data_i)
+
+            pooled_data = torch.stack(pooled_data_lst)
         else:
             raise ValueError(f"Invalid pooling type: {self.pooling_type}")
 

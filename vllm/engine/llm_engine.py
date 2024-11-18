@@ -31,7 +31,7 @@ from vllm.executor.gpu_executor import GPUExecutor
 from vllm.executor.hpu_executor import HPUExecutor
 from vllm.executor.ray_utils import initialize_ray_cluster
 from vllm.inputs import (INPUT_REGISTRY, InputRegistry, ProcessorInputs,
-                         PromptType)
+                         PromptType, SingletonInputsAdapter)
 from vllm.inputs.parse import is_encoder_decoder_inputs, is_token_prompt
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
@@ -40,6 +40,7 @@ from vllm.lora.request import LoRARequest
 from vllm.model_executor.guided_decoding import (
     get_local_guided_decoding_logits_processor)
 from vllm.model_executor.layers.sampler import SamplerOutput
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.outputs import (EmbeddingRequestOutput, RequestOutput,
                           RequestOutputFactory)
 from vllm.pooling_params import PoolingParams
@@ -227,6 +228,7 @@ class LLMEngine:
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
         input_registry: InputRegistry = INPUT_REGISTRY,
+        mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         use_cached_outputs: bool = False,
     ) -> None:
 
@@ -249,8 +251,7 @@ class LLMEngine:
             "Initializing an LLM engine (v%s) with config: "
             "model=%r, speculative_config=%r, tokenizer=%r, "
             "skip_tokenizer_init=%s, tokenizer_mode=%s, revision=%s, "
-            "override_neuron_config=%s, "
-            "rope_scaling=%r, rope_theta=%r, tokenizer_revision=%s, "
+            "override_neuron_config=%s, tokenizer_revision=%s, "
             "trust_remote_code=%s, dtype=%s, max_seq_len=%d, "
             "download_dir=%r, load_format=%s, tensor_parallel_size=%d, "
             "pipeline_parallel_size=%d, "
@@ -262,8 +263,7 @@ class LLMEngine:
             "num_scheduler_steps=%d, chunked_prefill_enabled=%s "
             "multi_step_stream_outputs=%s, enable_prefix_caching=%s, "
             "use_async_output_proc=%s, use_cached_outputs=%s, "
-            "chat_template_text_format=%s, mm_processor_kwargs=%s, "
-            "pooler_config=%r)",
+            "mm_processor_kwargs=%s, pooler_config=%r)",
             VLLM_VERSION,
             model_config.model,
             speculative_config,
@@ -272,8 +272,6 @@ class LLMEngine:
             model_config.tokenizer_mode,
             model_config.revision,
             model_config.override_neuron_config,
-            model_config.rope_scaling,
-            model_config.rope_theta,
             model_config.tokenizer_revision,
             model_config.trust_remote_code,
             model_config.dtype,
@@ -299,7 +297,6 @@ class LLMEngine:
             cache_config.enable_prefix_caching,
             model_config.use_async_output_proc,
             use_cached_outputs,
-            model_config.chat_template_text_format,
             model_config.mm_processor_kwargs,
             model_config.pooler_config,
         )
@@ -340,7 +337,8 @@ class LLMEngine:
             model_config)
 
         self.input_preprocessor = InputPreprocessor(model_config,
-                                                    self.tokenizer)
+                                                    self.tokenizer,
+                                                    mm_registry)
 
         self.input_registry = input_registry
         self.input_processor = input_registry.create_input_processor(
@@ -855,13 +853,6 @@ class LLMEngine:
             prompt_adapter_request=prompt_adapter_request,
         )
         processed_inputs = self.input_processor(preprocessed_inputs)
-
-        # This is a bit of a hack - copy the mm_processor_kwargs that were
-        # used in the input processor to the processed output, since these
-        # kwargs are presumed to be immutable and the values should be aligned
-        # between the input processor (here) and the input mapper.
-        processed_inputs["mm_processor_kwargs"] = preprocessed_inputs.get(
-            "mm_processor_kwargs")
 
         self._add_processed_request(
             request_id=request_id,
@@ -1680,6 +1671,7 @@ class LLMEngine:
         # Iteration stats
         num_prompt_tokens_iter = 0
         num_generation_tokens_iter = 0
+        num_tokens_iter = 0
         time_to_first_tokens_iter: List[float] = []
         time_per_output_tokens_iter: List[float] = []
         num_preemption_iter = (0 if scheduler_outputs is None else
@@ -1688,6 +1680,10 @@ class LLMEngine:
         # Request stats
         #   Latency
         time_e2e_requests: List[float] = []
+        time_queue_requests: List[float] = []
+        time_inference_requests: List[float] = []
+        time_prefill_requests: List[float] = []
+        time_decode_requests: List[float] = []
         time_in_queue_requests: List[float] = []
         model_forward_time_requests: List[float] = []
         model_execute_time_requests: List[float] = []
@@ -1695,6 +1691,7 @@ class LLMEngine:
         num_prompt_tokens_requests: List[int] = []
         num_generation_tokens_requests: List[int] = []
         n_requests: List[int] = []
+        max_num_generation_tokens_requests: List[int] = []
         max_tokens_requests: List[int] = []
         finished_reason_requests: List[str] = []
 
@@ -1785,6 +1782,18 @@ class LLMEngine:
                     # Latency timings
                     time_e2e_requests.append(now -
                                              seq_group.metrics.arrival_time)
+                    if (seq_group.metrics.first_scheduled_time is not None and
+                            seq_group.metrics.first_token_time is not None):
+                        time_queue_requests.append(
+                            seq_group.metrics.first_scheduled_time -
+                            seq_group.metrics.arrival_time)
+                        time_prefill_requests.append(
+                            seq_group.metrics.first_token_time -
+                            seq_group.metrics.first_scheduled_time)
+                        time_decode_requests.append(
+                            now - seq_group.metrics.first_token_time)
+                        time_inference_requests.append(
+                            now - seq_group.metrics.first_scheduled_time)
                     if seq_group.metrics.time_in_queue is not None:
                         time_in_queue_requests.append(
                             seq_group.metrics.time_in_queue)
@@ -1801,6 +1810,9 @@ class LLMEngine:
                         seq.get_output_len()
                         for seq in seq_group.get_finished_seqs()
                     ])
+                    max_num_generation_tokens_requests.append(
+                        max(seq.get_output_len()
+                            for seq in seq_group.get_seqs()))
                     if seq_group.sampling_params is not None:
                         n_requests.append(seq_group.sampling_params.n)
                         max_tokens_requests.append(
@@ -1819,7 +1831,8 @@ class LLMEngine:
             num_generation_tokens_iter = (
                 actual_num_batched_tokens - num_prompt_tokens_iter +
                 num_generation_tokens_from_prefill_groups)
-
+            num_tokens_iter = (num_generation_tokens_iter +
+                               num_prompt_tokens_iter)
         # Spec decode, if enabled, emits specialized metrics from the worker in
         # sampler output.
         if model_output and (model_output[0].spec_decode_worker_metrics
@@ -1845,6 +1858,7 @@ class LLMEngine:
             # Iteration stats
             num_prompt_tokens_iter=num_prompt_tokens_iter,
             num_generation_tokens_iter=num_generation_tokens_iter,
+            num_tokens_iter=num_tokens_iter,
             time_to_first_tokens_iter=time_to_first_tokens_iter,
             time_per_output_tokens_iter=time_per_output_tokens_iter,
             spec_decode_metrics=spec_decode_metrics,
@@ -1853,12 +1867,18 @@ class LLMEngine:
             # Request stats
             #   Latency
             time_e2e_requests=time_e2e_requests,
+            time_queue_requests=time_queue_requests,
+            time_inference_requests=time_inference_requests,
+            time_prefill_requests=time_prefill_requests,
+            time_decode_requests=time_decode_requests,
             time_in_queue_requests=time_in_queue_requests,
             model_forward_time_requests=model_forward_time_requests,
             model_execute_time_requests=model_execute_time_requests,
             #   Metadata
             num_prompt_tokens_requests=num_prompt_tokens_requests,
             num_generation_tokens_requests=num_generation_tokens_requests,
+            max_num_generation_tokens_requests=
+            max_num_generation_tokens_requests,
             n_requests=n_requests,
             max_tokens_requests=max_tokens_requests,
             finished_reason_requests=finished_reason_requests,
@@ -1987,9 +2007,6 @@ class LLMEngine:
                     SpanAttributes.LLM_LATENCY_TIME_IN_MODEL_EXECUTE,
                     metrics.model_execute_time)
 
-    def is_encoder_decoder_model(self):
-        return self.input_preprocessor.is_encoder_decoder_model()
-
     def _validate_model_inputs(self, inputs: ProcessorInputs,
                                lora_request: Optional[LoRARequest]):
         if is_encoder_decoder_inputs(inputs):
@@ -2000,7 +2017,7 @@ class LLMEngine:
         else:
             prompt_inputs = inputs
 
-        prompt_ids = prompt_inputs.get("prompt_token_ids")
+        prompt_ids = SingletonInputsAdapter(prompt_inputs).prompt_token_ids
 
         if prompt_ids is None or len(prompt_ids) == 0:
             raise ValueError("Prompt cannot be empty")

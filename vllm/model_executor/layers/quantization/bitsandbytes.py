@@ -114,9 +114,6 @@ class BitsAndBytesConfig(QuantizationConfig):
             return BitsAndBytesLinearMethod(self)
         return None
 
-    def get_scaled_act_names(self) -> List[str]:
-        return []
-
 
 def is_layer_skipped_bnb(prefix: str, llm_int8_skip_modules: List[str]):
     # Split the prefix into its dot-separated components
