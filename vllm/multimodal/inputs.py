@@ -6,7 +6,7 @@ import numpy as np
 import torch
 import torch.types
 from PIL.Image import Image
-from typing_extensions import TypeAlias
+from typing_extensions import NotRequired, TypeAlias
 
 from vllm.utils import JSONTree, is_list_of, json_map_leaves
 
@@ -214,6 +214,9 @@ class MultiModalInputsV2(TypedDict):
 
     prompt_token_ids: List[int]
     """The processed token IDs which includes placeholder tokens."""
+
+    token_type_ids: NotRequired[List[int]]
+    """The token type IDs of the prompt."""
 
     mm_kwargs: MultiModalKwargs
     """Keyword arguments to be directly passed to the model after batching."""
