@@ -274,7 +274,7 @@ def test_with_prefix_caching(
 # reset distributed env properly. Use a value > 1 just when you test.
 @pytest.mark.parametrize("tensor_parallel_size", [1])
 @pytest.mark.parametrize("attention_backend", ["TORCH_SDPA"])
-@pytest.mark.cpu_only
+@pytest.mark.cpu_model
 @pytest.mark.skipif(not current_platform.is_cpu(), reason="CPU only")
 def test_models_cpu(
     hf_runner,
@@ -311,7 +311,7 @@ def test_models_cpu(
 # reset distributed env properly. Use a value > 1 just when you test.
 @pytest.mark.parametrize("tensor_parallel_size", [1])
 @pytest.mark.parametrize("dtype", ["bfloat16"])
-@pytest.mark.cpu_only
+@pytest.mark.cpu_model
 @pytest.mark.skipif(not current_platform.is_cpu(), reason="CPU only")
 def test_with_prefix_caching_cpu(
     vllm_runner,

@@ -9,6 +9,7 @@ vLLM initially supports basic model inferencing and serving on x86 CPU platform,
 - Model Quantization (``INT8 W8A8, AWQ``)
 - Chunked-prefill
 - Prefix-caching
+- FP8-E5M2 KV-Caching (TODO)
 
 Table of contents:
 

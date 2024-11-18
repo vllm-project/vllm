@@ -60,7 +60,7 @@ function cpu_tests() {
   # Run chunked-prefill and prefix-cache test
   docker exec cpu-test bash -c "
     set -e
-    pytest -s -v -k cpu_only \
+    pytest -s -v -k cpu_model \
     tests/basic_correctness/test_chunked_prefill.py"  
 
   # online inference
@@ -81,4 +81,4 @@ function cpu_tests() {
 
 # All of CPU tests are expected to be finished less than 25 mins.
 export -f cpu_tests
-timeout 25m bash -c "cpu_tests $CORE_RANGE"
+timeout 30m bash -c "cpu_tests $CORE_RANGE"

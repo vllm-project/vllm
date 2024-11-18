@@ -19,7 +19,6 @@ from vllm.multimodal import (MULTIMODAL_REGISTRY, BatchedTensorInputs,
                              MultiModalKwargs, MultiModalPlaceholderMap)
 from vllm.sequence import (IntermediateTensors, SequenceData,
                            SequenceGroupMetadata)
-from vllm.utils import make_tensor_with_pad
 from vllm.worker.model_runner_base import (
     ModelRunnerBase, ModelRunnerInputBase, ModelRunnerInputBuilderBase,
     _add_attn_metadata_broadcastable_dict,
@@ -134,6 +133,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
         super().__init__()
         self.seq_group_metadata_list: List[SequenceGroupMetadata] = []
         self.runner = runner
+
         self.chunked_prefill = (runner.scheduler_config.chunked_prefill_enabled
                                 or runner.cache_config.enable_prefix_caching)
         self.model_input_cls = self.runner._model_input_cls
@@ -141,6 +141,8 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
         self.multi_modal_input_mapper = self.runner.multi_modal_input_mapper
         self.input_data = ModelInputForCPUBuilder.ModelInputData(
             self.runner.model_config.uses_mrope)
+        self.att_metadata_builder = self.runner.attn_backend.get_builder_cls()(
+            self)
 
     def add_seq_group(self, seq_group_metadata: SequenceGroupMetadata):
         self.seq_group_metadata_list.append(seq_group_metadata)
@@ -153,8 +155,6 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
         self._build_input_data()
 
         input_data = self.input_data
-        prefill_seq_lens = input_data.seq_lens[0:input_data.num_prefills]
-        prefill_query_lens = input_data.query_lens[0:input_data.num_prefills]
         input_tokens = torch.tensor(input_data.input_tokens,
                                     dtype=torch.long,
                                     device="cpu")
@@ -163,93 +163,15 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
             if not input_data.use_mrope else input_data.input_mrope_positions,
             dtype=torch.long,
             device="cpu")
-        slot_mapping = torch.tensor(input_data.slot_mapping,
-                                    dtype=torch.long,
-                                    device="cpu")
-
-        # For chunked-prefill
-        if self.chunked_prefill and input_data.num_prefill_tokens != 0:
-            prefill_block_tables = make_tensor_with_pad(
-                self.input_data.prefill_block_tables,
-                pad=0,
-                dtype=torch.int,
-                device="cpu",
-            )
-            query_lens_tensor = torch.tensor(prefill_query_lens,
-                                             dtype=torch.int32,
-                                             device="cpu")
-            kv_lens_tensor = torch.tensor(prefill_seq_lens,
-                                          dtype=torch.int32,
-                                          device="cpu")
-            query_start_loc = torch.zeros(input_data.num_prefills + 1,
-                                          dtype=torch.int32,
-                                          device="cpu")
-            kv_start_loc = torch.zeros(input_data.num_prefills + 1,
-                                       dtype=torch.int32,
-                                       device="cpu")
-            torch.cumsum(query_lens_tensor,
-                         dim=0,
-                         dtype=torch.int32,
-                         out=query_start_loc[1:])
-            torch.cumsum(kv_lens_tensor,
-                         dim=0,
-                         dtype=torch.int32,
-                         out=kv_start_loc[1:])
-            max_query_len = max(prefill_query_lens)
-            max_kv_len = max(prefill_seq_lens)
-        else:
-            prefill_block_tables = None
-            query_start_loc = None
-            kv_start_loc = None
-            max_query_len = None
-            max_kv_len = None
-
-        # For paged attention
-        if input_data.num_decode_tokens != 0:
-            seq_lens_tensor = torch.tensor(
-                input_data.seq_lens[input_data.num_prefills:],
-                dtype=torch.int,
-                device="cpu",
-            )
-            block_tables = make_tensor_with_pad(
-                self.input_data.decode_block_tables,
-                pad=0,
-                dtype=torch.int,
-                device="cpu",
-            )
-        else:
-            block_tables = torch.tensor([])
-            seq_lens_tensor = torch.tensor([])
 
         # For multi-modal models
         multi_modal_kwargs = None
-        placeholder_index_maps = None
         if len(input_data.multi_modal_inputs_list) != 0:
             multi_modal_kwargs = MultiModalKwargs.batch(
                 input_data.multi_modal_inputs_list)
-            placeholder_index_maps = {
-                modality: placeholder_map.index_map()
-                for modality, placeholder_map in
-                input_data.multi_modal_placeholder_maps.items()
-            }
 
-        attn_metadata = self.runner.attn_backend.make_metadata(
-            chunked_prefill=self.chunked_prefill,
-            seq_lens=prefill_seq_lens,
-            seq_lens_tensor=seq_lens_tensor,
-            max_query_len=max_query_len,
-            max_kv_len=max_kv_len,
-            query_start_loc=query_start_loc,
-            kv_start_loc=kv_start_loc,
-            max_decode_seq_len=input_data.max_decode_seq_len,
-            num_prefills=input_data.num_prefills,
-            num_prefill_tokens=input_data.num_prefill_tokens,
-            num_decode_tokens=input_data.num_decode_tokens,
-            block_tables=block_tables,
-            prefill_block_tables=prefill_block_tables,
-            slot_mapping=slot_mapping,
-            multi_modal_placeholder_index_maps=placeholder_index_maps,
-        )
+        attn_metadata = self.att_metadata_builder.build(
+            input_data.seq_lens, input_data.query_lens, -1, -1)
 
         return self.model_input_cls(
             input_tokens=input_tokens,
@@ -263,115 +185,126 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
     def _build_input_data(self):
         for seq_group_metadata in self.seq_group_metadata_list:
             for seq_id, seq_data in seq_group_metadata.seq_data.items():
-                self._compute_input_tokens(self.input_data, seq_group_metadata,
-                                           seq_data, seq_id)
-                if (seq_group_metadata.is_prompt
-                        and seq_group_metadata.multi_modal_data):
-                    self._compute_multi_modal_input(seq_group_metadata,
-                                                    seq_data)
+                if seq_group_metadata.is_prompt:
+                    self._compute_prompt_input_tokens(self.input_data,
+                                                      seq_group_metadata,
+                                                      seq_data, seq_id)
+                    if seq_group_metadata.multi_modal_data:
+                        self._compute_multi_modal_input(
+                            seq_group_metadata, seq_data)
+                else:
+                    self._compute_decode_input_tokens(self.input_data,
+                                                      seq_group_metadata,
+                                                      seq_data, seq_id)
 
-    def _compute_input_tokens(self, data: ModelInputData,
-                              seq_group_metadata: SequenceGroupMetadata,
-                              seq_data: SequenceData, seq_id: int):
+    def _compute_decode_input_tokens(self, data: ModelInputData,
+                                     seq_group_metadata: SequenceGroupMetadata,
+                                     seq_data: SequenceData, seq_id: int):
         """
-        Compute input tokens, positions, block table and slot mapping.
+        Compute decode input tokens, positions, block table and slot mapping.
         """
-        is_prompt = seq_group_metadata.is_prompt
+        block_size = self.runner.block_size
+
+        block_table = seq_group_metadata.block_tables[seq_id]
+        seq_len = seq_data.get_len()
+        context_len = seq_data.get_num_computed_tokens()
+
+        tokens = seq_data.get_last_token_id()
+        token_positions = seq_len - 1
+        block_number = block_table[token_positions // block_size]
+        block_offset = token_positions % block_size
+        slot = block_number * block_size + block_offset
+
+        # For paged_attention kernel
+        if self.runner.sliding_window:
+            start_idx = max(0, seq_len - self.runner.sliding_window)
+            start_block = start_idx // block_size
+            start_idx = start_block * block_size
+            seq_len = seq_len - start_idx
+            block_table = block_table[start_block:]
+
+        # For MRotaryEmbedding
+        if data.input_positions is None:
+            next_pos = MRotaryEmbedding.get_next_input_positions(
+                seq_data.mrope_position_delta,
+                context_len,
+                seq_len,
+            )
+            for idx in range(3):
+                data.input_mrope_positions[idx].extend(  # type: ignore
+                    next_pos[idx])
+        else:
+            data.input_positions.append(token_positions)  # type: ignore
+
+        # Update fields
+        data.input_tokens.append(tokens)
+        data.max_decode_seq_len = max(data.max_decode_seq_len, seq_len)
+        data.num_decode_tokens += 1
+        data.slot_mapping.append(slot)
+        data.decode_block_tables.append(block_table)
+        data.query_lens.append(1)
+        data.seq_lens.append(seq_len)
+
+    def _compute_prompt_input_tokens(self, data: ModelInputData,
+                                     seq_group_metadata: SequenceGroupMetadata,
+                                     seq_data: SequenceData, seq_id: int):
+        """
+        Compute prompt input tokens, positions, block table and slot mapping.
+        """
         token_chunk_size = seq_group_metadata.token_chunk_size
         block_size = self.runner.block_size
 
         block_table = seq_group_metadata.block_tables[seq_id]
         seq_len = seq_data.get_len()
         context_len = seq_data.get_num_computed_tokens()
-        if is_prompt:
-            seq_len = min(seq_len, context_len + token_chunk_size)
+        seq_len = min(seq_len, context_len + token_chunk_size)
 
-            # For prefix caching
-            prefix_cache_block_num = len(
-                seq_group_metadata.computed_block_nums)
-            if prefix_cache_block_num > 0:
-                prefix_cache_len = (prefix_cache_block_num *
-                                    self.runner.block_size)
-                if prefix_cache_len <= context_len:
-                    # We already passed the cache hit region,
-                    # so do normal computation.
-                    pass
-                elif context_len < prefix_cache_len < seq_len:
-                    # Partial hit. Compute the missing part.
-                    context_len = prefix_cache_len
-                    token_chunk_size = seq_len - context_len
-                elif seq_len <= prefix_cache_len:
-                    # Full hit. Only compute the last token to avoid
-                    # erroneous behavior. FIXME: Ideally we should directly
-                    # mark all tokens as computed in the scheduler and do not
-                    # schedule this sequence, so this case should not happen.
-                    context_len = seq_len - 1
-                    token_chunk_size = 1
+        # For prefix caching
+        prefix_cache_block_num = len(seq_group_metadata.computed_block_nums)
+        if prefix_cache_block_num > 0:
+            prefix_cache_len = (prefix_cache_block_num *
+                                self.runner.block_size)
+            if prefix_cache_len <= context_len:
+                # We already passed the cache hit region,
+                # so do normal computation.
+                pass
+            elif context_len < prefix_cache_len < seq_len:
+                # Partial hit. Compute the missing part.
+                context_len = prefix_cache_len
+                token_chunk_size = seq_len - context_len
+            elif seq_len <= prefix_cache_len:
+                # Full hit. Only compute the last token to avoid
+                # erroneous behavior. FIXME: Ideally we should directly
+                # mark all tokens as computed in the scheduler and do not
+                # schedule this sequence, so this case should not happen.
+                context_len = seq_len - 1
+                token_chunk_size = 1
 
-            tokens = seq_data.get_token_ids()
-            tokens = tokens[context_len:seq_len]
-            token_positions = range(context_len, seq_len)
+        tokens = seq_data.get_token_ids()
+        tokens = tokens[context_len:seq_len]
+        token_positions = range(context_len, seq_len)
 
-            # For encoder-only models, the block_table is None,
-            # and there is no need to initialize the slot_mapping.
-            if block_table is not None:
-                slot_mapping = [_PAD_SLOT_ID] * len(token_positions)
-                for i, pos in enumerate(token_positions):
-                    block_number = block_table[pos // block_size]
-                    block_offset = pos % block_size
-                    slot = block_number * block_size + block_offset
-                    slot_mapping[i] = slot
-                data.slot_mapping.extend(slot_mapping)
+        # For encoder-only models, the block_table is None,
+        # and there is no need to initialize the slot_mapping.
+        if block_table is not None:
+            slot_mapping = [_PAD_SLOT_ID] * len(token_positions)
+            for i, pos in enumerate(token_positions):
+                block_number = block_table[pos // block_size]
+                block_offset = pos % block_size
+                slot = block_number * block_size + block_offset
+                slot_mapping[i] = slot
+            data.slot_mapping.extend(slot_mapping)
 
-            # The MRPOE positions are prepared in _compute_multi_modal_input
-            if data.input_positions is not None:
-                data.input_positions.extend(token_positions)
+        # The MRPOE positions are prepared in _compute_multi_modal_input
+        if data.input_positions is not None:
+            data.input_positions.extend(token_positions)
 
-            # Update fields
-            data.input_tokens.extend(tokens)
-            data.num_prefills += 1
-            data.num_prefill_tokens += len(tokens)
-            data.query_lens.append(len(tokens))
-            data.prefill_block_tables.append(block_table)
-        else:
-            tokens = seq_data.get_last_token_id()
-            token_positions = seq_len - 1
-            block_number = block_table[token_positions // block_size]
-            block_offset = token_positions % block_size
-            slot = block_number * block_size + block_offset
-
-            # For paged_attention kernel
-            if self.runner.sliding_window:
-                start_idx = max(0, seq_len - self.runner.sliding_window)
-                start_block = start_idx // block_size
-                start_idx = start_block * block_size
-                seq_len = seq_len - start_idx
-                block_table = block_table[start_block:]
-
-            # For MRotaryEmbedding
-            if data.input_positions is None:
-                next_pos = MRotaryEmbedding.get_next_input_positions(
-                    seq_data.mrope_position_delta,
-                    context_len,
-                    seq_len,
-                )
-                data.input_mrope_positions[0].extend(  # type: ignore
-                    next_pos[0])
-                data.input_mrope_positions[1].extend(  # type: ignore
-                    next_pos[1])
-                data.input_mrope_positions[2].extend(  # type: ignore 
-                    next_pos[2])
-            else:
-                data.input_positions.append(token_positions)  # type: ignore
-
-            # Update fields
-            data.input_tokens.append(tokens)
-            data.max_decode_seq_len = max(data.max_decode_seq_len, seq_len)
-            data.num_decode_tokens += 1
-            data.slot_mapping.append(slot)
-            data.decode_block_tables.append(block_table)
-            data.query_lens.append(1)
-
+        # Update fields
+        data.input_tokens.extend(tokens)
+        data.num_prefills += 1
+        data.num_prefill_tokens += len(tokens)
+        data.query_lens.append(len(tokens))
+        data.prefill_block_tables.append(block_table)
         data.seq_lens.append(seq_len)
 
     def _compute_multi_modal_input(self,
@@ -425,12 +358,9 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
                 )
             seq_data.mrope_position_delta = mrope_position_delta
 
-            self.input_data.input_mrope_positions[0].extend(  # type: ignore
-                mrope_positions[0])
-            self.input_data.input_mrope_positions[1].extend(  # type: ignore
-                mrope_positions[1])
-            self.input_data.input_mrope_positions[2].extend(  # type: ignore
-                mrope_positions[2])
+            for i in range(3):
+                self.input_data.input_mrope_positions[  # type: ignore
+                    i].extend(mrope_positions[i])
 
         self.input_data.multi_modal_inputs_list.append(mm_kwargs)
         for modality, placeholder_map in placeholder_maps.items():
