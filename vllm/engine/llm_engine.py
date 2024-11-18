@@ -314,7 +314,7 @@ class LLMEngine:
         self.observability_config = observability_config or ObservabilityConfig(
         )
         self.log_stats = log_stats
-        self.snapshot_stats: Stats = None 
+        self.snapshot_stats: Stats = None
         self.use_cached_outputs = use_cached_outputs
 
         if not self.model_config.skip_tokenizer_init:
@@ -1198,11 +1198,12 @@ class LLMEngine:
                 use_cache=self.use_cached_outputs)
             if request_output:
                 # TODO: for async_engine case log stats here and remove duplicate call further in model_outputs
-                 # KV Cache Usage in %
+                # KV Cache Usage in %
                 if self.snapshot_stats:
                     request_output.metrics.gpu_kv_cache_utilisation = self.snapshot_stats.gpu_cache_usage_sys
                     request_output.metrics.cpu_kv_cache_utilisation = self.snapshot_stats.cpu_cache_usage_sys
-                    request_output.metrics.running_lora_adapters = ','.join(self.snapshot_stats.running_lora_adapters)
+                    request_output.metrics.running_lora_adapters = ','.join(
+                        self.snapshot_stats.running_lora_adapters)
                 ctx.request_outputs.append(request_output)
 
         # When we process a single request, we skip it for the next time,
@@ -1614,8 +1615,8 @@ class LLMEngine:
                      finished_before: Optional[List[int]] = None,
                      skip: Optional[List[int]] = None) -> None:
         """Forced log when no requests active."""
-        self.snapshot_stats =  self._get_stats(scheduler_outputs, model_output,
-                                    finished_before, skip)
+        self.snapshot_stats = self._get_stats(scheduler_outputs, model_output,
+                                              finished_before, skip)
         if self.log_stats:
             for logger in self.stat_loggers.values():
                 logger.log(self.snapshot_stats)

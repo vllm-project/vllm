@@ -376,16 +376,15 @@ class OpenAIServingCompletion(OpenAIServing):
         yield "data: [DONE]\n\n"
 
     def request_output_to_completion_response(
-        self,
-        final_res_batch: List[RequestOutput],
-        request: CompletionRequest,
-        request_id: str,
-        created_time: int,
-        model_name: str,
-        tokenizer: AnyTokenizer,
-        request_metadata: RequestResponseMetadata,
-        engine_metrics: dict = None
-    ) -> CompletionResponse:
+            self,
+            final_res_batch: List[RequestOutput],
+            request: CompletionRequest,
+            request_id: str,
+            created_time: int,
+            model_name: str,
+            tokenizer: AnyTokenizer,
+            request_metadata: RequestResponseMetadata,
+            engine_metrics: dict = None) -> CompletionResponse:
         choices: List[CompletionResponseChoice] = []
         num_prompt_tokens = 0
         num_generated_tokens = 0
@@ -465,23 +464,14 @@ class OpenAIServingCompletion(OpenAIServing):
             completion_tokens=num_generated_tokens,
             total_tokens=num_prompt_tokens + num_generated_tokens,
         )
-        
+
         metrics = EngineMetrics(
-            gpu_kv_cache_util = (
-                last_req_metrics.gpu_kv_cache_utilisation
-                if last_req_metrics is not None
-                else 0.0
-            ),
-            cpu_kv_cache_util= (
-                last_req_metrics.cpu_kv_cache_utilisation
-                if last_req_metrics is not None
-                else 0.0
-            ),
-            running_lora_adapters= (
-                last_req_metrics.running_lora_adapters
-                if last_req_metrics is not None
-                else ""
-            ),
+            gpu_kv_cache_util=(last_req_metrics.gpu_kv_cache_utilisation
+                               if last_req_metrics is not None else 0.0),
+            cpu_kv_cache_util=(last_req_metrics.cpu_kv_cache_utilisation
+                               if last_req_metrics is not None else 0.0),
+            running_lora_adapters=(last_req_metrics.running_lora_adapters
+                                   if last_req_metrics is not None else ""),
         )
         request_metadata.final_usage_info = usage
 

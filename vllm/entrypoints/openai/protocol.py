@@ -109,10 +109,12 @@ class UsageInfo(OpenAIBaseModel):
     completion_tokens: Optional[int] = 0
     prompt_tokens_details: Optional[PromptTokenUsageInfo] = None
 
+
 class EngineMetrics(OpenAIBaseModel):
     gpu_kv_cache_util: Optional[float] = 0.
     cpu_kv_cache_util: Optional[float] = 0.
-    running_lora_adapters: Optional[str]= ""
+    running_lora_adapters: Optional[str] = ""
+
 
 class RequestResponseMetadata(BaseModel):
     request_id: str
