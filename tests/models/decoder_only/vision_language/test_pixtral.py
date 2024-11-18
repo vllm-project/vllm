@@ -15,8 +15,8 @@ from mistral_common.protocol.instruct.request import ChatCompletionRequest
 from mistral_common.tokens.tokenizers.mistral import MistralTokenizer
 from mistral_common.tokens.tokenizers.multimodal import image_from_chunk
 
-from vllm import (EngineArgs, LLMEngine, SamplingParams, TokensPrompt,
-                  TextPrompt, RequestOutput)
+from vllm import (EngineArgs, LLMEngine, RequestOutput, SamplingParams,
+                  TokensPrompt, TextPrompt)
 from vllm.logger import init_logger
 from vllm.multimodal import MultiModalDataBuiltins
 from vllm.multimodal.inputs import PlaceholderRange
