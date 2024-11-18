@@ -47,6 +47,7 @@ class OpenAIServingCompletion(OpenAIServing):
         prompt_adapters: Optional[List[PromptAdapterPath]],
         request_logger: Optional[RequestLogger],
         return_tokens_as_token_ids: bool = False,
+        fim_encoder: Optional[str] = None,
     ):
         super().__init__(engine_client=engine_client,
                          model_config=model_config,
@@ -54,7 +55,8 @@ class OpenAIServingCompletion(OpenAIServing):
                          lora_modules=lora_modules,
                          prompt_adapters=prompt_adapters,
                          request_logger=request_logger,
-                         return_tokens_as_token_ids=return_tokens_as_token_ids)
+                         return_tokens_as_token_ids=return_tokens_as_token_ids,
+                         fim_encoder=fim_encoder)
 
     async def create_completion(
         self,
@@ -66,9 +68,6 @@ class OpenAIServingCompletion(OpenAIServing):
         See https://platform.openai.com/docs/api-reference/completions/create
         for the API specification. This API mimics the OpenAI Completion API.
 
-        NOTE: Currently we do not support the following feature:
-            - suffix (the language models we currently support do not support
-            suffix)
         """
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
@@ -79,11 +78,6 @@ class OpenAIServingCompletion(OpenAIServing):
         # success status before we actually start generating text :).
         if self.engine_client.errored:
             raise self.engine_client.dead_error
-
-        # Return error for unsupported features.
-        if request.suffix is not None:
-            return self.create_error_response(
-                "suffix is not currently supported")
 
         model_name = self.base_model_paths[0].name
         request_id = f"cmpl-{random_uuid()}"
@@ -105,6 +99,7 @@ class OpenAIServingCompletion(OpenAIServing):
                 request,
                 tokenizer,
                 request.prompt,
+                request.suffix,
                 truncate_prompt_tokens=request.truncate_prompt_tokens,
                 add_special_tokens=request.add_special_tokens,
             )
@@ -303,6 +298,14 @@ class OpenAIServingCompletion(OpenAIServing):
                             # Chunked prefill case, don't return empty chunks
                             continue
 
+                    previous_text_lens[i] += len(output.text)
+                    previous_num_tokens[i] += len(output.token_ids)
+                    finish_reason = output.finish_reason
+                    stop_reason = output.stop_reason
+
+                    if finish_reason and request.echo and request.suffix:
+                        delta_text += request.suffix
+
                     if request.logprobs is not None:
                         assert out_logprobs is not None, (
                             "Did not output logprobs")
@@ -315,11 +318,6 @@ class OpenAIServingCompletion(OpenAIServing):
                         )
                     else:
                         logprobs = None
-
-                    previous_text_lens[i] += len(output.text)
-                    previous_num_tokens[i] += len(output.token_ids)
-                    finish_reason = output.finish_reason
-                    stop_reason = output.stop_reason
 
                     chunk = CompletionStreamResponse(
                         id=request_id,
@@ -388,6 +386,8 @@ class OpenAIServingCompletion(OpenAIServing):
         num_prompt_tokens = 0
         num_generated_tokens = 0
 
+        suffix = "" if request.suffix is None else request.suffix
+
         for final_res in final_res_batch:
             prompt_token_ids = final_res.prompt_token_ids
             assert prompt_token_ids is not None
@@ -397,7 +397,6 @@ class OpenAIServingCompletion(OpenAIServing):
             token_ids: GenericSequence[int]
             out_logprobs: Optional[GenericSequence[Optional[Dict[int,
                                                                  Logprob]]]]
-
             for output in final_res.outputs:
                 assert request.max_tokens is not None
                 if request.echo:
@@ -405,7 +404,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     if request.max_tokens == 0:
                         token_ids = prompt_token_ids
                         out_logprobs = prompt_logprobs
-                        output_text = prompt_text
+                        output_text = prompt_text + suffix
                     else:
                         token_ids = [*prompt_token_ids, *output.token_ids]
 
@@ -419,7 +418,7 @@ class OpenAIServingCompletion(OpenAIServing):
                                 *output.logprobs,
                             ]
 
-                        output_text = prompt_text + output.text
+                        output_text = prompt_text + output.text + suffix
                 else:
                     token_ids = output.token_ids
                     out_logprobs = output.logprobs
