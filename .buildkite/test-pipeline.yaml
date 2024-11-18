@@ -165,6 +165,14 @@ steps:
   # OOM in the CI unless we run this separately
   - pytest -v -s tokenization
 
+- label: V1 Test
+  #mirror_hardwares: [amd]
+  source_file_dependencies:
+    - vllm/
+    - tests/v1
+  commands:
+    - pytest -v -s v1
+
 - label: Examples Test # 15min
   working_dir: "/vllm-workspace/examples"
   #mirror_hardwares: [amd]
@@ -305,71 +313,70 @@ steps:
 
 #####  models test  #####
 
-- label: Basic Models Test # 10min
+- label: Basic Models Test # 30min
   source_file_dependencies:
   - vllm/
   - tests/models
   commands:
     - pip install -e ./plugins/vllm_add_dummy_model
     - pytest -v -s models/test_oot_registration.py # it needs a clean process
-    - pytest -v -s models/*.py --ignore=models/test_oot_registration.py
+    - pytest -v -s models/test_registry.py
+    - pytest -v -s models/test_initialization.py
 
-- label: Decoder-only Language Models Test (Standard) # 18min
+- label: Language Models Test (Standard) # 42min
   #mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
   - tests/models/decoder_only/language
+  - tests/models/embedding/language
+  - tests/models/encoder_decoder/language
   commands:
-    - pytest -v -s models/decoder_only/language -m core_model
-    - pytest -v -s models/decoder_only/language -m quant_model
+    - pytest -v -s models/decoder_only/language -m 'core_model or quant_model'
+    - pytest -v -s models/embedding/language -m core_model
+    - pytest -v -s models/embedding/vision_language -m core_model
 
-- label: Decoder-only Language Models Test (Extended) # 46min
+- label: Language Models Test (Extended) # 50min
   nightly: true
   source_file_dependencies:
   - vllm/
   - tests/models/decoder_only/language
+  - tests/models/embedding/language
+  - tests/models/encoder_decoder/language
   commands:
     - pytest -v -s models/decoder_only/language -m 'not core_model and not quant_model'
+    - pytest -v -s models/embedding/language -m 'not core_model'
+    - pytest -v -s models/embedding/vision_language -m 'not core_model'
 
-- label: Decoder-only Multi-Modal Models Test (Standard) # 22min
+- label: Multi-Modal Models Test (Standard) # 26min
   #mirror_hardwares: [amd]
   source_file_dependencies:
   - vllm/
   - tests/models/decoder_only/audio_language
   - tests/models/decoder_only/vision_language
+  - tests/models/embedding/vision_language
+  - tests/models/encoder_decoder/vision_language
   commands:
-    - pytest -v -s models/decoder_only/audio_language -m core_model
-    - pytest -v -s --ignore models/decoder_only/vision_language/test_phi3v.py models/decoder_only/vision_language -m core_model
-    # No tests under this group for now
-    # - pytest -v -s models/decoder_only/audio_language -m quant_model
-    - pytest -v -s --ignore models/decoder_only/vision_language/test_phi3v.py models/decoder_only/vision_language -m quant_model
+    - pytest -v -s models/decoder_only/audio_language -m 'core_model or quant_model'
+    - pytest -v -s --ignore models/decoder_only/vision_language/test_phi3v.py models/decoder_only/vision_language -m 'core_model or quant_model'
+    - pytest -v -s models/encoder_decoder/language -m core_model
+    - pytest -v -s models/encoder_decoder/vision_language -m core_model
 
-- label: Decoder-only Multi-Modal Models Test (Extended) # 1h10m
+- label: Multi-Modal Models Test (Extended) # 1h15m
   nightly: true
   source_file_dependencies:
   - vllm/
   - tests/models/decoder_only/audio_language
   - tests/models/decoder_only/vision_language
+  - tests/models/embedding/vision_language
+  - tests/models/encoder_decoder/vision_language
   commands:
     - pytest -v -s models/decoder_only/audio_language -m 'not core_model and not quant_model'
     # HACK - run phi3v tests separately to sidestep this transformers bug
     # https://github.com/huggingface/transformers/issues/34307
     - pytest -v -s models/decoder_only/vision_language/test_phi3v.py
     - pytest -v -s --ignore models/decoder_only/vision_language/test_phi3v.py models/decoder_only/vision_language -m 'not core_model and not quant_model'
-
-- label: Other Models Test # 20min
-  #mirror_hardwares: [amd]
-  source_file_dependencies:
-  - vllm/
-  - tests/models/embedding/language
-  - tests/models/embedding/vision_language
-  - tests/models/encoder_decoder/language
-  - tests/models/encoder_decoder/vision_language
-  commands:
-    - pytest -v -s models/embedding/language
-    - pytest -v -s models/embedding/vision_language
-    - pytest -v -s models/encoder_decoder/language
-    - pytest -v -s models/encoder_decoder/vision_language
+    - pytest -v -s models/encoder_decoder/language -m 'not core_model'
+    - pytest -v -s models/encoder_decoder/vision_language -m 'not core_model'
 
 # This test is used only in PR development phase to test individual models and should never run on main
 - label: Custom Models Test

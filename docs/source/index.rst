@@ -156,10 +156,12 @@ Documentation
    :maxdepth: 2
    :caption: Design
 
+   design/class_hierarchy
+   design/huggingface_integration
+   design/plugin_system
    design/input_processing/model_inputs_index
    design/kernel/paged_attention
    design/multimodal/multimodal_index
-   design/huggingface_integration
 
 .. For Developers: contributing to the vLLM project
 

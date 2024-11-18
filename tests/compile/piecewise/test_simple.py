@@ -11,10 +11,9 @@ from torch.library import Library
 from vllm.compilation.compile_context import set_compile_context
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.decorators import support_torch_compile
-from vllm.compilation.levels import CompilationLevel
+from vllm.config import CompilationLevel, VllmConfig
+from vllm.plugins import set_current_vllm_config
 from vllm.utils import direct_register_custom_op
-
-os.environ["VLLM_TORCH_COMPILE_LEVEL"] = str(CompilationLevel.PIECEWISE)
 
 global_counter = 0
 
@@ -48,7 +47,11 @@ direct_register_custom_op(
 @support_torch_compile
 class SillyModel(nn.Module):
 
-    def __init__(self) -> None:
+    def __init__(self,
+                 *,
+                 vllm_config: VllmConfig,
+                 prefix: str = '',
+                 **kwargs) -> None:
         super().__init__()
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -74,13 +77,16 @@ class SillyModel(nn.Module):
 
 def test_simple_piecewise_compile():
 
-    model = SillyModel()
-
     directory = os.path.dirname(__file__)
     config = os.path.join(directory, "piecewise_compilation_config.json")
     os.environ["VLLM_TORCH_COMPILE_CONFIG"] = config
+    os.environ["VLLM_TORCH_COMPILE_LEVEL"] = str(CompilationLevel.PIECEWISE)
 
-    input_buffer = torch.randn(100).cuda()
+    vllm_config = VllmConfig()
+    with set_current_vllm_config(vllm_config):
+        model = SillyModel(vllm_config=vllm_config, prefix='')
+
+    inputs = torch.randn(100).cuda()
 
     with compilation_counter.expect(
             num_graphs_seen=1,  # one graph for the model
@@ -92,15 +98,15 @@ def test_simple_piecewise_compile():
     ):
 
         with set_compile_context([1, 2]):
-            model(input_buffer)
+            model(inputs)
 
-            model(input_buffer[:2])
-            model(input_buffer[:1])
+            model(torch.randn(2).cuda())
+            model(torch.randn(1).cuda())
 
-        input_buffer[:2].zero_()
+        input = torch.zeros(2).cuda()
         global global_counter
         global_counter = 0
-        output = model(input_buffer[:2])
+        output = model(input)
         assert global_counter == 2
         assert torch.allclose(output.cpu(), torch.tensor([3., 1.]))
 

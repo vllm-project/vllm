@@ -37,11 +37,11 @@ if current_platform.is_tpu():
     MAX_WAIT_SECONDS = 600
 
 
-@pytest.mark.parametrize("more_args", MORE_ARGS_LIST)
-def test_lm_eval_accuracy(more_args):
+def run_test(more_args):
+    """Run the end to end accuracy test."""
+
     args = list(DEFAULT_ARGS)
     args.extend(more_args)
-
     print(f"Running with: {args}")
 
     with RemoteOpenAIServer(
@@ -64,3 +64,22 @@ def test_lm_eval_accuracy(more_args):
         assert (measured_value - RTOL < EXPECTED_VALUE
                 and measured_value + RTOL > EXPECTED_VALUE
                 ), f"Expected: {EXPECTED_VALUE} |  Measured: {measured_value}"
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(),
+                    reason="V1 currently only supported on CUDA")
+def test_lm_eval_accuracy_v1_engine(monkeypatch):
+    """Run with the V1 Engine."""
+
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_USE_V1", "1")
+        run_test([])
+
+
+@pytest.mark.parametrize("more_args", MORE_ARGS_LIST)
+def test_lm_eval_accuracy_v0_engine(monkeypatch, more_args):
+    """Run with the V0 Engine."""
+
+    with monkeypatch.context() as m:
+        m.setenv("VLLM_USE_V1", "0")
+        run_test(more_args)

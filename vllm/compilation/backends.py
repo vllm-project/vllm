@@ -2,21 +2,19 @@ import copy
 import dataclasses
 import operator
 from contextlib import ExitStack
-from typing import (Any, Callable, Dict, List, Optional, Sequence, Set, Tuple,
-                    Union)
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 from unittest.mock import patch
 
 import torch
 import torch.fx as fx
 
 import vllm.envs as envs
+from vllm.config import CompilationConfig
 from vllm.logger import init_logger
 from vllm.utils import combine_fx_passes, weak_ref_tensors
 
-from .config import CompilationConfig
 from .counter import compilation_counter
 from .fusion import FusionPass
-from .levels import CompilationLevel
 from .reshapes import RedundantReshapesPass
 
 logger = init_logger(__name__)
@@ -389,8 +387,13 @@ class VllmBackend:
     returned_callable: Callable
     # Inductor passes to run on the graph pre-defunctionalization
     post_grad_passes: Sequence[Callable]
+    sym_tensor_indices: List[int]
+    input_buffers: List[torch.Tensor]
 
-    def __init__(self, post_grad_passes: Sequence[Callable] = ()):
+    def __init__(
+        self,
+        compilation_configs: CompilationConfig,
+    ):
         global global_graph_pool
         if global_graph_pool is None:
             global_graph_pool = torch.cuda.graph_pool_handle()
@@ -399,7 +402,12 @@ class VllmBackend:
         # streams, it might not be safe to share a global pool.
         # only investigate this when we use multiple streams
         self.graph_pool = global_graph_pool
-        self.post_grad_passes = post_grad_passes
+        self.post_grad_passes = []
+
+        self.sym_tensor_indices = []
+        self.input_buffers = []
+
+        self.compilation_configs = compilation_configs
 
         # `torch.compile` is JIT compiled, so we don't need to
         # do anything here
@@ -432,10 +440,10 @@ class VllmBackend:
         assert not self._called, "VllmBackend can only be called once"
 
         self.graph = graph
-        # config is read now, because only here can
+        # config is updated now, because only here can
         # we get the sizes to capture for cudagraph
         # from compilation context
-        self.compilation_configs = CompilationConfig.select_and_init_config()
+        self.compilation_configs.init_during_runtime()
         self.add_passes_to_config()
 
         self.split_gm, self.piecewise_graphs = split_graph(
@@ -461,7 +469,46 @@ class VllmBackend:
 
         self._called = True
 
-        return self.split_gm
+        if not self.compilation_configs.use_cudagraph or \
+            not self.compilation_configs.cudagraph_copy_inputs:
+            return self.split_gm
+
+        # if we need to copy input buffers for cudagraph
+        from torch._guards import detect_fake_mode
+        fake_mode = detect_fake_mode()
+        fake_args = [
+            fake_mode.from_tensor(t) if isinstance(t, torch.Tensor) else t
+            for t in example_inputs
+        ]
+
+        # index of tensors that have symbolic shapes (batch size)
+        self.sym_tensor_indices = [
+            i for i, x in enumerate(fake_args)
+            if isinstance(x, torch._subclasses.fake_tensor.FakeTensor)
+        ]
+
+        # compiler managed cudagraph input buffers
+        # we assume the first run with symbolic shapes
+        # has the maximum size among all the tensors
+        self.input_buffers = [
+            example_inputs[x].clone() for x in self.sym_tensor_indices
+        ]
+
+        def copy_and_call(*args):
+            list_args = list(args)
+            for i, index in enumerate(self.sym_tensor_indices):
+                runtime_tensor = list_args[index]
+                runtime_shape = runtime_tensor.shape[0]
+                static_tensor = self.input_buffers[i][:runtime_shape]
+
+                # copy the tensor to the static buffer
+                static_tensor.copy_(runtime_tensor)
+
+                # replace the tensor in the list_args to the static buffer
+                list_args[index] = static_tensor
+            return self.split_gm(*list_args)
+
+        return copy_and_call
 
 
 @dataclasses.dataclass
@@ -636,12 +683,3 @@ class PiecewiseBackend:
 
         entry.cudagraph.replay()
         return entry.output
-
-
-def select_default_backend(level: int) -> Union[str, Callable]:
-    if level in [CompilationLevel.DYNAMO_AS_IS, CompilationLevel.DYNAMO_ONCE]:
-        backend_str = "eager"
-        return backend_str
-    assert level == CompilationLevel.PIECEWISE
-
-    return VllmBackend()

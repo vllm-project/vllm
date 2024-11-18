@@ -218,13 +218,16 @@ def apply_int8_linear(
                                                symmetric=symmetric)
 
     if x_zp is not None:
+        # Currently, static is always per-tensor and dynamic is per-token
+        static = input_zero_point is not None
+        azp = None if static else x_zp
         return ops.cutlass_scaled_mm_azp(x_q,
                                          weight,
                                          scale_a=x_scale,
                                          scale_b=weight_scale,
                                          out_dtype=input.dtype,
                                          azp_adj=azp_adj,
-                                         azp=x_zp,
+                                         azp=azp,
                                          bias=bias)
     return ops.cutlass_scaled_mm(x_q,
                                  weight,
