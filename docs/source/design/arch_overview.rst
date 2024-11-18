@@ -15,7 +15,7 @@ Entrypoints
 vLLM provides a number of entrypoints for interacting with the system. The
 following diagram shows the relationship between them.
 
-.. image:: arch_overview/entrypoints.excalidraw.png
+.. image:: /assets/design/arch_overview/entrypoints.excalidraw.png
     :alt: Entrypoints Diagram
 
 LLM Class
@@ -91,7 +91,7 @@ LLM Engine
 The `LLMEngine` and `AsyncLLMEngine` classes are central to the functioning of
 the vLLM system, handling model inference and asynchronous request processing.
 
-.. image:: arch_overview/llm_engine.excalidraw.png
+.. image:: /assets/design/arch_overview/llm_engine.excalidraw.png
     :alt: LLMEngine Diagram
 
 LLMEngine
@@ -166,7 +166,7 @@ Class Hierarchy
 
 The following figure shows the class hierarchy of vLLM:
 
-    .. figure:: ../assets/design/hierarchy.png
+    .. figure:: /assets/design/hierarchy.png
         :alt: query
         :width: 100%
         :align: center
