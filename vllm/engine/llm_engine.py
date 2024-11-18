@@ -1197,12 +1197,14 @@ class LLMEngine:
                 self.seq_id_to_seq_group,
                 use_cache=self.use_cached_outputs)
             if request_output:
-                # TODO: for async_engine case log stats here and remove duplicate call further in model_outputs
-                # KV Cache Usage in %
+                # TODO: for async_engine case log stats here and remove
+                # duplicate call further in def model_outputs
                 if self.snapshot_stats:
-                    request_output.metrics.gpu_kv_cache_utilisation = self.snapshot_stats.gpu_cache_usage_sys
-                    request_output.metrics.cpu_kv_cache_utilisation = self.snapshot_stats.cpu_cache_usage_sys
-                    request_output.metrics.running_lora_adapters = ','.join(
+                    request_output.metrics.gpu_kv_cache_utilisation = (
+                        self.snapshot_stats.gpu_cache_usage_sys)
+                    request_output.metrics.cpu_kv_cache_utilisation = (
+                        self.snapshot_stats.cpu_cache_usage_sys)
+                    request_output.metrics.running_lora_adapters = ",".join(
                         self.snapshot_stats.running_lora_adapters)
                 ctx.request_outputs.append(request_output)
 

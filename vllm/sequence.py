@@ -111,7 +111,9 @@ class RequestMetrics:
         model_execute_time: The time spent in the model execute function. This
                             will include model forward, block/sync across
                             workers, cpu-gpu sync time and sampling time.
-        gpu_kv_cache_utilisation: snapshot kv_cache_utilisation of gpu post-request.
+        gpu_kv_cache_utilisation: post request kv_cache_utilisation of gpu.
+        cpu_kv_cache_utilisation: post request kv_cache_utilisation of cpu.
+        running_lora_adapters: post request running lora adapters in cache.
     """
     arrival_time: float
     last_token_time: float

@@ -17,10 +17,9 @@ from vllm.entrypoints.openai.protocol import (CompletionLogProbs,
                                               CompletionResponseChoice,
                                               CompletionResponseStreamChoice,
                                               CompletionStreamResponse,
-                                              ErrorResponse,
+                                              EngineMetrics, ErrorResponse,
                                               RequestResponseMetadata,
-                                              UsageInfo,
-                                              EngineMetrics)
+                                              UsageInfo)
 # yapf: enable
 from vllm.entrypoints.openai.serving_engine import (BaseModelPath,
                                                     LoRAModulePath,
