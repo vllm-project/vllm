@@ -1769,7 +1769,7 @@ class CUDAGraphRunner(nn.Module):
         # Run the model a few times without capturing the graph.
         # This is to make sure that the captured graph does not include the
         # kernel launches for initial benchmarking (e.g., Triton autotune).
-        # Note one iteration is not enough for torch.jit.script
+        # Note one iteration is not enough for torch.compile
         for _ in range(_NUM_WARMUP_ITERS):
             self.model(
                 input_ids=input_ids,
