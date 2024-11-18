@@ -144,7 +144,7 @@ class RequestOutput:
             request_id=request_id,
             prompt=prompt,
             prompt_token_ids=prompt_token_ids,
-            multi_modal_placeholders=MultiModalPlaceholderDict(),
+            multi_modal_placeholders={},
             prompt_logprobs=None,  # TODO
             outputs=[completion_output],
             finished=finished,
