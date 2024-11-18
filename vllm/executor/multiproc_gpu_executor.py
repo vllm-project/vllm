@@ -5,7 +5,6 @@ from typing import Any, List, Optional
 
 import torch
 
-import vllm.distributed.kv_transfer.vllm_adapter as dist_kv
 from vllm.executor.distributed_gpu_executor import (  # yapf: disable
     DistributedGPUExecutor, DistributedGPUExecutorAsync)
 from vllm.executor.gpu_executor import create_worker

@@ -38,7 +38,7 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op, supports_custom_op
-import vllm.distributed.kv_transfer.kv_transfer_agent as dist_kv
+import vllm.distributed.kv_transfer.kv_transfer_agent as kv_transfer
 
 
 @dataclass
@@ -944,10 +944,10 @@ def get_pp_group() -> GroupCoordinator:
 get_pipeline_model_parallel_group = get_pp_group
 
 
-_KV_TRANSFER: Optional[dist_kv.KV_transfer_agent] = None
+_KV_TRANSFER: Optional[kv_transfer.KV_transfer_agent] = None
 
 
-def get_kv_transfer_group() -> dist_kv.KV_transfer_agent:
+def get_kv_transfer_group() -> kv_transfer.KV_transfer_agent:
     assert _KV_TRANSFER is not None, (
         "disaggregated KV cache transfer parallel group is not initialized")
     return _KV_TRANSFER
@@ -1109,7 +1109,7 @@ def ensure_kv_transfer_initialized(
 
     global _KV_TRANSFER
     if config.need_kv_parallel_group and _KV_TRANSFER is None:
-        _KV_TRANSFER = dist_kv.KV_transfer_agent(
+        _KV_TRANSFER = kv_transfer.KV_transfer_agent(
             rank=get_world_group().rank,
             local_rank=get_world_group().local_rank,
             config=config

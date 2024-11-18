@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import msgspec
 
-import vllm.distributed.kv_transfer.vllm_adapter as dist_kv
 import vllm.envs as envs
 from vllm.executor.distributed_gpu_executor import (  # yapf: disable
     DistributedGPUExecutor, DistributedGPUExecutorAsync)
@@ -268,7 +267,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
         # this port will be binded by prefill instance
         # but the decode instance must use that port to init torch.distributed
         distributed_init_method = get_distributed_init_method(
-            driver_ip, get_open_port(force=dist_kv.IS_DISTRIBUTED_KV_INSTANCE))
+            driver_ip, get_open_port())
 
         # Initialize the actual workers inside worker wrapper.
         init_worker_all_kwargs = [

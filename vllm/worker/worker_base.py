@@ -370,7 +370,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         # output is List[SamplerOutput]
         return output
 
-    def _execute_model_spmdt(
+    def _execute_model_spmd(
         self,
         execute_model_req: ExecuteModelRequest,
         intermediate_tensors: Optional[IntermediateTensors] = None

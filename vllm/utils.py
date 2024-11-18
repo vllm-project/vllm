@@ -516,39 +516,11 @@ def get_open_zmq_ipc_path() -> str:
     return f"ipc://{base_rpc_path}/{uuid4()}"
 
 
-def get_open_port(force: bool = False) -> int:
+def get_open_port() -> int:
     port = envs.VLLM_PORT
-
-    if force:
-        # This flag will only be True in disaggregated prefill scenario
-        # and VLLM_PORT must be set so that vLLM can connect prefill vLLM
-        # instance and decode vLLM instance.
-        assert port is not None, "Please set environment variable VLLM_PORT in"
-        " order to use disaggregated prefill and distributed KV cache transfer"
-
-        # For prefill vLLM instance (KV producer), `port` must be available.
-        # For decode vLLM instance `port` can be not available.
-        if dist_kv.IS_KV_PRODUCER:
-            # `port` must be available.
-            try:
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    s.bind(("", port))
-                    return port
-            except OSError as e:
-                logger.error(
-                    "Port %d must be empty so that prefill vLLM "
-                    "instance can use this port to initialize "
-                    "distributed KV communication with decode "
-                    "vLLM instance.", port)
-                raise e
-        else:
-            # `port` can be not available
-            return port
-
     if port is not None:
         while True:
             try:
-                logger.info('Trying port %d', port)
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                     s.bind(("", port))
                     return port
