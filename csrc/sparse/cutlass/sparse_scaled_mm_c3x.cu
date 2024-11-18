@@ -226,7 +226,7 @@ void cutlass_scaled_sparse_mm_sm90_epilogue(torch::Tensor& out, torch::Tensor co
           out, a, e, b, std::forward<EpilogueArgs>(epilogue_args)...);
     }
   }
-  else {
+  else { // a.dtype() == torch::kBFloat16
     TORCH_CHECK(a.dtype() == torch::kBFloat16);
     TORCH_CHECK(e.dtype() == torch::kUInt8);
     TORCH_CHECK(b.dtype() == torch::kBFloat16);

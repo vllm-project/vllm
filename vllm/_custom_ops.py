@@ -548,8 +548,8 @@ def cutlass_scaled_sparse_mm(a: torch.Tensor,
                       bias: Optional[torch.Tensor] = None) -> torch.Tensor:
     # assert (b.shape[0] % 16 == 0 and b.shape[1] % 16 == 0)
     assert (out_dtype is torch.bfloat16 or out_dtype is torch.float16)
-    assert bias is None or bias.shape[0] == b.shape[
-        1] and bias.dtype == out_dtype
+    assert bias is None or bias.shape[0] == a.shape[0] \
+        and bias.dtype == out_dtype
 
     m = a.shape[0]
     n = b.shape[1]
