@@ -78,7 +78,13 @@ def _bgmv_expand_slice_kernel(
         )  # [BLOCK_N,BLOCK_K]
 
         if ADD_INPUTS:
-            tiled_out = tl.load(c_ptr + current_n * cn_stride, mask=c_mask)
+            # explicitly pass in other=None to tell triton that masked values
+            # can be uninitialized. This is OK because the later tl.store
+            # operation uses the same mask, eliminating the risk of garbage
+            # values propagating
+            tiled_out = tl.load(c_ptr + current_n * cn_stride,
+                                mask=c_mask,
+                                other=None)
             accumulator = tl.sum(tiled_a * tiled_b, 1) + tiled_out
         else:
             accumulator = tl.sum(tiled_a * tiled_b, 1)
