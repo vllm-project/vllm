@@ -53,7 +53,6 @@ class CacheEngine:
 
         # Get attention backend.
         self.attn_backend = get_attn_backend(self.head_size,
-                                             model_config.get_sliding_window(),
                                              model_config.dtype,
                                              cache_config.cache_dtype,
                                              self.block_size,

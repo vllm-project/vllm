@@ -3,6 +3,7 @@
 #include "cutlass/numeric_conversion.h"
 #include "cutlass_extensions/vllm_custom_types.cuh"
 #include "cutlass_extensions/cute_utils.cuh"
+#include "cutlass_extensions/vllm_type_utils.cuh"
 
 // this file extends:
 //   https://github.com/NVIDIA/cutlass/blob/cutlass-3.5.0/include/cutlass/numeric_conversion.h
@@ -28,8 +29,19 @@ struct InterleavedNumericArrayConverter {
 
   CUTLASS_DEVICE
   static result_type convert(source_type const& source) {
-    CUTE_INVALID_CONTROL_PATH(
-        "InterleavedNumericArrayConverter not implemented\n");
+    if (cute::elect_one_sync()) {
+      if constexpr (std::is_same_v<IlvBlkLayout, void>) {
+        printf(
+            "Convert %s <= %s (N = %d, IlvBlkLayout = void), not implemented\n",
+            nameof_v<T>, nameof_v<S>, N);
+      } else {
+        printf(
+            "Convert %s <= %s (N = %d, size(IlvBlkLayout{}) = %d), not "
+            "implemented\n",
+            nameof_v<T>, nameof_v<S>, N, size(IlvBlkLayout{}));
+      }
+      __brkpt();
+    }
     return {};
   }
 
@@ -56,11 +68,6 @@ struct InterleavedNumericArrayConverter<
   result_type operator()(source_type const& s) const { return convert(s); }
 };
 
-// TODO (LucasWilkinson): Implement
-// for Array<cutlass::float8_e4m3fn, N> <= Array<vllm_uint4b8_t, N>
-
-// ....
-
 template <typename RegConvert32bit, typename T, typename S, int N>
 struct ArrayConverterPacked32Bit {
   using result_type = Array<T, N>;
@@ -86,14 +93,16 @@ struct ArrayConverterPacked32Bit {
   using ScalarConverter = NumericConverter<T, S>;
 
   template <typename PackedSrc>
-  CUTLASS_DEVICE static uint32_t to_reg(PackedSrc const& source) {
+  CUTLASS_DEVICE static auto to_regs(PackedSrc const& src) {
     if constexpr (sizeof(PackedSrc) == 1) {
-      return static_cast<uint32_t>(reinterpret_cast<const uint8_t&>(source));
+      return Array<uint32_t, 1>{reinterpret_cast<uint8_t const&>(src)};
     } else if constexpr (sizeof(PackedSrc) == 2) {
-      return static_cast<uint32_t>(reinterpret_cast<const uint16_t&>(source));
+      return Array<uint32_t, 1>{reinterpret_cast<uint16_t const&>(src)};
+    } else if constexpr (sizeof(PackedSrc) == 4) {
+      return Array<uint32_t, 1>{reinterpret_cast<uint32_t const&>(src)};
     } else {
-      static_assert(sizeof(PackedSrc) == 4);
-      return reinterpret_cast<const uint32_t&>(source);
+      static_assert(sizeof(PackedSrc) == 8);
+      return reinterpret_cast<Array<uint32_t, 2> const&>(src);
     }
   }
 
@@ -110,7 +119,7 @@ struct ArrayConverterPacked32Bit {
     static_assert(std::is_same_v<typename PackedSrcType::Element, S>);
     static_assert(std::is_same_v<typename PackedResultType::Element, T>);
 
-    return RegConvert32bit::template convert<PackedResultType>(to_reg(source));
+    return RegConvert32bit::template convert<PackedResultType>(to_regs(source));
   }
 
   friend class detail::VectorizedConverter;
@@ -140,6 +149,131 @@ struct ArrayConverterPacked32Bit {
   }
 };
 
+// Convert 8 4bit values packed into a 32bit register to 8 8bit values packed
+// into 2 32bit register.
+template <uint8_t LUT0, uint8_t LUT1, uint8_t LUT2, uint8_t LUT3,    //
+          uint8_t LUT4, uint8_t LUT5, uint8_t LUT6, uint8_t LUT7,    //
+          uint8_t LUT8, uint8_t LUT9, uint8_t LUT10, uint8_t LUT11,  //
+          uint8_t LUT12, uint8_t LUT13, uint8_t LUT14, uint8_t LUT15>
+CUTLASS_DEVICE cutlass::AlignedArray<uint32_t, 2> lut_4bit_to_8bit_convert(
+    uint32_t src) {
+  cutlass::AlignedArray<uint32_t, 2> r;
+  // Determines if the value is in the top half of the LUT if set or
+  //  (i.e. LUT[8:15]) in the bottom half (i.e. LUT[0:7]) if not set. Then move
+  //  into bit position 0x4 of each nibble so when or'd with final_prmt_base it
+  //  selects the correct candidate. When elements in final_prmt_base
+  //  are >= 0x4, the high candidate is selected (i.e. LUT[8:15]), when elements
+  //  are  < 0x4, the low candidate is selected (i.e. LUT[0:7])
+  uint32_t high_bit = (src & 0x88888888) >> 1;
+
+  // `high_bit` is OR'd with 0x31203120 to find the correct value in the LUT
+  // (selects correct high or low candidate)
+  const uint32_t final_prmt_base = 0x32103210;
+
+  // Ignore the high bit when indexing into LUT, for each 4bit value
+  //  we index into both the high and low candidates then use
+  //  high_bit | final_prmt_base to select the correct candidate
+  uint32_t lut_idx = (src & 0x77777777);
+
+  auto pack = [](uint8_t a, uint8_t b, uint8_t c, uint8_t d) {
+    return uint32_t(a) | (uint32_t(b) << 8) | (uint32_t(c) << 16) |
+           (uint32_t(d) << 24);
+  };
+
+  static constexpr uint32_t LOW_0 = pack(LUT0, LUT1, LUT2, LUT3);
+  static constexpr uint32_t LOW_1 = pack(LUT4, LUT5, LUT6, LUT7);
+  static constexpr uint32_t HIGH_0 = pack(LUT8, LUT9, LUT10, LUT11);
+  static constexpr uint32_t HIGH_1 = pack(LUT12, LUT13, LUT14, LUT15);
+
+  CUTLASS_PRAGMA_UNROLL
+  for (int ii = 0; ii < 2; ++ii, lut_idx >>= 16, high_bit >>= 16) {
+    uint32_t final_prmt_idx = final_prmt_base | high_bit;
+
+    // This uses a look up table to convert packed int4s to packed int8s,
+    // using the int4 value as the index to prmt. It first select both the
+    // high and low candidates, then uses the high bit (i.e. `high_bit`) to
+    // select the correct candidate.
+    asm volatile(
+        "{\n"
+        "  .reg .b32 low, high;\n"
+        "  prmt.b32 low, %1, %2, %5;\n"
+        "  prmt.b32 high, %3, %4, %5;\n"
+        "  prmt.b32 %0, low, high, %6;\n"
+        "}\n"
+        : "=r"(r[ii])
+        : "n"(LOW_0), "n"(LOW_1), "n"(HIGH_0), "n"(HIGH_1), "r"(lut_idx),
+          "r"(final_prmt_idx));
+  }
+
+  return r;
+};
+
+// for Array<int8_t, N> <= Array<vllm_uint4b8_t, N>
+template <FloatRoundStyle Round, int N>
+struct NumericArrayConverter<int8_t, vllm_uint4b8_t, N, Round> {
+  using result_type = Array<int8_t, N>;
+  using source_type = Array<vllm_uint4b8_t, N>;
+
+  static FloatRoundStyle const round_style = Round;
+
+ private:
+  struct RegConvert {
+    template <typename PackedResultType>
+    CUTLASS_DEVICE static PackedResultType convert(Array<uint32_t, 1> src_) {
+      // [-8, -7, -6, -5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5, 6, 7] as int8s
+      auto r = lut_4bit_to_8bit_convert<0xF8, 0xF9, 0xFA, 0xFB,  //
+                                        0xFC, 0xFD, 0xFE, 0xFF,  //
+                                        0x00, 0x01, 0x02, 0x03,  //
+                                        0x04, 0x05, 0x06, 0x07>(src_[0]);
+      return reinterpret_cast<PackedResultType&>(r);
+    };
+  };
+
+ public:
+  CUTLASS_DEVICE
+  static result_type convert(source_type const& source) {
+    return ArrayConverterPacked32Bit<RegConvert, typename result_type::Element,
+                                     typename source_type::Element,
+                                     N>::convert(source);
+  }
+
+  CUTLASS_DEVICE
+  result_type operator()(source_type const& s) const { return convert(s); }
+};
+
+// for Array<cutlass::float_e4m3_t, N> <= Array<vllm_uint4b8_t, N>
+template <FloatRoundStyle Round, int N>
+struct NumericArrayConverter<cutlass::float_e4m3_t, vllm_uint4b8_t, N, Round> {
+  using result_type = Array<cutlass::float_e4m3_t, N>;
+  using source_type = Array<vllm_uint4b8_t, N>;
+
+  static FloatRoundStyle const round_style = Round;
+
+ private:
+  struct RegConvert {
+    template <typename PackedResultType>
+    CUTLASS_DEVICE static PackedResultType convert(Array<uint32_t, 1> src_) {
+      // [-8, -7, -6, -5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5, 6, 7] as fp8s
+      auto r = lut_4bit_to_8bit_convert<0xD0, 0xCE, 0xCC, 0xCA,  //
+                                        0xC8, 0xC4, 0xC0, 0xB8,  //
+                                        0x00, 0x38, 0x40, 0x44,  //
+                                        0x48, 0x4A, 0x4C, 0x4E>(src_[0]);
+      return reinterpret_cast<PackedResultType&>(r);
+    };
+  };
+
+ public:
+  CUTLASS_DEVICE
+  static result_type convert(source_type const& source) {
+    return ArrayConverterPacked32Bit<RegConvert, typename result_type::Element,
+                                     typename source_type::Element,
+                                     N>::convert(source);
+  }
+
+  CUTLASS_DEVICE
+  result_type operator()(source_type const& s) const { return convert(s); }
+};
+
 // for Array<cutlass::half_t, N> <= Array<vllm_uint4b8_t, N>
 template <FloatRoundStyle Round, int N>
 struct NumericArrayConverter<cutlass::half_t, vllm_uint4b8_t, N, Round> {
@@ -148,7 +282,8 @@ struct NumericArrayConverter<cutlass::half_t, vllm_uint4b8_t, N, Round> {
 
   struct RegConvert {
     template <typename PackedResultType>
-    CUTLASS_DEVICE static PackedResultType convert(uint32_t src) {
+    CUTLASS_DEVICE static PackedResultType convert(Array<uint32_t, 1> src_) {
+      uint32_t src = src_[0];
       using RegArray =
           cutlass::AlignedArray<uint32_t, PackedResultType::kElements / 2,
                                 sizeof(PackedResultType)>;
@@ -249,7 +384,8 @@ struct InterleavedNumericArrayConverter<Layout<Shape<_2, _4>, Stride<_4, _1>>,
  private:
   struct RegConvert {
     template <typename PackedResultType>
-    CUTLASS_DEVICE static PackedResultType convert(uint32_t src) {
+    CUTLASS_DEVICE static PackedResultType convert(Array<uint32_t, 1> src_) {
+      uint32_t src = src_[0];
       using RegArray =
           cutlass::AlignedArray<uint32_t, PackedResultType::kElements / 2,
                                 sizeof(PackedResultType)>;
@@ -338,7 +474,8 @@ struct InterleavedNumericArrayConverter<Layout<Shape<_2, _4>, Stride<_4, _1>>,
  private:
   struct RegConvert {
     template <typename PackedResultType>
-    CUTLASS_DEVICE static PackedResultType convert(uint32_t src) {
+    CUTLASS_DEVICE static PackedResultType convert(Array<uint32_t, 1> src_) {
+      uint32_t src = src_[0];
       using RegArray =
           cutlass::AlignedArray<uint32_t, PackedResultType::kElements / 2,
                                 sizeof(PackedResultType)>;
@@ -417,7 +554,8 @@ struct NumericArrayConverter<cutlass::half_t, vllm_uint8b128_t, N, Round> {
 
   struct RegConvert {
     template <typename PackedResultType>
-    CUTLASS_DEVICE static PackedResultType convert(uint32_t src) {
+    CUTLASS_DEVICE static PackedResultType convert(Array<uint32_t, 1> src_) {
+      uint32_t src = src_[0];
       // Hold output FP16s in reg. We need 1 reg for every 2 elements
       using RegArray =
           cutlass::AlignedArray<uint32_t, PackedResultType::kElements / 2,
@@ -469,7 +607,8 @@ struct NumericArrayConverter<float, vllm_uint8b128_t, N, Round> {
  private:
   struct RegConvert {
     template <typename PackedResultType>
-    CUTLASS_DEVICE static PackedResultType convert(uint32_t src) {
+    CUTLASS_DEVICE static PackedResultType convert(Array<uint32_t, 1> src_) {
+      uint32_t src = src_[0];
       PackedResultType r;
 
       // __byte_perm simulates the add.u32 0x4B000000 to every u8 element of
@@ -513,7 +652,8 @@ struct NumericArrayConverter<cutlass::bfloat16_t, vllm_uint4b8_t, N, Round> {
  private:
   struct RegConvert {
     template <typename PackedResultType>
-    CUTLASS_DEVICE static PackedResultType convert(uint32_t src_reg) {
+    CUTLASS_DEVICE static PackedResultType convert(Array<uint32_t, 1> src_) {
+      uint32_t src_reg = src_[0];
       // Hold output BF16s in reg. We need 1 reg for every 2 elements
       using RegArray =
           cutlass::AlignedArray<uint32_t, PackedResultType::kElements / 2,
@@ -603,7 +743,8 @@ struct InterleavedNumericArrayConverter<Layout<Shape<_2, _4>, Stride<_4, _1>>,
  private:
   struct RegConvert {
     template <typename PackedResultType>
-    CUTLASS_DEVICE static PackedResultType convert(uint32_t src) {
+    CUTLASS_DEVICE static PackedResultType convert(Array<uint32_t, 1> src_) {
+      uint32_t src = src_[0];
       using RegArray =
           cutlass::AlignedArray<uint32_t, PackedResultType::kElements / 2,
                                 sizeof(PackedResultType)>;
@@ -671,7 +812,8 @@ struct InterleavedNumericArrayConverter<Layout<Shape<_2, _4>, Stride<_4, _1>>,
  private:
   struct RegConvert {
     template <typename PackedResultType>
-    CUTLASS_DEVICE static PackedResultType convert(uint32_t src) {
+    CUTLASS_DEVICE static PackedResultType convert(Array<uint32_t, 1> src_) {
+      uint32_t src = src_[0];
       using RegArray =
           cutlass::AlignedArray<uint32_t, PackedResultType::kElements / 2,
                                 sizeof(PackedResultType)>;
@@ -787,6 +929,61 @@ struct NumericArrayConverter<cutlass::bfloat16_t, vllm_uint8b128_t, N, Round> {
 };
 
 #endif
+
+// for Array<int8_t, N> <= Array<cutlass::half_t, N>
+//   FastFP16toINT8 from https://arxiv.org/pdf/2406.09904
+template <FloatRoundStyle Round, int N>
+struct NumericArrayConverter<int8_t, cutlass::half_t, N, Round> {
+  using result_type = Array<int8_t, N>;
+  using source_type = Array<cutlass::half_t, N>;
+
+  struct RegConvert {
+    // FastFP16toINT8 from https://arxiv.org/pdf/2406.09904
+    template <typename PackedResultType, int src_regs>
+    CUTLASS_DEVICE static PackedResultType convert(
+        Array<uint32_t, src_regs> src) {
+      // Hold output int8s in reg. We need 1 reg for every 4 elements
+      using RegArray = cutlass::AlignedArray<
+          uint32_t, std::max(PackedResultType::kElements / 4, size_t(1))>;
+      RegArray r;
+
+      static constexpr uint32_t MAGIC_BIAS_ = 0x64806480;
+      auto MAGIC_BIAS = *reinterpret_cast<const half2*>(&MAGIC_BIAS_);
+
+      *reinterpret_cast<half2*>(&src[0]) =
+          __hadd2(*reinterpret_cast<half2*>(&src[0]), MAGIC_BIAS);
+
+      if constexpr (src_regs > 1) {
+        *reinterpret_cast<half2*>(&src[1]) =
+            __hadd2(*reinterpret_cast<half2*>(&src[1]), MAGIC_BIAS);
+      }
+
+      static_assert(PackedResultType::kElements <= 4);
+      uint32_t uint8s;
+      static constexpr uint32_t MASK_0246 = 0x6420;
+      static constexpr uint32_t UINT8s_TO_INT8s_MASK = 0x80808080;
+      asm volatile("prmt.b32 %0,%1,%2,%3;\n"
+                   : "=r"(uint8s)
+                   : "r"(src[0]), "r"((src_regs > 1) ? src[1] : src[0]),
+                     "n"(MASK_0246));
+
+      uint32_t int8s = (uint8s ^ UINT8s_TO_INT8s_MASK);
+
+      return reinterpret_cast<PackedResultType&>(int8s);
+    };
+  };
+
+ public:
+  CUTLASS_DEVICE
+  static result_type convert(source_type const& source) {
+    return ArrayConverterPacked32Bit<RegConvert, typename result_type::Element,
+                                     typename source_type::Element,
+                                     N>::convert(source);
+  }
+
+  CUTLASS_DEVICE
+  result_type operator()(source_type const& s) const { return convert(s); }
+};
 
 /////////////////////////////////////////////////////////////////////////////////////////////////
 

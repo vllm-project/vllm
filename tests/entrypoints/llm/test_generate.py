@@ -4,9 +4,7 @@ from typing import List
 import pytest
 
 from vllm import LLM, RequestOutput, SamplingParams
-
-from ...conftest import cleanup
-from ..openai.test_vision import TEST_IMAGE_URLS
+from vllm.distributed import cleanup_dist_env_and_memory
 
 MODEL_NAME = "facebook/opt-125m"
 
@@ -40,7 +38,7 @@ def llm():
 
         del llm
 
-    cleanup()
+    cleanup_dist_env_and_memory()
 
 
 def assert_outputs_equal(o1: List[RequestOutput], o2: List[RequestOutput]):
@@ -104,90 +102,3 @@ def test_multiple_sampling_params(llm: LLM):
     # sampling_params is None, default params should be applied
     outputs = llm.generate(PROMPTS, sampling_params=None)
     assert len(PROMPTS) == len(outputs)
-
-
-def test_chat():
-
-    llm = LLM(model="meta-llama/Meta-Llama-3-8B-Instruct")
-
-    prompt1 = "Explain the concept of entropy."
-    messages = [
-        {
-            "role": "system",
-            "content": "You are a helpful assistant"
-        },
-        {
-            "role": "user",
-            "content": prompt1
-        },
-    ]
-    outputs = llm.chat(messages)
-    assert len(outputs) == 1
-
-
-def test_multi_chat():
-
-    llm = LLM(model="meta-llama/Meta-Llama-3-8B-Instruct")
-
-    prompt1 = "Explain the concept of entropy."
-    prompt2 = "Explain what among us is."
-
-    conversation1 = [
-        {
-            "role": "system",
-            "content": "You are a helpful assistant"
-        },
-        {
-            "role": "user",
-            "content": prompt1
-        },
-    ]
-
-    conversation2 = [
-        {
-            "role": "system",
-            "content": "You are a helpful assistant"
-        },
-        {
-            "role": "user",
-            "content": prompt2
-        },
-    ]
-
-    messages = [conversation1, conversation2]
-
-    outputs = llm.chat(messages)
-    assert len(outputs) == 2
-
-
-@pytest.mark.parametrize("image_urls",
-                         [[TEST_IMAGE_URLS[0], TEST_IMAGE_URLS[1]]])
-def test_chat_multi_image(image_urls: List[str]):
-    llm = LLM(
-        model="microsoft/Phi-3.5-vision-instruct",
-        dtype="bfloat16",
-        max_model_len=4096,
-        max_num_seqs=5,
-        enforce_eager=True,
-        trust_remote_code=True,
-        limit_mm_per_prompt={"image": 2},
-    )
-
-    messages = [{
-        "role":
-        "user",
-        "content": [
-            *({
-                "type": "image_url",
-                "image_url": {
-                    "url": image_url
-                }
-            } for image_url in image_urls),
-            {
-                "type": "text",
-                "text": "What's in this image?"
-            },
-        ],
-    }]
-    outputs = llm.chat(messages)
-    assert len(outputs) >= 0
