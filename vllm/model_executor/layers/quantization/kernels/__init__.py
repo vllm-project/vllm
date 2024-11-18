@@ -1,6 +1,8 @@
 from typing import List, Optional, Type
 
 import vllm.envs as envs
+from vllm.model_executor.layers.quantization.kernels.bitblas import (
+    BitBLASLinearKernel)
 from vllm.model_executor.layers.quantization.kernels.exllama import (
     ExllamaLinearKernel)
 from vllm.model_executor.layers.quantization.kernels.machete import (
@@ -15,6 +17,7 @@ from vllm.platforms import current_platform
 _POSSIBLE_KERNELS: List[Type[MPLinearKernel]] = [
     MacheteLinearKernel,
     MarlinLinearKernel,
+    BitBLASLinearKernel,
     ExllamaLinearKernel,
 ]
 
