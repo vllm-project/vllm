@@ -24,12 +24,20 @@ struct KernelVecType<float> {
 
 template <>
 struct KernelVecType<c10::Half> {
-  using q_load_vec_type = vec_op::FP16Vec8;
+  #ifdef __powerpc64__
+    // Power architecture-specific vector types
+    using q_load_vec_type = vec_op::FP32Vec8;
+    using k_load_vec_type = vec_op::FP32Vec16;
+    using v_load_vec_type = vec_op::FP32Vec16;
+  #else
+    // Fallback for other architectures, including x86
+    using q_load_vec_type = vec_op::FP16Vec8;
+    using k_load_vec_type = vec_op::FP16Vec16;
+    using v_load_vec_type = vec_op::FP16Vec16;
+  #endif
   using q_vec_type = vec_op::FP32Vec16;
-  using k_load_vec_type = vec_op::FP16Vec16;
   using k_vec_type = vec_op::FP32Vec16;
   using qk_acc_vec_type = vec_op::FP32Vec16;
-  using v_load_vec_type = vec_op::FP16Vec16;
 };
 
 #ifdef __AVX512BF16__

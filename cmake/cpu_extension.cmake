@@ -16,10 +16,16 @@ include_directories("${CMAKE_SOURCE_DIR}/csrc")
 #
 # Check the compile flags
 #
+if (CMAKE_SYSTEM_PROCESSOR STREQUAL "ppc64le")
+    list(APPEND CXX_COMPILE_FLAGS
+    "-fopenmp"
+    "-DVLLM_CPU_EXTENSION")
+else()
 list(APPEND CXX_COMPILE_FLAGS
     "-fopenmp"
     "-mf16c"
     "-DVLLM_CPU_EXTENSION")
+endif()
 
 execute_process(COMMAND cat /proc/cpuinfo
                 RESULT_VARIABLE CPUINFO_RET
