@@ -157,7 +157,6 @@ Documentation
    :caption: Design
 
    design/arch_overview
-   design/class_hierarchy
    design/huggingface_integration
    design/plugin_system
    design/input_processing/model_inputs_index
