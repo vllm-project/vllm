@@ -114,8 +114,8 @@ class IPEXAttentionImpl(AttentionImpl):
             "key/v_scale is not supported in IPEXAttention.")
 
         output = torch.empty_like(query)
-        # torch.ops.vllm.ipex_attn(
-        ipex_attn(
+        torch.ops.vllm.ipex_attn(
+        # ipex_attn(
             output,
             query,
             key,
@@ -149,6 +149,16 @@ def split_kv_cache(
         value_cache = value_cache.view(num_blocks, num_kv_heads, head_size, -1)
         return key_cache, value_cache
 
+@torch.library.custom_op("vllm::ipex_attn",
+                         mutates_args=["output", "kv_cache"])
+def ipex_attn_fake(output: torch.Tensor, query: torch.Tensor, key: torch.Tensor,
+              value: torch.Tensor, num_heads: int, head_size: int,
+              num_kv_heads: int, kv_cache: torch.Tensor, kv_cache_dtype: str,
+              k_scale: float, v_scale: float, scale: float,
+              sliding_window: Optional[List[int]] = None,
+              alibi_slopes: Optional[torch.Tensor] = None,
+              logits_soft_cap: Optional[float] = None,) -> None:
+    pass
 # @torch.library.custom_op("vllm::ipex_attn",
 #                          mutates_args=["output", "kv_cache"])
 def ipex_attn(output: torch.Tensor, query: torch.Tensor, key: torch.Tensor,
