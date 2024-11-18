@@ -49,6 +49,9 @@ class CPUEmbeddingModelRunner(
         ]
 
         model_executable = self.model
+        cross_enc_kwargs = {}
+        if model_input.token_type_ids is not None:
+            cross_enc_kwargs["token_type_ids"] = model_input.token_type_ids
         execute_model_kwargs = {
             "input_ids":
             model_input.input_tokens,
@@ -60,6 +63,7 @@ class CPUEmbeddingModelRunner(
             model_input.attn_metadata,
             **MultiModalKwargs.as_kwargs(model_input.multi_modal_kwargs or {},
                                          device=self.device),
+            **cross_enc_kwargs,
             "intermediate_tensors":
             intermediate_tensors,
         }
