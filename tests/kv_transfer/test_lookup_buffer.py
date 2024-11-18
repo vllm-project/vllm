@@ -4,11 +4,11 @@ import random
 import torch
 from tqdm import tqdm
 
-import vllm.distributed.kv_transfer.kv_connector.pynccl_connector.pynccl_pipe \
-    as pnp 
-import vllm.distributed.kv_transfer.kv_connector.pynccl_connector.lookup_buffer\
-    as lb
 from vllm.config import KVTransferConfig
+from vllm.distributed.kv_transfer.kv_connector.pynccl_connector.buffer import (
+    lookup_buffer as lb)
+from vllm.distributed.kv_transfer.kv_connector.pynccl_connector.pipe import (
+    pynccl_pipe as pnp)
 
 # TODO: the test depends on a lot of fields in the current implementation.
 # We should have standard interface instead direct field access
@@ -20,7 +20,7 @@ def test_run(my_rank, buffer, device):
     if my_rank == 0:
         assert buffer.buffer_size == 0
         assert len(buffer.buffer) == 0
-        
+
     print("My rank: %d, device: %s" % (my_rank, device))
 
     # insert
@@ -113,8 +113,7 @@ def stress_test(my_rank, buf, device):
 
 
 if __name__ == "__main__":
-    
-    
+
     my_rank = int(os.environ['RANK'])
 
     torch.distributed.init_process_group(
@@ -123,16 +122,15 @@ if __name__ == "__main__":
         world_size=2,
         rank=my_rank,
     )
-    
+
     print("initialized! My rank is %d" % my_rank)
-    
 
     config = KVTransferConfig(
         kv_connector='PyNcclConnector',
         kv_buffer_device='cuda',
         kv_buffer_size=1e9,
         kv_rank=my_rank,
-        kv_role="kv_both", # this arg doesn't matter in this test
+        kv_role="kv_both",  # this arg doesn't matter in this test
         kv_parallel_size=2,
         kv_ip="127.0.0.1",
         kv_port=12345,

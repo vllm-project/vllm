@@ -18,24 +18,20 @@ Workflow (disaggregated prefill)
         - Delete the matched item in the lookup buffer to free up GPU memory.
     - The decode vLLM then store the KV cache into paged memory.
 """
-from typing import TYPE_CHECKING, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, List, Tuple, Union
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
 
-from copy import deepcopy
-
 import torch
-from torch.distributed import Backend
 
-import vllm.envs as envs
 from vllm import _custom_ops as ops
-from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
+from vllm.distributed.kv_transfer.kv_connector.factory import (
+    KVConnectorFactory)
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
 
 logger = init_logger(__name__)
-
 
 
 class KVTransferAgent:
@@ -53,19 +49,14 @@ class KVTransferAgent:
         local_rank: int,
         config,
     ):
-        
+
         self.config = config
         assert self.config.is_kv_transfer_instance, "KV cache transfer "\
             "agent should only be used when kv_connector is set."
 
         self.connector = KVConnectorFactory.create_connector(
-            rank,
-            local_rank, 
-            config
-        )
-        
+            rank, local_rank, config)
 
-        
     def send_kv_caches_and_hidden_states(
         self,
         model_executable: torch.nn.Module,
@@ -106,11 +97,10 @@ class KVTransferAgent:
 
             keys = torch.cat(keys, dim=0)
             values = torch.cat(values, dim=0)
-            
+
             self.connector.insert(
-                current_tokens, torch.ones_like(current_tokens,
-                                                dtype=bool), keys, values,
-                hidden_or_intermediate_states[start_pos:end_pos])
+                current_tokens, torch.ones_like(current_tokens, dtype=bool),
+                keys, values, hidden_or_intermediate_states[start_pos:end_pos])
 
         logger.debug("[rank%d]: KV send DONE.", torch.distributed.get_rank())
 

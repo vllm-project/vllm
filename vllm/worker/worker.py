@@ -7,9 +7,9 @@ import torch
 import torch.distributed
 
 import vllm.envs as envs
-from vllm.config import ParallelConfig, VllmConfig, KVTransferConfig
-from vllm.distributed import (ensure_model_parallel_initialized,
-                              ensure_kv_transfer_initialized,
+from vllm.config import KVTransferConfig, ParallelConfig, VllmConfig
+from vllm.distributed import (ensure_kv_transfer_initialized,
+                              ensure_model_parallel_initialized,
                               init_distributed_environment,
                               set_custom_all_reduce)
 from vllm.logger import init_logger
@@ -143,9 +143,8 @@ class Worker(LocalOrDistributedWorkerBase):
             raise RuntimeError(
                 f"Not support device type: {self.device_config.device}")
         # Initialize the distributed environment.
-        init_worker_distributed_environment(self.parallel_config, 
-                                            self.kv_transfer_config,
-                                            self.rank,
+        init_worker_distributed_environment(self.parallel_config,
+                                            self.kv_transfer_config, self.rank,
                                             self.distributed_init_method,
                                             self.local_rank)
         # Set random seed.

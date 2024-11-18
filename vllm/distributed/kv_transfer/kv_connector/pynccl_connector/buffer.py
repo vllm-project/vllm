@@ -10,27 +10,20 @@
 import threading
 import time
 from collections import deque
-from concurrent.futures import ThreadPoolExecutor
 from typing import Deque, List, Optional, Union
-from copy import deepcopy
 
 import torch
-from torch.distributed import Backend
 
-from vllm.distributed.kv_transfer.kv_connector.pynccl_connector.pynccl_pipe \
-    import PyNcclPipe 
+from vllm.distributed.kv_transfer.kv_connector.pynccl_connector.pipe import (
+    PyNcclPipe)
 from vllm.logger import init_logger
-
-
 
 logger = init_logger(__name__)
 
 
 class LookupBuffer:
 
-    def __init__(self, 
-                 signal_pipe: PyNcclPipe,
-                 data_pipe: PyNcclPipe,
+    def __init__(self, signal_pipe: PyNcclPipe, data_pipe: PyNcclPipe,
                  buffer_size_thresh: float):
         """
         signal_pipe: on CPU 
@@ -102,7 +95,7 @@ class LookupBuffer:
             # so this check needs to go after the check above
             return 0
 
-        raise AssertionError("Unknown data type %s" % type(data))
+        raise AssertionError(f"Unknown data type {type(data)}")
 
     def _add_to_buffer(self, input_tokens: torch.Tensor, roi: torch.Tensor,
                        key: torch.Tensor, value: torch.Tensor,
@@ -142,6 +135,8 @@ class LookupBuffer:
                 input_tokens = self.data_pipe.recv_tensor()
 
                 roi = self.data_pipe.recv_tensor()
+                assert roi is not None, "Please provide the roi when sending "\
+                    "drop-select request"
                 roi = (roi > 0.5)
                 tokens_roi_recver = [input_tokens, roi]
 
@@ -192,11 +187,11 @@ class LookupBuffer:
         if isinstance(input_tokens, torch.Tensor):
             input_tokens = input_tokens.clone()
         if isinstance(roi, torch.Tensor):
-            roi = roi.clone()
+            roi = roi.clone().float()
 
         self.signal_pipe.send_tensor(self.normal_signal)
         self.data_pipe.send_tensor(input_tokens)
-        self.data_pipe.send_tensor(roi.float())
+        self.data_pipe.send_tensor(roi)
 
         input_tokens = self.data_pipe.recv_tensor()
         roi = self.data_pipe.recv_tensor()
@@ -243,4 +238,3 @@ class LookupBuffer:
             # TODO: have a explicit close signal and have a explicit way to
             # check if it's requester
             self.signal_pipe.send_tensor(self.end_signal)
-            

@@ -9,11 +9,12 @@ import torch
 
 import vllm.envs as envs
 from vllm.config import (CacheConfig, ConfigFormat, DecodingConfig,
-                         DeviceConfig, HfOverrides, LoadConfig, LoadFormat,
-                         LoRAConfig, ModelConfig, ObservabilityConfig,
-                         ParallelConfig, PoolerConfig, PromptAdapterConfig,
-                         SchedulerConfig, SpeculativeConfig, TaskOption,
-                         TokenizerPoolConfig, KVTransferConfig, VllmConfig)
+                         DeviceConfig, HfOverrides, KVTransferConfig,
+                         LoadConfig, LoadFormat, LoRAConfig, ModelConfig,
+                         ObservabilityConfig, ParallelConfig, PoolerConfig,
+                         PromptAdapterConfig, SchedulerConfig,
+                         SpeculativeConfig, TaskOption, TokenizerPoolConfig,
+                         VllmConfig)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
@@ -193,7 +194,7 @@ class EngineArgs:
 
     # P/D disaggregation coonfiguration
     kv_connector: Optional[str] = None
-    kv_buffer_size: Optional[int] = 1e9
+    kv_buffer_size: Optional[float] = 1e9
     kv_buffer_device: Optional[str] = "cuda"
     kv_role: Optional[str] = None
     kv_rank: Optional[str] = None
@@ -884,8 +885,7 @@ class EngineArgs:
             type=int,
             default=EngineArgs.kv_parallel_size,
             help="The number of parallel instances for KV cache transfer. "
-            "For PyNcclConnector, this should be >1."
-        )
+            "For PyNcclConnector, this should be >1.")
 
         parser.add_argument(
             '--kv-connector',
@@ -900,8 +900,7 @@ class EngineArgs:
             type=float,
             default=EngineArgs.kv_buffer_size,
             help="The buffer size for TorchDistributedConnector. Measured in "
-            "number of bytes. Recommended value: 1e9 (about 1GB)."
-        )
+            "number of bytes. Recommended value: 1e9 (about 1GB).")
 
         parser.add_argument(
             '--kv-buffer-device',
@@ -909,42 +908,32 @@ class EngineArgs:
             default=EngineArgs.kv_buffer_device,
             choices=["cpu", "cuda"],
             help="The device used by kv connector to buffer the KV cache. Can "
-            "be CPU or GPU. Recommended value: CPU."
-        )
+            "be CPU or GPU. Recommended value: CPU.")
 
         parser.add_argument(
             '--kv-role',
             type=str,
-            default=None,            
+            default=None,
             choices=["kv_producer", "kv_consumer", "both"],
             help="Whether this vLLM instance produces, consumes KV cache, or "
-            "both. Choices are 'kv_producer', 'kv_consumer', and 'both'."
-        )
+            "both. Choices are 'kv_producer', 'kv_consumer', and 'both'.")
 
         parser.add_argument(
             '--kv-rank',
             type=int,
             default=None,
             help="The rank of this vLLM instance in the KV cache transfer."
-            " Typicall value: 0 for prefill instance, 1 for decode instance."
-        )
+            " Typical value: 0 for prefill instance, 1 for decode instance.")
 
-        parser.add_argument(
-            '--kv-ip',
-            type=str,
-            default=EngineArgs.kv_ip,
-            help="The IP address of the KV cache producer."
-        )
+        parser.add_argument('--kv-ip',
+                            type=str,
+                            default=EngineArgs.kv_ip,
+                            help="The IP address of the KV cache producer.")
 
-        
-        parser.add_argument(
-            '--kv-port',
-            type=int,
-            default=EngineArgs.kv_port,
-            help="The port of the KV cache producer."
-        )
-
-        
+        parser.add_argument('--kv-port',
+                            type=int,
+                            default=EngineArgs.kv_port,
+                            help="The port of the KV cache producer.")
 
         return parser
 
@@ -1218,7 +1207,6 @@ class EngineArgs:
             collect_model_execute_time="worker" in detailed_trace_modules
             or "all" in detailed_trace_modules,
         )
-
 
         return VllmConfig(
             model_config=model_config,

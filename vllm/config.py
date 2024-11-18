@@ -2053,7 +2053,7 @@ class ObservabilityConfig:
                 "'otlp_traces_endpoint'. Ensure OpenTelemetry packages are "
                 f"installed. Original error:\n{otel_import_error_traceback}")
 
-                
+
 @dataclass
 class KVTransferConfig:
     """Configuration for distributed KV cache transfer."""
@@ -2067,7 +2067,7 @@ class KVTransferConfig:
     kv_parallel_size: int = 1
     kv_ip: str = "127.0.0.1"
     kv_port: int = 14579
-    
+
     @property
     def is_kv_transfer_instance(self) -> bool:
         return self.kv_connector is not None and \
@@ -2078,40 +2078,35 @@ class KVTransferConfig:
         # for those database-based connector, vLLM does not need to create
         # parallel group, and in that case the kv parallel size will be 1.
         return self.kv_connector is not None and self.kv_parallel_size > 1
-    
+
     @property
     def is_kv_producer(self) -> bool:
         return self.kv_connector is not None and \
             self.kv_role in ["kv_producer", "kv_both"]
-    
+
     @property
     def is_kv_consumer(self) -> bool:
         return self.kv_connector is not None and \
             self.kv_role in ["kv_consumer", "kv_both"]
 
-        
     def __post_init__(self):
 
-        if self.kv_connector not in [None, 
-                                     "PyNcclConnector"]:
+        if self.kv_connector not in [None, "PyNcclConnector"]:
             raise ValueError(f"Unsupported kv_connector: {self.kv_connector}. "
                              f"Supported connectors are "
                              f"`PyNcclConnector`.")
 
-
-        if self.kv_role not in [None, 
-                                "kv_producer", 
-                                "kv_consumer", 
-                                "kv_both"]:
-            raise ValueError(f"Unsupported kv_role: {self.kv_disagg_role}. "
-                             f"Supported roles are `kv_producer`, `kv_consumer`, "
-                             f"and `kv_both`")
+        if self.kv_role not in [None, "kv_producer", "kv_consumer", "kv_both"]:
+            raise ValueError(
+                f"Unsupported kv_role: {self.kv_role}. "
+                f"Supported roles are `kv_producer`, `kv_consumer`, "
+                f"and `kv_both`")
 
         if self.kv_connector is not None and self.kv_role is None:
             raise ValueError("Please specify kv_disagg_role when kv_connector "
                              "is set, supported roles are `kv_producer`, "
                              "`kv_consumer`, and `kv_both`")
-            
+
 
 class CompilationLevel:
     # constants for the levels of the compilation process
@@ -2316,7 +2311,7 @@ class VllmConfig:
     compilation_config: CompilationConfig = field(default=None,
                                                   init=True)  # type: ignore
     kv_transfer_config: KVTransferConfig = field(default=None,
-                                                 init=True) # type: ignore
+                                                 init=True)  # type: ignore
 
     @staticmethod
     def _get_quantization_config(

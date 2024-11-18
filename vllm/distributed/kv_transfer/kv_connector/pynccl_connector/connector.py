@@ -7,33 +7,27 @@
     - `TorchDistributedConnector`: a torch distributed connector between P/D 
       instance, implemented on top of `TorchDistributedBuffer`
 """
-import threading
-import time
-from collections import deque
-from concurrent.futures import ThreadPoolExecutor
-from typing import Deque, List, Optional, Union
 from copy import deepcopy
+from typing import TYPE_CHECKING, List, Optional
 
 import torch
-from torch.distributed import Backend
 
-from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
-from vllm.distributed.kv_transfer.kv_connector.pynccl_connector.pynccl_pipe \
-    import PyNcclPipe
-from vllm.distributed.kv_transfer.kv_connector.pynccl_connector.lookup_buffer \
-    import LookupBuffer
-from vllm.logger import init_logger
 from vllm.config import KVTransferConfig
+from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
+from vllm.distributed.kv_transfer.kv_connector.pynccl_connector.buffer import (
+    LookupBuffer)
+from vllm.distributed.kv_transfer.kv_connector.pynccl_connector.pipe import (
+    PyNcclPipe)
+from vllm.logger import init_logger
 
-
+if TYPE_CHECKING:
+    from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
 
 logger = init_logger(__name__)
 
 
-
-            
 class PyNcclConnector(KVConnectorBase):
-    
+
     def __init__(
         self,
         rank: int,
@@ -51,7 +45,6 @@ class PyNcclConnector(KVConnectorBase):
         # 2 pipes for every rank in the world
         port_offset_base = 2 * rank
 
-
         # In disaggregated prefill, the prefill vLLM only uses send pipe
         # and the decode vLLM only uses recv pipe
         if config.is_kv_producer:
@@ -67,11 +60,10 @@ class PyNcclConnector(KVConnectorBase):
                 port_offset=port_offset_base + 1,
                 device="cpu",
             )
-            self.producer_buffer = LookupBuffer(
-                self.producer_signal_pipe, 
-                self.producer_data_pipe,
-                config.kv_buffer_size)
-             
+            self.producer_buffer = LookupBuffer(self.producer_signal_pipe,
+                                                self.producer_data_pipe,
+                                                config.kv_buffer_size)
+
         else:
 
             # the current vLLM instance is KV consumer, so it needs to connect
@@ -88,32 +80,27 @@ class PyNcclConnector(KVConnectorBase):
                 device="cpu",
             )
             self.consumer_buffer = LookupBuffer(
-                self.consumer_signal_pipe, 
+                self.consumer_signal_pipe,
                 self.consumer_data_pipe,
                 config.kv_buffer_size,
             )
-            
-            
-    def select(
-        self, input_tokens: Optional[torch.Tensor],
-        roi: Optional[torch.Tensor]) -> List[Optional[torch.Tensor]]:
 
+    def select(self, input_tokens: Optional[torch.Tensor],
+               roi: Optional[torch.Tensor]) -> List[Optional[torch.Tensor]]:
+
+        assert self.consumer_buffer is not None, "Please initialize the "\
+            "consumer buffer before calling select."
         return self.consumer_buffer.drop_select(input_tokens, roi)
-    
+
     def insert(self, input_tokens: torch.Tensor, roi: torch.Tensor,
                key: torch.Tensor, value: torch.Tensor,
                hidden: torch.Tensor) -> None:
 
-        return self.producer_buffer.insert(
-            input_tokens,
-            roi,
-            key,
-            value,
-            hidden
-        )
+        assert self.producer_buffer is not None, "Please initialize the "\
+            "producer buffer before calling insert."
 
-            
-            
+        self.producer_buffer.insert(input_tokens, roi, key, value, hidden)
+
     def build_partial_prefill_input(
         self,
         model_input: "ModelInputForGPUWithSamplingMetadata",
@@ -148,7 +135,7 @@ class PyNcclConnector(KVConnectorBase):
             token_tensor = input_tokens_list[idx]
             num_token = len(token_tensor)
             num_computed_token = num_computed_tokens_list[idx]
-            # currently attention kernel cannot handle the case where there is 
+            # currently attention kernel cannot handle the case where there is
             # 0 query token.
             if num_computed_token == num_token:
                 num_computed_token -= 1
@@ -167,8 +154,8 @@ class PyNcclConnector(KVConnectorBase):
             rebuilt_num_prefills += 1
             rebuilt_num_prefill_tokens += q_len
             new_slot_mapping = slot_mapping_flat[start_pos +
-                                                num_computed_token:start_pos +
-                                                num_token]
+                                                 num_computed_token:start_pos +
+                                                 num_token]
             rebuilt_slot_mapping.append(new_slot_mapping)
             rebuilt_max_query_len = max(q_len, rebuilt_max_query_len)
             # TODO(Jiayi): remove hard-code (block_size=16)
@@ -184,14 +171,15 @@ class PyNcclConnector(KVConnectorBase):
 
             # Sampling metadata related
             #seq_groups (use rebuilt query lens)
-            rebuilt_selected_token_indices.append(rebuilt_num_prefill_tokens - 1)
+            rebuilt_selected_token_indices.append(rebuilt_num_prefill_tokens -
+                                                  1)
 
         # rebuilt attn_metadata
         rebuilt_attn_metadata = deepcopy(model_input.attn_metadata)
         rebuilt_attn_metadata.num_prefills = rebuilt_num_prefills
         rebuilt_attn_metadata.num_prefill_tokens = rebuilt_num_prefill_tokens
-        rebuilt_attn_metadata.slot_mapping = torch.cat(rebuilt_slot_mapping).to(
-            device)
+        rebuilt_attn_metadata.slot_mapping = torch.cat(
+            rebuilt_slot_mapping).to(device)
         rebuilt_attn_metadata.max_query_len = rebuilt_max_query_len
 
         rebuilt_attn_metadata.block_tables = torch.tensor(
@@ -220,7 +208,8 @@ class PyNcclConnector(KVConnectorBase):
         ).to(device)
 
         # import here to avoid circular import.
-        from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
+        from vllm.worker.model_runner import (
+            ModelInputForGPUWithSamplingMetadata)
         rebuilt_model_input = ModelInputForGPUWithSamplingMetadata(
             input_tokens=torch.cat(rebuilt_input_tokens).to(device),
             input_positions=torch.cat(rebuilt_input_positions).to(device),
@@ -240,11 +229,9 @@ class PyNcclConnector(KVConnectorBase):
         )
 
         return rebuilt_model_input
-    
 
     def close(self):
         self.producer_data_pipe.close()
         self.producer_signal_pipe.close()
         self.consumer_data_pipe.close()
         self.consumer_signal_pipe.close()
-

@@ -12,21 +12,20 @@
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import Dict, List, Optional, Union
-from copy import deepcopy
+from typing import Callable, Dict, Optional, Tuple
 
 import torch
-from torch.distributed import Backend
 
-from vllm.distributed.utils import StatelessProcessGroup
-from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
-from vllm.logger import init_logger
 from vllm.config import KVTransferConfig
+from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
+from vllm.distributed.utils import StatelessProcessGroup
+from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
 
 class BrokenPipeException(Exception):
+
     def __init__(self, message):
         self.message = message
         super().__init__(self.message)
@@ -41,8 +40,8 @@ class PyNcclPipe:
     MAX_TENSOR_DIMENSIONS = 14
     METADATA_DTYPE = torch.int64
 
-    def __init__(self, 
-                 local_rank: int, 
+    def __init__(self,
+                 local_rank: int,
                  config: KVTransferConfig,
                  device: Optional[str] = None,
                  port_offset: int = 0):
@@ -76,13 +75,18 @@ class PyNcclPipe:
         self.buffer_size_lock = threading.Lock()
         self.buffer_size_thresh = self.config.kv_buffer_size
 
+    def _get_device_send_recv_impl(
+        self, group: StatelessProcessGroup
+    ) -> Tuple[Callable[[torch.Tensor, int], None], Callable[
+        [torch.Tensor, int], None]]:
 
-    def _get_device_send_recv_impl(self, group: StatelessProcessGroup):
+        send: Callable[[torch.Tensor, int], None]
+        recv: Callable[[torch.Tensor, int], None]
         if self.device.type == "cuda":
             # use PyNCCL for send / recv
             comm = PyNcclCommunicator(group, device=self.local_rank)
             comm.disabled = False
-            send, recv = comm.send, comm.recv
+            send, recv = comm.send, comm.recv  # type: ignore
         else:
             # use cpu communication
             send = group.send
@@ -125,10 +129,9 @@ class PyNcclPipe:
             - buffer: A tensor of the specified type and shape, allocated on 
               self.device.
         """
-        return torch.empty(
-            metadata["shape"], 
-            dtype=metadata["dtype"], 
-            device=self.device)
+        return torch.empty(metadata["shape"],
+                           dtype=metadata["dtype"],
+                           device=self.device)
 
     def _send_metadata(self, metadata: Metadata):
         """
@@ -161,7 +164,8 @@ class PyNcclPipe:
         metadata = self._make_metadata(tensor)
         self._send_metadata(metadata)
         if tensor is not None:
-            self.device_send_func(tensor.to(self.device), self.target_rank_for_send)
+            self.device_send_func(tensor.to(self.device),
+                                  self.target_rank_for_send)
 
     def _recv_impl(self) -> Optional[torch.Tensor]:
         """
@@ -179,10 +183,8 @@ class PyNcclPipe:
 
         return buffer
 
-    def send_tensor_wrapper(
-        self, 
-        tensor: Optional[torch.Tensor], 
-        tensor_size: int) -> None:
+    def send_tensor_wrapper(self, tensor: Optional[torch.Tensor],
+                            tensor_size: int) -> None:
         """
         Wrapper for _send_impl to handle exceptions and update buffer size.
         """
@@ -216,7 +218,7 @@ class PyNcclPipe:
         """
         if self.transport_thread is None:
             self.transport_thread = ThreadPoolExecutor(max_workers=1)
-            
+
         if tensor is not None:
             tensor_size = tensor.element_size() * tensor.numel()
         else:
@@ -227,11 +229,8 @@ class PyNcclPipe:
         with self.buffer_size_lock:
             self.buffer_size += tensor_size
 
-        self.transport_thread.submit(
-            self.send_tensor_wrapper, 
-            tensor, 
-            tensor_size
-        )
+        self.transport_thread.submit(self.send_tensor_wrapper, tensor,
+                                     tensor_size)
 
     def recv_tensor(self) -> Optional[torch.Tensor]:
         """
@@ -261,5 +260,6 @@ class PyNcclPipe:
         """
         Close the pipe and release associated resources.
         """
-        if hasattr(self, "transport_thread") and self.transport_thread is not None:
+        if hasattr(self,
+                   "transport_thread") and self.transport_thread is not None:
             self.transport_thread.shutdown()

@@ -5,9 +5,9 @@ from typing import List
 import torch
 from tqdm import tqdm
 
-import vllm.distributed.kv_transfer.kv_connector.pynccl_connector.pynccl_pipe \
-    as pnp 
 from vllm.config import KVTransferConfig
+from vllm.distributed.kv_transfer.kv_connector.pynccl_connector import (
+    pynccl_pipe as pnp)
 
 
 def test_run(my_rank, pipe):
@@ -38,14 +38,12 @@ def test_run(my_rank, pipe):
     assert torch.allclose(y, y2)
 
 
-
 def stress_test(my_rank, pipe):
 
     torch.distributed.barrier()
 
     tensors: List[torch.Tensor] = []
 
-    
     torch.manual_seed(0)
 
     for i in tqdm(range(500)):
@@ -65,11 +63,7 @@ def stress_test(my_rank, pipe):
             tensors.append(x.mean().unsqueeze(0))
             tensors.append(x.std().unsqueeze(0))
 
-    
-
     torch.distributed.barrier()
-
-
 
     for i in tqdm(range(500)):
         if my_rank == int((i % 10) > 3):
@@ -80,7 +74,7 @@ def stress_test(my_rank, pipe):
             x = pipe.recv_tensor()
             mean = pipe.recv_tensor()
             std = pipe.recv_tensor()
-            
+
             if x is None:
                 assert mean is None
                 assert std is None
@@ -88,10 +82,8 @@ def stress_test(my_rank, pipe):
                 assert torch.allclose(x, tensors[3 * i])
                 assert x.mean() == mean[0]
                 assert x.std() == std[0]
-            
 
         torch.distributed.barrier()
-
 
 
 def latency_test(my_rank, pipe, nelement, ntensor):
@@ -140,14 +132,13 @@ if __name__ == "__main__":
         world_size=2,
         rank=my_rank,
     )
-    
 
     config = KVTransferConfig(
         kv_connector='PyNcclConnector',
         kv_buffer_device='cuda',
         kv_buffer_size=1e9,
         kv_rank=my_rank,
-        kv_role="kv_both", # this arg doesn't matter in this test
+        kv_role="kv_both",  # this arg doesn't matter in this test
         kv_parallel_size=2,
         kv_ip="127.0.0.1",
         kv_port=12345,

@@ -8,7 +8,7 @@ if __name__ == "__main__":
     data = []
     for name in ['disagg_prefill', 'chunked_prefill']:
         for qps in [2, 4, 6, 8]:
-            with open(f"results/{name}-qps-{qps}.json", "r") as f:
+            with open(f"results/{name}-qps-{qps}.json") as f:
                 x = json.load(f)
                 x['name'] = name
                 x['qps'] = qps

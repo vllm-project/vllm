@@ -19,7 +19,7 @@ kill_gpu_processes() {
   # kill all processes on GPU.
   pkill -f pt_main_thread
   pkill -f python3
-  ps -e | grep pt_main_thread | awk '{print $1}' | xargs kill -9
+  pgrep pt_main_thread | xargs kill -9
   for port in 8000 8100 8200; do lsof -t -i:$port | xargs -r kill -9; done
   sleep 1
 }
@@ -111,14 +111,14 @@ benchmark() {
           --dataset-name $dataset_name \
           --dataset-path $dataset_path \
           --sonnet-input-len $input_len \
-          --sonnet-output-len $output_len \
+          --sonnet-output-len "$output_len" \
           --sonnet-prefix-len $prefix_len \
           --num-prompts $num_prompts \
           --port 8000 \
           --save-result \
           --result-dir $results_folder \
-          --result-filename $tag-qps-$qps.json \
-          --request-rate $qps
+          --result-filename "$tag"-qps-"$qps".json \
+          --request-rate "$qps"
 
   sleep 2
 

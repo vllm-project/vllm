@@ -83,7 +83,7 @@ output2=$(curl -s http://localhost:8000/v1/completions \
 
 
 # Cleanup commands, suppressing their output
-ps -e | grep pt_main_thread | awk '{print $1}' | xargs kill -9 > /dev/null 2>&1
+pgrep pt_main_thread | xargs kill -9 > /dev/null 2>&1
 pkill -f python3 > /dev/null 2>&1
 
 sleep 4

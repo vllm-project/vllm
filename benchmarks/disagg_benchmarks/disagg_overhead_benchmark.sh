@@ -77,7 +77,7 @@ benchmark() {
           --dataset-name $dataset_name \
           --dataset-path $dataset_path \
           --sonnet-input-len $input_len \
-          --sonnet-output-len $output_len \
+          --sonnet-output-len "$output_len" \
           --sonnet-prefix-len $prefix_len \
           --num-prompts $num_prompts \
           --port 8100 \
@@ -95,14 +95,14 @@ benchmark() {
           --dataset-name $dataset_name \
           --dataset-path $dataset_path \
           --sonnet-input-len $input_len \
-          --sonnet-output-len $output_len \
+          --sonnet-output-len "$output_len" \
           --sonnet-prefix-len $prefix_len \
           --num-prompts $num_prompts \
           --port 8200 \
           --save-result \
           --result-dir $results_folder \
           --result-filename disagg_prefill_2xtp4.json \
-          --request-rate $qps
+          --request-rate "$qps"
   kill_gpu_processes
 
 }
