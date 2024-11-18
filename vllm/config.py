@@ -696,6 +696,11 @@ class ModelConfig:
     def is_multimodal_model(self) -> bool:
         return self.multimodal_config is not None
 
+    @property
+    def is_cross_encoder(self) -> bool:
+        architectures = getattr(self.hf_config, "architectures", [])
+        return ModelRegistry.is_cross_encoder_model(architectures)
+
 
 class CacheConfig:
     """Configuration for the KV cache.

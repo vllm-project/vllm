@@ -43,6 +43,7 @@ class ModelInputForCPU(ModelRunnerInputBase):
     """
     input_tokens: Optional[torch.Tensor] = None
     input_positions: Optional[torch.Tensor] = None
+    token_type_ids: Optional[torch.Tensor] = None
     attn_metadata: Optional["AttentionMetadata"] = None
     multi_modal_kwargs: Optional[BatchedTensorInputs] = None
     virtual_engine: Optional[int] = None
@@ -54,6 +55,7 @@ class ModelInputForCPU(ModelRunnerInputBase):
         tensor_dict = {
             "input_tokens": self.input_tokens,
             "input_positions": self.input_positions,
+            "token_type_ids": self.token_type_ids,
             "multi_modal_kwargs": self.multi_modal_kwargs,
         }
         _add_attn_metadata_broadcastable_dict(tensor_dict, self.attn_metadata)
@@ -83,6 +85,7 @@ class ModelInputForCPUWithSamplingMetadata(ModelInputForCPU):
         tensor_dict = {
             "input_tokens": self.input_tokens,
             "input_positions": self.input_positions,
+            "token_type_ids": self.token_type_ids,
         }
         _add_attn_metadata_broadcastable_dict(tensor_dict, self.attn_metadata)
         _add_sampling_metadata_broadcastable_dict(tensor_dict,
@@ -127,18 +130,20 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
         is_prompt = self.seq_group_metadata_list[0].is_prompt
         # Prepare input tensors.
         if is_prompt:
-            (input_tokens, input_positions, attn_metadata, seq_lens,
-             multi_modal_kwargs) = self._prepare_prompt(
+            (input_tokens, input_positions, token_type_ids, attn_metadata,
+             seq_lens, multi_modal_kwargs) = self._prepare_prompt(
                  self.seq_group_metadata_list)
         else:
             (input_tokens, input_positions,
              attn_metadata) = self._prepare_decode(
                  self.seq_group_metadata_list)
             seq_lens = None
+            token_type_ids = None
 
         return self.model_input_cls(
             input_tokens=input_tokens,
             input_positions=input_positions,
+            token_type_ids=token_type_ids,
             attn_metadata=attn_metadata,
             multi_modal_kwargs=multi_modal_kwargs,
             # query_lens is not needed if chunked prefill is not
@@ -203,11 +208,12 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
     def _prepare_prompt(
         self,
         seq_group_metadata_list: List[SequenceGroupMetadata],
-    ) -> Tuple[torch.Tensor, torch.Tensor, AttentionMetadata, List[int],
-               BatchedTensorInputs]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, AttentionMetadata,
+               List[int], BatchedTensorInputs]:
         assert len(seq_group_metadata_list) > 0
         input_tokens: List[int] = []
         input_positions: List[int] = []
+        token_type_ids: List[int] = []
         input_mrope_positions: List[List[int]] = [[] for _ in range(3)]
 
         slot_mapping: List[int] = []
@@ -225,11 +231,13 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
 
             seq_data = seq_group_metadata.seq_data[seq_id]
             prompt_tokens = seq_data.get_token_ids()
+            token_types = seq_group_metadata.token_type_ids
             computed_len = seq_data.get_num_computed_tokens()
             seq_len = len(prompt_tokens)
 
             seq_lens.append(seq_len)  # Prompt token num
             input_tokens.extend(prompt_tokens)  # Token ids
+            token_type_ids.extend(token_types if token_types else [])
 
             mrope_positions = None
             if seq_group_metadata.multi_modal_data:
@@ -293,6 +301,11 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
                                        or input_mrope_positions,
                                        dtype=torch.long,
                                        device=self.device)  # type: ignore
+        token_type_ids = torch.tensor(token_type_ids,
+                                dtype=torch.long,
+                                device=self.device)\
+                                if token_type_ids else None
+
         slot_mapping = torch.tensor(slot_mapping,
                                     dtype=torch.long,
                                     device=self.device)  # type: ignore
@@ -317,8 +330,8 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
 
         multi_modal_kwargs = MultiModalKwargs.batch(multi_modal_kwargs_list)
 
-        return (input_tokens, input_positions, attn_metadata, seq_lens,
-                multi_modal_kwargs)
+        return (input_tokens, input_positions, token_type_ids, attn_metadata,
+                seq_lens, multi_modal_kwargs)
 
     def _prepare_decode(
         self,
