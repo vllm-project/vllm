@@ -2032,6 +2032,7 @@ class DecodingConfig:
             raise ValueError(f"Invalid guided_decoding_backend '{backend},"
                              f"must be one of {valid_guided_backends}")
 
+
 @dataclass
 class ObservabilityConfig:
     """Configuration for observability."""
