@@ -96,7 +96,6 @@ class RequestOutput:
         request_id: str,
         prompt: Optional[str],
         prompt_token_ids: Optional[List[int]],
-        multi_modal_placeholders: MultiModalPlaceholderDict,
         prompt_logprobs: Optional[PromptLogprobs],
         outputs: List[CompletionOutput],
         finished: bool,
@@ -105,11 +104,13 @@ class RequestOutput:
         encoder_prompt: Optional[str] = None,
         encoder_prompt_token_ids: Optional[List[int]] = None,
         num_cached_tokens: Optional[int] = None,
+        *,
+        multi_modal_placeholders: Optional[MultiModalPlaceholderDict] = None,
     ) -> None:
         self.request_id = request_id
         self.prompt = prompt
         self.prompt_token_ids = prompt_token_ids
-        self.multi_modal_placeholders = multi_modal_placeholders
+        self.multi_modal_placeholders = multi_modal_placeholders or {}
         self.prompt_logprobs = prompt_logprobs
         self.outputs = outputs
         self.finished = finished
@@ -144,7 +145,6 @@ class RequestOutput:
             request_id=request_id,
             prompt=prompt,
             prompt_token_ids=prompt_token_ids,
-            multi_modal_placeholders={},
             prompt_logprobs=None,  # TODO
             outputs=[completion_output],
             finished=finished,
@@ -158,8 +158,7 @@ class RequestOutput:
         finished = seq_group.is_finished()
 
         if seq_group.request_id in seq_id_to_seq_group:
-            group: SequenceGroupBase = seq_id_to_seq_group[
-                seq_group.request_id]
+            group: SequenceGroupBase = seq_id_to_seq_group[seq_group.request_id]
             if finished:
                 group.finish_seq(seq_group)
             assembled_seq_group = group.maybe_assemble_group(seq_group)
@@ -202,8 +201,8 @@ class RequestOutput:
         # num_cached_tokens should be the same for all the sequences
         num_cached_tokens = None
         for i, seq in enumerate(top_n_seqs):
-            output_text = seq.get_output_text_to_return(
-                text_buffer_length, delta)
+            output_text = seq.get_output_text_to_return(text_buffer_length,
+                                                        delta)
 
             output_token_ids = seq.get_output_token_ids_to_return(delta)
             num_output_tokens = 1 if isinstance(output_token_ids,
@@ -280,17 +279,17 @@ class RequestOutput:
         seq_group.set_finished_time(finished_time)
 
         init_args = (seq_group.request_id, prompt, prompt_token_ids,
-                     seq_group.multi_modal_placeholders, prompt_logprobs,
-                     outputs, finished, seq_group.metrics,
+                     prompt_logprobs, outputs, finished, seq_group.metrics,
                      seq_group.lora_request, encoder_prompt,
                      encoder_prompt_token_ids, num_cached_tokens)
+        init_kwargs = {"multi_modal_placeholders": seq_group.multi_modal_placeholders}
 
         if use_cache:
             request_output = seq_group.cached_request_output
-            request_output.__init__(*init_args)  # type: ignore
+            request_output.__init__(*init_args, **init_kwargs)  # type: ignore
 
         else:
-            request_output = cls(*init_args)
+            request_output = cls(*init_args, **init_kwargs)
 
         return request_output
 
@@ -298,7 +297,6 @@ class RequestOutput:
         return (f"RequestOutput(request_id={self.request_id}, "
                 f"prompt={self.prompt!r}, "
                 f"prompt_token_ids={self.prompt_token_ids}, "
-                f"multi_modal_placeholders={self.multi_modal_placeholders}, "
                 f"encoder_prompt={self.encoder_prompt!r}, "
                 f"encoder_prompt_token_ids={self.encoder_prompt_token_ids}, "
                 f"prompt_logprobs={self.prompt_logprobs}, "
@@ -306,7 +304,8 @@ class RequestOutput:
                 f"finished={self.finished}, "
                 f"metrics={self.metrics}, "
                 f"lora_request={self.lora_request}, "
-                f"num_cached_tokens={self.num_cached_tokens})")
+                f"num_cached_tokens={self.num_cached_tokens}, "
+                f"multi_modal_placeholders={self.multi_modal_placeholders})")
 
 
 class EmbeddingRequestOutput:
