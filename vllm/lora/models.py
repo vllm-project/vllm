@@ -4,8 +4,8 @@ import math
 import os
 import re
 from dataclasses import dataclass, field
-from typing import (Any, Callable, Dict, List, Optional, 
-                    Sequence, Tuple, Type, Union)
+from typing import (Any, Callable, Dict, List, Optional, Sequence, Tuple, Type,
+                    Union)
 
 import safetensors.torch
 import torch
