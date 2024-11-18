@@ -446,7 +446,7 @@ Text Generation
     - GLM-4V
     - T + I
     - :code:`THUDM/glm-4v-9b` etc.
-    - 
+    - ✅︎
     - ✅︎
   * - :code:`H2OVLChatModel`
     - H2OVL
