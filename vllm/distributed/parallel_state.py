@@ -944,10 +944,10 @@ def get_pp_group() -> GroupCoordinator:
 get_pipeline_model_parallel_group = get_pp_group
 
 
-_KV_TRANSFER: Optional[kv_transfer.KV_transfer_agent] = None
+_KV_TRANSFER: Optional[kv_transfer.KVTransferAgent] = None
 
 
-def get_kv_transfer_group() -> kv_transfer.KV_transfer_agent:
+def get_kv_transfer_group() -> kv_transfer.KVTransferAgent:
     assert _KV_TRANSFER is not None, (
         "disaggregated KV cache transfer parallel group is not initialized")
     return _KV_TRANSFER
@@ -1109,7 +1109,7 @@ def ensure_kv_transfer_initialized(
 
     global _KV_TRANSFER
     if config.need_kv_parallel_group and _KV_TRANSFER is None:
-        _KV_TRANSFER = kv_transfer.KV_transfer_agent(
+        _KV_TRANSFER = kv_transfer.KVTransferAgent(
             rank=get_world_group().rank,
             local_rank=get_world_group().local_rank,
             config=config

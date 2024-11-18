@@ -38,7 +38,7 @@ logger = init_logger(__name__)
 
 
 
-class KV_transfer_agent:
+class KVTransferAgent:
     """
     A class designated for distributed KV transfer
     

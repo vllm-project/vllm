@@ -90,7 +90,7 @@ class PyNcclConnector(KVConnectorBase):
             self.consumer_buffer = LookupBuffer(
                 self.consumer_signal_pipe, 
                 self.consumer_data_pipe,
-                config.kv_buffer_size
+                config.kv_buffer_size,
             )
             
             
@@ -148,8 +148,8 @@ class PyNcclConnector(KVConnectorBase):
             token_tensor = input_tokens_list[idx]
             num_token = len(token_tensor)
             num_computed_token = num_computed_tokens_list[idx]
-            # currently attention kernel cannot handle the case where there is 0
-            # query token.
+            # currently attention kernel cannot handle the case where there is 
+            # 0 query token.
             if num_computed_token == num_token:
                 num_computed_token -= 1
             start_pos = start_pos_list[idx]
@@ -239,7 +239,7 @@ class PyNcclConnector(KVConnectorBase):
             is_prompt=model_input.is_prompt,
         )
 
-        return rebuilt_model_input    
+        return rebuilt_model_input
     
 
     def close(self):

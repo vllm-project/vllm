@@ -19,7 +19,6 @@ def setup_servers():
     VLLM_HOST_IP = subprocess.check_output("hostname -I | awk '{print $1}'",
                                            shell=True).decode().strip()
     os.environ["VLLM_HOST_IP"] = VLLM_HOST_IP
-    os.environ["VLLM_PORT"] = "12345"
 
     # Start prefill instance
     prefill_cmd = [
@@ -33,12 +32,19 @@ def setup_servers():
         "--port",
         "8100",
         "--gpu-memory-utilization",
-        "0.8",
+        "0.5",
         "--max-model-len",
         "1000",
+        "--kv-connector",
+        "PyNcclConnector",
+        "--kv-role",
+        "kv_producer",
+        "--kv-rank",
+        "0",
+        "--kv-parallel-size",
+        "2",
     ]
     prefill_env = os.environ.copy()
-    prefill_env["VLLM_DISTRIBUTED_KV_ROLE"] = "producer"
     prefill_env["CUDA_VISIBLE_DEVICES"] = "0,1"
     prefill_proc = Popen(prefill_cmd, env=prefill_env)
 
@@ -54,12 +60,19 @@ def setup_servers():
         "--port",
         "8200",
         "--gpu-memory-utilization",
-        "0.8",
+        "0.5",
         "--max-model-len",
         "1000",
+        "--kv-connector",
+        "PyNcclConnector",
+        "--kv-role",
+        "kv_consumer",
+        "--kv-rank",
+        "1",
+        "--kv-parallel-size",
+        "2",
     ]
     decode_env = os.environ.copy()
-    decode_env["VLLM_DISTRIBUTED_KV_ROLE"] = "consumer"
     decode_env["CUDA_VISIBLE_DEVICES"] = "2,3"
     decode_proc = Popen(decode_cmd, env=decode_env)
 

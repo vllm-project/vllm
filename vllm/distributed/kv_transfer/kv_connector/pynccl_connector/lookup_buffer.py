@@ -17,8 +17,8 @@ from copy import deepcopy
 import torch
 from torch.distributed import Backend
 
-import vllm.distributed.kv_transfer.kv_connector.pynccl_connector.pynccl_pipe \
-    as pnp 
+from vllm.distributed.kv_transfer.kv_connector.pynccl_connector.pynccl_pipe \
+    import PyNcclPipe 
 from vllm.logger import init_logger
 
 
@@ -29,8 +29,8 @@ logger = init_logger(__name__)
 class LookupBuffer:
 
     def __init__(self, 
-                 signal_pipe: pnp.PyNcclPipe,
-                 data_pipe: pnp.PyNcclPipe,
+                 signal_pipe: PyNcclPipe,
+                 data_pipe: PyNcclPipe,
                  buffer_size_thresh: float):
         """
         signal_pipe: on CPU 
