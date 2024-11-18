@@ -206,7 +206,15 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # Set CUTLASS_REVISION manually -- its revision detection doesn't work in this case.
   set(CUTLASS_REVISION "v3.5.1" CACHE STRING "CUTLASS revision to use")
 
-  FetchContent_Declare(
+  # Use the specified CUTLASS source directory for compilation if CUTLASS_SRC_DIR is provided
+  if (DEFINED ENV{CUTLASS_SRC_DIR})
+    set(CUTLASS_SRC_DIR $ENV{CUTLASS_SRC_DIR})
+  endif()
+
+  if(CUTLASS_SRC_DIR)
+    FetchContent_Declare(cutlass SOURCE_DIR ${CUTLASS_SRC_DIR})
+  else()
+    FetchContent_Declare(
         cutlass
         GIT_REPOSITORY https://github.com/nvidia/cutlass.git
         GIT_TAG v3.5.1
@@ -216,7 +224,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
         # Important: If GIT_SHALLOW is enabled then GIT_TAG works only with branch names and tags.
         # So if the GIT_TAG above is updated to a commit hash, GIT_SHALLOW must be set to FALSE
         GIT_SHALLOW TRUE
-  )
+    )
+  endif()
   FetchContent_MakeAvailable(cutlass)
 
   list(APPEND VLLM_EXT_SRC
