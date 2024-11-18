@@ -277,7 +277,8 @@ class CLIPAttention(nn.Module):
             out = F.scaled_dot_product_attention(query_states,
                                                  key_states,
                                                  value_states,
-                                                 dropout_p=0.0)
+                                                 dropout_p=self.dropout,
+                                                 scale=self.scale)
             out = out.transpose(1, 2)
 
         out = out.view(bsz, tgt_len, -1)
