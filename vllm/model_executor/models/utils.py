@@ -588,6 +588,9 @@ class LLMWrapper(nn.Module):
 
 
 def get_vit_attn_backend() -> _Backend:
+    """
+    Get the available attention backend for Vision Transformer.
+    """
     selected_backend: Optional[_Backend] = get_global_forced_attn_backend()
     if selected_backend is None:
         backend_by_env_var: Optional[str] = envs.VLLM_ATTENTION_BACKEND
