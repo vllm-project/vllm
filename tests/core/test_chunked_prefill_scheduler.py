@@ -251,6 +251,7 @@ def test_short_prompts_jump_long_prompts_in_queue():
     assert seq_group_meta[0].token_chunk_size == 32  # large req gets 32 tokens
     assert seq_group_meta[1].token_chunk_size == 32  # small req gets 32 tokens
 
+    # all 4 are prefilling
     assert running[0].is_prefill()
     assert running[1].is_prefill()
     assert running[2].is_prefill()
@@ -270,6 +271,8 @@ def test_short_prompts_jump_long_prompts_in_queue():
     # the other small request had only 8 tokens left
     assert seq_group_meta[2].token_chunk_size == 8  # 40-32
 
+    # notice the small request got to decode now
+    # this is because of max_num_partial_prefills logic
     assert running[0].is_prefill()
     assert running[1].is_prefill()
     assert not running[2].is_prefill()
@@ -292,6 +295,7 @@ def test_short_prompts_jump_long_prompts_in_queue():
     assert out.num_prefill_groups == 2
     assert out.num_batched_tokens == 49  # (32+16+1 decode)
 
+    # both small requests have now reached decode
     assert running[0].is_prefill()
     assert running[1].is_prefill()
     assert not running[2].is_prefill()
