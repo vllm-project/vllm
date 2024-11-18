@@ -8,9 +8,7 @@ import pytest
 import torch
 
 from tests.kernels.utils import opcheck
-from vllm.config import VllmConfig
 from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
-from vllm.plugins import set_current_vllm_config
 
 
 def rotary_embedding_opcheck(rot,
@@ -44,9 +42,8 @@ def test_rotary_embedding_opcheck(dist_init, device, max_position,
     batch_size = 1
     base = 0
     num_heads = 7
-    with set_current_vllm_config(VllmConfig()):
-        rot = RotaryEmbedding(head_size, rotary_dim, max_position, base,
-                              is_neox_style, torch.float32)
+    rot = RotaryEmbedding(head_size, rotary_dim, max_position, base,
+                          is_neox_style, torch.float32)
 
     positions = torch.randint(0,
                               max_position, (batch_size, seq_len),
