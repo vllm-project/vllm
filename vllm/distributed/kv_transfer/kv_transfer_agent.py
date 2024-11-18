@@ -30,7 +30,7 @@ from torch.distributed import Backend
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
-from vllm.distributed.kv_transfer.kv_connector import KVConnectorFactory
+from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
 
@@ -49,6 +49,7 @@ class KV_transfer_agent:
 
     def __init__(
         self,
+        rank: int,
         local_rank: int,
         config,
     ):
@@ -57,7 +58,11 @@ class KV_transfer_agent:
         assert self.config.is_kv_transfer_instance, "KV cache transfer "\
             "agent should only be used when kv_connector is set."
 
-        self.connector = KVConnectorFactory.create_connector(config)
+        self.connector = KVConnectorFactory.create_connector(
+            rank,
+            local_rank, 
+            config
+        )
         
 
         

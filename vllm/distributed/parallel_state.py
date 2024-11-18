@@ -999,7 +999,6 @@ def init_distributed_environment(
             "distributed_init_method must be provided when initializing "
             "distributed environment")
         # this backend is used for WORLD
-        print(distributed_init_method)
         torch.distributed.init_process_group(
             backend=backend,
             init_method=distributed_init_method,
@@ -1111,6 +1110,7 @@ def ensure_kv_transfer_initialized(
     global _KV_TRANSFER
     if config.need_kv_parallel_group and _KV_TRANSFER is None:
         _KV_TRANSFER = dist_kv.KV_transfer_agent(
+            rank=get_world_group().rank,
             local_rank=get_world_group().local_rank,
             config=config
         )

@@ -10,7 +10,6 @@ All distributed communications are abstracted behind this class.
 from abc import ABC, abstractmethod
 from typing import List, Optional
 
-
 import torch
 
 
@@ -39,7 +38,12 @@ class KVConnectorBase(ABC):
     """
     
     @abstractmethod
-    def init(self, config):
+    def __init__(
+        self,
+        rank: int,
+        local_rank: int,
+        config: "KVTransferConfig",
+    ):
         raise NotImplementedError
 
     @abstractmethod
@@ -113,7 +117,7 @@ class KVConnectorBase(ABC):
     
     
     @abstractmethod
-    def rebuild_model_input(
+    def build_partial_prefill_input(
         self,
         model_input: "ModelInputForGPUWithSamplingMetadata",
         input_tokens_list: List[torch.Tensor],

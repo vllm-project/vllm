@@ -22,6 +22,9 @@ wait_for_server() {
     done" && return 0 || return 1
 }
 
+
+# You can also adjust --kv-ip and --kv-port for distributed inference.
+
 # prefilling instance, which is the KV producer
 CUDA_VISIBLE_DEVICES=0 python3 \
     -m vllm.entrypoints.openai.api_server \
@@ -52,8 +55,10 @@ wait_for_server 8200
 
 # launch a proxy server that opens the service at port 8000
 # the workflow of this proxy:
-# - send the request to prefill vLLM instance (port 8100), change max_tokens to 1
-# - after the prefill vLLM finishes prefill, send the request to decode vLLM instance
+# - send the request to prefill vLLM instance (port 8100), change max_tokens 
+#   to 1
+# - after the prefill vLLM finishes prefill, send the request to decode vLLM 
+#   instance
 python3 ../../benchmarks/disagg_benchmarks/disagg_prefill_proxy_server.py &
 sleep 1
 
@@ -76,6 +81,13 @@ output2=$(curl -s http://localhost:8000/v1/completions \
 "temperature": 0
 }')
 
+
+# Cleanup commands, suppressing their output
+ps -e | grep pt_main_thread | awk '{print $1}' | xargs kill -9 > /dev/null 2>&1
+pkill -f python3 > /dev/null 2>&1
+
+sleep 3
+
 # Print the outputs of the curl requests
 echo ""
 echo "Output of first request: $output1"
@@ -83,7 +95,3 @@ echo "Output of second request: $output2"
 
 echo "Successfully finished 2 test requests!"
 echo ""
-
-# Cleanup commands, suppressing their output
-ps -e | grep pt_main_thread | awk '{print $1}' | xargs kill -9 > /dev/null 2>&1
-pkill -f python3 > /dev/null 2>&1

@@ -36,57 +36,60 @@ class PyNcclConnector(KVConnectorBase):
     
     def __init__(
         self,
+        rank: int,
         local_rank: int,
         config: KVTransferConfig,
     ):
 
-        self.lookup_buffer_size = self.kv_buffer_size
+        self.config = config
 
-        self.send_buffer: Optional[LookupBuffer] = None
-        self.recv_buffer: Optional[LookupBuffer] = None
+        self.lookup_buffer_size = self.config.kv_buffer_size
+
+        self.producer_buffer: Optional[LookupBuffer] = None
+        self.consumer_buffer: Optional[LookupBuffer] = None
 
         # 2 pipes for every rank in the world
-        port_offset_base = 2 * config.rank
+        port_offset_base = 2 * rank
 
 
         # In disaggregated prefill, the prefill vLLM only uses send pipe
         # and the decode vLLM only uses recv pipe
         if config.is_kv_producer:
 
-            self.send_data_pipe = PyNcclPipe(
+            self.producer_data_pipe = PyNcclPipe(
                 local_rank=local_rank,
                 config=config,
                 port_offset=port_offset_base,
             )
-            self.send_signal_pipe = PyNcclPipe(
+            self.producer_signal_pipe = PyNcclPipe(
                 local_rank=local_rank,
                 config=config,
                 port_offset=port_offset_base + 1,
                 device="cpu",
             )
-            self.send_buffer = LookupBuffer(
-                self.send_signal_pipe, 
-                self.send_data_pipe,
+            self.producer_buffer = LookupBuffer(
+                self.producer_signal_pipe, 
+                self.producer_data_pipe,
                 config.kv_buffer_size)
              
         else:
 
             # the current vLLM instance is KV consumer, so it needs to connect
             # its recv pipe to the send pipe of KV producder
-            self.recv_data_pipe = PyNcclPipe(
+            self.consumer_data_pipe = PyNcclPipe(
                 local_rank=local_rank,
                 config=config,
                 port_offset=port_offset_base,
             )
-            self.recv_signal_pipe = PyNcclPipe(
+            self.consumer_signal_pipe = PyNcclPipe(
                 local_rank=local_rank,
                 config=config,
                 port_offset=port_offset_base + 1,
                 device="cpu",
             )
-            self.recv_buffer = LookupBuffer(
-                self.recv_signal_pipe, 
-                self.recv_data_pipe,
+            self.consumer_buffer = LookupBuffer(
+                self.consumer_signal_pipe, 
+                self.consumer_data_pipe,
                 config.kv_buffer_size
             )
             
@@ -95,13 +98,13 @@ class PyNcclConnector(KVConnectorBase):
         self, input_tokens: Optional[torch.Tensor],
         roi: Optional[torch.Tensor]) -> List[Optional[torch.Tensor]]:
 
-        return self.send_buffer.drop_select(input, roi)
+        return self.consumer_buffer.drop_select(input_tokens, roi)
     
     def insert(self, input_tokens: torch.Tensor, roi: torch.Tensor,
                key: torch.Tensor, value: torch.Tensor,
                hidden: torch.Tensor) -> None:
 
-        return self.recv_buffer.insert(
+        return self.producer_buffer.insert(
             input_tokens,
             roi,
             key,
@@ -236,5 +239,12 @@ class PyNcclConnector(KVConnectorBase):
             is_prompt=model_input.is_prompt,
         )
 
-        return rebuilt_model_input
+        return rebuilt_model_input    
+    
+
+    def close(self):
+        self.producer_data_pipe.close()
+        self.producer_signal_pipe.close()
+        self.consumer_data_pipe.close()
+        self.consumer_signal_pipe.close()
 

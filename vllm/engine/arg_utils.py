@@ -194,7 +194,7 @@ class EngineArgs:
     # P/D disaggregation coonfiguration
     kv_connector: Optional[str] = None
     kv_buffer_size: Optional[int] = 1e9
-    kv_buffer_device: Optional[str] = "gpu"
+    kv_buffer_device: Optional[str] = "cuda"
     kv_role: Optional[str] = None
     kv_rank: Optional[str] = None
     kv_parallel_size: int = 1
@@ -906,8 +906,8 @@ class EngineArgs:
         parser.add_argument(
             '--kv-buffer-device',
             type=str,
-            default=None,
-            choices=["CPU", "GPU"],
+            default=EngineArgs.kv_buffer_device,
+            choices=["cpu", "cuda"],
             help="The device used by kv connector to buffer the KV cache. Can "
             "be CPU or GPU. Recommended value: CPU."
         )
