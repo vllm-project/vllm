@@ -61,10 +61,13 @@ class CustomOp(nn.Module):
     def dispatch_forward(self):
         # NOTE(woosuk): Here we assume that vLLM was built for only one
         # specific backend. Currently, we do not support dynamic dispatching.
-
+        compilation_config = get_current_vllm_config().compilation_config
         enabled = self.enabled()
-        logger.debug("custom op %s %s", self.__class__.name,
-                     "enabled" if enabled else "disabled")
+        if enabled:
+            compilation_config.enabled_custom_ops.update([self.__class__.name])
+        else:
+            compilation_config.disabled_custom_ops.update(
+                [self.__class__.name])
 
         if not enabled:
             return self.forward_native
