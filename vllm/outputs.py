@@ -282,7 +282,9 @@ class RequestOutput:
                      prompt_logprobs, outputs, finished, seq_group.metrics,
                      seq_group.lora_request, encoder_prompt,
                      encoder_prompt_token_ids, num_cached_tokens)
-        init_kwargs = {"multi_modal_placeholders": seq_group.multi_modal_placeholders}
+        init_kwargs = {
+            "multi_modal_placeholders": seq_group.multi_modal_placeholders
+        }
 
         if use_cache:
             request_output = seq_group.cached_request_output
