@@ -55,7 +55,7 @@ class CompressedTensors24(CompressedTensorsScheme):
         """
 
         w_compressed, meta = ops.cutlass_compress_entry(layer.weight)
-        layer.weight = torch.nn.Parameter(w_compressed, requires_grad=False)
+        layer.w_compressed = torch.nn.Parameter(w_compressed, requires_grad=False)
         layer.meta = torch.nn.Parameter(meta, requires_grad=False)
 
     def apply_weights(self,
@@ -73,20 +73,12 @@ class CompressedTensors24(CompressedTensorsScheme):
         :param bias: The bias to be added to the output tensor
         :return: The output tensor of the layer 
         """
-
-        PAD_MULTIPLE = 16
-        remainder = x.shape[0] % 16        
-        pad_size = PAD_MULTIPLE - remainder if remainder > 0 else 0
-        if pad_size > 0:
-            input = torch.nn.functional.pad(x, (0,0,0,pad_size), value=0)
-        else:
-            input = x
-    
+        
         q_input, input_scale = ops.scaled_fp8_quant(
-            input, use_per_token_if_dynamic=True)
-    
+            x, use_per_token_if_dynamic=True)
+
         out = ops.cutlass_scaled_sparse_mm(
-            a=layer.weight,
+            a=layer.w_compressed,
             e=layer.meta,
             b=q_input.t(),
             scale_a=layer.weight_scale,
@@ -96,12 +88,7 @@ class CompressedTensors24(CompressedTensorsScheme):
         )
 
         out = out.t()
-        if pad_size > 0:
-            out = out[:-pad_size,:].contiguous()
-            # ^ this is of shape [5, 6144]
-        else:
-            out = out.contiguous()
-
+        assert out.is_contiguous()
         return out
 
 
