@@ -770,8 +770,8 @@ class FlashInferImpl(AttentionImpl):
         if alibi_slopes is not None:
             alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
         self.alibi_slopes = alibi_slopes
-        if sliding_window is not None:
-            self.sliding_window = sliding_window
+        self.sliding_window = ((sliding_window - 1,
+                                0) if sliding_window is not None else (-1, -1))
         self.kv_cache_dtype = kv_cache_dtype
         self.logits_soft_cap = logits_soft_cap
 
@@ -907,7 +907,8 @@ def unified_flash_infer(
                 logits_soft_cap=logits_soft_cap,
                 causal=True,
                 k_scale=k_scale,
-                v_scale=v_scale)
+                v_scale=v_scale,
+                window_left=window_size)
     if decode_meta := attn_metadata.decode_metadata:
         assert attn_metadata.decode_metadata is not None
         assert attn_metadata.decode_metadata.decode_wrapper is not None
@@ -917,7 +918,8 @@ def unified_flash_infer(
             sm_scale=softmax_scale,
             logits_soft_cap=logits_soft_cap,
             k_scale=k_scale,
-            v_scale=v_scale)
+            v_scale=v_scale,
+            window_left=window_size)
 
     if prefill_output is None and decode_output is not None:
         # Decode only batch.
