@@ -15,4 +15,4 @@ else:
 
 
 def init_worker(*args, **kwargs):
-    WorkerCls(*args, **kwargs)
+    return WorkerCls(*args, **kwargs)
