@@ -391,17 +391,6 @@ __device__ inline void sub_zp(typename ScalarType<scalar_t>::FragB& frag_b,
   frag_b[1] = __hsub2(frag_b[1], zp);
 }
 
-template <typename scalar_t>
-__device__ inline void sub_zpf(typename ScalarType<scalar_t>::FragB& frag_b,
-                               typename ScalarType<scalar_t>::FragZPF& frag_zpf,
-                               int i) {
-  using scalar_t2 = typename ScalarType<scalar_t>::scalar_t2;
-  scalar_t2 zp =
-      ScalarType<scalar_t>::num2num2(reinterpret_cast<scalar_t*>(&frag_zpf)[i]);
-  frag_b[0] = __hsub2(frag_b[0], zp);
-  frag_b[1] = __hsub2(frag_b[1], zp);
-}
-
 // Same as above, but for act_order (each K is multiplied individually)
 template <typename scalar_t>
 __device__ inline void scale4(typename ScalarType<scalar_t>::FragB& frag_b,
@@ -430,15 +419,6 @@ __device__ inline void scale_float(float* c,
   scalar_t* s_ptr = reinterpret_cast<scalar_t*>(&s);
   c[0] = __fmul_rn(c[0], ScalarType<scalar_t>::num2float(s_ptr[0]));
   c[1] = __fmul_rn(c[1], ScalarType<scalar_t>::num2float(s_ptr[1]));
-}
-
-// Given 2 floats subtract by 2 zero points (halves)
-template <typename scalar_t>
-__device__ inline void sub_zpf_float(
-    float* c, typename ScalarType<scalar_t>::FragZPF& zp) {
-  scalar_t* zp_ptr = reinterpret_cast<scalar_t*>(&zp);
-  c[0] = __fsub_rn(c[0], ScalarType<scalar_t>::num2float(zp_ptr[0]));
-  c[1] = __fsub_rn(c[1], ScalarType<scalar_t>::num2float(zp_ptr[1]));
 }
 
 // Wait until barrier reaches `count`, then lock for current threadblock.
@@ -578,7 +558,6 @@ __global__ void Marlin(
   using FragC = typename ScalarType<scalar_t>::FragC;
   using FragS = typename ScalarType<scalar_t>::FragS;
   using FragZP = typename ScalarType<scalar_t>::FragZP;
-  using FragZPF = typename ScalarType<scalar_t>::FragZPF;
 
   static constexpr auto w_type = vllm::ScalarType::from_id(w_type_id);
 
@@ -794,9 +773,10 @@ __global__ void Marlin(
   int zp_sh_rd;
   if constexpr (has_zp) {
     if constexpr (is_zp_float) {
-      if constexpr (group_blocks != -1)
+      if constexpr (group_blocks != -1) {
         zp_sh_rd = 8 * ((threadIdx.x / 32) % (thread_n_blocks / 4)) +
                    (threadIdx.x % 32) / 4;
+      }
     } else {
       zp_sh_rd = num_ints_per_thread * num_col_threads *
                      ((threadIdx.x / 32) % (thread_n_blocks / 4)) +
@@ -863,7 +843,7 @@ __global__ void Marlin(
   FragS act_frag_s[2][4][4];             // For act-order
   int frag_qzp[2][num_ints_per_thread];  // Zero-points
   FragZP frag_zp;                        // Zero-points in fp16
-  FragZPF frag_zpf[2][4];                // float16 zero-points
+  FragZP frag_zpf[2];                    // Zero-points in fp16 in HQQ
 
   // Zero accumulators.
   auto zero_accums = [&]() {
@@ -1222,7 +1202,11 @@ __global__ void Marlin(
           cur_k += k_iter_size * (k % b_sh_wr_iters);
 
           int k_blocks = cur_k / 16;
+          // Suppress bogus and persistent divide-by-zero warning
+  #pragma nv_diagnostic push
+  #pragma nv_diag_suppress divide_by_zero
           int cur_group_id = k_blocks / group_blocks;
+  #pragma nv_diagnostic pop
 
           int4* sh_zp_stage = sh_zp + zp_sh_stage * pipe;
 
@@ -1285,7 +1269,7 @@ __global__ void Marlin(
       }
 
       else if constexpr (has_zp && is_zp_float && group_blocks != -1) {
-        sub_zpf<scalar_t>(frag_b0, frag_zpf[k % 2][j], 0);
+        sub_zp<scalar_t>(frag_b0, frag_zpf[k % 2][j], 0);
       }
 
       // Apply scale to frag_b0
@@ -1305,7 +1289,7 @@ __global__ void Marlin(
       }
 
       else if constexpr (has_zp && is_zp_float && group_blocks != -1) {
-        sub_zpf<scalar_t>(frag_b1, frag_zpf[k % 2][j], 1);
+        sub_zp<scalar_t>(frag_b1, frag_zpf[k % 2][j], 1);
       }
 
       // Apply scale to frag_b1

@@ -86,9 +86,6 @@ class HQQMarlinConfig(QuantizationConfig):
             return HQQMarlinMethod(self)
         return None
 
-    def get_scaled_act_names(self) -> List[str]:
-        return []
-
 
 # Empty HQQ parameter, will be ignored during loading
 class HQQEmptyParameter(BasevLLMParameter):
@@ -258,7 +255,7 @@ class HQQMarlinMethod(LinearMethodBase):
         dev = layer.W_q.device
 
         # Repack to Marlin
-        sort_indices = torch.empty(0, dtype=torch.int, device=layer.W_q.device)
+        sort_indices = torch.empty(0, dtype=torch.int, device=dev)
         marlin_w_q = ops.gptq_marlin_repack(
             layer.W_q,
             sort_indices,
