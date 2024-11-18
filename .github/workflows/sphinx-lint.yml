@@ -11,7 +11,7 @@ on:
       - main
 
 jobs:
-  doc8:
+  sphinx-lint:
     runs-on: ubuntu-latest
     strategy:
       matrix:
