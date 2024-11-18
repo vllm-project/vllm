@@ -129,8 +129,9 @@ class XPUModelRunner(GPUModelRunner):
         seq_start_loc_np[0] = 0
         np.cumsum(seq_lens, out=seq_start_loc_np[1:])
 
-        self.input_ids[:total_num_scheduled_tokens].copy_(input_ids,
-                                                          non_blocking=True)
+        # self.input_ids[:total_num_scheduled_tokens].copy_(input_ids,
+        #                                                   non_blocking=True)
+        input_ids = input_ids.to(self.device, non_blocking=True)
         self.positions[:total_num_scheduled_tokens].copy_(positions,
                                                           non_blocking=True)
 
@@ -157,4 +158,4 @@ class XPUModelRunner(GPUModelRunner):
         # token from the partial request.
         # TODO: Support prompt logprobs.
         logits_indices = query_start_loc[1:] - 1
-        return attn_metadata, logits_indices
+        return input_ids, attn_metadata, logits_indices
