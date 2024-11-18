@@ -16,7 +16,7 @@ from mistral_common.tokens.tokenizers.multimodal import image_from_chunk
 from transformers import AutoProcessor
 
 from vllm import (EngineArgs, LLMEngine, RequestOutput, SamplingParams,
-                  TokensPrompt, TextPrompt)
+                  TextPrompt, TokensPrompt)
 from vllm.logger import init_logger
 from vllm.multimodal import MultiModalDataBuiltins
 from vllm.multimodal.inputs import PlaceholderRange
