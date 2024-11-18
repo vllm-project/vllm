@@ -263,9 +263,6 @@ class RayGPUExecutor(DistributedGPUExecutor):
             # solves this issue, as it always works for communication inside
             # the node.
             driver_ip = "127.0.0.1"
-        # force vLLM to use the port specified by envs.VLLM_PORT
-        # this port will be binded by prefill instance
-        # but the decode instance must use that port to init torch.distributed
         distributed_init_method = get_distributed_init_method(
             driver_ip, get_open_port())
 

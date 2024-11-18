@@ -47,8 +47,7 @@ class GPUExecutor(ExecutorBase):
         """Return worker init args for a given rank."""
         if distributed_init_method is None:
             distributed_init_method = get_distributed_init_method(
-                get_ip(),
-                get_open_port())
+                get_ip(), get_open_port())
         return dict(
             vllm_config=self.vllm_config,
             local_rank=local_rank,
