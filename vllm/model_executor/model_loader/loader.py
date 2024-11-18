@@ -29,6 +29,8 @@ from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (ReplicatedLinear,
                                                RowParallelLinear)
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizeMethodBase)
 from vllm.model_executor.model_loader.tensorizer import (
     TensorizerConfig, is_vllm_tensorized, load_with_tensorizer,
     serialize_vllm_model, tensorizer_weights_iterator)
@@ -348,7 +350,7 @@ class DefaultModelLoader(BaseModelLoader):
 
             for _, module in model.named_modules():
                 quant_method = getattr(module, "quant_method", None)
-                if quant_method is not None:
+                if isinstance(quant_method, QuantizeMethodBase):
                     # When quant methods need to process weights after loading
                     # (for repacking, quantizing, etc), they expect parameters
                     # to be on the global target device. This scope is for the
