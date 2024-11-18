@@ -8,89 +8,61 @@ namespace machete {
 
 using namespace vllm;
 
-//
-//  Utils (type dispatching)
-//
-
-template <typename Fn>
-static auto scalar_type_dispatch(ScalarType const& type, Fn fn) {
-  if (type == vllm::kU4) {
-    return fn(cutlass::uint4b_t{});
-  } else if (type == vllm::kU8) {
-    return fn(cutlass::uint8_t{});
-  } else if (type == vllm::kU4B8) {
-    return fn(cutlass::vllm_uint4b8_t{});
-  } else if (type == vllm::kU8B128) {
-    return fn(cutlass::vllm_uint8b128_t{});
-  } else {
-    TORCH_CHECK(false, "Unsupported type ", type.str());
-  }
+std::vector<std::string> supported_schedules(
+    at::ScalarType a_type, int64_t b_type_id,
+    c10::optional<at::ScalarType> maybe_group_scales_type,
+    c10::optional<at::ScalarType> maybe_group_zeros_type,
+    c10::optional<at::ScalarType> maybe_channel_scales_type,
+    c10::optional<at::ScalarType> maybe_token_scales_type,
+    c10::optional<at::ScalarType> maybe_out_type) {
+  ScalarType const b_type = ScalarType::from_id(b_type_id);
+  return supported_schedules_dispatch({
+      .a_type = a_type,
+      .b_type = b_type,
+      .maybe_group_scales_type = maybe_group_scales_type,
+      .maybe_group_zeros_type = maybe_group_zeros_type,
+      .maybe_channel_scales_type = maybe_channel_scales_type,
+      .maybe_token_scales_type = maybe_token_scales_type,
+      .maybe_out_type = maybe_out_type,
+  });
 }
 
-#define AT_DISPATCH_CASE_SUPPORTED_COMPUTE_TYPES(...) \
-  AT_DISPATCH_CASE_REDUCED_FLOATING_TYPES(__VA_ARGS__)
-
-#define AT_DISPATCH_SUPPORTED_COMPUTE_TYPES(TYPE, NAME, ...) \
-  AT_DISPATCH_SWITCH(TYPE, NAME,                             \
-                     AT_DISPATCH_CASE_SUPPORTED_COMPUTE_TYPES(__VA_ARGS__))
-
-//
-//  Interface
-//
-
-std::vector<std::string> supported_schedules(ScalarTypeId const btype_id) {
-#if defined(__CUDACC_VER_MAJOR__) && __CUDACC_VER_MAJOR__ >= 12
-  vllm::ScalarType b_type = ScalarType::from_id(btype_id);
-  return scalar_type_dispatch(b_type, [&](auto BType) {
-    return GemmDispatcher<half_t, decltype(BType)>::supported_schedules();
-  });
-#else
-  TORCH_CHECK(false, "Machete requires CUDA 12.0 or later");
-#endif
+torch::Tensor mm(torch::Tensor const& A, torch::Tensor const& B,
+                 int64_t b_type_id,
+                 c10::optional<at::ScalarType> const& maybe_out_type,
+                 c10::optional<torch::Tensor> const& maybe_group_scales,
+                 c10::optional<torch::Tensor> const& maybe_group_zeros,
+                 c10::optional<int64_t> maybe_group_size,
+                 c10::optional<torch::Tensor> const& maybe_channel_scales,
+                 c10::optional<torch::Tensor> const& maybe_token_scales,
+                 c10::optional<std::string> maybe_schedule) {
+  ScalarType const b_type = ScalarType::from_id(b_type_id);
+  return mm_dispatch({.A = A,
+                      .B = B,
+                      .b_type = b_type,
+                      .maybe_out_type = maybe_out_type,
+                      .maybe_group_scales = maybe_group_scales,
+                      .maybe_group_zeros = maybe_group_zeros,
+                      .maybe_group_size = maybe_group_size,
+                      .maybe_channel_scales = maybe_channel_scales,
+                      .maybe_token_scales = maybe_token_scales,
+                      .maybe_schedule = maybe_schedule});
 }
 
-torch::Tensor gemm(torch::Tensor const& A, torch::Tensor const& B,
-                   ScalarTypeId const btype_id,
-                   c10::optional<torch::Tensor> const& scales,
-                   c10::optional<torch::Tensor> const& zeros,
-                   c10::optional<int64_t> group_size,
-                   c10::optional<torch::Tensor> const& C,
-                   c10::optional<double> alpha, c10::optional<double> beta,
-                   c10::optional<std::string> schedule) {
-#if defined(__CUDACC_VER_MAJOR__) && __CUDACC_VER_MAJOR__ >= 12
-  ScalarType const btype = ScalarType::from_id(btype_id);
-  auto args = PyTorchArguments{.A = A,
-                               .B = B,
-                               .scales = scales,
-                               .zeros = zeros,
-                               .group_size = group_size,
-                               .C = C,
-                               .alpha = alpha,
-                               .beta = beta,
-                               .schedule = schedule};
-
-  return scalar_type_dispatch(btype, [&](auto BType) {
-    return AT_DISPATCH_SUPPORTED_COMPUTE_TYPES(
-        A.scalar_type(), "machete_gemm", [&] {
-          using ComputeType = equivalent_cutlass_type_t<scalar_t>;
-          return GemmDispatcher<ComputeType, decltype(BType)>::dispatch(args);
-        });
-  });
-#else
-  TORCH_CHECK(false, "Machete requires CUDA 12.0 or later");
-#endif
-}
-
-torch::Tensor prepack_B(torch::Tensor const& B, ScalarTypeId const btype_id) {
-  ScalarType const btype = ScalarType::from_id(btype_id);
-  return scalar_type_dispatch(btype, [&](auto BType) {
-    return PrepackBDispatcher<half_t, decltype(BType), half_t>::dispatch(B);
-  });
+torch::Tensor prepack_B(
+    torch::Tensor const& B, at::ScalarType const& a_type, int64_t b_type_id,
+    c10::optional<at::ScalarType> const& maybe_group_scales_type) {
+  ScalarType const b_type = ScalarType::from_id(b_type_id);
+  return prepack_B_dispatch(
+      {.B = B,
+       .a_type = a_type,
+       .b_type = b_type,
+       .maybe_group_scales_type = maybe_group_scales_type});
 }
 
 TORCH_LIBRARY_IMPL_EXPAND(TORCH_EXTENSION_NAME, CUDA, m) {
   m.impl("machete_prepack_B", &prepack_B);
-  m.impl("machete_gemm", &gemm);
+  m.impl("machete_mm", &mm);
 }
 
 // use CatchAll since supported_schedules has no tensor arguments
