@@ -101,6 +101,7 @@ Documentation
    models/engine_args
    models/lora
    models/vlm
+   models/structured_outputs
    models/spec_decode
    models/performance
 
