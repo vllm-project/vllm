@@ -14,12 +14,12 @@ from vllm.model_executor.layers.spec_decode_base_sampler import (
     SpecDecodeBaseSampler, SpecDecodeStochasticBaseSampler)
 from vllm.model_executor.layers.typical_acceptance_sampler import (
     TypicalAcceptanceSampler)
+from vllm.platforms import current_platform
 from vllm.sequence import (VLLM_INVALID_TOKEN_ID,
                            CompletionSequenceGroupOutput, ExecuteModelRequest,
                            HiddenStates, SequenceGroupMetadata,
                            get_all_seq_ids_and_request_ids)
 from vllm.spec_decode.batch_expansion import BatchExpansionTop1Scorer
-from vllm.spec_decode.draft_model_runner import TP1DraftModelRunner
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeScorer, SpeculativeScores)
 from vllm.spec_decode.medusa_worker import MedusaWorker
@@ -39,6 +39,11 @@ from vllm.spec_decode.util import (Timer, create_logprobs_output,
 from vllm.worker.selector import init_worker
 from vllm.worker.worker import Worker
 from vllm.worker.worker_base import LoraNotSupportedWorkerBase, WorkerBase
+
+if current_platform.is_hpu():
+    from vllm.spec_decode.hpu_draft_model_runner import HPUTP1DraftModelRunner
+else:
+    from vllm.spec_decode.draft_model_runner import TP1DraftModelRunner
 
 logger = init_logger(__name__)
 
@@ -159,8 +164,16 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                 proposer_worker = MedusaWorker(**draft_worker_kwargs)
             else:
                 if draft_tp == 1:
-                    draft_worker_kwargs[
-                        "model_runner_cls"] = TP1DraftModelRunner
+                    if current_platform.is_cuda_alike():
+                        draft_worker_kwargs[
+                            "model_runner_cls"] = TP1DraftModelRunner
+                    elif current_platform.is_hpu():
+                        draft_worker_kwargs[
+                            "model_runner_cls"] = HPUTP1DraftModelRunner
+                    else:
+                        raise NotImplementedError(
+                            "DraftModelRunner not implemented for this platform"
+                        )
                 else:
                     if draft_model_config.hf_config.model_type == "eagle":
                         raise NotImplementedError(

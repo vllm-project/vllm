@@ -12,7 +12,7 @@ import torch.distributed
 from vllm_hpu_extension.profiler import HabanaMemoryProfiler, format_bytes
 
 import vllm.envs as envs
-from vllm.config import ParallelConfig, SpeculativeConfig, VllmConfig
+from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment)
 from vllm.logger import init_logger
@@ -23,7 +23,6 @@ from vllm.sequence import ExecuteModelRequest
 from vllm.utils import hpu_backend_string, hpu_device_string, is_fake_hpu
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.hpu_model_runner import HPUModelRunner
-from vllm.worker.model_runner_base import ModelRunnerBase
 from vllm.worker.worker_base import (LocalOrDistributedWorkerBase, WorkerBase,
                                      WorkerInput)
 
@@ -45,8 +44,7 @@ class HPUWorker(LocalOrDistributedWorkerBase):
         rank: int,
         distributed_init_method: str,
         is_driver_worker: bool = False,
-        speculative_config: Optional[SpeculativeConfig] = None,
-        model_runner_cls: Optional[Type[ModelRunnerBase]] = None,
+        model_runner_cls: Optional[Type[HPUModelRunner]] = None,
     ) -> None:
         WorkerBase.__init__(self, vllm_config=vllm_config)
         self.parallel_config.rank = rank
@@ -62,8 +60,28 @@ class HPUWorker(LocalOrDistributedWorkerBase):
             from vllm.utils import init_cached_hf_modules
             init_cached_hf_modules()
 
-        self.model_runner: HPUModelRunner = HPUModelRunner(
-            vllm_config=vllm_config, is_driver_worker=is_driver_worker)
+        # Return hidden states from target model if the draft model is an
+        # mlp_speculator
+        speculative_config = self.speculative_config
+        model_config = self.model_config
+        speculative_args = {} if speculative_config is None \
+            or (speculative_config.draft_model_config.model ==
+                model_config.model) \
+            or (speculative_config.draft_model_config.hf_config.model_type
+                not in ["medusa", "mlp_speculator", "eagle"]) \
+                    else {"return_hidden_states": True}
+
+        ModelRunnerClass: Type[HPUModelRunner] = HPUModelRunner
+        if model_runner_cls is not None:
+            ModelRunnerClass = model_runner_cls
+        else:
+            ModelRunnerClass = HPUModelRunner
+        self.model_runner: HPUModelRunner = ModelRunnerClass(
+            vllm_config=vllm_config,
+            kv_cache_dtype=self.cache_config.cache_dtype,
+            is_driver_worker=is_driver_worker,
+            **speculative_args,
+        )
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
         self.cache_engine: List[HPUCacheEngine]
