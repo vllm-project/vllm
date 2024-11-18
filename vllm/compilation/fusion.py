@@ -6,8 +6,8 @@ from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor.pattern_matcher import (Match, PatternMatcherPass,
                                              fwd_only, register_replacement)
 
-from vllm.compilation.config import CompilationConfig
 from vllm.compilation.inductor_pass import InductorPass
+from vllm.config import CompilationConfig
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -281,11 +281,11 @@ class FusionPass(InductorPass):
         self.dump_graph(graph, "before_fusion")
 
         count = self.patterns.apply(graph)
-        logger.info("Replaced %s patterns", count)
+        logger.debug("Replaced %s patterns", count)
         self.dump_graph(graph, "after_pattern_match")
 
         # Manually process multi-output matches (and run DCE)
         self.process_matches(graph)
-        logger.info("Post-processed %s matches", len(self.matches))
+        logger.debug("Post-processed %s matches", len(self.matches))
         self.dump_graph(graph, "after_fusion")
         self.matches.clear()

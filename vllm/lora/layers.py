@@ -685,26 +685,27 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
     def slice_lora_b(
         self, lora_b: List[Union[torch.Tensor, None]]
     ) -> List[Union[torch.Tensor, None]]:
-        if lora_b[0] is None or lora_b[1] is None:
-            return lora_b
+        #NOTE: lora_b contains 2 subloras, and each sublora could be None.
         shard_size = self.output_dim
         start_idx = self.tp_rank * shard_size
         end_idx = (self.tp_rank + 1) * shard_size
         lora_b = [
-            lora_b[0][:, start_idx:end_idx],
-            lora_b[1][:, start_idx:end_idx],
+            lora_b[0][:, start_idx:end_idx] if lora_b[0] is not None else None,
+            lora_b[1][:, start_idx:end_idx] if lora_b[1] is not None else None,
         ]
         return lora_b
 
     def slice_bias(
         self, bias: List[Union[torch.Tensor,
                                None]]) -> List[Union[torch.Tensor, None]]:
-        if bias[0] is None or bias[1] is None:
-            return bias
+        # NOTE : each bias could be None.
         shard_size = self.output_dim
         start_idx = self.tp_rank * shard_size
         end_idx = (self.tp_rank + 1) * shard_size
-        bias = [bias[0][start_idx:end_idx], bias[1][start_idx:end_idx]]
+        bias = [
+            bias[0][start_idx:end_idx] if bias[0] is not None else None,
+            bias[1][start_idx:end_idx] if bias[1] is not None else None
+        ]
         return bias
 
     def set_lora(

@@ -3,10 +3,12 @@ import enum
 import json
 import warnings
 from dataclasses import dataclass, field, replace
-from typing import (TYPE_CHECKING, Any, ClassVar, Dict, Final, List, Literal,
-                    Mapping, Optional, Set, Tuple, Type, Union)
+from pathlib import Path
+from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Dict, Final, List,
+                    Literal, Mapping, Optional, Set, Tuple, Type, Union)
 
 import torch
+from pydantic import BaseModel, Field, PrivateAttr
 from transformers import PretrainedConfig
 
 import vllm.envs as envs
@@ -20,7 +22,7 @@ from vllm.transformers_utils.config import (
     get_hf_text_config, get_pooling_config,
     get_sentence_transformer_tokenizer_config, is_encoder_decoder, uses_mrope)
 from vllm.utils import (GiB_bytes, cuda_device_count_stateless, get_cpu_memory,
-                        print_warning_once)
+                        identity, print_warning_once)
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
@@ -43,6 +45,9 @@ TaskOption = Literal["auto", "generate", "embedding"]
 
 # "draft" is only used internally for speculative decoding
 _Task = Literal["generate", "embedding", "draft"]
+
+HfOverrides = Union[Dict[str, Any], Callable[[PretrainedConfig],
+                                             PretrainedConfig]]
 
 
 class ModelConfig:
@@ -109,29 +114,19 @@ class ModelConfig:
             the model name will be the same as `model`.
         limit_mm_per_prompt: Maximum number of data items per modality
             per prompt. Only applicable for multimodal models.
+        config_format: The config format which shall be loaded.
+            Defaults to 'auto' which defaults to 'hf'.
+        hf_overrides: If a dictionary, contains arguments to be forwarded to the
+            HuggingFace config. If a callable, it is called to update the
+            HuggingFace config.
+        mm_processor_kwargs: Arguments to be forwarded to the model's processor
+            for multi-modal data, e.g., image processor.
         override_neuron_config: Initialize non default neuron config or
             override default neuron config that are specific to Neuron devices,
             this argument will be used to configure the neuron config that
             can not be gathered from the vllm arguments.
-        config_format: The config format which shall be loaded.
-            Defaults to 'auto' which defaults to 'hf'.
-        hf_overrides: Arguments to be forwarded to the HuggingFace config.
-        mm_processor_kwargs: Arguments to be forwarded to the model's processor
-            for multi-modal data, e.g., image processor.
-        pooling_type: Used to configure the pooling method in the embedding 
-            model.
-        pooling_norm: Used to determine whether to normalize the pooled 
-            data in the embedding model.
-        pooling_softmax: Used to determine whether to softmax the pooled 
-            data in the embedding model.
-        pooling_step_tag_id: When pooling_step_tag_id is not -1, it indicates 
-            that the score corresponding to the pooling_step_tag_id in the 
-            generated sentence should be returned. Otherwise, it returns 
-            the scores for all tokens.
-        pooling_returned_token_ids: pooling_returned_token_ids represents a 
-            list of indices for the vocabulary dimensions to be extracted, 
-            such as the token IDs of good_token and bad_token in the 
-            math-shepherd-mistral-7b-prm model.
+        override_pooling_config: Initialize non default pooling config or
+            override default pooling config for the embedding model.
     """
 
     def __init__(
@@ -161,16 +156,11 @@ class ModelConfig:
             served_model_name: Optional[Union[str, List[str]]] = None,
             limit_mm_per_prompt: Optional[Mapping[str, int]] = None,
             use_async_output_proc: bool = True,
-            override_neuron_config: Optional[Dict[str, Any]] = None,
             config_format: ConfigFormat = ConfigFormat.AUTO,
-            chat_template_text_format: str = "string",
-            hf_overrides: Optional[Dict[str, Any]] = None,
+            hf_overrides: Optional[HfOverrides] = None,
             mm_processor_kwargs: Optional[Dict[str, Any]] = None,
-            pooling_type: Optional[str] = None,
-            pooling_norm: Optional[bool] = None,
-            pooling_softmax: Optional[bool] = None,
-            pooling_step_tag_id: Optional[int] = None,
-            pooling_returned_token_ids: Optional[List[int]] = None) -> None:
+            override_neuron_config: Optional[Dict[str, Any]] = None,
+            override_pooler_config: Optional["PoolerConfig"] = None) -> None:
         self.model = model
         self.tokenizer = tokenizer
         self.tokenizer_mode = tokenizer_mode
@@ -182,15 +172,23 @@ class ModelConfig:
 
         if hf_overrides is None:
             hf_overrides = {}
+
+        if callable(hf_overrides):
+            hf_overrides_kw = {}
+            hf_overrides_fn = hf_overrides
+        else:
+            hf_overrides_kw = hf_overrides
+            hf_overrides_fn = identity
+
         if rope_scaling is not None:
             hf_override: Dict[str, Any] = {"rope_scaling": rope_scaling}
-            hf_overrides.update(hf_override)
+            hf_overrides_kw.update(hf_override)
             msg = ("`--rope-scaling` will be removed in a future release. "
                    f"'Please instead use `--hf-overrides '{hf_override!r}'`")
             warnings.warn(DeprecationWarning(msg), stacklevel=2)
         if rope_theta is not None:
             hf_override = {"rope_theta": rope_theta}
-            hf_overrides.update(hf_override)
+            hf_overrides_kw.update(hf_override)
             msg = ("`--rope-theta` will be removed in a future release. "
                    f"'Please instead use `--hf-overrides '{hf_override!r}'`")
             warnings.warn(DeprecationWarning(msg), stacklevel=2)
@@ -207,16 +205,18 @@ class ModelConfig:
         self.max_logprobs = max_logprobs
         self.disable_sliding_window = disable_sliding_window
         self.skip_tokenizer_init = skip_tokenizer_init
-        self.hf_config = get_config(self.model, trust_remote_code, revision,
-                                    code_revision, config_format,
-                                    **hf_overrides)
+
+        hf_config = get_config(self.model, trust_remote_code, revision,
+                               code_revision, config_format, **hf_overrides_kw)
+        hf_config = hf_overrides_fn(hf_config)
+        self.hf_config = hf_config
+
         self.hf_text_config = get_hf_text_config(self.hf_config)
         self.encoder_config = self._get_encoder_config()
         self.hf_image_processor_config = get_hf_image_processor_config(
             self.model, revision)
         self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
         self.use_async_output_proc = use_async_output_proc
-        self.chat_template_text_format = chat_template_text_format
         self.mm_processor_kwargs = mm_processor_kwargs
 
         # Set enforce_eager to False if the value is unset.
@@ -264,13 +264,7 @@ class ModelConfig:
         supported_tasks, task = self._resolve_task(task, self.hf_config)
         self.supported_tasks = supported_tasks
         self.task: Final = task
-        self.pooler_config = self._init_pooler_config(
-            pooling_type,
-            pooling_norm,
-            pooling_softmax,
-            pooling_step_tag_id,
-            pooling_returned_token_ids,
-        )
+        self.pooler_config = self._init_pooler_config(override_pooler_config)
 
         self._verify_quantization()
         self._verify_cuda_graph()
@@ -295,27 +289,21 @@ class ModelConfig:
 
     def _init_pooler_config(
         self,
-        pooling_type: Optional[str] = None,
-        pooling_norm: Optional[bool] = None,
-        pooling_softmax: Optional[bool] = None,
-        pooling_step_tag_id: Optional[int] = None,
-        pooling_returned_token_ids: Optional[List[int]] = None
+        override_pooler_config: Optional["PoolerConfig"],
     ) -> Optional["PoolerConfig"]:
+
         if self.task == "embedding":
-            pooling_config = get_pooling_config(self.model, self.revision)
-            if pooling_config is not None:
-                # override if user does not
-                # specifies pooling_type and/or pooling_norm
-                if pooling_type is None:
-                    pooling_type = pooling_config["pooling_type"]
-                if pooling_norm is None:
-                    pooling_norm = pooling_config["normalize"]
-            return PoolerConfig(
-                pooling_type=pooling_type,
-                pooling_norm=pooling_norm,
-                pooling_softmax=pooling_softmax,
-                pooling_step_tag_id=pooling_step_tag_id,
-                pooling_returned_token_ids=pooling_returned_token_ids)
+            user_config = override_pooler_config or PoolerConfig()
+
+            base_config = get_pooling_config(self.model, self.revision)
+            if base_config is not None:
+                # Only set values that are not overridden by the user
+                for k, v in base_config.items():
+                    if getattr(user_config, k) is None:
+                        setattr(user_config, k, v)
+
+            return user_config
+
         return None
 
     def _init_attention_free(self) -> bool:
@@ -1782,13 +1770,43 @@ class MultiModalConfig:
 
 @dataclass
 class PoolerConfig:
-    """Controls the behavior of pooler in embedding model"""
+    """Controls the behavior of output pooling in embedding models."""
 
     pooling_type: Optional[str] = None
-    pooling_norm: Optional[bool] = None
-    pooling_softmax: Optional[bool] = None
-    pooling_step_tag_id: Optional[int] = None
-    pooling_returned_token_ids: Optional[List[int]] = None
+    """
+    The pooling method of the embedding model. This should be a key in
+    :class:`vllm.model_executor.layers.pooler.PoolingType`.
+    """
+
+    normalize: Optional[bool] = None
+    """
+    Whether to normalize the pooled outputs. Usually, this should be set to
+    ``True`` for embedding outputs.
+    """
+
+    softmax: Optional[bool] = None
+    """
+    Whether to apply softmax to the pooled outputs. Usually, this should be set
+    to ``True`` for classification outputs.
+    """
+
+    step_tag_id: Optional[int] = None
+    """
+    If set, only the score corresponding to the ``step_tag_id`` in the 
+    generated sentence should be returned. Otherwise, the scores for all tokens
+    are returned.
+    """
+
+    returned_token_ids: Optional[List[int]] = None
+    """
+    A list of indices for the vocabulary dimensions to be extracted, 
+    such as the token IDs of ``good_token`` and ``bad_token`` in the 
+    ``math-shepherd-mistral-7b-prm`` model.
+    """
+
+    @staticmethod
+    def from_json(json_str: str) -> "PoolerConfig":
+        return PoolerConfig(**json.loads(json_str))
 
 
 _STR_DTYPE_TO_TORCH_DTYPE = {
@@ -2048,6 +2066,185 @@ class ObservabilityConfig:
                 f"installed. Original error:\n{otel_import_error_traceback}")
 
 
+class CompilationLevel:
+    # constants for the levels of the compilation process
+    NO_COMPILATION = 0
+    DYNAMO_AS_IS = 1
+    DYNAMO_ONCE = 2
+    PIECEWISE = 3
+
+
+class CompilationConfig(BaseModel):
+    """
+    Configuration for compilation.
+    It has three parts:
+    - Top-level Compilation control:
+        - level: the level of compilation.
+            - 0: no compilation.
+            - 1: dynamo as is.
+            - 2: dynamo once.
+            - 3: piecewise compilation.
+        - custom_ops: fine-grained control over which custom ops to enable/disable.
+            Use 'all' to enable all, 'none' to disable all.
+            Also specify a list of custom op names to enable (prefixed with a '+'),
+            or disable (prefixed with a '-').
+            Examples:
+                - 'all,-op1' to enable all except op1
+                - 'none,+op1,+op2' to enable only op1 and op2
+            By default, all custom ops are enabled when running without Inductor
+                and disabled when running with Inductor (compile_level >= Inductor).
+    - CudaGraph capture:
+        - use_cudagraph: whether to use cudagraph inside compilation.
+            - False: cudagraph inside compilation is not used.
+            - True: cudagraph inside compilation is used. It requires
+                that all input buffers have fixed addresses.
+            Note that this is orthogonal to the cudagraph capture out
+            side of compilation.
+            TODO: move outside cudagraph logic into compilation.
+            torch.compile will handle cudagraph capture logic in the future.
+        - cudagraph_capture_sizes: sizes to capture cudagraph.
+            - None: capture sizes are inferred from compilation context.
+            - List[int]: capture sizes are specified.
+        - cudagraph_num_of_warmups: number of warmup runs for cudagraph.
+            It means the first several runs will be treated as warmup runs.
+            Only after that, the execution will be recorded, and the recorded
+            cudagraph will be used for subsequent runs.
+        - cudagraph_copy_inputs: whether to copy input tensors for
+            cudagraph. If the caller can guarantee that the same input buffers
+            are always used, it can set this to False. Otherwise, it should
+            set this to True, and the compiler will copy the input to an
+            internally managed buffer. Default is False.
+    - Inductor compilation:
+        - use_inductor: whether to use inductor compilation.
+            - False: inductor compilation is not used. graph runs in eager.
+            - True: inductor compilation is used. one graph for symbolic shape
+                is compiled. In addition, compile for different sizes specified
+                in inductor_compile_sizes, using configurations
+                in inductor_compile_config.
+        - inductor_compile_sizes: sizes to compile for inductor.
+        - inductor_specialize_for_cudagraph_no_more_than: an optional integer
+            to specialize inductor for cudagraph sizes no more than the
+            specified size. It is useful when we want to specialize inductor
+            with a subset of cudagraph sizes.
+        - inductor_compile_config: additional configurations for inductor.
+            - None: use default configurations.
+        - inductor_passes: additional passes for inductor. It is a dictionary
+            from pass name to pass function qualified name. We use function
+            name because the config uses json format. If we pass the config
+            from Python, functions can also be passed directly via Python object
+            constructor, e.g. `CompilationConfig(inductor_passes={"a": func})`
+        - custom inductor passes:
+            - dump_graph_stages: list of stages for which we want to dump the graph.
+                Each pass defines its own stages (before, after, maybe in-between).
+            - dump_graph_dir: directory to dump the graph. Default is .
+            - enable_fusion: whether to enable the custom fusion pass.
+                TODO better pass enabling system.
+    
+    Why we have different sizes for cudagraph and inductor:
+    - cudagraph: a cudagraph captured for a specific size can only be used
+        for the same size. We need to capture all the sizes we want to use.
+    - inductor: a graph compiled by inductor for a general shape can be used
+        for different sizes. Inductor can also compile for specific sizes,
+        where it can have more information to optimize the graph with fully
+        static shapes. However, we find the general shape compilation is
+        sufficient for most cases. It might be beneficial to compile for
+        certain small batchsizes, where inductor is good at optimizing.
+    """ # noqa
+    level: int = 0
+    custom_ops: List[str] = Field(default_factory=list)
+
+    use_inductor: bool = True
+    inductor_specialize_for_cudagraph_no_more_than: Optional[int] = None
+    inductor_compile_sizes: Optional[List[int]] = Field(default_factory=dict)
+    inductor_compile_config: Dict = Field(default_factory=dict)
+    inductor_passes: Dict[str, str] = Field(default_factory=dict)
+
+    use_cudagraph: bool = False
+    non_cudagraph_ops: List[str] = Field(default_factory=list)
+    cudagraph_num_of_warmups: int = 0
+    cudagraph_capture_sizes: Optional[List[int]] = None
+    cudagraph_copy_inputs: bool = False
+
+    dump_graph_stages: List[str] = Field(default_factory=list)
+    dump_graph_dir: Path = Field(default=Path("."))
+    enable_fusion: bool = True
+
+    # not configurable, computed after init
+    compile_sizes: List[int] = PrivateAttr
+    capture_sizes: List[int] = PrivateAttr
+
+    def model_post_init(self, __context: Any) -> None:
+        self.level = envs.VLLM_TORCH_COMPILE_LEVEL
+
+        count_none = self.custom_ops.count("none")
+        count_all = self.custom_ops.count("all")
+        assert count_none + count_all <= 1, "Can only specify 'none' or 'all'"
+
+        for k, v in self.inductor_passes.items():
+            if not isinstance(v, str):
+                assert callable(v), (
+                    f"pass {k} should be a function or a qualified name")
+                self.inductor_compile_config[k] = v
+                continue
+
+            # resolve function from qualified name
+            names = v.split(".")
+            module = ".".join(names[:-1])
+            func_name = names[-1]
+            func = __import__(module).__dict__[func_name]
+            self.inductor_compile_config[k] = func
+
+    def init_during_runtime(self):
+        """To complete the initialization of config,
+        we need to know the compile context, which is only available
+        during the first run of the model.
+        """
+        from vllm.compilation.compile_context import get_compile_context
+        context = get_compile_context()
+        context = copy.deepcopy(context) if context is not None else []
+        sizes_to_specialize: List[int] = context
+        if self.cudagraph_capture_sizes is None:
+            self.capture_sizes = sizes_to_specialize
+        else:
+            self.capture_sizes = self.cudagraph_capture_sizes
+            logger.info(("cudagraph sizes specified by model runner"
+                         " %s is overridden by config %s"),
+                        sizes_to_specialize, self.cudagraph_capture_sizes)
+        if self.inductor_specialize_for_cudagraph_no_more_than is not None:
+            assert self.inductor_compile_sizes is None, (
+                "inductor_compile_sizes should be None when "
+                "inductor_specialize_for_cudagraph_no_more_than is not None")
+            self.compile_sizes = [
+                x for x in self.capture_sizes
+                if x <= self.inductor_specialize_for_cudagraph_no_more_than
+            ]
+        else:
+            assert self.inductor_compile_sizes is not None, (
+                "inductor_compile_sizes should not be None when "
+                "inductor_specialize_for_cudagraph_no_more_than is None")
+            self.compile_sizes = self.inductor_compile_sizes
+
+    @staticmethod
+    def select_and_init_config() -> "CompilationConfig":
+        """The order of selecting config is:
+        1. Use the config specified in environment variable.
+        2. Use the config specified in plugins.
+        3. Use the default config.
+        """
+        config_path = envs.VLLM_TORCH_COMPILE_CONFIG
+        if config_path is not None:
+            with open(config_path) as json_file:
+                config = CompilationConfig.model_validate_json(
+                    json_file.read())
+        else:
+            from vllm.plugins import get_compilation_config
+            predefined_config = get_compilation_config()
+            config = predefined_config if predefined_config is not None else (
+                CompilationConfig())
+
+        return config
+
+
 @dataclass
 class VllmConfig:
     """Dataclass which contains all vllm-related configuration. This
@@ -2069,6 +2266,8 @@ class VllmConfig:
     observability_config: Optional[ObservabilityConfig] = None
     prompt_adapter_config: Optional[PromptAdapterConfig] = None
     quant_config: Optional[QuantizationConfig] = None
+    compilation_config: CompilationConfig = field(default=None,
+                                                  init=True)  # type: ignore
 
     @staticmethod
     def _get_quantization_config(
@@ -2128,6 +2327,12 @@ class VllmConfig:
             self.model_config is not None and self.load_config is not None:
             self.quant_config = VllmConfig._get_quantization_config(
                 self.model_config, self.load_config)
+
+        if self.compilation_config is None:
+            self.compilation_config = CompilationConfig.select_and_init_config(
+            )
+
+        current_platform.check_and_update_config(self)
 
     def __str__(self):
         return ("model=%r, speculative_config=%r, tokenizer=%r, "

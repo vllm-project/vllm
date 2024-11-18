@@ -53,7 +53,7 @@ class RedundantReshapesPass(InductorPass):
                     graph.erase_node(node)
                     count += 1
 
-        logger.info("Removed %s no-op reshapes", count)
+        logger.debug("Removed %s no-op reshapes", count)
 
         self.dump_graph(graph, "after_reshapes")
 
