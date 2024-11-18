@@ -19,7 +19,8 @@ from vllm.entrypoints.openai.protocol import (CompletionLogProbs,
                                               CompletionStreamResponse,
                                               ErrorResponse,
                                               RequestResponseMetadata,
-                                              UsageInfo)
+                                              UsageInfo,
+                                              EngineMetrics)
 # yapf: enable
 from vllm.entrypoints.openai.serving_engine import (BaseModelPath,
                                                     LoRAModulePath,
@@ -28,7 +29,7 @@ from vllm.entrypoints.openai.serving_engine import (BaseModelPath,
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams, SamplingParams
-from vllm.sequence import Logprob
+from vllm.sequence import Logprob, RequestMetrics
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import merge_async_iterators, random_uuid
 
@@ -383,11 +384,13 @@ class OpenAIServingCompletion(OpenAIServing):
         model_name: str,
         tokenizer: AnyTokenizer,
         request_metadata: RequestResponseMetadata,
+        engine_metrics: dict = None
     ) -> CompletionResponse:
         choices: List[CompletionResponseChoice] = []
         num_prompt_tokens = 0
         num_generated_tokens = 0
-
+        last_req_finished_time = 0.
+        last_req_metrics: RequestMetrics = None
         for final_res in final_res_batch:
             prompt_token_ids = final_res.prompt_token_ids
             assert prompt_token_ids is not None
@@ -397,7 +400,6 @@ class OpenAIServingCompletion(OpenAIServing):
             token_ids: GenericSequence[int]
             out_logprobs: Optional[GenericSequence[Optional[Dict[int,
                                                                  Logprob]]]]
-
             for output in final_res.outputs:
                 assert request.max_tokens is not None
                 if request.echo:
@@ -449,13 +451,38 @@ class OpenAIServingCompletion(OpenAIServing):
                 num_generated_tokens += len(output.token_ids)
 
             num_prompt_tokens += len(prompt_token_ids)
+            # get latest output's metrics
+            res_metrics = final_res.metrics
+            if res_metrics:
+                if res_metrics.last_token_time > last_req_finished_time:
+                    last_req_metrics = res_metrics
+                if res_metrics.finished_time:  # noqa: SIM102
+                    if res_metrics.finished_time > last_req_finished_time:
+                        last_req_metrics = res_metrics
 
         usage = UsageInfo(
             prompt_tokens=num_prompt_tokens,
             completion_tokens=num_generated_tokens,
             total_tokens=num_prompt_tokens + num_generated_tokens,
         )
-
+        
+        metrics = EngineMetrics(
+            gpu_kv_cache_util = (
+                last_req_metrics.gpu_kv_cache_utilisation
+                if last_req_metrics is not None
+                else 0.0
+            ),
+            cpu_kv_cache_util= (
+                last_req_metrics.cpu_kv_cache_utilisation
+                if last_req_metrics is not None
+                else 0.0
+            ),
+            running_lora_adapters= (
+                last_req_metrics.running_lora_adapters
+                if last_req_metrics is not None
+                else ""
+            ),
+        )
         request_metadata.final_usage_info = usage
 
         return CompletionResponse(
@@ -464,6 +491,7 @@ class OpenAIServingCompletion(OpenAIServing):
             model=model_name,
             choices=choices,
             usage=usage,
+            metrics=metrics,
         )
 
     def _create_completion_logprobs(
