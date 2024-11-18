@@ -1,5 +1,5 @@
 """PyTorch MAMBA model."""
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, List, Optional, Set, Tuple
 
 import torch
 from torch import nn
@@ -106,15 +106,22 @@ class MambaModel(nn.Module):
         self.norm_f = RMSNorm(config.hidden_size,
                               eps=config.layer_norm_epsilon)
 
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.embeddings(input_ids)
+
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         attn_metadata: AttentionMetadata,
         mamba_cache_params: MambaCacheParams,
+        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
 
-        hidden_states = self.embeddings(input_ids)
+        if inputs_embeds is not None:
+            hidden_states = inputs_embeds
+        else:
+            hidden_states = self.get_input_embeddings(input_ids)
         residual = None
 
         for i in range(len(self.layers)):
@@ -168,12 +175,16 @@ class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree):
                                                 config.vocab_size)
         self.sampler = get_sampler()
 
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.backbone.get_input_embeddings(input_ids)
+
     def forward(self,
                 input_ids: torch.Tensor,
                 positions: torch.Tensor,
                 kv_caches: List[KVCache],
                 attn_metadata: AttentionMetadata,
                 intermediate_tensors: Optional[IntermediateTensors] = None,
+                inputs_embeds: Optional[torch.Tensor] = None,
                 **kwargs):
         if self.mamba_cache is None:
             max_batch_size = (_get_graph_batch_size(
@@ -194,7 +205,7 @@ class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree):
                                               state_indices_tensor)
 
         hidden_states = self.backbone(input_ids, positions, attn_metadata,
-                                      mamba_cache_params)
+                                      mamba_cache_params, inputs_embeds)
 
         return hidden_states
 
@@ -232,8 +243,10 @@ class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         params_dict = dict(self.named_parameters())
+        loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
             if "A_log" in name:
                 name = name.replace("A_log", "A")
@@ -245,3 +258,5 @@ class MambaForCausalLM(nn.Module, HasInnerState, IsAttentionFree):
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
             weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params

@@ -101,6 +101,7 @@ Documentation
    models/engine_args
    models/lora
    models/vlm
+   models/structured_outputs
    models/spec_decode
    models/performance
 
@@ -158,6 +159,7 @@ Documentation
 
    design/class_hierarchy
    design/huggingface_integration
+   design/plugin_system
    design/input_processing/model_inputs_index
    design/kernel/paged_attention
    design/multimodal/multimodal_index
