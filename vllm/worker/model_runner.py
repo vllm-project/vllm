@@ -1556,6 +1556,24 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         ModelInputForGPUWithSamplingMetadata)
     _builder_cls: Type[ModelInputForGPUBuilder] = ModelInputForGPUBuilder
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.profile = False
+        if self.profile == True:
+            self.input = 0
+            self.steps = 0
+            self.before = 0
+            self.execute = 0
+            self.after = 0
+            self.total = 0
+            self.sample = 0
+            self.start_event = torch.cuda.Event(enable_timing=True)
+            self.end_event = torch.cuda.Event(enable_timing=True)
+
+        #self.model_input = model_input_data
+        #self.builder = builder_data
+
+
     def make_model_input_from_broadcasted_tensor_dict(
         self,
         tensor_dict: Dict[str, Any],
@@ -1586,6 +1604,9 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
 
         If cuda graph is required, this API automatically pads inputs.
         """
+        if self.profile == True:
+            T1 = time.time()
+
         model_input = self._prepare_model_input_tensors(
             seq_group_metadata_list, finished_requests_ids)
         if get_pp_group().is_last_rank:
@@ -1599,10 +1620,16 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             sampling_metadata = None
         is_prompt = (seq_group_metadata_list[0].is_prompt
                      if seq_group_metadata_list else None)
-        return dataclasses.replace(model_input,
+        res = dataclasses.replace(model_input,
                                    sampling_metadata=sampling_metadata,
                                    is_prompt=is_prompt,
                                    virtual_engine=virtual_engine)
+
+        if self.profile == True:
+            T2 = time.time()
+            self.input += T2 - T1
+
+        return res 
 
     @torch.inference_mode()
     @dump_input_when_exception(exclude_args=[0], exclude_kwargs=["self"])
@@ -1615,6 +1642,10 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
     ) -> Optional[Union[List[SamplerOutput], IntermediateTensors]]:
         if num_steps > 1:
             raise ValueError("num_steps > 1 is not supported in ModelRunner")
+
+        if self.profile == True:
+            self.steps += 1
+            T1 = time.time()
 
         #print(f"execute_model now!!!", file=sys.stderr)
         if self.lora_config:
@@ -1658,6 +1689,11 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             model_forward_end = torch.cuda.Event(enable_timing=True)
             model_forward_start.record()
 
+        if self.profile == True:
+            T2 = time.time()
+
+        #self.start_event.record()
+        
         hidden_or_intermediate_states = model_executable(
             input_ids=model_input.input_tokens,
             positions=model_input.input_positions,
@@ -1691,6 +1727,10 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                     torch.tensor(model_forward_time + orig_model_forward_time))
             return hidden_or_intermediate_states
 
+        #self.end_event.record()
+        #torch.cuda.synchronize()
+        if self.profile == True:
+            T3 = time.time()
 
         logits = self.model.compute_logits(hidden_or_intermediate_states,
                                            model_input.sampling_metadata)
@@ -1701,6 +1741,11 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             model_input.async_callback()
 
         
+        if self.profile == True:
+            T4 = time.time()
+
+        #import pdb 
+        #pdb.set_trace() 
         #check_data=model_input.sampling_metadata.seq_groups[0].seq_data[0] 
         #print(f"Sampling logits:{logits.shape}, sampling_metadata prompts-{len(check_data.prompt_token_ids)}, output-{len(check_data.output_token_ids)}\n")
         # Sample the next token.
@@ -1739,6 +1784,24 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                 hidden_states = hidden_or_intermediate_states
 
             output.hidden_states = hidden_states
+
+        if self.profile == True:
+            T5 = time.time()
+
+            self.before += T2 - T1
+            #self.execute += self.start_event.elapsed_time(self.end_event)
+            self.execute += T3 - T2
+            self.after += T4 - T3
+            self.sample += T5 - T4
+            self.total += T5 - T1
+            if self.steps % 512 == 0:
+                print(f"self.before:{self.before}, self.execute:{self.execute}, self.after:{self.after}, self.sample:{self.sample}, self.input:{self.input}, self.total:{self.total}", file=sys.stderr)
+                self.before = 0
+                self.execute = 0
+                self.after = 0
+                self.sample = 0
+                self.input = 0
+                self.total = 0
 
         return [output]
 

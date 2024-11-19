@@ -61,7 +61,9 @@ static void freePhysicalMemory(void* ptr, size_t size) {
   CUdeviceptr dptr = (CUdeviceptr)ptr;
   CUresult res = cuMemUnmap(dptr, size); 
   if(res != CUDA_SUCCESS) {
-    fprintf(stderr, "cuMemUnmap failed when deallocating ptr %p and size %lx\n", ptr, size);
+    const char* errorStr;
+    cuGetErrorString(res, &errorStr);
+    fprintf(stderr, "cuMemUnmap failed when deallocating ptr %p and size %lx with error %s\n", ptr, size, errorStr);
   } 
 }
 
@@ -132,10 +134,15 @@ int64_t kvCacheRegion::allocCacheBlocks(uint64_t blocks, uint64_t * used_pages, 
       
       // Touch this page in order to initiate page allocation
       // This is important to avoid the memory allocation overhead on the critical path. 
-      if(toallocPages == 1) {
+      //if(toallocPages == 1) {
+      for(int i = 0; i < toallocPages; i++) {
         int64_t h_data = 0;
-        //cuMemcpyHtoD(reinterpret_cast<CUdeviceptr>(this->nextUnmapedAddr), &h_data, sizeof(int64_t));
-        cudaMemcpyAsync(reinterpret_cast<void *>(this->nextUnmapedAddr), &h_data, sizeof(int64_t), cudaMemcpyHostToDevice, stream);
+        int64_t offset = this->page_size * i;
+        // Using different APIs for asynchronous memory allocations. 
+        if(stream == nullptr) 
+          cuMemcpyHtoD(reinterpret_cast<CUdeviceptr>(this->nextUnmapedAddr + offset), &h_data, sizeof(int64_t));
+        else
+          cudaMemcpyAsync(reinterpret_cast<void *>(this->nextUnmapedAddr + offset), &h_data, sizeof(int64_t), cudaMemcpyHostToDevice, stream);
       }
 
       this->nextUnmapedAddr = alignedAddr;
@@ -199,7 +206,9 @@ kvCacheAllocator::kvCacheAllocator(int64_t max_seq_length, int64_t layers_num, i
   CHECK_DRV(cuCtxGetDevice(&dev));
   
   size_t aligned_sz; 
+  //_prop.type = CU_MEM_ALLOCATION_TYPE_MAX;
   _prop.type = CU_MEM_ALLOCATION_TYPE_PINNED;
+  //_prop.type = CU_MEM_ALLOCATION_TYPE_PORTABLE;
   _prop.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
   _prop.location.id = dev;
   _accessDescr.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
@@ -499,7 +508,7 @@ void kvCacheAllocator::updateCacheBlocks(bool is_prefill_phase, std::vector<int6
       pthread_cond_wait(&this->cond_manager, &this->mutex_manager); 
     }
     this->releaseRegions(free_caches);
-    this->allocCacheBlocks(req_cache_blocks, this->stream);
+    this->allocCacheBlocks(req_cache_blocks, nullptr);
 
     pthread_mutex_unlock(&this->mutex_manager); 
   }

@@ -329,13 +329,14 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         sequences are provided."""
         start_time = time.perf_counter()
 
+        #print(f"In prepare_input now", file=sys.stderr)
         inputs = self.prepare_input(execute_model_req)
         if inputs is None:
             return None
 
         model_input, worker_input, kwargs = inputs
         num_steps = worker_input.num_steps
-
+        #print(f"execute worker now", file=sys.stderr)
         self.execute_worker(worker_input)
 
         # If there is no input, we don't need to execute the model.

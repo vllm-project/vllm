@@ -99,6 +99,9 @@ class CacheEngineDAttn:
         self.to_alloc_blocks = {}
         self.to_free_caches = set()
 
+        # DEBUG
+        self.steps = 0
+
         # Get attention backend.
         self.attn_backend = get_attn_backend(
             model_config.get_num_attention_heads(parallel_config),
@@ -237,7 +240,11 @@ class CacheEngineDAttn:
         self.to_free_caches.clear()
 
         #print(f"CACHE_ENGINE: update_cache_blocks!!!", file=sys.stderr)
-        self.device_cache_allocator.update_cache_blocks(is_prefill_phase, to_free_caches, to_alloc_blocks)
+        if len(to_free_caches) > 0 or len(to_alloc_blocks) > 0: 
+            self.steps += 1 
+            if self.steps < 2: 
+                self.device_cache_allocator.update_cache_blocks(is_prefill_phase, to_free_caches, to_alloc_blocks)
+                print(f"CACHE_ENGINE: update_cache_blocks self.step-{self.steps}, len(to_free_caches):{len(to_free_caches)}, len(to_alloc_blocks):{len(to_alloc_blocks)}!!!", file=sys.stderr)
         
 
 def _get_dtype_size(dtype: torch.dtype) -> int:

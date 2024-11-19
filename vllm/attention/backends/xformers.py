@@ -466,7 +466,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         assert self.num_heads % self.num_kv_heads == 0
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
         self.profile = os.getenv("PROFILE", "False") == "True"
-        self.profile = True
+        self.profile = False
          
         if self.profile == True:
             self.step = 0
@@ -474,6 +474,8 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
             self.attent_time = 0.0
             self.schedule_time = 0.0
             self.stop_time = 0.0
+            self.start = torch.cuda.Event(enable_timing=True)
+            self.stop = torch.cuda.Event(enable_timing=True)
 
         #print(f"XFormersImplXFormersImplXFormersImplXFormersImplXFormersImpl")
         suppored_head_sizes = PagedAttention.get_supported_head_sizes()
@@ -563,6 +565,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
 
         if self.profile == True:
             self.step += 1
+            self.start.record()
             start_time = time.time()
             if self.stop_time != 0:
                 self.schedule_time += (start_time - self.stop_time)
@@ -573,6 +576,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         # seqlen datastructures we utilize
 
         if (attn_type != AttentionType.ENCODER and kv_cache is not None):
+            
             if attn_metadata.use_dattn != True:
                 # KV-cache during decoder-self- or
                 # encoder-decoder-cross-attention, but not
@@ -630,7 +634,10 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                                                           self.kv_cache_dtype)  
 
             if self.profile == True:
-                self.cache_time += time.time() - start_time
+                self.stop.record()
+                torch.cuda.synchronize()
+                self.cache_time += self.start.elapsed_time(self.stop)
+                #self.cache_time += time.time() - start_time
               
 
         if attn_type != AttentionType.ENCODER:
@@ -708,6 +715,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         if decode_meta := attn_metadata.decode_metadata:
             if self.profile == True:
                 start_time = time.time()
+                self.start.record()
                         
             if not attn_metadata.use_dattn: 
                 (
@@ -759,7 +767,10 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 )
 
             if self.profile == True:
-                self.attent_time += time.time() - start_time
+                self.stop.record()
+                torch.cuda.synchronize()
+                self.attent_time += self.start.elapsed_time(self.stop)
+                #self.attent_time += time.time() - start_time
             
         if self.profile == True:
             #print(f"STEP:{self.step}, lay_index:{layer_idx}, cache time:{self.cache_time}, attent time: {self.attent_time}, loop time: {self.schedule_time}", file=sys.stderr) 

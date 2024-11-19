@@ -134,6 +134,10 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         seq = seq_group.get_seqs(status=SequenceStatus.WAITING)[0]
         
         need_blocks = self._get_seq_num_required_blocks(seq)
+        
+        # DEBUGGING DEBUG
+        need_blocks = 128
+
         cache_id, to_allocate_num, allocated_num = self._allocate_cache(need_blocks)
         #print(f"cache_id: {cache_id}, need_blocks:{need_blocks}, to_allocate_num:{to_allocate_num}, allocated_num:{allocated_num}") 
         seq.cache_id = cache_id
@@ -181,6 +185,8 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
             # Remove this item from the free_kv_caches
             del self.free_kv_caches[cache_id]
         else:
+            if self.num_free_gpu_blocks < need_blocks: 
+                print(f"self.num_free_gpu_blocks:{self.num_free_gpu_blocks}, need_blocks:{need_blocks}")
             assert self.num_free_gpu_blocks >= need_blocks
             cache_id = self.gpu_allocator.allocate()
             

@@ -1180,7 +1180,7 @@ class LLMEngine:
                 "Pipeline parallelism is only supported through AsyncLLMEngine "
                 "as performance will be severely degraded otherwise.")
 
-        print(f"step-{self.step_index}", file=sys.stderr)
+        #print(f"step-{self.step_index}", file=sys.stderr)
         # Update the step index
         self.step_index += 1
 

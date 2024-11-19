@@ -97,6 +97,7 @@ class OPTAttention(nn.Module):
                               cache_config=cache_config,
                               quant_config=quant_config)
         self.profile = os.getenv("PROFILE", "False") == "True"
+        self.profile = True
         if self.profile == True:
             self.attn_time = 0
             self.attn_prev = 0
@@ -282,11 +283,11 @@ class OPTDecoder(nn.Module):
             for _ in range(config.num_hidden_layers)
         ])
         self.profile = os.getenv("PROFILE", "False") == "True"
+        self.profile = False
         if self.profile == True:
             self.embed = 0
             self.layer = 0
             self.output = 0
-            self.outside = 0
             self.step = 0
             self.last = 0
 
@@ -301,6 +302,11 @@ class OPTDecoder(nn.Module):
         attn_metadata: AttentionMetadata,
         inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+
+        if self.profile == True:
+            self.step += 1
+            T1 = time.time()
+
         if inputs_embeds is None:
             inputs_embeds = self.get_input_embeddings(input_ids)
         pos_embeds = self.embed_positions(positions)
@@ -308,15 +314,34 @@ class OPTDecoder(nn.Module):
             inputs_embeds, _ = self.project_in(inputs_embeds)
         hidden_states = inputs_embeds + pos_embeds
 
+        if self.profile == True:
+            T2 = time.time()
+
+
         for i in range(len(self.layers)):
             layer = self.layers[i]
             
             hidden_states = layer(hidden_states, kv_caches[i], attn_metadata)
 
+        if self.profile == True:
+            T3 = time.time()
+
         if self.final_layer_norm is not None:
             hidden_states = self.final_layer_norm(hidden_states)
         if self.project_out is not None:
             hidden_states, _ = self.project_out(hidden_states)
+        
+        if self.profile == True:
+            T4 = time.time()
+            self.embed += T2 - T1
+            self.layer += T3 - T2
+            self.output += T4 - T3
+            if self.step % 512 == 0:
+                print(f"step-{self.step}, embed:{self.embed}, layers:{self.layer}, output:{self.output}")
+                self.embed = 0
+                self.layer = 0
+                self.output = 0
+
         return hidden_states
 
 

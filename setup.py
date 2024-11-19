@@ -467,12 +467,18 @@ def get_requirements() -> List[str]:
     return requirements
 
 
+if "TARGET_MODULES" not in os.environ or not os.environ["TARGET_MODULES"]:
+    default_modules = "_core_C,_dattn_C,_C"
+    target_modules=default_modules.split(",")
+else:
+    target_modules = os.getenv("TARGET_MODULES", "").split(",")
+
 ext_modules = []
 
-if _build_core_ext():
+if _build_core_ext() and  "_core_C" in target_modules:
     ext_modules.append(CMakeExtension(name="vllm._core_C"))
 
-if _is_cuda():
+if _is_cuda() and  "_dattn_C" in target_modules:
     ext_modules.append(CMakeExtension(name="vllm._dattn_C"))
 
 #if _is_cuda() or _is_hip():
@@ -481,7 +487,7 @@ if _is_cuda():
 if _is_hip():
     ext_modules.append(CMakeExtension(name="vllm._rocm_C"))
 
-if _build_custom_ops():
+if _build_custom_ops() and  "_C" in target_modules:
     ext_modules.append(CMakeExtension(name="vllm._C"))
 
 package_data = {

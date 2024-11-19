@@ -230,7 +230,6 @@ class Worker(LocalOrDistributedWorkerBase):
         print(f"in the end of profiling run", file=sys.stderr)
         # Calculate the number of blocks that can be allocated with the
         # profiled peak memory.
-        torch.cuda.synchronize()
         free_gpu_memory, total_gpu_memory = torch.cuda.mem_get_info()
         # NOTE(woosuk): Here we assume that the other processes using the same
         # GPU did not change their memory usage during the profiling.
