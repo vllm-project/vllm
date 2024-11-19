@@ -52,7 +52,8 @@ def test_fusion_rmsnorm_quant(dtype, hidden_size, num_tokens, eps):
         pytest.skip("Only test eps=1e-5 for now")
 
     # Reshape pass is needed for the fusion pass to work
-    config = CompilationConfig.PassConfig(enable_fusion=True, enable_reshape=True)
+    config = CompilationConfig.PassConfig(enable_fusion=True,
+                                          enable_reshape=True)
     reshape_pass = RedundantReshapesPass(config)
     fusion_pass = FusionPass.instance(config)
 

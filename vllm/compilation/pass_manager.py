@@ -6,7 +6,7 @@ from torch._inductor.codecache import BypassFxGraphCache
 from vllm.config import CompilationConfig
 from vllm.logger import init_logger
 
-from .functionalization import FixFunctionalizationPass
+from .fix_functionalization import FixFunctionalizationPass
 from .fusion import FusionPass
 from .inductor_pass import InductorPass, InductorPassType
 from .reshapes import RedundantReshapesPass
@@ -19,7 +19,7 @@ class PostGradPassManager:
     The pass manager for post-grad passes.
     It handles configuration, adding custom passes, and running passes.
     It also supports pickling, which is used by the Inductor code cache.
-    TODO in torch==2.6, use CustomGraphPass
+    TODO(torch==2.6), use CustomGraphPass
     (torch._inductor.custom_graph_pass.CustomGraphPass)
 
     The order of the post-grad post-passes is:
@@ -59,7 +59,7 @@ class PostGradPassManager:
         Pickling occurs because the pass manager is set as the value of
         `config["post_grad_custom_post_pass"]` in the Inductor config.
 
-        TODO in torch==2.6, use the `uuid` method in CustomGraphPass instead.
+        TODO(torch==2.6), use the `uuid` method in CustomGraphPass instead.
         """
         state = {"pass_config": self.pass_config}
         passes_state = []
@@ -67,8 +67,14 @@ class PostGradPassManager:
             if isinstance(pass_, InductorPass):
                 passes_state.append(pass_.uuid())
             else:
+                # Custom passes must inherit from InductorPass to avoid false
+                # cache hits and stale results. Always recompile if there are
+                # custom passes that don't inherit from InductorPass.
                 logger.warning("Custom pass does not inherit from "
                                "InductorPass. Bypassing Inductor code cache.")
+
+                # This exception will cause the compilation to bypass the
+                # Inductor code cache and force a recompilation.
                 raise BypassFxGraphCache(
                     "Custom pass should inherit InductorPass")
         passes_state.append(self.fix_functionalization.uuid())

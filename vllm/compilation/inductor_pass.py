@@ -42,7 +42,7 @@ def get_hash_for_files(paths: Tuple[str, ...], extra: str = "") -> bytes:
 class InductorPass(ABC):
     """
     General custom inductor pass interface.
-    TODO use torch._inductor.custom_graph_pass.CustomGraphPass in torch==2.6
+    TODO(torch==2.6) use torch._inductor.custom_graph_pass.CustomGraphPass
     """
 
     @abstractmethod
