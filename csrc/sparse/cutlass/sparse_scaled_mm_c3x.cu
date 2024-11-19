@@ -57,24 +57,22 @@ void cutlass_gemm_sm90_fp8_dispatch(torch::Tensor& out, torch::Tensor const& a,
   uint32_t const mp2 =
       std::max(static_cast<uint32_t>(64), next_pow_2(n));  // next power of 2
 
-  // if (mp2 <= 64) {
-  //   // n in [1, 64]
-  //   return cutlass_sparse_gemm_caller<Cutlass3xGemmM64>(
-  //       out, a, e, b, std::forward<EpilogueArgs>(args)...);
-  // } else if (mp2 <= 128) {
-  if (mp2 <= 128) {
+  if (mp2 <= 64) {
+    // n in [1, 64]
+    return cutlass_sparse_gemm_caller<Cutlass3xGemmM64>(
+        out, a, e, b, std::forward<EpilogueArgs>(args)...);
+  } else if (mp2 <= 128) {
     // n in (64, 128]
     return cutlass_sparse_gemm_caller<Cutlass3xGemmM128>(
         out, a, e, b, std::forward<EpilogueArgs>(args)...);
-  // } else if (mp2 <= 256) {
-  } else {
+  } else if (mp2 <= 256) {
     // n in (128, 256]
     return cutlass_sparse_gemm_caller<Cutlass3xGemmM256>(
         out, a, e, b, std::forward<EpilogueArgs>(args)...);
-  // } else {
-  //   // n in (256, inf)
-  //   return cutlass_sparse_gemm_caller<Cutlass3xGemmM512>(
-  //       out, a, e, b, std::forward<EpilogueArgs>(args)...);
+  } else {
+    // n in (256, inf)
+    return cutlass_sparse_gemm_caller<Cutlass3xGemmM512>(
+        out, a, e, b, std::forward<EpilogueArgs>(args)...);
   }
 }
 

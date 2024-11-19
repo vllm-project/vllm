@@ -101,8 +101,8 @@ def bench_fp8(dtype: torch.dtype, m: int, k: int, n: int, label: str,
     scale_b = torch.tensor(1.0, device="cuda", dtype=torch.float32)
     bias = torch.zeros((n, ), device="cuda", dtype=torch.bfloat16)
 
-    out = ops.cutlass_scaled_sparse_mm(b_compressed, e, aT, scale_b, scale_a, torch.float16)
-    out_ref = ops.cutlass_scaled_mm(a, bT, scale_a, scale_b, torch.float16)
+    out = ops.cutlass_scaled_sparse_mm(b_compressed, e, aT, scale_b, scale_a, torch.bfloat16)
+    out_ref = ops.cutlass_scaled_mm(a, bT, scale_a, scale_b, torch.bfloat16)
 
     if not torch.allclose(out.t(), out_ref):
         print("Incorrect result")
