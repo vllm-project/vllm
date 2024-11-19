@@ -2094,9 +2094,10 @@ class CompilationConfig(BaseModel):
         - use_cudagraph: whether to use cudagraph inside compilation.
             - False: cudagraph inside compilation is not used.
             - True: cudagraph inside compilation is used. It requires
-                that all input buffers have fixed addresses.
-            Note that this is orthogonal to the cudagraph capture out
-            side of compilation.
+                that all input buffers have fixed addresses, and all
+                splitting ops write their outputs to input buffers.
+            Note that this is orthogonal to the cudagraph capture logic
+            outside of compilation.
             TODO: move outside cudagraph logic into compilation.
             torch.compile will handle cudagraph capture logic in the future.
         - cudagraph_capture_sizes: sizes to capture cudagraph.
