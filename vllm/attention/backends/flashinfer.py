@@ -757,10 +757,8 @@ class FlashInferImpl(AttentionImpl):
         if alibi_slopes is not None:
             alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
         self.alibi_slopes = alibi_slopes
-        if sliding_window is None:
-            self.sliding_window = (-1, -1)
-        else:
-            self.sliding_window = (sliding_window - 1, 0)
+        self.sliding_window = ((sliding_window - 1,
+                                0) if sliding_window is not None else (-1, -1))
         self.kv_cache_dtype = kv_cache_dtype
         self.logits_soft_cap = logits_soft_cap
 
@@ -866,9 +864,7 @@ def unified_flash_infer(
     assert query.shape[0] == num_prefill_tokens
     assert decode_query.shape[0] == num_decode_tokens
 
-    window_left = -1
-    if window_size is not None:
-        window_left = window_size[0]
+    window_left = window_size[0] if window_size is not None else -1
 
     prefill_output: Optional[torch.Tensor] = None
     decode_output: Optional[torch.Tensor] = None
