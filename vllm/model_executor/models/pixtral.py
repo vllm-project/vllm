@@ -331,6 +331,7 @@ class VisionEncoderArgs:
     num_attention_heads: int
     rope_theta: float  # for rope-2D
     image_token_id: int
+    adapter_bias: bool = True
 
 
 def _reshape_for_broadcast(freqs_cis: torch.Tensor,
@@ -595,10 +596,10 @@ class VisionLanguageAdapter(nn.Module):
         self.w_in = nn.Linear(
             args.hidden_size,
             dim,
-            bias=True,
+            bias=args.adapter_bias,
         )
         self.gelu = nn.GELU()
-        self.w_out = nn.Linear(dim, dim, bias=True)
+        self.w_out = nn.Linear(dim, dim, bias=args.adapter_bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.w_out(self.gelu(self.w_in(x)))
