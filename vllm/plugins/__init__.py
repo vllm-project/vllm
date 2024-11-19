@@ -9,12 +9,19 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# make sure one process only loads plugins once
+plugins_loaded = False
+
 
 def load_general_plugins():
     """WARNING: plugins can be loaded for multiple times in different
     processes. They should be designed in a way that they can be loaded
     multiple times without causing issues.
     """
+    global plugins_loaded
+    if plugins_loaded:
+        return
+    plugins_loaded = True
     import sys
     if sys.version_info < (3, 10):
         from importlib_metadata import entry_points
