@@ -39,7 +39,6 @@ from transformers.models.qwen2_vl.image_processing_qwen2_vl import (
     make_batched_images, make_batched_videos, smart_resize)
 
 from vllm.attention import AttentionMetadata
-from vllm.attention.selector import _Backend
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group, parallel_state
 from vllm.distributed import utils as dist_utils
@@ -65,6 +64,7 @@ from vllm.multimodal.image import cached_get_image_processor
 from vllm.multimodal.inputs import (MultiModalData, MultiModalDataDict,
                                     MultiModalKwargs)
 from vllm.multimodal.utils import cached_get_tokenizer
+from vllm.platforms import _Backend
 from vllm.sequence import IntermediateTensors, PoolerOutput, SequenceData
 from vllm.transformers_utils.config import uses_mrope
 from vllm.transformers_utils.processor import cached_get_processor
