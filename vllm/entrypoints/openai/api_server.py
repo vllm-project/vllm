@@ -45,6 +45,7 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               EmbeddingRequest,
                                               EmbeddingResponse, ErrorResponse,
                                               LoadLoraAdapterRequest,
+                                              ScoreRequest, ScoreResponse,
                                               TokenizeRequest,
                                               TokenizeResponse,
                                               UnloadLoraAdapterRequest)
@@ -53,6 +54,7 @@ from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
 from vllm.entrypoints.openai.serving_engine import BaseModelPath, OpenAIServing
+from vllm.entrypoints.openai.serving_score import OpenAIServingScores
 from vllm.entrypoints.openai.serving_tokenization import (
     OpenAIServingTokenization)
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
@@ -280,6 +282,10 @@ def embedding(request: Request) -> Optional[OpenAIServingEmbedding]:
     return request.app.state.openai_serving_embedding
 
 
+def score(request: Request) -> Optional[OpenAIServingScores]:
+    return request.app.state.openai_serving_scores
+
+
 def tokenization(request: Request) -> OpenAIServingTokenization:
     return request.app.state.openai_serving_tokenization
 
@@ -386,6 +392,23 @@ async def create_embedding(request: EmbeddingRequest, raw_request: Request):
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.code)
     elif isinstance(generator, EmbeddingResponse):
+        return JSONResponse(content=generator.model_dump())
+
+    assert_never(generator)
+
+
+@router.post("/v1/score")
+async def create_score(request: ScoreRequest, raw_request: Request):
+    handler = score(raw_request)
+    if handler is None:
+        return base(raw_request).create_error_response(
+            message="The model does not support Score API")
+
+    generator = await handler.create_score(request, raw_request)
+    if isinstance(generator, ErrorResponse):
+        return JSONResponse(content=generator.model_dump(),
+                            status_code=generator.code)
+    elif isinstance(generator, ScoreResponse):
         return JSONResponse(content=generator.model_dump())
 
     assert_never(generator)
@@ -564,6 +587,12 @@ def init_app_state(
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
+    ) if model_config.task == "embedding" else None
+    state.openai_serving_scores = OpenAIServingScores(
+        engine_client,
+        model_config,
+        base_model_paths,
+        request_logger=request_logger
     ) if model_config.task == "embedding" else None
     state.openai_serving_tokenization = OpenAIServingTokenization(
         engine_client,

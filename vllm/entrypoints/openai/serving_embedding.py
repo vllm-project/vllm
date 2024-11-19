@@ -1,20 +1,16 @@
 import asyncio
 import base64
 import time
-from typing import (Annotated, Any, AsyncGenerator, Dict, Final, List, Literal,
-                    Optional, Sequence, Tuple, Union, cast)
+from typing import (AsyncGenerator, Final, List, Literal, Optional, Union, 
+                    cast)
 
 import numpy as np
 from fastapi import Request
-from pydantic import Field
 from typing_extensions import assert_never
 
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.chat_utils import (ChatCompletionMessageParam,
-                                         ChatTemplateContentFormatOption,
-                                         ConversationMessage,
-                                         parse_chat_messages_futures)
+from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (EmbeddingChatRequest,
                                               EmbeddingRequest,
@@ -22,13 +18,9 @@ from vllm.entrypoints.openai.protocol import (EmbeddingChatRequest,
                                               EmbeddingResponseData,
                                               ErrorResponse, UsageInfo)
 from vllm.entrypoints.openai.serving_engine import (BaseModelPath,
-                                                    OpenAIServing,
-                                                    RequestPrompt)
-from vllm.inputs.data import TokensPrompt
+                                                    OpenAIServing)
 from vllm.logger import init_logger
 from vllm.outputs import EmbeddingOutput, EmbeddingRequestOutput
-from vllm.transformers_utils.tokenizer import AnyTokenizer
-from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
 from vllm.utils import merge_async_iterators, random_uuid
 
 logger = init_logger(__name__)
@@ -146,21 +138,6 @@ class OpenAIServingEmbedding(OpenAIServing):
                 raise NotImplementedError("Prompt adapter is not supported "
                                           "for embedding models")
 
-            if self.model_config.is_cross_encoder:
-                if isinstance(request, EmbeddingChatRequest):
-                    (
-                        _,
-                        request_prompts,
-                        engine_prompts,
-                    ) = await self._preprocess_cross_encoding(
-                        tokenizer,
-                        request.messages,
-                        truncate_prompt_tokens=truncate_prompt_tokens,
-                    )
-                else:
-                    return self.create_error_response(
-                        "Cross encoding requests must "
-                        "use the chat embedding API")
             else:
                 if isinstance(request, EmbeddingChatRequest):
                     (
@@ -253,44 +230,3 @@ class OpenAIServingEmbedding(OpenAIServing):
             return self.create_error_response(str(e))
 
         return response
-
-    async def _preprocess_cross_encoding(
-        self,
-        tokenizer: AnyTokenizer,
-        messages: List[ChatCompletionMessageParam],
-        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=3)]] = None,
-    ) -> Tuple[List[ConversationMessage], Sequence[RequestPrompt],
-               List[TokensPrompt]]:
-
-        conversation, mm_data_future = parse_chat_messages_futures(
-            messages, self.model_config, tokenizer, "string")
-        await mm_data_future
-
-        if len(conversation) != 2:
-            raise ValueError("For cross encoding two inputs must be provided")
-        prompts = []
-        for msg in conversation:
-            content = msg["content"]
-            assert type(msg["content"]) is str
-            prompts.append(content)
-
-        if isinstance(tokenizer, MistralTokenizer):
-            raise ValueError(
-                "MistralTokenizer not supported for cross-encoding")
-
-        request_prompt = f"{prompts[0]}{tokenizer.sep_token}{prompts[1]}"
-
-        tokenization_kwargs: Dict[str, Any] = {}
-        if truncate_prompt_tokens is not None:
-            tokenization_kwargs["truncation"] = True
-            tokenization_kwargs["max_length"] = truncate_prompt_tokens
-
-        prompt_inputs = tokenizer(prompts[0],
-                                  text_pair=prompts[1],
-                                  **tokenization_kwargs)
-
-        engine_prompt = TokensPrompt(
-            prompt_token_ids=prompt_inputs["input_ids"],
-            token_type_ids=prompt_inputs.get("token_type_ids"))
-
-        return conversation, [request_prompt], [engine_prompt]

@@ -808,6 +808,29 @@ class EmbeddingChatRequest(OpenAIBaseModel):
 EmbeddingRequest = Union[EmbeddingCompletionRequest, EmbeddingChatRequest]
 
 
+class ScoreRequest(OpenAIBaseModel):
+    # Ordered by official OpenAI API documentation
+    # https://platform.openai.com/docs/api-reference/embeddings
+    model: str
+    text_1: Union[List[str], str]
+    text_2: Union[List[str], str]
+    truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None
+
+    # doc: begin-chat-embedding-pooling-params
+    additional_data: Optional[Any] = None
+    # doc: end-chat-embedding-pooling-params
+
+    priority: int = Field(
+        default=0,
+        description=(
+            "The priority of the request (lower means earlier handling; "
+            "default: 0). Any priority other than 0 will raise an error "
+            "if the served model does not use priority scheduling."))
+
+    def to_pooling_params(self):
+        return PoolingParams(additional_data=self.additional_data)
+
+
 class CompletionLogProbs(OpenAIBaseModel):
     text_offset: List[int] = Field(default_factory=list)
     token_logprobs: List[Optional[float]] = Field(default_factory=list)
@@ -875,6 +898,21 @@ class EmbeddingResponse(OpenAIBaseModel):
     created: int = Field(default_factory=lambda: int(time.time()))
     model: str
     data: List[EmbeddingResponseData]
+    usage: UsageInfo
+
+
+class ScoreResponseData(OpenAIBaseModel):
+    index: int
+    object: str = "score"
+    score: Union[List[float], str]
+
+
+class ScoreResponse(OpenAIBaseModel):
+    id: str = Field(default_factory=lambda: f"embd-{random_uuid()}")
+    object: str = "list"
+    created: int = Field(default_factory=lambda: int(time.time()))
+    model: str
+    data: List[ScoreResponseData]
     usage: UsageInfo
 
 
