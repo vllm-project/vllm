@@ -206,13 +206,17 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # Set CUTLASS_REVISION manually -- its revision detection doesn't work in this case.
   set(CUTLASS_REVISION "v3.5.1" CACHE STRING "CUTLASS revision to use")
 
-  # Use the specified CUTLASS source directory for compilation if CUTLASS_SRC_DIR is provided
-  if (DEFINED ENV{CUTLASS_SRC_DIR})
-    set(CUTLASS_SRC_DIR $ENV{CUTLASS_SRC_DIR})
+  # Use the specified CUTLASS source directory for compilation if VLLM_CUTLASS_SRC_DIR is provided
+  if (DEFINED ENV{VLLM_CUTLASS_SRC_DIR})
+    set(VLLM_CUTLASS_SRC_DIR $ENV{VLLM_CUTLASS_SRC_DIR})
   endif()
 
-  if(CUTLASS_SRC_DIR)
-    FetchContent_Declare(cutlass SOURCE_DIR ${CUTLASS_SRC_DIR})
+  if(VLLM_CUTLASS_SRC_DIR)
+    if(NOT IS_ABSOLUTE VLLM_CUTLASS_SRC_DIR)
+      get_filename_component(VLLM_CUTLASS_SRC_DIR "${VLLM_CUTLASS_SRC_DIR}" ABSOLUTE)
+    endif()
+    message(STATUS "The VLLM_CUTLASS_SRC_DIR is set, using ${VLLM_CUTLASS_SRC_DIR} for compilation")
+    FetchContent_Declare(cutlass SOURCE_DIR ${VLLM_CUTLASS_SRC_DIR})
   else()
     FetchContent_Declare(
         cutlass

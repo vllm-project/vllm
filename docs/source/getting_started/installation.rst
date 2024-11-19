@@ -173,13 +173,13 @@ To build vLLM using an existing PyTorch installation:
 Use the local cutlass for compilation
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 Currently, before starting the build process, vLLM fetches cutlass code from GitHub. However, there may be scenarios where you want to use a local version of cutlass instead.
-To achieve this, you can set the environment variable CUTLASS_SRC_DIR to point to your local cutlass directory.
+To achieve this, you can set the environment variable VLLM_CUTLASS_SRC_DIR to point to your local cutlass directory.
 
 .. code-block:: console
 
     $ git clone https://github.com/vllm-project/vllm.git
     $ cd vllm
-    $ CUTLASS_SRC_DIR=/path/to/cutlass pip install -e .
+    $ VLLM_CUTLASS_SRC_DIR=/path/to/cutlass pip install -e .
 
 
 Troubleshooting
