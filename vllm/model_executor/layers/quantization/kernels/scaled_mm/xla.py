@@ -10,6 +10,9 @@ from vllm.platforms import current_platform
 from .ScaledMMLinearKernel import (ScaledMMLinearKernel,
                                    ScaledMMLinearLayerConfig)
 
+if current_platform.is_tpu():
+    import torch_xla.experimental.xla_quantized_matmul  # noqa: F401
+
 
 class XLAScaledMMLinearKernel(ScaledMMLinearKernel):
 
@@ -36,11 +39,11 @@ class XLAScaledMMLinearKernel(ScaledMMLinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+
         # WEIGHT
         # [out, in] (different than cutlass_scaled_mm)
         weight = getattr(layer, self.w_q_name)
-        replace_parameter(layer, self.w_q_name,
-                          torch.nn.Parameter(weight.data, requires_grad=False))
+        replace_parameter(layer, self.w_q_name, weight.data)
 
         # WEIGHT SCALE
         # XLA kernels support only per-tensor and per-channel.
@@ -54,9 +57,7 @@ class XLAScaledMMLinearKernel(ScaledMMLinearKernel):
 
         # [out_channel,] (different than cutlass_scaled_mm)
         weight_scale = weight_scale.squeeze(-1)
-        replace_parameter(
-            layer, self.w_s_name,
-            torch.nn.Parameter(weight_scale.data, requires_grad=False))
+        replace_parameter(layer, self.w_s_name, weight_scale.data)
 
     def apply_weights(self,
                       layer: torch.nn.Module,
@@ -68,7 +69,6 @@ class XLAScaledMMLinearKernel(ScaledMMLinearKernel):
         assert i_azp_adj is None
         assert bias is None, "Bias is not supported for XLA yet."
 
-        import torch_xla.experimental.xla_quantized_matmul  # noqa: F401
         return torch.ops.xla.quantized_matmul(x,
                                               w_q,
                                               w_s,

@@ -121,7 +121,12 @@ class TPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         # intermediate activations.
         m = xm.get_memory_info(self.device)
         total_memory_size = m["bytes_limit"]
-        profiled = m["peak_bytes_used"]  # Weights + intermediate activations.
+        # NOTE: this should be peak_bytes_used, but currently the
+        # peak_bytes_used after calling model.load_weights is 2GB greater
+        # than the actual size of the weights.
+        # TODO(rob): reset peak_bytes_used or figure out why the
+        # memory utilization is above what we expect.
+        profiled = m["bytes_used"]
 
         # Calculate the TPU KV cache size based on profiling.
         usable_memory_size = int(total_memory_size *

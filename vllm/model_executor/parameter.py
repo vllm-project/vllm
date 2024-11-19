@@ -40,6 +40,14 @@ class BasevLLMParameter(Parameter):
         """
 
         if current_platform.is_tpu():
+            # NOTE: During weight loading, we often do something like:
+            # narrowed_tensor = param.data.narrow(0, offset, len)
+            # narrowed_tensor.copy_(real_weight) expecting narrowed_tensor
+            # and param.data to share the same storage.
+            # However, on TPUs, narrowed_tensor will lazily propagate to base
+            # tensor param.data, leading to the redundant memory usage.
+            # This sometimes causes OOM errors during model loading. To avoid
+            # this, we sync the param tensor after its weight loader is called.
             weight_loader = _make_synced_weight_loader(weight_loader)
 
         self._weight_loader = weight_loader
