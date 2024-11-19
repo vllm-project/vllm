@@ -1,5 +1,7 @@
 from vllm.entrypoints.openai.protocol import EngineMetrics
 from vllm.logger import init_logger
+import vllm.entrypoints.openai.orca_load_report_pb2 as orca_load_report_pb2
+import base64
 from typing import Optional, Tuple, List, Mapping
 import json
 
@@ -47,7 +49,13 @@ def create_orca_header(
     # endpoint-load-metrics: BIN
     # CZqZmZmZmbk/MQAAAAAAAABAQg4KA2ZvbxGamZmZmZm5P0IOCgNiYXIRmpmZmZmZyT8=
     if format == "BIN":
-        logger.warning("orca header format BIN not yet supported")
+        load_proto = orca_load_report_pb2.OrcaLoadReport()
+        for metric_name, value in named_metrics:
+            if isinstance(metric_name,str) and isinstance(value, float):
+                load_proto.named_metrics[metric_name] = value
+        binary_data = load_proto.SerializeToString()
+        base64_encoded_data = base64.b64encode(binary_data).decode("utf-8")
+        header["endpoint-load-metrics"] = f"BIN {base64_encoded_data}"
 
     # output example:
     # endpoint-load-metrics: TEXT named_metrics.kv_cache_utilization=0.4
