@@ -204,7 +204,7 @@ def input_processor_for_llava(ctx: InputContext, inputs: DecoderOnlyInputs):
 
 class LlavaLikeConfig(Protocol):
     vision_config: PretrainedConfig
-    vision_feature_layer: Union[int, List]
+    vision_feature_layer: Union[int, List[int]]
 
 
 def _get_num_hidden_layers(hf_config: LlavaLikeConfig) -> int:
