@@ -939,16 +939,17 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                     end_index = total_size // tp_size * (tp_rank + 1)
                     weight_sub_tensor = weight_tensor[...,
                                                       start_index:end_index]
-                # Weights have fused on disk
+                # Weights have fused on disk. In this case, we assume that the
+                # weight and module use same name.
                 elif any(
                         weight_name.startswith(module)
                         for module in self.maybe_fused_weights_modules):
+                    # special case for fused weights
+                    # get the size of each shard weight tensor
                     total_shard_sizes = next(
                         (sizes for module, sizes in
                          self.maybe_fused_weights_modules.items()
                          if weight_name.startswith(module)))
-                    # special case for fused weights
-                    # get the size of each shard weight tensor
                     total_size = weight_tensor.size(0)
                     assert total_size == sum(total_shard_sizes)
                     # get the start/end index of each shard weight tensor
@@ -1025,11 +1026,14 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             # static variable in the model implementation.
             if isinstance(module, (ReplicatedLinear, )):
                 self.unsharded_weights_modules.append(name)
-            # In TP, these weights are partitioned along the column
-            # dimension (dim=-1)
+            # `QKVParallelLinear` and `MergedColumnParallelLinear` might have
+            # fused weights on disk. We need to use the output sizes of these
+            # modules to shard the weights correctly.
             elif isinstance(module,
                             (QKVParallelLinear, MergedColumnParallelLinear)):
                 self.maybe_fused_weights_modules[name] = module.output_sizes
+            # In TP, these weights are partitioned along the column
+            # dimension (dim=-1)
             elif isinstance(module, (RowParallelLinear, )):
                 self.column_sharded_weights_modules.append(name)
 
