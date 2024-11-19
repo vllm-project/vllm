@@ -2174,8 +2174,14 @@ class CompilationConfig(BaseModel):
     enabled_custom_ops: Counter[str] = PrivateAttr
     disabled_custom_ops: Counter[str] = PrivateAttr
 
+    @classmethod
+    def from_cli(cls, cli_value: str) -> "CompilationConfig":
+        """Parse the CLI value for the compilation config."""
+        if cli_value in ["0", "1", "2", "3"]:
+            return cls(level=int(cli_value))
+        return CompilationConfig.model_validate_json(cli_value)
+
     def model_post_init(self, __context: Any) -> None:
-        self.level = envs.VLLM_TORCH_COMPILE_LEVEL
 
         count_none = self.custom_ops.count("none")
         count_all = self.custom_ops.count("all")
@@ -2248,26 +2254,6 @@ class CompilationConfig(BaseModel):
                 "inductor_compile_sizes should not be None when "
                 "inductor_specialize_for_cudagraph_no_more_than is None")
             self.compile_sizes = self.inductor_compile_sizes
-
-    @staticmethod
-    def select_and_init_config() -> "CompilationConfig":
-        """The order of selecting config is:
-        1. Use the config specified in environment variable.
-        2. Use the config specified in plugins.
-        3. Use the default config.
-        """
-        config_path = envs.VLLM_TORCH_COMPILE_CONFIG
-        if config_path is not None:
-            with open(config_path) as json_file:
-                config = CompilationConfig.model_validate_json(
-                    json_file.read())
-        else:
-            from vllm.plugins import get_compilation_config
-            predefined_config = get_compilation_config()
-            config = predefined_config if predefined_config is not None else (
-                CompilationConfig())
-
-        return config
 
 
 @dataclass
@@ -2354,8 +2340,19 @@ class VllmConfig:
                 self.model_config, self.load_config)
 
         if self.compilation_config is None:
-            self.compilation_config = CompilationConfig.select_and_init_config(
-            )
+            self.compilation_config = CompilationConfig()
+        if envs.VLLM_USE_V1:
+            # NOTE(woosuk): Currently, we use inductor because the piecewise
+            # CUDA graphs do not work properly with the custom CUDA kernels.
+            # FIXME(woosuk): Disable inductor to reduce the compilation time
+            # and avoid any potential issues with the inductor.
+            self.compilation_config.custom_ops = ["none"]
+            self.compilation_config.use_cudagraph = True
+            self.compilation_config.non_cudagraph_ops = [
+                "vllm.unified_v1_flash_attention"
+            ]
+            self.compilation_config.use_inductor = True
+            self.compilation_config.enable_fusion = False
 
         current_platform.check_and_update_config(self)
 
