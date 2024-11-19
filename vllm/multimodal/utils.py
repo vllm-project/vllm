@@ -419,6 +419,9 @@ def resolve_visual_encoder_outputs(
     # Get the hidden states corresponding to the layer indices.
     # Negative values are relative to the full visual encoder,
     # so offset them depending on how many layers were loaded.
+    # NOTE: this assumes that encoder_outputs contains a list
+    # of hidden states in the same order in the same order as the
+    # encoder layers that produced them.
     offset = max_possible_layers - len(encoder_outputs)
     hs_pool = [
         encoder_outputs[layer_idx]
