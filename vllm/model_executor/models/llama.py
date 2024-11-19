@@ -541,7 +541,6 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             pooling_type=PoolingType.STEP,
             normalize=False,
             softmax=False)
-        self.post_init_bnb_attrs()
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)
