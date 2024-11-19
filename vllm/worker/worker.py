@@ -1,6 +1,7 @@
 """A GPU worker class."""
 import gc
 import os
+import time
 from typing import Dict, List, Optional, Set, Tuple, Type, Union
 
 import torch
@@ -189,6 +190,7 @@ class Worker(LocalOrDistributedWorkerBase):
         torch.cuda.reset_peak_memory_stats()
 
         free_memory_pre_profile, total_gpu_memory = torch.cuda.mem_get_info()
+        start_time = time.time()
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
@@ -229,6 +231,9 @@ class Worker(LocalOrDistributedWorkerBase):
         num_gpu_blocks = max(num_gpu_blocks, 0)
         num_cpu_blocks = max(num_cpu_blocks, 0)
 
+        end_time = time.time()
+        logger.info("Memory profiling took %.2f seconds",
+                    end_time - start_time)
         logger.info(
             "Memory profiling results: total_gpu_memory=%.2fGiB"
             " initial_memory_usage=%.2fGiB peak_torch_memory=%.2fGiB"
