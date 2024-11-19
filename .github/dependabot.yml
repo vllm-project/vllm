@@ -15,6 +15,8 @@ updates:
     allow:
       - dependency-type: "all"
     ignore:
+      - dependency-name: "*"
+        update-types: ["version-update:semver-patch"]
       - dependency-name: "torch"
       - dependency-name: "torchvision"
       - dependency-name: "xformers"
@@ -24,9 +26,6 @@ updates:
       - dependency-name: "ray[adag]"
       - dependency-name: "lm-eval"
     groups:
-      patch-update:
-        applies-to: version-updates
-        update-types: ["patch"]
       minor-update:
         applies-to: version-updates
         update-types: ["minor"]

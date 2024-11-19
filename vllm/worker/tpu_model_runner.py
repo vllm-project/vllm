@@ -140,7 +140,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             model = get_model(vllm_config=self.vllm_config)
         model = model.eval()
         xm.wait_device_ops()
-        self.model = ModelWrapper(model)
+        self.model = ModelWrapper(model, self.vllm_config)
 
     def get_model(self) -> nn.Module:
         return self.model
@@ -672,13 +672,15 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
 
 class ModelWrapper(TorchCompileWrapperWithCustomDispatcher):
 
-    def __init__(self, model: nn.Module):
+    def __init__(self, model: nn.Module, vllm_config: VllmConfig):
         self.model = model
         compiled_callable = torch.compile(self.forward,
                                           backend="openxla",
                                           fullgraph=True,
                                           dynamic=False)
-        super().__init__(compiled_callable)
+        super().__init__(
+            compiled_callable,
+            compilation_level=vllm_config.compilation_config.level)
 
     def __call__(self, *args, is_prompt: bool, **kwargs):
         if len(self.compiled_codes) < 3 or not self.use_custom_dispatcher:

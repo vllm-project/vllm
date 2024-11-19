@@ -19,8 +19,7 @@ from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.attention.backends.abstract import AttentionState
 from vllm.attention.backends.utils import CommonAttentionState
 from vllm.compilation.compile_context import set_compile_context
-from vllm.compilation.levels import CompilationLevel
-from vllm.config import VllmConfig
+from vllm.config import CompilationLevel, VllmConfig
 from vllm.core.scheduler import SchedulerOutputs
 from vllm.distributed import get_pp_group
 from vllm.distributed.parallel_state import graph_capture
@@ -700,6 +699,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
                         spatial_merge_size=hf_config.vision_config.
                         spatial_merge_size,
                         context_len=inter_data.context_lens[seq_idx],
+                        seq_len=inter_data.seq_lens[seq_idx],
                     )
 
                 seq_data.mrope_position_delta = mrope_position_delta
@@ -1141,10 +1141,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     "provided. Defaulting to scaling factors of 1.0. "
                     "This may lead to less accurate results!")
 
-        if envs.VLLM_TORCH_COMPILE_LEVEL == CompilationLevel.DYNAMO_AS_IS \
-            and supports_dynamo():
-            from vllm.plugins import get_torch_compile_backend
-            backend = get_torch_compile_backend() or "eager"
+        if self.vllm_config.compilation_config.level ==\
+            CompilationLevel.DYNAMO_AS_IS and supports_dynamo():
+            backend = self.vllm_config.compilation_config.init_backend()
             self.model = torch.compile(
                 self.model,
                 fullgraph=envs.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
@@ -1773,7 +1772,7 @@ class CUDAGraphRunner(nn.Module):
         # Run the model a few times without capturing the graph.
         # This is to make sure that the captured graph does not include the
         # kernel launches for initial benchmarking (e.g., Triton autotune).
-        # Note one iteration is not enough for torch.jit.script
+        # Note one iteration is not enough for torch.compile
         for _ in range(_NUM_WARMUP_ITERS):
             self.model(
                 input_ids=input_ids,
