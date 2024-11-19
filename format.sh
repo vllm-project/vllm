@@ -299,6 +299,10 @@ echo 'vLLM shellcheck:'
 tools/shellcheck.sh
 echo 'vLLM shellcheck: Done'
 
+echo 'excalidraw png check:'
+tools/png-lint.sh
+echo 'excalidraw png check: Done'
+
 if ! git diff --quiet &>/dev/null; then
     echo 
     echo "🔍🔍There are files changed by the format checker or by you that are not added and committed:"
