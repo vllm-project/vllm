@@ -477,7 +477,6 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         "gate_proj": ("gate_up_proj", 0),
         "up_proj": ("gate_up_proj", 1),
     }
-    fused_weights_modules = {}
 
     # Mistral/Llama models can also be loaded with --load-format mistral
     # from consolidated.safetensors checkpoints
@@ -631,14 +630,6 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 name = name.replace(item, mapping[item])
 
         return name, loaded_weight
-
-    def post_init_bnb_attrs(self):
-        self.fused_weights_modules = {
-            k: v
-            for submodule in self.modules()
-            if hasattr(submodule, "fused_weights_modules")
-            for k, v in submodule.fused_weights_modules.items()
-        }
 
 
 class LlamaEmbeddingModel(nn.Module, SupportsLoRA, SupportsPP):
