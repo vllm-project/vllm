@@ -533,9 +533,9 @@ struct sm90_fp8_config_M64 {
   // M in [1, 64]
   static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
   using KernelSchedule =
-      cutlass::gemm::KernelTmaWarpSpecializedPingpongFP8FastAccum;
+      cutlass::gemm::KernelTmaWarpSpecializedFP8FastAccum;
   using EpilogueSchedule = typename cutlass::epilogue::TmaWarpSpecializedCooperative;
-  using TileShape = Shape<_128, _64, _256>;
+  using TileShape = Shape<_64, _64, _256>;
   using ClusterShape = Shape<_1, _1, _1>;
 
   using TileSchedule = cutlass::gemm::PersistentScheduler;
@@ -552,9 +552,9 @@ struct sm90_fp8_config_M128 {
   // M in (64, 128]
   static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
   using KernelSchedule =
-      cutlass::gemm::KernelTmaWarpSpecializedCooperativeFP8FastAccum;
-  using EpilogueSchedule = typename cutlass::epilogue::TmaWarpSpecializedCooperative;
-  using TileShape = Shape<_128, _64, _256>;
+      cutlass::gemm::KernelTmaWarpSpecializedPingpongFP8FastAccum;
+  using EpilogueSchedule = typename cutlass::epilogue::TmaWarpSpecialized;
+  using TileShape = Shape<_64, _128, _256>;
   using ClusterShape = Shape<_1, _1, _1>;
 
   using TileSchedule = cutlass::gemm::PersistentScheduler;
@@ -590,9 +590,9 @@ struct sm90_fp8_config_M512 {
   // M in (256, ]
   static_assert(std::is_same<InType, cutlass::float_e4m3_t>());
   using KernelSchedule =
-      cutlass::gemm::KernelTmaWarpSpecializedPingpongFP8FastAccum;
+      cutlass::gemm::KernelTmaWarpSpecializedCooperativeFP8FastAccum;
   using EpilogueSchedule = typename cutlass::epilogue::TmaWarpSpecializedCooperative;
-  using TileShape = Shape<_256, _128, _128>;
+  using TileShape = Shape<_128, _128, _256>;
   using ClusterShape = Shape<_1, _1, _1>;
 
   using TileSchedule = cutlass::gemm::PersistentScheduler;
