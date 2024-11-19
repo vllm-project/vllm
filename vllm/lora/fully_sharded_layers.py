@@ -45,10 +45,27 @@ class ColumnParallelLinearWithShardedLoRA(ColumnParallelLinearWithLoRA):
     """
 
     def slice_lora_a(self, lora_a: torch.Tensor) -> torch.Tensor:
-        tp_rank = get_tensor_model_parallel_rank()
-        shard_size = self.lora_a_stacked.shape[2]
-        start_idx = tp_rank * shard_size
-        lora_a = lora_a[:, start_idx:start_idx + shard_size]
+        if self.is_merged_col_linear:
+            tp_rank = get_tensor_model_parallel_rank()
+            shard_size = self.lora_a_stacked.shape[2]
+            offset = lora_a.shape[-1] // 2
+
+            left_weight = lora_a[:, tp_rank * shard_size:(tp_rank + 1) *
+                                 shard_size]
+            right_weigt = lora_a[:, offset + tp_rank * shard_size:offset +
+                                 (tp_rank + 1) * shard_size]
+            lora_a = torch.cat([left_weight, right_weigt], dim=1)
+        else:
+            #     tensor_model_parallel_rank = get_tensor_model_parallel_rank()
+            #     shard_size = self.output_dim
+            #     start_idx = tensor_model_parallel_rank * shard_size
+            #     end_idx = (tensor_model_parallel_rank + 1) * shard_size
+            #     lora_b = lora_b[:, start_idx:end_idx]
+            # return lora_b
+            tp_rank = get_tensor_model_parallel_rank()
+            shard_size = self.lora_a_stacked.shape[2]
+            start_idx = tp_rank * shard_size
+            lora_a = lora_a[:, start_idx:start_idx + shard_size]
         return lora_a
 
     def apply(self, x: torch.Tensor,

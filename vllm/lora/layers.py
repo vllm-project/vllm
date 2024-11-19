@@ -451,6 +451,10 @@ class ColumnParallelLinearWithLoRA(BaseLayerWithLoRA):
 
     def __init__(self, base_layer: ColumnParallelLinear) -> None:
         super().__init__()
+
+        self.is_merged_col_linear = type(
+            base_layer) is MergedColumnParallelLinear
+
         self.base_layer = base_layer
         self.tp_size = get_tensor_model_parallel_world_size()
         self.input_size = self.base_layer.input_size
@@ -508,11 +512,23 @@ class ColumnParallelLinearWithLoRA(BaseLayerWithLoRA):
         return lora_a
 
     def slice_lora_b(self, lora_b: torch.Tensor) -> torch.Tensor:
-        tensor_model_parallel_rank = get_tensor_model_parallel_rank()
-        shard_size = self.output_dim
-        start_idx = tensor_model_parallel_rank * shard_size
-        end_idx = (tensor_model_parallel_rank + 1) * shard_size
-        lora_b = lora_b[:, start_idx:end_idx]
+        # mlp weight
+        if self.is_merged_col_linear:
+            tp_rank = get_tensor_model_parallel_rank()
+            shard_size = self.output_size // 2
+            offset = lora_b.shape[-1] // 2
+
+            left_weight = lora_b[:, tp_rank * shard_size:(tp_rank + 1) *
+                                 shard_size]
+            right_weigt = lora_b[:, offset + tp_rank * shard_size:offset +
+                                 (tp_rank + 1) * shard_size]
+            lora_b = torch.cat([left_weight, right_weigt], dim=1)
+        else:
+            tensor_model_parallel_rank = get_tensor_model_parallel_rank()
+            shard_size = self.output_dim
+            start_idx = tensor_model_parallel_rank * shard_size
+            end_idx = (tensor_model_parallel_rank + 1) * shard_size
+            lora_b = lora_b[:, start_idx:end_idx]
         return lora_b
 
     def slice_bias(self, bias: torch.Tensor) -> torch.Tensor:
