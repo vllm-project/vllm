@@ -1,19 +1,21 @@
-from setuptools import setup
-from pybind11.setup_helpers import Pybind11Extension, build_ext
 import site
 
-# TODO(shawnd200) integrate for other ISA and find out a better build and install
+from pybind11.setup_helpers import Pybind11Extension, build_ext
+from setuptools import setup
+
+# TODO(shawnd200) integrate ISAs and find out a better build and install
 torch_path = site.getsitepackages()[0] + "/torch"
 ext_modules = [
-    Pybind11Extension(
-        "cputypes",
-        sources=["cpu_types_py_bindings.cpp"],
-        language="c++",
-        libraries=["torch"],
-        include_dirs=[f"{torch_path}/include/torch/csrc/api/include", f"{torch_path}/include"],
-        library_dirs=[f"{torch_path}/lib"],
-        extra_compile_args=["-std=c++17"]
-    )
+    Pybind11Extension("cputypes",
+                      sources=["cpu_types_py_bindings.cpp"],
+                      language="c++",
+                      libraries=["torch"],
+                      include_dirs=[
+                          f"{torch_path}/include/torch/csrc/api/include",
+                          f"{torch_path}/include"
+                      ],
+                      library_dirs=[f"{torch_path}/lib"],
+                      extra_compile_args=["-std=c++17"])
 ]
 
 setup(
@@ -24,4 +26,3 @@ setup(
     cmdclass={"build_ext": build_ext},
     zip_safe=False,
 )
-
