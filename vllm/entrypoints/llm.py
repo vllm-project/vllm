@@ -808,6 +808,7 @@ class LLM:
         self,
         text_1: Union[SingletonPrompt, Sequence[SingletonPrompt]],
         text_2: Union[SingletonPrompt, Sequence[SingletonPrompt]],
+        /,
         truncate_prompt_tokens: Optional[int] = None,
         use_tqdm: bool = True,
         lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
