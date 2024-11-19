@@ -15,8 +15,7 @@ from transformers import PretrainedConfig
 from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, InputContext,
                          token_inputs)
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.base import MultiModalInputs
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.utils import is_list_of
 
@@ -324,12 +323,12 @@ class H2OVLInputPipeline(InternVLInputPipeline):
         data: object,
         *,
         max_dynamic_patch: Optional[int] = None,
-    ) -> MultiModalInputs:
+    ) -> MultiModalKwargs:
 
         # NOTE: Preprocessing for the image data is done in the
         # 'input_processor' function during actual inference.
         if isinstance(data, dict):
-            return MultiModalInputs(data)
+            return MultiModalKwargs(data)
 
         # The section below is only used with dummy data during
         # memory profiling.
@@ -347,7 +346,7 @@ class H2OVLInputPipeline(InternVLInputPipeline):
             pixel_values = [image_pixel_values_mapper(img) for img in data]
 
         else:
-            return MultiModalInputs({"image_embeds": data})
+            return MultiModalKwargs({"image_embeds": data})
         model_config = ctx.model_config
         tokenizer = cached_get_tokenizer(
             model_config.tokenizer,
@@ -359,7 +358,7 @@ class H2OVLInputPipeline(InternVLInputPipeline):
             return_tensors="pt",
         )[0]
 
-        return MultiModalInputs({
+        return MultiModalKwargs({
             "pixel_values": pixel_values,
             "image_token_id": image_token_id
         })

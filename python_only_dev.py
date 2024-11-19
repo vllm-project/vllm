@@ -69,7 +69,8 @@ if not args.quit_dev:
     current_vllm_path = os.path.join(cwd, "vllm")
 
     print(f"Renaming {pre_built_vllm_path} to {tmp_path} for backup")
-    os.rename(pre_built_vllm_path, tmp_path)
+    shutil.copytree(pre_built_vllm_path, tmp_path)
+    shutil.rmtree(pre_built_vllm_path)
 
     print(f"Linking {current_vllm_path} to {pre_built_vllm_path}")
     os.symlink(current_vllm_path, pre_built_vllm_path)

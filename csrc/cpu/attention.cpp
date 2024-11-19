@@ -22,6 +22,24 @@ struct KernelVecType<float> {
   using v_load_vec_type = vec_op::FP32Vec16;
 };
 
+template <>
+struct KernelVecType<c10::Half> {
+#ifdef __powerpc64__
+  // Power architecture-specific vector types
+  using q_load_vec_type = vec_op::FP32Vec8;
+  using k_load_vec_type = vec_op::FP32Vec16;
+  using v_load_vec_type = vec_op::FP32Vec16;
+#else
+  // Fallback for other architectures, including x86
+  using q_load_vec_type = vec_op::FP16Vec8;
+  using k_load_vec_type = vec_op::FP16Vec16;
+  using v_load_vec_type = vec_op::FP16Vec16;
+#endif
+  using q_vec_type = vec_op::FP32Vec16;
+  using k_vec_type = vec_op::FP32Vec16;
+  using qk_acc_vec_type = vec_op::FP32Vec16;
+};
+
 #ifdef __AVX512BF16__
 template <>
 struct KernelVecType<c10::BFloat16> {
@@ -375,6 +393,9 @@ void paged_attention_v1_impl_launcher(
   int* seq_lens_ptr = seq_lens.data_ptr<int>();
 
   switch (head_size) {
+    case 32:
+      LAUNCH_V1_ATTENTION_KERNEL(T, 32, BLOCK_SIZE);
+      break;
     case 64:
       LAUNCH_V1_ATTENTION_KERNEL(T, 64, BLOCK_SIZE);
       break;
@@ -692,6 +713,9 @@ void paged_attention_v2_impl_launcher(
   int* seq_lens_ptr = seq_lens.data_ptr<int>();
 
   switch (head_size) {
+    case 32:
+      LAUNCH_V2_ATTENTION_KERNEL(T, 32, BLOCK_SIZE);
+      break;
     case 64:
       LAUNCH_V2_ATTENTION_KERNEL(T, 64, BLOCK_SIZE);
       break;

@@ -39,6 +39,7 @@ EXPECTED_STRS_MAP = {
 @pytest.mark.skip(
     reason=
     "Prevent unstable test based on golden strings from breaking the build.")
+@pytest.mark.quant_model
 @pytest.mark.skipif(not is_quant_method_supported("fp8"),
                     reason="fp8 is not supported on this GPU type.")
 @pytest.mark.parametrize("model_name", MODELS)

@@ -7,11 +7,12 @@ import re
 import signal
 import socket
 import tempfile
+import uuid
 from argparse import Namespace
 from contextlib import asynccontextmanager
 from functools import partial
 from http import HTTPStatus
-from typing import AsyncIterator, Optional, Set
+from typing import AsyncIterator, Optional, Set, Tuple
 
 import uvloop
 from fastapi import APIRouter, FastAPI, Request
@@ -25,10 +26,10 @@ from typing_extensions import assert_never
 import vllm.envs as envs
 from vllm.config import ModelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.engine.multiprocessing.client import MQLLMEngineClient
 from vllm.engine.multiprocessing.engine import run_mp_engine
 from vllm.engine.protocol import EngineClient
+from vllm.entrypoints.chat_utils import load_chat_template
 from vllm.entrypoints.launcher import serve_http
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.cli_args import (make_arg_parser,
@@ -57,8 +58,14 @@ from vllm.entrypoints.openai.serving_tokenization import (
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import FlexibleArgumentParser, get_open_zmq_ipc_path
+from vllm.utils import (FlexibleArgumentParser, get_open_zmq_ipc_path,
+                        is_valid_ipv6_address)
 from vllm.version import __version__ as VLLM_VERSION
+
+if envs.VLLM_USE_V1:
+    from vllm.v1.engine.async_llm import AsyncLLMEngine  # type: ignore
+else:
+    from vllm.engine.async_llm_engine import AsyncLLMEngine  # type: ignore
 
 TIMEOUT_KEEP_ALIVE = 5  # seconds
 
@@ -125,7 +132,8 @@ async def build_async_engine_client_from_engine_args(
     # Fall back
     # TODO: fill out feature matrix.
     if (MQLLMEngineClient.is_unsupported_config(engine_args)
-            or disable_frontend_multiprocessing):
+            or envs.VLLM_USE_V1 or disable_frontend_multiprocessing):
+
         engine_config = engine_args.create_engine_config()
         uses_ray = getattr(AsyncLLMEngine._get_executor_cls(engine_config),
                            "uses_ray", False)
@@ -142,6 +150,8 @@ async def build_async_engine_client_from_engine_args(
                 None, build_engine)
 
         yield engine_client
+        if hasattr(engine_client, "shutdown"):
+            engine_client.shutdown()
         return
 
     # Otherwise, use the multiprocessing AsyncLLMEngine.
@@ -475,6 +485,13 @@ def build_app(args: Namespace) -> FastAPI:
                                     status_code=401)
             return await call_next(request)
 
+    @app.middleware("http")
+    async def add_request_id(request: Request, call_next):
+        request_id = request.headers.get("X-Request-Id") or uuid.uuid4().hex
+        response = await call_next(request)
+        response.headers["X-Request-Id"] = request_id
+        return response
+
     for middleware in args.middleware:
         module_path, object_name = middleware.rsplit(".", 1)
         imported = getattr(importlib.import_module(module_path), object_name)
@@ -513,6 +530,9 @@ def init_app_state(
     state.engine_client = engine_client
     state.log_stats = not args.disable_log_stats
 
+    resolved_chat_template = load_chat_template(args.chat_template)
+    logger.info("Using supplied chat template:\n%s", resolved_chat_template)
+
     state.openai_serving_chat = OpenAIServingChat(
         engine_client,
         model_config,
@@ -521,10 +541,12 @@ def init_app_state(
         lora_modules=args.lora_modules,
         prompt_adapters=args.prompt_adapters,
         request_logger=request_logger,
-        chat_template=args.chat_template,
+        chat_template=resolved_chat_template,
+        chat_template_content_format=args.chat_template_content_format,
         return_tokens_as_token_ids=args.return_tokens_as_token_ids,
         enable_auto_tools=args.enable_auto_tool_choice,
         tool_parser=args.tool_call_parser,
+        enable_prompt_tokens_details=args.enable_prompt_tokens_details,
     ) if model_config.task == "generate" else None
     state.openai_serving_completion = OpenAIServingCompletion(
         engine_client,
@@ -540,7 +562,8 @@ def init_app_state(
         model_config,
         base_model_paths,
         request_logger=request_logger,
-        chat_template=args.chat_template,
+        chat_template=resolved_chat_template,
+        chat_template_content_format=args.chat_template_content_format,
     ) if model_config.task == "embedding" else None
     state.openai_serving_tokenization = OpenAIServingTokenization(
         engine_client,
@@ -548,8 +571,21 @@ def init_app_state(
         base_model_paths,
         lora_modules=args.lora_modules,
         request_logger=request_logger,
-        chat_template=args.chat_template,
+        chat_template=resolved_chat_template,
+        chat_template_content_format=args.chat_template_content_format,
     )
+
+
+def create_server_socket(addr: Tuple[str, int]) -> socket.socket:
+    family = socket.AF_INET
+    if is_valid_ipv6_address(addr[0]):
+        family = socket.AF_INET6
+
+    sock = socket.socket(family=family, type=socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(addr)
+
+    return sock
 
 
 async def run_server(args, **uvicorn_kwargs) -> None:
@@ -568,8 +604,8 @@ async def run_server(args, **uvicorn_kwargs) -> None:
     # workaround to make sure that we bind the port before the engine is set up.
     # This avoids race conditions with ray.
     # see https://github.com/vllm-project/vllm/issues/8204
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.bind(("", args.port))
+    sock_addr = (args.host or "", args.port)
+    sock = create_server_socket(sock_addr)
 
     def signal_handler(*_) -> None:
         # Interrupt server on sigterm while initializing
@@ -593,12 +629,13 @@ async def run_server(args, **uvicorn_kwargs) -> None:
             ssl_certfile=args.ssl_certfile,
             ssl_ca_certs=args.ssl_ca_certs,
             ssl_cert_reqs=args.ssl_cert_reqs,
-            fd=sock.fileno(),
             **uvicorn_kwargs,
         )
 
     # NB: Await server shutdown only after the backend context is exited
     await shutdown_task
+
+    sock.close()
 
 
 if __name__ == "__main__":

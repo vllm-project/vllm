@@ -127,9 +127,6 @@ class AWQMarlinConfig(QuantizationConfig):
             return AWQMoEMethod(self)
         return None
 
-    def get_scaled_act_names(self) -> List[str]:
-        return []
-
     @classmethod
     def is_awq_marlin_compatible(cls, quant_config: Dict[str, Any]):
         # Extract data from quant config.

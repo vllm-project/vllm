@@ -3,9 +3,8 @@ from typing import Dict, List, Optional, Union
 
 import torch
 
-import vllm.envs as envs
-from vllm.compilation.levels import CompilationLevel
 from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
+from vllm.config import CompilationLevel, VllmConfig
 from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
 from vllm.utils import supports_dynamo
@@ -110,27 +109,29 @@ def _support_torch_compile(cls: type,
     """
     A decorator to add support for compiling the forward method of a class.
     """
-
-    # for CompilationLevel.DYNAMO_AS_IS , the upper level model runner
-    # will handle the compilation, so we don't need to do anything here.
-    if envs.VLLM_TORCH_COMPILE_LEVEL in [
-            CompilationLevel.NO_COMPILATION, CompilationLevel.DYNAMO_AS_IS
-    ] or not supports_dynamo():
+    if TorchCompileWrapperWithCustomDispatcher in cls.__bases__:
+        # support decorating multiple times
         return cls
 
     # take care of method resolution order
     # make sure super().__init__ is called on the base class
     #  other than TorchCompileWrapperWithCustomDispatcher
-    if TorchCompileWrapperWithCustomDispatcher not in cls.__bases__:
-        # support decorating multiple times
-        cls.__bases__ = cls.__bases__ + (
-            TorchCompileWrapperWithCustomDispatcher, )
+    cls.__bases__ = cls.__bases__ + (TorchCompileWrapperWithCustomDispatcher, )
 
     old_init = cls.__init__  # type: ignore
 
-    def __init__(self, *args, **kwargs):
-        old_init(self, *args, **kwargs)
-        TorchCompileWrapperWithCustomDispatcher.__init__(self)
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = '', **kwargs):
+        old_init(self, vllm_config=vllm_config, prefix=prefix, **kwargs)
+        # for CompilationLevel.DYNAMO_AS_IS , the upper level model runner
+        # will handle the compilation, so we don't need to do anything here.
+        self.do_not_compile = \
+            vllm_config.compilation_config.level in [
+            CompilationLevel.NO_COMPILATION, CompilationLevel.DYNAMO_AS_IS
+        ] or not supports_dynamo()
+        if self.do_not_compile:
+            return
+        TorchCompileWrapperWithCustomDispatcher.__init__(
+            self, compilation_level=vllm_config.compilation_config.level)
 
     cls.__init__ = __init__  # type: ignore
 
@@ -138,7 +139,7 @@ def _support_torch_compile(cls: type,
         # torch.compiler.is_compiling() means we are inside the compilation
         # e.g. TPU has the compilation logic in model runner, so we don't
         # need to compile the model inside.
-        if torch.compiler.is_compiling():
+        if self.do_not_compile or torch.compiler.is_compiling():
             return self.forward(*args, **kwargs)
 
         # the first compilation needs to have dynamic shapes marked

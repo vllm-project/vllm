@@ -78,6 +78,11 @@ def parse_args():
         help="Port number for the Prometheus metrics server "
         "(only needed if enable-metrics is set).",
     )
+    parser.add_argument(
+        "--enable-prompt-tokens-details",
+        action='store_true',
+        default=False,
+        help="If set to True, enable prompt_tokens_details in usage.")
 
     return parser.parse_args()
 
@@ -120,7 +125,7 @@ async def read_file(path_or_url: str) -> str:
                    session.get(path_or_url) as resp:
             return await resp.text()
     else:
-        with open(path_or_url, "r", encoding="utf-8") as f:
+        with open(path_or_url, encoding="utf-8") as f:
             return f.read()
 
 
@@ -217,6 +222,8 @@ async def main(args):
         prompt_adapters=None,
         request_logger=request_logger,
         chat_template=None,
+        chat_template_content_format="auto",
+        enable_prompt_tokens_details=args.enable_prompt_tokens_details,
     ) if model_config.task == "generate" else None
     openai_serving_embedding = OpenAIServingEmbedding(
         engine,
@@ -224,6 +231,7 @@ async def main(args):
         base_model_paths,
         request_logger=request_logger,
         chat_template=None,
+        chat_template_content_format="auto",
     ) if model_config.task == "embedding" else None
 
     tracker = BatchProgressTracker()

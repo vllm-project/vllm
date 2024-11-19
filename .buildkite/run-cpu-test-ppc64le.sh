@@ -1,3 +1,5 @@
+#!/bin/bash
+
 # This script build the CPU docker image and run the offline inference inside the container.
 # It serves a sanity check for compilation and basic model usage.
 set -ex
@@ -13,27 +15,38 @@ remove_docker_container
 # Run the image, setting --shm-size=4g for tensor parallel.
 source /etc/environment
 #docker run -itd --entrypoint /bin/bash -v ~/.cache/huggingface:/root/.cache/huggingface --privileged=true --network host -e HF_TOKEN --env VLLM_CPU_KVCACHE_SPACE=4 --shm-size=4g --name cpu-test cpu-test
-docker run -itd --entrypoint /bin/bash -v ~/.cache/huggingface:/root/.cache/huggingface --privileged=true --network host -e HF_TOKEN=$HF_TOKEN --name cpu-test cpu-test
+docker run -itd --entrypoint /bin/bash -v ~/.cache/huggingface:/root/.cache/huggingface --privileged=true --network host -e HF_TOKEN="$HF_TOKEN" --name cpu-test cpu-test
 
-# Run basic model test
-docker exec cpu-test bash -c "
-  pip install pytest matplotlib einops transformers_stream_generator
-  pytest -v -s tests/models -m \"not vlm\" \
-    --ignore=tests/models/test_embedding.py \
-    --ignore=tests/models/test_oot_registration.py \
-    --ignore=tests/models/test_registry.py \
-    --ignore=tests/models/test_jamba.py \
-    --ignore=tests/models/test_mamba.py \
-    --ignore=tests/models/test_danube3_4b.py" # Mamba kernels and Danube3-4B on CPU is not supported
+function cpu_tests() {
+  set -e
 
-# online inference
-docker exec cpu-test bash -c "
-  python3 -m vllm.entrypoints.openai.api_server --model facebook/opt-125m & 
-  timeout 600 bash -c 'until curl localhost:8000/v1/models; do sleep 1; done' || exit 1
-  python3 benchmarks/benchmark_serving.py \
-    --backend vllm \
-    --dataset-name random \
-    --model facebook/opt-125m \
-    --num-prompts 20 \
-    --endpoint /v1/completions \
-    --tokenizer facebook/opt-125m"
+  # Run basic model test
+  docker exec cpu-test bash -c "
+    set -e
+    pip install pytest pytest-asyncio \
+      decord einops librosa peft Pillow sentence-transformers soundfile \
+      transformers_stream_generator matplotlib datamodel_code_generator
+    pip install torchvision --index-url https://download.pytorch.org/whl/cpu
+    pytest -v -s tests/models/decoder_only/language -m cpu_model
+    pytest -v -s tests/models/embedding/language -m cpu_model
+    pytest -v -s tests/models/encoder_decoder/language -m cpu_model
+    pytest -v -s tests/models/decoder_only/audio_language -m cpu_model
+    pytest -v -s tests/models/decoder_only/vision_language -m cpu_model"
+
+  # online inference
+  docker exec cpu-test bash -c "
+    set -e
+    python3 -m vllm.entrypoints.openai.api_server --model facebook/opt-125m & 
+    timeout 600 bash -c 'until curl localhost:8000/v1/models; do sleep 1; done' || exit 1
+    python3 benchmarks/benchmark_serving.py \
+      --backend vllm \
+      --dataset-name random \
+      --model facebook/opt-125m \
+      --num-prompts 20 \
+      --endpoint /v1/completions \
+      --tokenizer facebook/opt-125m"
+}
+
+# All of CPU tests are expected to be finished less than 25 mins.
+export -f cpu_tests
+timeout 25m bash -c "cpu_tests"

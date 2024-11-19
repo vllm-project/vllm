@@ -140,7 +140,6 @@ class OpenAIServingCompletion(OpenAIServing):
                 if isinstance(sampling_params, BeamSearchParams):
                     generator = self.engine_client.beam_search(
                         prompt=engine_prompt,
-                        model_config=self.model_config,
                         request_id=request_id,
                         params=sampling_params,
                     )
@@ -189,13 +188,7 @@ class OpenAIServingCompletion(OpenAIServing):
         try:
             async for i, res in result_generator:
                 final_res_batch[i] = res
-        except asyncio.CancelledError:
-            return self.create_error_response("Client disconnected")
-        except ValueError as e:
-            # TODO: Use a vllm-specific Validation Error
-            return self.create_error_response(str(e))
 
-        try:
             for i, final_res in enumerate(final_res_batch):
                 assert final_res is not None
 
@@ -217,6 +210,8 @@ class OpenAIServingCompletion(OpenAIServing):
                 tokenizer,
                 request_metadata,
             )
+        except asyncio.CancelledError:
+            return self.create_error_response("Client disconnected")
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
