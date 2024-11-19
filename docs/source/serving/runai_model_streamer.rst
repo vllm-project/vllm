@@ -6,6 +6,11 @@ Run:ai Model Streamer is a library to read tensors in concurrency, while streami
 Further reading can be found in `Run:ai Model Streamer Documentation <https://github.com/run-ai/runai-model-streamer/blob/master/docs/README.md>`_.
 
 vLLM supports loading weights in Safetensors format using the Run:ai Model Streamer.
+You first need to install vLLM RunAI optional dependency:
+
+.. code-block:: console
+
+    $ pip3 install vllm[runai]
 
 To run it as an OpenAI-compatible server, add the `--load-format runai_streamer` flag:
 

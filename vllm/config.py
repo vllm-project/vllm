@@ -21,7 +21,7 @@ from vllm.transformers_utils.config import (
     ConfigFormat, get_config, get_hf_image_processor_config,
     get_hf_text_config, get_pooling_config,
     get_sentence_transformer_tokenizer_config, is_encoder_decoder, uses_mrope)
-from vllm.transformers_utils.s3_utils import S3Model, is_s3
+from vllm.transformers_utils.utils import is_s3
 from vllm.utils import (GiB_bytes, cuda_device_count_stateless, get_cpu_memory,
                         identity, print_warning_once)
 
@@ -194,17 +194,27 @@ class ModelConfig:
                    f"'Please instead use `--hf-overrides '{hf_override!r}'`")
             warnings.warn(DeprecationWarning(msg), stacklevel=2)
 
-        if is_s3(model):
-            self.s3_model = S3Model()
-            self.s3_model.pull_files(model, allow_pattern=["*config.json"])
-            self.model_weights = self.model
-            self.model = self.s3_model.dir
+        if is_s3(model) or is_s3(tokenizer):
+            try:
+                from vllm.transformers_utils.s3_utils import S3Model
+            except ImportError as err:
+                raise ImportError(
+                    "Please install Run:ai optional dependency "
+                    "to use the S3 capabilities. "
+                    "You can install it with: pip install vllm[runai]"
+                ) from err
 
-        if is_s3(tokenizer):
-            self.s3_tokenizer = S3Model()
-            self.s3_tokenizer.pull_files(
-                model, ignore_pattern=["*.pt", "*.safetensors", "*.bin"])
-            self.tokenizer = self.s3_tokenizer.dir
+            if is_s3(model):
+                self.s3_model = S3Model()
+                self.s3_model.pull_files(model, allow_pattern=["*config.json"])
+                self.model_weights = self.model
+                self.model = self.s3_model.dir
+
+            if is_s3(tokenizer):
+                self.s3_tokenizer = S3Model()
+                self.s3_tokenizer.pull_files(
+                    model, ignore_pattern=["*.pt", "*.safetensors", "*.bin"])
+                self.tokenizer = self.s3_tokenizer.dir
 
         # The tokenizer version is consistent with the model version by default.
         if tokenizer_revision is None:

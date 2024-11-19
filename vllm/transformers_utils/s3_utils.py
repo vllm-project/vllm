@@ -10,10 +10,6 @@ from pathlib import Path
 import boto3
 
 
-def is_s3(model_or_path: str) -> bool:
-    return model_or_path.lower().startswith('s3://')
-
-
 def _filter_allow(paths: list[str], patterns: list[str]) -> list[str]:
     return [
         path for path in paths if any(

@@ -414,7 +414,12 @@ def runai_safetensors_weights_iterator(
     hf_weights_files: List[str]
 ) -> Generator[Tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files."""
-    from runai_model_streamer import SafetensorsStreamer
+    try:
+        from runai_model_streamer import SafetensorsStreamer
+    except ImportError as err:
+        raise ImportError(
+            "Please install Run:ai optional dependency."
+            "You can install it with: pip install vllm[runai]") from err
 
     enable_tqdm = not torch.distributed.is_initialized(
     ) or torch.distributed.get_rank() == 0
