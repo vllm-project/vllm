@@ -29,6 +29,8 @@ from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (ReplicatedLinear,
                                                RowParallelLinear)
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizeMethodBase)
 from vllm.model_executor.model_loader.tensorizer import (
     TensorizerConfig, is_vllm_tensorized, load_with_tensorizer,
     serialize_vllm_model, tensorizer_weights_iterator)
@@ -42,6 +44,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     safetensors_weights_iterator)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
+from vllm.plugins import set_current_vllm_config
 from vllm.utils import is_pin_memory_available
 
 
@@ -94,18 +97,36 @@ def _initialize_model(vllm_config: VllmConfig, prefix: str = "") -> nn.Module:
     model_config = vllm_config.model_config
     model_class, _ = get_model_architecture(model_config)
     signatures = inspect.signature(model_class.__init__)
-    # collect all kw-only parameters
-    kw_only_params = [
-        param.name for param in signatures.parameters.values()
-        if param.kind == inspect.Parameter.KEYWORD_ONLY
-    ]
-    assert "vllm_config" in kw_only_params and "prefix" in kw_only_params, \
-    ("vLLM model class must accept `vllm_config` and `prefix` as kw-only "
-    "arguments. Possibly you have an old-style model class registered from "
-    "out of tree and it is used for new vLLM version. "
-    "Please check https://docs.vllm.ai/en/latest/design/class_hierarchy.html "
-    "for the design and update the model class accordingly.")
-    return model_class(vllm_config=vllm_config, prefix=prefix)
+    all_params = [param.name for param in signatures.parameters.values()]
+    if "vllm_config" in all_params and "prefix" in all_params:
+        # new-style model class
+        with set_current_vllm_config(vllm_config):
+            return model_class(vllm_config=vllm_config, prefix=prefix)
+    msg = ("vLLM model class should accept `vllm_config` and `prefix` as "
+           "input arguments. Possibly you have an old-style model class"
+           " registered from out of tree and it is used for new vLLM version. "
+           "Check https://docs.vllm.ai/en/latest/design/class_hierarchy.html "
+           "for the design and update the model class accordingly.")
+    logger.warning(msg)
+    logger.warning(
+        "Trying to guess the arguments for old-style model class %s",
+        model_class)
+    # try to be compatible with old-style model class
+    kwargs = {}
+    if "prefix" in all_params:
+        kwargs["prefix"] = prefix
+    if "config" in all_params:
+        kwargs["config"] = model_config.hf_config
+    if "cache_config" in all_params:
+        kwargs["cache_config"] = vllm_config.cache_config
+    if "quant_config" in all_params:
+        kwargs["quant_config"] = vllm_config.quant_config
+    if "lora_config" in all_params:
+        kwargs["lora_config"] = vllm_config.lora_config
+    if "scheduler_config" in all_params:
+        kwargs["scheduler_config"] = vllm_config.scheduler_config
+    with set_current_vllm_config(vllm_config):
+        return model_class(**kwargs)
 
 
 class BaseModelLoader(ABC):
@@ -315,11 +336,21 @@ class DefaultModelLoader(BaseModelLoader):
             with target_device:
                 model = _initialize_model(vllm_config=vllm_config)
 
-            model.load_weights(self._get_all_weights(model_config, model))
+            weights_to_load = {name for name, _ in model.named_parameters()}
+            loaded_weights = model.load_weights(
+                self._get_all_weights(model_config, model))
+            # We only enable strict check for non-quantiized models
+            # that have loaded weights tracking currently.
+            if model_config.quantization is None and loaded_weights is not None:
+                weights_not_loaded = weights_to_load - loaded_weights
+                if weights_not_loaded:
+                    raise ValueError(
+                        "Following weights were not initialized from "
+                        f"checkpoint: {weights_not_loaded}")
 
             for _, module in model.named_modules():
                 quant_method = getattr(module, "quant_method", None)
-                if quant_method is not None:
+                if isinstance(quant_method, QuantizeMethodBase):
                     # When quant methods need to process weights after loading
                     # (for repacking, quantizing, etc), they expect parameters
                     # to be on the global target device. This scope is for the

@@ -16,7 +16,8 @@
 """ PyTorch Fuyu model."""
 import math
 from array import array
-from typing import Iterable, List, Literal, Mapping, Optional, Tuple, TypedDict
+from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,
+                    TypedDict)
 
 import torch
 import torch.nn as nn
@@ -41,7 +42,8 @@ from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
 from vllm.utils import is_list_of
 
 from .interfaces import SupportsMultiModal, SupportsPP
-from .utils import AutoWeightsLoader, flatten_bn, merge_multimodal_embeddings
+from .utils import (AutoWeightsLoader, flatten_bn, maybe_prefix,
+                    merge_multimodal_embeddings)
 
 # Cannot find the following 2 numbers from hf config.
 _IMAGE_TOKEN_ID = 71011
@@ -245,7 +247,9 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             gather_output=True,
         )
         self.language_model = PersimmonForCausalLM(
-            vllm_config.with_hf_config(config.text_config))
+            vllm_config=vllm_config.with_hf_config(config.text_config),
+            prefix=maybe_prefix(prefix, "language_model"),
+        )
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors)
 
@@ -351,6 +355,7 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         next_tokens = self.language_model.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         loader = AutoWeightsLoader(self)
-        loader.load_weights(weights)
+        return loader.load_weights(weights)

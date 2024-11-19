@@ -262,8 +262,7 @@ class LLMEngine:
             "num_scheduler_steps=%d, chunked_prefill_enabled=%s "
             "multi_step_stream_outputs=%s, enable_prefix_caching=%s, "
             "use_async_output_proc=%s, use_cached_outputs=%s, "
-            "chat_template_text_format=%s, mm_processor_kwargs=%s, "
-            "pooler_config=%r)",
+            "mm_processor_kwargs=%s, pooler_config=%r)",
             VLLM_VERSION,
             model_config.model,
             speculative_config,
@@ -296,7 +295,6 @@ class LLMEngine:
             cache_config.enable_prefix_caching,
             model_config.use_async_output_proc,
             use_cached_outputs,
-            model_config.chat_template_text_format,
             model_config.mm_processor_kwargs,
             model_config.pooler_config,
         )
@@ -1718,7 +1716,7 @@ class LLMEngine:
             # not counted (to avoid double counting)
             actual_num_batched_tokens = scheduler_outputs.num_batched_tokens  # type: ignore
 
-            num_generation_tokens_from_prefill_groups = 0.
+            num_generation_tokens_from_prefill_groups = 0
             # NOTE: if scheduler_outputs.num_prefill_groups > 0 and
             # the len of scheduler_outputs.scheduled_seq_groups is !=
             # scheduler_outputs.num_prefill_groups, this means that
@@ -2001,9 +1999,6 @@ class LLMEngine:
                 seq_span.set_attribute(
                     SpanAttributes.LLM_LATENCY_TIME_IN_MODEL_EXECUTE,
                     metrics.model_execute_time)
-
-    def is_encoder_decoder_model(self):
-        return self.input_preprocessor.is_encoder_decoder_model()
 
     def _validate_model_inputs(self, inputs: ProcessorInputs,
                                lora_request: Optional[LoRARequest]):
