@@ -575,7 +575,11 @@ def try_get_generation_config(
 def get_cross_encoder_activation_function(config: PretrainedConfig):
     if (hasattr(config, "sbert_ce_default_activation_function")
             and config.sbert_ce_default_activation_function is not None):
-        return import_from_string(
-            config.sbert_ce_default_activation_function)()
+
+        function_name = config.sbert_ce_default_activation_function
+        assert function_name.startswith("torch.nn.modules."), \
+            "Loading of activation functions is restricted to " \
+            "torch.nn.modules for security reasons"
+        return import_from_string(function_name)()
     else:
         return nn.Sigmoid() if config.num_labels == 1 else nn.Identity()
