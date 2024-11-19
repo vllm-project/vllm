@@ -63,13 +63,14 @@ class Medusa(nn.Module):
 
         if getattr(config, "original_lm_head", False):
             self.lm_head = ParallelLMHead(
-                    self.unpadded_vocab_size,
-                    config.hidden_size,
-                    org_num_embeddings=self.truncated_vocab_size,
-                    padding_size=DEFAULT_VOCAB_PADDING_SIZE,
-                )
-            self.lm_heads = [self.lm_head
-                             for _ in range(self.config.num_heads)]
+                self.unpadded_vocab_size,
+                config.hidden_size,
+                org_num_embeddings=self.truncated_vocab_size,
+                padding_size=DEFAULT_VOCAB_PADDING_SIZE,
+            )
+            self.lm_heads = [
+                self.lm_head for _ in range(self.config.num_heads)
+            ]
         else:
             self.lm_heads = nn.ModuleList([
                 ParallelLMHead(
@@ -185,7 +186,7 @@ class Medusa(nn.Module):
 
             elif (getattr(self.config, "original_lm_head", False)
                   and name == "lm_heads.0.weight"):
-                 weights_map["lm_head.weight"] = loaded_weight
+                weights_map["lm_head.weight"] = loaded_weight
 
         for name, loaded_weight in weights_map.items():
             if "lm_head" in name and self.token_map is not None and\
