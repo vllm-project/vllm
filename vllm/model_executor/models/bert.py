@@ -11,18 +11,18 @@ from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
-from vllm.model_executor.layers.pooler import Pooler, PoolingType
+from vllm.model_executor.layers.pooler import (CrossEncodingPooler, Pooler,
+                                               PoolingType)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import SupportsCrossEncoding
-from vllm.model_executor.pooling_metadata import (PoolingMetadata,
-                                                  PoolingTensors)
-from vllm.sequence import (EmbeddingSequenceGroupOutput, IntermediateTensors,
-                           PoolerOutput)
-from vllm.utils import import_from_string
+from vllm.model_executor.pooling_metadata import PoolingMetadata
+from vllm.sequence import IntermediateTensors, PoolerOutput
+from vllm.transformers_utils.config import (
+    get_cross_encoder_activation_function)
 
 from .utils import maybe_prefix
 
@@ -472,13 +472,8 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding):
         super().__init__()
         config = vllm_config.model_config.hf_config
 
-        if (hasattr(config, "sbert_ce_default_activation_function")
-                and config.sbert_ce_default_activation_function is not None):
-            self.default_activation_function = import_from_string(
-                config.sbert_ce_default_activation_function)()
-        else:
-            self.default_activation_function = \
-                nn.Sigmoid() if config.num_labels == 1 else nn.Identity()
+        self.default_activation_function = \
+            get_cross_encoder_activation_function(config)
 
         self.num_labels = config.num_labels
         self.bert = BertModel(vllm_config=vllm_config,
@@ -486,6 +481,8 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding):
                               embedding_class=BertEmbedding,
                               add_pooling_layer=True)
         self.classifier = nn.Linear(config.hidden_size, config.num_labels)
+        self._pooler = CrossEncodingPooler(config, self.classifier,
+                                           self.bert.pooler)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
 
@@ -514,28 +511,7 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding):
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
     ) -> Optional[PoolerOutput]:
-        prompt_lens = PoolingTensors.from_pooling_metadata(
-            pooling_metadata, hidden_states.device).prompt_lens
-
-        offset = 0
-        pooled_data_lst = []
-        for prompt_len in prompt_lens:
-            pooled_data_i = hidden_states[offset:offset + prompt_len]
-
-            pooled_data_i = self.bert.pooler(pooled_data_i)
-
-            pooled_data_lst.append(pooled_data_i)
-            offset += prompt_len
-
-        pooled_output = torch.stack(pooled_data_lst)
-
-        classifier_output = self.classifier(pooled_output)
-        logits = self.default_activation_function(classifier_output)
-
-        pooled_outputs = [
-            EmbeddingSequenceGroupOutput(data.tolist()) for data in logits
-        ]
-        return PoolerOutput(outputs=pooled_outputs)
+        return self._pooler(hidden_states, pooling_metadata)
 
     def forward(
         self,

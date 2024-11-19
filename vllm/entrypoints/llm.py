@@ -806,8 +806,8 @@ class LLM:
 
     def score(
         self,
-        texts: Union[SingletonPrompt, Sequence[SingletonPrompt]],
-        text_pairs: Union[SingletonPrompt, Sequence[SingletonPrompt]],
+        text_1: Union[SingletonPrompt, Sequence[SingletonPrompt]],
+        text_2: Union[SingletonPrompt, Sequence[SingletonPrompt]],
         truncate_prompt_tokens: Optional[int] = None,
         use_tqdm: bool = True,
         lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
@@ -816,19 +816,18 @@ class LLM:
         """Generates similarity scores for all pairs <text,text_pair>.
 
         The inputs can be 1 -> 1, 1 -> N or N -> N. In the 1 - N case
-        the text sentence will be replicated N times to pair with the text_pair
+        the text_1 sentence will be replicated N times to pair with the text_2
         sentences. The input pairs are used to build a list of prompts for the
         cross encoder model. This class automatically batches the prompts,
         considering the memory constraint. For the best performance, put all
         of your texts into a single list and pass it to this method.
 
         Args:
-            texts: can be a single prompt or a list of prompts, in which
-                case it has to have the same length as the text_pairs
-            text_pairs: The texts to pair with the query to form the input
-                to the LLM. You may pass a sequence of texts for batch
-                inference. See :class:`~vllm.inputs.PromptType` for more
-                details about the format of each prompts.
+            text_1: can be a single prompt or a list of prompts, in which
+                case it has to have the same length as the text_2 list
+            text_2: The texts to pair with the query to form the input
+                to the LLM. See :class:`~vllm.inputs.PromptType` for
+                more details about the format of each prompts.
             use_tqdm: Whether to use tqdm to display the progress bar.
             lora_request: LoRA request to use for generation, if any.
             prompt_adapter_request: Prompt Adapter request to use for
@@ -876,27 +875,27 @@ class LLM:
             assert type(prompt) is str
             return prompt
 
-        if isinstance(texts, (str, dict)):
+        if isinstance(text_1, (str, dict)):
             # Convert a single prompt to a list.
-            texts = [texts]
-        texts = [ensure_str(t) for t in texts]
+            text_1 = [text_1]
+        text_1 = [ensure_str(t) for t in text_1]
 
-        if isinstance(text_pairs, (str, dict)):
+        if isinstance(text_2, (str, dict)):
             # Convert a single prompt to a list.
-            text_pairs = [text_pairs]
-        text_pairs = [ensure_str(t) for t in text_pairs]
+            text_2 = [text_2]
+        text_2 = [ensure_str(t) for t in text_2]
 
-        if len(texts) > 1 and len(texts) != len(text_pairs):
+        if len(text_1) > 1 and len(text_1) != len(text_2):
             raise ValueError("Input lengths must be either 1:1, 1:N or N:N")
-        if len(texts) == 0:
+        if len(text_1) == 0:
             raise ValueError("At least one text element must be given")
-        if len(text_pairs) == 0:
+        if len(text_2) == 0:
             raise ValueError("At least one text_pair element must be given")
 
-        if len(texts) == 1:
-            texts = texts * len(text_pairs)
+        if len(text_1) == 1:
+            text_1 = text_1 * len(text_2)
 
-        input_pairs = [(t1, t2) for t1, t2 in zip(texts, text_pairs)]
+        input_pairs = [(t1, t2) for t1, t2 in zip(text_1, text_2)]
         pooling_params = PoolingParams()
 
         tokenization_kwargs: Dict[str, Any] = {}

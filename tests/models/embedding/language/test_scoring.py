@@ -77,7 +77,7 @@ def test_llm_1_to_1(llm: LLM, hf_model, distributed_init):
 
     text_pair = [TEXTS[0], TEXT_PAIRS[0]]
 
-    llm_output = llm.score(texts=text_pair[0], text_pairs=text_pair[1])
+    llm_output = llm.score(text_1=text_pair[0], text_2=text_pair[1])
     assert len(llm_output) == 1
 
     hf_output = hf_model.predict([text_pair]).tolist()
@@ -95,7 +95,7 @@ def test_llm_1_to_N(llm: LLM, hf_model, distributed_init):
         [TEXTS[0], TEXT_PAIRS[1]],
     ]
 
-    llm_output = llm.score(texts=TEXTS[0], text_pairs=TEXT_PAIRS)
+    llm_output = llm.score(text_1=TEXTS[0], text_2=TEXT_PAIRS)
     assert len(llm_output) == 2
 
     hf_output = hf_model.predict(text_pairs).tolist()
@@ -116,7 +116,7 @@ def test_llm_N_to_N(llm: LLM, hf_model, distributed_init):
         [TEXTS[1], TEXT_PAIRS[1]],
     ]
 
-    llm_output = llm.score(texts=TEXTS, text_pairs=TEXT_PAIRS)
+    llm_output = llm.score(text_1=TEXTS, text_2=TEXT_PAIRS)
 
     assert len(llm_output) == 2
 
