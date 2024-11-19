@@ -806,24 +806,26 @@ class LLM:
 
     def score(
         self,
-        query: SingletonPrompt,
         texts: Union[SingletonPrompt, Sequence[SingletonPrompt]],
+        text_pairs: Union[SingletonPrompt, Sequence[SingletonPrompt]],
         truncate_prompt_tokens: Optional[int] = None,
         use_tqdm: bool = True,
         lora_request: Optional[Union[List[LoRARequest], LoRARequest]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> List[EmbeddingRequestOutput]:
-        """Generates similarity scores for all pairs <query,text>.
+        """Generates similarity scores for all pairs <text,text_pair>.
 
-        This method pairs the input query with each of the texts to generate
-        a list of prompts for the cross encoder model. This class automatically
-        batches the prompts, considering the memory constraint. For the best
-        performance, put all of your texts into a single list and pass it to
-        this method.
+        The inputs can be 1 -> 1, 1 -> N or N -> N. In the 1 - N case
+        the text sentence will be replicated N times to pair with the text_pair
+        sentences. The input pairs are used to build a list of prompts for the
+        cross encoder model. This class automatically batches the prompts,
+        considering the memory constraint. For the best performance, put all
+        of your texts into a single list and pass it to this method.
 
         Args:
-            query: The query to compare against all other text input
-            texts: The texts to pair with the query to form the input
+            texts: can be a single prompt or a list of prompts, in which
+                case it has to have the same length as the text_pairs
+            text_pairs: The texts to pair with the query to form the input
                 to the LLM. You may pass a sequence of texts for batch
                 inference. See :class:`~vllm.inputs.PromptType` for more
                 details about the format of each prompts.
@@ -853,7 +855,7 @@ class LLM:
             raise ValueError("Your model does not support the cross encoding")
 
         tokenizer = self.llm_engine.get_tokenizer()
-        
+
         if isinstance(tokenizer, MistralTokenizer):
             raise ValueError(
                 "MistralTokenizer not supported for cross-encoding")
@@ -874,12 +876,27 @@ class LLM:
             assert type(prompt) is str
             return prompt
 
-        query = ensure_str(query)
         if isinstance(texts, (str, dict)):
             # Convert a single prompt to a list.
             texts = [texts]
+        texts = [ensure_str(t) for t in texts]
 
-        input_pairs = [(query, ensure_str(t)) for t in texts]
+        if isinstance(text_pairs, (str, dict)):
+            # Convert a single prompt to a list.
+            text_pairs = [text_pairs]
+        text_pairs = [ensure_str(t) for t in text_pairs]
+
+        if len(texts) > 1 and len(texts) != len(text_pairs):
+            raise ValueError("Input lengths must be either 1:1, 1:N or N:N")
+        if len(texts) == 0:
+            raise ValueError("At least one text element must be given")
+        if len(text_pairs) == 0:
+            raise ValueError("At least one text_pair element must be given")
+
+        if len(texts) == 1:
+            texts = texts * len(text_pairs)
+
+        input_pairs = [(t1, t2) for t1, t2 in zip(texts, text_pairs)]
         pooling_params = PoolingParams()
 
         tokenization_kwargs: Dict[str, Any] = {}

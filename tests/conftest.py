@@ -265,6 +265,7 @@ class HfRunner:
         model_kwargs: Optional[Dict[str, Any]] = None,
         is_embedding_model: bool = False,
         is_sentence_transformer: bool = False,
+        is_cross_encoder: bool = False,
         skip_tokenizer_init: bool = False,
         auto_cls: Type[_BaseAutoModelClass] = AutoModelForCausalLM,
         postprocess_inputs: Callable[..., BatchEncoding] = identity,
@@ -282,6 +283,14 @@ class HfRunner:
                     device="cpu",
                     trust_remote_code=True,
                 ).to(dtype=torch_dtype))
+        elif is_cross_encoder:
+            # Lazy init required for AMD CI
+            from sentence_transformers import CrossEncoder
+            self.model = CrossEncoder(
+                model_name,
+                device="cpu",
+                trust_remote_code=True,
+            )
         else:
             model_kwargs = model_kwargs if model_kwargs is not None else {}
             self.model = self.wrap_device(
@@ -624,6 +633,9 @@ class HfRunner:
 
     def encode(self, prompts: List[str]) -> List[List[torch.Tensor]]:
         return self.model.encode(prompts)
+
+    def predict(self, prompts: List[List[str]]) -> torch.Tensor:
+        return self.model.predict(prompts, convert_to_tensor=True)
 
     def __enter__(self):
         return self

@@ -62,9 +62,9 @@ class EmbeddingOutput:
 
     embedding: List[float]
 
-    def __repr__(self) -> str:
-        return (f"EmbeddingOutput("
-                f"embedding={len(self.embedding)})")
+    # def __repr__(self) -> str:
+    #     return (f"EmbeddingOutput("
+    #             f"embedding={len(self.embedding)})")
 
 
 class RequestOutput:

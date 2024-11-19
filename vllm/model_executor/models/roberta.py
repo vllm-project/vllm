@@ -16,6 +16,7 @@ from vllm.model_executor.pooling_metadata import (PoolingMetadata,
                                                   PoolingTensors)
 from vllm.sequence import (EmbeddingSequenceGroupOutput, IntermediateTensors,
                            PoolerOutput)
+from vllm.utils import import_from_string
 
 
 class RobertaEmbedding(nn.Module):
@@ -166,6 +167,14 @@ class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding):
         super().__init__()
         config = vllm_config.model_config.hf_config
 
+        if (hasattr(config, "sbert_ce_default_activation_function")
+                and config.sbert_ce_default_activation_function is not None):
+            self.default_activation_function = import_from_string(
+                config.sbert_ce_default_activation_function)()
+        else:
+            self.default_activation_function = \
+                nn.Sigmoid() if config.num_labels == 1 else nn.Identity()
+
         self.num_labels = config.num_labels
         self.roberta = BertModel(vllm_config=vllm_config,
                                  prefix=maybe_prefix(prefix, "bert"),
@@ -214,11 +223,11 @@ class RobertaForSequenceClassification(nn.Module, SupportsCrossEncoding):
             pooled_data_lst.append(pooled_data_i)
             offset += prompt_len
 
-        pooled_output = torch.stack(pooled_data_lst)
+        classifier_output = torch.stack(pooled_data_lst)
+        logits = self.default_activation_function(classifier_output)
 
         pooled_outputs = [
-            EmbeddingSequenceGroupOutput(data.tolist())
-            for data in pooled_output
+            EmbeddingSequenceGroupOutput(data.tolist()) for data in logits
         ]
         return PoolerOutput(outputs=pooled_outputs)
 

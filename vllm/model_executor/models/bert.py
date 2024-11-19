@@ -22,6 +22,7 @@ from vllm.model_executor.pooling_metadata import (PoolingMetadata,
                                                   PoolingTensors)
 from vllm.sequence import (EmbeddingSequenceGroupOutput, IntermediateTensors,
                            PoolerOutput)
+from vllm.utils import import_from_string
 
 from .utils import maybe_prefix
 
@@ -471,6 +472,14 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding):
         super().__init__()
         config = vllm_config.model_config.hf_config
 
+        if (hasattr(config, "sbert_ce_default_activation_function")
+                and config.sbert_ce_default_activation_function is not None):
+            self.default_activation_function = import_from_string(
+                config.sbert_ce_default_activation_function)()
+        else:
+            self.default_activation_function = \
+                nn.Sigmoid() if config.num_labels == 1 else nn.Identity()
+
         self.num_labels = config.num_labels
         self.bert = BertModel(vllm_config=vllm_config,
                               prefix=maybe_prefix(prefix, "bert"),
@@ -505,7 +514,6 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding):
         hidden_states: torch.Tensor,
         pooling_metadata: PoolingMetadata,
     ) -> Optional[PoolerOutput]:
-
         prompt_lens = PoolingTensors.from_pooling_metadata(
             pooling_metadata, hidden_states.device).prompt_lens
 
@@ -522,10 +530,10 @@ class BertForSequenceClassification(nn.Module, SupportsCrossEncoding):
         pooled_output = torch.stack(pooled_data_lst)
 
         classifier_output = self.classifier(pooled_output)
+        logits = self.default_activation_function(classifier_output)
 
         pooled_outputs = [
-            EmbeddingSequenceGroupOutput(data.tolist())
-            for data in classifier_output
+            EmbeddingSequenceGroupOutput(data.tolist()) for data in logits
         ]
         return PoolerOutput(outputs=pooled_outputs)
 
