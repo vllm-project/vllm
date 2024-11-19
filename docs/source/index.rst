@@ -101,6 +101,7 @@ Documentation
    models/engine_args
    models/lora
    models/vlm
+   models/structured_outputs
    models/spec_decode
    models/performance
 
@@ -156,7 +157,7 @@ Documentation
    :maxdepth: 2
    :caption: Design
 
-   design/class_hierarchy
+   design/arch_overview
    design/huggingface_integration
    design/plugin_system
    design/input_processing/model_inputs_index
