@@ -6,7 +6,7 @@
 
 # Do not set -e, as the mixtral 8x22B model tends to crash occasionally
 # and we still want to see other benchmarking results even when mixtral crashes.
-# set -e # note(simon): if mixtral crashes, we should at least know it crashed.
+set -ex
 set -o pipefail
 
 check_gpus() {
@@ -86,15 +86,11 @@ kill_gpu_processes() {
 
   ps -aux
   lsof -t -i:8000 | xargs -r kill -9
-  pkill -f pt_main_thread
-  # this line doesn't work now
-  # ps aux | grep python | grep openai | awk '{print $2}' | xargs -r kill -9
-  pkill -f python3
-  pkill -f /usr/bin/python3
+  pgrep python3 | xargs -r kill -9
 
 
   # wait until GPU memory usage smaller than 1GB
-  while [ $(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -n 1) -ge 1000 ]; do
+  while [ $(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | head -n 1) -ge 5000 ]; do
     sleep 1
   done
 
@@ -290,7 +286,7 @@ run_serving_tests() {
     # run the server
     echo "Running test case $test_name"
     echo "Server command: $server_command"
-    eval "$server_command" &
+    bash -c "$server_command" &
     server_pid=$!
 
     # wait until the server is alive
@@ -324,7 +320,7 @@ run_serving_tests() {
       echo "Running test case $test_name with qps $qps"
       echo "Client command: $client_command"
 
-      eval "$client_command"
+      bash -c "$client_command"
 
       # record the benchmarking commands
       jq_output=$(jq -n \
