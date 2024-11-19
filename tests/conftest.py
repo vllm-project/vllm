@@ -286,11 +286,11 @@ class HfRunner:
         elif is_cross_encoder:
             # Lazy init required for AMD CI
             from sentence_transformers import CrossEncoder
-            self.model = CrossEncoder(
-                model_name,
-                device="cpu",
-                trust_remote_code=True,
-            )
+            self.model = CrossEncoder(model_name,
+                                      device="cpu",
+                                      trust_remote_code=True)
+            self.model.model = self.wrap_device(self.model.model)\
+                .to(dtype=torch_dtype)
         else:
             model_kwargs = model_kwargs if model_kwargs is not None else {}
             self.model = self.wrap_device(
