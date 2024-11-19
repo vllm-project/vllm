@@ -28,7 +28,7 @@ WEIGHT_LOADER_V2_SUPPORTED = [
     "AWQLinearMethod", "GPTQMarlinLinearMethod", "Fp8LinearMethod",
     "MarlinLinearMethod", "QQQLinearMethod", "GPTQMarlin24LinearMethod",
     "TPUInt8LinearMethod", "GPTQLinearMethod", "FBGEMMFp8LinearMethod",
-    "ModelOptFp8LinearMethod", "IPEXAWQLinearMethod"
+    "ModelOptFp8LinearMethod", "IPEXAWQLinearMethod", "IPEXGPTQLinearMethod"
 ]
 
 
@@ -471,7 +471,8 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         needs_scalar_to_array = getattr(param, "needs_scalar_to_array", False)
 
         if loaded_shard_id is None:
-            # Loaded weight is already fused on disk (qkv/mlp).
+            # Loaded weight is already fused on disk (mlp).
+            # (e.g., Phi-3's gate_up_proj).
             if output_dim is None:
                 if needs_scalar_to_array:
                     param_data, loaded_weight = adjust_scalar_to_fused_array(
@@ -481,6 +482,8 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 param_data.copy_(loaded_weight)
                 return
             current_shard_offset = 0
+            use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit",
+                                            False)
             shard_offsets: List[Tuple[int, int, int]] = []
             for i, output_size in enumerate(self.output_sizes):
                 shard_offsets.append((i, current_shard_offset, output_size))
@@ -497,8 +500,6 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                     shard_size, shard_offset = adjust_marlin_shard(
                         param, shard_size, shard_offset)
 
-                use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit",
-                                                False)
                 if use_bitsandbytes_4bit:
                     index = list(itertools.accumulate([0] + self.output_sizes))
                     orig_offsets = {
@@ -821,7 +822,8 @@ class QKVParallelLinear(ColumnParallelLinear):
         needs_scalar_to_array = getattr(param, "needs_scalar_to_array", False)
 
         if loaded_shard_id is None:
-            # Loaded weight is already fused on disk (qkv/mlp).
+            # Loaded weight is already fused on disk (qkv).
+            # (e.g., Phi-3's qkv_proj).
             if output_dim is None:
                 if needs_scalar_to_array:
                     param_data, loaded_weight = adjust_scalar_to_fused_array(

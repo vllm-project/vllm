@@ -1,5 +1,5 @@
 import math
-from typing import Iterable, List, Optional, Tuple, Union
+from typing import Iterable, List, Optional, Set, Tuple, Union
 
 import torch
 from torch import nn
@@ -54,12 +54,12 @@ class HeadMajorColumnParallelLinear(MergedColumnParallelLinear):
         return load_column_parallel_weight(param, loaded_weight)
 
 
-@torch.jit.script
+@torch.compile(dynamic=True)
 def quick_gelu(x):
     return x * torch.sigmoid(1.702 * x)
 
 
-@torch.jit.script
+@torch.compile(dynamic=True)
 def gegelu(input, limit: Optional[float] = None):
     a_gelu, a_linear = input[..., ::2], input[..., 1::2]
     if limit is not None:
@@ -324,11 +324,8 @@ class Phi3SmallModel(nn.Module):
             make_empty_intermediate_tensors_factory(["hidden_states"],
                                                     config.hidden_size))
 
-    def get_input_embeddings(self):
-        return self.embed_tokens
-
-    def set_input_embeddings(self, value):
-        self.embed_tokens = value
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.embed_tokens(input_ids)
 
     def forward(
         self,
@@ -337,9 +334,13 @@ class Phi3SmallModel(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors],
+        inputs_embeds: Optional[torch.Tensor],
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if get_pp_group().is_first_rank:
-            hidden_states = self.embed_tokens(input_ids)
+            if inputs_embeds is not None:
+                hidden_states = inputs_embeds
+            else:
+                hidden_states = self.get_input_embeddings(input_ids)
             if (self.mup_embedding_multiplier is not None
                     and self.mup_embedding_multiplier > 0.0):
                 hidden_states = hidden_states * self.mup_embedding_multiplier
@@ -397,8 +398,8 @@ class Phi3SmallForCausalLM(nn.Module, SupportsPP):
         else:
             self.dummy_token_indices = None
 
-    def get_input_embeddings(self):
-        return self.model.embed_tokens
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.get_input_embeddings(input_ids)
 
     def set_input_embeddings(self, value):
         self.model.embed_tokens = value
@@ -433,6 +434,7 @@ class Phi3SmallForCausalLM(nn.Module, SupportsPP):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         output_hidden_states = self.model(
             input_ids=input_ids,
@@ -440,6 +442,7 @@ class Phi3SmallForCausalLM(nn.Module, SupportsPP):
             kv_caches=kv_caches,
             attn_metadata=attn_metadata,
             intermediate_tensors=intermediate_tensors,
+            inputs_embeds=inputs_embeds,
         )
         output_hidden_states = output_hidden_states
         return output_hidden_states
@@ -454,9 +457,11 @@ class Phi3SmallForCausalLM(nn.Module, SupportsPP):
                                    sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
 
         params_dict = dict(self.named_parameters())
+        loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -468,3 +473,5 @@ class Phi3SmallForCausalLM(nn.Module, SupportsPP):
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
             weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params

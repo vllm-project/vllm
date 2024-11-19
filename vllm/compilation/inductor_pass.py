@@ -2,7 +2,7 @@ from abc import ABC, abstractmethod
 
 import torch
 
-from vllm.compilation.config import CompilationConfig
+from vllm.config import CompilationConfig
 # yapf: disable
 from vllm.distributed import get_tensor_model_parallel_rank as get_tp_rank
 from vllm.distributed import (
