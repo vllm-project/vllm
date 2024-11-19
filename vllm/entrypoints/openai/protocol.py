@@ -90,9 +90,9 @@ class UsageInfo(OpenAIBaseModel):
 
 
 class EngineMetrics(OpenAIBaseModel):
-    gpu_kv_cache_util: Optional[float] = 0.
-    cpu_kv_cache_util: Optional[float] = 0.
-    running_lora_adapters: Optional[str] = ""
+    kv_cache_utilization: Optional[float] = 0.
+    active_models: Optional[str] = ""
+    format:Optional[str]= ""
 
 
 class RequestResponseMetadata(BaseModel):

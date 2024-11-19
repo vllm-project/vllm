@@ -134,6 +134,13 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
                         "or the template in single-line form "
                         "for the specified model")
     parser.add_argument(
+            "--orca-format",
+            type=nullable_str,
+            default="",
+            help='Enable ORCA metrics reporting in response header'
+                'select one or many of valid formats from [BIN, TEXT, JSON]',
+        )
+    parser.add_argument(
         '--chat-template-content-format',
         type=str,
         default="auto",
