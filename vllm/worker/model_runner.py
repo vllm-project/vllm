@@ -1082,8 +1082,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 self.model
             ), f"{self.model.__class__.__name__} does not support LoRA yet."
 
-            if supports_multimodal(self.model) and hasattr(
-                    self.model, "get_mm_mapping"):
+            if supports_multimodal(self.model):
                 logger.warning("Regarding multimodal models, vLLM currently "
                                "only supports adding LoRA to language model.")
             # It's necessary to distinguish between the max_position_embeddings
