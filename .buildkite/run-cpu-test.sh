@@ -13,26 +13,26 @@ numactl -C "$CORE_RANGE" -N "$NUMA_NODE" docker build -t cpu-test -f Dockerfile.
 numactl -C "$CORE_RANGE" -N "$NUMA_NODE" docker build --build-arg VLLM_CPU_DISABLE_AVX512="true" -t cpu-test-avx2 -f Dockerfile.cpu .
 
 # Setup cleanup
-remove_docker_container() { docker rm -f cpu-test-$NUMA_NODE cpu-test-avx2-$NUMA_NODE || true; }
+remove_docker_container() { docker rm -f cpu-test-"$NUMA_NODE" cpu-test-avx2-"$NUMA_NODE" || true; }
 trap remove_docker_container EXIT
 remove_docker_container
 
 # Run the image, setting --shm-size=4g for tensor parallel.
 docker run -itd --entrypoint /bin/bash -v ~/.cache/huggingface:/root/.cache/huggingface --cpuset-cpus="$CORE_RANGE"  \
- --cpuset-mems="$NUMA_NODE" --privileged=true --network host -e HF_TOKEN --env VLLM_CPU_KVCACHE_SPACE=4 --shm-size=4g --name cpu-test-$NUMA_NODE cpu-test
+ --cpuset-mems="$NUMA_NODE" --privileged=true --network host -e HF_TOKEN --env VLLM_CPU_KVCACHE_SPACE=4 --shm-size=4g --name cpu-test-"$NUMA_NODE" cpu-test
 docker run -itd --entrypoint /bin/bash -v ~/.cache/huggingface:/root/.cache/huggingface --cpuset-cpus="$CORE_RANGE" \
- --cpuset-mems="$NUMA_NODE" --privileged=true --network host -e HF_TOKEN --env VLLM_CPU_KVCACHE_SPACE=4 --shm-size=4g --name cpu-test-avx2-$NUMA_NODE cpu-test-avx2
+ --cpuset-mems="$NUMA_NODE" --privileged=true --network host -e HF_TOKEN --env VLLM_CPU_KVCACHE_SPACE=4 --shm-size=4g --name cpu-test-avx2-"$NUMA_NODE" cpu-test-avx2
 
 function cpu_tests() {
   set -e
 
   # offline inference
-  docker exec cpu-test-avx2-$NUMA_NODE bash -c "
+  docker exec cpu-test-avx2-"$NUMA_NODE" bash -c "
     set -e
     python3 examples/offline_inference.py"
 
   # Run basic model test
-  docker exec cpu-test-$NUMA_NODE bash -c "
+  docker exec cpu-test-"$NUMA_NODE" bash -c "
     set -e
     pip install pytest pytest-asyncio \
       decord einops librosa peft Pillow sentence-transformers soundfile \
@@ -45,20 +45,20 @@ function cpu_tests() {
     pytest -v -s tests/models/decoder_only/vision_language -m cpu_model"
 
   # Run compressed-tensor test
-  docker exec cpu-test-$NUMA_NODE bash -c "
+  docker exec cpu-test-"$NUMA_NODE" bash -c "
     set -e
     pytest -s -v \
     tests/quantization/test_compressed_tensors.py::test_compressed_tensors_w8a8_static_setup \
     tests/quantization/test_compressed_tensors.py::test_compressed_tensors_w8a8_dynamic_per_token"
 
   # Run AWQ test
-  docker exec cpu-test-$NUMA_NODE bash -c "
+  docker exec cpu-test-"$NUMA_NODE" bash -c "
     set -e
     pytest -s -v \
     tests/quantization/test_ipex_quant.py"
 
   # online inference
-  docker exec cpu-test-$NUMA_NODE bash -c "
+  docker exec cpu-test-"$NUMA_NODE" bash -c "
     set -e
     export VLLM_CPU_KVCACHE_SPACE=10 
     export VLLM_CPU_OMP_THREADS_BIND=$1
