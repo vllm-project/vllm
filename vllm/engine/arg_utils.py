@@ -1158,6 +1158,7 @@ class EngineArgs:
             decoding_config=decoding_config,
             observability_config=observability_config,
             prompt_adapter_config=prompt_adapter_config,
+            compilation_config=self.compilation_config,
         )
 
 
