@@ -250,7 +250,7 @@ class FlashInferState(AttentionState):
         state = self
 
         try:
-            scale = getattr(model.model.begs[0].self_attn.attn.impl, "scale",
+            scale = getattr(model.model.layers[0].self_attn.attn.impl, "scale",
                             None)
         except AttributeError as e:
             raise AttributeError("Failed to retrieve 'scale'. \
