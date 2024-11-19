@@ -14,9 +14,6 @@ from vllm.scalar_type import ScalarType
 
 logger = init_logger(__name__)
 
-if current_platform.is_hpu():
-    import habana_frameworks.torch.core as htcore
-
 if not current_platform.is_tpu() and not current_platform.is_hpu():
     try:
         import vllm._C
