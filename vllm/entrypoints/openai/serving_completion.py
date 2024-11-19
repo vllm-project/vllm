@@ -44,17 +44,14 @@ class OpenAIServingCompletion(OpenAIServing):
         base_model_paths: List[BaseModelPath],
         *,
         lora_modules: Optional[List[LoRAModulePath]],
-        orca_format: Optional[str],
         prompt_adapters: Optional[List[PromptAdapterPath]],
         request_logger: Optional[RequestLogger],
         return_tokens_as_token_ids: bool = False,
     ):
-        
         super().__init__(engine_client=engine_client,
                          model_config=model_config,
                          base_model_paths=base_model_paths,
                          lora_modules=lora_modules,
-                         orca_format=orca_format,
                          prompt_adapters=prompt_adapters,
                          request_logger=request_logger,
                          return_tokens_as_token_ids=return_tokens_as_token_ids)
@@ -466,13 +463,14 @@ class OpenAIServingCompletion(OpenAIServing):
             completion_tokens=num_generated_tokens,
             total_tokens=num_prompt_tokens + num_generated_tokens,
         )
-        
+
         metrics = EngineMetrics(
-            kv_cache_utilization=(last_req_metrics.gpu_kv_cache_utilisation
+            gpu_kv_cache_util=(last_req_metrics.gpu_kv_cache_utilisation
                                if last_req_metrics is not None else 0.0),
-            active_models=(last_req_metrics.running_lora_adapters
+            cpu_kv_cache_util=(last_req_metrics.cpu_kv_cache_utilisation
+                               if last_req_metrics is not None else 0.0),
+            running_lora_adapters=(last_req_metrics.running_lora_adapters
                                    if last_req_metrics is not None else ""),
-            format = self.orca_format
         )
         request_metadata.final_usage_info = usage
 
