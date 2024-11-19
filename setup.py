@@ -25,6 +25,7 @@ def load_module_from_path(module_name, path):
     return module
 
 
+os.environ["SETUPTOOLS_SCM_PRETEND_VERSION"] = "0.6.2+ipexllm"
 ROOT_DIR = os.path.dirname(__file__)
 logger = logging.getLogger(__name__)
 
