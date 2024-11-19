@@ -23,6 +23,12 @@ class MarlinLinearKernel(MPLinearKernel):
     @classmethod
     def can_implement(cls,
                       c: MPLinearLayerConfig) -> Tuple[bool, Optional[str]]:
+        
+        is_supported, reason = cls.is_supported_cuda(
+            cls.get_min_capability(), kernel_name="Marlin")
+        if not is_supported:
+            return False, reason
+
         if c.zero_points:
             return False, "Zero points currently not supported by "\
                           " MarlinLinearKernel. Will be added when AWQMarlin "\

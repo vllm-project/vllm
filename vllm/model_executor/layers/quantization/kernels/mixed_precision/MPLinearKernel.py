@@ -5,6 +5,7 @@ from typing import Callable, Optional, Tuple
 import torch
 
 from vllm.model_executor.layers.quantization.utils import replace_parameter
+from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType
 
 
@@ -31,6 +32,23 @@ class MPLinearKernel(ABC):
     def can_implement(cls,
                       c: MPLinearLayerConfig) -> Tuple[bool, Optional[str]]:
         raise NotImplementedError
+    
+    @staticmethod
+    def is_supported_cuda(min_capability: int,
+                          kernel_name: str) -> Tuple[bool, Optional[str]]:
+        if not current_platform.is_cuda():
+            return False, f"{kernel_name} requires CUDA platform."
+
+        _cc = current_platform.get_device_capability()
+        if _cc is None:
+            raise ValueError("current_platform.get_device_capability() "
+                             "should not be None on CUDA platform.")
+        compute_capability = _cc[0] * 10 + _cc[1]
+        if compute_capability < min_capability:
+            return False, f"{kernel_name} requires compute capability "\
+                          f"{min_capability} but current device "\
+                          f"has compute capability {compute_capability}."
+        return True, None
 
     def __init__(self,
                  c: MPLinearLayerConfig,

@@ -24,6 +24,12 @@ class ExllamaLinearKernel(MPLinearKernel):
     @classmethod
     def can_implement(cls,
                       c: MPLinearLayerConfig) -> Tuple[bool, Optional[str]]:
+
+        is_supported, reason = cls.is_supported_cuda(
+            cls.get_min_capability(), kernel_name="Exllama")
+        if not is_supported:
+            return False, reason
+
         if c.has_g_idx and\
             c.partition_weight_shape[0] != c.full_weight_shape[0]:
             return False, "Act reordering currently not supported by Exllama, "\
