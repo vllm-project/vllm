@@ -715,9 +715,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             idx for idx in non_spec_indices
             if execute_model_req.seq_group_metadata_list[idx].is_prompt
         ]
-        broadcast_dict = dict(
-            run_spec_proposer=bool(non_spec_indices)
-        )
+        broadcast_dict = dict(run_spec_proposer=bool(non_spec_indices))
         broadcast_tensor_dict(broadcast_dict, src=self._driver_rank)
         if len(non_spec_indices):
             all_hidden_states = proposal_scores.hidden_states
