@@ -1,4 +1,3 @@
-import os
 from typing import List
 
 import pytest
@@ -53,9 +52,8 @@ class Relu3(ReLUSquaredActivation):
     ])
 def test_enabled_ops(env: str, torch_level: int, ops_enabled: List[int],
                      default_on: bool):
-    os.environ["VLLM_TORCH_COMPILE_LEVEL"] = str(torch_level)
     vllm_config = VllmConfig(compilation_config=CompilationConfig(
-        custom_ops=env.split(",")))
+        level=torch_level, custom_ops=env.split(",")))
     with set_current_vllm_config(vllm_config):
         assert CustomOp.default_on() == default_on
 
