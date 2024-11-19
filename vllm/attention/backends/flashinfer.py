@@ -250,7 +250,7 @@ class FlashInferState(AttentionState):
         state = self
 
         try:
-            scale = getattr(model.model.layers[0].self_attn.attn.impl, "scale",
+            scale = getattr(model.model.begs[0].self_attn.attn.impl, "scale",
                             None)
         except AttributeError as e:
             raise AttributeError("Failed to retrieve 'scale'. \
@@ -508,7 +508,6 @@ class FlashInferMetadata(AttentionMetadata):
             assert self.second_level_kv_indptr is not None
             assert self.second_level_kv_last_page_len is not None
         
-        print("DO WE USE CUDA GRAPH?", self.use_cuda_graph)
         # Skip device transfer for profile run
         if not self.is_profile_run:
             # Move tensors to device
