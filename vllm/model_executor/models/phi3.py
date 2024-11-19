@@ -14,3 +14,13 @@ class Phi3ForCausalLM(LlamaForCausalLM):
             "gate_up_proj",
         ],
     }
+
+    # BitandBytes specific attributes
+    default_bitsandbytes_target_modules = [
+        ".gate_up_proj.",
+        ".down_proj.",
+        ".qkv_proj.",
+        ".o_proj.",
+    ]
+    # Initialize an empty dict when there is no stacked parameter mapping.
+    bitsandbytes_stacked_params_mapping = {}
