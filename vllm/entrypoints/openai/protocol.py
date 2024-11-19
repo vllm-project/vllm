@@ -35,8 +35,8 @@ assert _LONG_INFO.max == _MOCK_LONG_INFO.max
 
 
 class OpenAIBaseModel(BaseModel):
-    # OpenAI API does not allow extra fields
-    model_config = ConfigDict(extra="forbid")
+    # OpenAI API does allow extra fields
+    model_config = ConfigDict(extra="allow")
 
 
 class ErrorResponse(OpenAIBaseModel):
