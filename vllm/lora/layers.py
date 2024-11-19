@@ -451,7 +451,9 @@ class ColumnParallelLinearWithLoRA(BaseLayerWithLoRA):
 
     def __init__(self, base_layer: ColumnParallelLinear) -> None:
         super().__init__()
-
+        # The base_layer type is ColumnParallelLinear or
+        # MergedColumnParallelLinear, their weight sharding logic is
+        # inconsistent when TP is greater than 1.
         self.is_merged_col_linear = type(
             base_layer) is MergedColumnParallelLinear
 
@@ -512,7 +514,8 @@ class ColumnParallelLinearWithLoRA(BaseLayerWithLoRA):
         return lora_a
 
     def slice_lora_b(self, lora_b: torch.Tensor) -> torch.Tensor:
-        # mlp weight
+        # Applicable to cases where the base_layer is
+        # MergedColumnParallelLinear.
         if self.is_merged_col_linear:
             tp_rank = get_tensor_model_parallel_rank()
             shard_size = self.output_size // 2
@@ -523,6 +526,8 @@ class ColumnParallelLinearWithLoRA(BaseLayerWithLoRA):
             right_weigt = lora_b[:, offset + tp_rank * shard_size:offset +
                                  (tp_rank + 1) * shard_size]
             lora_b = torch.cat([left_weight, right_weigt], dim=1)
+        # Applicable to cases where the base_layer is
+        # ColumnParallelLinear.
         else:
             tensor_model_parallel_rank = get_tensor_model_parallel_rank()
             shard_size = self.output_dim

@@ -1,5 +1,7 @@
 from typing import List
 
+import pytest
+
 import vllm
 from vllm.lora.request import LoRARequest
 
@@ -22,7 +24,6 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> List[str]:
             "Show name, country, age for all singers ordered by age from the oldest to the youngest."  # noqa: E501
         ),
     ]
-    print(prompts)
     sampling_params = vllm.SamplingParams(temperature=0, max_tokens=32)
     outputs = llm.generate(
         prompts,
@@ -46,8 +47,7 @@ def test_chatglm3_lora_tp1(chatglm3_lora_files):
                    max_loras=4,
                    max_lora_rank=64,
                    tensor_parallel_size=1,
-                   trust_remote_code=True
-                )
+                   trust_remote_code=True)
 
     expected_lora_output = [
         "SELECT count(*) FROM singer",
@@ -64,16 +64,18 @@ def test_chatglm3_lora_tp1(chatglm3_lora_files):
 
 
 @multi_gpu_test(num_gpus=2)
-def test_chatglm3_lora_tp2(chatglm3_lora_files):
-    llm = vllm.LLM(MODEL_PATH,
-                   max_model_len=1024,
-                   enable_lora=True,
-                   max_loras=4,
-                   max_lora_rank=64,
-                   tensor_parallel_size=2,
-                   trust_remote_code=True,
-                #    fully_sharded_loras=True,
-                )
+@pytest.mark.parametrize("fully_sharded", [True, False])
+def test_chatglm3_lora_tp2(chatglm3_lora_files, fully_sharded):
+    llm = vllm.LLM(
+        MODEL_PATH,
+        max_model_len=1024,
+        enable_lora=True,
+        max_loras=4,
+        max_lora_rank=64,
+        tensor_parallel_size=2,
+        trust_remote_code=True,
+        fully_sharded_loras=fully_sharded,
+    )
 
     expected_lora_output = [
         "SELECT count(*) FROM singer",
@@ -88,16 +90,18 @@ def test_chatglm3_lora_tp2(chatglm3_lora_files):
     for i in range(len(expected_lora_output)):
         assert output2[i] == expected_lora_output[i]
 
+
 @multi_gpu_test(num_gpus=4)
-def test_chatglm3_lora_tp4(chatglm3_lora_files):
+@pytest.mark.parametrize("fully_sharded", [True, False])
+def test_chatglm3_lora_tp4(chatglm3_lora_files, fully_sharded):
     llm = vllm.LLM(MODEL_PATH,
                    max_model_len=1024,
                    enable_lora=True,
                    max_loras=4,
                    max_lora_rank=64,
                    tensor_parallel_size=4,
-                   trust_remote_code=True
-                )
+                   trust_remote_code=True,
+                   fully_sharded_loras=fully_sharded)
 
     expected_lora_output = [
         "SELECT count(*) FROM singer",
