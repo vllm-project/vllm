@@ -9,14 +9,13 @@ import torch
 
 import vllm.envs as envs
 from vllm.config import (CacheConfig, ConfigFormat, DecodingConfig,
-                         DeviceConfig, LoadConfig, LoadFormat, LoRAConfig,
-                         ModelConfig, ObservabilityConfig, ParallelConfig,
-                         PromptAdapterConfig, SchedulerConfig,
-                         SpeculativeConfig, TaskOption, TokenizerPoolConfig,
-                         VllmConfig)
+                         DeviceConfig, HfOverrides, LoadConfig, LoadFormat,
+                         LoRAConfig, ModelConfig, ObservabilityConfig,
+                         ParallelConfig, PoolerConfig, PromptAdapterConfig,
+                         SchedulerConfig, SpeculativeConfig, TaskOption,
+                         TokenizerPoolConfig, VllmConfig)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
-from vllm.model_executor.layers.pooler import PoolingType
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.platforms import current_platform
 from vllm.transformers_utils.utils import check_gguf_file
@@ -91,7 +90,6 @@ class EngineArgs:
     task: TaskOption = "auto"
     skip_tokenizer_init: bool = False
     tokenizer_mode: str = 'auto'
-    chat_template_text_format: str = 'string'
     trust_remote_code: bool = False
     allowed_local_media_path: str = ""
     download_dir: Optional[str] = None
@@ -128,7 +126,7 @@ class EngineArgs:
     code_revision: Optional[str] = None
     rope_scaling: Optional[Dict[str, Any]] = None
     rope_theta: Optional[float] = None
-    hf_overrides: Optional[Dict[str, Any]] = None
+    hf_overrides: Optional[HfOverrides] = None
     tokenizer_revision: Optional[str] = None
     quantization: Optional[str] = None
     enforce_eager: Optional[bool] = None
@@ -143,6 +141,7 @@ class EngineArgs:
     limit_mm_per_prompt: Optional[Mapping[str, int]] = None
     mm_processor_kwargs: Optional[Dict[str, Any]] = None
     enable_lora: bool = False
+    enable_lora_bias: bool = False
     max_loras: int = 1
     max_lora_rank: int = 16
     enable_prompt_adapter: bool = False
@@ -186,15 +185,10 @@ class EngineArgs:
     otlp_traces_endpoint: Optional[str] = None
     collect_detailed_traces: Optional[str] = None
     disable_async_output_proc: bool = False
-    override_neuron_config: Optional[Dict[str, Any]] = None
     scheduling_policy: Literal["fcfs", "priority"] = "fcfs"
 
-    # Pooling configuration.
-    pooling_type: Optional[str] = None
-    pooling_norm: Optional[bool] = None
-    pooling_softmax: Optional[bool] = None
-    pooling_step_tag_id: Optional[int] = None
-    pooling_returned_token_ids: Optional[List[int]] = None
+    override_neuron_config: Optional[Dict[str, Any]] = None
+    override_pooler_config: Optional[PoolerConfig] = None
 
     def __post_init__(self):
         if not self.tokenizer:
@@ -263,24 +257,16 @@ class EngineArgs:
             'fast tokenizer if available.\n* "slow" will '
             'always use the slow tokenizer. \n* '
             '"mistral" will always use the `mistral_common` tokenizer.')
-        parser.add_argument(
-            '--chat-template-text-format',
-            type=str,
-            default=EngineArgs.chat_template_text_format,
-            choices=['string', 'openai'],
-            help='The format to render text content within a chat template. '
-            '"string" will keep the content field as a string whereas '
-            '"openai" will parse content in the current OpenAI format.')
         parser.add_argument('--trust-remote-code',
                             action='store_true',
                             help='Trust remote code from huggingface.')
         parser.add_argument(
             '--allowed-local-media-path',
             type=str,
-            help="Allowing API requests to read local images or videos"
-            "from directories specified by the server file system."
-            "This is a security risk."
-            "Should only be enabled in trusted environments")
+            help="Allowing API requests to read local images or videos "
+            "from directories specified by the server file system. "
+            "This is a security risk. "
+            "Should only be enabled in trusted environments.")
         parser.add_argument('--download-dir',
                             type=nullable_str,
                             default=EngineArgs.download_dir,
@@ -345,7 +331,7 @@ class EngineArgs:
             'scaling factors. This should generally be supplied, when '
             'KV cache dtype is FP8. Otherwise, KV cache scaling factors '
             'default to 1.0, which may cause accuracy issues. '
-            'FP8_E5M2 (without scaling) is only supported on cuda version'
+            'FP8_E5M2 (without scaling) is only supported on cuda version '
             'greater than 11.8. On ROCm (AMD GPU), FP8_E4M3 is instead '
             'supported for common inference criteria.')
         parser.add_argument('--max-model-len',
@@ -369,9 +355,14 @@ class EngineArgs:
             '--distributed-executor-backend',
             choices=['ray', 'mp'],
             default=EngineArgs.distributed_executor_backend,
-            help='Backend to use for distributed serving. When more than 1 GPU '
-            'is used, on CUDA this will be automatically set to "ray" if '
-            'installed or "mp" (multiprocessing) otherwise.')
+            help='Backend to use for distributed model '
+            'workers, either "ray" or "mp" (multiprocessing). If the product '
+            'of pipeline_parallel_size and tensor_parallel_size is less than '
+            'or equal to the number of GPUs available, "mp" will be used to '
+            'keep processing on a single host. Otherwise, this will default '
+            'to "ray" if Ray is installed and fail otherwise. Note that tpu '
+            'and hpu only support Ray for distributed inference.')
+
         parser.add_argument(
             '--worker-use-ray',
             action='store_true',
@@ -446,9 +437,9 @@ class EngineArgs:
             'this argument can be seen as a virtual way to increase '
             'the GPU memory size. For example, if you have one 24 GB '
             'GPU and set this to 10, virtually you can think of it as '
-            'a 34 GB GPU. Then you can load a 13B model with BF16 weight,'
+            'a 34 GB GPU. Then you can load a 13B model with BF16 weight, '
             'which requires at least 26GB GPU memory. Note that this '
-            'requires fast CPU-GPU interconnect, as part of the model is'
+            'requires fast CPU-GPU interconnect, as part of the model is '
             'loaded from CPU memory to GPU memory on the fly in each '
             'model forward pass.')
         parser.add_argument(
@@ -468,7 +459,7 @@ class EngineArgs:
             type=int,
             default=None,
             help='If specified, ignore GPU profiling result and use this number'
-            'of GPU blocks. Used for testing preemption.')
+            ' of GPU blocks. Used for testing preemption.')
         parser.add_argument('--max-num-batched-tokens',
                             type=int,
                             default=EngineArgs.max_num_batched_tokens,
@@ -514,7 +505,7 @@ class EngineArgs:
         parser.add_argument('--hf-overrides',
                             type=json.loads,
                             default=EngineArgs.hf_overrides,
-                            help='Extra arguments for the HuggingFace config.'
+                            help='Extra arguments for the HuggingFace config. '
                             'This should be a JSON string that will be '
                             'parsed into a dictionary.')
         parser.add_argument('--enforce-eager',
@@ -572,13 +563,16 @@ class EngineArgs:
             '--mm-processor-kwargs',
             default=None,
             type=json.loads,
-            help=('Overrides for the multimodal input mapping/processing,'
+            help=('Overrides for the multimodal input mapping/processing, '
                   'e.g., image processor. For example: {"num_crops": 4}.'))
 
         # LoRA related configs
         parser.add_argument('--enable-lora',
                             action='store_true',
                             help='If True, enable handling of LoRA adapters.')
+        parser.add_argument('--enable-lora-bias',
+                            action='store_true',
+                            help='If True, enable bias for LoRA adapters.')
         parser.add_argument('--max-loras',
                             type=int,
                             default=EngineArgs.max_loras,
@@ -598,7 +592,7 @@ class EngineArgs:
             '--lora-dtype',
             type=str,
             default=EngineArgs.lora_dtype,
-            choices=['auto', 'float16', 'bfloat16', 'float32'],
+            choices=['auto', 'float16', 'bfloat16'],
             help=('Data type for LoRA. If auto, will default to '
                   'base model dtype.'))
         parser.add_argument(
@@ -617,8 +611,8 @@ class EngineArgs:
             type=int,
             default=EngineArgs.max_cpu_loras,
             help=('Maximum number of LoRAs to store in CPU memory. '
-                  'Must be >= than max_num_seqs. '
-                  'Defaults to max_num_seqs.'))
+                  'Must be >= than max_loras. '
+                  'Defaults to max_loras.'))
         parser.add_argument(
             '--fully-sharded-loras',
             action='store_true',
@@ -819,9 +813,9 @@ class EngineArgs:
             "of the provided names. The model name in the model "
             "field of a response will be the first name in this "
             "list. If not specified, the model name will be the "
-            "same as the `--model` argument. Noted that this name(s)"
+            "same as the `--model` argument. Noted that this name(s) "
             "will also be used in `model_name` tag content of "
-            "prometheus metrics, if multiple names provided, metrics"
+            "prometheus metrics, if multiple names provided, metrics "
             "tag will take the first one.")
         parser.add_argument('--qlora-adapter-name-or-path',
                             type=str,
@@ -850,12 +844,6 @@ class EngineArgs:
             default=EngineArgs.disable_async_output_proc,
             help="Disable async output processing. This may result in "
             "lower performance.")
-        parser.add_argument(
-            '--override-neuron-config',
-            type=json.loads,
-            default=None,
-            help="Override or set neuron device configuration. "
-            "e.g. {\"cast_logits_dtype\": \"bloat16\"}.'")
 
         parser.add_argument(
             '--scheduling-policy',
@@ -868,56 +856,17 @@ class EngineArgs:
             'arrival deciding any ties).')
 
         parser.add_argument(
-            '--pooling-type',
-            choices=[pt.name for pt in PoolingType],
+            '--override-neuron-config',
+            type=json.loads,
             default=None,
-            help='Used to configure the pooling method in the embedding model.'
-        )
-
-        parser.add_argument('--pooling-norm',
-                            default=None,
-                            action='store_true',
-                            help="Used to determine whether to normalize "
-                            "the pooled data in the embedding model.")
-
-        parser.add_argument('--no-pooling-norm',
-                            default=None,
-                            action='store_false',
-                            dest='pooling_norm',
-                            help="Used to determine whether to normalize "
-                            "the pooled data in the embedding model.")
-
-        parser.add_argument('--pooling-softmax',
-                            default=None,
-                            action='store_true',
-                            help="Used to determine whether to softmax "
-                            "the pooled data in the embedding model.")
-
-        parser.add_argument('--no-pooling-softmax',
-                            default=None,
-                            action='store_false',
-                            dest='pooling_softmax',
-                            help="Used to determine whether to softmax "
-                            "the pooled data in the embedding model.")
-
+            help="Override or set neuron device configuration. "
+            "e.g. {\"cast_logits_dtype\": \"bloat16\"}.'")
         parser.add_argument(
-            '--pooling-step-tag-id',
-            type=int,
+            '--override-pooler-config',
+            type=PoolerConfig.from_json,
             default=None,
-            help="When pooling-step-tag-id is not -1, it indicates "
-            "that the score corresponding to the step-tag-ids in the "
-            "generated sentence should be returned. Otherwise, it "
-            "returns the scores for all tokens.")
-
-        parser.add_argument(
-            '--pooling-returned-token-ids',
-            nargs='+',
-            type=int,
-            default=None,
-            help="pooling-returned-token-ids represents a list of "
-            "indices for the vocabulary dimensions to be extracted, "
-            "such as the token IDs of good_token and bad_token in "
-            "the math-shepherd-mistral-7b-prm model.")
+            help="Override or set the pooling method in the embedding model. "
+            "e.g. {\"pooling_type\": \"mean\", \"normalize\": false}.'")
 
         return parser
 
@@ -936,7 +885,6 @@ class EngineArgs:
             # We know this is not None because we set it in __post_init__
             tokenizer=cast(str, self.tokenizer),
             tokenizer_mode=self.tokenizer_mode,
-            chat_template_text_format=self.chat_template_text_format,
             trust_remote_code=self.trust_remote_code,
             allowed_local_media_path=self.allowed_local_media_path,
             dtype=self.dtype,
@@ -958,14 +906,10 @@ class EngineArgs:
             served_model_name=self.served_model_name,
             limit_mm_per_prompt=self.limit_mm_per_prompt,
             use_async_output_proc=not self.disable_async_output_proc,
-            override_neuron_config=self.override_neuron_config,
             config_format=self.config_format,
             mm_processor_kwargs=self.mm_processor_kwargs,
-            pooling_type=self.pooling_type,
-            pooling_norm=self.pooling_norm,
-            pooling_softmax=self.pooling_softmax,
-            pooling_step_tag_id=self.pooling_step_tag_id,
-            pooling_returned_token_ids=self.pooling_returned_token_ids,
+            override_neuron_config=self.override_neuron_config,
+            override_pooler_config=self.override_pooler_config,
         )
 
     def create_load_config(self) -> LoadConfig:
@@ -1143,6 +1087,7 @@ class EngineArgs:
                              and parallel_config.use_ray),
             policy=self.scheduling_policy)
         lora_config = LoRAConfig(
+            bias_enabled=self.enable_lora_bias,
             max_lora_rank=self.max_lora_rank,
             max_loras=self.max_loras,
             fully_sharded_loras=self.fully_sharded_loras,

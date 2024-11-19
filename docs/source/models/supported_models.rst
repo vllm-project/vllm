@@ -330,15 +330,23 @@ Text Embedding
     - :code:`BAAI/bge-multilingual-gemma2`, etc.
     - 
     - ✅︎
-  * - :code:`MistralModel`
-    - Mistral-based
+  * - :code:`LlamaModel`, :code:`LlamaForCausalLM`, :code:`MistralModel`, etc.
+    - Llama-based
     - :code:`intfloat/e5-mistral-7b-instruct`, etc.
+    - ✅︎
+    - ✅︎
+  * - :code:`Qwen2Model`, :code:`Qwen2ForCausalLM`
+    - Qwen2-based
+    - :code:`ssmits/Qwen2-7B-Instruct-embed-base`, :code:`Alibaba-NLP/gte-Qwen2-1.5B-instruct`, etc.
     - ✅︎
     - ✅︎
 
 .. important::
   Some model architectures support both generation and embedding tasks.
   In this case, you have to pass :code:`--task embedding` to run the model in embedding mode.
+
+.. tip::
+  You can override the model's pooling method by passing :code:`--override-pooler-config`.
 
 Reward Modeling
 ---------------
@@ -355,11 +363,11 @@ Reward Modeling
   * - :code:`Qwen2ForRewardModel`
     - Qwen2-based
     - :code:`Qwen/Qwen2.5-Math-RM-72B`, etc.
-    - 
+    - ✅︎
     - ✅︎
 
 .. note::
-    As an interim measure, these models are supported via Embeddings API. See `this RFC <https://github.com/vllm-project/vllm/issues/8967>`_ for upcoming changes.
+    As an interim measure, these models are supported in both offline and online inference via Embeddings API.
 
 Classification
 ---------------
@@ -376,11 +384,11 @@ Classification
   * - :code:`Qwen2ForSequenceClassification`
     - Qwen2-based
     - :code:`jason9693/Qwen2.5-1.5B-apeach`, etc.
-    - 
+    - ✅︎
     - ✅︎
 
 .. note::
-    As an interim measure, these models are supported via Embeddings API. It will be supported via Classification API in the future (no reference APIs exist now).
+    As an interim measure, these models are supported in both offline and online inference via Embeddings API.
 
 
 Multimodal Language Models
@@ -438,7 +446,7 @@ Text Generation
     - GLM-4V
     - T + I
     - :code:`THUDM/glm-4v-9b` etc.
-    - 
+    - ✅︎
     - ✅︎
   * - :code:`H2OVLChatModel`
     - H2OVL
@@ -450,7 +458,7 @@ Text Generation
     - Idefics3
     - T + I
     - :code:`HuggingFaceM4/Idefics3-8B-Llama3` etc.
-    - 
+    - ✅︎
     - 
   * - :code:`InternVLChatModel`
     - InternVL2
@@ -538,7 +546,7 @@ Text Generation
     - ✅︎
   * - :code:`Qwen2VLForConditionalGeneration`
     - Qwen2-VL
-    - T + I\ :sup:`E+` + V\ :sup:`+`
+    - T + I\ :sup:`E+` + V\ :sup:`E+`
     - :code:`Qwen/Qwen2-VL-2B-Instruct`, :code:`Qwen/Qwen2-VL-7B-Instruct`, :code:`Qwen/Qwen2-VL-72B-Instruct`, etc.
     - ✅︎
     - ✅︎
@@ -584,10 +592,19 @@ Multimodal Embedding
     - :code:`TIGER-Lab/VLM2Vec-Full`
     - 🚧
     - ✅︎
+  * - :code:`Qwen2VLForConditionalGeneration`
+    - Qwen2-VL-based
+    - T + I
+    - :code:`MrLight/dse-qwen2-2b-mrl-v1`
+    - 
+    - ✅︎
 
 .. important::
   Some model architectures support both generation and embedding tasks.
   In this case, you have to pass :code:`--task embedding` to run the model in embedding mode.
+
+.. tip::
+  You can override the model's pooling method by passing :code:`--override-pooler-config`.
 
 Model Support Policy
 =====================

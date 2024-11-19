@@ -1,14 +1,15 @@
 """Minimal implementation of CLIPVisionModel intended to be only used
 within a vision language model."""
-from typing import Iterable, List, Optional, Tuple, Union
+from typing import Iterable, List, Optional, Set, Tuple, Union
 
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from PIL import Image
 from transformers import CLIPVisionConfig
-from transformers.models.clip.modeling_clip import CLIPSdpaAttention
 
+from vllm.attention.selector import _Backend
 from vllm.config import ModelConfig
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.inputs import DecoderOnlyInputs, token_inputs
@@ -23,11 +24,7 @@ from vllm.multimodal.utils import (cached_get_tokenizer,
                                    repeat_and_pad_placeholder_tokens)
 from vllm.sequence import SequenceData
 
-try:
-    from xformers import ops as xops
-    USE_XFORMERS_OPS = True
-except ImportError:
-    USE_XFORMERS_OPS = False
+from .utils import get_vit_attn_backend
 
 
 def get_clip_patch_grid_length(*, image_size: int, patch_size: int) -> int:
@@ -197,7 +194,7 @@ class CLIPVisionEmbeddings(nn.Module):
         return embeddings
 
 
-class CLIPParallelAttention(nn.Module):
+class CLIPAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
     def __init__(
@@ -237,6 +234,12 @@ class CLIPParallelAttention(nn.Module):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.num_heads_per_partition = divide(self.num_heads, self.tp_size)
 
+        # Detect attention implementation.
+        self.attn_backend = get_vit_attn_backend(support_fa=False)
+        if self.attn_backend not in {_Backend.TORCH_SDPA, _Backend.XFORMERS}:
+            raise RuntimeError(
+                f"CLIP does not support {self.attn_backend} backend now.")
+
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
         return tensor.view(bsz, seq_len, self.num_heads,
                            self.head_dim).transpose(1, 2).contiguous()
@@ -261,11 +264,26 @@ class CLIPParallelAttention(nn.Module):
                                          self.num_heads_per_partition,
                                          self.head_dim)
 
-        out = xops.memory_efficient_attention_forward(query_states,
-                                                      key_states,
-                                                      value_states,
-                                                      p=self.dropout,
-                                                      scale=self.scale)
+        if self.attn_backend == _Backend.XFORMERS:
+            from xformers import ops as xops
+
+            out = xops.memory_efficient_attention_forward(query_states,
+                                                          key_states,
+                                                          value_states,
+                                                          p=self.dropout,
+                                                          scale=self.scale)
+        elif self.attn_backend == _Backend.TORCH_SDPA:
+            query_states, key_states, value_states = (x.transpose(1, 2)
+                                                      for x in (query_states,
+                                                                key_states,
+                                                                value_states))
+            out = F.scaled_dot_product_attention(query_states,
+                                                 key_states,
+                                                 value_states,
+                                                 dropout_p=self.dropout,
+                                                 scale=self.scale)
+            out = out.transpose(1, 2)
+
         out = out.view(bsz, tgt_len, -1)
         attn_output, _ = self.out_proj(out)
 
@@ -311,17 +329,11 @@ class CLIPEncoderLayer(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-
-        num_heads = config.num_attention_heads
-        tp_size = get_tensor_model_parallel_world_size()
-        if USE_XFORMERS_OPS and num_heads % tp_size == 0:
-            self.self_attn = CLIPParallelAttention(
-                config,
-                quant_config=quant_config,
-                prefix=f"{prefix}.self_attn",
-            )
-        else:
-            self.self_attn = CLIPSdpaAttention(config)
+        self.self_attn = CLIPAttention(
+            config,
+            quant_config=quant_config,
+            prefix=f"{prefix}.self_attn",
+        )
         self.layer_norm1 = nn.LayerNorm(config.hidden_size,
                                         eps=config.layer_norm_eps)
         self.mlp = CLIPMLP(config,
@@ -461,11 +473,6 @@ class CLIPVisionModel(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-
-        tp_size = get_tensor_model_parallel_world_size()
-        num_heads = config.num_attention_heads
-        self.shard_weight = USE_XFORMERS_OPS and num_heads % tp_size == 0
-
         self.vision_model = CLIPVisionTransformer(
             config=config,
             quant_config=quant_config,
@@ -483,14 +490,16 @@ class CLIPVisionModel(nn.Module):
 
     # (TODO) Add prefix argument for filtering out weights to be loaded
     #        ref: https://github.com/vllm-project/vllm/pull/7186#discussion_r1734163986
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
             ("qkv_proj", "k_proj", "k"),
             ("qkv_proj", "v_proj", "v"),
-        ] if self.shard_weight else []
+        ]
         params_dict = dict(self.named_parameters())
+        loaded_params: Set[str] = set()
         layer_count = len(self.vision_model.encoder.layers)
 
         for name, loaded_weight in weights:
@@ -508,8 +517,9 @@ class CLIPVisionModel(nn.Module):
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
                     continue
+                name = name.replace(weight_name, param_name)
 
-                param = params_dict[name.replace(weight_name, param_name)]
+                param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
                 break
@@ -518,3 +528,5 @@ class CLIPVisionModel(nn.Module):
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params

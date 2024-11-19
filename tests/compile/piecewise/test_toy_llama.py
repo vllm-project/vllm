@@ -15,11 +15,10 @@ from torch import nn
 from torch.library import Library
 
 from vllm.compilation.compile_context import set_compile_context
-from vllm.compilation.config import CompilationConfig
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.decorators import support_torch_compile
-from vllm.compilation.levels import CompilationLevel
-from vllm.plugins import set_compilation_config
+from vllm.config import CompilationConfig, CompilationLevel, VllmConfig
+from vllm.plugins import set_compilation_config, set_current_vllm_config
 from vllm.utils import direct_register_custom_op
 
 # create a library to hold the custom op
@@ -195,9 +194,15 @@ class LlamaDecoderLayer(nn.Module):
         return hidden_states, residual
 
 
+@support_torch_compile
 class LlamaModel(nn.Module):
 
-    def __init__(self, config: LlamaConfig) -> None:
+    def __init__(self,
+                 *,
+                 vllm_config: VllmConfig,
+                 config: LlamaConfig,
+                 prefix: str = '',
+                 **kwargs) -> None:
         super().__init__()
         self.embedding_tokens = nn.Embedding(
             num_embeddings=config.vocab_size,
@@ -265,10 +270,11 @@ def run_model(llama_config,
             CompilationLevel.NO_COMPILATION)
         set_compilation_config(None)
 
-    cls = LlamaModel
-    if use_compile:
-        cls = support_torch_compile(LlamaModel)
-    model = cls(llama_config).eval().cuda()
+    vllm_config = VllmConfig()
+    with set_current_vllm_config(vllm_config):
+        model = LlamaModel(config=llama_config,
+                           vllm_config=vllm_config,
+                           prefix="").eval().cuda()
 
     B = 16  # max batch size
     input_ids = torch.randint(0, llama_config.vocab_size, (B, )).cuda()
@@ -357,7 +363,6 @@ def test_toy_llama():
 def benchmark():
     os.environ["VLLM_TORCH_COMPILE_LEVEL"] = str(CompilationLevel.PIECEWISE)
     from triton.testing import do_bench
-    cls = support_torch_compile(LlamaModel)
 
     # similar to llama 3.1-8B
     llama_config = LlamaConfig(hidden_size=4096,
@@ -390,7 +395,11 @@ def benchmark():
         else:
             set_compilation_config(None)
 
-        model = cls(llama_config).eval().cuda().to(torch.bfloat16)
+        vllm_config = VllmConfig()
+        with set_current_vllm_config(vllm_config):
+            model = LlamaModel(config=llama_config,
+                               vllm_config=vllm_config,
+                               prefix="").eval().cuda().to(torch.bfloat16)
 
         B = 256  # max batch size
         input_ids = torch.randint(0, llama_config.vocab_size, (B, )).cuda()

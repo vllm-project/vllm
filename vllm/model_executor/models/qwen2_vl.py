@@ -23,7 +23,7 @@
 """Inference-only Qwen2-VL model compatible with HuggingFace weights."""
 from functools import partial
 from typing import (Any, Callable, Dict, Iterable, List, Literal, Mapping,
-                    Optional, Tuple, Type, TypedDict, Union)
+                    Optional, Set, Tuple, Type, TypedDict, Union)
 
 import torch
 import torch.nn as nn
@@ -51,6 +51,7 @@ from vllm.model_executor.layers.activation import QuickGELU
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.pooler import Pooler, PoolingType
 from vllm.model_executor.layers.quantization import (GPTQConfig,
                                                      GPTQMarlinConfig,
                                                      QuantizationConfig)
@@ -58,12 +59,13 @@ from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.qwen2 import Qwen2Model
-from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalDataDict,
-                             MultiModalKwargs)
-from vllm.multimodal.base import MultiModalData
+from vllm.model_executor.pooling_metadata import PoolingMetadata
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import cached_get_image_processor
+from vllm.multimodal.inputs import (MultiModalData, MultiModalDataDict,
+                                    MultiModalKwargs)
 from vllm.multimodal.utils import cached_get_tokenizer
-from vllm.sequence import IntermediateTensors, SequenceData
+from vllm.sequence import IntermediateTensors, PoolerOutput, SequenceData
 from vllm.transformers_utils.config import uses_mrope
 from vllm.transformers_utils.processor import cached_get_processor
 
@@ -79,7 +81,7 @@ logger = init_logger(__name__)
 
 class Qwen2VLImagePixelInputs(TypedDict):
     type: Literal["pixel_values"]
-    data: torch.Tensor
+    pixel_values: torch.Tensor
     """Shape:
     `(num_patches, num_channels * patch_size * patch_size)`
     """
@@ -92,9 +94,22 @@ class Qwen2VLImagePixelInputs(TypedDict):
 
 class Qwen2VLImageEmbeddingInputs(TypedDict):
     type: Literal["image_embeds"]
-    data: torch.Tensor
-    """Shape: `(batch_size * num_images, image_feature_size, hidden_size)`
-    `hidden_size` must match the hidden size of language model backbone.
+    image_embeds: torch.Tensor
+    """Supported types:
+    - List[`torch.Tensor`]: A list of tensors holding all images' features.
+        Each tensor holds an image's features.
+    - `torch.Tensor`: A tensor holding all images' features
+        (concatenation of all images' feature tensors).
+    
+    Tensor shape: `(num_image_features, hidden_size)`
+    - `num_image_features` varies based on
+        the number and resolution of the images.
+    - `hidden_size` must match the hidden size of language model backbone.
+    """
+
+    image_grid_thw: torch.Tensor
+    """Shape: `(num_images, 3)`
+    This should be in `(grid_t, grid_h, grid_w)` format.
     """
 
 
@@ -102,7 +117,8 @@ Qwen2VLImageInputs = Union[Qwen2VLImagePixelInputs,
                            Qwen2VLImageEmbeddingInputs]
 
 
-class Qwen2VLVideoInputs(TypedDict):
+class Qwen2VLVideoPixelInputs(TypedDict):
+    type: Literal["pixel_values_videos"]
     pixel_values_videos: torch.Tensor
     """Shape:
     `(num_patches,
@@ -115,6 +131,30 @@ class Qwen2VLVideoInputs(TypedDict):
     This should be in `(grid_t, grid_h, grid_w)` format.
     """
 
+
+class Qwen2VLVideoEmbeddingInputs(TypedDict):
+    type: Literal["video_embeds"]
+    video_embeds: torch.Tensor
+    """Supported types:
+    - List[`torch.Tensor`]: A list of tensors holding all videos' features.
+        Each tensor holds an video's features.
+    - `torch.Tensor`: A tensor holding all videos' features
+      (concatenation of all videos' feature tensors).
+    
+    Tensor shape: `(num_image_features, hidden_size)`
+    - `num_image_features` varies based on 
+        the number and resolution of the videos.
+    - `hidden_size` must match the hidden size of language model backbone.
+    """
+
+    video_grid_thw: torch.Tensor
+    """Shape: `(num_videos, 3)`
+    This should be in `(grid_t, grid_h, grid_w)` format.
+    """
+
+
+Qwen2VLVideoInputs = Union[Qwen2VLVideoPixelInputs,
+                           Qwen2VLVideoEmbeddingInputs]
 
 # === Vision Encoder === #
 
@@ -220,7 +260,7 @@ class Qwen2VisionAttention(nn.Module):
                                       prefix=f"{prefix}.proj")
 
         # Detect attention implementation.
-        self.attn_backend: _Backend = get_vit_attn_backend()
+        self.attn_backend: _Backend = get_vit_attn_backend(support_fa=True)
         if self.attn_backend not in {
                 _Backend.FLASH_ATTN, _Backend.TORCH_SDPA, _Backend.XFORMERS
         }:
@@ -585,6 +625,12 @@ def mm_input_mapper_for_qwen2_vl(
             "image_embeds": data.get("image_embeds"),
             "image_grid_thw": data.get("image_grid_thw"),
         })
+    if data_type_key == "video" and isinstance(data, dict):
+        return MultiModalKwargs({
+            "video_embeds": data.get("video_embeds"),
+            "video_grid_thw": data.get("video_grid_thw"),
+        })
+
     model_config = ctx.model_config
     # Handle mm processor kwargs; we pass these at creation time
     # because preprocess() in transformers doesn't expose them
@@ -890,16 +936,33 @@ def input_processor_for_qwen2_vl(
                 idx for idx, token in enumerate(prompt_token_ids)
                 if token == hf_config.image_token_id
             ]
-            image_cnt = len(image_indices)
-            embed_dim = image_inputs.get('image_embeds').size(0)
-            assert embed_dim % image_cnt == 0
-            num_pad_tokens = embed_dim // image_cnt
+
+            # ensure all image tokens have grid_thw
+            assert \
+                len(image_indices) == image_inputs["image_grid_thw"].size(0), \
+                "image token num does not match image_grid_thw.shape"
+
+            image_counter = 0
+            pad_token_counter = 0
             for idx, token in enumerate(prompt_token_ids):
                 if idx in image_indices:
+                    grid_thw = image_inputs["image_grid_thw"][image_counter]
+                    grid_t, grid_h, grid_w = grid_thw
+                    num_pad_tokens = (grid_t * grid_h * grid_w //
+                                      image_processor.merge_size //
+                                      image_processor.merge_size)
                     prompt_token_ids_with_image.extend([token] *
                                                        num_pad_tokens)
+                    image_counter += 1
+                    pad_token_counter += num_pad_tokens
                 else:
                     prompt_token_ids_with_image.append(token)
+
+            # ensure all embeddings are used
+            assert \
+                pad_token_counter == image_inputs["image_embeds"].size(0), \
+                "image_embeds.shape does not match image_grid_thw"
+
             prompt_token_ids = prompt_token_ids_with_image
         else:
             prompt_token_ids = _expand_pad_tokens(image_inputs,
@@ -912,14 +975,49 @@ def input_processor_for_qwen2_vl(
                                                   max_pixels=max_pixels)
 
     if video_inputs is not None:
-        prompt_token_ids = _expand_pad_tokens(video_inputs,
-                                              hf_config.video_token_id,
-                                              make_batched_videos,
-                                              "video",
-                                              image_processor,
-                                              prompt_token_ids,
-                                              min_pixels=min_pixels,
-                                              max_pixels=max_pixels)
+        if isinstance(video_inputs, dict):
+            prompt_token_ids_with_video = []
+            video_indices = [
+                idx for idx, token in enumerate(prompt_token_ids)
+                if token == hf_config.video_token_id
+            ]
+
+            # ensure all video tokens have grid_thw
+            assert \
+                len(video_indices) == video_inputs["video_grid_thw"].size(0), \
+                "video token num does not match video_grid_thw.shape"
+
+            video_counter = 0
+            pad_token_counter = 0
+            for idx, token in enumerate(prompt_token_ids):
+                if idx in video_indices:
+                    grid_thw = video_inputs["video_grid_thw"][video_counter]
+                    grid_t, grid_h, grid_w = grid_thw
+                    num_pad_tokens = (grid_t * grid_h * grid_w //
+                                      image_processor.merge_size //
+                                      image_processor.merge_size)
+                    prompt_token_ids_with_video.extend([token] *
+                                                       num_pad_tokens)
+                    video_counter += 1
+                    pad_token_counter += num_pad_tokens
+                else:
+                    prompt_token_ids_with_video.append(token)
+
+            # ensure all embeddings are used
+            assert \
+                pad_token_counter == video_inputs["video_embeds"].size(0), \
+                "video_embeds.shape does not match video_grid_thw"
+
+            prompt_token_ids = prompt_token_ids_with_video
+        else:
+            prompt_token_ids = _expand_pad_tokens(video_inputs,
+                                                  hf_config.video_token_id,
+                                                  make_batched_videos,
+                                                  "video",
+                                                  image_processor,
+                                                  prompt_token_ids,
+                                                  min_pixels=min_pixels,
+                                                  max_pixels=max_pixels)
 
     prompt = inputs.get("prompt")
     if prompt is None:
@@ -971,6 +1069,7 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         config = vllm_config.model_config.hf_config
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
+        pooler_config = vllm_config.model_config.pooler_config
         multimodal_config = vllm_config.model_config.multimodal_config
         assert not cache_config.enable_prefix_caching, \
             "Qwen2-VL currently does not support prefix caching"
@@ -1002,6 +1101,11 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = get_sampler()
+        self._pooler = Pooler.from_config_with_defaults(
+            pooler_config,
+            pooling_type=PoolingType.LAST,
+            normalize=True,
+            softmax=False)
         self.make_empty_intermediate_tensors = (
             make_empty_intermediate_tensors_factory(
                 ["hidden_states", "residual"], config.hidden_size))
@@ -1051,49 +1155,71 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
                                  f"Got type: {type(pixel_values)}")
 
             return Qwen2VLImagePixelInputs(type="pixel_values",
-                                           data=pixel_values,
+                                           pixel_values=pixel_values,
                                            image_grid_thw=image_grid_thw)
 
         if image_embeds is not None:
             image_embeds = self._validate_and_reshape_mm_tensor(
                 image_embeds, "image embeds")
+            image_grid_thw = self._validate_and_reshape_mm_tensor(
+                image_grid_thw, "image grid_thw")
 
             if not isinstance(image_embeds, torch.Tensor):
                 raise ValueError("Incorrect type of image embeddings. "
                                  f"Got type: {type(image_embeds)}")
             return Qwen2VLImageEmbeddingInputs(type="image_embeds",
-                                               data=image_embeds)
+                                               image_embeds=image_embeds,
+                                               image_grid_thw=image_grid_thw)
 
     def _parse_and_validate_video_input(
             self, **kwargs: object) -> Optional[Qwen2VLVideoInputs]:
         pixel_values_videos = kwargs.pop("pixel_values_videos", None)
+        video_embeds = kwargs.pop("video_embeds", None)
         video_grid_thw = kwargs.pop("video_grid_thw", None)
 
-        if pixel_values_videos is None:
+        if pixel_values_videos is None and video_embeds is None:
             return None
 
-        pixel_values_videos = self._validate_and_reshape_mm_tensor(
-            pixel_values_videos, "video pixel values")
-        video_grid_thw = self._validate_and_reshape_mm_tensor(
-            video_grid_thw, "video grid_thw")
+        if pixel_values_videos is not None:
+            pixel_values_videos = self._validate_and_reshape_mm_tensor(
+                pixel_values_videos, "video pixel values")
+            video_grid_thw = self._validate_and_reshape_mm_tensor(
+                video_grid_thw, "video grid_thw")
 
-        return Qwen2VLVideoInputs(
-            pixel_values_videos=pixel_values_videos,
-            video_grid_thw=video_grid_thw,
-        )
+            return Qwen2VLVideoPixelInputs(
+                type="pixel_values_videos",
+                pixel_values_videos=pixel_values_videos,
+                video_grid_thw=video_grid_thw,
+            )
+
+        if video_embeds is not None:
+            video_embeds = self._validate_and_reshape_mm_tensor(
+                video_embeds, "video embeds")
+            video_grid_thw = self._validate_and_reshape_mm_tensor(
+                video_grid_thw, "video grid_thw")
+
+            if not isinstance(video_embeds, torch.Tensor):
+                raise ValueError("Incorrect type of video embeddings. "
+                                 f"Got type: {type(video_embeds)}")
+            return Qwen2VLVideoEmbeddingInputs(type="video_embeds",
+                                               video_embeds=video_embeds,
+                                               video_grid_thw=video_grid_thw)
 
     def _process_image_input(self,
                              image_input: Qwen2VLImageInputs) -> torch.Tensor:
         if image_input["type"] == "image_embeds":
-            return image_input["data"].type(self.visual.dtype)
+            return image_input["image_embeds"].type(self.visual.dtype)
 
-        pixel_values = image_input["data"].type(self.visual.dtype)
+        pixel_values = image_input["pixel_values"].type(self.visual.dtype)
         image_embeds = self.visual(pixel_values,
                                    grid_thw=image_input["image_grid_thw"])
         return image_embeds
 
     def _process_video_input(self,
                              video_input: Qwen2VLVideoInputs) -> torch.Tensor:
+        if video_input["type"] == "video_embeds":
+            return video_input["video_embeds"].type(self.visual.dtype)
+
         pixel_values_videos = video_input["pixel_values_videos"].type(
             self.visual.dtype)
         video_embeds = self.visual(pixel_values_videos,
@@ -1200,7 +1326,15 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def pooler(
+        self,
+        hidden_states: torch.Tensor,
+        pooling_metadata: PoolingMetadata,
+    ) -> Optional[PoolerOutput]:
+        return self._pooler(hidden_states, pooling_metadata)
+
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -1210,6 +1344,7 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
             ("gate_up_proj", "gate_proj", 0),
         ]
         params_dict = dict(self.named_parameters(remove_duplicate=False))
+        loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -1259,3 +1394,5 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params

@@ -1,22 +1,19 @@
-import os
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Dict, List, Optional, Set
+from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
 
 import numpy as np
 import torch
 import torch.distributed
 import torch.nn as nn
 
-from vllm import envs
 from vllm.compilation.compile_context import set_compile_context
-from vllm.compilation.config import CompilationConfig
-from vllm.compilation.levels import CompilationLevel
-from vllm.config import VllmConfig
+from vllm.config import CompilationConfig, CompilationLevel, VllmConfig
 from vllm.forward_context import set_forward_context
+from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
-from vllm.multimodal import MultiModalDataDict
+from vllm.multimodal import MultiModalKwargs
 from vllm.plugins import set_compilation_config
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler, cdiv,
@@ -27,6 +24,7 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 
 if TYPE_CHECKING:
+    from vllm.multimodal.inputs import PlaceholderRange
     from vllm.v1.core.scheduler import SchedulerOutput
 
 logger = init_logger(__name__)
@@ -37,8 +35,8 @@ class GPUModelRunner:
     def __init__(
         self,
         vllm_config: VllmConfig,
+        input_registry: InputRegistry = INPUT_REGISTRY,
     ):
-        # TODO: use ModelRunnerBase.__init__(self, vllm_config=vllm_config)
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
@@ -75,10 +73,16 @@ class GPUModelRunner:
             parallel_config)
         self.num_kv_heads = model_config.get_num_kv_heads(parallel_config)
         self.head_size = model_config.get_head_size()
+        self.hidden_size = model_config.get_hidden_size()
+
+        # Multi-modal data support
+        self.input_registry = input_registry
 
         # Lazy initialization
         # self.model: nn.Module  # Set after load_model
         self.kv_caches: List[torch.Tensor] = []
+        # req_id -> (input_id -> encoder_output)
+        self.encoder_cache: Dict[str, Dict[int, torch.Tensor]] = {}
 
         # Request states.
         self.requests: Dict[str, CachedRequestState] = {}
@@ -91,23 +95,33 @@ class GPUModelRunner:
             pin_memory=self.pin_memory,
         )
 
-        self.use_cuda_graph = (envs.VLLM_TORCH_COMPILE_LEVEL
+        self.use_cuda_graph = (self.vllm_config.compilation_config.level
                                == CompilationLevel.PIECEWISE
                                and not self.model_config.enforce_eager)
         # TODO(woosuk): Provide an option to tune the max cudagraph batch size.
         self.cudagraph_batch_sizes = [1, 2, 4] + [i for i in range(8, 513, 8)]
-        self.input_ids = torch.zeros(self.max_num_tokens,
-                                     dtype=torch.int32,
-                                     device=self.device)
         self.positions = torch.zeros(self.max_num_tokens,
                                      dtype=torch.int64,
                                      device=self.device)
+        self.inputs_embeds = torch.zeros(
+            (self.max_num_tokens, self.hidden_size),
+            dtype=self.dtype,
+            device=self.device)
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         # Remove stopped requests from the cached states.
         # Keep the states of the pre-empted requests.
         for req_id in scheduler_output.finished_req_ids:
             self.requests.pop(req_id, None)
+            self.encoder_cache.pop(req_id, None)
+
+        # Free the cached encoder outputs.
+        for req_id, input_id in scheduler_output.free_encoder_input_ids:
+            encoder_outputs = self.encoder_cache.get(req_id)
+            if encoder_outputs is not None:
+                encoder_outputs.pop(input_id, None)
+                if not encoder_outputs:
+                    self.encoder_cache.pop(req_id, None)
 
         # Remove the requests from the persistent batch.
         stopped_req_ids = set().union(
@@ -156,7 +170,8 @@ class GPUModelRunner:
                 req_id=req_id,
                 prompt_token_ids=req_data.prompt_token_ids,
                 prompt=req_data.prompt,
-                multi_modal_data=req_data.multi_modal_data,
+                mm_inputs=req_data.mm_inputs,
+                mm_positions=req_data.mm_positions,
                 sampling_params=sampling_params,
                 generator=generator,
                 block_ids=req_data.block_ids,
@@ -285,11 +300,9 @@ class GPUModelRunner:
         seq_start_loc_np[0] = 0
         np.cumsum(seq_lens, out=seq_start_loc_np[1:])
 
-        self.input_ids[:total_num_scheduled_tokens].copy_(input_ids,
-                                                          non_blocking=True)
+        input_ids = input_ids.to(self.device, non_blocking=True)
         self.positions[:total_num_scheduled_tokens].copy_(positions,
                                                           non_blocking=True)
-
         query_start_loc = query_start_loc.to(self.device, non_blocking=True)
         seq_start_loc = seq_start_loc.to(self.device, non_blocking=True)
         slot_mapping = slot_mapping.to(self.device, non_blocking=True).long()
@@ -308,7 +321,7 @@ class GPUModelRunner:
         # token from the partial request.
         # TODO: Support prompt logprobs.
         logits_indices = query_start_loc[1:] - 1
-        return attn_metadata, logits_indices
+        return input_ids, attn_metadata, logits_indices
 
     def _prepare_sampling(
         self,
@@ -325,13 +338,91 @@ class GPUModelRunner:
         sampling_metadata = self.input_batch.make_sampling_metadata(skip_copy)
         return sampling_metadata
 
+    def _execute_encoder(self, scheduler_output: "SchedulerOutput"):
+        scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
+        if not scheduled_encoder_inputs:
+            return
+
+        # Batch the multi-modal inputs.
+        mm_inputs: List[MultiModalKwargs] = []
+        req_input_ids: List[Tuple[int, int]] = []
+        for req_id, encoder_input_ids in scheduled_encoder_inputs.items():
+            req_state = self.requests[req_id]
+            for input_id in encoder_input_ids:
+                mm_inputs.append(req_state.mm_inputs[input_id])
+                req_input_ids.append((req_id, input_id))
+        batched_mm_inputs = MultiModalKwargs.batch(mm_inputs)
+        batched_mm_inputs = MultiModalKwargs.as_kwargs(batched_mm_inputs,
+                                                       device=self.device)
+
+        # Run the encoder.
+        # `encoder_outputs` is either of the following:
+        # 1. A tensor of shape [num_images, feature_size, hidden_size]
+        # in case when feature_size is fixed across all images.
+        # 2. A list (length: num_images) of tensors, each of shape
+        # [feature_size, hidden_size] in case when the feature size is
+        # dynamic depending on input images.
+        encoder_outputs = self.model.process_mm_inputs(**batched_mm_inputs)
+
+        # Cache the encoder outputs.
+        for (req_id, input_id), output in zip(req_input_ids, encoder_outputs):
+            if req_id not in self.encoder_cache:
+                self.encoder_cache[req_id] = {}
+            self.encoder_cache[req_id][input_id] = output
+
+    def _gather_encoder_outputs(
+        self,
+        scheduler_output: "SchedulerOutput",
+    ) -> List[torch.Tensor]:
+        encoder_outputs: List[torch.Tensor] = []
+        num_reqs = self.input_batch.num_reqs
+        for req_id in self.input_batch.req_ids[:num_reqs]:
+            num_scheduled_tokens = scheduler_output.num_scheduled_tokens[
+                req_id]
+            req_state = self.requests[req_id]
+            num_computed_tokens = req_state.num_computed_tokens
+            mm_positions = req_state.mm_positions
+            for i, pos_info in enumerate(mm_positions):
+                start_pos = pos_info["offset"]
+                num_encoder_tokens = pos_info["length"]
+
+                # The encoder output is needed if the two ranges overlap:
+                # [num_computed_tokens,
+                #  num_computed_tokens + num_scheduled_tokens) and
+                # [start_pos, start_pos + num_encoder_tokens)
+                if start_pos >= num_computed_tokens + num_scheduled_tokens:
+                    # The encoder output is not needed in this step.
+                    break
+                if start_pos + num_encoder_tokens <= num_computed_tokens:
+                    # The encoder output is already processed and stored
+                    # in the decoder's KV cache.
+                    continue
+
+                start_idx = max(num_computed_tokens - start_pos, 0)
+                end_idx = min(
+                    num_computed_tokens - start_pos + num_scheduled_tokens,
+                    num_encoder_tokens)
+                assert start_idx < end_idx
+                assert req_id in self.encoder_cache
+                assert i in self.encoder_cache[req_id]
+                encoder_output = self.encoder_cache[req_id][i]
+                encoder_outputs.append(encoder_output[start_idx:end_idx])
+        return encoder_outputs
+
     @torch.inference_mode()
     def execute_model(
         self,
         scheduler_output: "SchedulerOutput",
     ) -> ModelRunnerOutput:
         self._update_states(scheduler_output)
-        attn_metadata, logits_indices = self._prepare_inputs(scheduler_output)
+
+        # Run the encoder.
+        self._execute_encoder(scheduler_output)
+        encoder_outputs = self._gather_encoder_outputs(scheduler_output)
+
+        # Prepare the decoder inputs.
+        input_ids, attn_metadata, logits_indices = self._prepare_inputs(
+            scheduler_output)
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if (self.use_cuda_graph
                 and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
@@ -343,12 +434,26 @@ class GPUModelRunner:
             # Eager mode.
             num_input_tokens = num_scheduled_tokens
 
+        # Get the inputs embeds.
+        if encoder_outputs:
+            inputs_embeds = self.model.get_input_embeddings(
+                input_ids, encoder_outputs)
+        else:
+            inputs_embeds = self.model.get_input_embeddings(input_ids)
+        # NOTE(woosuk): To unify token ids and soft tokens (vision embeddings),
+        # always use embeddings (rather than token ids) as input to the model.
+        # TODO(woosuk): Avoid the copy. Optimize.
+        self.inputs_embeds[:num_scheduled_tokens].copy_(inputs_embeds)
+
+        # Run the decoder.
+        # Use persistent buffers for CUDA graphs.
         with set_forward_context(attn_metadata):
             hidden_states = self.model(
-                input_ids=self.input_ids[:num_input_tokens],
+                input_ids=None,
                 positions=self.positions[:num_input_tokens],
                 kv_caches=self.kv_caches,
                 attn_metadata=None,
+                inputs_embeds=self.inputs_embeds[:num_input_tokens],
             )
         hidden_states = hidden_states[:num_scheduled_tokens]
         hidden_states = hidden_states[logits_indices]
@@ -404,15 +509,17 @@ class GPUModelRunner:
 
     def load_model(self) -> None:
         if self.use_cuda_graph:
-            # FIXME(woosuk): Currently, the custom ops are not supported
-            # in the piecewise compilation mode. We rely on TorchInductor
-            # to optimize the model.
-            os.environ["VLLM_CUSTOM_OPS"] = "none"
+            # NOTE(woosuk): Currently, we use inductor because the piecewise
+            # CUDA graphs do not work properly with the custom CUDA kernels.
+            # FIXME(woosuk): Disable inductor to reduce the compilation time
+            # and avoid any potential issues with the inductor.
             set_compilation_config(
                 CompilationConfig(
+                    custom_ops=["none"],
                     use_cudagraph=True,
                     non_cudagraph_ops=["vllm.unified_v1_flash_attention"],
                     use_inductor=True,
+                    enable_fusion=False,
                 ))
 
         logger.info("Starting to load model %s...", self.model_config.model)
@@ -438,13 +545,16 @@ class GPUModelRunner:
         with set_forward_context(None):  # noqa: SIM117
             with set_compile_context(self.cudagraph_batch_sizes):
                 # Trigger compilation for general shape.
-                model(self.input_ids,
-                      self.positions,
-                      dummy_kv_caches,
-                      attn_metadata=None)
+                model(input_ids=None,
+                      positions=self.positions,
+                      kv_caches=dummy_kv_caches,
+                      attn_metadata=None,
+                      inputs_embeds=self.inputs_embeds)
 
     @torch.inference_mode()
     def profile_run(self) -> None:
+        # TODO(woosuk): Profile the max memory usage of the encoder and
+        # the encoder cache.
         self._dummy_run(self.model, self.max_num_tokens)
         torch.cuda.synchronize()
 
@@ -466,10 +576,11 @@ class GPUModelRunner:
             # can reuse the memory pool allocated for the large shapes.
             for num_tokens in reversed(self.cudagraph_batch_sizes):
                 self.model(
-                    self.input_ids[:num_tokens],
-                    self.positions[:num_tokens],
+                    input_ids=None,
+                    positions=self.positions[:num_tokens],
                     kv_caches=self.kv_caches,
                     attn_metadata=None,
+                    inputs_embeds=self.inputs_embeds[:num_tokens],
                 )
 
         end_time = time.perf_counter()
@@ -504,7 +615,8 @@ class CachedRequestState:
     req_id: str
     prompt_token_ids: List[int]
     prompt: Optional[str]
-    multi_modal_data: Optional["MultiModalDataDict"]
+    mm_inputs: List[MultiModalKwargs]
+    mm_positions: List["PlaceholderRange"]
     sampling_params: SamplingParams
     generator: Optional[torch.Generator]
 

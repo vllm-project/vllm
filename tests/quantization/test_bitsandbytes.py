@@ -9,7 +9,7 @@ import pytest
 import torch
 
 from tests.quantization.utils import is_quant_method_supported
-from tests.utils import fork_new_process_for_each_test
+from tests.utils import compare_two_settings, fork_new_process_for_each_test
 
 models_4bit_to_test = [
     ("facebook/opt-125m", "quantize opt model inflight"),
@@ -80,6 +80,34 @@ def test_load_tp_4bit_bnb_model(hf_runner, vllm_runner, example_prompts,
                              model_name,
                              hf_model_kwargs,
                              vllm_tp_size=2)
+
+
+@pytest.mark.skipif(torch.cuda.device_count() < 2,
+                    reason='Test requires at least 2 GPUs.')
+@pytest.mark.skipif(not is_quant_method_supported("bitsandbytes"),
+                    reason='bitsandbytes is not supported on this GPU type.')
+@pytest.mark.parametrize("model_name, description", models_4bit_to_test)
+@fork_new_process_for_each_test
+def test_load_pp_4bit_bnb_model(model_name, description) -> None:
+    common_args = [
+        "--disable-log-stats",
+        "--disable-log-requests",
+        "--dtype",
+        "bfloat16",
+        "--enable-prefix-caching",
+        "--quantization",
+        "bitsandbytes",
+        "--load-format",
+        "bitsandbytes",
+        "--gpu-memory-utilization",
+        "0.7",
+    ]
+    pp_args = [
+        *common_args,
+        "--pipeline-parallel-size",
+        "2",
+    ]
+    compare_two_settings(model_name, common_args, pp_args)
 
 
 def log_generated_texts(prompts, outputs, runner_name):
