@@ -875,7 +875,11 @@ class EngineArgs:
                             default=None,
                             help='torch.compile configuration for the model.'
                             'When it is a number (0, 1, 2, 3), it will be '
-                            'interpreted as the optimization level. '
+                            'interpreted as the optimization level.\n'
+                            'NOTE: level 0 is the default level without '
+                            'any optimization. level 1 and 2 are for internal '
+                            'testing only. level 3 is the recommended level '
+                            'for production.\n'
                             'To specify the full compilation config, '
                             'use a JSON string.')
 
