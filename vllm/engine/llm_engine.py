@@ -1716,7 +1716,7 @@ class LLMEngine:
             # not counted (to avoid double counting)
             actual_num_batched_tokens = scheduler_outputs.num_batched_tokens  # type: ignore
 
-            num_generation_tokens_from_prefill_groups = 0.
+            num_generation_tokens_from_prefill_groups = 0
             # NOTE: if scheduler_outputs.num_prefill_groups > 0 and
             # the len of scheduler_outputs.scheduled_seq_groups is !=
             # scheduler_outputs.num_prefill_groups, this means that
