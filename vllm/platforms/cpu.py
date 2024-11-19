@@ -5,7 +5,9 @@ import torch
 
 from vllm.logger import init_logger
 
-from .interface import Platform, PlatformEnum
+from .interface import Platform, PlatformEnum, _Backend
+
+logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -21,6 +23,12 @@ class CpuPlatform(Platform):
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
         return "cpu"
+
+    @classmethod
+    def get_default_attn_backend(cls, selected_backend: _Backend) -> _Backend:
+        if selected_backend != _Backend.TORCH_SDPA:
+            logger.info("Cannot use %s backend on CPU.", selected_backend)
+        return _Backend.TORCH_SDPA
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:

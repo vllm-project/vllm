@@ -11,6 +11,20 @@ else:
     VllmConfig = None
 
 
+class _Backend(enum.Enum):
+    FLASH_ATTN = enum.auto()
+    FLASH_ATTN_VLLM_V1 = enum.auto()
+    XFORMERS = enum.auto()
+    ROCM_FLASH = enum.auto()
+    TORCH_SDPA = enum.auto()
+    OPENVINO = enum.auto()
+    FLASHINFER = enum.auto()
+    HPU_ATTN = enum.auto()
+    PALLAS = enum.auto()
+    IPEX = enum.auto()
+    NO_ATTENTION = enum.auto()
+
+
 class PlatformEnum(enum.Enum):
     CUDA = enum.auto()
     ROCM = enum.auto()
@@ -70,6 +84,11 @@ class Platform:
     def is_cuda_alike(self) -> bool:
         """Stateless version of :func:`torch.cuda.is_available`."""
         return self._enum in (PlatformEnum.CUDA, PlatformEnum.ROCM)
+
+    @classmethod
+    def get_default_attn_backend(cls, selected_backend: _Backend):
+        """Get the default attention backend of a device."""
+        return None
 
     @classmethod
     def get_device_capability(

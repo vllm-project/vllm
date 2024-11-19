@@ -5,7 +5,7 @@ import torch
 
 from vllm.logger import init_logger
 
-from .interface import DeviceCapability, Platform, PlatformEnum
+from .interface import DeviceCapability, Platform, PlatformEnum, _Backend
 
 logger = init_logger(__name__)
 
@@ -18,6 +18,18 @@ if os.environ.get("VLLM_WORKER_MULTIPROC_METHOD", None) in ["fork", None]:
 
 class RocmPlatform(Platform):
     _enum = PlatformEnum.ROCM
+
+    @classmethod
+    def get_default_attn_backend(cls, selected_backend: _Backend) -> _Backend:
+        selected_backend = (_Backend.ROCM_FLASH if selected_backend
+                            == _Backend.FLASH_ATTN else selected_backend)
+        if selected_backend == _Backend.ROCM_FLASH:
+            if not cls.has_device_capability(90):
+                # not Instinct series GPUs.
+                logger.info("flash_attn is not supported on NAVI GPUs.")
+        else:
+            logger.info("%s is not supported in AMD GPUs.", selected_backend)
+        return _Backend.ROCM_FLASH
 
     @classmethod
     @lru_cache(maxsize=8)
