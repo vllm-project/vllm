@@ -95,11 +95,6 @@ class LlamaMLP(nn.Module):
         x, _ = self.down_proj(x)
         return x
 
-    @property
-    def fused_weights_modules(self):
-        # BitandBytes specific attributes for fused weights
-        return {"gate_up_proj": self.gate_up_proj.output_sizes}
-
 
 class LlamaAttention(nn.Module):
 
@@ -194,11 +189,6 @@ class LlamaAttention(nn.Module):
         attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
         output, _ = self.o_proj(attn_output)
         return output
-
-    @property
-    def fused_weights_modules(self):
-        # BitandBytes specific attributes for fused weights
-        return {"qkv_proj": self.qkv_proj.output_sizes}
 
 
 class LlamaDecoderLayer(nn.Module):

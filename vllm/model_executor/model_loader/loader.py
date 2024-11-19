@@ -28,7 +28,9 @@ from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
-from vllm.model_executor.layers.linear import (ReplicatedLinear,
+from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
+                                               QKVParallelLinear,
+                                               ReplicatedLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase)
@@ -937,16 +939,17 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                     end_index = total_size // tp_size * (tp_rank + 1)
                     weight_sub_tensor = weight_tensor[...,
                                                       start_index:end_index]
-                elif any(module in weight_name
-                         for module in self.fused_weights_modules):
+                # Weights have fused on disk
+                elif any(
+                        weight_name.startswith(module)
+                        for module in self.maybe_fused_weights_modules):
+                    total_shard_sizes = next(
+                        (sizes for module, sizes in
+                         self.maybe_fused_weights_modules.items()
+                         if weight_name.startswith(module)))
                     # special case for fused weights
                     # get the size of each shard weight tensor
                     total_size = weight_tensor.size(0)
-                    for module in self.fused_weights_modules:
-                        if module in weight_name:
-                            total_shard_sizes = self.fused_weights_modules[
-                                module]
-                            break
                     assert total_size == sum(total_shard_sizes)
                     # get the start/end index of each shard weight tensor
                     total_start_index = list(
@@ -1012,10 +1015,9 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             else:
                 self.target_modules = self.default_target_modules
 
-        if hasattr(model, 'fused_weights_modules'):
-            self.fused_weights_modules = model.fused_weights_modules
-        else:
-            self.fused_weights_modules = []
+        # Modules whose weights might have fused on disk
+        # we need their output_sizes to make shard in flight correctly with TP
+        self.maybe_fused_weights_modules: Dict[str, List[int]] = {}
 
         for name, module in model.named_modules():
             # Some modules like `ReplicatedLinear` should not have their weights
@@ -1025,6 +1027,9 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 self.unsharded_weights_modules.append(name)
             # In TP, these weights are partitioned along the column
             # dimension (dim=-1)
+            elif isinstance(module,
+                            (QKVParallelLinear, MergedColumnParallelLinear)):
+                self.maybe_fused_weights_modules[name] = module.output_sizes
             elif isinstance(module, (RowParallelLinear, )):
                 self.column_sharded_weights_modules.append(name)
 
