@@ -465,9 +465,6 @@ class LlamaForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         ".k_proj.",
         ".v_proj.",
         ".o_proj.",
-        # phi-3 specific
-        ".gate_up_proj.",
-        ".qkv_proj.",
     ]
     bitsandbytes_stacked_params_mapping = {
         # shard_name, weight_name, index
