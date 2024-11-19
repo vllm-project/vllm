@@ -433,7 +433,8 @@ class CLIPVisionTransformer(nn.Module):
             config=config,
             quant_config=quant_config,
             num_hidden_layers_override=num_hidden_layers_override,
-            prefix=f"{prefix}.encoder")
+            prefix=f"{prefix}.encoder",
+        )
 
         num_hidden_layers = config.num_hidden_layers
         if len(self.encoder.layers) > config.num_hidden_layers:
