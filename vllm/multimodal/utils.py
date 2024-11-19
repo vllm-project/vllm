@@ -427,8 +427,7 @@ def resolve_visual_encoder_outputs(
     ]
 
     # Apply post-norm on the final hidden state if we are using it
-    uses_last_layer = ((len(hs_pool) - 1) in feature_sample_layers
-                       or -1 in feature_sample_layers)
+    uses_last_layer = feature_sample_layers[-1] in (len(hs_pool) - 1, -1)
     if post_layer_norm is not None and uses_last_layer:
         hs_pool[-1] = post_layer_norm(encoder_outputs)
     return torch.cat(hs_pool, dim=-1)
