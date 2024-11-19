@@ -471,8 +471,6 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         decode_query = query[num_prefill_tokens:]
         # QKV for prefill.
         query = query[:num_prefill_tokens]
-        key = key[:num_prefill_tokens]
-        value = value[:num_prefill_tokens]
 
         if key is not None and value is not None \
             and attn_type != AttentionType.ENCODER_DECODER:
