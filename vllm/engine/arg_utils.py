@@ -190,6 +190,7 @@ class EngineArgs:
 
     override_neuron_config: Optional[Dict[str, Any]] = None
     override_pooler_config: Optional[PoolerConfig] = None
+    compilation_config: Optional[CompilationConfig] = None
 
     def __post_init__(self):
         if not self.tokenizer:
