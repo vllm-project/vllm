@@ -156,7 +156,7 @@ def test_draft_model_tp_lt_target_model_tp2(model, common_llm_kwargs,
                           ])])
 @pytest.mark.parametrize("batch_size", [2])
 @pytest.mark.parametrize("seed", [1])
-def test_spec_decode_chunked_prefill__tp2(model, common_llm_kwargs,
+def test_spec_decode_chunked_prefill_tp2(model, common_llm_kwargs,
                                           per_test_common_llm_kwargs,
                                           baseline_llm_kwargs, test_llm_kwargs,
                                           batch_size: int, seed: int):
