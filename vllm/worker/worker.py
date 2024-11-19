@@ -233,12 +233,15 @@ class Worker(LocalOrDistributedWorkerBase):
 
         end_time = time.time()
         logger.info(
-            "Memory profiling results: duration=%.2f seconds,"
-            "total_gpu_memory=%.2fGiB"
-            " initial_memory_usage=%.2fGiB peak_torch_memory=%.2fGiB"
-            " memory_usage_post_profile=%.2fGiB"
-            " non_torch_memory=%.2fGiB kv_cache_size=%.2fGiB"
-            " gpu_memory_utilization=%.2f", end_time - start_time,
+            "Memory profiling results: "
+            "duration=%.2f seconds, "
+            "total_gpu_memory=%.2fGiB, "
+            "initial_memory_usage=%.2fGiB, "
+            "peak_torch_memory=%.2fGiB, "
+            "memory_usage_post_profile=%.2fGiB, "
+            "non_torch_memory=%.2fGiB, "
+            "kv_cache_size=%.2fGiB, "
+            "gpu_memory_utilization=%.2f.", end_time - start_time,
             total_gpu_memory / (1024**3),
             (total_gpu_memory - free_memory_pre_profile) / (1024**3),
             (peak_memory - non_torch_allocations) / (1024**3),
