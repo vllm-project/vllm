@@ -13,6 +13,7 @@ from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.layernorm import NORM_CLASS_REGISTRY
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
@@ -78,8 +79,9 @@ class MPTAttention(nn.Module):
             quant_config=quant_config,
         )
         if self.qk_ln:
-            self.q_ln = nn.LayerNorm(self.d_model)
-            self.k_ln = nn.LayerNorm(self.d_model)
+            norm_class = NORM_CLASS_REGISTRY[config.norm_type]
+            self.q_ln = norm_class(self.d_model)
+            self.k_ln = norm_class(self.d_model)
         self.out_proj = RowParallelLinear(
             self.d_model,
             self.d_model,
@@ -182,12 +184,13 @@ class MPTBlock(nn.Module):
     ):
         super().__init__()
         hidden_size = config.d_model
-        self.norm_1 = nn.LayerNorm(hidden_size)
+        norm_class = NORM_CLASS_REGISTRY[config.norm_type]
+        self.norm_1 = norm_class(hidden_size)
         self.attn = MPTAttention(config,
                                  cache_config,
                                  quant_config,
                                  prefix=f"{prefix}.attn")
-        self.norm_2 = nn.LayerNorm(hidden_size)
+        self.norm_2 = norm_class(hidden_size)
         self.ffn = MPTMLP(config, quant_config)
 
     def forward(
@@ -218,7 +221,12 @@ class MPTModel(nn.Module):
         quant_config = vllm_config.quant_config
 
         assert config.embedding_fraction == 1.0
-        assert config.norm_type == "low_precision_layernorm"
+        assert config.norm_type in (
+            "layernorm",
+            "low_precision_layernorm",
+            "rmsnorm",
+            "low_precision_rmsnorm",
+        )
 
         self.wte = VocabParallelEmbedding(
             config.vocab_size,
@@ -229,7 +237,7 @@ class MPTModel(nn.Module):
             lambda prefix: MPTBlock(
                 config, cache_config, quant_config, prefix=prefix),
             prefix=f"{prefix}.blocks")
-        self.norm_f = nn.LayerNorm(config.d_model)
+        self.norm_f = NORM_CLASS_REGISTRY[config.norm_type](config.d_model)
         if config.no_bias:
             for module in self.modules():
                 if hasattr(module, "bias") and isinstance(
