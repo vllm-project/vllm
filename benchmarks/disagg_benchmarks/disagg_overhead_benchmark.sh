@@ -10,7 +10,7 @@ set -ex
 
 kill_gpu_processes() {
   # kill all processes on GPU.
-  pkill pt_main_thread
+  pkill -f pt_main_thread
   sleep 10
 
   # remove vllm config file
@@ -38,7 +38,6 @@ benchmark() {
 
   export VLLM_LOGGING_LEVEL=DEBUG
   export VLLM_HOST_IP=$(hostname -I | awk '{print $1}')
-  export VLLM_PORT=12345
 
   # compare chunked prefill with disaggregated prefill
 
@@ -53,19 +52,30 @@ benchmark() {
   output_len=$2
 
 
-  VLLM_DISTRIBUTED_KV_ROLE=producer CUDA_VISIBLE_DEVICES=0 python3 \
+  CUDA_VISIBLE_DEVICES=0 python3 \
     -m vllm.entrypoints.openai.api_server \
     --model meta-llama/Meta-Llama-3.1-8B-Instruct \
     --port 8100 \
     --max-model-len 10000 \
-    --gpu-memory-utilization 0.8 &
+    --gpu-memory-utilization 0.6 \
+    --kv-connector PyNcclConnector \
+    --kv-role kv_producer \
+    --kv-rank 0 \
+    --kv-parallel-size 2 \
+    --kv-buffer-size 1e10 &
+    
 
-  VLLM_DISTRIBUTED_KV_ROLE=consumer CUDA_VISIBLE_DEVICES=1 python3 \
+  CUDA_VISIBLE_DEVICES=1 python3 \
     -m vllm.entrypoints.openai.api_server \
     --model meta-llama/Meta-Llama-3.1-8B-Instruct \
     --port 8200 \
     --max-model-len 10000 \
-    --gpu-memory-utilization 0.8 &
+    --gpu-memory-utilization 0.6 \
+    --kv-connector PyNcclConnector \
+    --kv-role kv_consumer \
+    --kv-rank 1 \
+    --kv-parallel-size 2 \
+    --kv-buffer-size 1e10 &
 
   wait_for_server 8100
   wait_for_server 8200

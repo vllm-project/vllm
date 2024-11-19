@@ -36,28 +36,22 @@ wait_for_server() {
 
 
 launch_chunked_prefill() {
-  model="meta-llama/Meta-Llama-3.1-70B-Instruct"
+  model="meta-llama/Meta-Llama-3.1-8B-Instruct"
   # disagg prefill
-  CUDA_VISIBLE_DEVICES=0,1,2,3 python3 \
-      -m vllm.entrypoints.openai.api_server \
-      --model $model \
-      --port 8100 \
-      -tp 4 \
-      --max-model-len 10000 \
-      --disable-log-stats \
-      --disable-log-requests \
-      --enable-chunked-prefill \
-      --gpu-memory-utilization 0.8 &
-  CUDA_VISIBLE_DEVICES=4,5,6,7 python3 \
+  CUDA_VISIBLE_DEVICES=0 python3 \
+    -m vllm.entrypoints.openai.api_server \
+    --model $model \
+    --port 8100 \
+    --max-model-len 10000 \
+    --enable-chunked-prefill \
+    --gpu-memory-utilization 0.6 &
+  CUDA_VISIBLE_DEVICES=1 python3 \
     -m vllm.entrypoints.openai.api_server \
     --model $model \
     --port 8200 \
-    -tp 4 \
     --max-model-len 10000 \
-    --disable-log-stats \
-    --disable-log-requests \
     --enable-chunked-prefill \
-    --gpu-memory-utilization 0.8 &
+    --gpu-memory-utilization 0.6 &
   wait_for_server 8100
   wait_for_server 8200
   python3 round_robin_proxy.py &
@@ -66,26 +60,30 @@ launch_chunked_prefill() {
 
 
 launch_disagg_prefill() {
-  model="meta-llama/Meta-Llama-3.1-70B-Instruct" 
+  model="meta-llama/Meta-Llama-3.1-8B-Instruct" 
   # disagg prefill
-  VLLM_PORT=12345 VLLM_DISTRIBUTED_KV_ROLE=producer CUDA_VISIBLE_DEVICES=0,1,2,3 python3 \
-      -m vllm.entrypoints.openai.api_server \
-      --model $model \
-      --port 8100 \
-      -tp 4 \
-      --max-model-len 10000 \
-      --disable-log-stats \
-      --disable-log-requests \
-      --gpu-memory-utilization 0.8 &
-  VLLM_PORT=12345 VLLM_DISTRIBUTED_KV_ROLE=consumer CUDA_VISIBLE_DEVICES=4,5,6,7 python3 \
+  CUDA_VISIBLE_DEVICES=0 python3 \
     -m vllm.entrypoints.openai.api_server \
-    --model $model \
-    --port 8200 \
-    -tp 4 \
+    --model meta-llama/Meta-Llama-3.1-8B-Instruct \
+    --port 8100 \
     --max-model-len 10000 \
-    --disable-log-stats \
-    --disable-log-requests \
-    --gpu-memory-utilization 0.8 &
+    --gpu-memory-utilization 0.6 \
+    --kv-connector PyNcclConnector \
+    --kv-role kv_producer \
+    --kv-rank 0 \
+    --kv-parallel-size 2 \
+    --kv-buffer-size 5e9 &
+  CUDA_VISIBLE_DEVICES=1 python3 \
+    -m vllm.entrypoints.openai.api_server \
+    --model meta-llama/Meta-Llama-3.1-8B-Instruct \
+    --port 8200 \
+    --max-model-len 10000 \
+    --gpu-memory-utilization 0.6 \
+    --kv-connector PyNcclConnector \
+    --kv-role kv_consumer \
+    --kv-rank 1 \
+    --kv-parallel-size 2 \
+    --kv-buffer-size 5e9 &
   wait_for_server 8100
   wait_for_server 8200
   python3 disagg_prefill_proxy_server.py &
@@ -98,7 +96,7 @@ benchmark() {
   model="meta-llama/Meta-Llama-3.1-70B-Instruct"
   dataset_name="sonnet"
   dataset_path="../sonnet_4x.txt"
-  num_prompts=200
+  num_prompts=100
   qps=$1
   prefix_len=50
   input_len=1024
@@ -149,7 +147,6 @@ main() {
 
   default_output_len=6
 
-  export VLLM_LOGGING_LEVEL=DEBUG
   export VLLM_HOST_IP=$(hostname -I | awk '{print $1}')
 
   launch_chunked_prefill
