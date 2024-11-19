@@ -341,8 +341,8 @@ run_serving_tests() {
     done
 
     # clean up
-    kill -9 $server_pid
     kill_gpu_processes
+    kill -9 $server_pid
   done
 }
 
