@@ -873,7 +873,11 @@ class EngineArgs:
                             '-O',
                             type=CompilationConfig.from_cli,
                             default=None,
-                            help='Compilation configuration for the model.')
+                            help='torch.compile configuration for the model.'
+                            'When it is a number (0, 1, 2, 3), it will be '
+                            'interpreted as the optimization level. '
+                            'To specify the full compilation config, '
+                            'use a JSON string.')
 
         return parser
 
