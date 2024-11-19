@@ -24,7 +24,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 
 
 FROM base AS rocm_base
-ARG ROCM_VERSION=6.2.4
+ARG ROCM_VERSION=6.2.3
 ARG PYTHON_VERSION
 ARG BASE_UBI_IMAGE_TAG
 
