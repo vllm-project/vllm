@@ -59,9 +59,9 @@
     {{- "Cutting Knowledge Date: December 2023\n" }}
     {{- "Today Date: " + date_string + "\n\n" }}
     {%- if tools is not none and not tools_in_user_message %}
-        {{- "You have access to the following functions. To call a function, please respond with JSON for a function call." }}
-        {{- ' Respond in the format {"name": function name, "parameters": dictionary of argument name and its value}.' }}
-        {{- " Do not use variables.\n\n" }}
+        {{- "You have access to the following functions. To call a function, please respond with JSON for a function call. " }}
+        {{- 'Respond in the format {"name": function name, "parameters": dictionary of argument name and its value}. ' }}
+        {{- "Do not use variables.\n\n" }}
         {%- for t in tools %}
             {{- t | tojson(indent=4) }}
             {{- "\n\n" }}
@@ -80,7 +80,6 @@
         {%- else %}
             {%- set first_user_message = messages[0]['content']['text']|trim %}
         {%- endif %}
-        {%- set first_user_message = messages[0]['content']|trim %}
         {%- set messages = messages[1:] %}
     {%- else %}
         {{- raise_exception("Cannot put tools in the first user message when there's no first user message!") }}
@@ -88,8 +87,8 @@
     {{- '<|start_header_id|>user<|end_header_id|>\n\n' -}}
     {{- "Given the following functions, please respond with a JSON for a function call " }}
     {{- "with its proper arguments that best answers the given prompt.\n\n" }}
-    {{- 'Respond in the format {"name": function name, "parameters": dictionary of argument name and its value}.' }}
-    {{- " Do not use variables.\n\n" }}
+    {{- 'Respond in the format {"name": function name, "parameters": dictionary of argument name and its value}. ' }}
+    {{- "Do not use variables.\n\n" }}
     {%- for t in tools %}
         {{- t | tojson(indent=4) }}
         {{- "\n\n" }}
@@ -125,10 +124,10 @@
         {{- "<|eot_id|>" }}
     {%- elif message.role == "tool" or message.role == "ipython" %}
         {{- "<|start_header_id|>ipython<|end_header_id|>\n\n" }}
-        {%- if message.content is mapping %}
-            {{- message.content | tojson }}
-        {%- else %}
+        {%- if message.content is string %}
             {{- { "output": message.content } | tojson }}
+        {%- else %}
+            {{- message.content | tojson }}
         {%- endif %}
         {{- "<|eot_id|>" }}
     {%- endif %}
