@@ -359,8 +359,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         """
         scheme = CompressedTensors24(
             model_compressor=self.model_compressor,
-            layer_name=layer_name
-        )
+            layer_name=layer_name)
         # scheme = CompressedTensorsW8A8Fp8(
         #     strategy=QuantizationStrategy.CHANNEL,
         #     is_static_input_scheme=False)
