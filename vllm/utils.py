@@ -1491,7 +1491,7 @@ class LazyDict(Mapping, Generic[T]):
             self._dict[key] = self._factory[key]()
         return self._dict[key]
 
-    def __setitem__(self, key:str, value: Callable[[], T]):
+    def __setitem__(self, key: str, value: Callable[[], T]):
         self._factory[key] = value
 
     def __iter__(self):
