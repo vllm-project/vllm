@@ -20,6 +20,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.platforms import current_platform
 from vllm.transformers_utils.utils import check_gguf_file
+from vllm.usage.usage_lib import UsageContext
 from vllm.utils import FlexibleArgumentParser, StoreBoolean
 
 if TYPE_CHECKING:
@@ -936,7 +937,9 @@ class EngineArgs:
             ignore_patterns=self.ignore_patterns,
         )
 
-    def create_engine_config(self) -> VllmConfig:
+    def create_engine_config(self,
+                             usage_context: Optional[UsageContext] = None
+                             ) -> VllmConfig:
         # gguf file needs a specific model loader and doesn't use hf_repo
         if check_gguf_file(self.model):
             self.quantization = self.load_format = "gguf"
@@ -1160,6 +1163,54 @@ class EngineArgs:
             prompt_adapter_config=prompt_adapter_config,
             compilation_config=self.compilation_config,
         )
+
+
+@dataclass
+class EngineArgsV1(EngineArgs):
+    """Arguments for vLLM engine v1."""
+
+    # V1's default values that differ from the default values in EngineArgs.
+    # This allows to switch between V1 and V0's default behaviour transparently.
+    enable_prefix_caching: bool = True
+    max_num_seqs: int = 1024
+    max_num_batched_tokens: Optional[int] = None
+
+    @staticmethod
+    def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
+        parser = EngineArgs.add_cli_args(parser)
+        return parser
+
+    def create_engine_config(self,
+                             usage_context: Optional[UsageContext] = None
+                             ) -> VllmConfig:
+        assert (usage_context
+                is not None), "usage_context must be provided for EngineArgsV1"
+
+        if self.max_num_batched_tokens is None:
+            if usage_context == UsageContext.LLM_CLASS:
+                logger.warning("Setting max_num_batched_tokens to 8192 "
+                               "for LLM_CLASS usage context.")
+                self.max_num_batched_tokens = 8192
+            elif usage_context == UsageContext.OPENAI_API_SERVER:
+                logger.warning("Setting max_num_batched_tokens to 2048 "
+                               "for OPENAI_API_SERVER usage context.")
+                self.max_num_batched_tokens = 2048
+
+        engine_config = super().create_engine_config(usage_context)
+
+        # TODO (ywang96): Enable APC by default when VLM supports it.
+        if engine_config.model_config.is_multimodal_model:
+            logger.warning(
+                "Prefix caching is currently not supported for multimodal "
+                "models and has been disabled.")
+            engine_config.cache_config.enable_prefix_caching = False
+        return engine_config
+
+
+if envs.VLLM_USE_V1:
+    # Overwrite EngineArgs to use EngineArgsV1
+    # This has to be done before `AsyncEngineArgs` is imported.
+    EngineArgs = EngineArgsV1  # type: ignore
 
 
 @dataclass
