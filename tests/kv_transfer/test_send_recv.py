@@ -7,7 +7,7 @@ from tqdm import tqdm
 
 from vllm.config import KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.pynccl_connector import (
-    pynccl_pipe as pnp)
+    pipe as pnp)
 
 
 def test_run(my_rank, pipe):

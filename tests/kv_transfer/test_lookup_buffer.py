@@ -6,9 +6,9 @@ from tqdm import tqdm
 
 from vllm.config import KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.pynccl_connector.buffer import (
-    lookup_buffer as lb)
+    LookupBuffer)
 from vllm.distributed.kv_transfer.kv_connector.pynccl_connector.pipe import (
-    pynccl_pipe as pnp)
+    PyNcclPipe)
 
 # TODO: the test depends on a lot of fields in the current implementation.
 # We should have standard interface instead direct field access
@@ -136,20 +136,20 @@ if __name__ == "__main__":
         kv_port=12345,
     )
 
-    data_pipe = pnp.PyNcclPipe(
+    data_pipe = PyNcclPipe(
         local_rank=my_rank,
         config=config,
         device="cuda",
         port_offset=0,
     )
-    cpu_pipe = pnp.PyNcclPipe(
+    cpu_pipe = PyNcclPipe(
         local_rank=my_rank,
         config=config,
         device="cpu",
         port_offset=1,
     )
 
-    buffer = lb.LookupBuffer(cpu_pipe, data_pipe, 170000)
+    buffer = LookupBuffer(cpu_pipe, data_pipe, 170000)
 
     test_run(my_rank, buffer, data_pipe.device)
 
