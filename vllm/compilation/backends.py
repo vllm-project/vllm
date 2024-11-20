@@ -13,7 +13,7 @@ from vllm.logger import init_logger
 from vllm.utils import weak_ref_tensors
 
 from .counter import compilation_counter
-from .inductor_pass import CallableInductorPass
+from .inductor_pass import InductorPass
 from .pass_manager import PostGradPassManager
 
 logger = init_logger(__name__)
@@ -229,7 +229,7 @@ class VllmBackend:
         PASS_KEY = "post_grad_custom_post_pass"
         if PASS_KEY in inductor_config:
             # Config should automatically wrap all inductor passes
-            assert isinstance(inductor_config[PASS_KEY], CallableInductorPass)
+            assert isinstance(inductor_config[PASS_KEY], InductorPass)
             self.post_grad_pass_manager.add(inductor_config[PASS_KEY])
         inductor_config[PASS_KEY] = self.post_grad_pass_manager
 
