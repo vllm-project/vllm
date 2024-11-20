@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 if TYPE_CHECKING:
     VLLM_HOST_IP: str = ""
+    HOST_IP: str = ""
     VLLM_PORT: Optional[int] = None
     VLLM_RPC_BASE_PATH: str = tempfile.gettempdir()
     VLLM_USE_MODELSCOPE: bool = False
@@ -153,7 +154,13 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # If you are using multi-node inference, you should set this differently
     # on each node.
     'VLLM_HOST_IP':
-    lambda: os.getenv('VLLM_HOST_IP', "") or os.getenv("HOST_IP", ""),
+    lambda: os.getenv('VLLM_HOST_IP', ""),
+
+    # used in distributed environment to determine the ip address
+    # of the current node, when the env variable VLLM_HOST_IP is not set
+    # and the it's hard to get the host ip.
+    'HOST_IP':
+    lambda: os.getenv('HOST_IP', ""),
 
     # used in distributed environment to manually set the communication port
     # Note: if VLLM_PORT is set, and some code asks for multiple ports, the

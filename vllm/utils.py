@@ -479,6 +479,11 @@ def get_ip() -> str:
     except Exception:
         pass
 
+    try:
+        return socket.gethostbyname(socket.gethostname())
+    except Exception:
+        pass
+
     # try ipv6
     try:
         s = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
@@ -489,12 +494,15 @@ def get_ip() -> str:
     except Exception:
         pass
 
-    warnings.warn(
-        "Failed to get the IP address, using 0.0.0.0 by default."
-        "The value can be set by the environment variable"
-        " VLLM_HOST_IP or HOST_IP.",
-        stacklevel=2)
-    return "0.0.0.0"
+    if envs.HOST_IP:
+        return envs.HOST_IP
+    else:
+        warnings.warn(
+            "Failed to get the IP address, using 0.0.0.0 by default."
+            "The value can be set by the environment variable"
+            " VLLM_HOST_IP or HOST_IP.",
+            stacklevel=2)
+        return "0.0.0.0"
 
 
 def is_valid_ipv6_address(address: str) -> bool:
