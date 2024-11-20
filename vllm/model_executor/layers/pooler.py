@@ -94,14 +94,10 @@ class Pooler(nn.Module):
             pooled_data = hidden_states[last_token_flat_indices]
         elif self.pooling_type == PoolingType.ALL:
             offset = 0
-            pooled_data_lst = []
+            pooled_data = []
             for prompt_len in prompt_lens:
-                pooled_data_i = hidden_states[offset:offset + prompt_len]
-
-                pooled_data_lst.append(pooled_data_i)
+                pooled_data.append(hidden_states[offset:offset + prompt_len])
                 offset += prompt_len
-
-            pooled_data = torch.stack(pooled_data_lst)
         elif self.pooling_type == PoolingType.MEAN:
             # Calculate mean pooling
             cumsum = torch.cumsum(hidden_states, dim=0)
