@@ -9,8 +9,7 @@
 # label(str): the name of the test. emoji allowed.
 # fast_check(bool): whether to run this on each commit on fastcheck pipeline.
 # fast_check_only(bool): run this test on fastcheck pipeline only
-# nightly(bool): run this test in nightly pipeline only
-# optional(bool): never run this test by default (i.e. need to unblock manually)
+# optional(bool): never run this test by default (i.e. need to unblock manually) unless it's scheduled nightly run.
 # command(str): the single command to run for tests. incompatible with commands.
 # commands(list): the list of commands to run for test. incompatbile with command.
 # mirror_hardwares(list): the list of hardwares to run the test on as well. currently only supports [amd]
@@ -336,7 +335,7 @@ steps:
     - pytest -v -s models/embedding/vision_language -m core_model
 
 - label: Language Models Test (Extended) # 50min
-  nightly: true
+  optional: true
   source_file_dependencies:
   - vllm/
   - tests/models/decoder_only/language
@@ -362,7 +361,7 @@ steps:
     - pytest -v -s models/encoder_decoder/vision_language -m core_model
 
 - label: Multi-Modal Models Test (Extended) # 1h15m
-  nightly: true
+  optional: true
   source_file_dependencies:
   - vllm/
   - tests/models/decoder_only/audio_language
@@ -513,6 +512,7 @@ steps:
 
 - label: Distributed Tests (A100) # optional
   gpu: a100
+  optional: true
   num_gpus: 4
   source_file_dependencies:
   - vllm/
@@ -526,6 +526,7 @@ steps:
 
 - label: LM Eval Large Models # optional
   gpu: a100
+  optional: true
   num_gpus: 4
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
   source_file_dependencies:
