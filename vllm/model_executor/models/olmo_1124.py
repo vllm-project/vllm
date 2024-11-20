@@ -53,7 +53,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 
-class OlmoAttention(nn.Module):
+class Olmo1124Attention(nn.Module):
     """
     This is the attention block where the output is computed as
     ``Attention(LN(x))`` in ``MLP(LN(x + Attention(LN(x))))``
@@ -162,7 +162,7 @@ class OlmoAttention(nn.Module):
         return output
 
 
-class OlmoMLP(nn.Module):
+class Olmo1124MLP(nn.Module):
     """
     This is the MLP block where the output is computed as
     ``MLP(x)`` in ``LN(MLP(x + LN(Attention(x))))``
@@ -207,7 +207,7 @@ class OlmoMLP(nn.Module):
         return x
 
 
-class OlmoDecoderLayer(nn.Module):
+class Olmo1124DecoderLayer(nn.Module):
     """
     This is a typical transformer block where the output is
     computed as ``MLP(LN(x + Attention(LN(x))))``
@@ -219,11 +219,11 @@ class OlmoDecoderLayer(nn.Module):
         config = vllm_config.model_config.hf_config
         assert isinstance(config, Olmo1124Config)
         # Attention block.
-        self.self_attn = OlmoAttention(vllm_config=vllm_config,
+        self.self_attn = Olmo1124Attention(vllm_config=vllm_config,
                                        prefix=f"{prefix}.self_attn")
 
         # MLP block.
-        self.mlp = OlmoMLP(vllm_config=vllm_config, prefix=f"{prefix}.mlp")
+        self.mlp = Olmo1124MLP(vllm_config=vllm_config, prefix=f"{prefix}.mlp")
 
         # LayerNorm
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
@@ -254,7 +254,7 @@ class OlmoDecoderLayer(nn.Module):
         return hidden_states
 
 
-class OlmoModel(nn.Module):
+class Olmo1124Model(nn.Module):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -268,7 +268,7 @@ class OlmoModel(nn.Module):
         )
         self.start_layer, self.end_layer, self.layers = make_layers(
             self.config.num_hidden_layers,
-            lambda prefix: OlmoDecoderLayer(vllm_config=vllm_config,
+            lambda prefix: Olmo1124DecoderLayer(vllm_config=vllm_config,
                                             prefix=prefix),
             prefix=f"{prefix}.layers",
         )
@@ -332,7 +332,7 @@ class Olmo1124ForCausalLM(nn.Module, SupportsPP):
         config = vllm_config.model_config.hf_config
         assert isinstance(config, Olmo1124Config)
         self.config = config
-        self.model = OlmoModel(vllm_config=vllm_config,
+        self.model = Olmo1124Model(vllm_config=vllm_config,
                                prefix=maybe_prefix(prefix, "model"))
         if config.tie_word_embeddings:
             self.lm_head = self.model.embed_tokens
