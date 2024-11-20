@@ -1014,7 +1014,8 @@ class EngineArgs:
                 use_spec_decode = self.speculative_model is not None
                 if (is_gpu and not use_sliding_window and not use_spec_decode
                         and not self.enable_lora
-                        and not self.enable_prompt_adapter):
+                        and not self.enable_prompt_adapter
+                        and model_config.task != "embedding"):
                     self.enable_chunked_prefill = True
                     logger.warning(
                         "Chunked prefill is enabled by default for models with "
@@ -1031,6 +1032,9 @@ class EngineArgs:
                 "errors during the initial memory profiling phase, or result "
                 "in low performance due to small KV cache space. Consider "
                 "setting --max-model-len to a smaller value.", max_model_len)
+        elif self.enable_chunked_prefill and model_config.task == "embedding":
+            msg = "Chunked prefill is not supported for embedding models"
+            raise ValueError(msg)
 
         speculative_config = SpeculativeConfig.maybe_create_spec_config(
             target_model_config=model_config,
