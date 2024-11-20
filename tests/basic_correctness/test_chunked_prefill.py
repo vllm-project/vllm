@@ -282,7 +282,6 @@ def test_models_cpu(
     max_tokens: int,
     chunked_prefill_token_size: int,
     enforce_eager: bool,
-    tensor_parallel_size: int,
     attention_backend: str,
     monkeypatch,
 ) -> None:
@@ -295,7 +294,7 @@ def test_models_cpu(
         max_tokens,
         chunked_prefill_token_size,
         enforce_eager,
-        tensor_parallel_size,
+        1,
         attention_backend,
         monkeypatch,
     )
@@ -312,7 +311,6 @@ def test_with_prefix_caching_cpu(
     max_tokens: int,
     enforce_eager: bool,
     chunk_size: int,
-    tensor_parallel_size: int,
     dtype: str,
 ) -> None:
     test_with_prefix_caching(
@@ -320,6 +318,6 @@ def test_with_prefix_caching_cpu(
         max_tokens,
         enforce_eager,
         chunk_size,
-        tensor_parallel_size,
+        1,
         dtype,
     )
