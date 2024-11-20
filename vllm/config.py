@@ -766,7 +766,7 @@ class CacheConfig:
                 "memory footprint and boosts the performance. "
                 "Meanwhile, it may cause accuracy drop without a proper "
                 "scaling factor")
-        elif self.cache_dtype == "int8":
+        elif self.cache_dtype in ("int8", "int8_group0", "int8_groupN"):
             logger.info(
                 "Using int8 data type to store kv cache. It reduces the GPU "
                 "memory footprint and boosts the performance. "
