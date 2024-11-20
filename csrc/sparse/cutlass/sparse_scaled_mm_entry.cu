@@ -52,7 +52,7 @@ void cutlass_scaled_sparse_mm(torch::Tensor& c, torch::Tensor const& a,
 
   // Check for strides and alignment
   TORCH_CHECK(a.stride(1) == 1);  // Row-major
-  TORCH_CHECK(b.stride(0) == 1 && c.stride(0) == 1); // Column-major
+  // TORCH_CHECK(b.stride(0) == 1 && c.stride(0) == 1); // Column-major
   // TORCH_CHECK(c.stride(0) % 16 == 0);  // 16 Byte Alignment
   TORCH_CHECK(b.stride(1) % 16 == 0);  // 16 Byte Alignment
   TORCH_CHECK(a_scales.is_contiguous() && b_scales.is_contiguous());
