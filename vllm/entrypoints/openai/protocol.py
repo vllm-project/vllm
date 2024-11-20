@@ -958,6 +958,7 @@ class ChatCompletionResponse(OpenAIBaseModel):
     model: str
     choices: List[ChatCompletionResponseChoice]
     usage: UsageInfo
+    metrics: EngineMetrics
     prompt_logprobs: Optional[List[Optional[Dict[int, Logprob]]]] = None
 
 

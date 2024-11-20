@@ -388,7 +388,7 @@ class OpenAIServingCompletion(OpenAIServing):
         num_prompt_tokens = 0
         num_generated_tokens = 0
         last_req_finished_time = 0.
-        last_req_metrics: RequestMetrics = None
+        last_req_metrics: Optional[RequestMetrics] = None
         for final_res in final_res_batch:
             prompt_token_ids = final_res.prompt_token_ids
             assert prompt_token_ids is not None
@@ -454,8 +454,10 @@ class OpenAIServingCompletion(OpenAIServing):
             if res_metrics:
                 if res_metrics.last_token_time > last_req_finished_time:
                     last_req_metrics = res_metrics
-                if res_metrics.finished_time:  # noqa: SIM102
-                    if res_metrics.finished_time > last_req_finished_time:
+                if (
+                    res_metrics.finished_time
+                    and res_metrics.finished_time > last_req_finished_time
+                ):
                         last_req_metrics = res_metrics
 
         usage = UsageInfo(

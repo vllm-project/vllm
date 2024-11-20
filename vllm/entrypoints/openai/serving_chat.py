@@ -20,7 +20,7 @@ from vllm.entrypoints.openai.protocol import (
     ChatCompletionResponseChoice, ChatCompletionResponseStreamChoice,
     ChatCompletionStreamResponse, ChatMessage, DeltaFunctionCall, DeltaMessage,
     DeltaToolCall, ErrorResponse, FunctionCall, PromptTokenUsageInfo,
-    RequestResponseMetadata, ToolCall, UsageInfo)
+    RequestResponseMetadata, ToolCall, UsageInfo, EngineMetrics)
 from vllm.entrypoints.openai.serving_engine import (BaseModelPath,
                                                     LoRAModulePath,
                                                     OpenAIServing,
@@ -29,7 +29,7 @@ from vllm.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
 from vllm.logger import init_logger
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import BeamSearchParams, SamplingParams
-from vllm.sequence import Logprob
+from vllm.sequence import Logprob, RequestMetrics
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
 from vllm.transformers_utils.tokenizers import maybe_serialize_tool_calls
 from vllm.utils import iterate_with_cancellation
@@ -612,6 +612,8 @@ class OpenAIServingChat(OpenAIServing):
         assert final_res is not None
 
         choices: List[ChatCompletionResponseChoice] = []
+        last_req_finished_time = 0.
+        last_req_metrics: RequestMetrics = None
 
         role = self.get_chat_request_role(request)
         for output in final_res.outputs:
@@ -705,6 +707,17 @@ class OpenAIServingChat(OpenAIServing):
                 output.finish_reason if output.finish_reason else "stop",
                 stop_reason=output.stop_reason)
             choices.append(choice_data)
+            
+            # get latest output's metrics
+            res_metrics = final_res.metrics
+            if res_metrics:
+                if res_metrics.last_token_time > last_req_finished_time:
+                    last_req_metrics = res_metrics
+                if (
+                    res_metrics.finished_time
+                    and res_metrics.finished_time > last_req_finished_time
+                ):
+                    last_req_metrics = res_metrics
 
         if request.echo or request.continue_final_message:
             last_msg_content: Union[str, List[Dict[str, str]]] = ""
@@ -735,7 +748,15 @@ class OpenAIServingChat(OpenAIServing):
                 cached_tokens=final_res.num_cached_tokens)
 
         request_metadata.final_usage_info = usage
-
+        
+        metrics = EngineMetrics(
+            gpu_kv_cache_util=(last_req_metrics.gpu_kv_cache_utilisation
+                               if last_req_metrics is not None else 0.0),
+            cpu_kv_cache_util=(last_req_metrics.cpu_kv_cache_utilisation
+                               if last_req_metrics is not None else 0.0),
+            running_lora_adapters=(last_req_metrics.running_lora_adapters
+                                   if last_req_metrics is not None else ""),
+        )
         response = ChatCompletionResponse(
             id=request_id,
             created=created_time,
@@ -743,6 +764,7 @@ class OpenAIServingChat(OpenAIServing):
             choices=choices,
             usage=usage,
             prompt_logprobs=final_res.prompt_logprobs,
+            metrics=metrics,
         )
 
         return response
