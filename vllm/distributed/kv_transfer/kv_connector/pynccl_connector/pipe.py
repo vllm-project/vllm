@@ -1,12 +1,14 @@
 """
-    This file implements a simple PyNccl pipe that can send and receive 
-    Optional[torch.Tensor] between two ranks.
-    
-    We will first transmit the metadata, and then the tensor.
-    Metadata format:
-    Metadata = Dict[str, Optional[torch.Tensor]]
-    - "dtype": The data type of the tensor (tensor.dtype) or None
-    - "shape": The shape of the tensor (tensor.shape) or None
+    This module implements a PyNccl pipe for sending and receiving 
+    Optional[torch.Tensor] between distributed ranks with advanced 
+    communication features.
+
+    Key Features:
+    - Supports sending and receiving tensors with metadata
+    - Handles both CUDA and CPU device communications
+    - Implements a non-blocking tensor transfer mechanism
+    - Manages buffer size and provides backpressure control
+    - Supports distributed process groups with configurable parameters
 """
 
 import threading

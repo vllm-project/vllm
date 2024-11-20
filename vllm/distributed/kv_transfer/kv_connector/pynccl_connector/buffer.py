@@ -1,11 +1,13 @@
 """
-    This file implements a simple torch distributed connector by 3 classes:
-    - `TorchDistributedPipe`: a tensor transmission pipe between vllm instances,
-        using `torch.distributed`
-    - `TorchDistributedBuffer`: a buffer to store tensors, implemented on top 
-        of `TorchDistributedPipe`
-    - `TorchDistributedConnector`: a torch distributed connector between P/D 
-      instance, implemented on top of `TorchDistributedBuffer`
+    Implements a distributed key-value (KV) cache transfer mechanism for vLLM 
+    instances with buffer management.
+
+    Key Features:
+    - Distributed KV cache transmission using PyNccl pipes.
+    - Non-blocking `insert`, blocking `drop_select`.
+    - Use CPU signal pipe to avoid racing condition
+    - Handles buffer size constraints and provide backpressure mechanism to 
+      stop the prefill instance when the decode instance is slow.
 """
 import threading
 import time
