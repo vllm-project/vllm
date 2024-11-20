@@ -49,7 +49,7 @@ struct _typeConvert<c10::Half> {
   }
 };
 
-  #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 800
+  #if defined(USE_ROCM) || (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800))
 // CUDA_ARCH < 800 does not have BF16 support
 // TODO: Add in ROCm support once public headers handle bf16 maturely
 template <>
