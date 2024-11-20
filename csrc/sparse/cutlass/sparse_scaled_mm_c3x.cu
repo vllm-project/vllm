@@ -52,20 +52,85 @@ void cutlass_gemm_sm90_fp8_dispatch(torch::Tensor& out, torch::Tensor const& a,
       typename sm90_fp8_config_M256<InType, OutType, Epilogue>::Cutlass3xGemm;
   using Cutlass3xGemmM512 =
       typename sm90_fp8_config_M512<InType, OutType, Epilogue>::Cutlass3xGemm;
+    
+  using Cutlass3xGemm1 =
+      typename sm90_fp8_config_1<InType, OutType, Epilogue>::Cutlass3xGemm;
+  using Cutlass3xGemm2 =
+      typename sm90_fp8_config_2<InType, OutType, Epilogue>::Cutlass3xGemm;
+  using Cutlass3xGemm3 =
+      typename sm90_fp8_config_3<InType, OutType, Epilogue>::Cutlass3xGemm;
+  using Cutlass3xGemm4 =
+      typename sm90_fp8_config_4<InType, OutType, Epilogue>::Cutlass3xGemm;
+  using Cutlass3xGemm5 =
+      typename sm90_fp8_config_5<InType, OutType, Epilogue>::Cutlass3xGemm;
+  using Cutlass3xGemm6 =
+      typename sm90_fp8_config_6<InType, OutType, Epilogue>::Cutlass3xGemm;
+  using Cutlass3xGemm7 =
+      typename sm90_fp8_config_7<InType, OutType, Epilogue>::Cutlass3xGemm;
+  using Cutlass3xGemm8 =
+      typename sm90_fp8_config_8<InType, OutType, Epilogue>::Cutlass3xGemm;
 
-  uint32_t const n = b.size(1);
-  uint32_t const mp2 =
+  uint32_t const n = b.size(1); // Batch size
+  uint32_t const m = a.size(0);
+  uint32_t const np2 =
       std::max(static_cast<uint32_t>(64), next_pow_2(n));  // next power of 2
 
-  if (mp2 <= 64) {
+  if (np2 <= 64) {
+    if (m == 28672) {
+      return cutlass_sparse_gemm_caller<Cutlass3xGemm2>(
+        out, a, e, b, std::forward<EpilogueArgs>(args)...);
+    }
+    else if (m == 4096 || m == 6144) {
+      return cutlass_sparse_gemm_caller<Cutlass3xGemm1>(
+        out, a, e, b, std::forward<EpilogueArgs>(args)...);
+    }
+  } else if (np2 <= 128) {
+    if (m == 4096) {
+      return cutlass_sparse_gemm_caller<Cutlass3xGemm3>(
+        out, a, e, b, std::forward<EpilogueArgs>(args)...);
+    }
+    else if (m == 28672) {
+      return cutlass_sparse_gemm_caller<Cutlass3xGemm5>(
+        out, a, e, b, std::forward<EpilogueArgs>(args)...);
+    }
+    else if (m == 6144) {
+      return cutlass_sparse_gemm_caller<Cutlass3xGemm4>(
+        out, a, e, b, std::forward<EpilogueArgs>(args)...);
+    }
+  } else if (np2 <= 256) {
+    if (m == 4096) {
+      return cutlass_sparse_gemm_caller<Cutlass3xGemm6>(
+        out, a, e, b, std::forward<EpilogueArgs>(args)...);
+    }
+    else if (m == 28672) {
+      return cutlass_sparse_gemm_caller<Cutlass3xGemm8>(
+        out, a, e, b, std::forward<EpilogueArgs>(args)...);
+    }
+    else if (m == 6144) {
+      return cutlass_sparse_gemm_caller<Cutlass3xGemm7>(
+        out, a, e, b, std::forward<EpilogueArgs>(args)...);
+    }
+  } else {
+    if (m == 6144 || m == 28672) {
+      return cutlass_sparse_gemm_caller<Cutlass3xGemm8>(
+        out, a, e, b, std::forward<EpilogueArgs>(args)...);
+    }
+    else if (m == 4096) {
+      return cutlass_sparse_gemm_caller<Cutlass3xGemm7>(
+        out, a, e, b, std::forward<EpilogueArgs>(args)...);
+    }
+  }
+
+  // Otherwise the default heuristic
+  if (np2 <= 64) {
     // n in [1, 64]
     return cutlass_sparse_gemm_caller<Cutlass3xGemmM64>(
         out, a, e, b, std::forward<EpilogueArgs>(args)...);
-  } else if (mp2 <= 128) {
+  } else if (np2 <= 128) {
     // n in (64, 128]
     return cutlass_sparse_gemm_caller<Cutlass3xGemmM128>(
         out, a, e, b, std::forward<EpilogueArgs>(args)...);
-  } else if (mp2 <= 256) {
+  } else if (np2 <= 256) {
     // n in (128, 256]
     return cutlass_sparse_gemm_caller<Cutlass3xGemmM256>(
         out, a, e, b, std::forward<EpilogueArgs>(args)...);
@@ -181,8 +246,8 @@ void cutlass_scaled_sparse_mm_sm90_epilogue(torch::Tensor& out, torch::Tensor co
                                      torch::Tensor const& e,
                                      torch::Tensor const& b,
                                      EpilogueArgs&&... epilogue_args) {
+  TORCH_CHECK(e.dtype() == torch::kUInt8);
   if (a.dtype() == torch::kInt8) {
-    TORCH_CHECK(e.dtype() == torch::kUInt8);
     TORCH_CHECK(b.dtype() == torch::kInt8);
 
     if (out.dtype() == torch::kBFloat16) {
@@ -195,7 +260,6 @@ void cutlass_scaled_sparse_mm_sm90_epilogue(torch::Tensor& out, torch::Tensor co
           out, a, e, b, std::forward<EpilogueArgs>(epilogue_args)...);
     }
   } else if (a.dtype() == torch::kFloat8_e4m3fn) {
-    TORCH_CHECK(e.dtype() == torch::kUInt8);
     TORCH_CHECK(b.dtype() == torch::kFloat8_e4m3fn);
 
     if (out.dtype() == torch::kBFloat16) {
@@ -210,7 +274,6 @@ void cutlass_scaled_sparse_mm_sm90_epilogue(torch::Tensor& out, torch::Tensor co
     }
   }
   else if (a.dtype() == torch::kFloat16) {
-    TORCH_CHECK(e.dtype() == torch::kUInt8);
     TORCH_CHECK(b.dtype() == torch::kFloat16);
 
     if (out.dtype() == torch::kBFloat16) {
@@ -226,7 +289,6 @@ void cutlass_scaled_sparse_mm_sm90_epilogue(torch::Tensor& out, torch::Tensor co
   }
   else { // a.dtype() == torch::kBFloat16
     TORCH_CHECK(a.dtype() == torch::kBFloat16);
-    TORCH_CHECK(e.dtype() == torch::kUInt8);
     TORCH_CHECK(b.dtype() == torch::kBFloat16);
 
     if (out.dtype() == torch::kBFloat16) {
