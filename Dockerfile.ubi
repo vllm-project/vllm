@@ -205,13 +205,13 @@ FROM vllm-openai as vllm-grpc-adapter
 
 USER root
 
-RUN --mount=type=bind,from=build,src=/workspace/dist,target=/workspace/dist \
-    --mount=type=cache,target=/root/.cache/pip \
-    --mount=type=cache,target=/root/.cache/uv \
-    uv pip install $(echo dist/*.whl)'[tensorizer]' --verbose
+RUN echo "Dir dist:" && ls -l dist
 
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install git+https://github.com/opendatahub-io/vllm-tgis-adapter@ibm-20241106-adapter
+    --mount=type=bind,from=build,src=/workspace/dist,target=/workspace/dist \
+    uv pip install $(echo dist/*.whl)'[tensorizer]' vllm-tgis-adapter==0.5.3
+
+RUN echo "Dir dist:" && ls -l dist
 
 ENV GRPC_PORT=8033 \
     PORT=8000 \
