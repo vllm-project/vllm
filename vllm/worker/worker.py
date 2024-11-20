@@ -208,8 +208,8 @@ class Worker(LocalOrDistributedWorkerBase):
         torch.cuda.empty_cache()
         torch_allocated_bytes = torch.cuda.memory_stats(
         )["allocated_bytes.all.current"]
-        total_allocated_bytes = torch.cuda.mem_get_info(
-        )[1] - torch.cuda.mem_get_info()[0]
+        total_allocated_bytes = self.init_gpu_memory - torch.cuda.mem_get_info(
+        )[0]
         non_torch_allocations = total_allocated_bytes - torch_allocated_bytes
         if non_torch_allocations > 0:
             peak_memory += non_torch_allocations
