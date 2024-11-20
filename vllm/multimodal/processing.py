@@ -209,23 +209,26 @@ def find_token_match_by_text(
 
     left_idx = len(_encode(tokenizer, left_text, add_special_tokens=False))
     right_idx = len(_encode(tokenizer, right_text, add_special_tokens=True))
+    window_size = len(match_ids)
 
     valid_candidates = list[_Candidate]()
-    for window_size in (len(match_ids) - 1, len(match_ids)):
-        for start_idx in range(left_idx, right_idx - window_size + 1):
-            end_idx = start_idx + window_size
-            candidate_text = tokenizer.decode(
-                token_ids[start_idx:end_idx],
-                skip_special_tokens=False,
-            )
+    for start_idx in range(left_idx, right_idx - window_size + 1):
+        end_idx = start_idx + window_size
+        candidate_text = tokenizer.decode(
+            token_ids[start_idx:end_idx],
+            skip_special_tokens=False,
+        )
 
-            if match_text in candidate_text:
-                candidate = _Candidate(
-                    start_idx=start_idx,
-                    end_idx=end_idx,
-                    distance=len(candidate_text) - len(match_text),
-                )
-                valid_candidates.append(candidate)
+        if match_text in candidate_text:
+            candidate = _Candidate(
+                start_idx=start_idx,
+                end_idx=end_idx,
+                distance=len(candidate_text) - len(match_text),
+            )
+            valid_candidates.append(candidate)
+
+            if candidate.distance == 0:
+                break
 
     assert len(valid_candidates) > 0, dict(
         # To facilitate debugging
