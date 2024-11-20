@@ -2133,12 +2133,7 @@ class CompilationConfig(BaseModel):
             name because the config uses json format. If we pass the config
             from Python, functions can also be passed directly via Python object
             constructor, e.g. `CompilationConfig(inductor_passes={"a": func})`
-        - custom inductor passes:
-            - dump_graph_stages: list of stages for which we want to dump the graph.
-                Each pass defines its own stages (before, after, maybe in-between).
-            - dump_graph_dir: directory to dump the graph. Default is .
-            - enable_fusion: whether to enable the custom fusion pass.
-                TODO better pass enabling system.
+        - custom inductor passes: see PassConfig for more details
     
     Why we have different sizes for cudagraph and inductor:
     - cudagraph: a cudagraph captured for a specific size can only be used
@@ -2393,7 +2388,7 @@ class VllmConfig:
             self.compilation_config.custom_ops = ["none"]
             self.compilation_config.use_cudagraph = True
             self.compilation_config.use_inductor = True
-            # self.compilation_config.pass_config.enable_fusion = False
+            self.compilation_config.pass_config.enable_fusion = False
             self.compilation_config.pass_config.enable_reshape = False
 
         current_platform.check_and_update_config(self)
