@@ -17,9 +17,8 @@ set -ex
 
 kill_gpu_processes() {
   # kill all processes on GPU.
-  pkill -f pt_main_thread
-  pkill -f python3
-  pgrep pt_main_thread | xargs kill -9
+  pgrep pt_main_thread | xargs -r kill -9
+  pgrep python3 | xargs -r kill -9
   for port in 8000 8100 8200; do lsof -t -i:$port | xargs -r kill -9; done
   sleep 1
 }
@@ -64,7 +63,7 @@ launch_disagg_prefill() {
   # disagg prefill
   CUDA_VISIBLE_DEVICES=0 python3 \
     -m vllm.entrypoints.openai.api_server \
-    --model meta-llama/Meta-Llama-3.1-8B-Instruct \
+    --model $model \
     --port 8100 \
     --max-model-len 10000 \
     --gpu-memory-utilization 0.6 \
@@ -75,7 +74,7 @@ launch_disagg_prefill() {
     --kv-buffer-size 5e9 &
   CUDA_VISIBLE_DEVICES=1 python3 \
     -m vllm.entrypoints.openai.api_server \
-    --model meta-llama/Meta-Llama-3.1-8B-Instruct \
+    --model $model \
     --port 8200 \
     --max-model-len 10000 \
     --gpu-memory-utilization 0.6 \
@@ -93,7 +92,7 @@ launch_disagg_prefill() {
 
 benchmark() {
   results_folder="./results"
-  model="meta-llama/Meta-Llama-3.1-70B-Instruct"
+  model="meta-llama/Meta-Llama-3.1-8B-Instruct"
   dataset_name="sonnet"
   dataset_path="../sonnet_4x.txt"
   num_prompts=100

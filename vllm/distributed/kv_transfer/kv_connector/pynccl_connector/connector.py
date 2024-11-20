@@ -7,11 +7,11 @@
     - `TorchDistributedConnector`: a torch distributed connector between P/D 
       instance, implemented on top of `TorchDistributedBuffer`
 """
-from copy import deepcopy
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 
 import torch
 
+from vllm import _custom_ops as ops
 from vllm.config import KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
 from vllm.distributed.kv_transfer.kv_connector.pynccl_connector.buffer import (
@@ -19,6 +19,7 @@ from vllm.distributed.kv_transfer.kv_connector.pynccl_connector.buffer import (
 from vllm.distributed.kv_transfer.kv_connector.pynccl_connector.pipe import (
     PyNcclPipe)
 from vllm.logger import init_logger
+from vllm.sequence import IntermediateTensors
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
@@ -101,134 +102,154 @@ class PyNcclConnector(KVConnectorBase):
 
         self.producer_buffer.insert(input_tokens, roi, key, value, hidden)
 
-    def build_partial_prefill_input(
+    def send_kv_caches_and_hidden_states(
         self,
+        model_executable: torch.nn.Module,
         model_input: "ModelInputForGPUWithSamplingMetadata",
-        input_tokens_list: List[torch.Tensor],
-        num_computed_tokens_list: List[int],
-        start_pos_list: List[int],
-        slot_mapping_flat: torch.Tensor,
-        device: torch.device,
-    ) -> "ModelInputForGPUWithSamplingMetadata":
-        """
-        Helper function to rebuild the model input for the current request.
-        Goal: avoid running redundant prefill on those tokens that already has
-        KV caches received.
-        """
-        rebuilt_input_tokens = []
-        rebuilt_input_positions = []
-        rebuilt_query_lens = []
+        kv_caches: List[torch.Tensor],
+        hidden_or_intermediate_states: Union[torch.Tensor,
+                                             IntermediateTensors],
+    ) -> None:
 
-        rebuilt_num_prefills = 0
-        rebuilt_num_prefill_tokens = 0
-        rebuilt_slot_mapping = []
-        rebuilt_max_query_len = 0
+        input_tokens_tensor = model_input.input_tokens
+        seq_lens = model_input.attn_metadata.seq_lens
+        slot_mapping_flat = model_input.attn_metadata.slot_mapping.flatten()
+        start_layer = model_executable.model.start_layer
+        end_layer = model_executable.model.end_layer
 
-        rebuilt_block_tables = []
+        # query_lens contains new KV caches that are added to vLLM.
+        # so we will send them to decode instance
+        # FIXME(Kuntai): This assume that all requests are prefill.
+        for idx, slen in enumerate(seq_lens):
+            start_pos = sum(seq_lens[:idx])
+            end_pos = start_pos + slen
+            current_tokens = input_tokens_tensor[start_pos:end_pos]
 
-        rebuilt_query_start_loc = [0]
-        rebuilt_context_lens_tensor = []
-        rebuilt_selected_token_indices = []
+            keys, values = [], []
 
-        # recounting query and context lengths
-        for idx in range(len(input_tokens_list)):
-            token_tensor = input_tokens_list[idx]
-            num_token = len(token_tensor)
-            num_computed_token = num_computed_tokens_list[idx]
-            # currently attention kernel cannot handle the case where there is
-            # 0 query token.
-            if num_computed_token == num_token:
-                num_computed_token -= 1
-            start_pos = start_pos_list[idx]
+            for layer_id in range(start_layer, end_layer):
+                kv_cache = kv_caches[layer_id - start_layer]
 
-            rebuilt_input_tokens.append(token_tensor[num_computed_token:])
-            # TODO(Jiayi): please check the correctness of next line
-            rebuilt_input_positions.append(
-                model_input.input_positions[start_pos +
-                                            num_computed_token:start_pos +
-                                            num_token])
-            q_len = num_token - num_computed_token
-            rebuilt_query_lens.append(q_len)
+                _, _, num_heads, head_size = kv_cache[0].shape
 
-            # Attn metadata-related
-            rebuilt_num_prefills += 1
-            rebuilt_num_prefill_tokens += q_len
-            new_slot_mapping = slot_mapping_flat[start_pos +
-                                                 num_computed_token:start_pos +
-                                                 num_token]
-            rebuilt_slot_mapping.append(new_slot_mapping)
-            rebuilt_max_query_len = max(q_len, rebuilt_max_query_len)
-            # TODO(Jiayi): remove hard-code (block_size=16)
-            blk_size = 16
-            temp_block_table = [
-                slot_mapping_flat[i] // blk_size
-                for i in range(start_pos, start_pos + num_token, blk_size)
-            ]
-            rebuilt_block_tables.append(temp_block_table)
-            rebuilt_query_start_loc.append(
-                rebuilt_num_prefill_tokens)  #start with 0
-            rebuilt_context_lens_tensor.append(num_computed_token)
+                key_cache = kv_cache[0].reshape(-1, num_heads, head_size)
+                value_cache = kv_cache[1].reshape(-1, num_heads, head_size)
 
-            # Sampling metadata related
-            #seq_groups (use rebuilt query lens)
-            rebuilt_selected_token_indices.append(rebuilt_num_prefill_tokens -
-                                                  1)
+                current_slot_mapping = slot_mapping_flat[start_pos:end_pos]
 
-        # rebuilt attn_metadata
-        rebuilt_attn_metadata = deepcopy(model_input.attn_metadata)
-        rebuilt_attn_metadata.num_prefills = rebuilt_num_prefills
-        rebuilt_attn_metadata.num_prefill_tokens = rebuilt_num_prefill_tokens
-        rebuilt_attn_metadata.slot_mapping = torch.cat(
-            rebuilt_slot_mapping).to(device)
-        rebuilt_attn_metadata.max_query_len = rebuilt_max_query_len
+                keys.append(key_cache[current_slot_mapping].unsqueeze(0))
+                values.append(value_cache[current_slot_mapping].unsqueeze(0))
 
-        rebuilt_attn_metadata.block_tables = torch.tensor(
-            rebuilt_block_tables,
-            dtype=model_input.attn_metadata.block_tables.dtype).to(device)
+            keys = torch.cat(keys, dim=0)
+            values = torch.cat(values, dim=0)
 
-        rebuilt_attn_metadata.query_start_loc = torch.tensor(
-            rebuilt_query_start_loc,
-            dtype=model_input.attn_metadata.query_start_loc.dtype).to(device)
-        rebuilt_attn_metadata.context_lens_tensor = torch.tensor(
-            rebuilt_context_lens_tensor,
-            dtype=model_input.attn_metadata.context_lens_tensor.dtype,
-        ).to(device)
+            self.insert(current_tokens,
+                        torch.ones_like(current_tokens,
+                                        dtype=bool), keys, values,
+                        hidden_or_intermediate_states[start_pos:end_pos])
 
-        rebuilt_attn_metadata._cached_prefill_metadata = None
+        logger.debug("[rank%d]: KV send DONE.", torch.distributed.get_rank())
 
-        # rebuilt sampling_metadata
-        rebuilt_sampling_metadata = deepcopy(model_input.sampling_metadata)
-        for idx, q_len in enumerate(rebuilt_query_lens):
-            if rebuilt_sampling_metadata.seq_groups is not None:
-                rebuilt_sampling_metadata.seq_groups[idx].query_len = q_len
+    def recv_kv_caches_and_hidden_states(
+        self, model_executable: torch.nn.Module,
+        model_input: "ModelInputForGPUWithSamplingMetadata",
+        kv_caches: List[torch.Tensor]
+    ) -> Tuple[Union[torch.Tensor, IntermediateTensors], bool,
+               "ModelInputForGPUWithSamplingMetadata"]:
 
-        rebuilt_sampling_metadata.selected_token_indices = torch.tensor(
-            rebuilt_selected_token_indices,
-            dtype=model_input.sampling_metadata.selected_token_indices.dtype,
-        ).to(device)
+        # When bypass_model_exec is set to False, it means that at least for one
+        # request its corresponding KV cache or hidden state is missing.
+        # In this case we need to do prefilling to recompute missing KV cache
+        # and hidden states.
+        bypass_model_exec = True
 
-        # import here to avoid circular import.
-        from vllm.worker.model_runner import (
-            ModelInputForGPUWithSamplingMetadata)
-        rebuilt_model_input = ModelInputForGPUWithSamplingMetadata(
-            input_tokens=torch.cat(rebuilt_input_tokens).to(device),
-            input_positions=torch.cat(rebuilt_input_positions).to(device),
-            seq_lens=model_input.seq_lens,
-            query_lens=rebuilt_query_lens,
-            lora_mapping=model_input.lora_mapping,
-            lora_requests=model_input.lora_requests,
-            attn_metadata=rebuilt_attn_metadata,
-            prompt_adapter_mapping=model_input.prompt_adapter_mapping,
-            prompt_adapter_requests=model_input.prompt_adapter_requests,
-            multi_modal_kwargs=model_input.multi_modal_kwargs,
-            request_ids_to_seq_ids=model_input.request_ids_to_seq_ids,
-            finished_requests_ids=model_input.finished_requests_ids,
-            virtual_engine=model_input.virtual_engine,
-            sampling_metadata=rebuilt_sampling_metadata,
-            is_prompt=model_input.is_prompt,
-        )
+        input_tokens_tensor = model_input.input_tokens
+        seq_lens = model_input.attn_metadata.seq_lens
+        slot_mapping = model_input.attn_metadata.slot_mapping.flatten()
 
-        return rebuilt_model_input
+        hidden_or_intermediate_states_for_one_req = []
+
+        input_tokens_list = []
+        num_computed_tokens_list = []
+        start_pos_list = []
+
+        # enumerate different requests
+        # FIXME(Kuntai): This impl assumes that all requests are prefill.
+        for idx, slen in enumerate(seq_lens):
+
+            start_pos = sum(seq_lens[:idx])
+            end_pos = start_pos + slen
+            current_tokens = input_tokens_tensor[start_pos:end_pos]
+            num_tokens = slen
+
+            # collecting data for rebuilding the input
+            input_tokens_list.append(current_tokens)
+            start_pos_list.append(start_pos)
+
+            ret = self.select(current_tokens,
+                              torch.ones_like(current_tokens, dtype=bool))
+            if ret[0] is None:
+                # didn't find any match.
+                bypass_model_exec = False
+                num_computed_tokens_list.append(0)
+                continue
+
+            roi: torch.Tensor = ret[1]
+            keys: torch.Tensor = ret[2]
+            values: torch.Tensor = ret[3]
+            hidden: torch.Tensor = ret[4]
+
+            num_computed_tokens = roi.shape[0]
+            num_computed_tokens_list.append(num_computed_tokens)
+
+            # check if both KV cache and the hidden states are received
+            # If not, need to redo the forwarding to compute missing states
+            if not all([(num_computed_tokens == num_tokens), hidden is not None
+                        ]):
+                bypass_model_exec = False
+
+            # update the end position based on how many tokens are cached.
+            end_pos = start_pos + num_computed_tokens
+
+            # put received KV caches into paged memory
+            for i in range(model_executable.model.start_layer,
+                           model_executable.model.end_layer):
+
+                kv_cache = kv_caches[i - model_executable.model.start_layer]
+                layer = model_executable.model.layers[i]
+
+                key_cache, value_cache = kv_cache[0], kv_cache[1]
+                ops.reshape_and_cache_flash(
+                    keys[i - model_executable.model.start_layer].to(
+                        key_cache.device),
+                    values[i - model_executable.model.start_layer].to(
+                        value_cache.device),
+                    key_cache,
+                    value_cache,
+                    slot_mapping[start_pos:end_pos],
+                    layer.self_attn.attn.kv_cache_dtype,
+                    layer.self_attn.attn._k_scale,
+                    layer.self_attn.attn._v_scale,
+                )
+
+            hidden_or_intermediate_states_for_one_req.append(hidden)
+
+        if not bypass_model_exec:
+            # Some of the KV cache is not retrieved
+            # so we need to adjust model_input and redo the forwarding.
+            logger.debug(
+                "[rank%d]: Failed to receive all KVs and hidden "
+                "states, redo model forwarding.", torch.distributed.get_rank())
+            hidden_or_intermediate_states = None
+
+        else:
+            logger.debug(
+                "[rank%d]: Successfully received all KVs and hidden "
+                "states, skip model forwarding.", torch.distributed.get_rank())
+            hidden_or_intermediate_states = torch.cat(
+                hidden_or_intermediate_states_for_one_req, dim=0)
+
+        return hidden_or_intermediate_states, bypass_model_exec, model_input
 
     def close(self):
         self.producer_data_pipe.close()
