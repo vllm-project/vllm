@@ -6,8 +6,7 @@ import torch
 from tqdm import tqdm
 
 from vllm.config import KVTransferConfig
-from vllm.distributed.kv_transfer.kv_connector.pynccl_connector import (pipe as
-                                                                        pnp)
+from vllm.distributed.kv_transfer.kv_connector.pynccl_connector import pipe
 
 
 def test_run(my_rank, pipe):
@@ -144,7 +143,7 @@ if __name__ == "__main__":
         kv_port=12345,
     )
 
-    pipe = pnp.PyNcclPipe(
+    pipe = pipe.PyNcclPipe(
         local_rank=my_rank,
         config=config,
     )
