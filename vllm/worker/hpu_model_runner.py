@@ -1425,8 +1425,9 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                                         group_id,
                                         seq_len,
                                         is_prompt,
-                                        lora_request=None):
-        sampling_params = SamplingParams(temperature=0)
+                                        lora_request=None,
+                                        temperature=0):
+        sampling_params = SamplingParams(temperature=temperature)
         num_blocks = math.ceil(seq_len / self.block_size)
         seq_len = max(seq_len, 1)
         if is_prompt:
@@ -1466,7 +1467,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                         is_prompt,
                         kv_caches,
                         is_pt_profiler_run=False,
-                        is_lora_profile_run=False) -> None:
+                        is_lora_profile_run=False,
+                        temperature=0) -> None:
         use_graphs = self._use_graphs(batch_size, seq_len, is_prompt)
         scenario_name = ("warmup_"
                          f"{'prompt' if is_prompt else 'decode'}_"
@@ -1505,8 +1507,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                     seq_len,
                     is_prompt,
                     lora_request=dummy_lora_requests_per_seq[i]
-                    if dummy_lora_requests_per_seq else None)
-                for i in range(batch_size)
+                    if dummy_lora_requests_per_seq else None,
+                    temperature=temperature) for i in range(batch_size)
             ]
         else:
             # FIXME: seq_len is actually number of blocks
@@ -1518,8 +1520,8 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                     b * self.block_size - 1,
                     is_prompt,
                     lora_request=dummy_lora_requests_per_seq[i]
-                    if dummy_lora_requests_per_seq else None)
-                for i, b in enumerate(blocks)
+                    if dummy_lora_requests_per_seq else None,
+                    temperature=temperature) for i, b in enumerate(blocks)
             ]
         torch.hpu.synchronize()
         profiler = None
@@ -1629,6 +1631,7 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
                 f'Unsupported graph allocation strategy: {strategy}')
         buckets = list(sorted(buckets, key=ordering))
         captured_all = True
+        warmed_random_sampler_bs: Set[int] = set()
         for idx, (batch_size, seq_len) in enumerate(buckets):
             # Graph memory usage is proportional to seq dimension in a batch
             batch_seq = batch_size * seq_len if is_prompt else batch_size
@@ -1642,7 +1645,13 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             self.graphed_buckets.add(graphed_bucket)
             self.log_warmup(phase, idx, num_candidates, batch_size, seq_len)
             with HabanaMemoryProfiler() as mem_prof:
-                self.warmup_scenario(batch_size, seq_len, is_prompt, kv_caches)
+                self.warmup_scenario(batch_size,
+                                     seq_len,
+                                     is_prompt,
+                                     kv_caches,
+                                     temperature=1.0 if batch_size
+                                     not in warmed_random_sampler_bs else 0)
+            warmed_random_sampler_bs.add(batch_size)
             used_mem = align_workers(mem_prof.consumed_device_memory,
                                      torch.distributed.ReduceOp.MAX)
             available_mem -= used_mem
