@@ -19,8 +19,8 @@ from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
 from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
                          InputContext, token_inputs)
-from vllm.model_executor.layers.quantization import (AWQConfig,
-                                                     QuantizationConfig)
+from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.awq import AWQConfig
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.models.intern_vit import (InternVisionModel,
                                                    InternVisionPatchModel)
