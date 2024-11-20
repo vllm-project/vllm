@@ -43,13 +43,14 @@ class OpenAIBaseModel(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def __log_extra_fields__(cls, values):
-        extra_fields = values.keys() - cls.model_fields.keys()
-        if extra_fields:
-            logger.warning(
-                "The following fields were present in the request "
-                "but ignored: %s", extra_fields)
-        return values
+    def __log_extra_fields__(cls, data):
+        if isinstance(data, dict):
+            extra_fields = data.keys() - cls.model_fields.keys()
+            if extra_fields:
+                logger.warning(
+                    "The following fields were present in the request "
+                    "but ignored: %s", extra_fields)
+        return data
 
 
 class ErrorResponse(OpenAIBaseModel):
