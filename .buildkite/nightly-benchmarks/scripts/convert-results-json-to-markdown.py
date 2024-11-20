@@ -157,6 +157,11 @@ if __name__ == "__main__":
                                              throughput_results,
                                              serving_results)
 
+    # Sort all dataframes by their respective "Test name" columns
+    for df in [latency_results, serving_results, throughput_results]:
+        if not df.empty:
+            df.sort_values(by="Test name", inplace=True)
+
     # get markdown tables
     latency_md_table = tabulate(latency_results,
                                 headers='keys',
