@@ -1,3 +1,4 @@
+from .interface import _Backend  # noqa: F401
 from .interface import Platform, PlatformEnum, UnspecifiedPlatform
 
 current_platform: Platform

@@ -1491,6 +1491,9 @@ class LazyDict(Mapping, Generic[T]):
             self._dict[key] = self._factory[key]()
         return self._dict[key]
 
+    def __setitem__(self, key: str, value: Callable[[], T]):
+        self._factory[key] = value
+
     def __iter__(self):
         return iter(self._factory)
 
@@ -1600,3 +1603,12 @@ def direct_register_custom_op(
     my_lib.impl(op_name, op_func, "CUDA")
     if fake_impl is not None:
         my_lib._register_fake(op_name, fake_impl)
+
+
+def resolve_obj_by_qualname(qualname: str) -> Any:
+    """
+    Resolve an object by its fully qualified name.
+    """
+    module_name, obj_name = qualname.rsplit(".", 1)
+    module = importlib.import_module(module_name)
+    return getattr(module, obj_name)
