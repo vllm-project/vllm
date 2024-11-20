@@ -12,6 +12,7 @@ import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils import direct_register_custom_op
 
 logger = init_logger(__name__)
 
@@ -104,16 +105,18 @@ def fused_moe_kernel(
     num_tokens_post_padded = tl.load(num_tokens_post_padded_ptr)
     if pid_m * BLOCK_SIZE_M >= num_tokens_post_padded:
         return
-    offs_token_id = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    offs_token_id = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M).to(
+        tl.int64)
     offs_token = tl.load(sorted_token_ids_ptr + offs_token_id)
     token_mask = offs_token < num_valid_tokens
 
-    offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
+    offs_bn = (pid_n * BLOCK_SIZE_N +
+               tl.arange(0, BLOCK_SIZE_N).to(tl.int64)) % N
     offs_k = tl.arange(0, BLOCK_SIZE_K)
     a_ptrs = a_ptr + (offs_token[:, None] // top_k * stride_am +
                       offs_k[None, :] * stride_ak)
 
-    off_experts = tl.load(expert_ids_ptr + pid_m)
+    off_experts = tl.load(expert_ids_ptr + pid_m).to(tl.int64)
     b_ptrs = b_ptr + off_experts * stride_be + (offs_k[:, None] * stride_bk +
                                                 offs_bn[None, :] * stride_bn)
     if use_int8_w8a16:
@@ -466,8 +469,6 @@ def get_config_dtype_str(dtype: torch.dtype,
     return None
 
 
-@torch.library.custom_op("vllm::inplace_fused_experts",
-                         mutates_args=["hidden_states"])
 def inplace_fused_experts(hidden_states: torch.Tensor,
                           w1: torch.Tensor,
                           w2: torch.Tensor,
@@ -484,22 +485,29 @@ def inplace_fused_experts(hidden_states: torch.Tensor,
                        a1_scale, a2_scale)
 
 
-@inplace_fused_experts.register_fake
-def _(hidden_states: torch.Tensor,
-      w1: torch.Tensor,
-      w2: torch.Tensor,
-      topk_weights: torch.Tensor,
-      topk_ids: torch.Tensor,
-      use_fp8_w8a8: bool = False,
-      use_int8_w8a16: bool = False,
-      w1_scale: Optional[torch.Tensor] = None,
-      w2_scale: Optional[torch.Tensor] = None,
-      a1_scale: Optional[torch.Tensor] = None,
-      a2_scale: Optional[torch.Tensor] = None) -> None:
+def inplace_fused_experts_fake(
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        use_fp8_w8a8: bool = False,
+        use_int8_w8a16: bool = False,
+        w1_scale: Optional[torch.Tensor] = None,
+        w2_scale: Optional[torch.Tensor] = None,
+        a1_scale: Optional[torch.Tensor] = None,
+        a2_scale: Optional[torch.Tensor] = None) -> None:
     pass
 
 
-@torch.library.custom_op("vllm::outplace_fused_experts", mutates_args=[])
+direct_register_custom_op(
+    op_name="inplace_fused_experts",
+    op_func=inplace_fused_experts,
+    mutates_args=["hidden_states"],
+    fake_impl=inplace_fused_experts_fake,
+)
+
+
 def outplace_fused_experts(
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
@@ -517,19 +525,27 @@ def outplace_fused_experts(
                               w2_scale, a1_scale, a2_scale)
 
 
-@outplace_fused_experts.register_fake
-def _(hidden_states: torch.Tensor,
-      w1: torch.Tensor,
-      w2: torch.Tensor,
-      topk_weights: torch.Tensor,
-      topk_ids: torch.Tensor,
-      use_fp8_w8a8: bool = False,
-      use_int8_w8a16: bool = False,
-      w1_scale: Optional[torch.Tensor] = None,
-      w2_scale: Optional[torch.Tensor] = None,
-      a1_scale: Optional[torch.Tensor] = None,
-      a2_scale: Optional[torch.Tensor] = None) -> torch.Tensor:
+def outplace_fused_experts_fake(
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        use_fp8_w8a8: bool = False,
+        use_int8_w8a16: bool = False,
+        w1_scale: Optional[torch.Tensor] = None,
+        w2_scale: Optional[torch.Tensor] = None,
+        a1_scale: Optional[torch.Tensor] = None,
+        a2_scale: Optional[torch.Tensor] = None) -> torch.Tensor:
     return torch.empty_like(hidden_states)
+
+
+direct_register_custom_op(
+    op_name="outplace_fused_experts",
+    op_func=outplace_fused_experts,
+    mutates_args=[],
+    fake_impl=outplace_fused_experts_fake,
+)
 
 
 def fused_experts(hidden_states: torch.Tensor,

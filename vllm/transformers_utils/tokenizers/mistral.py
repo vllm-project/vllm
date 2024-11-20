@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union, cast
 import huggingface_hub
 from huggingface_hub import HfApi, hf_hub_download
 from mistral_common.protocol.instruct.request import ChatCompletionRequest
+from mistral_common.tokens.tokenizers.base import SpecialTokens
 # yapf: disable
 from mistral_common.tokens.tokenizers.mistral import (
     MistralTokenizer as PublicMistralTokenizer)
@@ -16,13 +17,54 @@ from mistral_common.tokens.tokenizers.sentencepiece import (
 from mistral_common.tokens.tokenizers.tekken import (SpecialTokenPolicy,
                                                      Tekkenizer)
 
+from vllm.logger import init_logger
+
 if TYPE_CHECKING:
     from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
+
+logger = init_logger(__name__)
 
 
 @dataclass
 class Encoding:
     input_ids: List[int]
+
+
+def maybe_serialize_tool_calls(request: ChatCompletionRequest):
+    # SEE: https://github.com/vllm-project/vllm/pull/9951
+    # Credits go to: @gcalmettes
+    # NOTE: There is currently a bug in pydantic where attributes
+    # declared as iterables are replaced in in the instances by
+    # pydantic-core ValidatorIterator instance. In particular, this
+    # affects tool_calls defined in ChatCompletionAssistantMessageParam
+    # model:
+    # see:
+    #   - https://github.com/pydantic/pydantic/issues/9467
+    # As a result, tool_calls from assistant messages are never
+    # deserialized in the request object if the tool_calls iterator is
+    # not consumed. This affect messages passed to the MistralTokenizer
+    # since no chat template is applied and therefore the tools_calls
+    # iterator is not directly consumed.
+    # Issue is tracked on Pydantic side, with resolution planned for
+    # v2.11 release. In the meantime, the official workaround is to
+    # consume the iterator so the tool_calls are correctly deserialized
+    # in the OpenAI ChatCompletionAssistantMessageParam object
+    # https://github.com/pydantic/pydantic/issues/9467#issuecomment-2442097291 # noqa: E501
+    # Official Pydantic Issues:
+    #   - https://github.com/pydantic/pydantic/issues/9541
+    # TODO: remove when pydantic v2.11 is released
+    for i, message in enumerate(request.messages):
+        if message.get("role") == 'assistant':
+            tool_calls_validator = message.get("tool_calls", ().__iter__())
+            validated_tool_calls = []
+            while True:
+                try:
+                    tool_call = next(tool_calls_validator)  # type: ignore
+                    validated_tool_calls.append(tool_call)
+                except StopIteration:
+                    break
+
+            request.messages[i]["tool_calls"] = validated_tool_calls
 
 
 def list_local_repo_files(repo_id: str, revision: Optional[str]) -> List[str]:
@@ -68,24 +110,26 @@ class MistralTokenizer:
         self.instruct = tokenizer.instruct_tokenizer
 
         tokenizer_ = tokenizer.instruct_tokenizer.tokenizer
-        if isinstance(tokenizer_, Tekkenizer):
+        self.is_tekken = isinstance(tokenizer_, Tekkenizer)
+        self.is_spm = isinstance(tokenizer_, SentencePieceTokenizer)
+        if self.is_tekken:
             # Make sure special tokens will not raise
             tokenizer_.special_token_policy = SpecialTokenPolicy.IGNORE
-
-            self._vocab = {
-                token: idx
-                for idx, token in enumerate(tokenizer_.vocab())
-            }
-        elif isinstance(tokenizer_, SentencePieceTokenizer):
-            self._vocab = {
-                token: idx
-                for idx, token in enumerate(tokenizer_.vocab())
-            }
+        elif self.is_spm:
+            pass
         else:
             raise TypeError(f"Unsupported tokenizer: {type(tokenizer_)}")
 
+        self._vocab = tokenizer_.vocab()
+        # Convert to a Dict[str, int] to match protocol, but this is a lossy
+        # conversion. There may be multiple token ids that decode to the same
+        # string due to partial UTF-8 byte sequences being converted to �
+        self._vocab_dict = {
+            token: idx
+            for idx, token in enumerate(self._vocab)
+        }
         self.tokenizer = tokenizer_
-        self._max_token_id = max(self._vocab.values())
+        self._max_token_id = self.vocab_size - 1
 
     @classmethod
     def from_pretrained(cls,
@@ -130,18 +174,29 @@ class MistralTokenizer:
                                          revision=revision)
         return tokenizer_file
 
-    # the following attributes are set to fit VLLM's design
+    # the following attributes are set to fit VLLM's design and are used
+    # by the guided structured output backends.
     @property
     def all_special_tokens_extended(self) -> List[str]:
-        return []
+        # tekken defines its own extended special tokens list
+        if hasattr(self.tokenizer, "SPECIAL_TOKENS"):
+            special_tokens = self.tokenizer.SPECIAL_TOKENS
+        else:
+            special_tokens = list(SpecialTokens)
+        return [
+            s.value if isinstance(s, SpecialTokens) else s
+            for s in special_tokens
+        ]
 
     @property
     def all_special_tokens(self) -> List[str]:
-        return []
+        return self.all_special_tokens_extended
 
     @property
     def all_special_ids(self) -> List[int]:
-        return []
+        return [
+            self.all_special_tokens.index(t) for t in self.all_special_tokens
+        ]
 
     @property
     def bos_token_id(self) -> int:
@@ -182,7 +237,9 @@ class MistralTokenizer:
         return Encoding(input_ids=input_ids)
 
     def get_vocab(self) -> Dict[str, int]:
-        return self._vocab
+        # NB: the dictionary form of the vocabulary collapses token ids that map
+        # to the same string but have different bytes
+        return self._vocab_dict
 
     def get_added_vocab(self) -> Dict[str, int]:
         # Mistral tokenizers have no added vocabulary
@@ -211,32 +268,65 @@ class MistralTokenizer:
         return encoded.tokens
 
     def convert_tokens_to_string(self, tokens: List[str]) -> str:
-        if isinstance(self.tokenizer, Tekkenizer):
+        if self.is_tekken:
             tokens = [
                 t for t in tokens
-                if t not in self.tokenizer._all_special_tokens
+                if (t is SpecialTokens.tool_calls
+                    or t not in self.tokenizer._all_special_tokens)
             ]
 
             if any(isinstance(t, bytes) for t in tokens):
                 # we need to encode and decode all tokens again
                 shift = self.tokenizer.num_special_tokens
-                byte_tokens = [
-                    t.encode("utf-8") if not isinstance(t, bytes) else t
-                    for t in tokens
-                ]
-                ids = [
-                    self.tokenizer._tekken_token2id_nospecial[t] + shift
-                    for t in byte_tokens
-                ]
+
+                def _token_to_id(t: str):
+                    t_bytes = t.encode("utf-8") \
+                        if not isinstance(t, bytes) else t
+                    try:
+                        return shift + \
+                            self.tokenizer._tekken_token2id_nospecial[t_bytes]
+                    except KeyError:
+                        logger.warning(
+                            "Failed to convert token %s to id,"
+                            " replacing with <unk>", t_bytes)
+                        return self.tokenizer.unk_id
+
+                ids = [_token_to_id(t) for t in tokens]
                 decoded = self.tokenizer.decode(ids)
             else:
                 decoded = "".join(tokens)
         else:
-            decoded = self.tokenizer.decode(tokens)  # type: ignore[arg-type]
+            # make sure certain special tokens like Tool calls are
+            # not decoded
+            special_tokens = {SpecialTokens.tool_calls}
+            regular_tokens: List[str] = []
+            decoded_list = []
+
+            for token in tokens:
+                if token in special_tokens:
+                    if regular_tokens:
+                        decoded_list.append(
+                            self.tokenizer.decode(regular_tokens))
+                        regular_tokens = []
+                    decoded_list.append(token)
+                else:
+                    regular_tokens.append(token)
+
+            if regular_tokens:
+                decoded_list.append(
+                    self.decode(regular_tokens))  # type: ignore
+
+            decoded = ''.join(decoded_list)
 
         return decoded
 
-    def decode(self, ids: Union[List[int], int]) -> str:
+    def decode(self,
+               ids: Union[List[int], int],
+               skip_special_tokens: bool = True) -> str:
+        assert (
+            skip_special_tokens
+        ), "skip_special_tokens=False is not supported for Mistral tokenizers."
+
         if isinstance(ids, int):
             ids = [ids]
         return self.tokenizer.decode(ids)
@@ -249,18 +339,25 @@ class MistralTokenizer:
         # TODO(Patrick) - potentially allow special tokens to not be skipped
         assert (
             skip_special_tokens
-        ), "Skipping special tokens is not supported for Mistral tokenizers."
+        ), "skip_special_tokens=False is not supported for Mistral tokenizers."
 
-        assert isinstance(self.tokenizer,
-                          (Tekkenizer, SentencePieceTokenizer)), type(
-                              self.tokenizer)
+        assert self.is_tekken or self.is_spm, type(self.tokenizer)
+
+        if self.is_tekken:
+            # skip special tokens except tool call
+            ids = [
+                i for i in ids if i > self.tokenizer.num_special_tokens or i ==
+                self.tokenizer.get_control_token(SpecialTokens.tool_calls)
+            ]
 
         tokens = [self.tokenizer.id_to_piece(id) for id in ids]
 
-        if any(t.strip() == "�" for t in tokens):
-            # if any stripped decoded token is undefined
-            # because it's invalid unicode then pass bytes
+        if any("�" in t for t in tokens) and self.is_tekken:
+            # if a decoded token contains the replacement character, then the
+            # token has an incomplete UTF-8 character so we must use bytes
             # See: https://github.com/vllm-project/vllm/pull/8640
+            #      https://github.com/vllm-project/vllm/pull/9625
+            # if underlying tokenizeir is sentencepiece, we just add "�"
             tokens = [self.tokenizer.id_to_byte_piece(id) for id in ids]
 
         return tokens

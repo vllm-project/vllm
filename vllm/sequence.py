@@ -5,23 +5,20 @@ from abc import ABC, abstractmethod
 from array import array
 from collections import defaultdict
 from dataclasses import dataclass, field
-from functools import cached_property, reduce
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Mapping, Optional
+from functools import reduce
+from typing import Any, Callable, DefaultDict, Dict, List, Mapping, Optional
 from typing import Sequence as GenericSequence
-from typing import Set, Tuple, Union, cast
+from typing import Set, Tuple, Union
 
 import msgspec
 import torch
 
-from vllm.inputs.parse import is_encoder_decoder_inputs
+from vllm.inputs import SingletonInputs, SingletonInputsAdapter
 from vllm.lora.request import LoRARequest
+from vllm.multimodal import MultiModalDataDict, MultiModalPlaceholderDict
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import RequestOutputKind, SamplingParams
-
-if TYPE_CHECKING:
-    from vllm.inputs import SingletonInputs
-    from vllm.multimodal.base import MultiModalDataDict
 
 VLLM_TOKEN_ID_ARRAY_TYPE = "l"
 
@@ -166,6 +163,8 @@ class SequenceData(msgspec.Struct,
                                    ...] = msgspec.field(default_factory=tuple)
     # The number of tokens that are computed (that run against the model).
     _num_computed_tokens: int = 0
+    # The number of tokens with prefix cache hit.
+    _num_cached_tokens: int = 0
     _stage: SequenceStage = SequenceStage.PREFILL
     _cached_all_token_ids: List[int] = msgspec.field(default_factory=list)
 
@@ -256,7 +255,8 @@ class SequenceData(msgspec.Struct,
         return tuple(self._output_token_ids)
 
     @output_token_ids.setter
-    def output_token_ids(self, new_output_token_ids: List[int]) -> None:
+    def output_token_ids(self,
+                         new_output_token_ids: GenericSequence[int]) -> None:
         self._output_token_ids = array(VLLM_TOKEN_ID_ARRAY_TYPE,
                                        new_output_token_ids)
         self._update_cached_all_tokens()
@@ -321,6 +321,14 @@ class SequenceData(msgspec.Struct,
         if self.get_num_uncomputed_tokens() == 0:
             self._stage = SequenceStage.DECODE
 
+    def get_num_cached_tokens(self) -> int:
+        """Return the number of tokens with prefix cache hit."""
+        return self._num_cached_tokens
+
+    def update_num_cached_tokens(self, num_cached_tokens: int):
+        """Update the number of tokens with prefix cache hit."""
+        self._num_cached_tokens = num_cached_tokens
+
     def reset_state_for_recompute(self) -> None:
         """Reset the number of computed tokens from this sequence. It is
         supposed to be called when a sequence needs to be started from
@@ -378,14 +386,9 @@ class SequenceData(msgspec.Struct,
 class Sequence:
     """Stores the data, status, and block information of a sequence.
 
-    The sequence is constructed from the :code:`SingletonInputs` instance
-    passed in through the :code:`inputs` constructor argument.
-
-    For encoder/decoder models, SingletonInputs encapsulates both a
-    decoder and encoder prompt, creating an ambiguity about which
-    prompt to construct the sequence from. The `from_decoder_prompt`
-    constructor argument signals whether to construct the Sequence
-    from the SingletonInputs decoder prompt, or encoder prompt.
+    The sequence is constructed from the :data:`DecoderOnlyInputs`
+    (for decoder-only) or :data:`EncoderDecoderInputs` (for encoder-decoder)
+    instance passed in through the :code:`inputs` constructor argument.
 
     Args:
         seq_id: The ID of the sequence.
@@ -395,55 +398,23 @@ class Sequence:
         eos_token_id: The end-of-sequence (EOS) token id recognized by this LLM.
         lora_request: LoRA request.
         prompt_adapter_request: Prompt Adapter request.
-        from_decoder_prompt: Construct Sequence from SingletonInputs decoder
-                             prompt (True) or encoder prompt (False.) Must be
-                             True for decoder-only model.
-
     """
 
     def __init__(
         self,
         seq_id: int,
-        inputs: "SingletonInputs",
+        inputs: SingletonInputs,
         block_size: int,
         eos_token_id: Optional[int] = None,
         lora_request: Optional[LoRARequest] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
-        from_decoder_prompt: bool = True,
     ) -> None:
         self.seq_id = seq_id
-        self.inputs = inputs
+        self.inputs = SingletonInputsAdapter(inputs)
         self.block_size = block_size
         self.eos_token_id = eos_token_id
         self.lora_request = lora_request
         self.prompt_adapter_request = prompt_adapter_request
-        self.from_decoder_prompt = from_decoder_prompt
-
-        # For decoder-only models, a Sequence is constructed
-        # from an DecoderOnlyInputs instance (the `inputs` arg.)
-        #
-        # For encoder/decoder models the same `inputs`
-        # instance could be utilized to construct either an
-        # encoder sequence or a decoder sequence, because
-        # `DecoderOnlyInputs` has both decoder- and encoder-oriented
-        # member variables (i.e. it encapsulates both an encoder
-        # and a decoder prompt.) The decision of which type of sequence
-        # to generate is determined by the `from_decoder_prompt` argument.
-        #
-        # When constructing a encoder sequence
-        # (`from_decoder_prompt` False) it matters that
-        # the `DecoderOnlyInputs` instance stored in `inputs` is valid
-        # in the sense that its encoder-related member variables are
-        # populated; below, an exception is raised if this is
-        # not the case.
-        #
-        # When constructing a decoder sequence (`from_decoder_prompt` True)
-        # it does not matter whether `inputs` has its encoder-related
-        # member variables populated.
-        if not (from_decoder_prompt or is_encoder_decoder_inputs(inputs)):
-            raise ValueError("Cannot extract encoder input prompt from "
-                             f"invalid input {inputs}; did you forget the "
-                             "encoder input prompt fields?")
 
         self.data = SequenceData.from_seqs(self.prompt_token_ids)
         self.output_logprobs: SampleLogprobs = []
@@ -466,43 +437,29 @@ class Sequence:
     def n_blocks(self) -> int:
         return (self.get_len() + self.block_size - 1) // self.block_size
 
-    @cached_property
+    @property
     def prompt(self) -> Optional[str]:
-        # Select decoder or encoder input prompt str, as appropriate
-        prompt_key: str = ("prompt"
-                           if self.from_decoder_prompt else "encoder_prompt")
+        return self.inputs.prompt
 
-        return cast(Optional[str], self.inputs.get(prompt_key))
-
-    @cached_property
+    @property
     def prompt_token_ids(self) -> List[int]:
-        # Select decoder or encoder input prompt token ids, as appropriate
-        prompt_token_ids_key: str = ("prompt_token_ids"
-                                     if self.from_decoder_prompt else
-                                     "encoder_prompt_token_ids")
+        return self.inputs.prompt_token_ids
 
-        # Cache computed prompt token ids
-        return cast(List[int], self.inputs.get(prompt_token_ids_key))
+    @property
+    def prompt_embeds(self) -> Optional[torch.Tensor]:
+        return self.inputs.prompt_embeds
 
     @property
     def multi_modal_data(self) -> "MultiModalDataDict":
-        inputs = self.inputs
+        return self.inputs.multi_modal_data
 
-        if (inputs.get("multi_modal_data")
-                and inputs.get("encoder_multi_modal_data")):
-            raise ValueError(
-                "Multi-modal data in both encoder and decoder is not supported."
-            )
-
-        return cast(
-            "MultiModalDataDict",
-            (inputs.get("multi_modal_data")
-             or inputs.get("encoder_multi_modal_data") or {}),
-        )
+    @property
+    def multi_modal_placeholders(self) -> MultiModalPlaceholderDict:
+        return self.inputs.multi_modal_placeholders
 
     @property
     def mm_processor_kwargs(self) -> Dict[str, Any]:
-        return self.inputs.get("mm_processor_kwargs") or {}
+        return self.inputs.mm_processor_kwargs
 
     @property
     def lora_int_id(self) -> int:
@@ -728,8 +685,12 @@ class SequenceGroup:
                 if self.encoder_seq is not None else None)
 
     @property
-    def multi_modal_data(self) -> "MultiModalDataDict":
+    def multi_modal_data(self) -> MultiModalDataDict:
         return self.first_seq.multi_modal_data
+
+    @property
+    def multi_modal_placeholders(self) -> MultiModalPlaceholderDict:
+        return self.first_seq.multi_modal_placeholders
 
     @property
     def mm_processor_kwargs(self) -> Dict[str, Any]:
@@ -921,7 +882,7 @@ class SequenceGroupMetadata(
         multi_modal_data: Multi modal data.
         mm_processor_kwargs: Multimodal input processor / mapper overrides.
         encoder_seq_data: Optional sequence data for encoder prompt
-                          (SequenceGroup.encoder_seq). Should be None 
+                          (SequenceGroup.encoder_seq). Should be None
                           unless you are working with an encoder/decoder
                           model.
         cross_block_table: Optional cross-attention block table associated
@@ -946,6 +907,7 @@ class SequenceGroupMetadata(
     # "MultiModalDataDict" types. We have to use Any due to msgspec
     # doesn't allow to have union of 2 different dicts.
     multi_modal_data: Optional[Any] = None
+    multi_modal_placeholders: Optional[MultiModalPlaceholderDict] = None
     mm_processor_kwargs: Optional[Dict[str, Any]] = None
     encoder_seq_data: Optional[SequenceData] = None
     cross_block_table: Optional[List[int]] = None
@@ -1164,7 +1126,7 @@ def get_all_seq_ids_and_request_ids(
     sequence ids.
     """
     seq_ids: List[int] = []
-    request_id_seq_ids_mapping: Dict[str, Set[int]] = defaultdict(set)
+    request_id_seq_ids_mapping: DefaultDict[str, Set[int]] = defaultdict(set)
     for sg in seq_group_metadata_list:
         for seq_id in sg.seq_data:
             seq_ids.append(seq_id)

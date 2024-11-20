@@ -2,11 +2,6 @@ import os
 from functools import partial
 from typing import Any, Awaitable, List, Optional, Set, Tuple, Union
 
-import torch
-
-import vllm.envs as envs
-from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
-                         SchedulerConfig)
 from vllm.executor.executor_base import ExecutorAsyncBase, ExecutorBase
 from vllm.executor.multiproc_worker_utils import (ProcessWorkerWrapper,
                                                   ResultHandler, WorkerMonitor)
@@ -15,7 +10,7 @@ from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import ExecuteModelRequest
-from vllm.utils import (GiB_bytes, get_distributed_init_method, get_open_port,
+from vllm.utils import (get_distributed_init_method, get_open_port,
                         get_vllm_instance_id, make_async)
 from vllm.worker.worker_base import WorkerWrapperBase
 
@@ -58,13 +53,6 @@ class CPUExecutor(ExecutorBase):
         # To hint IPEX uses shared memory based AllReduce
         os.environ["LOCAL_WORLD_SIZE"] = str(
             self.parallel_config.tensor_parallel_size)
-
-        self.model_config = _verify_and_get_model_config(self.model_config)
-        self.cache_config = _verify_and_get_cache_config(self.cache_config)
-        self.scheduler_config = _verify_and_get_scheduler_config(
-            self.scheduler_config)
-        self.parallel_config = _verify_and_get_parallel_config(
-            self.parallel_config)
 
         # Multiprocessing-based executor does not support multi-node setting.
         # Since it only works for single node, we can use the loopback address
@@ -138,18 +126,11 @@ class CPUExecutor(ExecutorBase):
         assert self.distributed_init_method is not None
 
         kwargs = dict(
-            model_config=self.model_config,
-            parallel_config=self.parallel_config,
-            scheduler_config=self.scheduler_config,
-            device_config=self.device_config,
-            cache_config=self.cache_config,
-            load_config=self.load_config,
+            vllm_config=self.vllm_config,
             local_rank=local_rank,
             rank=rank,
             distributed_init_method=self.distributed_init_method,
-            lora_config=self.lora_config,
             kv_cache_dtype=self.cache_config.cache_dtype,
-            prompt_adapter_config=self.prompt_adapter_config,
             is_driver_worker=rank == 0,
         )
         wrapper.init_worker(**kwargs)
@@ -320,65 +301,6 @@ class CPUExecutorAsync(CPUExecutor, ExecutorAsyncBase):
 
     async def check_health_async(self) -> None:
         self.check_health()
-
-
-def _verify_and_get_model_config(config: ModelConfig) -> ModelConfig:
-    if config.dtype == torch.float16:
-        logger.warning("float16 is not supported on CPU, casting to bfloat16.")
-        config.dtype = torch.bfloat16
-    # Reminder: Please update docs/source/serving/compatibility_matrix.rst
-    # If the feature combo become valid
-    if not config.enforce_eager:
-        logger.warning(
-            "CUDA graph is not supported on CPU, fallback to the eager "
-            "mode.")
-        config.enforce_eager = True
-    return config
-
-
-def _verify_and_get_scheduler_config(
-        config: SchedulerConfig) -> SchedulerConfig:
-    # Reminder: Please update docs/source/serving/compatibility_matrix.rst
-    # If the feature combo become valid
-    if config.chunked_prefill_enabled:
-        logger.warning("Chunked prefill is not supported on CPU, disable it.")
-        config.chunked_prefill_enabled = False
-
-    return config
-
-
-def _verify_and_get_cache_config(config: CacheConfig) -> CacheConfig:
-    # Reminder: Please update docs/source/serving/compatibility_matrix.rst
-    # If the feature combo become valid
-    if config.enable_prefix_caching:
-        logger.warning("Prefix caching is not supported on CPU, disable it.")
-        config.enable_prefix_caching = False
-
-    kv_cache_space = envs.VLLM_CPU_KVCACHE_SPACE
-
-    if kv_cache_space >= 0:
-        if kv_cache_space == 0:
-            config.cpu_kvcache_space_bytes = 4 * GiB_bytes  # type: ignore
-            logger.warning("Environment variable VLLM_CPU_KVCACHE_SPACE (GB) "
-                           "for CPU backend is not set, using 4 by default.")
-        else:
-            config.cpu_kvcache_space_bytes = kv_cache_space * GiB_bytes  # type: ignore
-    else:
-        raise RuntimeError(
-            "Invalid environment variable VLLM_CPU_KVCACHE_SPACE"
-            f" {kv_cache_space}, expect a positive integer value.")
-
-    return config
-
-
-def _verify_and_get_parallel_config(config: ParallelConfig) -> ParallelConfig:
-    if (config.distributed_executor_backend is not None
-            and config.distributed_executor_backend != "mp"):
-        logger.warning(
-            "%s is not supported on CPU, fallback to mp distributed executor "
-            "backend.", config.distributed_executor_backend)
-        config.distributed_executor_backend = "mp"
-    return config
 
 
 def _driver_method_invoker(driver, method: str, *args, **kwargs):

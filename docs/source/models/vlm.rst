@@ -185,7 +185,7 @@ Below is an example on how to launch the same ``microsoft/Phi-3.5-vision-instruc
       --trust-remote-code --max-model-len 4096 --limit-mm-per-prompt image=2
 
 .. important::
-    Since OpenAI Vision API is based on `Chat Completions <https://platform.openai.com/docs/api-reference/chat>`_ API,
+    Since OpenAI Vision API is based on `Chat Completions API <https://platform.openai.com/docs/api-reference/chat>`_,
     a chat template is **required** to launch the API server.
 
     Although Phi-3.5-Vision comes with a chat template, for other models you may have to provide one if the model's tokenizer does not come with it.
@@ -240,8 +240,15 @@ To consume the server, you can use the OpenAI client like in the example below:
     )
     print("Chat completion output:", chat_response.choices[0].message.content)
 
+A full code example can be found in `examples/openai_chat_completion_client_for_multimodal.py <https://github.com/vllm-project/vllm/blob/main/examples/openai_chat_completion_client_for_multimodal.py>`_.
 
-A full code example can be found in `examples/openai_api_client_for_multimodal.py <https://github.com/vllm-project/vllm/blob/main/examples/openai_api_client_for_multimodal.py>`_.
+.. tip::
+    Loading from local file paths is also supported on vLLM: You can specify the allowed local media path via ``--allowed-local-media-path`` when launching the API server/engine,
+    and pass the file path as ``url`` in the API request.
+
+.. tip::
+    There is no need to place image placeholders in the text content of the API request - they are already represented by the image content.
+    In fact, you can place image placeholders in the middle of the text by interleaving text and image content.
 
 .. note::
 
@@ -251,5 +258,73 @@ A full code example can be found in `examples/openai_api_client_for_multimodal.p
 
         $ export VLLM_IMAGE_FETCH_TIMEOUT=<timeout>
 
-.. note::
-    There is no need to format the prompt in the API request since it will be handled by the server.
+Chat Embeddings API
+^^^^^^^^^^^^^^^^^^^
+
+vLLM's Chat Embeddings API is a superset of OpenAI's `Embeddings API <https://platform.openai.com/docs/api-reference/embeddings>`_,
+where a list of ``messages`` can be passed instead of batched ``inputs``. This enables multi-modal inputs to be passed to embedding models.
+
+.. tip::
+    The schema of ``messages`` is exactly the same as in Chat Completions API.
+
+In this example, we will serve the ``TIGER-Lab/VLM2Vec-Full`` model.
+
+.. code-block:: bash
+
+    vllm serve TIGER-Lab/VLM2Vec-Full --task embedding \
+      --trust-remote-code --max-model-len 4096 --chat-template examples/template_vlm2vec.jinja
+
+.. important::
+
+    Since VLM2Vec has the same model architecture as Phi-3.5-Vision, we have to explicitly pass ``--task embedding``
+    to run this model in embedding mode instead of text generation mode.
+
+.. important::
+
+    VLM2Vec does not expect chat-based input. We use a `custom chat template <https://github.com/vllm-project/vllm/blob/main/examples/template_vlm2vec.jinja>`_
+    to combine the text and images together.
+
+Since the request schema is not defined by OpenAI client, we post a request to the server using the lower-level ``requests`` library:
+
+.. code-block:: python
+
+    import requests
+
+    image_url = "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
+
+    response = requests.post(
+        "http://localhost:8000/v1/embeddings",
+        json={
+            "model": "TIGER-Lab/VLM2Vec-Full",
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": image_url}},
+                    {"type": "text", "text": "Represent the given image."},
+                ],
+            }],
+            "encoding_format": "float",
+        },
+    )
+    response.raise_for_status()
+    response_json = response.json()
+    print("Embedding output:", response_json["data"][0]["embedding"])
+
+Here is an example for serving the ``MrLight/dse-qwen2-2b-mrl-v1`` model.
+
+.. code-block:: bash
+
+    vllm serve MrLight/dse-qwen2-2b-mrl-v1 --task embedding \
+      --trust-remote-code --max-model-len 8192 --chat-template examples/template_dse_qwen2_vl.jinja
+
+.. important::
+
+    Like with VLM2Vec, we have to explicitly pass ``--task embedding``. Additionally, ``MrLight/dse-qwen2-2b-mrl-v1`` requires an EOS token for embeddings, 
+    which is handled by the jinja template.
+
+.. important::
+
+    Also important, ``MrLight/dse-qwen2-2b-mrl-v1`` requires a placeholder image of the minimum image size for text query embeddings. See the full code 
+    example below for details.
+
+A full code example can be found in `examples/openai_chat_embedding_client_for_multimodal.py <https://github.com/vllm-project/vllm/blob/main/examples/openai_chat_embedding_client_for_multimodal.py>`_.

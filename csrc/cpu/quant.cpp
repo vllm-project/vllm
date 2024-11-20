@@ -23,6 +23,19 @@ struct KernelVecType<c10::BFloat16> {
   using cvt_vec_type = vec_op::FP32Vec16;
 };
 
+template <>
+struct KernelVecType<c10::Half> {
+#ifdef __powerpc64__
+  // Power architecture-specific vector type
+  using load_vec_type = vec_op::FP32Vec16;
+#else
+  // Fallback for other architectures
+  using load_vec_type = vec_op::FP16Vec16;
+#endif
+  using azp_adj_load_vec_type = vec_op::INT32Vec16;
+  using cvt_vec_type = vec_op::FP32Vec16;
+};
+
 #ifdef __AVX512F__
 template <bool AZP, typename scalar_t>
 void static_scaled_int8_quant_impl(const scalar_t* input, int8_t* output,

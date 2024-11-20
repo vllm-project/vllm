@@ -251,6 +251,19 @@ def sample_hf_requests(
                     "url": f"data:image/jpeg;base64,{image_base64}"
                 },
             }
+        elif "image" in data and isinstance(data["image"], str):
+            if (data["image"].startswith("http://") or \
+                data["image"].startswith("file://")):
+                image_url = data["image"]
+            else:
+                image_url = f"file://{data['image']}"
+
+            mm_content = {
+                "type": "image_url",
+                "image_url": {
+                    "url": image_url
+                },
+            }
         else:
             mm_content = None
 
@@ -297,8 +310,33 @@ def sample_random_requests(
 async def get_request(
     input_requests: List[Tuple[str, int, int]],
     request_rate: float,
+    burstiness: float = 1.0,
 ) -> AsyncGenerator[Tuple[str, int, int], None]:
+    """
+    Asynchronously generates requests at a specified rate 
+    with OPTIONAL burstiness.
+    
+    Args:
+        input_requests: 
+            A list of input requests, each represented as a tuple.
+        request_rate: 
+            The rate at which requests are generated (requests/s).
+        burstiness (optional): 
+            The burstiness factor of the request generation. 
+            Only takes effect when request_rate is not inf.
+            Default value is 1, which follows a Poisson process.
+            Otherwise, the request intervals follow a gamma distribution.
+            A lower burstiness value (0 < burstiness < 1) results 
+            in more bursty requests, while a higher burstiness value 
+            (burstiness > 1) results in a more uniform arrival of requests.
+    """
     input_requests = iter(input_requests)
+
+    # Calculate scale parameter theta to maintain the desired request_rate.
+    assert burstiness > 0, (
+        f"A positive burstiness factor is expected, but given {burstiness}.")
+    theta = 1.0 / (request_rate * burstiness)
+
     for request in input_requests:
         yield request
 
@@ -306,8 +344,9 @@ async def get_request(
             # If the request rate is infinity, then we don't need to wait.
             continue
 
-        # Sample the request interval from the exponential distribution.
-        interval = np.random.exponential(1.0 / request_rate)
+        # Sample the request interval from the gamma distribution.
+        # If burstiness is 1, it follows exponential distribution.
+        interval = np.random.gamma(shape=burstiness, scale=theta)
         # The next request will be sent after the interval.
         await asyncio.sleep(interval)
 
@@ -406,9 +445,9 @@ def calculate_metrics(
         median_itl_ms=np.median(itls or 0) * 1000,
         percentiles_itl_ms=[(p, np.percentile(itls or 0, p) * 1000)
                             for p in selected_percentiles],
-        mean_e2el_ms=np.median(e2els or 0) * 1000,
+        mean_e2el_ms=np.mean(e2els or 0) * 1000,
         std_e2el_ms=np.std(e2els or 0) * 1000,
-        median_e2el_ms=np.mean(e2els or 0) * 1000,
+        median_e2el_ms=np.median(e2els or 0) * 1000,
         percentiles_e2el_ms=[(p, np.percentile(e2els or 0, p) * 1000)
                              for p in selected_percentiles],
     )
@@ -426,6 +465,7 @@ async def benchmark(
     logprobs: Optional[int],
     best_of: int,
     request_rate: float,
+    burstiness: float,
     disable_tqdm: bool,
     profile: bool,
     selected_percentile_metrics: List[str],
@@ -480,7 +520,13 @@ async def benchmark(
         if profile_output.success:
             print("Profiler started")
 
+    if burstiness == 1.0:
+        distribution = "Poisson process"
+    else:
+        distribution = "Gamma distribution"
+
     print(f"Traffic request rate: {request_rate}")
+    print(f"Burstiness factor: {burstiness} ({distribution})")
     print(f"Maximum request concurrency: {max_concurrency}")
 
     pbar = None if disable_tqdm else tqdm(total=len(input_requests))
@@ -502,7 +548,7 @@ async def benchmark(
 
     benchmark_start_time = time.perf_counter()
     tasks: List[asyncio.Task] = []
-    async for request in get_request(input_requests, request_rate):
+    async for request in get_request(input_requests, request_rate, burstiness):
         prompt, prompt_len, output_len, mm_content = request
         request_func_input = RequestFuncInput(model=model_id,
                                               prompt=prompt,
@@ -769,6 +815,7 @@ def main(args: argparse.Namespace):
             logprobs=args.logprobs,
             best_of=args.best_of,
             request_rate=args.request_rate,
+            burstiness=args.burstiness,
             disable_tqdm=args.disable_tqdm,
             profile=args.profile,
             selected_percentile_metrics=args.percentile_metrics.split(","),
@@ -807,6 +854,7 @@ def main(args: argparse.Namespace):
         # Traffic
         result_json["request_rate"] = (
             args.request_rate if args.request_rate < float("inf") else "inf")
+        result_json["burstiness"] = args.burstiness
         result_json["max_concurrency"] = args.max_concurrency
 
         # Merge with benchmark result
@@ -922,8 +970,20 @@ if __name__ == "__main__":
         default=float("inf"),
         help="Number of requests per second. If this is inf, "
         "then all the requests are sent at time 0. "
-        "Otherwise, we use Poisson process to synthesize "
-        "the request arrival times.",
+        "Otherwise, we use Poisson process or gamma distribution "
+        "to synthesize the request arrival times.",
+    )
+    parser.add_argument(
+        "--burstiness",
+        type=float,
+        default=1.0,
+        help="Burstiness factor of the request generation. "
+        "Only take effect when request_rate is not inf. "
+        "Default value is 1, which follows Poisson process. "
+        "Otherwise, the request intervals follow a gamma distribution. "
+        "A lower burstiness value (0 < burstiness < 1) results in more "
+        "bursty requests. A higher burstiness value (burstiness > 1) "
+        "results in a more uniform arrival of requests.",
     )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(

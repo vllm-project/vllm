@@ -21,6 +21,11 @@ class MQAScorer(SpeculativeScorer):
         all_proposal_lengths = proposals.proposal_lens.tolist()
         for i, seq_group_metadata in enumerate(
                 execute_model_req.seq_group_metadata_list):
+            if all_proposal_lengths[i] == 0:
+                # Keep prompt seqs untouched (keep computed_tokens for chunks).
+                target_seq_group_metadata_list.append(seq_group_metadata)
+                continue
+
             seq_data_dict = seq_group_metadata.seq_data
             assert len(seq_data_dict) == 1
             seq_id = next(iter(seq_data_dict.keys()))
@@ -40,8 +45,7 @@ class MQAScorer(SpeculativeScorer):
             new_seq_data.update_num_computed_tokens(
                 len(prompt_token_ids) + len(output_token_ids) - 1)
 
-            # Ensure that the new sequence has at least one token
-            # because we only use mqa scorer in the decoding stage.
+            # Ensure that the new decode sequence has at least one token.
             assert len(output_token_ids) >= 1
             new_seq_data_dict = {target_seq_id: new_seq_data}
 
@@ -54,7 +58,6 @@ class MQAScorer(SpeculativeScorer):
                     target_seq_id: seq_group_metadata.block_tables[seq_id],
                 },
                 lora_request=None,
-                token_chunk_size=1,
             )
             target_seq_group_metadata_list.append(new_seq_group_metadata)
 
@@ -77,6 +80,7 @@ class MQAScorer(SpeculativeScorer):
             all_probs = target_probs.reshape(bs, k + 1, self._vocab_size)
             all_logprobs = target_logprobs.reshape(bs, k + 1, self._vocab_size)
         else:
+            # We either have decodes with different lens or prefill+decodes.
             all_tokens = target_token_ids.new_full(size=(bs, k + 1),
                                                    fill_value=-1)
             all_probs = target_probs.new_zeros(*all_tokens.shape,
@@ -85,15 +89,18 @@ class MQAScorer(SpeculativeScorer):
                                                     fill_value=-float("inf"))
             target_token_ids = target_token_ids.flatten()
             start_loc = 0
-            for i, proposed_len in enumerate(all_proposal_lengths):
-                output_len = proposed_len + 1
-                end_loc = start_loc + output_len
-                all_tokens[
-                    i, :output_len] = target_token_ids[start_loc:end_loc]
-                all_probs[i, :output_len] = target_probs[start_loc:end_loc]
-                all_logprobs[
-                    i, :output_len] = target_logprobs[start_loc:end_loc]
-                start_loc = end_loc
+            for i, (proposed_len, seq_meta) in enumerate(
+                    zip(all_proposal_lengths, target_seq_group_metadata_list)):
+                # Skip chunks with no output tokens.
+                if seq_meta.do_sample:
+                    output_len = proposed_len + 1
+                    end_loc = start_loc + output_len
+                    all_tokens[
+                        i, :output_len] = target_token_ids[start_loc:end_loc]
+                    all_probs[i, :output_len] = target_probs[start_loc:end_loc]
+                    all_logprobs[
+                        i, :output_len] = target_logprobs[start_loc:end_loc]
+                    start_loc = end_loc
 
         hidden_states = None
         if target_sampler_output.hidden_states is not None:

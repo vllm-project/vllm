@@ -31,13 +31,13 @@ install(CODE "set(CMAKE_INSTALL_LOCAL_ONLY TRUE)" ALL_COMPONENTS)
 # Supported python versions.  These versions will be searched in order, the
 # first match will be selected.  These should be kept in sync with setup.py.
 #
-set(PYTHON_SUPPORTED_VERSIONS "3.8" "3.9" "3.10" "3.11" "3.12")
+set(PYTHON_SUPPORTED_VERSIONS "3.9" "3.10" "3.11" "3.12")
 
 # Supported NVIDIA architectures.
 set(CUDA_SUPPORTED_ARCHS "7.0;7.5;8.0;8.6;8.9;9.0")
 
 # Supported AMD GPU architectures.
-set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx940;gfx941;gfx942;gfx1030;gfx1100")
+set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx940;gfx941;gfx942;gfx1030;gfx1100;gfx1101")
 
 #
 # Supported/expected torch versions for CUDA/ROCm.
@@ -49,8 +49,8 @@ set(HIP_SUPPORTED_ARCHS "gfx906;gfx908;gfx90a;gfx940;gfx941;gfx942;gfx1030;gfx11
 # requirements.txt files and should be kept consistent.  The ROCm torch
 # versions are derived from Dockerfile.rocm
 #
-set(TORCH_SUPPORTED_VERSION_CUDA "2.5.0")
-set(TORCH_SUPPORTED_VERSION_ROCM "2.5.0")
+set(TORCH_SUPPORTED_VERSION_CUDA "2.5.1")
+set(TORCH_SUPPORTED_VERSION_ROCM "2.5.1")
 
 #
 # Try to find python package with an executable that exactly matches
@@ -128,9 +128,9 @@ endif()
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   #
-  # For cuda we want to be able to control which architectures we compile for on 
+  # For cuda we want to be able to control which architectures we compile for on
   # a per-file basis in order to cut down on compile time. So here we extract
-  # the set of architectures we want to compile for and remove the from the 
+  # the set of architectures we want to compile for and remove the from the
   # CMAKE_CUDA_FLAGS so that they are not applied globally.
   #
   clear_cuda_arches(CUDA_ARCH_FLAGS)
@@ -138,7 +138,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   message(STATUS "CUDA target architectures: ${CUDA_ARCHS}")
   # Filter the target architectures by the supported supported archs
   # since for some files we will build for all CUDA_ARCHS.
-  cuda_archs_loose_intersection(CUDA_ARCHS 
+  cuda_archs_loose_intersection(CUDA_ARCHS
     "${CUDA_SUPPORTED_ARCHS}" "${CUDA_ARCHS}")
   message(STATUS "CUDA supported target architectures: ${CUDA_ARCHS}")
 else()
@@ -187,10 +187,12 @@ message(STATUS "FetchContent base directory: ${FETCHCONTENT_BASE_DIR}")
 
 set(VLLM_EXT_SRC
   "csrc/cache_kernels.cu"
-  "csrc/attention/attention_kernels.cu"
+  "csrc/attention/paged_attention_v1.cu"
+  "csrc/attention/paged_attention_v2.cu"
   "csrc/pos_encoding_kernels.cu"
   "csrc/activation_kernels.cu"
   "csrc/layernorm_kernels.cu"
+  "csrc/layernorm_quant_kernels.cu"
   "csrc/quantization/gptq/q_gemm.cu"
   "csrc/quantization/compressed_tensors/int8_quant_kernels.cu"
   "csrc/quantization/fp8/common.cu"
@@ -204,7 +206,19 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # Set CUTLASS_REVISION manually -- its revision detection doesn't work in this case.
   set(CUTLASS_REVISION "v3.5.1" CACHE STRING "CUTLASS revision to use")
 
-  FetchContent_Declare(
+  # Use the specified CUTLASS source directory for compilation if VLLM_CUTLASS_SRC_DIR is provided
+  if (DEFINED ENV{VLLM_CUTLASS_SRC_DIR})
+    set(VLLM_CUTLASS_SRC_DIR $ENV{VLLM_CUTLASS_SRC_DIR})
+  endif()
+
+  if(VLLM_CUTLASS_SRC_DIR)
+    if(NOT IS_ABSOLUTE VLLM_CUTLASS_SRC_DIR)
+      get_filename_component(VLLM_CUTLASS_SRC_DIR "${VLLM_CUTLASS_SRC_DIR}" ABSOLUTE)
+    endif()
+    message(STATUS "The VLLM_CUTLASS_SRC_DIR is set, using ${VLLM_CUTLASS_SRC_DIR} for compilation")
+    FetchContent_Declare(cutlass SOURCE_DIR ${VLLM_CUTLASS_SRC_DIR})
+  else()
+    FetchContent_Declare(
         cutlass
         GIT_REPOSITORY https://github.com/nvidia/cutlass.git
         GIT_TAG v3.5.1
@@ -214,7 +228,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
         # Important: If GIT_SHALLOW is enabled then GIT_TAG works only with branch names and tags.
         # So if the GIT_TAG above is updated to a commit hash, GIT_SHALLOW must be set to FALSE
         GIT_SHALLOW TRUE
-  )
+    )
+  endif()
   FetchContent_MakeAvailable(cutlass)
 
   list(APPEND VLLM_EXT_SRC
@@ -236,7 +251,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # are not supported by Machete yet.
   cuda_archs_loose_intersection(MARLIN_ARCHS "8.0;8.6;8.9;9.0" ${CUDA_ARCHS})
   if (MARLIN_ARCHS)
-    set(MARLIN_SRCS 
+    set(MARLIN_SRCS
        "csrc/quantization/fp8/fp8_marlin.cu"
        "csrc/quantization/marlin/dense/marlin_cuda_kernel.cu"
        "csrc/quantization/marlin/sparse/marlin_24_cuda_kernel.cu"
@@ -277,7 +292,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
                      "in CUDA target architectures")
     endif()
 
-    # clear SCALED_MM_3X_ARCHS so the scaled_mm_c2x kernels know we didn't 
+    # clear SCALED_MM_3X_ARCHS so the scaled_mm_c2x kernels know we didn't
     # build any 3x kernels
     set(SCALED_MM_3X_ARCHS)
   endif()
@@ -285,7 +300,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   #
   # For the cutlass_scaled_mm kernels we want to build the c2x (CUTLASS 2.x)
   # kernels for the remaining archs that are not already built for 3x.
-  cuda_archs_loose_intersection(SCALED_MM_2X_ARCHS 
+  cuda_archs_loose_intersection(SCALED_MM_2X_ARCHS
     "7.5;8.0;8.6;8.9;9.0" "${CUDA_ARCHS}")
   # subtract out the archs that are already built for 3x
   list(REMOVE_ITEM SCALED_MM_2X_ARCHS ${SCALED_MM_3X_ARCHS})
@@ -316,10 +331,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   cuda_archs_loose_intersection(MACHETE_ARCHS "9.0a" "${CUDA_ARCHS}")
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0 AND MACHETE_ARCHS)
     #
-    # For the Machete kernels we automatically generate sources for various 
+    # For the Machete kernels we automatically generate sources for various
     # preselected input type pairs and schedules.
     # Generate sources:
-    set(MACHETE_GEN_SCRIPT 
+    set(MACHETE_GEN_SCRIPT
       ${CMAKE_CURRENT_SOURCE_DIR}/csrc/quantization/machete/generate.py)
     file(MD5 ${MACHETE_GEN_SCRIPT} MACHETE_GEN_SCRIPT_HASH)
 
@@ -329,8 +344,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     if (NOT DEFINED CACHE{MACHETE_GEN_SCRIPT_HASH}
         OR NOT $CACHE{MACHETE_GEN_SCRIPT_HASH} STREQUAL ${MACHETE_GEN_SCRIPT_HASH})
       execute_process(
-        COMMAND ${CMAKE_COMMAND} -E env 
-        PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/csrc/cutlass_extensions/:${CUTLASS_DIR}/python/:${VLLM_PYTHON_PATH}:$PYTHONPATH 
+        COMMAND ${CMAKE_COMMAND} -E env
+        PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/csrc/cutlass_extensions/:${CUTLASS_DIR}/python/:${VLLM_PYTHON_PATH}:$PYTHONPATH
           ${Python_EXECUTABLE} ${MACHETE_GEN_SCRIPT}
         RESULT_VARIABLE machete_generation_result
         OUTPUT_VARIABLE machete_generation_output
@@ -340,11 +355,11 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
 
       if (NOT machete_generation_result EQUAL 0)
         message(FATAL_ERROR "Machete generation failed."
-                            " Result: \"${machete_generation_result}\"" 
+                            " Result: \"${machete_generation_result}\""
                             "\nCheck the log for details: "
                             "${CMAKE_CURRENT_BINARY_DIR}/machete_generation.log")
       else()
-        set(MACHETE_GEN_SCRIPT_HASH ${MACHETE_GEN_SCRIPT_HASH} 
+        set(MACHETE_GEN_SCRIPT_HASH ${MACHETE_GEN_SCRIPT_HASH}
             CACHE STRING "Last run machete generate script hash" FORCE)
         message(STATUS "Machete generation completed successfully.")
       endif()
@@ -366,7 +381,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
 
     message(STATUS "Building Machete kernels for archs: ${MACHETE_ARCHS}")
   else()
-    if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0 
+    if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0
         AND MACHETE_ARCHS)
       message(STATUS "Not building Machete kernels as CUDA Compiler version is "
                      "not >= 12.0, we recommend upgrading to CUDA 12.0 or "
@@ -392,8 +407,8 @@ define_gpu_extension_target(
   USE_SABI 3
   WITH_SOABI)
 
-# If CUTLASS is compiled on NVCC >= 12.5, it by default uses 
-# cudaGetDriverEntryPointByVersion as a wrapper to avoid directly calling the 
+# If CUTLASS is compiled on NVCC >= 12.5, it by default uses
+# cudaGetDriverEntryPointByVersion as a wrapper to avoid directly calling the
 # driver API. This causes problems when linking with earlier versions of CUDA.
 # Setting this variable sidesteps the issue by calling the driver directly.
 target_compile_definitions(_C PRIVATE CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
@@ -471,9 +486,9 @@ if (NOT VLLM_TARGET_DEVICE STREQUAL "cuda")
   return()
 endif ()
 
-# vLLM flash attention requires VLLM_GPU_ARCHES to contain the set of target  
-# arches in the CMake syntax (75-real, 89-virtual, etc), since we clear the 
-# arches in the CUDA case (and instead set the gencodes on a per file basis) 
+# vLLM flash attention requires VLLM_GPU_ARCHES to contain the set of target
+# arches in the CMake syntax (75-real, 89-virtual, etc), since we clear the
+# arches in the CUDA case (and instead set the gencodes on a per file basis)
 # we need to manually set VLLM_GPU_ARCHES here.
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   foreach(_ARCH ${CUDA_ARCHS})

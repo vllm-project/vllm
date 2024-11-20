@@ -25,7 +25,7 @@ from transformers import BartConfig
 from transformers.utils import logging
 
 from vllm.attention import Attention, AttentionMetadata, AttentionType
-from vllm.config import CacheConfig, LoRAConfig
+from vllm.config import CacheConfig, LoRAConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -34,12 +34,14 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
+
+from .utils import maybe_prefix
 
 logger = logging.get_logger(__name__)
 
@@ -393,8 +395,7 @@ class BartEncoderLayer(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config)
         self.self_attn_layer_norm = nn.LayerNorm(self.embed_dim)
-        self.activation_fn = get_act_fn(config.activation_function,
-                                        quant_config)
+        self.activation_fn = get_act_fn(config.activation_function)
 
         ffn_hidden_size = self.embed_dim
         ffn_intermediate_size = config.encoder_ffn_dim
@@ -405,7 +406,7 @@ class BartEncoderLayer(nn.Module):
             bias=ffn_has_bias,
             quant_config=quant_config,
         )
-        self.act = get_act_fn("gelu", quant_config, ffn_intermediate_size)
+        self.act = get_act_fn("gelu")
         self.fc2 = RowParallelLinear(
             ffn_intermediate_size,
             ffn_hidden_size,
@@ -473,8 +474,7 @@ class BartDecoderLayer(nn.Module):
             config=config,
             cache_config=cache_config,
             quant_config=quant_config)
-        self.activation_fn = get_act_fn(config.activation_function,
-                                        quant_config)
+        self.activation_fn = get_act_fn(config.activation_function)
 
         self.self_attn_layer_norm = nn.LayerNorm(self.embed_dim)
         '''
@@ -624,8 +624,6 @@ class BartEncoder(nn.Module):
             Decoder output torch.Tensor
         """
         # retrieve input_ids and inputs_embeds
-
-        input_ids = input_ids.view(-1, input_ids.shape[-1])
         inputs_embeds = self.embed_tokens(input_ids)
 
         embed_pos = self.embed_positions(
@@ -743,12 +741,13 @@ class BartModel(nn.Module):
         "encoder.embed_tokens.weight", "decoder.embed_tokens.weight"
     ]
 
-    def __init__(self,
-                 config: BartConfig,
-                 cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 lora_config: Optional[LoRAConfig] = None):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+        lora_config = vllm_config.lora_config
 
         self.config = config
 
@@ -814,20 +813,16 @@ class BartModel(nn.Module):
 class BartForConditionalGeneration(nn.Module):
     base_model_prefix = "model"
 
-    def __init__(self,
-                 config: BartConfig,
-                 cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 lora_config: Optional[LoRAConfig] = None):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
 
         super().__init__()
+        config = vllm_config.model_config.hf_config
+        lora_config = vllm_config.lora_config
         # currently all existing BART models have `tie_word_embeddings` enabled
         assert config.tie_word_embeddings
         self.config = config
-        self.model = BartModel(config,
-                               cache_config,
-                               quant_config,
-                               lora_config=lora_config)
+        self.model = BartModel(vllm_config=vllm_config,
+                               prefix=maybe_prefix(prefix, "model"))
 
         self.unpadded_vocab_size = config.vocab_size
         if lora_config:
@@ -842,7 +837,7 @@ class BartForConditionalGeneration(nn.Module):
 
         self.logits_processor = LogitsProcessor(self.unpadded_vocab_size,
                                                 config.vocab_size)
-        self.sampler = Sampler()
+        self.sampler = get_sampler()
 
     def forward(
         self,

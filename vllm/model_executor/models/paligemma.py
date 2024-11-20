@@ -1,4 +1,4 @@
-from typing import (Iterable, List, Literal, Mapping, Optional, Tuple,
+from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,
                     TypedDict, Union)
 
 import torch
@@ -6,13 +6,11 @@ from torch import nn
 from transformers import PaliGemmaConfig
 
 from vllm.attention import AttentionMetadata
-from vllm.config import CacheConfig, MultiModalConfig
-from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, InputContext,
-                         token_inputs)
+from vllm.config import VllmConfig
+from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
+                         InputContext, token_inputs)
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import SamplerOutput
-from vllm.model_executor.models.gemma import GemmaForCausalLM
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.utils import cached_get_tokenizer
@@ -21,7 +19,8 @@ from vllm.sequence import IntermediateTensors
 from .interfaces import SupportsMultiModal, SupportsPP
 from .siglip import (SiglipVisionModel, dummy_image_for_siglip,
                      dummy_seq_data_for_siglip, get_max_siglip_image_tokens)
-from .utils import AutoWeightsLoader, merge_multimodal_embeddings
+from .utils import (AutoWeightsLoader, init_vllm_registered_model,
+                    maybe_prefix, merge_multimodal_embeddings)
 
 logger = init_logger(__name__)
 
@@ -58,7 +57,7 @@ def dummy_data_for_paligemma(ctx: InputContext, seq_len: int,
     vision_config = hf_config.vision_config
     num_images = mm_counts["image"]
 
-    seq_data = dummy_seq_data_for_siglip(
+    seq_data, ranges = dummy_seq_data_for_siglip(
         vision_config,
         seq_len,
         num_images,
@@ -66,7 +65,7 @@ def dummy_data_for_paligemma(ctx: InputContext, seq_len: int,
     )
 
     mm_data = dummy_image_for_siglip(vision_config, num_images)
-    return seq_data, mm_data
+    return DummyData(seq_data, mm_data, ranges)
 
 
 def input_processor_for_paligemma(ctx: InputContext,
@@ -132,28 +131,28 @@ class PaliGemmaMultiModalProjector(nn.Module):
 class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal,
                                         SupportsPP):
 
-    def __init__(self,
-                 config: PaliGemmaConfig,
-                 multimodal_config: MultiModalConfig,
-                 cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
+        multimodal_config = vllm_config.model_config.multimodal_config
         self.config = config
         self.multimodal_config = multimodal_config
 
         self.vision_tower = SiglipVisionModel(config.vision_config,
                                               quant_config,
-                                              prefix="vision_tower")
+                                              prefix=maybe_prefix(
+                                                  prefix, "vision_tower"))
         self.multi_modal_projector = PaliGemmaMultiModalProjector(
             vision_hidden_size=config.vision_config.hidden_size,
             projection_dim=config.vision_config.projection_dim)
 
         self.quant_config = quant_config
-        self.language_model = GemmaForCausalLM(config.text_config,
-                                               cache_config,
-                                               quant_config,
-                                               prefix="language_model")
+        config.text_config.architectures = ["GemmaForCausalLM"]
+        self.language_model = init_vllm_registered_model(
+            config.text_config,
+            vllm_config=vllm_config,
+            prefix=maybe_prefix(prefix, "language_model"))
         logit_scale = getattr(config, "logit_scale", 1.0)
         self.language_model.logits_processor.scale *= logit_scale
 
@@ -296,6 +295,7 @@ class PaliGemmaForConditionalGeneration(nn.Module, SupportsMultiModal,
     ) -> Optional[SamplerOutput]:
         return self.language_model.sample(logits, sampling_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         loader = AutoWeightsLoader(self)
-        loader.load_weights(weights)
+        return loader.load_weights(weights)

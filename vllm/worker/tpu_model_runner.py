@@ -12,8 +12,7 @@ import torch_xla.runtime as xr
 
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
-from vllm.config import (CacheConfig, DeviceConfig, LoadConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig)
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader import get_model
@@ -90,20 +89,10 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
 
     def __init__(
         self,
-        model_config: ModelConfig,
-        parallel_config: ParallelConfig,
-        scheduler_config: SchedulerConfig,
-        device_config: DeviceConfig,
-        cache_config: CacheConfig,
-        load_config: LoadConfig,
+        vllm_config: VllmConfig,
         is_driver_worker: bool = False,
     ):
-        self.model_config = model_config
-        self.parallel_config = parallel_config
-        self.scheduler_config = scheduler_config
-        self.device_config = device_config
-        self.cache_config = cache_config
-        self.load_config = load_config
+        ModelRunnerBase.__init__(self, vllm_config=vllm_config)
         self.is_driver_worker = is_driver_worker
 
         self.block_size = self.cache_config.block_size
@@ -148,18 +137,10 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                 "vllm.model_executor.layers.vocab_parallel_embedding."
                 "get_tensor_model_parallel_rank",
                 return_value=xm_tp_rank):
-            model = get_model(
-                model_config=self.model_config,
-                load_config=self.load_config,
-                device_config=self.device_config,
-                parallel_config=self.parallel_config,
-                cache_config=self.cache_config,
-                scheduler_config=self.scheduler_config,
-                lora_config=None,
-            )
+            model = get_model(vllm_config=self.vllm_config)
         model = model.eval()
         xm.wait_device_ops()
-        self.model = ModelWrapper(model)
+        self.model = ModelWrapper(model, self.vllm_config)
 
     def _dummy_run(
         self,
@@ -184,6 +165,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                 num_prefill_tokens=batch_size * seq_len,
                 num_decode_tokens=0,
                 slot_mapping=slot_mapping,
+                multi_modal_placeholder_index_maps=None,
                 block_tables=None,
                 context_lens=None,
             )
@@ -216,6 +198,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
                 num_prefill_tokens=0,
                 num_decode_tokens=batch_size * seq_len,
                 slot_mapping=slot_mapping,
+                multi_modal_placeholder_index_maps=None,
                 block_tables=block_tables,
                 context_lens=context_lens,
             )
@@ -360,6 +343,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             num_prefill_tokens=0,  # NOTE: This is not used.
             num_decode_tokens=0,
             slot_mapping=slot_mapping,
+            multi_modal_placeholder_index_maps=None,
             block_tables=None,
             context_lens=None,
         )
@@ -429,6 +413,7 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             num_prefill_tokens=0,
             num_decode_tokens=batch_size,
             slot_mapping=slot_mapping,
+            multi_modal_placeholder_index_maps=None,
             block_tables=block_tables,
             context_lens=context_lens,
         )
@@ -684,13 +669,15 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
 
 class ModelWrapper(TorchCompileWrapperWithCustomDispatcher):
 
-    def __init__(self, model: nn.Module):
+    def __init__(self, model: nn.Module, vllm_config: VllmConfig):
         self.model = model
         compiled_callable = torch.compile(self.forward,
                                           backend="openxla",
                                           fullgraph=True,
                                           dynamic=False)
-        super().__init__(compiled_callable)
+        super().__init__(
+            compiled_callable,
+            compilation_level=vllm_config.compilation_config.level)
 
     def __call__(self, *args, is_prompt: bool, **kwargs):
         if len(self.compiled_codes) < 3 or not self.use_custom_dispatcher:

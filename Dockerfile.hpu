@@ -1,0 +1,18 @@
+FROM vault.habana.ai/gaudi-docker/1.18.0/ubuntu22.04/habanalabs/pytorch-installer-2.4.0:latest
+
+COPY ./ /workspace/vllm
+
+WORKDIR /workspace/vllm
+
+RUN pip install -v -r requirements-hpu.txt
+
+ENV no_proxy=localhost,127.0.0.1
+ENV PT_HPU_ENABLE_LAZY_COLLECTIVES=true
+
+RUN VLLM_TARGET_DEVICE=hpu python3 setup.py install
+
+WORKDIR /workspace/
+
+RUN ln -s /workspace/vllm/tests && ln -s /workspace/vllm/examples && ln -s /workspace/vllm/benchmarks
+
+ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]

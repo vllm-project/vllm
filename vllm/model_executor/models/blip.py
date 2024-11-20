@@ -1,13 +1,14 @@
 """Minimal implementation of BlipVisionModel intended to be only used 
 within a vision language model."""
-from typing import Iterable, Optional, Tuple, Union
+from typing import Iterable, Optional, Set, Tuple, Union
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from PIL import Image
 from transformers import Blip2VisionConfig, BlipVisionConfig
-from transformers.models.blip.modeling_blip import BlipAttention
 
+from vllm.attention.selector import _Backend
 from vllm.config import ModelConfig
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.inputs import DecoderOnlyInputs, token_inputs
@@ -21,11 +22,7 @@ from vllm.multimodal.utils import (cached_get_tokenizer,
                                    repeat_and_pad_placeholder_tokens)
 from vllm.sequence import SequenceData
 
-try:
-    from xformers import ops as xops
-    USE_XFORMERS_OPS = True
-except ImportError:
-    USE_XFORMERS_OPS = False
+from .utils import get_vit_attn_backend
 
 
 def get_blip_patch_grid_length(*, image_size: int, patch_size: int) -> int:
@@ -98,6 +95,11 @@ def input_processor_for_blip(
     if multi_modal_data is None or "image" not in multi_modal_data:
         return inputs
 
+    if "multi_modal_placeholders" in inputs and "image" in inputs[
+            "multi_modal_placeholders"]:
+        # The inputs already have placeholders.
+        return inputs
+
     tokenizer = cached_get_tokenizer(model_config.tokenizer)
 
     if image_feature_size_override is None:
@@ -105,7 +107,7 @@ def input_processor_for_blip(
     else:
         image_feature_size = image_feature_size_override
 
-    new_prompt, new_token_ids = repeat_and_pad_placeholder_tokens(
+    new_prompt, new_token_ids, ranges = repeat_and_pad_placeholder_tokens(
         tokenizer,
         inputs.get("prompt"),
         inputs["prompt_token_ids"],
@@ -116,7 +118,8 @@ def input_processor_for_blip(
     # NOTE: Create a defensive copy of the original inputs
     return token_inputs(prompt_token_ids=new_token_ids,
                         prompt=new_prompt,
-                        multi_modal_data=multi_modal_data)
+                        multi_modal_data=multi_modal_data,
+                        multi_modal_placeholders={"image": ranges})
 
 
 # Adapted from https://github.com/huggingface/transformers/blob/v4.39.0/src/transformers/models/blip/modeling_blip.py#L164 # noqa
@@ -162,7 +165,7 @@ class BlipVisionEmbeddings(nn.Module):
         return embeddings
 
 
-class BlipParallelAttention(nn.Module):
+class BlipAttention(nn.Module):
     """Multi-headed attention from 'Attention Is All You Need' paper"""
 
     def __init__(
@@ -202,6 +205,12 @@ class BlipParallelAttention(nn.Module):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.num_heads_per_partition = divide(self.num_heads, self.tp_size)
 
+        # Detect attention implementation.
+        self.attn_backend = get_vit_attn_backend(support_fa=False)
+        if self.attn_backend not in {_Backend.TORCH_SDPA, _Backend.XFORMERS}:
+            raise RuntimeError(
+                f"BLIP does not support {self.attn_backend} backend now.")
+
     def _shape(self, tensor: torch.Tensor, seq_len: int, bsz: int):
         return tensor.view(bsz, seq_len, self.num_heads,
                            self.head_dim).transpose(1, 2).contiguous()
@@ -225,11 +234,26 @@ class BlipParallelAttention(nn.Module):
                                          self.num_heads_per_partition,
                                          self.head_dim)
 
-        out = xops.memory_efficient_attention_forward(query_states,
-                                                      key_states,
-                                                      value_states,
-                                                      p=self.dropout,
-                                                      scale=self.scale)
+        if self.attn_backend == _Backend.XFORMERS:
+            from xformers import ops as xops
+
+            out = xops.memory_efficient_attention_forward(query_states,
+                                                          key_states,
+                                                          value_states,
+                                                          p=self.dropout,
+                                                          scale=self.scale)
+        elif self.attn_backend == _Backend.TORCH_SDPA:
+            query_states, key_states, value_states = (x.transpose(1, 2)
+                                                      for x in (query_states,
+                                                                key_states,
+                                                                value_states))
+            out = F.scaled_dot_product_attention(query_states,
+                                                 key_states,
+                                                 value_states,
+                                                 dropout_p=self.dropout,
+                                                 scale=self.scale)
+            out = out.transpose(1, 2)
+
         out = out.view(bsz, tgt_len, -1)
         attn_output, _ = self.projection(out)
 
@@ -279,18 +303,11 @@ class BlipEncoderLayer(nn.Module):
         super().__init__()
 
         # fallback to sdpa attention if tp unavailable
-        num_heads = config.num_attention_heads
-        tp_size = get_tensor_model_parallel_world_size()
-        if USE_XFORMERS_OPS and num_heads % tp_size == 0:
-            self.self_attn = BlipParallelAttention(
-                config,
-                quant_config=quant_config,
-                prefix=f"{prefix}.self_attn",
-            )
-        else:
-            # Blip doesn't have SDPA attention implemented in transformers
-            # use eager attention instead for cpu backend
-            self.self_attn = BlipAttention(config)
+        self.self_attn = BlipAttention(
+            config,
+            quant_config=quant_config,
+            prefix=f"{prefix}.self_attn",
+        )
         self.layer_norm1 = nn.LayerNorm(config.hidden_size,
                                         eps=config.layer_norm_eps)
         self.mlp = BlipMLP(config,
@@ -368,11 +385,6 @@ class BlipVisionModel(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-
-        tp_size = get_tensor_model_parallel_world_size()
-        num_heads = config.num_attention_heads
-        self.shard_weight = USE_XFORMERS_OPS and num_heads % tp_size == 0
-
         self.config = config
 
         self.embeddings = BlipVisionEmbeddings(config)
@@ -409,14 +421,16 @@ class BlipVisionModel(nn.Module):
 
         return self.post_layernorm(hidden_states)
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
             ("qkv_proj", "k_proj", "k"),
             ("qkv_proj", "v_proj", "v"),
-        ] if self.shard_weight else []
+        ]
         params_dict = dict(self.named_parameters())
+        loaded_params: Set[str] = set()
         layer_count = len(self.encoder.layers)
 
         for name, loaded_weight in weights:
@@ -434,8 +448,8 @@ class BlipVisionModel(nn.Module):
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
                     continue
-
-                param = params_dict[name.replace(weight_name, param_name)]
+                name = name.replace(weight_name, param_name)
+                param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
                 break
@@ -444,3 +458,5 @@ class BlipVisionModel(nn.Module):
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params
