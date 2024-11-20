@@ -89,7 +89,6 @@ inline __device__ float block_sum(float* red_smem, float sum) {
 // Grid: (num_heads, num_seqs, max_num_partitions).
 template <typename scalar_t, typename cache_t, int HEAD_SIZE, int BLOCK_SIZE,
           int NUM_THREADS, vllm::Fp8KVCacheDataType KV_DTYPE,
-          bool IS_LAYER_LEVEL,
           bool IS_BLOCK_SPARSE,
           int PARTITION_SIZE = 0>  // Zero means no partitioning.
 __device__ void paged_attention_kernel(
@@ -290,25 +289,23 @@ __device__ void paged_attention_kernel(
           k_vecs[j] = *reinterpret_cast<const K_vec*>(
               k_ptr + offset1 * BLOCK_SIZE * x + offset2);
         // int8 kv-cache
-        } else if constexpr (KV_DTYPE == Fp8KVCacheDataType::kInt8) {
-          if constexpr (IS_LAYER_LEVEL){
-            Quant_vec k_vec_quant = *reinterpret_cast<const Quant_vec*>(
-                k_ptr + offset1 * BLOCK_SIZE * x + offset2);
-            k_vecs[j] = int8::scaled_vec_conversion_int8<K_vec, Quant_vec>(
-                k_vec_quant, k_scale, 0);
-          }else{
-            int64_t tgt_ks_idx = floor((kv_head_idx*HEAD_SIZE)/quant_group)
-                                + floor((physical_block_offset * x 
-                                + offset1 * BLOCK_SIZE * x 
-                                + offset2)/(quant_group*BLOCK_SIZE));
-            float k_scale_int8 = 
-                  *reinterpret_cast<const float*>(k_scaling_factor + tgt_ks_idx);
-            // Vector conversion from Quant_vec to K_vec.
-            Quant_vec k_vec_quant = *reinterpret_cast<const Quant_vec*>(
-                k_ptr + offset1 * BLOCK_SIZE * x + offset2);
-            k_vecs[j] = int8::scaled_vec_conversion_int8<K_vec, Quant_vec>(
-                k_vec_quant, k_scale_int8, 0);
-          }
+        } else if constexpr (KV_DTYPE == Fp8KVCacheDataType::kInt8Group0) {
+          Quant_vec k_vec_quant = *reinterpret_cast<const Quant_vec*>(
+              k_ptr + offset1 * BLOCK_SIZE * x + offset2);
+          k_vecs[j] = int8::scaled_vec_conversion_int8<K_vec, Quant_vec>(
+              k_vec_quant, k_scale, 0);
+        } else if constexpr (KV_DTYPE == Fp8KVCacheDataType::kInt8GroupN) {
+          int64_t tgt_ks_idx = floor((kv_head_idx*HEAD_SIZE)/quant_group)
+                              + floor((physical_block_offset * x 
+                              + offset1 * BLOCK_SIZE * x 
+                              + offset2)/(quant_group*BLOCK_SIZE));
+          float k_scale_int8 = 
+                *reinterpret_cast<const float*>(k_scaling_factor + tgt_ks_idx);
+          // Vector conversion from Quant_vec to K_vec.
+          Quant_vec k_vec_quant = *reinterpret_cast<const Quant_vec*>(
+              k_ptr + offset1 * BLOCK_SIZE * x + offset2);
+          k_vecs[j] = int8::scaled_vec_conversion_int8<K_vec, Quant_vec>(
+              k_vec_quant, k_scale_int8, 0);
         } else {
           // Vector conversion from Quant_vec to K_vec.
           Quant_vec k_vec_quant = *reinterpret_cast<const Quant_vec*>(
@@ -440,26 +437,24 @@ __device__ void paged_attention_kernel(
         if constexpr (KV_DTYPE == Fp8KVCacheDataType::kAuto) {
           v_vec = *reinterpret_cast<const V_vec*>(v_ptr + offset);
         // int8 kv-cache
-        } else if constexpr (KV_DTYPE == Fp8KVCacheDataType::kInt8) {
-          if constexpr (IS_LAYER_LEVEL){
-            V_quant_vec v_quant_vec =
-                *reinterpret_cast<const V_quant_vec*>(v_ptr + offset);
-            // Vector conversion from V_quant_vec to V_vec.
-            v_vec = int8::scaled_vec_conversion_int8<V_vec, V_quant_vec>(v_quant_vec,
-                                                                      v_scale, 
-                                                                      0);
-          }else{
-            const int64_t tgt_vs_idx = floor((kv_head_idx*HEAD_SIZE)/quant_group) 
-                                      + floor(offset/(quant_group*BLOCK_SIZE));
-            float v_scale_int8 = 
-                  *reinterpret_cast<const float*>(v_scaling_factor + tgt_vs_idx);
-            V_quant_vec v_quant_vec =
-                *reinterpret_cast<const V_quant_vec*>(v_ptr + offset);
-            // Vector conversion from V_quant_vec to V_vec.
-            v_vec = int8::scaled_vec_conversion_int8<V_vec, V_quant_vec>(v_quant_vec,
-                                                                      v_scale_int8, 
-                                                                      0);
-          }
+        } else if constexpr (KV_DTYPE == Fp8KVCacheDataType::kInt8Group0) {
+          V_quant_vec v_quant_vec =
+              *reinterpret_cast<const V_quant_vec*>(v_ptr + offset);
+          // Vector conversion from V_quant_vec to V_vec.
+          v_vec = int8::scaled_vec_conversion_int8<V_vec, V_quant_vec>(v_quant_vec,
+                                                                    v_scale, 
+                                                                    0);
+        } else if constexpr (KV_DTYPE == Fp8KVCacheDataType::kInt8GroupN) {
+          const int64_t tgt_vs_idx = floor((kv_head_idx*HEAD_SIZE)/quant_group) 
+                                    + floor(offset/(quant_group*BLOCK_SIZE));
+          float v_scale_int8 = 
+                *reinterpret_cast<const float*>(v_scaling_factor + tgt_vs_idx);
+          V_quant_vec v_quant_vec =
+              *reinterpret_cast<const V_quant_vec*>(v_ptr + offset);
+          // Vector conversion from V_quant_vec to V_vec.
+          v_vec = int8::scaled_vec_conversion_int8<V_vec, V_quant_vec>(v_quant_vec,
+                                                                    v_scale_int8, 
+                                                                    0);
         } else {
           V_quant_vec v_quant_vec =
               *reinterpret_cast<const V_quant_vec*>(v_ptr + offset);
@@ -548,7 +543,6 @@ __device__ void paged_attention_kernel(
 // Grid: (num_heads, num_seqs, 1).
 template <typename scalar_t, typename cache_t, int HEAD_SIZE, int BLOCK_SIZE,
           int NUM_THREADS, vllm::Fp8KVCacheDataType KV_DTYPE,
-          bool IS_LAYER_LEVEL,
           bool IS_BLOCK_SPARSE>
 __global__ void paged_attention_v1_kernel(
     scalar_t* __restrict__ out,           // [num_seqs, num_heads, head_size]
@@ -572,7 +566,7 @@ __global__ void paged_attention_v1_kernel(
     const int blocksparse_local_blocks, const int blocksparse_vert_stride,
     const int blocksparse_block_size, const int blocksparse_head_sliding_step) {
   paged_attention_kernel<scalar_t, cache_t, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS,
-                         KV_DTYPE, IS_LAYER_LEVEL, IS_BLOCK_SPARSE>(
+                         KV_DTYPE, IS_BLOCK_SPARSE>(
       /* exp_sums */ nullptr, /* max_logits */ nullptr, out, q, k_cache,
       v_cache, num_kv_heads, scale, block_tables, seq_lens,
       max_num_blocks_per_seq, alibi_slopes, q_stride, kv_block_stride,
@@ -586,7 +580,6 @@ __global__ void paged_attention_v1_kernel(
 // Grid: (num_heads, num_seqs, max_num_partitions).
 template <typename scalar_t, typename cache_t, int HEAD_SIZE, int BLOCK_SIZE,
           int NUM_THREADS, vllm::Fp8KVCacheDataType KV_DTYPE,
-          bool IS_LAYER_LEVEL,
           bool IS_BLOCK_SPARSE,
           int PARTITION_SIZE>
 __global__ void paged_attention_v2_kernel(
@@ -615,7 +608,7 @@ __global__ void paged_attention_v2_kernel(
     const int blocksparse_local_blocks, const int blocksparse_vert_stride,
     const int blocksparse_block_size, const int blocksparse_head_sliding_step) {
   paged_attention_kernel<scalar_t, cache_t, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS,
-                         KV_DTYPE, IS_LAYER_LEVEL, IS_BLOCK_SPARSE, PARTITION_SIZE>(
+                         KV_DTYPE, IS_BLOCK_SPARSE, PARTITION_SIZE>(
       exp_sums, max_logits, tmp_out, q, k_cache, v_cache, num_kv_heads, scale,
       block_tables, seq_lens, max_num_blocks_per_seq, alibi_slopes, q_stride,
       kv_block_stride, kv_head_stride, k_scale, v_scale, 
