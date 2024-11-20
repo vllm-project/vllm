@@ -59,7 +59,7 @@ function cpu_tests() {
     tests/quantization/test_ipex_quant.py"
 
   # Run chunked-prefill and prefix-cache test
-  docker exec cpu-test bash -c "
+  docker exec cpu-test-"$NUMA_NODE" bash -c "
     set -e
     pytest -s -v -k cpu_model \
     tests/basic_correctness/test_chunked_prefill.py"  
