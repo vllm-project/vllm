@@ -11,7 +11,7 @@ import torch
 from typing_extensions import ParamSpec
 
 # import custom ops, trigger op registration
-import vllm._custom_ops  # noqa
+import vllm._C  # noqa
 from vllm.logger import init_logger
 
 from .interface import DeviceCapability, Platform, PlatformEnum
