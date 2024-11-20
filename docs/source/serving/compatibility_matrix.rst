@@ -344,7 +344,7 @@ Feature x Hardware
      - ✅
      - ✅
      - ✅
-     - ✗ 
+     - ✅
      - ✅
    * - :ref:`APC <apc>`
      - `✗ <https://github.com/vllm-project/vllm/issues/3687>`__ 
@@ -352,7 +352,7 @@ Feature x Hardware
      - ✅
      - ✅
      - ✅
-     - ✗
+     - ✅
      - ✅
    * - :ref:`LoRA <lora>`
      - ✅
