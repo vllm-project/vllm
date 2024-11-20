@@ -575,8 +575,7 @@ class ChatGLMModel(nn.Module):
         return hidden_states
 
 
-class ChatGLMBaseModel(nn.Module, SupportsLoRA, SupportsPP,
-                       SupportsMultiModal):
+class ChatGLMBaseModel(nn.Module, SupportsLoRA, SupportsPP):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -695,7 +694,7 @@ class ChatGLM(ChatGLMBaseModel):
     embedding_padding_modules = []
 
 
-class ChatGLMV(ChatGLMBaseModel):
+class ChatGLMV(ChatGLMBaseModel, SupportsMultiModal):
     packed_modules_mapping = {
         "query_key_value": ["query_key_value"],
         "dense_h_to_4h": ["dense_h_to_4h"],

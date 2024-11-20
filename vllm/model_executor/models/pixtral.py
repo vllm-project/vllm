@@ -17,6 +17,7 @@ from transformers.models.pixtral.modeling_pixtral import (
 
 from vllm.attention import AttentionMetadata
 from vllm.config import ModelConfig, VllmConfig
+from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
                          InputContext, token_inputs)
 from vllm.model_executor.layers.activation import get_act_and_mul_fn
@@ -330,6 +331,7 @@ class VisionEncoderArgs:
     num_attention_heads: int
     rope_theta: float  # for rope-2D
     image_token_id: int
+    adapter_bias: bool = True
 
 
 def _reshape_for_broadcast(freqs_cis: torch.Tensor,
@@ -594,10 +596,10 @@ class VisionLanguageAdapter(nn.Module):
         self.w_in = nn.Linear(
             args.hidden_size,
             dim,
-            bias=True,
+            bias=args.adapter_bias,
         )
         self.gelu = nn.GELU()
-        self.w_out = nn.Linear(dim, dim, bias=True)
+        self.w_out = nn.Linear(dim, dim, bias=args.adapter_bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.w_out(self.gelu(self.w_in(x)))
@@ -843,17 +845,20 @@ class PixtralHFAttention(nn.Module):
 
         self.config = config
         assert not config.hidden_size % config.num_attention_heads
-        self.n_heads = config.num_attention_heads
+        self.total_num_heads = config.num_attention_heads
+        tp_size = get_tensor_model_parallel_world_size()
+        self.n_heads = divide(config.num_attention_heads, tp_size)
         self.head_dim = config.hidden_size // config.num_attention_heads
 
         self.qkv_proj = QKVParallelLinear(
             hidden_size=config.hidden_size,
             head_size=self.head_dim,
-            total_num_heads=self.n_heads,
+            total_num_heads=self.total_num_heads,
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj",
         )
+        assert self.total_num_heads * self.head_dim == config.hidden_size
         self.o_proj = RowParallelLinear(
             input_size=config.hidden_size,
             output_size=config.hidden_size,
