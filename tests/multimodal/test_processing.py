@@ -26,6 +26,11 @@ from vllm.multimodal.processing import apply_placeholders, iter_token_runs
 # yapf: enable
 def test_iter_token_runs(token_ids, expected):
     result = list(iter_token_runs(token_ids))
+
+    # Invariants
+    assert sum(run_info["length"] for _, run_info in result) == len(token_ids)
+
+    # Manually constructed results
     assert result == expected
 
 
@@ -109,6 +114,8 @@ def test_apply_placeholders(
     expected_new_token_ids,
     expected_range,
 ):
+    orig_token_ids = token_ids[:]
+
     placeholder_range = apply_placeholders(
         token_ids,
         match_ids,
@@ -116,5 +123,19 @@ def test_apply_placeholders(
         replacement_count,
     )
 
+    # Invariants
+    if placeholder_range is None:
+        assert orig_token_ids == token_ids
+    else:
+        offset = placeholder_range["offset"]
+        match_len = len(match_ids)
+        repl_len = placeholder_range["length"]
+
+        assert orig_token_ids[offset:offset + match_len] == match_ids
+
+        repl_ids = [replacement_id] * replacement_count
+        assert token_ids[offset:offset + repl_len] == repl_ids
+
+    # Manually constructed results
     assert token_ids == expected_new_token_ids
     assert placeholder_range == expected_range
