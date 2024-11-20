@@ -3,6 +3,7 @@ import pytest
 from vllm.multimodal.processing import apply_placeholders, iter_token_runs
 
 
+# yapf: disable
 @pytest.mark.parametrize(
     ("token_ids", "expected"),
     [
@@ -20,18 +21,20 @@ from vllm.multimodal.processing import apply_placeholders, iter_token_runs
                 (918, { "offset": 9, "length": 1 }),
             ],
         ),
-    ],  # yapf: disable
+    ],
 )
+# yapf: enable
 def test_iter_token_runs(token_ids, expected):
     result = list(iter_token_runs(token_ids))
     assert result == expected
 
 
+# yapf: disable
 @pytest.mark.parametrize(
     (
         "token_ids", "match_ids", "replacement_id", "replacement_count",
         "expected_new_token_ids", "expected_range",
-    ),  # yapf: disable
+    ),
     [
         # Empty
         (
@@ -95,8 +98,9 @@ def test_iter_token_runs(token_ids, expected):
             [32000, 32000, 32000], [32000], +1, 2,
             [+1, +1, 32000, 32000],  { "offset": 0, "length": 2 },
         ),
-    ],  # yapf: disable
+    ],
 )
+# yapf: enable
 def test_apply_placeholders(
     token_ids,
     match_ids,
