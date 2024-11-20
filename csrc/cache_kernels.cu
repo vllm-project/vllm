@@ -150,7 +150,7 @@ void copy_blocks(std::vector<torch::Tensor> const& key_caches,
 
 namespace vllm {
 
-template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt, bool IS_LAYER_LEVEL>
+template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
 __global__ void reshape_and_cache_kernel(
     const scalar_t* __restrict__ key,    // [num_tokens, num_heads, head_size]
     const scalar_t* __restrict__ value,  // [num_tokens, num_heads, head_size]
@@ -199,32 +199,30 @@ __global__ void reshape_and_cache_kernel(
       key_cache[tgt_key_idx] = tgt_key;
       value_cache[tgt_value_idx] = tgt_value;
     // int8 kv-cache
-    } else if constexpr (kv_dt == Fp8KVCacheDataType::kInt8) {
-      if (IS_LAYER_LEVEL){
-        key_cache[tgt_key_idx] =
-            int8::scaled_vec_conversion_int8<cache_t, scalar_t>(tgt_key, 
-                                                                k_scale,
-                                                                0);
-        value_cache[tgt_value_idx] =
-            int8::scaled_vec_conversion_int8<cache_t, scalar_t>(tgt_value, 
-                                                                v_scale, 
-                                                                0);
-      }else{
-        const int64_t tgt_ks_idx = floor(i/quant_group);
-        const int64_t tgt_vs_idx = floor(i/quant_group);
-        float k_scale_int8 = 
-                  *reinterpret_cast<const float*>(k_scaling_factor + tgt_ks_idx);
-        float v_scale_int8 = 
-                  *reinterpret_cast<const float*>(v_scaling_factor + tgt_vs_idx);
-        key_cache[tgt_key_idx] =
-            int8::scaled_vec_conversion_int8<cache_t, scalar_t>(tgt_key, 
-                                                                k_scale_int8,
-                                                                0);
-        value_cache[tgt_value_idx] =
-            int8::scaled_vec_conversion_int8<cache_t, scalar_t>(tgt_value, 
-                                                                v_scale_int8, 
-                                                                0);
-      }
+    } else if constexpr (kv_dt == Fp8KVCacheDataType::kInt8Group0) {
+      key_cache[tgt_key_idx] =
+          int8::scaled_vec_conversion_int8<cache_t, scalar_t>(tgt_key, 
+                                                              k_scale,
+                                                              0);
+      value_cache[tgt_value_idx] =
+          int8::scaled_vec_conversion_int8<cache_t, scalar_t>(tgt_value, 
+                                                              v_scale, 
+                                                              0);
+    } else if constexpr (kv_dt == Fp8KVCacheDataType::kInt8GroupN) {
+      const int64_t tgt_ks_idx = floor(i/quant_group);
+      const int64_t tgt_vs_idx = floor(i/quant_group);
+      float k_scale_int8 = 
+                *reinterpret_cast<const float*>(k_scaling_factor + tgt_ks_idx);
+      float v_scale_int8 = 
+                *reinterpret_cast<const float*>(v_scaling_factor + tgt_vs_idx);
+      key_cache[tgt_key_idx] =
+          int8::scaled_vec_conversion_int8<cache_t, scalar_t>(tgt_key, 
+                                                              k_scale_int8,
+                                                              0);
+      value_cache[tgt_value_idx] =
+          int8::scaled_vec_conversion_int8<cache_t, scalar_t>(tgt_value, 
+                                                              v_scale_int8, 
+                                                              0);
     } else {
       key_cache[tgt_key_idx] =
           fp8::scaled_convert<cache_t, scalar_t, kv_dt>(tgt_key, k_scale);
@@ -234,7 +232,7 @@ __global__ void reshape_and_cache_kernel(
   }
 }
 
-template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt, bool IS_LAYER_LEVEL>
+template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
 __global__ void reshape_and_cache_flash_kernel(
     const scalar_t* __restrict__ key,    // [num_tokens, num_heads, head_size]
     const scalar_t* __restrict__ value,  // [num_tokens, num_heads, head_size]
@@ -272,32 +270,30 @@ __global__ void reshape_and_cache_flash_kernel(
       key_cache[tgt_key_value_idx] = tgt_key;
       value_cache[tgt_key_value_idx] = tgt_value;
     // int8 kv-cache
-    } else if constexpr (kv_dt == Fp8KVCacheDataType::kInt8) {
-      if(IS_LAYER_LEVEL){
-        key_cache[tgt_key_value_idx] =
-            int8::scaled_vec_conversion_int8<cache_t, scalar_t>(tgt_key, 
-                                                                k_scale, 
-                                                                0);
-        value_cache[tgt_key_value_idx] =
-            int8::scaled_vec_conversion_int8<cache_t, scalar_t>(tgt_value, 
-                                                                v_scale, 
-                                                                0);
-      }else{
-        const int64_t tgt_ks_idx = floor(i/quant_group);
-        const int64_t tgt_vs_idx = floor(i/quant_group);
-        float k_scale_int8 = 
-                  *reinterpret_cast<const float*>(k_scaling_factor + tgt_ks_idx);
-        float v_scale_int8 = 
-                  *reinterpret_cast<const float*>(v_scaling_factor + tgt_vs_idx);
-        key_cache[tgt_key_value_idx] =
-            int8::scaled_vec_conversion_int8<cache_t, scalar_t>(tgt_key, 
-                                                                k_scale_int8, 
-                                                                0);
-        value_cache[tgt_key_value_idx] =
-            int8::scaled_vec_conversion_int8<cache_t, scalar_t>(tgt_value, 
-                                                                v_scale_int8, 
-                                                                0);
-      }
+    } else if constexpr (kv_dt == Fp8KVCacheDataType::kInt8Group0) {
+      key_cache[tgt_key_value_idx] =
+          int8::scaled_vec_conversion_int8<cache_t, scalar_t>(tgt_key, 
+                                                              k_scale, 
+                                                              0);
+      value_cache[tgt_key_value_idx] =
+          int8::scaled_vec_conversion_int8<cache_t, scalar_t>(tgt_value, 
+                                                              v_scale, 
+                                                              0);
+    } else if constexpr (kv_dt == Fp8KVCacheDataType::kInt8GroupN) {
+      const int64_t tgt_ks_idx = floor(i/quant_group);
+      const int64_t tgt_vs_idx = floor(i/quant_group);
+      float k_scale_int8 = 
+                *reinterpret_cast<const float*>(k_scaling_factor + tgt_ks_idx);
+      float v_scale_int8 = 
+                *reinterpret_cast<const float*>(v_scaling_factor + tgt_vs_idx);
+      key_cache[tgt_key_value_idx] =
+          int8::scaled_vec_conversion_int8<cache_t, scalar_t>(tgt_key, 
+                                                              k_scale_int8, 
+                                                              0);
+      value_cache[tgt_key_value_idx] =
+          int8::scaled_vec_conversion_int8<cache_t, scalar_t>(tgt_value, 
+                                                              v_scale_int8, 
+                                                              0);
     } else {
       key_cache[tgt_key_value_idx] =
           fp8::scaled_convert<cache_t, scalar_t, kv_dt>(tgt_key, k_scale);
@@ -312,34 +308,17 @@ __global__ void reshape_and_cache_flash_kernel(
 // CACHE_T is the data type of key and value tensors.
 // KV_DTYPE is the real data type of kv-cache.
 #define CALL_RESHAPE_AND_CACHE(KV_T, CACHE_T, KV_DTYPE)               \
-  switch (is_layer_level) {                                                 \
-      case true:                                                            \
-        vllm::reshape_and_cache_kernel<KV_T, CACHE_T, KV_DTYPE, true>       \
-            <<<grid, block, 0, stream>>>(                                   \
-                reinterpret_cast<KV_T*>(key.data_ptr()),                    \
-                reinterpret_cast<KV_T*>(value.data_ptr()),                  \
-                reinterpret_cast<CACHE_T*>(key_cache.data_ptr()),           \
-                reinterpret_cast<CACHE_T*>(value_cache.data_ptr()),         \
-                slot_mapping.data_ptr<int64_t>(), key_stride, value_stride, \
-                num_heads, head_size, block_size, x, k_scale, v_scale,      \
-                quant_group,                                                \
-                k_scaling_factor.data_ptr<float>(),                         \
-                v_scaling_factor.data_ptr<float>());                        \
-        break;                                                              \
-      case false:                                                           \
-        vllm::reshape_and_cache_kernel<KV_T, CACHE_T, KV_DTYPE, false>      \
-            <<<grid, block, 0, stream>>>(                                   \
-                reinterpret_cast<KV_T*>(key.data_ptr()),                    \
-                reinterpret_cast<KV_T*>(value.data_ptr()),                  \
-                reinterpret_cast<CACHE_T*>(key_cache.data_ptr()),           \
-                reinterpret_cast<CACHE_T*>(value_cache.data_ptr()),         \
-                slot_mapping.data_ptr<int64_t>(), key_stride, value_stride, \
-                num_heads, head_size, block_size, x, k_scale, v_scale,      \
-                quant_group,                                                \
-                k_scaling_factor.data_ptr<float>(),                         \
-                v_scaling_factor.data_ptr<float>());                        \
-        break;                                                              \
-    }
+  vllm::reshape_and_cache_kernel<KV_T, CACHE_T, KV_DTYPE>             \
+      <<<grid, block, 0, stream>>>(                                   \
+          reinterpret_cast<KV_T*>(key.data_ptr()),                    \
+          reinterpret_cast<KV_T*>(value.data_ptr()),                  \
+          reinterpret_cast<CACHE_T*>(key_cache.data_ptr()),           \
+          reinterpret_cast<CACHE_T*>(value_cache.data_ptr()),         \
+          slot_mapping.data_ptr<int64_t>(), key_stride, value_stride, \
+          num_heads, head_size, block_size, x, k_scale, v_scale,      \
+          quant_group,                                                \
+          k_scaling_factor.data_ptr<float>(),                         \
+          v_scaling_factor.data_ptr<float>());                        \
 
 void reshape_and_cache(
     torch::Tensor& key,    // [num_tokens, num_heads, head_size]
@@ -367,7 +346,6 @@ void reshape_and_cache(
   dim3 block(std::min(num_heads * head_size, 512));
   const at::cuda::OptionalCUDAGuard device_guard(device_of(key));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  const bool is_layer_level = (quant_group==0);
 
   DISPATCH_BY_KV_CACHE_DTYPE(key.dtype(), kv_cache_dtype,
                              CALL_RESHAPE_AND_CACHE)
@@ -377,36 +355,19 @@ void reshape_and_cache(
 // CACHE_T is the data type of key and value tensors.
 // KV_DTYPE is the real data type of kv-cache.
 #define CALL_RESHAPE_AND_CACHE_FLASH(KV_T, CACHE_T, KV_DTYPE)         \
-  switch (is_layer_level) {                                                 \
-      case true:                                                            \
-        vllm::reshape_and_cache_flash_kernel<KV_T, CACHE_T, KV_DTYPE, true> \
-            <<<grid, block, 0, stream>>>(                                   \
-                reinterpret_cast<KV_T*>(key.data_ptr()),                    \
-                reinterpret_cast<KV_T*>(value.data_ptr()),                  \
-                reinterpret_cast<CACHE_T*>(key_cache.data_ptr()),           \
-                reinterpret_cast<CACHE_T*>(value_cache.data_ptr()),         \
-                slot_mapping.data_ptr<int64_t>(), block_stride, key_stride, \
-                value_stride, num_heads, head_size, block_size,             \
-                k_scale, v_scale,                                           \
-                quant_group,                                                \
-                k_scaling_factor.data_ptr<float>(),                         \
-                v_scaling_factor.data_ptr<float>());                        \
-        break;                                                              \
-      case false:                                                           \
-        vllm::reshape_and_cache_flash_kernel<KV_T, CACHE_T, KV_DTYPE, false>\
-            <<<grid, block, 0, stream>>>(                                   \
-                reinterpret_cast<KV_T*>(key.data_ptr()),                    \
-                reinterpret_cast<KV_T*>(value.data_ptr()),                  \
-                reinterpret_cast<CACHE_T*>(key_cache.data_ptr()),           \
-                reinterpret_cast<CACHE_T*>(value_cache.data_ptr()),         \
-                slot_mapping.data_ptr<int64_t>(), block_stride, key_stride, \
-                value_stride, num_heads, head_size, block_size,             \
-                k_scale, v_scale,                                           \
-                quant_group,                                                \
-                k_scaling_factor.data_ptr<float>(),                         \
-                v_scaling_factor.data_ptr<float>());                        \
-        break;                                                              \
-    }
+  vllm::reshape_and_cache_flash_kernel<KV_T, CACHE_T, KV_DTYPE>       \
+      <<<grid, block, 0, stream>>>(                                   \
+          reinterpret_cast<KV_T*>(key.data_ptr()),                    \
+          reinterpret_cast<KV_T*>(value.data_ptr()),                  \
+          reinterpret_cast<CACHE_T*>(key_cache.data_ptr()),           \
+          reinterpret_cast<CACHE_T*>(value_cache.data_ptr()),         \
+          slot_mapping.data_ptr<int64_t>(), block_stride, key_stride, \
+          value_stride, num_heads, head_size, block_size,             \
+          k_scale, v_scale,                                           \
+          quant_group,                                                \
+          k_scaling_factor.data_ptr<float>(),                         \
+          v_scaling_factor.data_ptr<float>());
+
 void reshape_and_cache_flash(
     torch::Tensor& key,        // [num_tokens, num_heads, head_size]
     torch::Tensor& value,      // [num_tokens, num_heads, head_size]
@@ -433,7 +394,6 @@ void reshape_and_cache_flash(
   dim3 block(std::min(num_heads * head_size, 512));
   const at::cuda::OptionalCUDAGuard device_guard(device_of(key));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  const bool is_layer_level = (quant_group==0);
 
   DISPATCH_BY_KV_CACHE_DTYPE(key.dtype(), kv_cache_dtype,
                              CALL_RESHAPE_AND_CACHE_FLASH);
