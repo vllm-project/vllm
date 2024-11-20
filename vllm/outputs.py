@@ -4,8 +4,8 @@ from typing import Dict, List, Optional
 from typing import Sequence as GenericSequence
 from typing import Union
 
-from vllm.lora.request import LoRARequest
 from vllm.engine.metrics_types import Stats
+from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalPlaceholderDict
 from vllm.sampling_params import RequestOutputKind
 from vllm.sequence import (PromptLogprobs, RequestMetrics, SampleLogprobs,
