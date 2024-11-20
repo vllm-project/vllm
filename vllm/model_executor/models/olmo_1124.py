@@ -220,7 +220,7 @@ class Olmo1124DecoderLayer(nn.Module):
         assert isinstance(config, Olmo1124Config)
         # Attention block.
         self.self_attn = Olmo1124Attention(vllm_config=vllm_config,
-                                       prefix=f"{prefix}.self_attn")
+                                           prefix=f"{prefix}.self_attn")
 
         # MLP block.
         self.mlp = Olmo1124MLP(vllm_config=vllm_config, prefix=f"{prefix}.mlp")
@@ -269,7 +269,7 @@ class Olmo1124Model(nn.Module):
         self.start_layer, self.end_layer, self.layers = make_layers(
             self.config.num_hidden_layers,
             lambda prefix: Olmo1124DecoderLayer(vllm_config=vllm_config,
-                                            prefix=prefix),
+                                                prefix=prefix),
             prefix=f"{prefix}.layers",
         )
         self.norm = RMSNorm(
@@ -333,7 +333,7 @@ class Olmo1124ForCausalLM(nn.Module, SupportsPP):
         assert isinstance(config, Olmo1124Config)
         self.config = config
         self.model = Olmo1124Model(vllm_config=vllm_config,
-                               prefix=maybe_prefix(prefix, "model"))
+                                   prefix=maybe_prefix(prefix, "model"))
         if config.tie_word_embeddings:
             self.lm_head = self.model.embed_tokens
         else:
