@@ -1,5 +1,5 @@
 # Adapted from
-# https://github.com/huggingface/transformers/blob/v4.40.1/src/transformers/models/olmo/modeling_olmo.py
+# https://github.com/huggingface/transformers/blob/main/src/transformers/models/olmo_1124/modeling_olmo_1124.py
 # Copyright 2024 The vLLM team.
 # Copyright 2024 EleutherAI and the HuggingFace Inc. team. All rights reserved.
 #
@@ -19,7 +19,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Inference-only OLMo2 model compatible with HuggingFace weights."""
+"""Inference-only OLMo November model compatible with HuggingFace weights."""
 
 from functools import partial
 from typing import Iterable, List, Optional, Tuple, Union
