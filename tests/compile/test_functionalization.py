@@ -6,8 +6,8 @@ from vllm import LLM, SamplingParams
 from vllm.compilation.fix_functionalization import FixFunctionalizationPass
 from vllm.compilation.fusion import (FusionPass, find_auto_fn,
                                      find_auto_fn_maybe)
-from vllm.compilation.inductor_pass import is_func
 from vllm.compilation.reshapes import RedundantReshapesPass
+from vllm.compilation.vllm_inductor_pass import is_func
 from vllm.config import CompilationConfig
 
 from .backend import TestBackend

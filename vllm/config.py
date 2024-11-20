@@ -1,5 +1,6 @@
 import copy
 import enum
+import hashlib
 import json
 import warnings
 from dataclasses import dataclass, field, replace
@@ -13,6 +14,7 @@ from pydantic import BaseModel, Field, PrivateAttr
 from transformers import PretrainedConfig
 
 import vllm.envs as envs
+from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.model_executor.models import ModelRegistry
@@ -2186,6 +2188,18 @@ class CompilationConfig(BaseModel):
         enable_fusion: bool = True
         enable_reshape: bool = True
 
+        def uuid(self):
+            """
+            Produces a hash unique to the pass configuration.
+            Any new fields that affect compilation should be added to the hash.
+            Do not include dump_graph_* in the hash - they don't affect
+            compilation.
+            """
+            dict_ = self.model_dump(
+                include={"enable_fusion", "enable_reshape"})
+            encoded = json.dumps(dict_, sort_keys=True).encode("utf-8")
+            return hashlib.sha256(encoded).digest()
+
         def model_post_init(self, __context: Any) -> None:
             if not self.enable_reshape and self.enable_fusion:
                 print_warning_once(
@@ -2218,8 +2232,9 @@ class CompilationConfig(BaseModel):
         for k, v in self.inductor_passes.items():
             if not isinstance(v, str):
                 assert callable(v), (
-                    f"pass {k} should be a function or a qualified name")
-                self.inductor_compile_config[k] = v
+                    f"pass {k} should be callable or a qualified name")
+                self.inductor_compile_config[k] = v if isinstance(
+                    v, InductorPass) else CallableInductorPass(v)
                 continue
 
             # resolve function from qualified name
@@ -2227,7 +2242,8 @@ class CompilationConfig(BaseModel):
             module = ".".join(names[:-1])
             func_name = names[-1]
             func = __import__(module).__dict__[func_name]
-            self.inductor_compile_config[k] = func
+            self.inductor_compile_config[k] = func if isinstance(
+                func, InductorPass) else CallableInductorPass(func)
 
         self.enabled_custom_ops = Counter()
         self.disabled_custom_ops = Counter()

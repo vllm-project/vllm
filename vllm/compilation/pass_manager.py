@@ -1,14 +1,13 @@
 from typing import List
 
 from torch import fx as fx
-from torch._inductor.codecache import BypassFxGraphCache
 
 from vllm.config import CompilationConfig
 from vllm.logger import init_logger
 
 from .fix_functionalization import FixFunctionalizationPass
 from .fusion import FusionPass
-from .inductor_pass import InductorPass, InductorPassType
+from .inductor_pass import InductorPass
 from .reshapes import RedundantReshapesPass
 
 logger = init_logger(__name__)
@@ -31,7 +30,7 @@ class PostGradPassManager:
     """
 
     def __init__(self):
-        self.passes: List[InductorPassType] = []
+        self.passes: List[InductorPass] = []
 
     def __call__(self, graph: fx.Graph):
         for pass_ in self.passes:
@@ -50,7 +49,8 @@ class PostGradPassManager:
 
         self.fix_functionalization = FixFunctionalizationPass(pass_config)
 
-    def add(self, pass_: InductorPassType):
+    def add(self, pass_: InductorPass):
+        assert isinstance(pass_, InductorPass)
         self.passes.append(pass_)
 
     def __getstate__(self):
@@ -58,26 +58,15 @@ class PostGradPassManager:
         Custom pickling for the pass manager, as some passes cannot be pickled.
         Pickling occurs because the pass manager is set as the value of
         `config["post_grad_custom_post_pass"]` in the Inductor config.
+        The config is pickled to act as a key in the Inductor code cache.
+        Any other passes in the config are pickled as well.
 
         TODO(torch==2.6), use the `uuid` method in CustomGraphPass instead.
         """
-        state = {"pass_config": self.pass_config}
-        passes_state = []
+        state = {"pass_config": self.pass_config.uuid(), "passes": []}
         for pass_ in self.passes:
-            if isinstance(pass_, InductorPass):
-                passes_state.append(pass_.uuid())
-            else:
-                # Custom passes must inherit from InductorPass to avoid false
-                # cache hits and stale results. Always recompile if there are
-                # custom passes that don't inherit from InductorPass.
-                logger.warning("Custom pass does not inherit from "
-                               "InductorPass. Bypassing Inductor code cache.")
-
-                # This exception will cause the compilation to bypass the
-                # Inductor code cache and force a recompilation.
-                raise BypassFxGraphCache(
-                    "Custom pass should inherit InductorPass")
-        passes_state.append(self.fix_functionalization.uuid())
+            state["passes"].append(pass_.uuid())
+        state["passes"].append(self.fix_functionalization.uuid())
         return state
 
     def __setstate__(self, state):

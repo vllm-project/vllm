@@ -1,12 +1,12 @@
 import operator
-from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
+from typing import Dict, Iterable, List, Optional, Tuple, Union
 
 import torch
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
 
 from vllm.logger import init_logger
 
-from .inductor_pass import VllmInductorPass, is_func
+from .vllm_inductor_pass import VllmInductorPass, is_func
 
 logger = init_logger(__name__)
 
@@ -19,9 +19,6 @@ class FixFunctionalizationPass(VllmInductorPass):
 
     To add new nodes to defunctionalize, add to the if-elif chain in __call__.
     """
-
-    def uuid(self) -> Any:
-        return self.get_hash_for_files((__file__, ))
 
     def __call__(self, graph: torch.fx.Graph):
         self.begin()

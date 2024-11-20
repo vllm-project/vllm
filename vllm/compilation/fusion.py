@@ -6,9 +6,10 @@ from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor.pattern_matcher import (Match, PatternMatcherPass,
                                              fwd_only, register_replacement)
 
-from vllm.compilation.inductor_pass import VllmInductorPass, is_func
 from vllm.config import CompilationConfig
 from vllm.logger import init_logger
+
+from .vllm_inductor_pass import VllmInductorPass, is_func
 
 logger = init_logger(__name__)
 
@@ -151,9 +152,6 @@ class FusionPass(VllmInductorPass):
         else:
             cls._instance.config = config
         return cls._instance
-
-    def uuid(self) -> Any:
-        return self.get_hash_for_files((__file__, ))
 
     def __init__(self, config: CompilationConfig.PassConfig):
         assert self.__class__._instance is None, \

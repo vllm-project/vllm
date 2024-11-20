@@ -1,8 +1,9 @@
 from copy import deepcopy
+from typing import Callable, Union
 
 from torch import fx
 
-from vllm.compilation.inductor_pass import InductorPassType
+from vllm.compilation.inductor_pass import InductorPass
 
 
 class TestBackend:
@@ -12,7 +13,8 @@ class TestBackend:
     It also saves the graph before and after the custom passes for inspection.
     """
 
-    def __init__(self, *passes: InductorPassType):
+    def __init__(self, *passes: Union[InductorPass, Callable[[fx.Graph],
+                                                             None]]):
         self.custom_passes = list(passes)
         from torch._inductor import config
         self.current_config = config.shallow_copy_dict()
