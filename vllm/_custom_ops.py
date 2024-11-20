@@ -551,7 +551,7 @@ def cutlass_scaled_sparse_mm(a: torch.Tensor,
 
     torch.ops._C.cutlass_scaled_sparse_mm(out, a, e, b, scale_a, scale_b, bias)
 
-    return out
+    return out.t()
 
 
 # aqlm
