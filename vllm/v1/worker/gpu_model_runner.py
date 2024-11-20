@@ -1,4 +1,3 @@
-import os
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
@@ -8,17 +7,13 @@ import torch
 import torch.distributed
 import torch.nn as nn
 
-from vllm import envs
 from vllm.compilation.compile_context import set_compile_context
-from vllm.compilation.config import CompilationConfig
-from vllm.compilation.levels import CompilationLevel
-from vllm.config import VllmConfig
+from vllm.config import CompilationLevel, VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.multimodal import MultiModalKwargs
-from vllm.plugins import set_compilation_config
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, DeviceMemoryProfiler, cdiv,
                         is_pin_memory_available)
@@ -99,7 +94,7 @@ class GPUModelRunner:
             pin_memory=self.pin_memory,
         )
 
-        self.use_cuda_graph = (envs.VLLM_TORCH_COMPILE_LEVEL
+        self.use_cuda_graph = (self.vllm_config.compilation_config.level
                                == CompilationLevel.PIECEWISE
                                and not self.model_config.enforce_eager)
         # TODO(woosuk): Provide an option to tune the max cudagraph batch size.
@@ -512,20 +507,6 @@ class GPUModelRunner:
         return model_runner_output
 
     def load_model(self) -> None:
-        if self.use_cuda_graph:
-            # NOTE(woosuk): Currently, we use inductor because the piecewise
-            # CUDA graphs do not work properly with the custom CUDA kernels.
-            # FIXME(woosuk): Disable inductor to reduce the compilation time
-            # and avoid any potential issues with the inductor.
-            os.environ["VLLM_CUSTOM_OPS"] = "none"
-            set_compilation_config(
-                CompilationConfig(
-                    use_cudagraph=True,
-                    non_cudagraph_ops=["vllm.unified_v1_flash_attention"],
-                    use_inductor=True,
-                    enable_fusion=False,
-                ))
-
         logger.info("Starting to load model %s...", self.model_config.model)
         with DeviceMemoryProfiler() as m:  # noqa: SIM117
             self.model = get_model(vllm_config=self.vllm_config)
@@ -566,9 +547,8 @@ class GPUModelRunner:
     def capture_model(self) -> None:
         if not self.use_cuda_graph:
             logger.warning(
-                "Skipping CUDA graph capture. Please set "
-                "VLLM_TORCH_COMPILE_LEVEL=%d to use CUDA graphs.",
-                CompilationLevel.PIECEWISE)
+                "Skipping CUDA graph capture. Please add "
+                "-O 3 to use CUDA graphs.", CompilationLevel.PIECEWISE)
             return
 
         start_time = time.perf_counter()
