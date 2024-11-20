@@ -1,4 +1,4 @@
-from typing import Any, Union
+from typing import Union, Any
 
 import torch.fx
 from torch import SymInt
@@ -31,9 +31,10 @@ class RedundantReshapesPass(VllmInductorPass):
     """
 
     def uuid(self) -> Any:
-        return self.get_hash_for_files((__file__, ))
+        return self.get_hash_for_files((__file__,))
 
     def __call__(self, graph: torch.fx.Graph):
+        self.begin()
         self.dump_graph(graph, "before_reshapes")
         count = 0
         # Remove no-op reshapes/views:
@@ -59,6 +60,7 @@ class RedundantReshapesPass(VllmInductorPass):
         logger.debug("Removed %s no-op reshapes", count)
 
         self.dump_graph(graph, "after_reshapes")
+        self.end_and_log()
 
     def dims_equivalent(self, dim: Union[int, torch.fx.Node],
                         i_dim: Union[int, SymInt]) -> bool:

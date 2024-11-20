@@ -24,6 +24,7 @@ class FixFunctionalizationPass(VllmInductorPass):
         return self.get_hash_for_files((__file__, ))
 
     def __call__(self, graph: torch.fx.Graph):
+        self.begin()
         self.dump_graph(graph, "before_fix_functionalization")
 
         self.nodes_to_remove: List[torch.fx.Node] = []
@@ -92,6 +93,7 @@ class FixFunctionalizationPass(VllmInductorPass):
         logger.debug("De-functionalized %s nodes, removed %s nodes", count,
                      count_removed)
         self.dump_graph(graph, "after_fix_functionalization")
+        self.end_and_log()
 
     def _remove(self, node_or_nodes: Union[torch.fx.Node,
                                            Iterable[torch.fx.Node]]):

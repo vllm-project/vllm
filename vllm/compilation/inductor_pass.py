@@ -1,6 +1,8 @@
 import hashlib
+import time
 from abc import ABC, abstractmethod
 from functools import lru_cache
+from logging import Logger
 from typing import Any, Callable, Tuple, Union
 
 import torch
@@ -109,10 +111,12 @@ def as_inductor_pass(*, uuid: Any = None, files: Tuple[str, ...] = ()):
 class VllmInductorPass(InductorPass):
     """
     An inductor pass with access to vLLM PassConfig.
+    It provides timing, logging, and dumping utilities.
     """
 
     def __init__(self, config: CompilationConfig.PassConfig):
         self.config = config
+        self.pass_name = self.__class__.__name__
 
     def dump_graph(self, graph: torch.fx.Graph, stage: str):
         if stage in self.config.dump_graph_stages:
@@ -121,9 +125,17 @@ class VllmInductorPass(InductorPass):
             rank = f"-{get_tp_rank()}" if parallel else ""
             filepath = self.config.dump_graph_dir / f"{stage}{rank}.py"
 
-            logger.info("Printing graph to %s", filepath)
+            logger.info("%s printing graph to %s", self.pass_name, filepath)
             with open(filepath, "w") as f:
                 src = graph.python_code(root_module="self", verbose=True).src
                 # Add imports so it's not full of errors
                 print("import torch; from torch import device", file=f)
                 print(src, file=f)
+
+    def begin(self):
+        self._start_time = time.perf_counter_ns()
+
+    def end_and_log(self):
+        self._end_time = time.perf_counter_ns()
+        duration_ms = float(self._end_time - self._start_time) / 1.0e6
+        logger.debug("%s completed in %.1f ms", self.pass_name, duration_ms)

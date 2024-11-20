@@ -1,5 +1,5 @@
 import operator
-from typing import Any, Iterable, List, Optional
+from typing import Iterable, List, Optional
 
 import torch
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
@@ -279,6 +279,7 @@ class FusionPass(VllmInductorPass):
                    for node in match.nodes)
 
     def __call__(self, graph: torch.fx.Graph):
+        self.begin()
         self.dump_graph(graph, "before_fusion")
 
         count = self.patterns.apply(graph)
@@ -290,3 +291,4 @@ class FusionPass(VllmInductorPass):
         logger.debug("Post-processed %s matches", len(self.matches))
         self.dump_graph(graph, "after_fusion")
         self.matches.clear()
+        self.end_and_log()
