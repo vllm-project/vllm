@@ -36,27 +36,19 @@ from vllm.distributed.parallel_state import get_tensor_model_parallel_rank
 from vllm.distributed.utils import split_tensor_along_last_dim
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (
-    MergedColumnParallelLinear,
-    QKVParallelLinear,
-    RowParallelLinear,
-)
+from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
+                                               QKVParallelLinear,
+                                               RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    ParallelLMHead,
-    VocabParallelEmbedding,
-)
+    ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-
 from vllm.model_executor.models.interfaces import SupportsPP
 from vllm.model_executor.models.utils import (
-    is_pp_missing_parameter,
-    make_empty_intermediate_tensors_factory,
-    make_layers,
-    maybe_prefix,
-)
+    is_pp_missing_parameter, make_empty_intermediate_tensors_factory,
+    make_layers, maybe_prefix)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
@@ -81,9 +73,8 @@ class OlmoAttention(nn.Module):
         assert self.total_num_heads % self.tp_size == 0
 
         self.num_heads = self.total_num_heads // self.tp_size
-        self.total_num_kv_heads = (
-            self.config.num_key_value_heads or self.total_num_heads
-        )
+        self.total_num_kv_heads = (self.config.num_key_value_heads
+                                   or self.total_num_heads)
         if self.total_num_kv_heads >= self.tp_size:
             assert self.total_num_kv_heads % self.tp_size == 0
         else:
@@ -112,16 +103,15 @@ class OlmoAttention(nn.Module):
             self.total_num_kv_heads * self.head_dim,
             eps=self.config.rms_norm_eps,
         )
-        self.q_norm = RMSNorm(
-            self.config.hidden_size, eps=self.config.rms_norm_eps
-        )
+        self.q_norm = RMSNorm(self.config.hidden_size,
+                              eps=self.config.rms_norm_eps)
 
         # Rotary embeddings.
         self.rotary_emb = get_rope(
             self.head_dim,
             rotary_dim=self.head_dim,
             max_position=self.max_position_embeddings,
-            base=self.rope_theta, # type: ignore
+            base=self.rope_theta,  # type: ignore
         )
         self.scaling = self.head_dim**-0.5
         self.attn = Attention(
@@ -142,18 +132,16 @@ class OlmoAttention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
-    def _apply_qk_norm(
-        self, q: torch.Tensor, k: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _apply_qk_norm(self, q: torch.Tensor,
+                       k: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         if self.tp_size > 1:
             q = tensor_model_parallel_all_gather(q.contiguous())
             k = tensor_model_parallel_all_gather(k.contiguous())
         q = self.q_norm.forward_native(q)
         k = self.k_norm.forward_native(k)
         if self.tp_size > 1:
-            splitter = partial(
-                split_tensor_along_last_dim, num_partitions=self.tp_size
-            )
+            splitter = partial(split_tensor_along_last_dim,
+                               num_partitions=self.tp_size)
             q = splitter(q)[self.tp_rank]
             k = splitter(k)[self.tp_rank]
         return q, k
@@ -231,21 +219,18 @@ class OlmoDecoderLayer(nn.Module):
         config = vllm_config.model_config.hf_config
         assert isinstance(config, Olmo1124Config)
         # Attention block.
-        self.self_attn = OlmoAttention(
-            vllm_config=vllm_config, prefix=f"{prefix}.self_attn"
-        )
+        self.self_attn = OlmoAttention(vllm_config=vllm_config,
+                                       prefix=f"{prefix}.self_attn")
 
         # MLP block.
         self.mlp = OlmoMLP(vllm_config=vllm_config, prefix=f"{prefix}.mlp")
 
         # LayerNorm
-        self.post_attention_layernorm = RMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps
-        )
+        self.post_attention_layernorm = RMSNorm(config.hidden_size,
+                                                eps=config.rms_norm_eps)
 
-        self.post_feedforward_layernorm = RMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps
-        )
+        self.post_feedforward_layernorm = RMSNorm(config.hidden_size,
+                                                  eps=config.rms_norm_eps)
 
     def forward(
         self,
@@ -256,9 +241,8 @@ class OlmoDecoderLayer(nn.Module):
     ) -> torch.Tensor:
         # Attention block.
         residual = hidden_states
-        hidden_states = self.self_attn(
-            positions, hidden_states, kv_cache, attn_metadata
-        )
+        hidden_states = self.self_attn(positions, hidden_states, kv_cache,
+                                       attn_metadata)
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = hidden_states + residual
 
@@ -271,6 +255,7 @@ class OlmoDecoderLayer(nn.Module):
 
 
 class OlmoModel(nn.Module):
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.config = vllm_config.model_config.hf_config
@@ -283,9 +268,8 @@ class OlmoModel(nn.Module):
         )
         self.start_layer, self.end_layer, self.layers = make_layers(
             self.config.num_hidden_layers,
-            lambda prefix: OlmoDecoderLayer(
-                vllm_config=vllm_config, prefix=prefix
-            ),
+            lambda prefix: OlmoDecoderLayer(vllm_config=vllm_config,
+                                            prefix=prefix),
             prefix=f"{prefix}.layers",
         )
         self.norm = RMSNorm(
@@ -293,10 +277,8 @@ class OlmoModel(nn.Module):
             eps=self.config.rms_norm_eps,
         )
         self.make_empty_intermediate_tensors = (
-            make_empty_intermediate_tensors_factory(
-                ["hidden_states"], self.config.hidden_size
-            )
-        )
+            make_empty_intermediate_tensors_factory(["hidden_states"],
+                                                    self.config.hidden_size))
 
     def forward(
         self,
@@ -350,9 +332,8 @@ class Olmo1124ForCausalLM(nn.Module, SupportsPP):
         config = vllm_config.model_config.hf_config
         assert isinstance(config, Olmo1124Config)
         self.config = config
-        self.model = OlmoModel(
-            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
-        )
+        self.model = OlmoModel(vllm_config=vllm_config,
+                               prefix=maybe_prefix(prefix, "model"))
         if config.tie_word_embeddings:
             self.lm_head = self.model.embed_tokens
         else:
@@ -367,8 +348,7 @@ class Olmo1124ForCausalLM(nn.Module, SupportsPP):
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
         self.make_empty_intermediate_tensors = (
-            self.model.make_empty_intermediate_tensors
-        )
+            self.model.make_empty_intermediate_tensors)
 
     def forward(
         self,
@@ -392,9 +372,8 @@ class Olmo1124ForCausalLM(nn.Module, SupportsPP):
         hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> Optional[torch.Tensor]:
-        logits = self.logits_processor(
-            self.lm_head, hidden_states, sampling_metadata
-        )
+        logits = self.logits_processor(self.lm_head, hidden_states,
+                                       sampling_metadata)
         return logits
 
     def sample(
@@ -419,10 +398,8 @@ class Olmo1124ForCausalLM(nn.Module, SupportsPP):
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
-            if (
-                "rotary_emb.cos_cached" in name
-                or "rotary_emb.sin_cached" in name
-            ):
+            if ("rotary_emb.cos_cached" in name
+                    or "rotary_emb.sin_cached" in name):
                 # Models trained using ColossalAI may include these tensors in
                 # the checkpoint. Skip them.
                 continue
@@ -449,7 +426,6 @@ class Olmo1124ForCausalLM(nn.Module, SupportsPP):
                 if name.endswith(".bias") and name not in params_dict:
                     continue
                 param = params_dict[name]
-                weight_loader = getattr(
-                    param, "weight_loader", default_weight_loader
-                )
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
                 weight_loader(param, loaded_weight)
