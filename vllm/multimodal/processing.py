@@ -1,7 +1,8 @@
 from dataclasses import dataclass
 from functools import lru_cache
+from heapq import nsmallest
 from itertools import groupby
-from typing import (Any, Callable, Collection, Generic, List, Mapping,
+from typing import (Any, Callable, Generic, List, Mapping, NamedTuple,
                     Optional, TypeVar, Union, final)
 
 from transformers import BatchFeature
@@ -128,95 +129,148 @@ def iter_token_runs(token_ids: List[int]):
         start_idx += length
 
 
-def encode_no_special_tokens(
+def _encode(
     tokenizer: AnyTokenizer,
     text: str,
+    *,
+    add_special_tokens: bool = False,
 ) -> List[int]:
     """
     Backend-agnostic equivalent of HF's
-    :code:`tokenizer.encode(text, add_special_tokens=False)`.
+    :code:`tokenizer.encode(text, add_special_tokens=...)`.
     """
     if isinstance(tokenizer, MistralTokenizer):
-        return tokenizer.tokenizer.encode(text, bos=False, eos=False)
+        return tokenizer.tokenizer.encode(text,
+                                          bos=add_special_tokens,
+                                          eos=add_special_tokens)
 
-    return tokenizer.encode(text, add_special_tokens=False)
+    return tokenizer.encode(text, add_special_tokens=add_special_tokens)
 
 
 @lru_cache
-def candidate_placeholders(
+def _max_vocab_token_len(tokenizer: AnyTokenizer) -> int:
+    return max(len(token_text) for token_text in tokenizer.get_vocab())
+
+
+class _TokenMatch(NamedTuple):
+    start_idx: int
+    end_idx: int
+
+
+def find_token_match(token_ids: List[int], match_ids: List[int]):
+    """
+    Find the first occurrence of :code:`match_ids` in :code:`token_ids`.
+    """
+    match_len = len(match_ids)
+
+    for start_idx in range(len(token_ids) - match_len + 1):
+        end_idx = start_idx + match_len
+        if token_ids[start_idx:end_idx] == match_ids:
+            return _TokenMatch(start_idx, end_idx)
+
+    return None
+
+
+class _Candidate(NamedTuple):
+    start_idx: int
+    end_idx: int
+    distance: int
+
+
+def find_token_match_by_text(
     tokenizer: AnyTokenizer,
-    placeholder_text: str,
-) -> Collection[List[int]]:
-    """Generate token ID sequences that may represent a placeholder text."""
-    # When the placeholder text is not mapped to a special token ID,
-    # it may be tokenized differently based on whether it is at the start/end
-    # of the string. So, we go through each combination of whether the text
-    # is at the start and end boundaries of the string
+    token_ids: List[int],
+    token_text: str,
+    match_text: str,
+):
+    """
+    Find the first occurrence of the tokenized :code:`match_text` in
+    :code:`token_ids`.
+    """
+    match_ids = _encode(tokenizer, match_text, add_special_tokens=False)
+    if (match := find_token_match(token_ids, match_ids)):
+        return match
 
-    # Matches the placeholder when it is in the middle of the string
-    start_id, = encode_no_special_tokens(tokenizer, "a")
-    end_id, = encode_no_special_tokens(tokenizer, "b")
+    # When `match_text` is not mapped to a special token ID,
+    # it may be tokenized differently based on the surrounding tokens
+    # as well as whether it is at the start/end of the string.
+    # Therefore, we need to use `token_text` as a reference.
+    text_start_idx = token_text.find(match_text)
+    if text_start_idx == -1:
+        return None
 
-    candidate_basic = encode_no_special_tokens(tokenizer, placeholder_text)
+    text_end_idx = text_start_idx + len(match_text)
 
-    start_id_, *candidate_a = encode_no_special_tokens(
-        tokenizer,
-        f"a{placeholder_text}",
+    # In case the left/right side of `match_text` is fused with the
+    # string immediately before/after it during tokenization
+    text_buffer = _max_vocab_token_len(tokenizer) - 1
+    left_text = token_text[:max(0, text_start_idx - text_buffer)]
+    right_text = token_text[:text_end_idx + text_buffer]
+
+    left_idx = len(_encode(tokenizer, left_text, add_special_tokens=False))
+    right_idx = len(_encode(tokenizer, right_text, add_special_tokens=True))
+
+    valid_candidates = list[_Candidate]()
+    for window_size in (len(match_ids) - 1, len(match_ids)):
+        for start_idx in range(left_idx, right_idx - window_size + 1):
+            end_idx = start_idx + window_size
+            candidate_text = tokenizer.decode(
+                token_ids[start_idx:end_idx],
+                skip_special_tokens=False,
+            )
+
+            if match_text in candidate_text:
+                candidate = _Candidate(
+                    start_idx=start_idx,
+                    end_idx=end_idx,
+                    distance=len(candidate_text) - len(match_text),
+                )
+                valid_candidates.append(candidate)
+
+    assert len(valid_candidates) > 0, dict(
+        # To facilitate debugging
+        token_ids=token_ids,
+        match_ids=match_ids,
+        left_text=left_text,
+        right_text=right_text,
+        left_idx=left_idx,
+        right_idx=right_idx,
     )
-    assert start_id == start_id_
 
-    start_id_, *candidate_ab, end_id_ = encode_no_special_tokens(
-        tokenizer,
-        f"a{placeholder_text}b",
-    )
-    assert start_id == start_id_ and end_id == end_id_
-
-    *candidate_b, end_id_ = encode_no_special_tokens(
-        tokenizer,
-        f"{placeholder_text}b",
-    )
-    assert end_id == end_id_
-
-    # Remove duplicates (need to convert to tuple to be hashable)
-    unique_candidates = {
-        tuple(c)
-        for c in [candidate_basic, candidate_a, candidate_ab, candidate_b]
-    }
-
-    # Convert back to list
-    return [list(c) for c in unique_candidates]
+    best_candidate, = nsmallest(1, valid_candidates, key=lambda x: x.distance)
+    return best_candidate.start_idx, best_candidate.end_idx
 
 
 def apply_placeholders(
+    tokenizer: AnyTokenizer,
     token_ids: List[int],
-    match_ids: List[int],
+    token_text: str,
+    match_text: str,
     replacement_id: int,
     replacement_count: int,
 ) -> Optional[PlaceholderRange]:
     """
-    Find the first occurrence of :code:`placeholder_ids`,
-    and replace it with the output of :code:`get_replacement_ids`.
+    Find the first occurrence of the tokenized :code:`match_text` in
+    :code:`token_ids`, and replace it with
+    :code:`[replacement_id] * replacement_count`.
 
     This function updates :code:`token_ids` in place.
     """
-    if len(match_ids) == 0:
-        raise ValueError("Match tokens should not be empty")
-    if replacement_id in match_ids:
-        raise ValueError(f"Match tokens ({match_ids}) should not include "
-                         f"replacement token ({replacement_id})")
+    match = find_token_match_by_text(
+        tokenizer,
+        token_ids,
+        token_text,
+        match_text,
+    )
 
-    placeholder_length = len(match_ids)
+    if match is None:
+        return None
 
-    for start_idx in range(len(token_ids) - placeholder_length + 1):
-        end_idx = start_idx + placeholder_length
+    # TODO(youkaichao): Don't update new_token_ids
+    start_idx, end_idx = match
+    token_ids[start_idx:end_idx] = [replacement_id] * replacement_count
 
-        if token_ids[start_idx:end_idx] == match_ids:
-            replacement_ids = [replacement_id] * replacement_count
-            token_ids[start_idx:end_idx] = replacement_ids
-
-            return PlaceholderRange(offset=start_idx, length=replacement_count)
-
-    return None
+    return PlaceholderRange(offset=start_idx, length=replacement_count)
 
 
 class MultiModalProcessor:
@@ -290,18 +344,17 @@ class MultiModalProcessor:
                                 item_idx,
                             )
 
-                        for match_ids in candidate_placeholders(
-                                tokenizer, match_str):
-                            # TODO(youkaichao): Don't update new_token_ids
-                            placeholders = apply_placeholders(
-                                new_token_ids,
-                                match_ids,
-                                replacement["token_id"],
-                                replacement_count,
-                            )
+                        placeholders = apply_placeholders(
+                            tokenizer,
+                            new_token_ids,
+                            prompt,
+                            match_str,
+                            replacement["token_id"],
+                            replacement_count,
+                        )
 
-                            if placeholders is not None:
-                                modality_placeholders.append(placeholders)
+                        if placeholders is not None:
+                            modality_placeholders.append(placeholders)
 
             mm_placeholders[modality] = modality_placeholders  # type: ignore[index]  # yapf: disable
 
