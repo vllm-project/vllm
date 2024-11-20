@@ -121,14 +121,13 @@ class Pooler(nn.Module):
             if returned_token_ids is not None and len(returned_token_ids) > 0:
                 hidden_states = hidden_states[:, returned_token_ids]
 
-            logits = hidden_states.softmax(dim=-1)
             step_tag_id = self.step_tag_id
 
             offset = 0
             pooled_data_lst = []
             for prompt_len, seq_data_i in zip(
                     prompt_lens, pooling_metadata.seq_data.values()):
-                pooled_data_i = logits[offset:offset + prompt_len]
+                pooled_data_i = hidden_states[offset:offset + prompt_len]
                 if step_tag_id is not None:
                     token_ids = torch.tensor(seq_data_i.prompt_token_ids)
                     pooled_data_i = pooled_data_i[token_ids == step_tag_id]

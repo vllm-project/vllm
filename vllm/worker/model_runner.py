@@ -1171,8 +1171,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
         if self.vllm_config.compilation_config.level ==\
             CompilationLevel.DYNAMO_AS_IS and supports_dynamo():
-            from vllm.plugins import get_torch_compile_backend
-            backend = get_torch_compile_backend() or "eager"
+            backend = self.vllm_config.compilation_config.init_backend()
             self.model = torch.compile(
                 self.model,
                 fullgraph=envs.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
@@ -1798,7 +1797,7 @@ class CUDAGraphRunner(nn.Module):
         # Run the model a few times without capturing the graph.
         # This is to make sure that the captured graph does not include the
         # kernel launches for initial benchmarking (e.g., Triton autotune).
-        # Note one iteration is not enough for torch.jit.script
+        # Note one iteration is not enough for torch.compile
         for _ in range(_NUM_WARMUP_ITERS):
             self.model(
                 input_ids=input_ids,
