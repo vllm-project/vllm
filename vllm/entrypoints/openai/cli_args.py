@@ -7,11 +7,14 @@ purposes.
 import argparse
 import json
 import ssl
-from typing import List, Optional, Sequence, Union
+from typing import List, Optional, Sequence, Union, get_args
 
 from vllm.engine.arg_utils import AsyncEngineArgs, nullable_str
+from vllm.entrypoints.chat_utils import (ChatTemplateContentFormatOption,
+                                         validate_chat_template)
 from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
                                                     PromptAdapterPath)
+from vllm.entrypoints.openai.tool_parsers import ToolParserManager
 from vllm.utils import FlexibleArgumentParser
 
 
@@ -31,8 +34,23 @@ class LoRAParserAction(argparse.Action):
 
         lora_list: List[LoRAModulePath] = []
         for item in values:
-            name, path = item.split('=')
-            lora_list.append(LoRAModulePath(name, path))
+            if item in [None, '']:  # Skip if item is None or empty string
+                continue
+            if '=' in item and ',' not in item:  # Old format: name=path
+                name, path = item.split('=')
+                lora_list.append(LoRAModulePath(name, path))
+            else:  # Assume JSON format
+                try:
+                    lora_dict = json.loads(item)
+                    lora = LoRAModulePath(**lora_dict)
+                    lora_list.append(lora)
+                except json.JSONDecodeError:
+                    parser.error(
+                        f"Invalid JSON format for --lora-modules: {item}")
+                except TypeError as e:
+                    parser.error(
+                        f"Invalid fields for --lora-modules: {item} - {str(e)}"
+                    )
         setattr(namespace, self.dest, lora_list)
 
 
@@ -95,8 +113,12 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         default=None,
         nargs='+',
         action=LoRAParserAction,
-        help="LoRA module configurations in the format name=path. "
-        "Multiple modules can be specified.")
+        help="LoRA module configurations in either 'name=path' format"
+        "or JSON format. "
+        "Example (old format): 'name=path' "
+        "Example (new format): "
+        "'{\"name\": \"name\", \"local_path\": \"path\", "
+        "\"base_model_name\": \"id\"}'")
     parser.add_argument(
         "--prompt-adapters",
         type=nullable_str,
@@ -111,6 +133,18 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
                         help="The file path to the chat template, "
                         "or the template in single-line form "
                         "for the specified model")
+    parser.add_argument(
+        '--chat-template-content-format',
+        type=str,
+        default="auto",
+        choices=get_args(ChatTemplateContentFormatOption),
+        help='The format to render message content within a chat template.'
+        '\n\n'
+        '* "string" will render the content as a string. '
+        'Example: "Hello World"\n'
+        '* "openai" will render the content as a list of dictionaries, '
+        'similar to OpenAI schema. '
+        'Example: [{"type": "text", "text": "Hello world!"}]')
     parser.add_argument("--response-role",
                         type=nullable_str,
                         default="assistant",
@@ -169,17 +203,28 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         default=False,
         help=
         "Enable auto tool choice for supported models. Use --tool-call-parser"
-        "to specify which parser to use")
+        " to specify which parser to use")
 
+    valid_tool_parsers = ToolParserManager.tool_parsers.keys()
     parser.add_argument(
         "--tool-call-parser",
         type=str,
-        choices=["mistral", "hermes"],
+        metavar="{" + ",".join(valid_tool_parsers) + "} or name registered in "
+        "--tool-parser-plugin",
         default=None,
         help=
         "Select the tool call parser depending on the model that you're using."
         " This is used to parse the model-generated tool call into OpenAI API "
         "format. Required for --enable-auto-tool-choice.")
+
+    parser.add_argument(
+        "--tool-parser-plugin",
+        type=str,
+        default="",
+        help=
+        "Special the tool parser plugin write to parse the model-generated tool"
+        " into OpenAI API format, the name register in this plugin can be used "
+        "in --tool-call-parser.")
 
     parser = AsyncEngineArgs.add_cli_args(parser)
 
@@ -196,8 +241,27 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         default=False,
         help="Disable FastAPI's OpenAPI schema, Swagger UI, and ReDoc endpoint"
     )
+    parser.add_argument(
+        "--enable-prompt-tokens-details",
+        action='store_true',
+        default=False,
+        help="If set to True, enable prompt_tokens_details in usage.")
 
     return parser
+
+
+def validate_parsed_serve_args(args: argparse.Namespace):
+    """Quick checks for model serve args that raise prior to loading."""
+    if hasattr(args, "subparser") and args.subparser != "serve":
+        return
+
+    # Ensure that the chat template is valid; raises if it likely isn't
+    validate_chat_template(args.chat_template)
+
+    # Enable auto tool needs a tool call parser to be valid
+    if args.enable_auto_tool_choice and not args.tool_call_parser:
+        raise TypeError("Error: --enable-auto-tool-choice requires "
+                        "--tool-call-parser")
 
 
 def create_parser_for_docs() -> FlexibleArgumentParser:

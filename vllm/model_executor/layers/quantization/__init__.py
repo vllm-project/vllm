@@ -21,6 +21,8 @@ from vllm.model_executor.layers.quantization.gptq_marlin import (
     GPTQMarlinConfig)
 from vllm.model_executor.layers.quantization.gptq_marlin_24 import (
     GPTQMarlin24Config)
+from vllm.model_executor.layers.quantization.hqq_marlin import HQQMarlinConfig
+from vllm.model_executor.layers.quantization.ipex_quant import IPEXConfig
 from vllm.model_executor.layers.quantization.marlin import MarlinConfig
 from vllm.model_executor.layers.quantization.modelopt import ModelOptFp8Config
 from vllm.model_executor.layers.quantization.neuron_quant import (
@@ -47,8 +49,10 @@ QUANTIZATION_METHODS: Dict[str, Type[QuantizationConfig]] = {
     "compressed-tensors": CompressedTensorsConfig,
     "bitsandbytes": BitsAndBytesConfig,
     "qqq": QQQConfig,
+    "hqq": HQQMarlinConfig,
     "experts_int8": ExpertsInt8Config,
     "neuron_quant": NeuronQuantConfig,
+    "ipex": IPEXConfig,
 }
 
 

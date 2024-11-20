@@ -13,6 +13,9 @@ def assert_enc_dec_mr_supported_scenario(
     a supported scenario.
     '''
 
+    # Reminder: Please update docs/source/serving/compatibility_matrix.rst
+    # If the feature combo become valid
+
     if enc_dec_mr.cache_config.enable_prefix_caching:
         raise NotImplementedError(
             STR_NOT_IMPL_ENC_DEC_ERR_STRS['STR_NOT_IMPL_ENC_DEC_PREFIX_CACHE'])
@@ -38,10 +41,6 @@ def assert_enc_dec_mr_supported_scenario(
     if enc_dec_mr.parallel_config.pipeline_parallel_size > 1:
         raise NotImplementedError(
             STR_NOT_IMPL_ENC_DEC_ERR_STRS['STR_NOT_IMPL_ENC_DEC_PP'])
-
-    if enc_dec_mr.model_config.is_multimodal_model:
-        raise NotImplementedError(
-            STR_NOT_IMPL_ENC_DEC_ERR_STRS['STR_NOT_IMPL_ENC_DEC_MM'])
 
     if enc_dec_mr.scheduler_config.num_lookahead_slots > 0:
         raise NotImplementedError(

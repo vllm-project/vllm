@@ -4,7 +4,7 @@ import pytest
 
 from vllm import SamplingParams
 
-from .conftest import run_logprob_correctness_test
+from .conftest import run_equality_correctness_test
 
 
 @pytest.mark.parametrize(
@@ -14,9 +14,6 @@ from .conftest import run_logprob_correctness_test
 
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
-
-        # Required for spec decode.
-        "use_v2_block_manager": True,
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
@@ -25,6 +22,10 @@ from .conftest import run_logprob_correctness_test
                              "speculative_model": "JackFram/llama-160m",
                              "num_speculative_tokens": 3,
                              "disable_logprobs_during_spec_decoding": False,
+                         }, {
+                             "speculative_model": "JackFram/llama-160m",
+                             "num_speculative_tokens": 3,
+                             "disable_logprobs_during_spec_decoding": True,
                          }])
 @pytest.mark.parametrize("batch_size", [8])
 @pytest.mark.parametrize(
@@ -41,16 +42,19 @@ def test_logprobs_equality(vllm_runner, common_llm_kwargs,
                            seed: int, logprobs: int):
     """Verify output logprobs are equal with and without speculative decoding.
     """
-    run_logprob_correctness_test(vllm_runner,
-                                 common_llm_kwargs,
-                                 per_test_common_llm_kwargs,
-                                 baseline_llm_kwargs,
-                                 test_llm_kwargs,
-                                 batch_size,
-                                 output_len,
-                                 seed,
-                                 temperature=0.0,
-                                 logprobs=logprobs)
+    run_equality_correctness_test(vllm_runner,
+                                  common_llm_kwargs,
+                                  per_test_common_llm_kwargs,
+                                  baseline_llm_kwargs,
+                                  test_llm_kwargs,
+                                  batch_size,
+                                  output_len,
+                                  seed,
+                                  temperature=0.0,
+                                  logprobs=logprobs,
+                                  prompt_logprobs=logprobs,
+                                  disable_logprobs=test_llm_kwargs[
+                                      'disable_logprobs_during_spec_decoding'])
 
 
 @pytest.mark.parametrize(
@@ -60,9 +64,6 @@ def test_logprobs_equality(vllm_runner, common_llm_kwargs,
 
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
-
-        # Required for spec decode.
-        "use_v2_block_manager": True
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
@@ -91,16 +92,18 @@ def test_logprobs_different_k(vllm_runner, common_llm_kwargs,
                               output_len: int, seed: int, logprobs: int):
     """Veriy logprob greedy equality with different speculation lens.
     """
-    run_logprob_correctness_test(vllm_runner,
-                                 common_llm_kwargs,
-                                 per_test_common_llm_kwargs,
-                                 baseline_llm_kwargs,
-                                 test_llm_kwargs,
-                                 batch_size,
-                                 output_len,
-                                 seed,
-                                 temperature=0.0,
-                                 logprobs=logprobs)
+    run_equality_correctness_test(vllm_runner,
+                                  common_llm_kwargs,
+                                  per_test_common_llm_kwargs,
+                                  baseline_llm_kwargs,
+                                  test_llm_kwargs,
+                                  batch_size,
+                                  output_len,
+                                  seed,
+                                  temperature=0.0,
+                                  logprobs=logprobs,
+                                  disable_logprobs=test_llm_kwargs[
+                                      'disable_logprobs_during_spec_decoding'])
 
 
 @pytest.mark.parametrize(
@@ -110,9 +113,6 @@ def test_logprobs_different_k(vllm_runner, common_llm_kwargs,
 
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
-
-        # Required for spec decode.
-        "use_v2_block_manager": True
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
@@ -143,16 +143,18 @@ def test_logprobs_when_skip_speculation(vllm_runner, common_llm_kwargs,
                                         seed: int, logprobs: int):
     """Verify logprobs greedy equality when some sequences skip speculation.
     """
-    run_logprob_correctness_test(vllm_runner,
-                                 common_llm_kwargs,
-                                 per_test_common_llm_kwargs,
-                                 baseline_llm_kwargs,
-                                 test_llm_kwargs,
-                                 batch_size,
-                                 output_len,
-                                 seed,
-                                 temperature=0.0,
-                                 logprobs=logprobs)
+    run_equality_correctness_test(vllm_runner,
+                                  common_llm_kwargs,
+                                  per_test_common_llm_kwargs,
+                                  baseline_llm_kwargs,
+                                  test_llm_kwargs,
+                                  batch_size,
+                                  output_len,
+                                  seed,
+                                  temperature=0.0,
+                                  logprobs=logprobs,
+                                  disable_logprobs=test_llm_kwargs[
+                                      'disable_logprobs_during_spec_decoding'])
 
 
 @pytest.mark.parametrize(
@@ -162,9 +164,6 @@ def test_logprobs_when_skip_speculation(vllm_runner, common_llm_kwargs,
 
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
-
-        # Required for spec decode.
-        "use_v2_block_manager": True
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
@@ -240,8 +239,6 @@ def test_logprobs_temp_1(vllm_runner, common_llm_kwargs,
         "model_name": "JackFram/llama-160m",
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
-        # Required for spec decode.
-        "use_v2_block_manager": True,
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
@@ -267,13 +264,15 @@ def test_logprobs_disabled(vllm_runner, common_llm_kwargs,
     """Check the behavior when logprobs are disabled.
     Token choices should match with the base model.
     """
-    run_logprob_correctness_test(vllm_runner,
-                                 common_llm_kwargs,
-                                 per_test_common_llm_kwargs,
-                                 baseline_llm_kwargs,
-                                 test_llm_kwargs,
-                                 batch_size,
-                                 output_len,
-                                 seed,
-                                 temperature=0.0,
-                                 logprobs=logprobs)
+    run_equality_correctness_test(vllm_runner,
+                                  common_llm_kwargs,
+                                  per_test_common_llm_kwargs,
+                                  baseline_llm_kwargs,
+                                  test_llm_kwargs,
+                                  batch_size,
+                                  output_len,
+                                  seed,
+                                  temperature=0.0,
+                                  logprobs=logprobs,
+                                  disable_logprobs=test_llm_kwargs[
+                                      'disable_logprobs_during_spec_decoding'])

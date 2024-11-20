@@ -16,7 +16,7 @@ However, we still need to verify below scenario could be passed:
     * Test greedy equality under various number of speculative tokens.
 
 With those tests, we can say at least, MLPSpeculator would not break the
-correctess for the target model outputs.
+correctness for the target model outputs.
 """
 
 from unittest.mock import patch
@@ -46,9 +46,6 @@ PRECISION = "float32"
     [{
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
-
-        # Required for spec decode.
-        "use_v2_block_manager": True,
 
         # Print spec metrics.
         "disable_log_stats": False,
@@ -94,8 +91,57 @@ def test_mlp_e2e_greedy_correctness(vllm_runner, common_llm_kwargs,
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
 
-        # Required for spec decode.
-        "use_v2_block_manager": True,
+        # Print spec metrics.
+        "disable_log_stats": False,
+
+        # Precision
+        "dtype": PRECISION,
+
+        # Main model
+        "model_name": MAIN_MODEL,
+    }])
+@pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
+@pytest.mark.parametrize("baseline_llm_kwargs", [{}])
+@pytest.mark.parametrize("test_llm_kwargs", [
+    {
+        "speculative_model": SPEC_MODEL,
+        "disable_logprobs_during_spec_decoding": False,
+    },
+    {
+        "speculative_model": SPEC_MODEL,
+        "disable_logprobs_during_spec_decoding": True,
+    },
+])
+@pytest.mark.parametrize("output_len", [8])
+@pytest.mark.parametrize("batch_size", [8])
+@pytest.mark.parametrize("seed", [1])
+@pytest.mark.parametrize("logprobs", [1, 6])
+def test_mlp_e2e_greedy_logprobs(vllm_runner, common_llm_kwargs,
+                                 per_test_common_llm_kwargs,
+                                 baseline_llm_kwargs, test_llm_kwargs,
+                                 batch_size: int, output_len: int, seed: int,
+                                 logprobs: int):
+    """Verify greedy equality with different batch size."""
+    run_equality_correctness_test(vllm_runner,
+                                  common_llm_kwargs,
+                                  per_test_common_llm_kwargs,
+                                  baseline_llm_kwargs,
+                                  test_llm_kwargs,
+                                  batch_size,
+                                  max_output_len=output_len,
+                                  seed=seed,
+                                  temperature=0.0,
+                                  logprobs=logprobs,
+                                  prompt_logprobs=logprobs,
+                                  disable_logprobs=test_llm_kwargs[
+                                      'disable_logprobs_during_spec_decoding'])
+
+
+@pytest.mark.parametrize(
+    "common_llm_kwargs",
+    [{
+        # Skip cuda graph recording for fast test.
+        "enforce_eager": True,
 
         # Print spec metrics.
         "disable_log_stats": False,
@@ -139,9 +185,6 @@ def test_mlp_e2e_acceptance_rate(vllm_runner, common_llm_kwargs,
     [{
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
-
-        # Required for spec decode.
-        "use_v2_block_manager": True,
 
         # Print spec metrics.
         "disable_log_stats": False,
@@ -203,9 +246,6 @@ def test_mlp_e2e_seeded_correctness(vllm_runner, common_llm_kwargs,
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
 
-        # Required for spec decode.
-        "use_v2_block_manager": True,
-
         # Precision
         "dtype": PRECISION,
 
@@ -255,9 +295,6 @@ def test_mlp_e2e_greedy_correctness_with_preemption(
 
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
-
-        # Required for spec decode.
-        "use_v2_block_manager": True,
 
         # Precision
         "dtype": PRECISION,
@@ -311,9 +348,6 @@ def test_mlp_e2e_greedy_correctness_with_padding(
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
 
-        # Required for spec decode.
-        "use_v2_block_manager": True,
-
         # Precision
         "dtype": PRECISION,
 
@@ -364,9 +398,6 @@ def test_mlp_different_k(vllm_runner, common_llm_kwargs,
         # Skip cuda graph recording for fast test.
         "enforce_eager": True,
 
-        # Required for spec decode.
-        "use_v2_block_manager": True,
-
         # Precision
         "dtype": PRECISION,
 
@@ -395,6 +426,46 @@ def test_mlp_disable_queue(vllm_runner, common_llm_kwargs,
     """Verify that mlp speculative decoding produces exact equality
     to without spec decode when speculation is disabled for large
     batch sizes.
+    """
+    run_equality_correctness_test(vllm_runner,
+                                  common_llm_kwargs,
+                                  per_test_common_llm_kwargs,
+                                  baseline_llm_kwargs,
+                                  test_llm_kwargs,
+                                  batch_size,
+                                  max_output_len=output_len,
+                                  seed=seed,
+                                  temperature=0.0)
+
+
+@pytest.mark.parametrize(
+    "common_llm_kwargs",
+    [{
+        "model_name": MAIN_MODEL,
+
+        # Skip cuda graph recording for fast test.
+        "enforce_eager": True,
+        "speculative_model": SPEC_MODEL,
+    }])
+@pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
+@pytest.mark.parametrize("baseline_llm_kwargs", [{}])
+@pytest.mark.parametrize("test_llm_kwargs",
+                         [{
+                             "speculative_disable_mqa_scorer": True,
+                         }])
+@pytest.mark.parametrize("batch_size", [1, 5])
+@pytest.mark.parametrize(
+    "output_len",
+    [
+        # Use smaller output len for fast test.
+        32,
+    ])
+@pytest.mark.parametrize("seed", [1])
+def test_mqa_scorer(vllm_runner, common_llm_kwargs, per_test_common_llm_kwargs,
+                    baseline_llm_kwargs, test_llm_kwargs, batch_size: int,
+                    output_len: int, seed: int):
+    """Verify that speculative decoding generates the same output 
+    with batch expansion scorer and mqa scorer.
     """
     run_equality_correctness_test(vllm_runner,
                                   common_llm_kwargs,

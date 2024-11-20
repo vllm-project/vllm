@@ -7,6 +7,7 @@ from functools import lru_cache, wraps
 from typing import Callable, List, Tuple, TypeVar
 
 import pynvml
+import torch
 from typing_extensions import ParamSpec
 
 from vllm.logger import init_logger
@@ -25,6 +26,10 @@ if pynvml.__file__.endswith("__init__.py"):
         " When both of them are installed, `pynvml` will take precedence"
         " and cause errors. See https://pypi.org/project/pynvml "
         "for more information.")
+
+# pytorch 2.5 uses cudnn sdpa by default, which will cause crash on some models
+# see https://github.com/huggingface/diffusers/issues/9704 for details
+torch.backends.cuda.enable_cudnn_sdp(False)
 
 # NVML utils
 # Note that NVML is not affected by `CUDA_VISIBLE_DEVICES`,
@@ -57,6 +62,13 @@ def get_physical_device_capability(device_id: int = 0) -> Tuple[int, int]:
 def get_physical_device_name(device_id: int = 0) -> str:
     handle = pynvml.nvmlDeviceGetHandleByIndex(device_id)
     return pynvml.nvmlDeviceGetName(handle)
+
+
+@lru_cache(maxsize=8)
+@with_nvml_context
+def get_physical_device_total_memory(device_id: int = 0) -> int:
+    handle = pynvml.nvmlDeviceGetHandleByIndex(device_id)
+    return int(pynvml.nvmlDeviceGetMemoryInfo(handle).total)
 
 
 @with_nvml_context
@@ -108,6 +120,11 @@ class CudaPlatform(Platform):
         return get_physical_device_name(physical_device_id)
 
     @classmethod
+    def get_device_total_memory(cls, device_id: int = 0) -> int:
+        physical_device_id = device_id_to_physical_device_id(device_id)
+        return get_physical_device_total_memory(physical_device_id)
+
+    @classmethod
     @with_nvml_context
     def is_full_nvlink(cls, physical_device_ids: List[int]) -> bool:
         """
@@ -125,10 +142,9 @@ class CudaPlatform(Platform):
                             pynvml.NVML_P2P_CAPS_INDEX_NVLINK)
                         if p2p_status != pynvml.NVML_P2P_STATUS_OK:
                             return False
-                    except pynvml.NVMLError as error:
-                        logger.error(
+                    except pynvml.NVMLError:
+                        logger.exception(
                             "NVLink detection failed. This is normal if your"
-                            " machine has no NVLink equipped.",
-                            exc_info=error)
+                            " machine has no NVLink equipped.")
                         return False
         return True

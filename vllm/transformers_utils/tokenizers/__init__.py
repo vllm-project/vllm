@@ -1,4 +1,3 @@
-from vllm.transformers_utils.tokenizers.baichuan import BaichuanTokenizer
-from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
+from .mistral import MistralTokenizer, maybe_serialize_tool_calls
 
-__all__ = ["BaichuanTokenizer", "MistralTokenizer"]
+__all__ = ["MistralTokenizer", "maybe_serialize_tool_calls"]

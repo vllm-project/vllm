@@ -1,4 +1,3 @@
-# coding=utf-8
 # Adapted from
 # https://github.com/huggingface/transformers/blob/a5cc30d72ae2dc19af534e4b35c986cc28db1275/src/transformers/models/falcon/modeling_falcon.py
 # Copyright 2023 The vLLM team.
@@ -19,7 +18,7 @@
 """PyTorch Falcon model."""
 
 import math
-from typing import Iterable, List, Optional, Tuple, Union
+from typing import Iterable, List, Optional, Set, Tuple, Union
 
 import torch
 from torch import nn
@@ -27,8 +26,9 @@ from torch.nn import LayerNorm
 from transformers import FalconConfig as HF_FalconConfig
 
 from vllm.attention import Attention, AttentionMetadata
-from vllm.config import CacheConfig
-from vllm.distributed import (get_tensor_model_parallel_rank,
+from vllm.compilation.decorators import support_torch_compile
+from vllm.config import CacheConfig, VllmConfig
+from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
                               tensor_model_parallel_all_reduce)
 from vllm.model_executor.layers.activation import get_act_fn
@@ -36,16 +36,20 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import RWConfig
+
+from .interfaces import SupportsPP
+from .utils import (is_pp_missing_parameter,
+                    make_empty_intermediate_tensors_factory, make_layers,
+                    maybe_prefix)
 
 FalconConfig = Union[HF_FalconConfig, RWConfig]
 
@@ -209,7 +213,7 @@ class FalconMLP(nn.Module):
                                                   bias=config.bias,
                                                   skip_bias_add=True,
                                                   quant_config=quant_config)
-        self.act = get_act_fn("gelu", quant_config, 4 * hidden_size)
+        self.act = get_act_fn("gelu")
         self.reduce_row_parallel_results = not (config.new_decoder_architecture
                                                 or config.parallel_attn)
         self.dense_4h_to_h = RowParallelLinear(
@@ -245,6 +249,9 @@ class FalconDecoderLayer(nn.Module):
                                               quant_config)
         self.mlp = FalconMLP(config, quant_config)
         self.config = config
+
+        if (not hasattr(config, "num_ln_in_parallel_attn")):
+            config.num_ln_in_parallel_attn = None
 
         if (config.num_ln_in_parallel_attn is None
                 and config.new_decoder_architecture):
@@ -326,15 +333,16 @@ class FalconDecoderLayer(nn.Module):
         return output
 
 
+@support_torch_compile
 class FalconModel(nn.Module):
 
-    def __init__(
-        self,
-        config: FalconConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-    ):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+
         self.config = config
         self.embed_dim = config.hidden_size
         self.num_heads = config.num_attention_heads
@@ -347,46 +355,71 @@ class FalconModel(nn.Module):
         )
 
         # Transformer blocks
-        self.h = nn.ModuleList([
-            FalconDecoderLayer(config, cache_config, quant_config)
-            for _ in range(config.num_hidden_layers)
-        ])
+        self.start_layer, self.end_layer, self.h = make_layers(
+            config.num_hidden_layers,
+            lambda prefix: FalconDecoderLayer(config, cache_config,
+                                              quant_config),
+            prefix=f"{prefix}.h")
 
         # Final Layer Norm
         self.ln_f = LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
+        self.make_empty_intermediate_tensors = (
+            make_empty_intermediate_tensors_factory(["hidden_states"],
+                                                    config.hidden_size))
+
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.word_embeddings(input_ids)
 
     def forward(
         self,
-        input_ids: torch.LongTensor,
+        input_ids: torch.Tensor,
         positions: torch.Tensor,
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
-    ) -> torch.Tensor:
-        hidden_states = self.word_embeddings(input_ids)
-        for i in range(len(self.h)):
+        intermediate_tensors: Optional[IntermediateTensors],
+        inputs_embeds: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, IntermediateTensors]:
+        if get_pp_group().is_first_rank:
+            if inputs_embeds is not None:
+                hidden_states = inputs_embeds
+            else:
+                hidden_states = self.get_input_embeddings(input_ids)
+        else:
+            hidden_states = intermediate_tensors["hidden_states"]
+        for i in range(self.start_layer, self.end_layer):
             layer = self.h[i]
             hidden_states = layer(
                 positions,
                 hidden_states,
-                kv_caches[i],
+                kv_caches[i - self.start_layer],
                 attn_metadata,
             )
+        if not get_pp_group().is_last_rank:
+            return IntermediateTensors({"hidden_states": hidden_states})
         hidden_states = self.ln_f(hidden_states)
         return hidden_states
 
 
-class FalconForCausalLM(nn.Module):
+class FalconForCausalLM(nn.Module, SupportsPP):
 
-    def __init__(
-        self,
-        config: FalconConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-    ):
+    # BitandBytes specific attributes
+    bitsandbytes_stacked_params_mapping = {}
+    default_bitsandbytes_target_modules = [
+        ".query_key_value.",
+        ".dense.",
+        ".dense_h_to_4h.",
+        ".dense_4h_to_h.",
+    ]
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
-        self.transformer = FalconModel(config, cache_config, quant_config)
+        self.transformer = FalconModel(vllm_config=vllm_config,
+                                       prefix=maybe_prefix(
+                                           prefix, "transformer"))
         # only Falcon-11B doesn't share lm_head weight with word embeddings
         # and previous Falcon model doesn't have tie_word_embeddings config
         # so we set tie_word_embeddings to True by default
@@ -402,7 +435,12 @@ class FalconForCausalLM(nn.Module):
                 quant_config=quant_config,
             )
         self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.sampler = Sampler()
+        self.sampler = get_sampler()
+        self.make_empty_intermediate_tensors = (
+            self.transformer.make_empty_intermediate_tensors)
+
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.transformer.get_input_embeddings(input_ids)
 
     def forward(
         self,
@@ -411,13 +449,11 @@ class FalconForCausalLM(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        hidden_states = self.transformer(
-            input_ids,
-            positions,
-            kv_caches,
-            attn_metadata,
-        )
+        hidden_states = self.transformer(input_ids, positions, kv_caches,
+                                         attn_metadata, intermediate_tensors,
+                                         inputs_embeds)
         return hidden_states
 
     def compute_logits(
@@ -437,7 +473,8 @@ class FalconForCausalLM(nn.Module):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         total_num_heads = self.config.num_attention_heads
         if self.config.new_decoder_architecture:
             total_num_kv_heads = self.config.num_kv_heads
@@ -447,12 +484,15 @@ class FalconForCausalLM(nn.Module):
             total_num_kv_heads = total_num_heads
         num_query_heads_per_kv_head = total_num_heads // total_num_kv_heads
         params_dict = dict(self.named_parameters(remove_duplicate=False))
+        loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
             if name == "lm_head.weight" and self.tie_word_embeddings:
                 # Falcon uses tied embeddings except Falcon-11b.
                 continue
             # Skip loading extra bias for GPTQ models.
             if name.endswith(".bias") and name not in params_dict:
+                continue
+            if is_pp_missing_parameter(name, self):
                 continue
             param = params_dict[name]
             if "query_key_value" in name:
@@ -481,3 +521,5 @@ class FalconForCausalLM(nn.Module):
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
             weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params

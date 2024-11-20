@@ -1,3 +1,4 @@
+import os
 import pickle
 import time
 from contextlib import contextmanager
@@ -9,19 +10,14 @@ from unittest.mock import patch
 import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
+from zmq import IPV6  # type: ignore
 from zmq import SUB, SUBSCRIBE, XPUB, XPUB_VERBOSE, Context  # type: ignore
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.utils import get_ip, get_open_port
+from vllm.utils import get_ip, get_open_port, is_valid_ipv6_address
 
 VLLM_RINGBUFFER_WARNING_INTERVAL = envs.VLLM_RINGBUFFER_WARNING_INTERVAL
-
-# time to wait if the queue is full or empty
-# if we sleep for too short, it will consume too much CPU
-# if we sleep for too long, it will slow down the writer/reader
-# 0.1 us is a good balance
-RINGBUFFER_SLEEP_INTERVAL = 1e-7
 
 logger = init_logger(__name__)
 
@@ -214,6 +210,8 @@ class MessageQueue:
             self.remote_socket = context.socket(XPUB)
             self.remote_socket.setsockopt(XPUB_VERBOSE, True)
             remote_subscribe_port = get_open_port()
+            if is_valid_ipv6_address(connect_ip):
+                self.remote_socket.setsockopt(IPV6, 1)
             socket_addr = f"tcp://*:{remote_subscribe_port}"
             self.remote_socket.bind(socket_addr)
 
@@ -274,6 +272,8 @@ class MessageQueue:
 
             self.remote_socket = context.socket(SUB)
             self.remote_socket.setsockopt_string(SUBSCRIBE, "")
+            if is_valid_ipv6_address(handle.connect_ip):
+                self.remote_socket.setsockopt(IPV6, 1)
             socket_addr = f"tcp://{handle.connect_ip}:{handle.remote_subscribe_port}"
             logger.debug("Connecting to %s", socket_addr)
             self.remote_socket.connect(socket_addr)
@@ -328,8 +328,8 @@ class MessageQueue:
                     # if this block is not ready to write,
                     # we need to wait until it is read by all readers
 
-                    # wait for a while
-                    time.sleep(RINGBUFFER_SLEEP_INTERVAL)
+                    # Release the processor to other threads
+                    os.sched_yield()
 
                     # if we wait for a long time, we should warn the user
                     if (time.monotonic() - start_time >
@@ -382,8 +382,8 @@ class MessageQueue:
                     # if this block is not ready,
                     # we need to wait until it is written
 
-                    # wait for a while
-                    time.sleep(RINGBUFFER_SLEEP_INTERVAL)
+                    # Release the processor to other threads
+                    os.sched_yield()
 
                     # if we wait for a long time, we should warn the user
                     if (time.monotonic() - start_time >

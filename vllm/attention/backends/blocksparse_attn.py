@@ -186,6 +186,9 @@ class BlocksparseFlashAttentionMetadata(AttentionMetadata):
     # TODO(woosuk): Move `use_cuda_graph` out since it's unrelated to attention.
     use_cuda_graph: bool
 
+    # Max number of query tokens for among request in the batch.
+    max_decode_query_len: Optional[int] = None
+
     _cached_prefill_metadata: Optional[
         "BlocksparseFlashAttentionMetadata"] = None
     _cached_decode_metadata: Optional[
@@ -212,6 +215,8 @@ class BlocksparseFlashAttentionMetadata(AttentionMetadata):
             num_prefill_tokens=self.num_prefill_tokens,
             num_decode_tokens=0,
             slot_mapping=self.slot_mapping[:self.num_prefill_tokens],
+            multi_modal_placeholder_index_maps=self.
+            multi_modal_placeholder_index_maps,
             seq_lens=self.seq_lens[:self.num_prefills],
             seq_lens_tensor=self.seq_lens_tensor[:self.num_prefills],
             max_query_len=self.max_query_len,
@@ -240,6 +245,7 @@ class BlocksparseFlashAttentionMetadata(AttentionMetadata):
             num_prefill_tokens=0,
             num_decode_tokens=self.num_decode_tokens,
             slot_mapping=self.slot_mapping[self.num_prefill_tokens:],
+            multi_modal_placeholder_index_maps=None,
             seq_lens=None,
             seq_lens_tensor=self.seq_lens_tensor[self.num_prefills:],
             max_query_len=None,
@@ -357,6 +363,8 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
             key: shape = [num_tokens, num_kv_heads * head_size]
             value: shape = [num_tokens, num_kv_heads * head_size]
             kv_cache = [2, num_blocks, block_size * num_kv_heads * head_size]
+                NOTE: kv_cache will be an empty tensor with shape [0]
+                for profiling run.
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]
@@ -373,7 +381,7 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
         key = key.view(-1, self.num_kv_heads, self.head_size)
         value = value.view(-1, self.num_kv_heads, self.head_size)
 
-        if kv_cache is not None:
+        if kv_cache.numel() > 0:
             key_cache, value_cache = PagedAttention.split_kv_cache(
                 kv_cache, self.num_kv_heads, self.head_size)
 
@@ -399,7 +407,7 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
             # When block_tables are not filled, it means q and k are the
             # prompt, and they have the same length.
 
-            assert kv_cache is None \
+            assert kv_cache.numel() == 0 \
                     or prefill_meta.block_tables is None \
                     or prefill_meta.block_tables.numel() == 0, \
                 "Does not support prefix-enabled attention."

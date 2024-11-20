@@ -1,4 +1,3 @@
-# coding=utf-8
 # Adapted from
 # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/llama/modeling_llama.py
 # Copyright 2024 The ModelBest team.
@@ -26,27 +25,29 @@ from typing import Any, Dict, Optional
 
 import torch
 from torch import nn
+from transformers import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
-from vllm.config import CacheConfig
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.models.minicpm import (MiniCPMDecoderLayer,
                                                 MiniCPMForCausalLM,
                                                 MiniCPMModel)
+
+from .utils import make_layers, maybe_prefix
 
 
 class MiniCPM3Attention(nn.Module):
 
     def __init__(
         self,
-        config,
+        config: PretrainedConfig,
         hidden_size: int,
         num_heads: int,
         qk_nope_head_dim: int,
@@ -199,18 +200,44 @@ class MiniCPM3DecoderLayer(MiniCPMDecoderLayer):
 
 class MiniCPM3Model(MiniCPMModel):
 
-    def _init_layers(self):
-        self.layers = nn.ModuleList([
-            MiniCPM3DecoderLayer(self.config, self.cache_config,
-                                 self.quant_config)
-            for _ in range(self.config.num_hidden_layers)
-        ])
+    def _init_layers(
+        self,
+        prefix: str,
+        config: PretrainedConfig,
+        cache_config: Optional[CacheConfig],
+        quant_config: Optional[QuantizationConfig],
+    ):
+        self.start_layer, self.end_layer, self.layers = make_layers(
+            config.num_hidden_layers,
+            lambda prefix: MiniCPM3DecoderLayer(config, cache_config,
+                                                quant_config),
+            prefix=f"{prefix}.layers")
 
 
 class MiniCPM3ForCausalLM(MiniCPMForCausalLM):
+    packed_modules_mapping = {
+        "gate_up_proj": [
+            "gate_proj",
+            "up_proj",
+        ],
+    }
 
-    def _init_model(self):
-        self.model = MiniCPM3Model(config=self.config,
-                                   cache_config=self.cache_config,
-                                   quant_config=self.quant_config,
-                                   lora_config=self.lora_config)
+    # LoRA specific attributes
+    supported_lora_modules = [
+        "kv_a_proj_with_mqa",
+        "q_a_proj",
+        "q_b_proj",
+        "kv_b_proj",
+        "o_proj",
+        "gate_up_proj",
+        "down_proj",
+        "embed_tokens",
+        "lm_head",
+    ]
+
+    # `embedding_modules` and `embedding_padding_modules`
+    # are inherited from MiniCPMForCausalLM
+
+    def _init_model(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        self.model = MiniCPM3Model(vllm_config=vllm_config,
+                                   prefix=maybe_prefix(prefix, "model"))

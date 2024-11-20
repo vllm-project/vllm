@@ -24,10 +24,8 @@ BLOCK_SIZE = 16
         "num_gpu_blocks_override": 100000 // BLOCK_SIZE,
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
-@pytest.mark.parametrize("baseline_llm_kwargs", [{
-    "use_v2_block_manager": False
-}])
-@pytest.mark.parametrize("test_llm_kwargs", [{"use_v2_block_manager": True}])
+@pytest.mark.parametrize("baseline_llm_kwargs", [{}])
+@pytest.mark.parametrize("test_llm_kwargs", [{}])
 @pytest.mark.parametrize("batch_size", [5])
 @pytest.mark.parametrize("seed", [1])
 def test_sliding_window_retrival(baseline_llm_generator, test_llm_generator,
@@ -48,7 +46,6 @@ def test_sliding_window_retrival(baseline_llm_generator, test_llm_generator,
 
     prompts, answer, indices = prep_prompts(batch_size)
 
-    print('Getting token ids from block manager v1')
     baseline_texts = get_text_from_llm_generator(baseline_llm_generator,
                                                  prompts,
                                                  sampling_params,
@@ -84,10 +81,7 @@ def test_sliding_window_retrival(baseline_llm_generator, test_llm_generator,
         "num_gpu_blocks_override": 100000 // BLOCK_SIZE,
     }])
 @pytest.mark.parametrize("per_test_common_llm_kwargs", [{}])
-@pytest.mark.parametrize("test_llm_kwargs", [{
-    "use_v2_block_manager": True,
-    "enable_chunked_prefill": True
-}])
+@pytest.mark.parametrize("test_llm_kwargs", [{"enable_chunked_prefill": True}])
 @pytest.mark.parametrize("batch_size", [5])
 @pytest.mark.parametrize("seed", [1])
 def test_sliding_window_chunked_prefill(test_llm_generator, batch_size, seed):

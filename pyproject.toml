@@ -4,12 +4,16 @@ requires = [
     "cmake>=3.26",
     "ninja",
     "packaging",
-    "setuptools >= 49.4.0",
-    "torch == 2.4.0",
+    "setuptools>=61",
+    "setuptools-scm>=8.0",
+    "torch == 2.5.1",
     "wheel",
     "jinja2",
 ]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools_scm]
+# version_file = "vllm/_version.py" # currently handled by `setup.py:get_version()`
 
 [tool.ruff]
 # Allow lines to be as long as 80.
@@ -19,6 +23,10 @@ exclude = [
     "examples/fp8/quantizer/quantize.py"
 ]
 
+[tool.ruff.lint.per-file-ignores]
+"vllm/version.py" = ["F401"]
+"vllm/_version.py" = ["ALL"]
+
 [tool.ruff.lint]
 select = [
     # pycodestyle
@@ -26,7 +34,7 @@ select = [
     # Pyflakes
     "F",
     # pyupgrade
-    # "UP",
+    "UP",
     # flake8-bugbear
     "B",
     # flake8-simplify
@@ -47,14 +55,12 @@ ignore = [
 ]
 
 [tool.mypy]
-python_version = "3.8"
-
 ignore_missing_imports = true
 check_untyped_defs = true
 follow_imports = "silent"
 
 # After fixing type errors resulting from follow_imports: "skip" -> "silent",
-# move the directory here and remove it from format.sh and mypy.yaml
+# move the directory here and remove it from tools/mypy.sh
 files = [
     "vllm/*.py",
     "vllm/adapter_commons",
@@ -62,7 +68,7 @@ files = [
     "vllm/entrypoints",
     "vllm/core",
     "vllm/inputs",
-    "vllm/logging",
+    "vllm/logging_utils",
     "vllm/multimodal",
     "vllm/platforms",
     "vllm/transformers_utils",
@@ -87,6 +93,9 @@ skip_gitignore = true
 [tool.pytest.ini_options]
 markers = [
     "skip_global_cleanup",
-    "core_model: run this model test in each PR instead of just daily",
+    "core_model: enable this model test in each PR instead of only nightly",
+    "cpu_model: enable this model test in CPU tests",
+    "quant_model: run this model test under Quantized category",
     "distributed_2_gpus: run this test only in distributed tests for 2 GPUs",
+    "skip_v1: do not run this test with v1",
 ]

@@ -6,8 +6,8 @@ import pytest
 from transformers import AutoTokenizer
 
 from vllm.multimodal.utils import rescale_image_size
+from vllm.platforms import current_platform
 from vllm.sequence import SampleLogprobs
-from vllm.utils import is_cpu, is_hip
 
 from ....conftest import IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner
 from ...utils import check_logprobs_close
@@ -44,13 +44,11 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
 
 
 target_dtype = "half"
-if is_cpu():
-    target_dtype = "bfloat16"
 
 # ROCm Triton FA can run into shared memory issues with these models,
 # use other backends in the meantime
 # FIXME (mattwong, gshtrasb, hongxiayan)
-if is_hip():
+if current_platform.is_rocm():
     os.environ["VLLM_USE_TRITON_FLASH_ATTN"] = "0"
 
 
@@ -71,21 +69,25 @@ def run_test(
 
     All the image fixtures for the test are from IMAGE_ASSETS.
     For huggingface runner, we provide the PIL images as input.
-    For vllm runner, we provide MultiModalDataDict objects 
+    For vllm runner, we provide MultiModalDataDict objects
     and corresponding MultiModalConfig as input.
     Note, the text input is also adjusted to abide by vllm contract.
     The text output is sanitized to be able to compare with hf.
     """
+    # HACK - this is an attempted workaround for the following bug
+    # https://github.com/huggingface/transformers/issues/34307
+    from transformers import AutoImageProcessor  # noqa: F401
+    from transformers import AutoProcessor  # noqa: F401
 
     # NOTE: take care of the order. run vLLM first, and then run HF.
     # vLLM needs a fresh new process without cuda initialization.
     # if we run HF first, the cuda initialization will be done and it
     # will hurt multiprocessing backend with fork method (the default method).
-
     # max_model_len should be greater than image_feature_size
     with vllm_runner(model,
+                     task="generate",
                      max_model_len=4096,
-                     max_num_seqs=1,
+                     max_num_seqs=2,
                      dtype=dtype,
                      limit_mm_per_prompt={"image": mm_limit},
                      tensor_parallel_size=tensor_parallel_size,
