@@ -1,10 +1,11 @@
 from dataclasses import dataclass
-from functools import lru_cache, partial
+from functools import lru_cache
+from itertools import groupby
 from typing import (Any, Callable, Collection, Generic, List, Mapping,
-                    Optional, TypedDict, TypeVar, final)
+                    Optional, TypeVar, Union, final)
 
 from transformers import BatchFeature
-from typing_extensions import TypeAlias
+from typing_extensions import TypeAlias, TypedDict
 
 from vllm.inputs import InputProcessingContext
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
@@ -16,19 +17,26 @@ from .inputs import (AudioItem, ImageItem, MultiModalDataDict,
 
 _T = TypeVar("_T")
 
-ReplacementFunc: TypeAlias = Callable[[_T, BatchFeature, int], List[int]]
-"""
-Given the original data item, HF-processed data, and index of the processed
-item, output the replacement token IDs to be allocated in vLLM.
-"""
+
+class PlaceholderReplacement(TypedDict, Generic[_T]):
+    token_id: int
+    """The ID of the placeholder token."""
+
+    count: Union[Callable[[_T, BatchFeature, int], int], int]
+    """
+    Given the original data item, HF-processed data, and index of the processed
+    item, output the number of replacement tokens to be allocated in vLLM.
+
+    For convenience, you can pass in an integer if this number is a constant.
+    """
 
 
 @dataclass
 class ModalityProcessingMetadata(Generic[_T]):
-    placeholder_replacements: Mapping[str, ReplacementFunc]
+    placeholder_replacements: Mapping[str, PlaceholderReplacement[_T]]
     """
-    A dictionary where each item represents the original placeholder in the
-    prompt text and the corresponding replacement.
+    A dictionary that maps each substring to search in the original prompt text
+    to the corresponding replacement.
     """
 
 
@@ -107,6 +115,19 @@ def to_multi_format(data: MultiModalDataDict) -> MultiModalMultiDataDict:
     return multi_data
 
 
+def iter_token_runs(token_ids: List[int]):
+    """
+    Yield the starting index and length of each run of tokens that are the same.
+    """
+    start_idx = 0
+
+    for token_id, it in groupby(token_ids):
+        length = sum(1 for _ in it)
+        yield token_id, PlaceholderRange(offset=start_idx, length=length)
+
+        start_idx += length
+
+
 def encode_no_special_tokens(
     tokenizer: AnyTokenizer,
     text: str,
@@ -168,8 +189,9 @@ def candidate_placeholders(
 
 def apply_placeholders(
     token_ids: List[int],
-    placeholder_ids: List[int],
-    get_replacement_ids: Callable[[], List[int]],
+    match_ids: List[int],
+    replacement_id: int,
+    replacement_count: int,
 ) -> Optional[PlaceholderRange]:
     """
     Find the first occurrence of :code:`placeholder_ids`,
@@ -177,14 +199,22 @@ def apply_placeholders(
 
     This function updates :code:`token_ids` in place.
     """
-    placeholder_length = len(placeholder_ids)
+    if len(match_ids) == 0:
+        raise ValueError("Match tokens should not be empty")
+    if replacement_id in match_ids:
+        raise ValueError(f"Match tokens ({match_ids}) should not include "
+                         f"replacement token ({replacement_id})")
+
+    placeholder_length = len(match_ids)
 
     for start_idx in range(len(token_ids) - placeholder_length + 1):
-        if token_ids[start_idx:placeholder_length] == placeholder_ids:
-            token_ids[start_idx:placeholder_length] = get_replacement_ids()
+        end_idx = start_idx + placeholder_length
 
-            return PlaceholderRange(offset=start_idx,
-                                    length=placeholder_length)
+        if token_ids[start_idx:end_idx] == match_ids:
+            replacement_ids = [replacement_id] * replacement_count
+            token_ids[start_idx:end_idx] = replacement_ids
+
+            return PlaceholderRange(offset=start_idx, length=replacement_count)
 
     return None
 
@@ -235,34 +265,44 @@ class MultiModalProcessor:
             assert isinstance(orig_inputs, list)
 
             metadata = self.metadata[modality]
-            placeholder_replacements = metadata.placeholder_replacements
+            placeholder_repls = metadata.placeholder_replacements
+            repl_token_ids = {
+                replacement["token_id"]
+                for replacement in placeholder_repls.values()
+            }
 
             modality_placeholders: List[PlaceholderRange] = []
 
-            for item_idx, orig_item in enumerate(orig_inputs):
-                for match_text, replace_fn in placeholder_replacements.items():
-                    candidates = candidate_placeholders(tokenizer, match_text)
-                    get_replacement_ids = partial(
-                        replace_fn,
-                        orig_item,
-                        processed_inputs,
-                        item_idx,
-                    )
+            # In case HF processor already inserts placeholder tokens
+            for new_token_id, run_info in iter_token_runs(new_token_ids):
+                if new_token_id in repl_token_ids:
+                    modality_placeholders.append(run_info)
 
-                    for match_ids in candidates:
-                        # TODO(youkaichao): Don't update new_token_ids
-                        placeholders = apply_placeholders(
-                            new_token_ids,
-                            match_ids,
-                            get_replacement_ids,
-                        )
+            if not modality_placeholders:
+                for item_idx, orig_item in enumerate(orig_inputs):
+                    for match_str, replacement in placeholder_repls.items():
+                        replacement_count = replacement["count"]
+                        if callable(replacement_count):
+                            replacement_count = replacement_count(
+                                orig_item,
+                                processed_inputs,
+                                item_idx,
+                            )
 
-                        if placeholders is not None:
-                            modality_placeholders.append(placeholders)
+                        for match_ids in candidate_placeholders(
+                                tokenizer, match_str):
+                            # TODO(youkaichao): Don't update new_token_ids
+                            placeholders = apply_placeholders(
+                                new_token_ids,
+                                match_ids,
+                                replacement["token_id"],
+                                replacement_count,
+                            )
 
-            # yapf: disable
-            mm_placeholders[modality] = modality_placeholders  # type: ignore[index]
-            # yapf: enable
+                            if placeholders is not None:
+                                modality_placeholders.append(placeholders)
+
+            mm_placeholders[modality] = modality_placeholders  # type: ignore[index]  # yapf: disable
 
         return MultiModalInputsV2(
             type="multimodal",
