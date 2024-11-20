@@ -58,7 +58,10 @@ async def async_fetch_image(image_url: str,
 
     By default, the image is converted into RGB format.
     """
-    if image_url.startswith('http'):
+    import os
+    if os.path.exists(image_url):
+       image = Image.open(image_url).convert('RGB')
+    elif image_url.startswith('http'):
         try:
             import requests
             image = Image.open(requests.get(image_url, stream=True).raw)
