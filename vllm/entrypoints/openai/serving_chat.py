@@ -47,6 +47,7 @@ class OpenAIServingChat(OpenAIServing):
         response_role: str,
         *,
         lora_modules: Optional[List[LoRAModulePath]],
+        orca_format: Optional[str],
         prompt_adapters: Optional[List[PromptAdapterPath]],
         request_logger: Optional[RequestLogger],
         chat_template: Optional[str],
@@ -60,6 +61,7 @@ class OpenAIServingChat(OpenAIServing):
                          model_config=model_config,
                          base_model_paths=base_model_paths,
                          lora_modules=lora_modules,
+                         orca_format=orca_format,
                          prompt_adapters=prompt_adapters,
                          request_logger=request_logger,
                          return_tokens_as_token_ids=return_tokens_as_token_ids)
@@ -750,12 +752,11 @@ class OpenAIServingChat(OpenAIServing):
         request_metadata.final_usage_info = usage
         
         metrics = EngineMetrics(
-            gpu_kv_cache_util=(last_req_metrics.gpu_kv_cache_utilisation
+            kv_cache_utilization=(last_req_metrics.gpu_kv_cache_utilisation
                                if last_req_metrics is not None else 0.0),
-            cpu_kv_cache_util=(last_req_metrics.cpu_kv_cache_utilisation
-                               if last_req_metrics is not None else 0.0),
-            running_lora_adapters=(last_req_metrics.running_lora_adapters
+            active_models=(last_req_metrics.running_lora_adapters
                                    if last_req_metrics is not None else ""),
+            format = self.orca_format
         )
         response = ChatCompletionResponse(
             id=request_id,

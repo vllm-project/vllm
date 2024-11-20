@@ -354,7 +354,7 @@ async def create_chat_completion(request: ChatCompletionRequest,
 
     elif isinstance(generator, ChatCompletionResponse):
         header = metrics_header(generator.metrics)
-        return JSONResponse(content=generator.model_dump(), headers= header)
+        return JSONResponse(content=generator.model_dump(), headers=header)
 
     return StreamingResponse(content=generator, media_type="text/event-stream")
 
@@ -541,6 +541,7 @@ def init_app_state(
         base_model_paths,
         args.response_role,
         lora_modules=args.lora_modules,
+        orca_format=args.orca_format,
         prompt_adapters=args.prompt_adapters,
         request_logger=request_logger,
         chat_template=resolved_chat_template,
