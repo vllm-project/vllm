@@ -374,12 +374,11 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         if self.use_triton_flash_attn:
             if logits_soft_cap is not None:
                 raise ValueError(
-                        "ROCm Triton FlashAttention does not support attention logits soft "
-                        "capping."
-                        "please try using the ROCm CK "
-                               "FA backend instead by setting the env var "
-                               "`VLLM_USE_TRITON_FLASH_ATTN=0`"
-                        )
+                    "ROCm Triton FlashAttention does not support attention"
+                    "logits soft capping."
+                    "please try using the ROCm CK "
+                    "FA backend instead by setting the env var "
+                    "`VLLM_USE_TRITON_FLASH_ATTN=0`")
 
             from vllm.attention.ops.triton_flash_attention import (  # noqa: F401
                 triton_attention)
@@ -407,8 +406,8 @@ class ROCmFlashAttentionImpl(AttentionImpl):
             if self.use_naive_attn:
                 if logits_soft_cap is not None:
                     raise ValueError(
-                            "ROCm Naive FlashAttention does not support attention logits soft "
-                            "capping.")
+                        "ROCm Naive FlashAttention does not support attention"
+                        "logits soft capping.")
 
                 self.attn_func = _sdpa_attention
                 logger.debug("Using naive attention in ROCmBackend")
