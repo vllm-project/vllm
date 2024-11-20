@@ -213,17 +213,7 @@ RUN --mount=type=bind,from=build_amdsmi,src=/install,target=/install/amdsmi/ \
         /install/flashattention/*.whl\
         /install/vllm/*.whl
 
-# Set up a non-root user for OpenShift
-RUN umask 002 && \
-    useradd --uid 2000 --gid 0 vllm && \
-    mkdir -p /licenses && \
-    chmod g+rwx $HOME /usr/src /workspace
-
-COPY LICENSE /licenses/vllm.md
-COPY examples/*.jinja /app/data/template/
-
 ENV HF_HUB_OFFLINE=1 \
-    PORT=8000 \
     HOME=/home/vllm \
     # Allow requested max length to exceed what is extracted from the
     # config.json
@@ -236,14 +226,23 @@ ENV HF_HUB_OFFLINE=1 \
     TOKENIZERS_PARALLELISM=false  \
     RAY_EXPERIMENTAL_NOSET_ROCR_VISIBLE_DEVICES=1 \
     VLLM_USE_TRITON_FLASH_ATTN=0 \
+    HIP_FORCE_DEV_KERNARG=1 \
     OUTLINES_CACHE_DIR=/tmp/outlines \
     NUMBA_CACHE_DIR=/tmp/numba \
     TRITON_CACHE_DIR=/tmp/triton
 
-# Switch to the non-root user
-USER 2000
+# setup non-root user for OpenShift
+RUN umask 002 && \
+    useradd --uid 2000 --gid 0 vllm && \
+    mkdir -p /licenses /home/vllm && \
+    chmod g+rwx /home/vllm
 
-# Set the entrypoint
+COPY LICENSE /licenses/vllm.md
+COPY examples/*.jinja /app/data/template/
+
+USER 2000
+WORKDIR /home/vllm
+
 ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
 
 
@@ -254,7 +253,7 @@ USER root
 RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,from=build_vllm,src=/workspace/dist,target=/install/vllm/ \
-    HOME=/root/ uv pip install /install/vllm/*.whl vllm-tgis-adapter==0.5.3
+    HOME=/root uv pip install /install/vllm/*.whl vllm-tgis-adapter==0.5.3
 
 ENV GRPC_PORT=8033 \
     PORT=8000 \

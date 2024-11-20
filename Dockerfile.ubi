@@ -146,7 +146,7 @@ ARG PYTHON_VERSION
 WORKDIR /workspace
 
 ENV VIRTUAL_ENV=/opt/vllm
-ENV PATH=$VIRTUAL_ENV/bin/:$PATH
+ENV PATH=$VIRTUAL_ENV/bin:$PATH
 
 # force using the python venv's cuda runtime libraries
 ENV LD_LIBRARY_PATH="${VIRTUAL_ENV}/lib/python${PYTHON_VERSION}/site-packages/nvidia/cuda_nvrtc/lib:${LD_LIBRARY_PATH}"
@@ -182,22 +182,23 @@ ENV HF_HUB_OFFLINE=1 \
     VLLM_ALLOW_LONG_MAX_MODEL_LEN=1 \
     VLLM_USAGE_SOURCE=production-docker-image \
     VLLM_WORKER_MULTIPROC_METHOD=fork \
+    VLLM_NO_USAGE_STATS=1 \
     OUTLINES_CACHE_DIR=/tmp/outlines \
     NUMBA_CACHE_DIR=/tmp/numba \
     TRITON_CACHE_DIR=/tmp/triton \
-    VLLM_NO_USAGE_STATS=1
 
 # setup non-root user for OpenShift
-RUN umask 002 \
-    && useradd --uid 2000 --gid 0 vllm \
-    && chmod g+rwx $HOME /usr/src /workspace
+RUN umask 002 && \
+    useradd --uid 2000 --gid 0 vllm && \
+    mkdir -p /home/vllm && \
+    chmod g+rwx /home/vllm /usr/src /workspace
 
 COPY LICENSE /licenses/vllm.md
-
-# Copy only .jinja files from example directory to template directory
 COPY examples/*.jinja /app/data/template/
 
 USER 2000
+WORKDIR /home/vllm
+
 ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
 
 
@@ -206,8 +207,9 @@ FROM vllm-openai as vllm-grpc-adapter
 USER root
 
 RUN --mount=type=cache,target=/root/.cache/pip \
+    --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,from=build,src=/workspace/dist,target=/workspace/dist \
-    uv pip install $(echo dist/*.whl)'[tensorizer]' vllm-tgis-adapter==0.5.3
+    HOME=/root uv pip install $(echo dist/*.whl)'[tensorizer]' vllm-tgis-adapter==0.5.3
 
 ENV GRPC_PORT=8033 \
     PORT=8000 \
