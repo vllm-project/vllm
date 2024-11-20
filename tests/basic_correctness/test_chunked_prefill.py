@@ -7,6 +7,7 @@ prefill requests are chunked.
 Run `pytest tests/models/test_chunked_prefill.py`.
 """
 import os
+
 import pytest
 
 from tests.kernels.utils import override_backend_env_variable
@@ -244,7 +245,7 @@ def test_with_prefix_caching(
             outputs[enable] = []
             for prompt in full_prompts:
                 outputs[enable] += vllm_model.generate_greedy([prompt],
-                                                                max_tokens)
+                                                              max_tokens)
 
     check_outputs_equal(
         outputs_0_lst=outputs[False],
