@@ -587,16 +587,22 @@ class GPUModelRunner:
 
     def _get_padded_batch_size(self, batch_size: int) -> Optional[int]:
         left, right = 0, len(self.cudagraph_batch_sizes) - 1
+        result = None
+
         while left <= right:
             mid = (left + right) // 2
             mid_size = self.cudagraph_batch_sizes[mid]
+
             if batch_size == mid_size:
                 return mid_size
             elif batch_size < mid_size:
                 right = mid - 1
+                if result is None or mid_size < result:
+                    result = mid_size
             else:
                 left = mid + 1
-        return None
+
+        return result
 
 
 @dataclass
