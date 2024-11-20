@@ -1031,7 +1031,6 @@ def get_rope(
                 if k in ("extrapolation_factor", "attn_factor", "beta_fast",
                          "beta_slow")
             }
-            print("rope scaling", rope_scaling)
             rotary_emb = YaRNScalingRotaryEmbedding(head_size, rotary_dim,
                                                     original_max_position,
                                                     base, is_neox_style,
