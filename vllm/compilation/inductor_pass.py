@@ -1,5 +1,6 @@
 import hashlib
 import inspect
+import types
 from abc import ABC, abstractmethod
 from typing import Any, Callable, Optional, Union
 
@@ -39,7 +40,12 @@ class InductorPass(ABC):
         """
         hasher = hashlib.sha256()
         for src in srcs:
-            src_str = src if isinstance(src, str) else inspect.getsource(src)
+            if isinstance(src, str):
+                src_str = src
+            elif isinstance(src, types.FunctionType):
+                src_str = inspect.getsource(src)
+            else:
+                src_str = inspect.getsource(src.__class__)
             hasher.update(src_str.encode("utf-8"))
         return hasher.digest()
 
