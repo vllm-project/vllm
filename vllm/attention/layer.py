@@ -66,6 +66,10 @@ class Attention(nn.Module):
         self._v_scaling_factor = torch.Tensor(v_scaling_factor_lists).type(torch.float32).to("cuda")
         self._quant_group = cache_config.kv_quant_group
         if cache_config.cache_dtype == "int8":
+            if self._quant_group > 0:
+                cache_config.cache_dtype = "int8_groupN"
+            elif self._quant_group == 0:
+                cache_config.cache_dtype = "int8_group0"
             # self._k_scale = 0.16
             # self._v_scale = 0.005
             self._k_scale = 1.0
