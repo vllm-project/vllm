@@ -275,7 +275,7 @@ def which_attn_to_use(head_size: int,
                 "better performance by setting environment variable  "
                 "VLLM_ATTENTION_BACKEND=FLASHINFER")
             selected_backend = _Backend.XFORMERS
-        elif kv_cache_dtype is not None and kv_cache_dtype=="int8":
+        elif kv_cache_dtype is not None and kv_cache_dtype.startswith("int8"):
             logger.info(
                 "Cannot use FlashAttention-2 backend for int8 KV cache.")
             logger.warning(
