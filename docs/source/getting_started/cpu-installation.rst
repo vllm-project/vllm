@@ -5,11 +5,11 @@ Installation with CPU
 
 vLLM initially supports basic model inferencing and serving on x86 CPU platform, with data types FP32, FP16 and BF16. vLLM CPU backend supports the following vLLM features:
 
-- Tensor Parallel (``-tp = N``)
-- Quantization (``INT8 W8A8, AWQ``)
-
-.. note::
-    More advanced features on `chunked-prefill`, `prefix-caching` and `FP8 KV cache` are under development and will be available soon.
+- Tensor Parallel 
+- Model Quantization (``INT8 W8A8, AWQ``)
+- Chunked-prefill
+- Prefix-caching
+- FP8-E5M2 KV-Caching (TODO)
 
 Table of contents:
 
