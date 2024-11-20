@@ -27,17 +27,22 @@ from collections import namedtuple
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from multiprocessing import shared_memory
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
+                    Union)
 from unittest.mock import patch
 
 import torch
 import torch.distributed
 from torch.distributed import Backend, ProcessGroup
 
+import vllm.distributed.kv_transfer.kv_transfer_agent as kv_transfer
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils import direct_register_custom_op, supports_custom_op
+
+if TYPE_CHECKING:
+    from vllm.config import KVTransferConfig
 
 
 @dataclass
@@ -942,6 +947,14 @@ def get_pp_group() -> GroupCoordinator:
 # kept for backward compatibility
 get_pipeline_model_parallel_group = get_pp_group
 
+_KV_TRANSFER: Optional[kv_transfer.KVTransferAgent] = None
+
+
+def get_kv_transfer_group() -> kv_transfer.KVTransferAgent:
+    assert _KV_TRANSFER is not None, (
+        "disaggregated KV cache transfer parallel group is not initialized")
+    return _KV_TRANSFER
+
 
 @contextmanager
 def graph_capture():
@@ -1088,6 +1101,19 @@ def initialize_model_parallel(
                                     backend,
                                     use_custom_allreduce=False,
                                     group_name="pp")
+
+
+def ensure_kv_transfer_initialized(config: "KVTransferConfig") -> None:
+    """
+    Initialize KV cache transfer parallel group.
+    """
+
+    global _KV_TRANSFER
+    if config.need_kv_parallel_group and _KV_TRANSFER is None:
+        _KV_TRANSFER = kv_transfer.KVTransferAgent(
+            rank=get_world_group().rank,
+            local_rank=get_world_group().local_rank,
+            config=config)
 
 
 def ensure_model_parallel_initialized(
