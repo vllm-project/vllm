@@ -79,7 +79,7 @@ def test_simple_piecewise_compile():
     vllm_config = VllmConfig(compilation_config=CompilationConfig(
         level=CompilationLevel.PIECEWISE,
         use_cudagraph=True,
-        non_cudagraph_ops=["silly.attention"],
+        splitting_ops=["silly.attention"],
         cudagraph_copy_inputs=True,
     ))
     with set_current_vllm_config(vllm_config):
