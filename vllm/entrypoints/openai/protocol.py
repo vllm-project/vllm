@@ -9,11 +9,14 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from typing_extensions import Annotated
 
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
+from vllm.logger import init_logger
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import (BeamSearchParams, GuidedDecodingParams,
                                   RequestOutputKind, SamplingParams)
 from vllm.sequence import Logprob
 from vllm.utils import random_uuid
+
+logger = init_logger(__name__)
 
 # torch is mocked during docs generation,
 # so we have to provide the values as literals
@@ -35,8 +38,19 @@ assert _LONG_INFO.max == _MOCK_LONG_INFO.max
 
 
 class OpenAIBaseModel(BaseModel):
-    # OpenAI API does not allow extra fields
-    model_config = ConfigDict(extra="forbid")
+    # OpenAI API does allow extra fields
+    model_config = ConfigDict(extra="allow")
+
+    @model_validator(mode="before")
+    @classmethod
+    def __log_extra_fields__(cls, data):
+        if isinstance(data, dict):
+            extra_fields = data.keys() - cls.model_fields.keys()
+            if extra_fields:
+                logger.warning(
+                    "The following fields were present in the request "
+                    "but ignored: %s", extra_fields)
+        return data
 
 
 class ErrorResponse(OpenAIBaseModel):
