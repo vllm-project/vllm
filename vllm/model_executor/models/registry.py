@@ -73,6 +73,7 @@ _TEXT_GENERATION_MODELS = {
     "MPTForCausalLM": ("mpt", "MPTForCausalLM"),
     "NemotronForCausalLM": ("nemotron", "NemotronForCausalLM"),
     "OlmoForCausalLM": ("olmo", "OlmoForCausalLM"),
+    "Olmo1124ForCausalLM": ("olmo_1124", "Olmo1124ForCausalLM"),
     "OlmoeForCausalLM": ("olmoe", "OlmoeForCausalLM"),
     "OPTForCausalLM": ("opt", "OPTForCausalLM"),
     "OrionForCausalLM": ("orion", "OrionForCausalLM"),
