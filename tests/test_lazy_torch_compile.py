@@ -62,5 +62,7 @@ module_name = "torch._inductor.async_compile"
 with blame(lambda: module_name in sys.modules) as result:
     import vllm  # noqa
 
-assert not result.found, ("Module is already imported, the first"
-                          " import location is: \n" + result.trace_stack)
+assert not result.found, (f"Module {module_name} is already imported, the"
+                          f" first import location is:\n{result.trace_stack}")
+
+print(f"Module {module_name} is not imported yet")
