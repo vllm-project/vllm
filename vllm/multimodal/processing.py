@@ -209,10 +209,12 @@ def find_token_match_by_text(
 
     left_idx = len(_encode(tokenizer, left_text, add_special_tokens=False))
     right_idx = len(_encode(tokenizer, right_text, add_special_tokens=True))
+    avg_idx = (left_idx + right_idx) // 2
     window_size = len(match_ids)
 
     valid_candidates = list[_Candidate]()
-    for start_idx in range(left_idx, right_idx - window_size + 1):
+    for start_idx in sorted(range(left_idx, right_idx - window_size + 1),
+                            key=lambda x: abs(x - avg_idx)):
         end_idx = start_idx + window_size
         candidate_text = tokenizer.decode(
             token_ids[start_idx:end_idx],
