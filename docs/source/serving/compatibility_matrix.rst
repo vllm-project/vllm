@@ -45,7 +45,7 @@ Feature x Feature
      - :abbr:`prmpt logP (Prompt Logprobs)`
      - :abbr:`async output (Async Output Processing)`
      - multi-step
-     - :abbr:`MM (Multimodal)`
+     - :abbr:`mm (Multimodal)`
      - best-of
      - beam-search
      - :abbr:`guided dec (Guided Decoding)`
@@ -253,7 +253,7 @@ Feature x Feature
      - 
      - 
      - 
-   * - :abbr:`MM (Multimodal)`
+   * - :abbr:`mm (Multimodal)`
      - ✅
      -  `✗ <https://github.com/vllm-project/vllm/pull/8348>`__ 
      -  `✗ <https://github.com/vllm-project/vllm/pull/7199>`__ 
@@ -402,6 +402,14 @@ Feature x Hardware
      - ✅
      - ✅
      - ✗
+   * - :abbr:`mm (Multimodal)`
+     - ✅
+     - ✅
+     - ✅
+     - ✅
+     - ✅
+     - ✅
+     - ✅
    * - :abbr:`logP (Logprobs)`
      - ✅
      - ✅
@@ -433,14 +441,6 @@ Feature x Hardware
      - ✅
      - ✅
      - `✗ <https://github.com/vllm-project/vllm/issues/8477>`__ 
-     - ✅
-   * - :abbr:`MM (Multimodal)`
-     - ✅
-     - ✅
-     - ✅
-     - ✅
-     - ✅
-     - ✅
      - ✅
    * - best-of
      - ✅
