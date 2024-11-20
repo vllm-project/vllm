@@ -17,6 +17,7 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
+from vllm.utils import is_navi3
 
 
 class PatchEmbedding(nn.Module):
@@ -79,6 +80,30 @@ class Attention(nn.Module):
         self.output_dropout = torch.nn.Dropout(config.dropout_prob)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if is_navi3():
+            try:
+                # git clone -b howiejay/navi_support https://github.com/ROCm/flash-attention.git
+                from flash_attn import flash_attn_func
+                B, L, _ = x.shape
+                qkv, _ = self.query_key_value(x)  # B, L, 3 * H * D
+                q, k, v = qkv.chunk(3, dim=-1)
+
+                q = q.reshape(B, L, self.num_heads_per_rank,
+                              self.head_dim)  # B, L, H, D
+                k = k.reshape(B, L, self.num_heads_per_rank,
+                              self.head_dim)  # B, L, H, D
+                v = v.reshape(B, L, self.num_heads_per_rank,
+                              self.head_dim)  # B, L, H, D
+
+                out = flash_attn_func(q, k, v)
+
+                output, _ = self.dense(out.view(B, L, -1))
+                output = self.output_dropout(output)
+
+                return output
+            except ModuleNotFoundError:
+                pass
+
         B, L, _ = x.shape
         qkv, _ = self.query_key_value(x)  # B, L, 3 * H * D
         q, k, v = qkv.chunk(3, dim=-1)
