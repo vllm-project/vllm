@@ -399,7 +399,7 @@ class DefaultModelLoader(BaseModelLoader):
                                           lora_config, cache_config,
                                           scheduler_config)
 
-            model.load_weights(self._get_all_weights(model_config, model))
+            model.load_weights(self._get_all_weights(model_config, model), arch_isCausalLM=model_config.isCausalLM)
 
             for _, module in model.named_modules():
                 quant_method = getattr(module, "quant_method", None)

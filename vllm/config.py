@@ -113,6 +113,7 @@ class ModelConfig:
         mm_processor_kwargs: Arguments to be forwarded to the model's processor
             for multi-modal data, e.g., image processor.
         forward_hidden_state: False: forward token id; True: forward last token hidden states
+        isCausalLM: False: will convert 1. architectures name and key in model to CausalLM format
     """
 
     def __init__(self,
@@ -144,7 +145,14 @@ class ModelConfig:
                  override_neuron_config: Optional[Dict[str, Any]] = None,
                  config_format: ConfigFormat = ConfigFormat.AUTO,
                  mm_processor_kwargs: Optional[Dict[str, Any]] = None,
-                 forward_hidden_state: Optional[bool] = False) -> None:
+                 forward_hidden_state: Optional[bool] = False,
+                 isCausalLM: Optional[bool] = True,
+                 ) -> None:
+        
+        self.forward_hidden_state = forward_hidden_state
+        self.isCausalLM = isCausalLM
+        self.model_architectures_map = {"Qwen2Model" : "Qwen2ForCausalLM"}
+        
         self.model = model
         self.tokenizer = tokenizer
         self.tokenizer_mode = tokenizer_mode
@@ -224,17 +232,29 @@ class ModelConfig:
         supported_tasks, task = self._resolve_task(task, self.hf_config)
         self.supported_tasks = supported_tasks
         self.task: Final = task
-        
-        self.forward_hidden_state = forward_hidden_state
 
         self._verify_quantization()
         self._verify_cuda_graph()
         self._verify_bnb_config()
+        
+    def arch_2_CausalLM(self, architectures):
+        
+        if self.isCausalLM == False:
+            result = []
+            for architecture in architectures:
+                try:
+                    result.append(self.model_architectures_map[architecture])
+                except:
+                    result.append(architecture)
+            return result
+        else:
+            return architectures
 
     def _init_multimodal_config(
         self, limit_mm_per_prompt: Optional[Mapping[str, int]]
     ) -> Optional["MultiModalConfig"]:
         architectures = getattr(self.hf_config, "architectures", [])
+        architectures = self.arch_2_CausalLM(architectures)
         if ModelRegistry.is_multimodal_model(architectures):
             return MultiModalConfig(limit_per_prompt=limit_mm_per_prompt or {})
 
@@ -246,10 +266,12 @@ class ModelConfig:
 
     def _init_attention_free(self) -> bool:
         architectures = getattr(self.hf_config, "architectures", [])
+        architectures = self.arch_2_CausalLM(architectures)
         return ModelRegistry.is_attention_free_model(architectures)
 
     def _init_has_inner_state(self) -> bool:
         architectures = getattr(self.hf_config, "architectures", [])
+        architectures = self.arch_2_CausalLM(architectures)
         return ModelRegistry.model_has_inner_state(architectures)
 
     def _verify_tokenizer_mode(self) -> None:
@@ -269,6 +291,7 @@ class ModelConfig:
             return {"draft"}, "draft"
 
         architectures = getattr(hf_config, "architectures", [])
+        architectures = self.arch_2_CausalLM(architectures)
 
         task_support: Dict[_Task, bool] = {
             # NOTE: Listed from highest to lowest priority,
@@ -472,6 +495,7 @@ class ModelConfig:
         pipeline_parallel_size = parallel_config.pipeline_parallel_size
         if pipeline_parallel_size > 1:
             architectures = getattr(self.hf_config, "architectures", [])
+            architectures = self.arch_2_CausalLM(architectures)
             if not ModelRegistry.is_pp_supported_model(architectures):
                 raise NotImplementedError(
                     "Pipeline parallelism is not supported for this model. "

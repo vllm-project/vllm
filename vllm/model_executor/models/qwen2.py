@@ -48,7 +48,7 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 
 from .interfaces import SupportsLoRA, SupportsPP
-from .utils import (AutoWeightsLoader, PPMissingLayer, is_pp_missing_parameter,
+from .utils import (AutoWeightsLoader, WeightsMapper, PPMissingLayer, is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers)
 
 
@@ -461,10 +461,18 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]], arch_isCausalLM):
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=(["lm_head."]
                            if self.config.tie_word_embeddings else None),
         )
-        loader.load_weights(weights)
+                
+        weightsMapper_ = None
+        if arch_isCausalLM == False:
+            weightsMapper_ = WeightsMapper(orig_to_new_prefix={
+                                                    "embed_tokens.": "model.embed_tokens.",
+                                                    "layers.": "model.layers.",
+                                                    "norm.weight": "model.norm.weight",})
+        
+        loader.load_weights(weights, mapper=weightsMapper_)

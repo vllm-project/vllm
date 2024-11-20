@@ -160,6 +160,7 @@ class LLM:
         # After positional args are removed, move this right below `model`
         task: TaskOption = "auto",
         forward_hidden_state: bool = False,
+        isCausalLM: bool = True,
         **kwargs,
     ) -> None:
         '''
@@ -195,6 +196,7 @@ class LLM:
             disable_async_output_proc=disable_async_output_proc,
             mm_processor_kwargs=mm_processor_kwargs,
             forward_hidden_state=forward_hidden_state,
+            isCausalLM=isCausalLM,
             **kwargs,
         )
         self.llm_engine = LLMEngine.from_engine_args(

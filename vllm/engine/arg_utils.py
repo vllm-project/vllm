@@ -184,6 +184,7 @@ class EngineArgs:
     scheduling_policy: Literal["fcfs", "priority"] = "fcfs"
     
     forward_hidden_state: Optional[bool] = False
+    isCausalLM: Optional[bool] = True
 
     def __post_init__(self):
         if not self.tokenizer:
@@ -848,6 +849,12 @@ class EngineArgs:
             type=bool,
             default=False,
             help='False: forward token id; True: forward last token hidden states')
+        
+        parser.add_argument(
+            '--isCausalLM',
+            type=bool,
+            default=True,
+            help='False: will convert 1. architectures name and key in model to CausalLM format')
 
         return parser
 
@@ -889,7 +896,8 @@ class EngineArgs:
             override_neuron_config=self.override_neuron_config,
             config_format=self.config_format,
             mm_processor_kwargs=self.mm_processor_kwargs,
-            forward_hidden_state=self.forward_hidden_state
+            forward_hidden_state=self.forward_hidden_state,
+            isCausalLM=self.isCausalLM
         )
 
     def create_load_config(self) -> LoadConfig:
