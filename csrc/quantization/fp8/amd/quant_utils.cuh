@@ -567,13 +567,24 @@ __inline__ __device__ Tout scaled_convert(const Tin& x, const float scale) {
           TORCH_CHECK(false,                                                   \
                       "Unsupported input type of kv cache: ", SRC_DTYPE);      \
         }                                                                      \
-      } else if (KV_DTYPE == "int8") {                                         \
+      } else if (KV_DTYPE == "int8_group0") {                                  \
         if (SRC_DTYPE == at::ScalarType::Float) {                              \
-          FN(float, uint8_t, vllm::Fp8KVCacheDataType::kInt8);                 \
+          FN(float, uint8_t, vllm::Fp8KVCacheDataType::kInt8Group0);           \
         } else if (SRC_DTYPE == at::ScalarType::Half) {                        \
-          FN(uint16_t, uint8_t, vllm::Fp8KVCacheDataType::kInt8);              \
+          FN(uint16_t, uint8_t, vllm::Fp8KVCacheDataType::kInt8Group0);        \
         } else if (SRC_DTYPE == at::ScalarType::BFloat16) {                    \
-          FN(__nv_bfloat16, uint8_t, vllm::Fp8KVCacheDataType::kInt8);         \
+          FN(__nv_bfloat16, uint8_t, vllm::Fp8KVCacheDataType::kInt8Group0);   \
+        } else {                                                               \
+          TORCH_CHECK(false,                                                   \
+                      "Unsupported input type of kv cache: ", SRC_DTYPE);      \
+        }                                                                      \
+      } else if (KV_DTYPE == "int8_groupN") {                                  \
+        if (SRC_DTYPE == at::ScalarType::Float) {                              \
+          FN(float, uint8_t, vllm::Fp8KVCacheDataType::kInt8GroupN);           \
+        } else if (SRC_DTYPE == at::ScalarType::Half) {                        \
+          FN(uint16_t, uint8_t, vllm::Fp8KVCacheDataType::kInt8GroupN);        \
+        } else if (SRC_DTYPE == at::ScalarType::BFloat16) {                    \
+          FN(__nv_bfloat16, uint8_t, vllm::Fp8KVCacheDataType::kInt8GroupN);   \
         } else {                                                               \
           TORCH_CHECK(false,                                                   \
                       "Unsupported input type of kv cache: ", SRC_DTYPE);      \
