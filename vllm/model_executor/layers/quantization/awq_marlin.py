@@ -20,7 +20,6 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_make_empty_g_idx, marlin_make_workspace, marlin_moe_permute_scales,
     marlin_permute_scales, moe_awq_to_marlin_zero_points,
     verify_marlin_supported, verify_marlin_supports_shape)
-from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.parameter import (GroupQuantScaleParameter,
                                            PackedvLLMParameter)
 from vllm.platforms import current_platform
@@ -118,6 +117,9 @@ class AWQMarlinConfig(QuantizationConfig):
 
     def get_quant_method(self, layer: torch.nn.Module,
                          prefix: str) -> Optional["QuantizeMethodBase"]:
+        # NOTE: lazy import to avoid calling `torch.compile` early
+        from vllm.model_executor.layers.vocab_parallel_embedding import (  # noqa
+            ParallelLMHead)
         if (isinstance(layer, LinearBase) or
             (isinstance(layer, ParallelLMHead) and self.lm_head_quantized)):
             if is_layer_skipped_awq(prefix, self.modules_to_not_convert):
