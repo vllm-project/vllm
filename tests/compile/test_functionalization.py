@@ -13,6 +13,7 @@ from vllm.config import CompilationConfig
 from .backend import TestBackend
 
 OPS_IN_MODEL = [
+    torch.ops._C.rotary_embedding.default,
     torch.ops._C.fused_add_rms_norm.default,
     torch.ops._C.silu_and_mul.default,
 ]
