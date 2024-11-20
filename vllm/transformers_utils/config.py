@@ -107,6 +107,15 @@ def patch_rope_scaling(config: PretrainedConfig) -> None:
 
 
 def patch_rope_scaling_dict(rope_scaling: Dict[str, Any]) -> None:
+    if "rope_type" in rope_scaling and "type" in rope_scaling:
+        rope_type = rope_scaling["rope_type"]
+        rope_type_legacy = rope_scaling["type"]
+        if rope_type != rope_type_legacy:
+            raise ValueError(
+                f"Found conflicts between 'rope_type={rope_type}' (modern "
+                f"field) and 'type={rope_type_legacy}' (legacy field). "
+                "You should only specify one of them.")
+
     if "rope_type" not in rope_scaling and "type" in rope_scaling:
         rope_scaling["rope_type"] = rope_scaling["type"]
         logger.info("Replacing legacy 'type' key with 'rope_type'")
