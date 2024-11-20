@@ -16,20 +16,8 @@ include_directories("${CMAKE_SOURCE_DIR}/csrc")
 #
 # Check the compile flags
 #
-<<<<<<< HEAD
-if (CMAKE_SYSTEM_PROCESSOR STREQUAL "ppc64le")
-    list(APPEND CXX_COMPILE_FLAGS
-        "-fopenmp"
-        "-DVLLM_CPU_EXTENSION")
-else()
-    list(APPEND CXX_COMPILE_FLAGS
-        "-fopenmp"
-        "-mf16c"
-        "-DVLLM_CPU_EXTENSION")
-endif()
-=======
 
-if (NOT CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64")
+if (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64")
     list(APPEND CXX_COMPILE_FLAGS
         "-mf16c"
     )
@@ -37,7 +25,6 @@ endif()
 list(APPEND CXX_COMPILE_FLAGS
     "-fopenmp"
     "-DVLLM_CPU_EXTENSION")
->>>>>>> eca86e66 (Rebased and resolved merge conflicts)
 
 execute_process(COMMAND cat /proc/cpuinfo
                 RESULT_VARIABLE CPUINFO_RET
@@ -72,7 +59,7 @@ find_isa(${CPUINFO} "avx512f" AVX512_FOUND)
 find_isa(${CPUINFO} "POWER10" POWER10_FOUND)
 find_isa(${CPUINFO} "POWER9" POWER9_FOUND)
 find_isa(${CPUINFO} "asimd" ASIMD_FOUND) # Check for ARM NEON support
-find_isa(${CPUINFO} "bf16" BF16_FOUND) # Check for BF16 support
+find_isa(${CPUINFO} "bf16" ARM_BF16_FOUND) # Check for ARM BF16 support
 
 if (AVX512_FOUND AND NOT AVX512_DISABLED)
     list(APPEND CXX_COMPILE_FLAGS
@@ -107,10 +94,10 @@ elseif (POWER9_FOUND OR POWER10_FOUND)
 
 elseif (ASIMD_FOUND)
     message(STATUS "ARMv8 or later architecture detected")
-    if(BF16_FOUND)
+    if(ARM_BF16_FOUND)
         message(STATUS "BF16 extension detected")
         set(MARCH_FLAGS "-march=armv8.2-a+bf16+dotprod+fp16")
-        add_compile_definitions(BF16_SUPPORT)
+        add_compile_definitions(ARM_BF16_SUPPORT)
     else()
         message(WARNING "BF16 functionality is not available")
         set(MARCH_FLAGS "-march=armv8.2-a+dotprod+fp16")  

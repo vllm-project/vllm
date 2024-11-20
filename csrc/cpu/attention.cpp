@@ -52,7 +52,7 @@ struct KernelVecType<c10::BFloat16> {
 };
 #else
   #ifdef __aarch64__
-    #ifndef BF16_SUPPORT
+    #ifndef ARM_BF16_SUPPORT
     // pass
     #else
 template <>
