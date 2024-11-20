@@ -134,7 +134,7 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "float": torch.float,
     "int8": torch.uint8,
     "int8_group0": torch.uint8,
-    "int8_groupN": torch.uint8,
+    "int8_group128": torch.uint8,
     "fp8": torch.uint8,
     "fp8_e4m3": torch.uint8,
     "fp8_e5m2": torch.uint8,
@@ -613,7 +613,7 @@ def get_kv_cache_torch_dtype(
             torch_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_dtype]
         elif cache_dtype == "fp8":
             torch_dtype = torch.uint8
-        elif cache_dtype == "int8":
+        elif cache_dtype.startswith("int8"):
             torch_dtype = torch.uint8
         else:
             raise ValueError(f"Invalid kv cache dtype: {cache_dtype}")
@@ -678,7 +678,7 @@ def create_kv_caches_with_random(
         raise ValueError(
             f"Does not support key cache of type fp8 with head_size {head_size}"
         )
-    if cache_dtype == "int8" and head_size % 16:
+    if cache_dtype.startswith("int8") and head_size % 16:
         raise ValueError(
             f"Does not support key cache of type int8 with head_size {head_size}"
         )

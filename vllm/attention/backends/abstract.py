@@ -240,10 +240,8 @@ class AttentionImpl(ABC, Generic[T]):
         kv_cache: torch.Tensor,
         attn_metadata: T,
         quant_group: Optional[int],
-        k_scaling_factor: torch.Tensor,
-        v_scaling_factor: torch.Tensor,
-        k_scale: float = 1.0,
-        v_scale: float = 1.0,
+        k_scales: torch.Tensor,
+        v_scales: torch.Tensor,
         attn_type: AttentionType = AttentionType.DECODER,
     ) -> torch.Tensor:
         raise NotImplementedError

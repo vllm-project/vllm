@@ -413,10 +413,8 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         kv_cache: torch.Tensor,
         attn_metadata: ROCmFlashAttentionMetadata,
         quant_group: Optional[int],
-        k_scaling_factor: torch.Tensor,
-        v_scaling_factor: torch.Tensor,
-        k_scale: float = 1.0,
-        v_scale: float = 1.0,
+        k_scales: torch.Tensor,
+        v_scales: torch.Tensor,
         attn_type: AttentionType = AttentionType.DECODER,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention and PagedAttention.
@@ -460,11 +458,9 @@ class ROCmFlashAttentionImpl(AttentionImpl):
                 value_cache,
                 attn_metadata.slot_mapping,
                 self.kv_cache_dtype,
-                k_scale,
-                v_scale,
                 quant_group,
-                k_scaling_factor,
-                v_scaling_factor,
+                k_scales,
+                v_scales,
             )
 
         num_prefill_tokens = attn_metadata.num_prefill_tokens

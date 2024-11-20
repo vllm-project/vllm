@@ -29,6 +29,6 @@ do
     python export_kv_params.py \
         --work_dir ${save_dir} \
         --kv_params_dir ${save_dir_path} \
-        --quant_group 8  2>&1|tee ${log} 
+        --quant_group 128  2>&1|tee ${log} 
 done
 

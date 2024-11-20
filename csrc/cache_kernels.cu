@@ -160,23 +160,31 @@ __global__ void reshape_and_cache_kernel(
                                          // block_size]
     const int64_t* __restrict__ slot_mapping,  // [num_tokens]
     const int key_stride, const int value_stride, const int num_heads,
-    const int head_size, const int block_size, const int x, const float k_scale,
-    const float v_scale,
+    const int head_size, const int block_size, const int x, 
     const int quant_group,
-    const float* __restrict__ k_scaling_factor, 
-    const float* __restrict__ v_scaling_factor) {
+    const float* __restrict__ k_scales, 
+    const float* __restrict__ v_scales) {
   const int64_t token_idx = blockIdx.x;
   const int64_t slot_idx = slot_mapping[token_idx];
   if (slot_idx < 0) {
     // Padding token that should be ignored.
     return;
   }
-
   const int64_t block_idx = slot_idx / block_size;
   const int64_t block_offset = slot_idx % block_size;
 
   const int n = num_heads * head_size;
   for (int i = threadIdx.x; i < n; i += blockDim.x) {
+    float k_scale = 0;
+    float v_scale = 0;
+    if constexpr (kv_dt == Fp8KVCacheDataType::kInt8Group128) {
+      int64_t tgt_kvs_idx = floor(i/quant_group);
+      k_scale = *reinterpret_cast<const float*>(k_scales+tgt_kvs_idx);
+      v_scale = *reinterpret_cast<const float*>(v_scales+tgt_kvs_idx);
+    } else {
+      k_scale = *reinterpret_cast<const float*>(k_scales);
+      v_scale = *reinterpret_cast<const float*>(v_scales);
+    }
     const int64_t src_key_idx = token_idx * key_stride + i;
     const int64_t src_value_idx = token_idx * value_stride + i;
 
@@ -208,20 +216,14 @@ __global__ void reshape_and_cache_kernel(
           int8::scaled_vec_conversion_int8<cache_t, scalar_t>(tgt_value, 
                                                               v_scale, 
                                                               0);
-    } else if constexpr (kv_dt == Fp8KVCacheDataType::kInt8GroupN) {
-      const int64_t tgt_ks_idx = floor(i/quant_group);
-      const int64_t tgt_vs_idx = floor(i/quant_group);
-      float k_scale_int8 = 
-                *reinterpret_cast<const float*>(k_scaling_factor + tgt_ks_idx);
-      float v_scale_int8 = 
-                *reinterpret_cast<const float*>(v_scaling_factor + tgt_vs_idx);
+    } else if constexpr (kv_dt == Fp8KVCacheDataType::kInt8Group128) {
       key_cache[tgt_key_idx] =
           int8::scaled_vec_conversion_int8<cache_t, scalar_t>(tgt_key, 
-                                                              k_scale_int8,
+                                                              k_scale,
                                                               0);
       value_cache[tgt_value_idx] =
           int8::scaled_vec_conversion_int8<cache_t, scalar_t>(tgt_value, 
-                                                              v_scale_int8, 
+                                                              v_scale, 
                                                               0);
     } else {
       key_cache[tgt_key_idx] =
@@ -243,10 +245,9 @@ __global__ void reshape_and_cache_flash_kernel(
     const int64_t* __restrict__ slot_mapping,  // [num_tokens]
     const int block_stride, const int key_stride, const int value_stride,
     const int num_heads, const int head_size, const int block_size,
-    const float k_scale, const float v_scale,
     const int quant_group,
-    const float* __restrict__ k_scaling_factor, 
-    const float* __restrict__ v_scaling_factor) {
+    const float* __restrict__ k_scales, 
+    const float* __restrict__ v_scales) {
   const int64_t token_idx = blockIdx.x;
   const int64_t slot_idx = slot_mapping[token_idx];
   // NOTE: slot_idx can be -1 if the token is padded
@@ -257,6 +258,16 @@ __global__ void reshape_and_cache_flash_kernel(
   const int64_t block_offset = slot_idx % block_size;
   const int n = num_heads * head_size;
   for (int i = threadIdx.x; i < n; i += blockDim.x) {
+    float k_scale = 0;
+    float v_scale = 0;
+    if constexpr (kv_dt == Fp8KVCacheDataType::kInt8Group128) {
+      int64_t tgt_kvs_idx = floor(i/quant_group);
+      k_scale = *reinterpret_cast<const float*>(k_scales+tgt_kvs_idx);
+      v_scale = *reinterpret_cast<const float*>(v_scales+tgt_kvs_idx);
+    } else {
+      k_scale = *reinterpret_cast<const float*>(k_scales);
+      v_scale = *reinterpret_cast<const float*>(v_scales);
+    }
     const int64_t src_key_idx = token_idx * key_stride + i;
     const int64_t src_value_idx = token_idx * value_stride + i;
     const int head_idx = i / head_size;
@@ -279,20 +290,14 @@ __global__ void reshape_and_cache_flash_kernel(
           int8::scaled_vec_conversion_int8<cache_t, scalar_t>(tgt_value, 
                                                               v_scale, 
                                                               0);
-    } else if constexpr (kv_dt == Fp8KVCacheDataType::kInt8GroupN) {
-      const int64_t tgt_ks_idx = floor(i/quant_group);
-      const int64_t tgt_vs_idx = floor(i/quant_group);
-      float k_scale_int8 = 
-                *reinterpret_cast<const float*>(k_scaling_factor + tgt_ks_idx);
-      float v_scale_int8 = 
-                *reinterpret_cast<const float*>(v_scaling_factor + tgt_vs_idx);
+    } else if constexpr (kv_dt == Fp8KVCacheDataType::kInt8Group128) {
       key_cache[tgt_key_value_idx] =
           int8::scaled_vec_conversion_int8<cache_t, scalar_t>(tgt_key, 
-                                                              k_scale_int8, 
+                                                              k_scale,
                                                               0);
       value_cache[tgt_key_value_idx] =
           int8::scaled_vec_conversion_int8<cache_t, scalar_t>(tgt_value, 
-                                                              v_scale_int8, 
+                                                              v_scale,
                                                               0);
     } else {
       key_cache[tgt_key_value_idx] =
@@ -315,10 +320,10 @@ __global__ void reshape_and_cache_flash_kernel(
           reinterpret_cast<CACHE_T*>(key_cache.data_ptr()),           \
           reinterpret_cast<CACHE_T*>(value_cache.data_ptr()),         \
           slot_mapping.data_ptr<int64_t>(), key_stride, value_stride, \
-          num_heads, head_size, block_size, x, k_scale, v_scale,      \
+          num_heads, head_size, block_size, x,                        \
           quant_group,                                                \
-          k_scaling_factor.data_ptr<float>(),                         \
-          v_scaling_factor.data_ptr<float>());                        \
+          k_scales.data_ptr<float>(),                         \
+          v_scales.data_ptr<float>());                        \
 
 void reshape_and_cache(
     torch::Tensor& key,    // [num_tokens, num_heads, head_size]
@@ -328,11 +333,10 @@ void reshape_and_cache(
     torch::Tensor&
         value_cache,  // [num_blocks, num_heads, head_size, block_size]
     torch::Tensor& slot_mapping,  // [num_tokens]
-    const std::string& kv_cache_dtype, const double k_scale,
-    const double v_scale,
+    const std::string& kv_cache_dtype, 
     const int64_t quant_group,
-    torch::Tensor& k_scaling_factor, 
-    torch::Tensor& v_scaling_factor) {
+    torch::Tensor& k_scales, 
+    torch::Tensor& v_scales) {
   int num_tokens = key.size(0);
   int num_heads = key.size(1);
   int head_size = key.size(2);
@@ -363,10 +367,8 @@ void reshape_and_cache(
           reinterpret_cast<CACHE_T*>(value_cache.data_ptr()),         \
           slot_mapping.data_ptr<int64_t>(), block_stride, key_stride, \
           value_stride, num_heads, head_size, block_size,             \
-          k_scale, v_scale,                                           \
-          quant_group,                                                \
-          k_scaling_factor.data_ptr<float>(),                         \
-          v_scaling_factor.data_ptr<float>());
+          quant_group, k_scales.data_ptr<float>(),                    \
+          v_scales.data_ptr<float>());
 
 void reshape_and_cache_flash(
     torch::Tensor& key,        // [num_tokens, num_heads, head_size]
@@ -375,11 +377,10 @@ void reshape_and_cache_flash(
     torch::Tensor&
         value_cache,  // [num_blocks, block_size, num_heads, head_size]
     torch::Tensor& slot_mapping,  // [num_tokens]
-    const std::string& kv_cache_dtype, const double k_scale,
-    const double v_scale,
+    const std::string& kv_cache_dtype, 
     const int64_t quant_group,
-    torch::Tensor& k_scaling_factor, 
-    torch::Tensor& v_scaling_factor) {
+    torch::Tensor& k_scales, 
+    torch::Tensor& v_scales) {
   int num_tokens = key.size(0);
   int num_heads = key.size(1);
   int head_size = key.size(2);

@@ -37,9 +37,8 @@
           exp_sums_ptr, max_logits_ptr, tmp_out_ptr, query_ptr, key_cache_ptr, \
           value_cache_ptr, num_kv_heads, scale, block_tables_ptr,              \
           seq_lens_ptr, max_num_blocks_per_seq, alibi_slopes_ptr, q_stride,    \
-          kv_block_stride, kv_head_stride, k_scale, v_scale,                   \
-          quant_group, k_scaling_factor_ptr, v_scaling_factor_ptr,             \
-          tp_rank,                                                             \
+          kv_block_stride, kv_head_stride,                                     \
+          quant_group, k_scales_ptr, v_scales_ptr, tp_rank,                    \
           blocksparse_local_blocks, blocksparse_vert_stride,                   \
           blocksparse_block_size, blocksparse_head_sliding_step);              \
   vllm::paged_attention_v2_reduce_kernel<T, HEAD_SIZE, NUM_THREADS,            \
@@ -56,11 +55,10 @@ void paged_attention_v2_launcher(
     torch::Tensor& tmp_out, torch::Tensor& query, torch::Tensor& key_cache,
     torch::Tensor& value_cache, int num_kv_heads, float scale,
     torch::Tensor& block_tables, torch::Tensor& seq_lens, int max_seq_len,
-    const c10::optional<torch::Tensor>& alibi_slopes, float k_scale,
-    float v_scale, 
+    const c10::optional<torch::Tensor>& alibi_slopes, 
     int quant_group,
-    torch::Tensor& k_scaling_factor,
-    torch::Tensor& v_scaling_factor,
+    torch::Tensor& k_scales,
+    torch::Tensor& v_scales,
     const int tp_rank, const int blocksparse_local_blocks,
     const int blocksparse_vert_stride, const int blocksparse_block_size,
     const int blocksparse_head_sliding_step) {
@@ -88,8 +86,8 @@ void paged_attention_v2_launcher(
   T* query_ptr = reinterpret_cast<T*>(query.data_ptr());
   CACHE_T* key_cache_ptr = reinterpret_cast<CACHE_T*>(key_cache.data_ptr());
   CACHE_T* value_cache_ptr = reinterpret_cast<CACHE_T*>(value_cache.data_ptr());
-  float* k_scaling_factor_ptr = reinterpret_cast<float*>(k_scaling_factor.data_ptr());
-  float* v_scaling_factor_ptr = reinterpret_cast<float*>(v_scaling_factor.data_ptr());
+  float* k_scales_ptr = reinterpret_cast<float*>(k_scales.data_ptr());
+  float* v_scales_ptr = reinterpret_cast<float*>(v_scales.data_ptr());
   int* block_tables_ptr = block_tables.data_ptr<int>();
   int* seq_lens_ptr = seq_lens.data_ptr<int>();
 
@@ -150,8 +148,7 @@ void paged_attention_v2_launcher(
                               IS_BLOCK_SPARSE>(                               \
       out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache,      \
       num_kv_heads, scale, block_tables, seq_lens, max_seq_len, alibi_slopes, \
-      k_scale, v_scale,                                                       \
-      quant_group, k_scaling_factor, v_scaling_factor,                        \
+      quant_group, k_scales, v_scales,                                        \
       tp_rank, blocksparse_local_blocks,                                      \
       blocksparse_vert_stride, blocksparse_block_size,                        \
       blocksparse_head_sliding_step);
@@ -201,10 +198,10 @@ void paged_attention_v2(
     torch::Tensor& seq_lens,      // [num_seqs]
     int64_t block_size, int64_t max_seq_len,
     const c10::optional<torch::Tensor>& alibi_slopes,
-    const std::string& kv_cache_dtype, double k_scale, double v_scale,
+    const std::string& kv_cache_dtype, 
     const int64_t quant_group,
-    torch::Tensor& k_scaling_factor,
-    torch::Tensor& v_scaling_factor,
+    torch::Tensor& k_scales,
+    torch::Tensor& v_scales,
     const int64_t tp_rank, const int64_t blocksparse_local_blocks,
     const int64_t blocksparse_vert_stride, const int64_t blocksparse_block_size,
     const int64_t blocksparse_head_sliding_step) {

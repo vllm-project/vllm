@@ -323,7 +323,7 @@ def _export_asym(key_stats: dict,
 def main(work_dir: str,
          kv_params_dir: str = './work_dir/',
          kv_bits: int = 8,
-         quant_group: int = 32,
+         quant_group: int = 128,
          kv_sym: bool = True,
          num_tp: int = 1) -> None:
     """Main function to export key and value stats.

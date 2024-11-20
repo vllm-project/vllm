@@ -57,36 +57,21 @@ class Attention(nn.Module):
         # expect the pre-quantized k/v_scale to be loaded along
         # with the model weights.
         self.kv_cache_dtype = kv_cache_dtype
-        self._k_scale = 1.0
-        self._v_scale = 1.0
-        self._k_zero_point = 0
-        self._v_zero_point = 0
-        k_scaling_factor_lists = v_scaling_factor_lists = [1.0, 0.0]
-        self._k_scaling_factor = torch.Tensor(k_scaling_factor_lists).type(torch.float32).to("cuda")
-        self._v_scaling_factor = torch.Tensor(v_scaling_factor_lists).type(torch.float32).to("cuda")
+        k_scales_lists = v_scales_lists = [1.0]
+        # k_scales_lists = [0.16]
+        # v_scales_lists = [0.005]
+        self._k_scales = torch.Tensor(k_scales_lists).type(torch.float32).to("cuda")
+        self._v_scales = torch.Tensor(v_scales_lists).type(torch.float32).to("cuda")
         self._quant_group = cache_config.kv_quant_group
-        if cache_config.cache_dtype == "int8":
-            if self._quant_group > 0:
-                cache_config.cache_dtype = "int8_groupN"
-            elif self._quant_group == 0:
-                cache_config.cache_dtype = "int8_group0"
-            # self._k_scale = 0.16
-            # self._v_scale = 0.005
-            self._k_scale = 1.0
-            self._v_scale = 1.0
+        if cache_config.cache_dtype.startswith("int8"):
             if cache_config.kv_quant_params_path is not None:
-                if type(cache_config.kv_quant_params[0][0]) == list and len(cache_config.kv_quant_params[0][0])==1:
-                    self._k_scale = cache_config.kv_quant_params[0].pop(0)[0]
-                    self._v_scale = cache_config.kv_quant_params[1].pop(0)[0]
-                    self._k_zero_point = cache_config.kv_quant_params[2].pop(0)[0]
-                    self._v_zero_point = cache_config.kv_quant_params[3].pop(0)[0]
-                elif type(cache_config.kv_quant_params[0][0]) == list:
-                    k_scaling_factor_lists = cache_config.kv_quant_params[0].pop(0)
-                    v_scaling_factor_lists = cache_config.kv_quant_params[1].pop(0)
-                    self._k_scaling_factor = torch.Tensor(k_scaling_factor_lists).type(torch.float32).to("cuda")
-                    self._v_scaling_factor = torch.Tensor(v_scaling_factor_lists).type(torch.float32).to("cuda")
-                    self._k_scaling_factor = self._k_scaling_factor.reshape((-1, num_kv_heads, head_size//self._quant_group))
-                    self._v_scaling_factor = self._v_scaling_factor.reshape((-1, num_kv_heads, head_size//self._quant_group))
+                k_scales_lists = cache_config.kv_quant_params[0].pop(0)
+                v_scales_lists = cache_config.kv_quant_params[1].pop(0)
+                self._k_scales = torch.Tensor(k_scales_lists).type(torch.float32).to("cuda")
+                self._v_scales = torch.Tensor(v_scales_lists).type(torch.float32).to("cuda")
+                if self._quant_group !=0:
+                    self._k_scales = self._k_scales.reshape((-1, num_kv_heads, head_size//self._quant_group))
+                    self._v_scales = self._v_scales.reshape((-1, num_kv_heads, head_size//self._quant_group))
         quant_method = quant_config.get_quant_method(
             self, prefix=prefix) if quant_config else None
         if quant_method is not None:
@@ -130,10 +115,8 @@ class Attention(nn.Module):
                                  kv_cache,
                                  attn_metadata,
                                  self._quant_group,
-                                 self._k_scaling_factor,
-                                 self._v_scaling_factor,
-                                 self._k_scale,
-                                 self._v_scale,
+                                 self._k_scales,
+                                 self._v_scales,
                                  attn_type=attn_type)
 
     def extra_repr(self) -> str:
