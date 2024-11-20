@@ -6,6 +6,7 @@ ruff==0.6.5
 codespell==2.3.0
 isort==5.13.2
 clang-format==18.1.5
+sphinx-lint==1.0.0
 
 # type checking
 mypy==1.11.1
