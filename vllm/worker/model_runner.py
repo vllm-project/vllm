@@ -993,7 +993,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         self.pin_memory = is_pin_memory_available()
 
         self.kv_cache_dtype = kv_cache_dtype
-        self.kv_quant_params = self.load_kv_quant_params(model_config, self.cache_config.kv_quant_params_path) if self.kv_cache_dtype == "int8" else None
+        self.kv_quant_params = self.load_kv_quant_params(
+            model_config, self.cache_config.kv_quant_params_path
+          ) if self.kv_cache_dtype.startswith("int8") else None
         self.cache_config.kv_quant_params = self.kv_quant_params
         self.sliding_window = model_config.get_sliding_window()
         self.block_size = cache_config.block_size
@@ -1219,7 +1221,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     "provided. Defaulting to scaling factors of 1.0. "
                     "This may lead to less accurate results!")
 
-        if self.kv_cache_dtype == "int8" and current_platform.is_rocm():
+        if self.kv_cache_dtype.startswith("int8") and current_platform.is_rocm():
             # Currently only ROCm accepts kv-cache scaling factors
             # via quantization_param_path and this will be deprecated
             # in the future.
