@@ -453,6 +453,9 @@ class WorkerWrapperBase:
         # see https://github.com/NVIDIA/nccl/issues/1234
         os.environ['NCCL_CUMEM_ENABLE'] = '0'
 
+        # see https://github.com/vllm-project/vllm/issues/10480
+        os.environ['TORCHINDUCTOR_COMPILE_THREADS'] = '1'
+
         from vllm.plugins import load_general_plugins
         load_general_plugins()
 
