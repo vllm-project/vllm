@@ -210,7 +210,8 @@ def marlin_create_bench_fn(bt: BenchmarkTensors) -> Callable:
                                           size_m=bt.a.shape[0],
                                           size_n=bt.w_ref.shape[1],
                                           size_k=bt.w_ref.shape[0],
-                                          is_k_full=True)
+                                          is_k_full=True,
+                                          is_zp_float=False)
     else:
         assert bt.a.dtype == torch.int8
         assert bt.wtype == scalar_types.uint4b8
