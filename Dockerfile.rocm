@@ -51,9 +51,9 @@ RUN --mount=type=cache,target=/root/.cache/pip \
         *"rocm-6.2"*) \
             python3 -m pip uninstall -y torch torchvision \
             && python3 -m pip install --pre \
-                torch==2.6.0.dev20240918 \
+                torch==2.6.0.dev20241113+rocm6.2 \
                 'setuptools-scm>=8' \
-                torchvision==0.20.0.dev20240918 \
+                torchvision==0.20.0.dev20241113+rocm6.2 \
                 --extra-index-url https://download.pytorch.org/whl/nightly/rocm6.2;; \
         *) ;; esac
 
