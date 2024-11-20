@@ -169,6 +169,7 @@ class GPUModelRunner:
                 req_id=req_id,
                 prompt_token_ids=req_data.prompt_token_ids,
                 prompt=req_data.prompt,
+                mm_hash=req_data.mm_hash,
                 mm_inputs=req_data.mm_inputs,
                 mm_positions=req_data.mm_positions,
                 sampling_params=sampling_params,
@@ -599,6 +600,7 @@ class CachedRequestState:
     req_id: str
     prompt_token_ids: List[int]
     prompt: Optional[str]
+    mm_hash: List[str]
     mm_inputs: List[MultiModalKwargs]
     mm_positions: List["PlaceholderRange"]
     sampling_params: SamplingParams

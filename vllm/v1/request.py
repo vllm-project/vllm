@@ -57,6 +57,9 @@ class Request:
         # Output of the mm input mapper (e.g., image tensors).
         self.mm_inputs: List[MultiModalKwargs] = []
 
+        # FIXME(alexm): Support other modalities (not just image)
+        self.mm_hash: List[int] = []
+
     @classmethod
     def from_engine_core_request(cls, request: EngineCoreRequest) -> "Request":
         return cls(

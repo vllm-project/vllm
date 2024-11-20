@@ -508,6 +508,7 @@ class NewRequestData:
     req_id: str
     prompt_token_ids: List[int]
     prompt: Optional[str]
+    mm_hash: List[str]
     mm_inputs: List["MultiModalKwargs"]
     mm_positions: List["PlaceholderRange"]
     sampling_params: SamplingParams
@@ -525,6 +526,7 @@ class NewRequestData:
             req_id=request.request_id,
             prompt_token_ids=request.prompt_token_ids,
             prompt=request.prompt,
+            mm_hash=request.mm_hash,
             mm_inputs=request.mm_inputs,
             mm_positions=request.mm_positions,
             sampling_params=request.sampling_params,

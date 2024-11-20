@@ -7,8 +7,10 @@ from multiprocessing.process import BaseProcess
 from multiprocessing.sharedctypes import Synchronized
 from typing import Any, Iterator, List, Tuple, Type, Union
 
+import PIL
 import zmq
 import zmq.asyncio
+from blake3 import blake3
 from msgspec import msgpack
 
 from vllm.config import CacheConfig, VllmConfig
@@ -93,6 +95,34 @@ class EngineCore:
         self.model_executor.initialize_cache(num_gpu_blocks)
         return num_gpu_blocks, num_cpu_blocks
 
+    def hash_mm_data(self, req: EngineCoreRequest):
+        assert req.mm_data  # Data exists
+        assert not req.mm_hash  # No hash
+
+        print("hash_mm_data: req_id = {}".format(req.request_id))
+
+        # FIXME(alexm):
+        #   1. Support other modalities
+        #   2. Support multiple images
+        image = req.mm_data.get("image")
+        assert isinstance(image, PIL.Image.Image)
+
+        print("  type(data) = {}, data = {}".format(type(image), image))
+
+        # Convert image to bytes
+        start_time = time.time()
+        bytes = image.tobytes()
+        elapsed_time = time.time() - start_time
+        print("    tobytes time = {}".format(elapsed_time))
+
+        # Hash image bytes
+        start_time = time.time()
+        hasher = blake3()
+        hasher.update(bytes)
+        req.mm_hash.append(hasher.hexdigest())
+        elapsed_time = time.time() - start_time
+        print("    hash time = {}".format(elapsed_time))
+
     def add_request(self, request: EngineCoreRequest):
         """Add request to the scheduler."""
 
@@ -101,6 +131,9 @@ class EngineCore:
         # take 10-50 ms, which can cause a spike in the latency. We should
         # consider moving this to a separate thread.
         if req.mm_data:
+
+            self.hash_mm_data(req)
+
             req.mm_inputs = self.mm_input_mapper.process_inputs(
                 req.mm_data, req.mm_processor_kwargs)
         self.scheduler.add_request(req)

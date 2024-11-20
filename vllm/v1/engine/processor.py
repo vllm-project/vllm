@@ -114,6 +114,7 @@ class Processor:
             decoder_inputs.prompt,
             decoder_inputs.prompt_token_ids,
             decoder_inputs.multi_modal_data,
+            [],  # Initially, mm hash is empty
             decoder_inputs.multi_modal_placeholders,
             decoder_inputs.mm_processor_kwargs,
             sampling_params,

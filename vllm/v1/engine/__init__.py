@@ -36,6 +36,7 @@ class EngineCoreRequest:
     prompt: Optional[str]
     prompt_token_ids: List[int]
     mm_data: Optional[MultiModalDataDict]
+    mm_hash: List[str]
     mm_placeholders: Optional[MultiModalPlaceholderDict]
     mm_processor_kwargs: Optional[Dict[str, Any]]
     sampling_params: SamplingParams
