@@ -7,7 +7,7 @@ prompts = [
 ]
 answers = [
     " or, through inaction, allow a human being to come to harm.",
-    " what is essential is invisible to the eye",
+    " what is essential is invisible to the eye.",
     " but in rising every time we fall.",
 ]
 N = 1
@@ -19,7 +19,7 @@ sampling_params = SamplingParams(temperature=0.7,
 
 # Set `enforce_eager=True` to avoid ahead-of-time compilation.
 # In real workloads, `enforace_eager` should be `False`.
-llm = LLM(model="google/gemma-2b", enable_prefix_caching=True)
+llm = LLM(model="google/gemma-2b", enforce_eager=True)
 outputs = llm.generate(prompts, sampling_params)
 for output, answer in zip(outputs, answers):
     prompt = output.prompt
