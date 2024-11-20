@@ -17,17 +17,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 import torch
 from torch import nn
 from transformers import PretrainedConfig
-
+from vllm.config import CacheConfig, VllmConfig
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import CacheConfig, LoRAConfig
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import (ColumnParallelLinear,
+from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.distributed import (get_tensor_model_parallel_rank,
@@ -45,10 +45,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.model_executor.layers.sampler import SamplerOutput
-from vllm.utils import is_hip
-
-from .interfaces import SupportsLoRA
-
+from .utils import AutoWeightsLoader, make_layers, maybe_prefix
 
 class TeleChat2MLP(nn.Module):
 
@@ -59,33 +56,32 @@ class TeleChat2MLP(nn.Module):
         hidden_act: str,
         quant_config: Optional[QuantizationConfig] = None,
         bias: bool = False,
+        prefix: str = "",
     ) -> None:
         super().__init__()
-        self.gate_proj = ColumnParallelLinear(
-            input_size=hidden_size,
-            output_size=intermediate_size,
+        self.gate_up_proj = MergedColumnParallelLinear(
+            hidden_size,
+            [intermediate_size] * 2,
             bias=False,
-            quant_config=quant_config)
-        
-        self.up_proj = ColumnParallelLinear(
-            input_size=hidden_size,
-            output_size=intermediate_size,
-            bias=False,
-            quant_config=quant_config)
-        
-        self.down_proj = RowParallelLinear(input_size=intermediate_size,
-                                           output_size=hidden_size,
-                                           bias=True,
-                                           quant_config=quant_config,
-                                           input_is_parallel=True)
+            quant_config=quant_config,
+            prefix=f"{prefix}.gate_up_proj",
+        )
+    
+        self.down_proj = RowParallelLinear(
+            input_size=intermediate_size,
+            output_size=hidden_size,
+            bias=True,
+            quant_config=quant_config,
+            input_is_parallel=True,
+            prefix=f"{prefix}.down_proj",
+        )
         self.act_fn = SiluAndMul()
 
     def forward(self, x):
-        gate_output, _ = self.gate_proj(x)
-        up_output, _ = self.up_proj(x)
-        gate_output = self.act_fn(torch.cat([gate_output, up_output], dim=-1))
-        output, _ = self.down_proj(gate_output)
-        return output
+        gate_up, _ = self.gate_up_proj(x)
+        x = self.act_fn(gate_up)
+        x, _ = self.down_proj(x)
+        return x
     
 
 class TeleChat2Attention(nn.Module):
@@ -102,7 +98,7 @@ class TeleChat2Attention(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
         bias: bool = False,
         cache_config: Optional[CacheConfig] = None,
-    ) -> None:
+        prefix: str = "") -> None:
         super().__init__()
         self.config = config 
         self.hidden_size = hidden_size
@@ -134,6 +130,7 @@ class TeleChat2Attention(nn.Module):
             total_num_kv_heads=self.total_num_kv_heads,
             bias=bias,
             quant_config=quant_config,
+            prefix=f"{prefix}.qkv_proj",
         )
 
         self.dense = RowParallelLinear(
@@ -142,6 +139,7 @@ class TeleChat2Attention(nn.Module):
             bias=True,
             quant_config=quant_config,
             input_is_parallel=True,
+            prefix=f"{prefix}.dense_proj",
         )
 
         self.rotary_emb = get_rope(
@@ -157,7 +155,8 @@ class TeleChat2Attention(nn.Module):
                               self.scaling,
                               num_kv_heads=self.num_kv_heads,
                               cache_config=cache_config,
-                              quant_config=quant_config)
+                              quant_config=quant_config,
+                              prefix=f"{prefix}.self_attention")
     
     def forward(
         self,
@@ -182,6 +181,7 @@ class TeleChat2DecoderLayer(nn.Module):
         config: PretrainedConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -200,15 +200,16 @@ class TeleChat2DecoderLayer(nn.Module):
         self.self_attention = TeleChat2Attention(
             config,
             hidden_size=self.hidden_size,
-            num_heads=config.num_attention_heads,
+            num_heads=config.n_head,
             num_kv_heads=getattr(config, "num_key_value_heads",
-                                 config.num_attention_heads),
+                                 config.n_head),
             rope_theta=rope_theta,
             rope_scaling=rope_scaling,
             max_position_embeddings=max_position_embeddings,
             quant_config=quant_config,
             bias=attention_bias,
             cache_config=cache_config,
+            prefix=f"{prefix}.self_attention"
         )
         self.mlp = TeleChat2MLP(
             hidden_size=self.hidden_size,
@@ -216,6 +217,7 @@ class TeleChat2DecoderLayer(nn.Module):
             hidden_act=config.hidden_act,
             quant_config=quant_config,
             bias=getattr(config, "mlp_bias", False),
+            prefix=f"{prefix}.mlp",
         )
         self.input_layernorm = RMSNorm(config.hidden_size,
                                        eps=config.rms_norm_eps)
@@ -248,14 +250,13 @@ class TeleChat2DecoderLayer(nn.Module):
 
 class TeleChat2Model(nn.Module):
     
-    def __init__(
-        self,
-        config: PretrainedConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        lora_config: Optional[LoRAConfig] = None,
-    ) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+
         self.config = config
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
@@ -263,14 +264,16 @@ class TeleChat2Model(nn.Module):
             self.vocab_size,
             config.hidden_size,
             org_num_embeddings=config.vocab_size,
+            prefix=f"{prefix}.word_embeddings",
         )
-        self.h = nn.ModuleList(
-           [
-                TeleChat2DecoderLayer(config=config,
-                                  cache_config=cache_config,
-                                  quant_config=quant_config)
-                for _ in range(self.config.num_hidden_layers)
-            ] 
+
+        self.start_layer, self.end_layer, self.h = make_layers(
+            config.num_hidden_layers,
+            lambda prefix: TeleChat2DecoderLayer(config=config,
+                                             cache_config=cache_config,
+                                             quant_config=quant_config,
+                                             prefix=f"{prefix}.layers"),
+            prefix=f"{prefix}.h",
         )
         
         self.ln_f = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -288,47 +291,88 @@ class TeleChat2Model(nn.Module):
         
         hidden_states = self.get_input_embeddings(input_ids)
        
-        for i in range(self.config.num_hidden_layers):
+        for i in range(self.start_layer, self.end_layer):
             layer = self.h[i]
             hidden_states = layer(
                 positions,
                 hidden_states,
-                kv_caches[i],
+                kv_caches[i - self.start_layer],
                 attn_metadata,
             )
 
         hidden_states = self.ln_f(hidden_states)
         return hidden_states
-
-
-class TeleChat2ForCausalLM(nn.Module, SupportsLoRA):
     
-    def __init__(
-        self,
-        config: PretrainedConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        lora_config: Optional[LoRAConfig] = None,
-    ) -> None:
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
+        stacked_params_mapping = [
+            ('gate_up_proj', 'gate_proj', 0),
+            ('gate_up_proj', 'up_proj', 1),
+        ]
+        params_dict = dict(self.named_parameters())
+        loaded_params: Set[str] = set()
+        total_num_heads = self.config.n_head
+        head_dim = self.config.hidden_size // total_num_heads
+        for name, loaded_weight in weights:
+            if "self_attention.key_value" in name:
+                k_weight = []
+                v_weight = []
+                for i in range(total_num_heads):
+                    start =i * head_dim * 2
+                    k_weight.append(loaded_weight[start:start+head_dim,:])
+                    v_weight.append(loaded_weight[start+head_dim:start+2*head_dim:])
+                k_weight = torch.cat(k_weight,dim=0)
+                v_weight = torch.cat(v_weight,dim=0)
+                name = name.replace("key_value", "qkv_proj")
+                param = params_dict[name]
+                weight_loader = param.weight_loader
+                weight_loader(param, k_weight, "k")
+                weight_loader(param, v_weight, "v")
+                loaded_params.add(name)
+            elif "query" in name:
+                name = name.replace("query", "qkv_proj")
+                param = params_dict[name]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, "q")
+                loaded_params.add(name)
+            else:
+                for param_name, weight_name, shard_id in stacked_params_mapping:
+                    if weight_name not in name:
+                        continue
+                    name = name.replace(weight_name, param_name)
+                    param = params_dict[name]
+                    weight_loader = param.weight_loader
+                    weight_loader(param, loaded_weight, shard_id)
+                    break
+                else:
+                    param = params_dict[name]
+                    weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                    weight_loader(param, loaded_weight)
+        return loaded_params
+    
+
+class TeleChat2ForCausalLM(nn.Module):
+    
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
         config.intermediate_size = config.ffn_hidden_size
         config.hidden_act = "silu"
         config.rms_norm_eps = config.layer_norm_epsilon
         config.tie_word_embeddings = False
-
         self.config = config
-        self.lora_config = lora_config
-
-        self.transformer = TeleChat2Model(config,
-                                cache_config,
-                                quant_config,
-                                lora_config=lora_config)
+        self.transformer = TeleChat2Model(vllm_config=vllm_config,
+                                prefix=maybe_prefix(prefix, "transformer"))
   
         self.lm_head = ParallelLMHead(
             config.vocab_size,
             config.hidden_size,
             bias=False,
             quant_config=quant_config,
+            prefix=maybe_prefix(
+                prefix, "lm_head")
         )
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
@@ -373,62 +417,11 @@ class TeleChat2ForCausalLM(nn.Module, SupportsLoRA):
                         device=device),
         })
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-
-        params_dict = dict(self.named_parameters())
-
-        num_key_value_heads = self.config.num_attention_heads
-        head_dim = self.config.hidden_size // num_key_value_heads
-        for name, loaded_weight in weights:
-            if "self_attention.key_value" in name:
-                k_weight = []
-                v_weight = []
-                for i in range(num_key_value_heads):
-                    start =i * head_dim * 2
-                    k_weight.append(loaded_weight[start:start+head_dim,:])
-                    v_weight.append(loaded_weight[start+head_dim:start+2*head_dim:])
-                
-                k_weight = torch.cat(k_weight,dim=0)
-                v_weight = torch.cat(v_weight,dim=0)
-
-                #loaded_weight = torch.cat([k_weight, v_weight], dim=0)
-                name = name.replace("key_value", "qkv_proj")
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, k_weight, "k")
-                weight_loader(param, v_weight, "v")
-            elif "query" in name:
-                name = name.replace("query", "qkv_proj")
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, "q")
-            else:
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                weight_loader(param, loaded_weight)
-            #except KeyError:
-            #    print("key error")
-            #    pass
-
-    def load_kv_cache_scales(self, quantization_param_path: str) -> None:
-        tp_size = get_tensor_model_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
-        for layer_idx, scaling_factor in kv_cache_scales_loader(
-                quantization_param_path, tp_rank, tp_size,
-                self.config.num_hidden_layers,
-                self.config.__class__.model_type):
-            if not isinstance(self.model.layers[layer_idx], nn.Identity):
-                layer_self_attn = self.model.layers[layer_idx].self_attn
-
-            if is_hip():
-                # The scaling factor convention we are assuming is
-                # quantized_value * scaling_factor ~= true_value
-                # which is consistent with the practice of setting
-                # scaling_factor = tensor_amax / FPtype_max
-                scaling_factor *= 2
-            if hasattr(layer_self_attn, "kv_scale"):
-                layer_self_attn.attn._kv_scale = scaling_factor
-            else:
-                raise RuntimeError("Self attention has no KV cache scaling "
-                                   "factor attribute!")
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
+        loader = AutoWeightsLoader(
+            self,
+            skip_prefixes=(["lm_head."]
+                           if self.config.tie_word_embeddings else None),
+        )
+        return loader.load_weights(weights)
