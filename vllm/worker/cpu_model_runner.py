@@ -295,7 +295,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
                 slot_mapping[i] = slot
             data.slot_mapping.extend(slot_mapping)
 
-        # The MRPOE positions are prepared in _compute_multi_modal_input
+        # The MROPE positions are prepared in _compute_multi_modal_input
         if data.input_positions is not None:
             data.input_positions.extend(token_positions)
 

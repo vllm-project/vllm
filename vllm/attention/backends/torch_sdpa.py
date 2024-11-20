@@ -294,7 +294,7 @@ class TorchSDPAMetadataBuilder(AttentionMetadataBuilder[TorchSDPAMetadata]):
             prefill_block_tables = make_tensor_with_pad(
                 self.input_data.prefill_block_tables,
                 pad=0,
-                dtype=torch.int,
+                dtype=torch.int32,
                 device="cpu",
             )
             query_lens_tensor = torch.tensor(prefill_query_lens,
@@ -330,13 +330,13 @@ class TorchSDPAMetadataBuilder(AttentionMetadataBuilder[TorchSDPAMetadata]):
         if input_data.num_decode_tokens != 0:
             seq_lens_tensor = torch.tensor(
                 input_data.seq_lens[input_data.num_prefills:],
-                dtype=torch.int,
+                dtype=torch.int32,
                 device="cpu",
             )
             block_tables = make_tensor_with_pad(
                 self.input_data.decode_block_tables,
                 pad=0,
-                dtype=torch.int,
+                dtype=torch.int32,
                 device="cpu",
             )
         else:

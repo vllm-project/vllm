@@ -270,9 +270,6 @@ def test_with_prefix_caching(
 @pytest.mark.parametrize("max_tokens", [32])
 @pytest.mark.parametrize("chunked_prefill_token_size", [1, 4, 16])
 @pytest.mark.parametrize("enforce_eager", [False])
-# NOTE: Increasing this in this suite will fail CI because we currently cannot
-# reset distributed env properly. Use a value > 1 just when you test.
-@pytest.mark.parametrize("tensor_parallel_size", [1])
 @pytest.mark.parametrize("attention_backend", ["TORCH_SDPA"])
 @pytest.mark.cpu_model
 @pytest.mark.skipif(not current_platform.is_cpu(), reason="CPU only")
@@ -307,9 +304,6 @@ def test_models_cpu(
 @pytest.mark.parametrize("max_tokens", [16])
 @pytest.mark.parametrize("enforce_eager", [False])
 @pytest.mark.parametrize("chunk_size", [30, 32])
-# NOTE: Increasing this in this suite will fail CI because we currently cannot
-# reset distributed env properly. Use a value > 1 just when you test.
-@pytest.mark.parametrize("tensor_parallel_size", [1])
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.cpu_model
 @pytest.mark.skipif(not current_platform.is_cpu(), reason="CPU only")
