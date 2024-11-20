@@ -13,7 +13,7 @@ from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
 from vllm.sequence import ExecuteModelRequest
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size
-from vllm.worker.tpu_model_runner import TPUModelRunner
+from vllm.worker.tpu_model_runner import ExecutionMode, TPUModelRunner
 from vllm.worker.worker_base import (LocalOrDistributedWorkerBase,
                                      LoraNotSupportedWorkerBase, WorkerBase,
                                      WorkerInput)
@@ -112,7 +112,7 @@ class TPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
             batch_size=1,
             seq_len=self.scheduler_config.max_num_batched_tokens,
             kv_caches=kv_caches,
-            is_prompt=True,
+            exec_mode=ExecutionMode.PREFILL,
         )
         # Synchronize before measuring the memory usage.
         xm.wait_device_ops()
