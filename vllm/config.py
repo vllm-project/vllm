@@ -22,7 +22,7 @@ from vllm.transformers_utils.config import (
     get_hf_text_config, get_pooling_config,
     get_sentence_transformer_tokenizer_config, is_encoder_decoder, uses_mrope)
 from vllm.utils import (GiB_bytes, cuda_device_count_stateless, get_cpu_memory,
-                        identity, is_mi250, print_warning_once,
+                        identity, is_mi250, is_navi, print_warning_once,
                         resolve_obj_by_qualname)
 
 if TYPE_CHECKING:
@@ -1035,6 +1035,12 @@ class ParallelConfig:
             logger.info(
                 "Disabled the custom all-reduce kernel because it is not "
                 "working correctly on multi AMD MI250.")
+
+        if is_navi() and self.tensor_parallel_size <= 2:
+            self.disable_custom_all_reduce = True
+            logger.info(
+                "Disabled the custom all-reduce kernel because it is not "
+                "working correctly when using two AMD Navi GPUs.")
 
     @property
     def use_ray(self) -> bool:
