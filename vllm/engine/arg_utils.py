@@ -9,12 +9,12 @@ import torch
 
 import vllm.envs as envs
 from vllm.config import (CacheConfig, CompilationConfig, ConfigFormat,
-                         DecodingConfig, DeviceConfig, HfOverrides, LoadConfig,
-                         LoadFormat, LoRAConfig, ModelConfig,
-                         ObservabilityConfig, ParallelConfig, PoolerConfig,
-                         PromptAdapterConfig, SchedulerConfig,
+                         DecodingConfig, DeviceConfig, HfOverrides,
+                         KVTransferConfig, LoadConfig, LoadFormat, LoRAConfig,
+                         ModelConfig, ObservabilityConfig, ParallelConfig,
+                         PoolerConfig, PromptAdapterConfig, SchedulerConfig,
                          SpeculativeConfig, TaskOption, TokenizerPoolConfig,
-                         VllmConfig, KVTransferConfig)
+                         VllmConfig)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
