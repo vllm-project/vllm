@@ -278,6 +278,7 @@ class MultiModalProcessor:
                 if new_token_id in repl_token_ids:
                     modality_placeholders.append(run_info)
 
+            # Otherwise, we insert them ourselves
             if not modality_placeholders:
                 for item_idx, orig_item in enumerate(orig_inputs):
                     for match_str, replacement in placeholder_repls.items():
