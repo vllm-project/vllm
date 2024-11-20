@@ -31,9 +31,7 @@
 
 #define LAUNCH_PAGED_ATTENTION_V2(HEAD_SIZE)                                   \
   vllm::paged_attention_v2_kernel<T, CACHE_T, HEAD_SIZE, BLOCK_SIZE,           \
-                                  NUM_THREADS, KV_DTYPE,                       \
-                                  IS_LAYER_LEVEL,                              \
-                                  IS_BLOCK_SPARSE,                             \
+                                  NUM_THREADS, KV_DTYPE, IS_BLOCK_SPARSE,      \
                                   PARTITION_SIZE>                              \
       <<<grid, block, shared_mem_size, stream>>>(                              \
           exp_sums_ptr, max_logits_ptr, tmp_out_ptr, query_ptr, key_cache_ptr, \
@@ -51,9 +49,7 @@
           max_num_partitions);
 
 template <typename T, typename CACHE_T, int BLOCK_SIZE,
-          vllm::Fp8KVCacheDataType KV_DTYPE, 
-          bool IS_LAYER_LEVEL,
-          bool IS_BLOCK_SPARSE,
+          vllm::Fp8KVCacheDataType KV_DTYPE, bool IS_BLOCK_SPARSE,
           int NUM_THREADS = 128, int PARTITION_SIZE = 512>
 void paged_attention_v2_launcher(
     torch::Tensor& out, torch::Tensor& exp_sums, torch::Tensor& max_logits,
@@ -149,9 +145,9 @@ void paged_attention_v2_launcher(
   }
 }
 
-#define CALL_V2_LAUNCHER(T, CACHE_T, BLOCK_SIZE, KV_DTYPE, IS_LAYER_LEVEL, IS_BLOCK_SPARSE)   \
+#define CALL_V2_LAUNCHER(T, CACHE_T, BLOCK_SIZE, KV_DTYPE, IS_BLOCK_SPARSE)   \
   paged_attention_v2_launcher<T, CACHE_T, BLOCK_SIZE, KV_DTYPE,               \
-                              IS_LAYER_LEVEL, IS_BLOCK_SPARSE>(               \
+                              IS_BLOCK_SPARSE>(                               \
       out, exp_sums, max_logits, tmp_out, query, key_cache, value_cache,      \
       num_kv_heads, scale, block_tables, seq_lens, max_seq_len, alibi_slopes, \
       k_scale, v_scale,                                                       \
@@ -162,24 +158,12 @@ void paged_attention_v2_launcher(
 
 #define CALL_V2_LAUNCHER_SPARSITY(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE) \
   switch (is_block_sparse) {                                               \
-    case true:                                                                      \
-      switch (is_layer_level) {                                                     \
-          case true:                                                                \
-            CALL_V2_LAUNCHER(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, true, true);  \
-            break;                                                                  \
-          case false:                                                               \
-            CALL_V2_LAUNCHER(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, false, true); \
-            break;                                                                  \
-        }                                                                           \
-    case false:                                                                     \
-      switch (is_layer_level) {                                                     \
-          case true:                                                                \
-            CALL_V2_LAUNCHER(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, true, false); \
-            break;                                                                  \
-          case false:                                                               \
-            CALL_V2_LAUNCHER(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, false, false);\
-            break;                                                                  \
-        }                                                                           \
+    case true:                                                             \
+      CALL_V2_LAUNCHER(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, true);     \
+      break;                                                               \
+    case false:                                                            \
+      CALL_V2_LAUNCHER(T, CACHE_T, BLOCK_SIZE, IS_FP8_KV_CACHE, false);    \
+      break;                                                               \
   }
 
 // NOTE(woosuk): To reduce the compilation time, we omitted block sizes
@@ -225,7 +209,6 @@ void paged_attention_v2(
     const int64_t blocksparse_vert_stride, const int64_t blocksparse_block_size,
     const int64_t blocksparse_head_sliding_step) {
   const bool is_block_sparse = (blocksparse_vert_stride > 1);
-  const bool is_layer_level = (quant_group == 0);
 
   DISPATCH_BY_KV_CACHE_DTYPE(query.dtype(), kv_cache_dtype,
                              CALL_V2_LAUNCHER_BLOCK_SIZE)
