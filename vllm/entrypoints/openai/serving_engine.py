@@ -99,6 +99,7 @@ class OpenAIServing:
         lora_modules: Optional[List[LoRAModulePath]],
         prompt_adapters: Optional[List[PromptAdapterPath]],
         request_logger: Optional[RequestLogger],
+        orca_format: Optional[str] = "",
         return_tokens_as_token_ids: bool = False,
     ):
         super().__init__()
@@ -139,6 +140,7 @@ class OpenAIServing:
 
         self.request_logger = request_logger
         self.return_tokens_as_token_ids = return_tokens_as_token_ids
+        self.orca_format: Optional[str] = orca_format
 
     async def show_available_models(self) -> ModelList:
         """Show available models. Right now we only have one model."""

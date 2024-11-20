@@ -314,6 +314,7 @@ class LLMEngine:
         self.observability_config = observability_config or ObservabilityConfig(
         )
         self.log_stats = log_stats
+        self.snapshot_stats: Optional[Stats] = None
         self.use_cached_outputs = use_cached_outputs
 
         if not self.model_config.skip_tokenizer_init:
@@ -1195,8 +1196,16 @@ class LLMEngine:
                 seq_group,
                 self.seq_id_to_seq_group,
                 use_cache=self.use_cached_outputs)
-            if request_output:
-                ctx.request_outputs.append(request_output)
+
+            if (request_output and isinstance(request_output, RequestOutput)
+                    and self.snapshot_stats):
+                request_output.metrics.gpu_kv_cache_utilisation = (
+                    self.snapshot_stats.gpu_cache_usage_sys)
+                request_output.metrics.cpu_kv_cache_utilisation = (
+                    self.snapshot_stats.cpu_cache_usage_sys)
+                request_output.metrics.running_lora_adapters = ",".join(
+                    self.snapshot_stats.running_lora_adapters)
+            ctx.request_outputs.append(request_output)
 
         # When we process a single request, we skip it for the next time,
         # and invoke the request output callback (if there was final output)
@@ -1238,6 +1247,14 @@ class LLMEngine:
                 self.seq_id_to_seq_group,
                 use_cache=self.use_cached_outputs)
             if request_output:
+                # if (request_output and isinstance(request_output, RequestOutput)
+                #     and self.snapshot_stats):
+                #     request_output.metrics.gpu_kv_cache_utilisation = (
+                #         self.snapshot_stats.gpu_cache_usage_sys)
+                #     request_output.metrics.cpu_kv_cache_utilisation = (
+                #         self.snapshot_stats.cpu_cache_usage_sys)
+                #     request_output.metrics.running_lora_adapters = ",".join(
+                #         self.snapshot_stats.running_lora_adapters)
                 ctx.request_outputs.append(request_output)
 
         # For multi-step with streaming, create outputs each iteration
@@ -1607,11 +1624,11 @@ class LLMEngine:
                      finished_before: Optional[List[int]] = None,
                      skip: Optional[List[int]] = None) -> None:
         """Forced log when no requests active."""
+        self.snapshot_stats = self._get_stats(scheduler_outputs, model_output,
+                                              finished_before, skip)
         if self.log_stats:
-            stats = self._get_stats(scheduler_outputs, model_output,
-                                    finished_before, skip)
             for logger in self.stat_loggers.values():
-                logger.log(stats)
+                logger.log(self.snapshot_stats)
 
     def _get_stats(self,
                    scheduler_outputs: Optional[SchedulerOutputs],

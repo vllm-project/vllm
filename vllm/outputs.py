@@ -4,6 +4,7 @@ from typing import Dict, List, Optional
 from typing import Sequence as GenericSequence
 from typing import Union
 
+from vllm.engine.metrics_types import Stats
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalPlaceholderDict
 from vllm.sampling_params import RequestOutputKind
@@ -100,6 +101,7 @@ class RequestOutput:
         outputs: List[CompletionOutput],
         finished: bool,
         metrics: Optional[RequestMetrics] = None,
+        engine_metrics: Optional[Stats] = None,
         lora_request: Optional[LoRARequest] = None,
         encoder_prompt: Optional[str] = None,
         encoder_prompt_token_ids: Optional[List[int]] = None,
@@ -115,6 +117,7 @@ class RequestOutput:
         self.outputs = outputs
         self.finished = finished
         self.metrics = metrics
+        self.engine_metrics = engine_metrics
         self.lora_request = lora_request
         self.encoder_prompt = encoder_prompt
         self.encoder_prompt_token_ids = encoder_prompt_token_ids

@@ -89,6 +89,12 @@ class UsageInfo(OpenAIBaseModel):
     prompt_tokens_details: Optional[PromptTokenUsageInfo] = None
 
 
+class EngineMetrics(OpenAIBaseModel):
+    kv_cache_utilization: Optional[float] = 0.
+    active_models: Optional[str] = ""
+    format: Optional[str] = ""
+
+
 class RequestResponseMetadata(BaseModel):
     request_id: str
     final_usage_info: Optional[UsageInfo] = None
@@ -838,6 +844,7 @@ class CompletionResponse(OpenAIBaseModel):
     model: str
     choices: List[CompletionResponseChoice]
     usage: UsageInfo
+    metrics: EngineMetrics
 
 
 class CompletionResponseStreamChoice(OpenAIBaseModel):
@@ -951,6 +958,7 @@ class ChatCompletionResponse(OpenAIBaseModel):
     model: str
     choices: List[ChatCompletionResponseChoice]
     usage: UsageInfo
+    metrics: EngineMetrics
     prompt_logprobs: Optional[List[Optional[Dict[int, Logprob]]]] = None
 
 

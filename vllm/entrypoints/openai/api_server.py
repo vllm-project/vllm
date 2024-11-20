@@ -34,6 +34,7 @@ from vllm.entrypoints.launcher import serve_http
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.cli_args import (make_arg_parser,
                                               validate_parsed_serve_args)
+from vllm.entrypoints.openai.orca_header import metrics_header
 # yapf conflicts with isort for this block
 # yapf: disable
 from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
@@ -346,13 +347,13 @@ async def create_chat_completion(request: ChatCompletionRequest,
             message="The model does not support Chat Completions API")
 
     generator = await handler.create_chat_completion(request, raw_request)
-
     if isinstance(generator, ErrorResponse):
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.code)
 
     elif isinstance(generator, ChatCompletionResponse):
-        return JSONResponse(content=generator.model_dump())
+        header = metrics_header(generator.metrics)
+        return JSONResponse(content=generator.model_dump(), headers=header)
 
     return StreamingResponse(content=generator, media_type="text/event-stream")
 
@@ -369,7 +370,8 @@ async def create_completion(request: CompletionRequest, raw_request: Request):
         return JSONResponse(content=generator.model_dump(),
                             status_code=generator.code)
     elif isinstance(generator, CompletionResponse):
-        return JSONResponse(content=generator.model_dump())
+        header = metrics_header(generator.metrics)
+        return JSONResponse(content=generator.model_dump(), headers=header)
 
     return StreamingResponse(content=generator, media_type="text/event-stream")
 
@@ -539,6 +541,7 @@ def init_app_state(
         base_model_paths,
         args.response_role,
         lora_modules=args.lora_modules,
+        orca_format=args.orca_format,
         prompt_adapters=args.prompt_adapters,
         request_logger=request_logger,
         chat_template=resolved_chat_template,
@@ -553,6 +556,7 @@ def init_app_state(
         model_config,
         base_model_paths,
         lora_modules=args.lora_modules,
+        orca_format=args.orca_format,
         prompt_adapters=args.prompt_adapters,
         request_logger=request_logger,
         return_tokens_as_token_ids=args.return_tokens_as_token_ids,

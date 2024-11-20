@@ -101,6 +101,7 @@ class RequestMetrics:
         arrival_time: The time when the request arrived.
         first_scheduled_time: The time when the request was first scheduled.
         first_token_time: The time when the first token was generated.
+        last_token_time: The time when last token was generated.
         time_in_queue: The time the request spent in the queue.
         finished_time: The time when the request was finished.
         scheduler_time: The time spent in the scheduler when this request was
@@ -110,6 +111,9 @@ class RequestMetrics:
         model_execute_time: The time spent in the model execute function. This
                             will include model forward, block/sync across
                             workers, cpu-gpu sync time and sampling time.
+        gpu_kv_cache_utilisation: post request kv_cache_utilisation of gpu.
+        cpu_kv_cache_utilisation: post request kv_cache_utilisation of cpu.
+        running_lora_adapters: post request running lora adapters in cache.
     """
     arrival_time: float
     last_token_time: float
@@ -120,6 +124,9 @@ class RequestMetrics:
     scheduler_time: Optional[float] = None
     model_forward_time: Optional[float] = None
     model_execute_time: Optional[float] = None
+    gpu_kv_cache_utilisation: Optional[float] = 0.0
+    cpu_kv_cache_utilisation: Optional[float] = 0.0
+    running_lora_adapters: Optional[str] = ""
 
 
 class SequenceDataDelta(

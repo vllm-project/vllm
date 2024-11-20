@@ -17,7 +17,7 @@ from vllm.entrypoints.openai.protocol import (CompletionLogProbs,
                                               CompletionResponseChoice,
                                               CompletionResponseStreamChoice,
                                               CompletionStreamResponse,
-                                              ErrorResponse,
+                                              EngineMetrics, ErrorResponse,
                                               RequestResponseMetadata,
                                               UsageInfo)
 # yapf: enable
@@ -28,7 +28,7 @@ from vllm.entrypoints.openai.serving_engine import (BaseModelPath,
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams, SamplingParams
-from vllm.sequence import Logprob
+from vllm.sequence import Logprob, RequestMetrics
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.utils import merge_async_iterators, random_uuid
 
@@ -46,12 +46,15 @@ class OpenAIServingCompletion(OpenAIServing):
         lora_modules: Optional[List[LoRAModulePath]],
         prompt_adapters: Optional[List[PromptAdapterPath]],
         request_logger: Optional[RequestLogger],
+        orca_format: Optional[str] = "",
         return_tokens_as_token_ids: bool = False,
     ):
+
         super().__init__(engine_client=engine_client,
                          model_config=model_config,
                          base_model_paths=base_model_paths,
                          lora_modules=lora_modules,
+                         orca_format=orca_format,
                          prompt_adapters=prompt_adapters,
                          request_logger=request_logger,
                          return_tokens_as_token_ids=return_tokens_as_token_ids)
@@ -387,7 +390,8 @@ class OpenAIServingCompletion(OpenAIServing):
         choices: List[CompletionResponseChoice] = []
         num_prompt_tokens = 0
         num_generated_tokens = 0
-
+        last_req_finished_time = 0.
+        last_req_metrics: Optional[RequestMetrics] = None
         for final_res in final_res_batch:
             prompt_token_ids = final_res.prompt_token_ids
             assert prompt_token_ids is not None
@@ -397,7 +401,6 @@ class OpenAIServingCompletion(OpenAIServing):
             token_ids: GenericSequence[int]
             out_logprobs: Optional[GenericSequence[Optional[Dict[int,
                                                                  Logprob]]]]
-
             for output in final_res.outputs:
                 assert request.max_tokens is not None
                 if request.echo:
@@ -449,6 +452,14 @@ class OpenAIServingCompletion(OpenAIServing):
                 num_generated_tokens += len(output.token_ids)
 
             num_prompt_tokens += len(prompt_token_ids)
+            # get latest output's metrics
+            res_metrics = final_res.metrics
+            if res_metrics:
+                if res_metrics.last_token_time > last_req_finished_time:
+                    last_req_metrics = res_metrics
+                if (res_metrics.finished_time and
+                        res_metrics.finished_time > last_req_finished_time):
+                    last_req_metrics = res_metrics
 
         usage = UsageInfo(
             prompt_tokens=num_prompt_tokens,
@@ -456,6 +467,12 @@ class OpenAIServingCompletion(OpenAIServing):
             total_tokens=num_prompt_tokens + num_generated_tokens,
         )
 
+        metrics = EngineMetrics(
+            kv_cache_utilization=(last_req_metrics.gpu_kv_cache_utilisation
+                                  if last_req_metrics is not None else 0.0),
+            active_models=(last_req_metrics.running_lora_adapters
+                           if last_req_metrics is not None else ""),
+            format=self.orca_format)
         request_metadata.final_usage_info = usage
 
         return CompletionResponse(
@@ -464,6 +481,7 @@ class OpenAIServingCompletion(OpenAIServing):
             model=model_name,
             choices=choices,
             usage=usage,
+            metrics=metrics,
         )
 
     def _create_completion_logprobs(
