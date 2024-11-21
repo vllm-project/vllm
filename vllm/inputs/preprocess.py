@@ -10,7 +10,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.processing import MultiModalDataDict, MultiModalInputsV2
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.transformers_utils.tokenizer_group import BaseTokenizerGroup
-from vllm.utils import print_warning_once
+from vllm.utils import print_info_once, print_warning_once
 
 from .data import (DecoderOnlyInputs, EncoderDecoderInputs, ProcessorInputs,
                    PromptType, SingletonInputs, SingletonPrompt, token_inputs)
@@ -212,7 +212,7 @@ class InputPreprocessor:
         # updated to use the new multi-modal processor
         can_process_multimodal = self.mm_registry.has_processor(model_config)
         if not can_process_multimodal:
-            print_warning_once(
+            print_info_once(
                 "Your model uses the legacy input pipeline instead of the new "
                 "multi-modal processor. Please note that the legacy pipeline "
                 "will be removed in a future release. For more details, see: "
