@@ -1109,8 +1109,12 @@ def ensure_kv_transfer_initialized(config: "KVTransferConfig") -> None:
     """
 
     global _KV_TRANSFER
+
+    if config is None:
+        return
+
     if all([
-            config is not None, config.need_kv_parallel_group,
+            config.need_kv_parallel_group,
             _KV_TRANSFER is None
     ]):
         _KV_TRANSFER = kv_transfer.KVTransferAgent(
