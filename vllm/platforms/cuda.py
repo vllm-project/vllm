@@ -15,6 +15,11 @@ import vllm._C  # noqa
 from vllm.logger import init_logger
 
 from .interface import DeviceCapability, Platform, PlatformEnum
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
+else:
+    VllmConfig = None
 
 logger = init_logger(__name__)
 
@@ -157,3 +162,17 @@ class CudaPlatform(Platform):
                             " machine has no NVLink equipped.")
                         return False
         return True
+
+    @classmethod
+    def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+        parallel_config = vllm_config.parallel_config
+        scheduler_config = vllm_config.scheduler_config
+        if parallel_config.worker_cls == "auto":
+            if scheduler_config.is_multi_step:
+                parallel_config.worker_cls = \
+                    "vllm.worker.multi_step_worker.MultiStepWorker"
+            elif vllm_config.speculative_config:
+                parallel_config.worker_cls = \
+                    "vllm.spec_decode.spec_decode_worker.create_spec_worker"
+            else:
+                parallel_config.worker_cls = "vllm.worker.worker.Worker"

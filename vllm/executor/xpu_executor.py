@@ -6,7 +6,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.sequence import ExecuteModelRequest, PoolerOutput
 from vllm.utils import make_async
-from vllm.worker.worker_base import WorkerBase
 
 logger = init_logger(__name__)
 
@@ -21,17 +20,6 @@ class XPUExecutor(GPUExecutor):
             "Speculative decoding not yet supported for XPU backend")
 
         GPUExecutor._init_executor(self)
-
-    def _get_worker_module_and_class(
-            self) -> Tuple[str, str, Optional[Callable[[], Type[WorkerBase]]]]:
-        worker_class_fn = None
-        if self.speculative_config is not None:
-            raise NotImplementedError(
-                "XPU does not support speculative decoding")
-        else:
-            worker_module_name = "vllm.worker.xpu_worker"
-            worker_class_name = "XPUWorker"
-        return (worker_module_name, worker_class_name, worker_class_fn)
 
     def execute_model(
         self, execute_model_req: ExecuteModelRequest

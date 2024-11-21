@@ -1,6 +1,11 @@
 import torch
 
 from .interface import Platform, PlatformEnum, _Backend
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
+else:
+    VllmConfig = None
 
 
 class HpuPlatform(Platform):
@@ -14,3 +19,19 @@ class HpuPlatform(Platform):
     @staticmethod
     def inference_mode():
         return torch.no_grad()
+
+    @classmethod
+    def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+
+        scheduler_config = vllm_config.scheduler_config
+        if scheduler_config.is_multi_step:
+            raise NotImplementedError(
+                "Multi-step execution is not implemented for HPU")
+
+        if vllm_config.speculative_config is not None:
+            raise NotImplementedError(
+                "Speculative decoding is not implemented for HPU")
+
+        parallel_config = vllm_config.parallel_config
+        if parallel_config.worker_cls == "auto":
+            parallel_config.worker_cls = "vllm.worker.hpu_worker.HPUWorker"
