@@ -116,6 +116,8 @@ class NeuronCausalLM(nn.Module):
 
 class NeuronSpeculationCausalLM(nn.Module):
 
+    SPECULATION_TERMINATION_ID = -1
+
     def __init__(
         self,
         speculation_model
@@ -129,7 +131,15 @@ class NeuronSpeculationCausalLM(nn.Module):
         positions: torch.Tensor,
         input_block_ids: torch.Tensor,
     ) -> torch.Tensor:
-        tokens, counts = self.model.speculative_iteration(input_ids, positions, input_block_ids)
+        tokens, counts = self.model.speculative_iteration(
+            input_ids, positions, input_block_ids)
+
+        # Mark the end of accepted specualtive tokens for each sequence with the
+        # speculation termination id.
+        mask = torch.arange(tokens.size(1)).repeat(tokens.size(0),
+                                                   1) >= counts.unsqueeze(-1)
+        tokens[mask] = self.SPECULATION_TERMINATION_ID
+
         return tokens
 
     def sample(
@@ -141,12 +151,12 @@ class NeuronSpeculationCausalLM(nn.Module):
         seq_ids = [seq_id for sg in sampling_metadata.seq_groups for seq_id in sg.seq_ids]
         # Organize input tensors by step instead of by sequence.
         accepted_token_ids_by_step = logits.transpose(0, 1)
-        accepted_token_ids_by_step[accepted_token_ids_by_step==self.model.pad_token_id]=-1
         accepted_token_ids_by_step = accepted_token_ids_by_step.tolist()
 
         sampler_output_list = []
         for step_index in range(num_steps):
-            if all(token_id == -1 for token_id in accepted_token_ids_by_step[step_index]):
+            if all(token_id == self.SPECULATION_TERMINATION_ID
+                   for token_id in accepted_token_ids_by_step[step_index]):
                 break
             step_output_token_ids = []
             for sequence_index in range(batch_size):
