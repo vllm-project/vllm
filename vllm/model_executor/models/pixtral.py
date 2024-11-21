@@ -33,7 +33,8 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.multimodal.inputs import PlaceholderRange
 from vllm.multimodal.utils import (cached_get_tokenizer,
-                                   consecutive_placeholder_ranges)
+                                   consecutive_placeholder_ranges,
+                                   resolve_visual_encoder_outputs)
 from vllm.sequence import IntermediateTensors, SequenceData
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.utils import is_list_of
@@ -970,9 +971,18 @@ class PixtralHFTransformer(nn.Module):
         x: torch.Tensor,
         attention_mask: torch.Tensor,
         position_embeddings: torch.Tensor,
+        return_all_hidden_states: bool,
     ) -> torch.Tensor:
+        hidden_states_pool = []
+
         for layer in self.layers:
             x = layer(x, attention_mask, position_embeddings)
+            if return_all_hidden_states:
+                hidden_states_pool.append(x)
+        # If we have multiple feature sample layers, we return all hidden
+        # states in order and grab the ones we need by index.
+        if return_all_hidden_states:
+            return hidden_states_pool
         return x
 
 
@@ -990,6 +1000,7 @@ class PixtralHFVisionModel(nn.Module):
         super().__init__()
 
         self.config = config
+
         self.patch_conv = nn.Conv2d(
             in_channels=config.num_channels,
             out_channels=config.hidden_size,
@@ -1024,6 +1035,7 @@ class PixtralHFVisionModel(nn.Module):
     def forward(
         self,
         pixel_values: List[torch.Tensor],
+        feature_sample_layers: Optional[list[int]] = None,
     ) -> torch.Tensor:
         """
         Args:
@@ -1031,6 +1043,9 @@ class PixtralHFVisionModel(nn.Module):
                 in pixel_values. This means it will be a list of tensors
                 because multiple requests batched can have multiple images,
                 each with their own shape potentially
+            feature_sample_layers: Layer indices whose features should be
+                concatenated and used as the visual encoder output. If none
+                are provided, the last layer is used.
 
         Returns:
             image_features: tensor of token features for
@@ -1065,8 +1080,15 @@ class PixtralHFVisionModel(nn.Module):
                 [p.shape[-2] * p.shape[-1] for p in patch_embeds_list],
                 patch_embeds)
 
-        out = self.transformer(patch_embeds, attention_mask,
-                               position_embedding)
+        return_all_hidden_states = feature_sample_layers is not None
+        out = self.transformer(
+            patch_embeds,
+            attention_mask,
+            position_embedding,
+            return_all_hidden_states=return_all_hidden_states)
+
+        out = resolve_visual_encoder_outputs(out, feature_sample_layers, None,
+                                             self.config.num_hidden_layers)
 
         return out
 
