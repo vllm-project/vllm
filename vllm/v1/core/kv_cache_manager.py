@@ -338,7 +338,7 @@ class KVCacheManager:
     @staticmethod
     def _cache_full_blocks(
         request: Request,
-        blk_start_idx: int,  # TODO: use prev_block's info instead.
+        blk_start_idx: int,
         full_blocks: List[KVCacheBlock],
         prev_block: Optional[KVCacheBlock],
         cached_block_hash_to_block: Dict[BlockHashType, Dict[int,
@@ -377,8 +377,6 @@ class KVCacheManager:
             )
 
             # Compute the hash of the current block.
-            # TODO(rickyx): we will add more metadata to the block hash
-            # from the request later on.
             block_hash = hash_block_tokens(prev_block_hash,
                                            tuple(block_tokens))
 
