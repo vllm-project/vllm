@@ -3,7 +3,6 @@
 #include <c10/cuda/CUDAGuard.h>
 
 #include "../../dispatch_utils.h"
-#include "../../reduction_utils.cuh"
 #include "layernorm_utils.cuh"
 #include "quant_conversions.cuh"
 
