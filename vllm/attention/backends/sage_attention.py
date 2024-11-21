@@ -275,15 +275,14 @@ class SageAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
 
 
 class SageAttentionMetadataBuilder(
-    AttentionMetadataBuilder[SageAttentionMetadata]
-):
+    AttentionMetadataBuilder[SageAttentionMetadata]):
 
     def __init__(self, input_builder: ModelInputForCPUBuilder) -> None:
         self.chunked_prefill = input_builder.chunked_prefill
         self.input_data = input_builder.input_data
 
     def build(self, seq_lens: List[int], query_lens: List[int],
-              cuda_graph_pad_size: int, 
+              cuda_graph_pad_size: int,
               batch_size: int) -> SageAttentionMetadata:
         input_data = self.input_data
         prefill_seq_lens = seq_lens[0:input_data.num_prefills]
@@ -611,14 +610,14 @@ class SageAttentionBackendImpl(AttentionImpl[SageAttentionMetadata]):
                                                attn_masks):
             end_q = start_q + seq_len_q
             end_kv = start_kv + seq_len_kv
-            sub_out = sageattn(
-                query[None, :, start_q:end_q, :],
-                key[None, :, start_kv:end_kv, :],
-                value[None, :, start_kv:end_kv, :],
-                attn_mask=mask,
-                dropout_p=0.0,
-                is_causal=causal_attn and not self.need_mask,
-                scale=self.scale).squeeze(0).movedim(query.dim() - 2, 0)
+            sub_out = sageattn(query[None, :, start_q:end_q, :],
+                               key[None, :, start_kv:end_kv, :],
+                               value[None, :, start_kv:end_kv, :],
+                               attn_mask=mask,
+                               dropout_p=0.0,
+                               is_causal=causal_attn and not self.need_mask,
+                               scale=self.scale).squeeze(0).movedim(
+                                   query.dim() - 2, 0)
             output[start_q:end_q, :, :] = sub_out
             start_q, start_kv = end_q, end_kv
 
