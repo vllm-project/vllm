@@ -55,7 +55,7 @@ print(f"Result: {get_weather(**json.loads(tool_call.arguments))}")
 ```
 
 Example output:
-```json
+```
 Function called: get_weather
 Arguments: {"location": "San Francisco, CA", "unit": "fahrenheit"}
 Result: Getting the weather for San Francisco, CA in fahrenheit...
