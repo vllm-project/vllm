@@ -187,6 +187,9 @@ class LLM:
         if compilation_config is not None:
             compilation_config_instance = CompilationConfig.from_cli(
                 json.dumps(compilation_config))
+        else:
+            compilation_config_instance = None
+
         engine_args = EngineArgs(
             model=model,
             task=task,
