@@ -26,6 +26,7 @@ from vllm.entrypoints.openai.serving_engine import (BaseModelPath,
                                                     LoRAModulePath,
                                                     OpenAIServing,
                                                     PromptAdapterPath)
+from vllm.lora.resolver import LoRAResolver
 from vllm.logger import init_logger
 from vllm.outputs import RequestOutput
 from vllm.sequence import Logprob
@@ -51,6 +52,7 @@ class OpenAIServingCompletion(OpenAIServing):
         base_model_paths: List[BaseModelPath],
         *,
         lora_modules: Optional[List[LoRAModulePath]],
+        lora_resolver: Optional[LoRAResolver],
         prompt_adapters: Optional[List[PromptAdapterPath]],
         request_logger: Optional[RequestLogger],
         return_tokens_as_token_ids: bool = False,
@@ -59,6 +61,7 @@ class OpenAIServingCompletion(OpenAIServing):
                          model_config=model_config,
                          base_model_paths=base_model_paths,
                          lora_modules=lora_modules,
+                         lora_resolver=lora_resolver,
                          prompt_adapters=prompt_adapters,
                          request_logger=request_logger,
                          return_tokens_as_token_ids=return_tokens_as_token_ids)
