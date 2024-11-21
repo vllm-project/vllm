@@ -104,7 +104,7 @@ def test_token_match_by_text(
             or match_str in tokenizer.decode(token_ids,
                                              skip_special_tokens=False)):
         assert match is not None
-        match_start_idx, match_end_idx = match
+        match_start_idx, match_end_idx, *_ = match
 
         assert match_str in tokenizer.decode(
             token_ids[match_start_idx:match_end_idx],
