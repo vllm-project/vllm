@@ -19,6 +19,7 @@ logger = init_logger(__name__)
 
 class CpuPlatform(Platform):
     _enum = PlatformEnum.CPU
+    device_type: str = "cpu"
 
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:

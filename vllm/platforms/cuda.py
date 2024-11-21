@@ -109,6 +109,7 @@ def device_id_to_physical_device_id(device_id: int) -> int:
 
 class CudaPlatform(Platform):
     _enum = PlatformEnum.CUDA
+    device_type: str = "cuda"
 
     @classmethod
     def get_device_capability(cls, device_id: int = 0) -> DeviceCapability:
