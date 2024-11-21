@@ -143,9 +143,10 @@ class KVCacheManager:
                                     self.block_size)
 
         # NOTE(rickyx): We are assuming the `num_tokens` are actual
-        # tokens rather than placeholders for lookahead slots. If not
-        # we will need to differentiate between them so that we can
-        # know how many blocks are full after appending the actual tokens.
+        # tokens rather than lookahead slots (e.g. for speculative decoding).
+        # TODO(rickyx): When supporting speculative decoding, we will need to
+        # differentiate between them so that we can know how many blocks are
+        # full after appending the actual tokens.
         num_full_blocks_after_append = (request.num_computed_tokens +
                                         num_tokens) // self.block_size
         assert num_full_blocks_after_append <= len(req_blocks)
@@ -271,9 +272,8 @@ class KVCacheManager:
             assert curr_block.ref_cnt == 0
 
             if self.enable_caching:
-                self._reset_cached_block(
-                    curr_block, self.cached_block_hash_to_block
-                )
+                self._reset_cached_block(curr_block,
+                                         self.cached_block_hash_to_block)
 
             curr_block.incr_ref()
             ret.append(curr_block)
@@ -284,9 +284,8 @@ class KVCacheManager:
     @staticmethod
     def _reset_cached_block(
         block: KVCacheBlock,
-        cached_block_hash_to_block: Dict[
-            BlockHashType, Dict[int, KVCacheBlock]
-        ],
+        cached_block_hash_to_block: Dict[BlockHashType, Dict[int,
+                                                             KVCacheBlock]],
     ) -> None:
         """
         If a block is hashed in `cached_block_hash_to_block`, we reset its hash
