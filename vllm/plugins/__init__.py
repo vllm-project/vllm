@@ -1,4 +1,5 @@
 import logging
+import os
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Optional
 
@@ -18,6 +19,14 @@ def load_general_plugins():
     processes. They should be designed in a way that they can be loaded
     multiple times without causing issues.
     """
+
+    # all processes created by vllm will load plugins,
+    # and here we can inject some common environment variables
+    # for all processes.
+
+    # see https://github.com/vllm-project/vllm/issues/10480
+    os.environ['TORCHINDUCTOR_COMPILE_THREADS'] = '1'
+
     global plugins_loaded
     if plugins_loaded:
         return

@@ -9,6 +9,17 @@ from .interface import DeviceCapability, Platform, PlatformEnum, _Backend
 
 logger = init_logger(__name__)
 
+try:
+    import vllm._C  # noqa: F401
+except ImportError as e:
+    logger.warning("Failed to import from vllm._C with %r", e)
+
+# import custom ops, trigger op registration
+try:
+    import vllm._rocm_C  # noqa: F401
+except ImportError as e:
+    logger.warning("Failed to import from vllm._rocm_C with %r", e)
+
 if os.environ.get("VLLM_WORKER_MULTIPROC_METHOD", None) in ["fork", None]:
     logger.warning("`fork` method is not supported by ROCm. "
                    "VLLM_WORKER_MULTIPROC_METHOD is overridden to"

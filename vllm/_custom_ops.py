@@ -19,9 +19,6 @@ if not current_platform.is_tpu() and not current_platform.is_hpu():
     except ImportError as e:
         logger.warning("Failed to import from vllm._C with %r", e)
 
-if current_platform.is_rocm():
-    import vllm._rocm_C  # noqa: F401
-
 supports_moe_ops = False
 with contextlib.suppress(ImportError):
     import vllm._moe_C  # noqa: F401
