@@ -275,7 +275,7 @@ class SageAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
 
 
 class SageAttentionMetadataBuilder(
-    AttentionMetadataBuilder[SageAttentionMetadata]):
+        AttentionMetadataBuilder[SageAttentionMetadata]):
 
     def __init__(self, input_builder: ModelInputForCPUBuilder) -> None:
         self.chunked_prefill = input_builder.chunked_prefill
