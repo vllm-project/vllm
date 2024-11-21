@@ -170,3 +170,4 @@ class Platform:
 
 class UnspecifiedPlatform(Platform):
     _enum = PlatformEnum.UNSPECIFIED
+    device_type = ""
