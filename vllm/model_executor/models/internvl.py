@@ -307,6 +307,7 @@ class InternVLInputPipeline:
         inputs: DecoderOnlyInputs,
         *,
         max_dynamic_patch: Optional[int] = None,
+        dynamic_image_size: Optional[bool] = None,
     ) -> DecoderOnlyInputs:
         multi_modal_data = inputs.get("multi_modal_data")
         if multi_modal_data is None or "image" not in multi_modal_data:
@@ -318,7 +319,7 @@ class InternVLInputPipeline:
         image_data = multi_modal_data["image"]
         num_patches = get_internvl_num_patches(hf_config)
         num_blocks_calculator = calculate_num_blocks_wrapper(
-            hf_config, max_dynamic_patch)
+            hf_config, max_dynamic_patch, dynamic_image_size)
         if isinstance(image_data, Image.Image):
             width, height = image_data.size
             num_blocks, _, _ = num_blocks_calculator(width, height)
@@ -358,11 +359,12 @@ class InternVLInputPipeline:
         data: object,
         *,
         max_dynamic_patch: Optional[int] = None,
+        dynamic_image_size: Optional[bool] = None,
     ):
         hf_config = ctx.get_hf_config()
 
         image_pixel_values_mapper = image_to_pixel_values_wrapper(
-            hf_config, max_dynamic_patch)
+            hf_config, max_dynamic_patch, dynamic_image_size)
         if isinstance(data, Image.Image):
             data = image_pixel_values_mapper(data)
             # Add an N dimension for number of images per prompt (currently 1).
@@ -392,13 +394,17 @@ class InternVLInputPipeline:
         mm_counts: Mapping[str, int],
         *,
         max_dynamic_patch: Optional[int] = None,
+        dynamic_image_size: Optional[bool] = None,
     ):
         num_images = mm_counts["image"]
 
         hf_config = ctx.get_hf_config()
 
         image_feature_size = get_max_internvl_image_tokens(
-            ctx, max_dynamic_patch=max_dynamic_patch)
+            ctx,
+            max_dynamic_patch=max_dynamic_patch,
+            dynamic_image_size=dynamic_image_size,
+        )
         model_config = ctx.model_config
         tokenizer = cached_get_tokenizer(
             model_config.tokenizer,
@@ -414,7 +420,10 @@ class InternVLInputPipeline:
         )
 
         max_image_width, max_image_height = get_max_internvl_image_size(
-            ctx, max_dynamic_patch=max_dynamic_patch)
+            ctx,
+            max_dynamic_patch=max_dynamic_patch,
+            dynamic_image_size=dynamic_image_size,
+        )
 
         mm_data = dummy_image_for_clip(
             hf_config.vision_config,
