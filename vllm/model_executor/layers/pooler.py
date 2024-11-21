@@ -132,15 +132,18 @@ class Pooler(nn.Module):
 
         if self.normalize:
             if isinstance(pooled_data, list):
-                pooled_data = [nn.functional.normalize(data, p=2, dim=1) 
-                              for data in pooled_data]
+                pooled_data = [
+                    nn.functional.normalize(data, p=2, dim=1)
+                    for data in pooled_data
+                ]
             else:
                 pooled_data = nn.functional.normalize(pooled_data, p=2, dim=1)
 
         if self.softmax:
             if isinstance(pooled_data, list):
-                pooled_data = [nn.functional.softmax(data, dim=-1) 
-                              for data in pooled_data]
+                pooled_data = [
+                    nn.functional.softmax(data, dim=-1) for data in pooled_data
+                ]
             else:
                 pooled_data = nn.functional.softmax(pooled_data, dim=-1)
 
