@@ -200,10 +200,13 @@ class OpenAIServing:
             return None
         if request.model in [lora.lora_name for lora in self.lora_requests]:
             return None
-        if self.lora_resolver and (lora_request := await self.lora_resolver.resolve_lora(request.model)):
-            if lora_request.lora_int_id not in {lora.lora_int_id for lora in self.lora_requests}:
-                self.lora_requests.append(lora_request)
-                return None
+        if (self.lora_resolver
+                and (lora_request := await self.lora_resolver.resolve_lora(
+                    request.model)) and lora_request.lora_int_id
+                not in {lora.lora_int_id
+                        for lora in self.lora_requests}):
+            self.lora_requests.append(lora_request)
+            return None
         if request.model in [
                 prompt_adapter.prompt_adapter_name
                 for prompt_adapter in self.prompt_adapter_requests
