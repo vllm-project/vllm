@@ -123,8 +123,15 @@ def calculate_num_blocks(orig_width: int, orig_height: int, min_num: int,
     return blocks, target_width, target_height
 
 
-def calculate_num_blocks_wrapper(hf_config: PretrainedConfig,
-                                 max_dynamic_patch: Optional[int] = None):
+def calculate_num_blocks_wrapper(
+    hf_config: PretrainedConfig,
+    max_dynamic_patch: Optional[int] = None,
+    dynamic_image_size: Optional[bool] = None,
+):
+    if dynamic_image_size is None:
+        dynamic_image_size = hf_config.dynamic_image_size
+
+    max_dynamic_patch = max_dynamic_patch if dynamic_image_size else 1
     if max_dynamic_patch is None:
         max_dynamic_patch = hf_config.max_dynamic_patch
     min_num = hf_config.min_dynamic_patch
@@ -183,10 +190,17 @@ def image_to_pixel_values(image: Image.Image, input_size: int, min_num: int,
     return pixel_values
 
 
-def image_to_pixel_values_wrapper(hf_config: PretrainedConfig,
-                                  max_dynamic_patch: Optional[int] = None):
+def image_to_pixel_values_wrapper(
+    hf_config: PretrainedConfig,
+    max_dynamic_patch: Optional[int] = None,
+    dynamic_image_size: Optional[bool] = None,
+):
     image_size = hf_config.vision_config.image_size
     min_num = hf_config.min_dynamic_patch
+    if dynamic_image_size is None:
+        dynamic_image_size = hf_config.dynamic_image_size
+
+    max_dynamic_patch = max_dynamic_patch if dynamic_image_size else 1
     if max_dynamic_patch is None:
         max_dynamic_patch = hf_config.max_dynamic_patch
     use_thumbnail = hf_config.use_thumbnail
@@ -207,11 +221,17 @@ def get_internvl_num_patches(hf_config: PretrainedConfig):
         (downsample_ratio**2))
 
 
-def get_max_internvl_image_tokens(ctx: InputContext,
-                                  *,
-                                  max_dynamic_patch: Optional[int] = None):
+def get_max_internvl_image_tokens(
+    ctx: InputContext,
+    *,
+    max_dynamic_patch: Optional[int] = None,
+    dynamic_image_size: Optional[bool] = None,
+):
     hf_config = ctx.get_hf_config()
+    if dynamic_image_size is None:
+        dynamic_image_size = hf_config.dynamic_image_size
 
+    max_dynamic_patch = max_dynamic_patch if dynamic_image_size else 1
     if max_dynamic_patch is None:
         max_dynamic_patch = hf_config.max_dynamic_patch
     use_thumbnail = hf_config.use_thumbnail
@@ -222,12 +242,18 @@ def get_max_internvl_image_tokens(ctx: InputContext,
     return num_patches * max_dynamic_patch
 
 
-def get_max_internvl_image_size(ctx: InputContext,
-                                *,
-                                max_dynamic_patch: Optional[int] = None):
+def get_max_internvl_image_size(
+    ctx: InputContext,
+    *,
+    max_dynamic_patch: Optional[int] = None,
+    dynamic_image_size: Optional[bool] = None,
+):
     hf_config = ctx.get_hf_config()
     image_size = hf_config.vision_config.image_size
+    if dynamic_image_size is None:
+        dynamic_image_size = hf_config.dynamic_image_size
 
+    max_dynamic_patch = max_dynamic_patch if dynamic_image_size else 1
     if max_dynamic_patch is None:
         max_dynamic_patch = hf_config.max_dynamic_patch
     use_thumbnail = hf_config.use_thumbnail
