@@ -926,56 +926,56 @@ class LoadConfig:
                 f"{rocm_supported_load_format}")
 
 
+@dataclass
 class ParallelConfig:
-    """Configuration for the distributed execution.
+    """Configuration for the distributed execution."""
 
-    Args:
-        pipeline_parallel_size: Number of pipeline parallel groups.
-        tensor_parallel_size: Number of tensor parallel groups.
-        worker_use_ray: Deprecated, use distributed_executor_backend instead.
-        max_parallel_loading_workers: Maximum number of multiple batches
-            when load model sequentially. To avoid RAM OOM when using tensor
-            parallel and large models.
-        disable_custom_all_reduce: Disable the custom all-reduce kernel and
-            fall back to NCCL.
-        tokenizer_pool_config: Config for the tokenizer pool.
-            If None, will use synchronous tokenization.
-        ray_workers_use_nsight: Whether to profile Ray workers with nsight, see
-            https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-nsight-profiler.
-        placement_group: ray distributed model workers placement group.
-        distributed_executor_backend: Backend to use for distributed model
-            workers, either "ray" or "mp" (multiprocessing). If the product
-            of pipeline_parallel_size and tensor_parallel_size is less than
-            or equal to the number of GPUs available, "mp" will be used to
-            keep processing on a single host. Otherwise, this will default
-            to "ray" if Ray is installed and fail otherwise. Note that tpu
-            and hpu only support Ray for distributed inference.
-    """
+    pipeline_parallel_size: int  # Number of pipeline parallel groups.
+    tensor_parallel_size: int  # Number of tensor parallel groups.
 
-    def __init__(
-        self,
-        pipeline_parallel_size: int,
-        tensor_parallel_size: int,
-        worker_use_ray: Optional[bool] = None,
-        max_parallel_loading_workers: Optional[int] = None,
-        disable_custom_all_reduce: bool = False,
-        tokenizer_pool_config: Optional[TokenizerPoolConfig] = None,
-        ray_workers_use_nsight: bool = False,
-        placement_group: Optional["PlacementGroup"] = None,
-        distributed_executor_backend: Optional[Union[
-            str, Type["ExecutorBase"]]] = None,
-    ) -> None:
-        self.pipeline_parallel_size = pipeline_parallel_size
-        self.tensor_parallel_size = tensor_parallel_size
-        self.distributed_executor_backend = distributed_executor_backend
-        self.max_parallel_loading_workers = max_parallel_loading_workers
-        self.disable_custom_all_reduce = disable_custom_all_reduce
-        self.tokenizer_pool_config = tokenizer_pool_config
-        self.ray_workers_use_nsight = ray_workers_use_nsight
-        self.placement_group = placement_group
-        self.world_size = pipeline_parallel_size * self.tensor_parallel_size
+    # Deprecated, use distributed_executor_backend instead.
+    worker_use_ray: Optional[bool] = None
 
-        if worker_use_ray:
+    # Maximum number of multiple batches
+    # when load model sequentially. To avoid RAM OOM when using tensor
+    # parallel and large models.
+    max_parallel_loading_workers: Optional[int] = None
+
+    # Disable the custom all-reduce kernel and fall back to NCCL.
+    disable_custom_all_reduce: bool = False
+
+    # Config for the tokenizer pool. If None, will use synchronous tokenization.
+    tokenizer_pool_config: Optional[TokenizerPoolConfig] = None
+
+    # Whether to profile Ray workers with nsight, see https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-nsight-profiler.
+    ray_workers_use_nsight: bool = False
+
+    # ray distributed model workers placement group.
+    placement_group: Optional["PlacementGroup"] = None
+
+    # Backend to use for distributed model
+    # workers, either "ray" or "mp" (multiprocessing). If the product
+    # of pipeline_parallel_size and tensor_parallel_size is less than
+    # or equal to the number of GPUs available, "mp" will be used to
+    # keep processing on a single host. Otherwise, this will default
+    # to "ray" if Ray is installed and fail otherwise. Note that tpu
+    # and hpu only support Ray for distributed inference.
+    distributed_executor_backend: Optional[Union[str,
+                                                 Type["ExecutorBase"]]] = None
+
+    # the full name of the worker class to use. If "auto", the worker class
+    # will be determined based on the platform.
+    worker_cls: str = "auto"
+
+    world_size: int = field(init=False)
+
+    rank: int = 0
+
+    def __post_init__(self) -> None:
+        self.world_size = self.pipeline_parallel_size * \
+            self.tensor_parallel_size
+
+        if self.worker_use_ray:
             if self.distributed_executor_backend is None:
                 self.distributed_executor_backend = "ray"
             elif not self.use_ray:
@@ -1026,7 +1026,6 @@ class ParallelConfig:
                         backend)
 
         self._verify_args()
-        self.rank: int = 0
 
     @property
     def use_ray(self) -> bool:
