@@ -1191,12 +1191,13 @@ class SchedulerConfig:
 
 class DeviceConfig:
     device: Optional[torch.device]
+    device_type: str
 
     def __init__(self, device: str = "auto") -> None:
         if device == "auto":
             # Automated device type detection
             self.device_type = current_platform.device_type
-            if self.device_type is None:
+            if not self.device_type:
                 raise RuntimeError("Failed to infer device type")
         else:
             # Device type is assigned explicitly
