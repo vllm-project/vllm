@@ -537,6 +537,7 @@ class ColumnParallelLinearWithLoRA(BaseLayerWithLoRA):
         return lora_b
 
     def slice_bias(self, bias: torch.Tensor) -> torch.Tensor:
+        # TODO: Fix the slicing logic of bias.
         if bias is None:
             return bias
         tensor_model_parallel_rank = get_tensor_model_parallel_rank()
