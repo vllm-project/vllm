@@ -36,7 +36,7 @@ def model_name(request):
 
 
 @pytest.fixture(scope="module")
-def llm(request, model_name):
+def llm(model_name):
     # pytest caches the fixture so we use weakref.proxy to
     # enable garbage collection
     llm = LLM(
@@ -56,7 +56,7 @@ def llm(request, model_name):
 
 
 @pytest.fixture(scope="module")
-def hf_model(hf_runner, model_name):
+def hf_model(model_name):
     yield HfRunner(model_name, dtype="half", is_cross_encoder=True)
 
 

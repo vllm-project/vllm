@@ -1,5 +1,4 @@
 import pytest
-import pytest_asyncio
 import requests
 
 from vllm.entrypoints.openai.protocol import ScoreResponse
@@ -17,12 +16,6 @@ def server():
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
-
-
-@pytest_asyncio.fixture
-async def client(server):
-    async with server.get_async_client() as async_client:
-        yield async_client
 
 
 @pytest.mark.asyncio
