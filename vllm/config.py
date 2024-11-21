@@ -1,5 +1,6 @@
 import copy
 import enum
+import hashlib
 import json
 import warnings
 from dataclasses import dataclass, field, replace
@@ -13,6 +14,7 @@ from pydantic import BaseModel, Field, PrivateAttr
 from transformers import PretrainedConfig
 
 import vllm.envs as envs
+from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (QUANTIZATION_METHODS,
                                                      get_quantization_config)
@@ -2120,12 +2122,7 @@ class CompilationConfig(BaseModel):
             name because the config uses json format. If we pass the config
             from Python, functions can also be passed directly via Python object
             constructor, e.g. `CompilationConfig(inductor_passes={"a": func})`
-        - custom inductor passes:
-            - dump_graph_stages: list of stages for which we want to dump the graph.
-                Each pass defines its own stages (before, after, maybe in-between).
-            - dump_graph_dir: directory to dump the graph. Default is .
-            - enable_fusion: whether to enable the custom fusion pass.
-                TODO better pass enabling system.
+        - custom inductor passes: see PassConfig for more details
     
     Why we have different sizes for cudagraph and inductor:
     - cudagraph: a cudagraph captured for a specific size can only be used
@@ -2157,9 +2154,43 @@ class CompilationConfig(BaseModel):
     cudagraph_capture_sizes: Optional[List[int]] = None
     cudagraph_copy_inputs: bool = False
 
-    dump_graph_stages: List[str] = Field(default_factory=list)
-    dump_graph_dir: Path = Field(default=Path("."))
-    enable_fusion: bool = True
+    class PassConfig(BaseModel):
+        """
+        Configuration for custom Inductor passes.
+        This is separate from general CompilationConfig so that inductor passes
+        don't all have access to full configuration - that would create a cycle
+        as the PassManager is set as a property of config.
+        - dump_graph_stages: list of stages for which we want to dump the graph.
+            Each pass defines its own stages (before, after, maybe in-between).
+        - dump_graph_dir: directory to dump the graphs. Default is .
+        - enable_fusion: whether to enable the custom fusion pass.
+        - enable_reshape: whether to enable the custom reshape elimination pass.
+            TODO better pass enabling system.
+        """
+        dump_graph_stages: List[str] = Field(default_factory=list)
+        dump_graph_dir: Path = Field(default=Path("."))
+        enable_fusion: bool = True
+        enable_reshape: bool = True
+
+        def uuid(self):
+            """
+            Produces a hash unique to the pass configuration.
+            Any new fields that affect compilation should be added to the hash.
+            Do not include dump_graph_* in the hash - they don't affect
+            compilation.
+            """
+            dict_ = self.model_dump(
+                include={"enable_fusion", "enable_reshape"})
+            encoded = json.dumps(dict_, sort_keys=True).encode("utf-8")
+            return hashlib.sha256(encoded).digest()
+
+        def model_post_init(self, __context: Any) -> None:
+            if not self.enable_reshape and self.enable_fusion:
+                print_warning_once(
+                    "Fusion enabled but reshape elimination disabled."
+                    "RMSNorm + quant (fp8) fusion might not work")
+
+    pass_config: PassConfig = Field(default_factory=PassConfig)
 
     # not configurable, computed after init
     compile_sizes: List[int] = PrivateAttr
@@ -2185,8 +2216,9 @@ class CompilationConfig(BaseModel):
         for k, v in self.inductor_passes.items():
             if not isinstance(v, str):
                 assert callable(v), (
-                    f"pass {k} should be a function or a qualified name")
-                self.inductor_compile_config[k] = v
+                    f"pass {k} should be callable or a qualified name")
+                self.inductor_compile_config[k] = v if isinstance(
+                    v, InductorPass) else CallableInductorPass(v)
                 continue
 
             # resolve function from qualified name
@@ -2194,7 +2226,8 @@ class CompilationConfig(BaseModel):
             module = ".".join(names[:-1])
             func_name = names[-1]
             func = __import__(module).__dict__[func_name]
-            self.inductor_compile_config[k] = func
+            self.inductor_compile_config[k] = func if isinstance(
+                func, InductorPass) else CallableInductorPass(func)
 
         self.enabled_custom_ops = Counter()
         self.disabled_custom_ops = Counter()
@@ -2344,7 +2377,8 @@ class VllmConfig:
             self.compilation_config.custom_ops = ["none"]
             self.compilation_config.use_cudagraph = True
             self.compilation_config.use_inductor = True
-            self.compilation_config.enable_fusion = False
+            self.compilation_config.pass_config.enable_fusion = False
+            self.compilation_config.pass_config.enable_reshape = False
 
         current_platform.check_and_update_config(self)
 
