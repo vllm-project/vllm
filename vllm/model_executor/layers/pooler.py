@@ -117,7 +117,7 @@ class Pooler(nn.Module):
             step_tag_id = self.step_tag_id
 
             offset = 0
-            pooled_data_lst = []
+            pooled_data = []
             for prompt_len, seq_data_i in zip(
                     prompt_lens, pooling_metadata.seq_data.values()):
                 pooled_data_i = hidden_states[offset:offset + prompt_len]
@@ -126,17 +126,23 @@ class Pooler(nn.Module):
                     pooled_data_i = pooled_data_i[token_ids == step_tag_id]
 
                 offset += prompt_len
-                pooled_data_lst.append(pooled_data_i)
-
-            pooled_data = torch.stack(pooled_data_lst)
+                pooled_data.append(pooled_data_i)
         else:
             raise ValueError(f"Invalid pooling type: {self.pooling_type}")
 
         if self.normalize:
-            pooled_data = nn.functional.normalize(pooled_data, p=2, dim=1)
+            if isinstance(pooled_data, list):
+                pooled_data = [nn.functional.normalize(data, p=2, dim=1) 
+                              for data in pooled_data]
+            else:
+                pooled_data = nn.functional.normalize(pooled_data, p=2, dim=1)
 
         if self.softmax:
-            pooled_data = nn.functional.softmax(pooled_data, dim=-1)
+            if isinstance(pooled_data, list):
+                pooled_data = [nn.functional.softmax(data, dim=-1) 
+                              for data in pooled_data]
+            else:
+                pooled_data = nn.functional.softmax(pooled_data, dim=-1)
 
         pooled_outputs = [
             EmbeddingSequenceGroupOutput(data.tolist()) for data in pooled_data
