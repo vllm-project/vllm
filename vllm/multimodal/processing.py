@@ -296,7 +296,7 @@ def find_token_match_by_text(
     )
 
 
-def apply_placeholders(
+def replace_by_text(
     tokenizer: AnyTokenizer,
     token_ids: List[int],
     token_text: str,
@@ -417,7 +417,7 @@ class MultiModalProcessor:
                             new_token_ids,
                             new_prompt,
                             placeholders,
-                        ) = apply_placeholders(
+                        ) = replace_by_text(
                             tokenizer,
                             new_token_ids,
                             new_prompt,
