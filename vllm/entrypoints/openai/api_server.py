@@ -489,8 +489,9 @@ def build_app(args: Namespace) -> FastAPI:
 
     @app.exception_handler(RequestValidationError)
     async def validation_exception_handler(_, exc):
-        chat = app.state.openai_serving_chat
-        err = chat.create_error_response(message=str(exc))
+        err = ErrorResponse(message=str(exc),
+                            type="BadRequestError",
+                            code=HTTPStatus.BAD_REQUEST)
         return JSONResponse(err.model_dump(),
                             status_code=HTTPStatus.BAD_REQUEST)
 
