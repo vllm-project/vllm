@@ -1,13 +1,17 @@
 import logging
+import os
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Optional
 
 import vllm.envs as envs
 
 if TYPE_CHECKING:
-    from vllm.config import CompilationConfig, VllmConfig
+    from vllm.config import VllmConfig
 
 logger = logging.getLogger(__name__)
+
+# make sure one process only loads plugins once
+plugins_loaded = False
 
 
 def load_general_plugins():
@@ -15,6 +19,18 @@ def load_general_plugins():
     processes. They should be designed in a way that they can be loaded
     multiple times without causing issues.
     """
+
+    # all processes created by vllm will load plugins,
+    # and here we can inject some common environment variables
+    # for all processes.
+
+    # see https://github.com/vllm-project/vllm/issues/10480
+    os.environ['TORCHINDUCTOR_COMPILE_THREADS'] = '1'
+
+    global plugins_loaded
+    if plugins_loaded:
+        return
+    plugins_loaded = True
     import sys
     if sys.version_info < (3, 10):
         from importlib_metadata import entry_points
@@ -45,18 +61,6 @@ def load_general_plugins():
                 logger.info("plugin %s loaded.", plugin.name)
             except Exception:
                 logger.exception("Failed to load plugin %s", plugin.name)
-
-
-_compilation_config: Optional["CompilationConfig"] = None
-
-
-def set_compilation_config(config: Optional["CompilationConfig"]):
-    global _compilation_config
-    _compilation_config = config
-
-
-def get_compilation_config() -> Optional["CompilationConfig"]:
-    return _compilation_config
 
 
 _current_vllm_config: Optional["VllmConfig"] = None

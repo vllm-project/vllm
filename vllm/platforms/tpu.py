@@ -1,4 +1,3 @@
-import os
 from typing import TYPE_CHECKING
 
 import torch
@@ -17,6 +16,7 @@ logger = init_logger(__name__)
 
 class TpuPlatform(Platform):
     _enum = PlatformEnum.TPU
+    device_type: str = "tpu"
 
     @classmethod
     def get_default_attn_backend(cls, selected_backend: _Backend) -> _Backend:
@@ -40,7 +40,8 @@ class TpuPlatform(Platform):
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         from vllm.config import CompilationLevel
         compilation_config = vllm_config.compilation_config
-        if "VLLM_TORCH_COMPILE_LEVEL" not in os.environ:
+        if compilation_config.level == CompilationLevel.NO_COMPILATION:
+            # TPU does not support NO_COMPILATION
             compilation_config.level = CompilationLevel.DYNAMO_ONCE
         assert compilation_config.level < CompilationLevel.PIECEWISE,\
             "TPU does not support Inductor."
