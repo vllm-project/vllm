@@ -13,9 +13,10 @@ os.environ["VLLM_RPC_TIMEOUT"] = "30000"
 def test_custom_dispatcher():
     compare_two_settings(
         "google/gemma-2b",
-        arg1=["--enforce-eager", "-O",
-              str(CompilationLevel.DYNAMO_ONCE)],
-        arg2=["--enforce-eager", "-O",
-              str(CompilationLevel.DYNAMO_AS_IS)],
+        arg1=[
+            "--enforce-eager",
+            f"-O{CompilationLevel.DYNAMO_ONCE}",
+        ],
+        arg2=["--enforce-eager", f"-O{CompilationLevel.DYNAMO_AS_IS}"],
         env1={},
         env2={})

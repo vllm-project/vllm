@@ -882,7 +882,10 @@ class EngineArgs:
                             'testing only. level 3 is the recommended level '
                             'for production.\n'
                             'To specify the full compilation config, '
-                            'use a JSON string.')
+                            'use a JSON string.\n'
+                            'Following the convention of traditional '
+                            'compilers, using -O without space is also '
+                            'supported. -O3 is equivalent to -O 3.')
 
         return parser
 
