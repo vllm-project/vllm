@@ -2,7 +2,7 @@
 
 vLLM currently supports named function calling, as well as the `auto` and `none` options for the `tool_choice` field in the chat completion API. The `tool_choice` option `required` is **not yet supported** but on the roadmap.
 
-### Quickstart
+## Quickstart
 
 Start the server with tool calling enabled. This example uses Meta's Llama 3.1 8B model, so we need to use the llama3 tool calling chat template from the vLLM examples directory:
 
@@ -76,7 +76,7 @@ Remember that it's the callers responsibility to:
 
 For more advanced usage, including parallel tool calls and different model-specific parsers, see the sections below.
 
-### Named Function Calling
+## Named Function Calling
 vLLM supports named function calling in the chat completion API by default. It does so using Outlines through guided decoding, so this is
 enabled by default, and will work with any supported model. You are guaranteed a validly-parsable function call - not a
 high-quality one.
@@ -87,7 +87,7 @@ To use a named function, you need to define the functions in the `tools` paramet
 specify the `name` of one of the tools in the `tool_choice` parameter of the chat completion request.
 
 
-### Automatic Function Calling
+## Automatic Function Calling
 
 To enable this feature, you should set the following flags:
 * `--enable-auto-tool-choice` -- **mandatory** Auto tool choice. tells vLLM that you want to enable the model to generate its own tool calls when it
@@ -104,7 +104,7 @@ from HuggingFace; and you can find an example of this in a `tokenizer_config.jso
 If your favorite tool-calling model is not supported, please feel free to contribute a parser & tool use chat template!
 
 
-#### Hermes Models (`hermes`)
+### Hermes Models (`hermes`)
 
 All Nous Research Hermes-series models newer than Hermes 2 Pro should be supported.
 * `NousResearch/Hermes-2-Pro-*`
@@ -118,7 +118,7 @@ step in their creation_.
 Flags: `--tool-call-parser hermes`
 
 
-#### Mistral Models (`mistral`)
+### Mistral Models (`mistral`)
 
 Supported models:
 * `mistralai/Mistral-7B-Instruct-v0.3` (confirmed)
@@ -139,7 +139,7 @@ when tools are provided, that results in much better reliability when working wi
 Recommended flags: `--tool-call-parser mistral --chat-template examples/tool_chat_template_mistral_parallel.jinja`
 
 
-#### Llama Models (`llama3_json`)
+### Llama Models (`llama3_json`)
 
 Supported models:
 * `meta-llama/Meta-Llama-3.1-8B-Instruct`
@@ -176,7 +176,7 @@ Recommended flags: `--tool-call-parser granite-20b-fc --chat-template examples/t
 `examples/tool_chat_template_granite_20b_fc.jinja`: this is a modified chat template from the original on Huggingface, which is not vLLM compatible. It blends function description elements from the Hermes template and follows the same system prompt as "Response Generation" mode from [the paper](https://arxiv.org/abs/2407.00121). Parallel function calls are supported.
 
 
-#### InternLM Models (`internlm`)
+### InternLM Models (`internlm`)
 
 Supported models:
 * `internlm/internlm2_5-7b-chat` (confirmed)
@@ -188,7 +188,7 @@ Known issues:
 Recommended flags: `--tool-call-parser internlm --chat-template examples/tool_chat_template_internlm2_tool.jinja`
 
 
-#### Jamba Models (`jamba`)
+### Jamba Models (`jamba`)
 AI21's Jamba-1.5 models are supported.
 * `ai21labs/AI21-Jamba-1.5-Mini`
 * `ai21labs/AI21-Jamba-1.5-Large`
@@ -197,7 +197,7 @@ AI21's Jamba-1.5 models are supported.
 Flags: `--tool-call-parser jamba`
 
 
-#### Models with Pythonic Tool Calls (`pythonic`)
+### Models with Pythonic Tool Calls (`pythonic`)
 
 A growing number of models output a python list to represent tool calls instead of using JSON. This has the advantage of inherently supporting parallel tool calls and removing ambiguity around the JSON schema required for tool calls. The `pythonic` tool parser can support such models.
 
@@ -225,7 +225,7 @@ Llama's smaller models frequently fail to emit tool calls in the correct format.
 ---
 
 
-### How to write a tool parser plugin
+## How to write a tool parser plugin
 
 A tool parser plugin is a Python file containing one or more ToolParser implementations. You can write a ToolParser similar to the `Hermes2ProToolParser` in vllm/entrypoints/openai/tool_parsers/hermes_tool_parser.py.
 
