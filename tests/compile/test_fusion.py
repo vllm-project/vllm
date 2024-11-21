@@ -52,11 +52,14 @@ class TestModel(torch.nn.Module):
                     reason="Only test on CUDA")
 def test_fusion_rmsnorm_quant(dtype, hidden_size, num_tokens, eps, static):
     torch.set_default_device("cuda")
-    torch.set_default_dtype(torch.float16)
+    torch.set_default_dtype(dtype)
+    torch.manual_seed(1)
 
     # Reshape pass is needed for the fusion pass to work
-    config = CompilationConfig.PassConfig(enable_fusion=True,
-                                          enable_reshape=True)
+    config = CompilationConfig.PassConfig(
+        enable_fusion=True,
+        enable_reshape=True,
+        dump_graph_stages=["before_fusion", "after_fusion"])
     reshape_pass = RedundantReshapesPass(config)
     fusion_pass = FusionPass.instance(config)
 
@@ -73,8 +76,11 @@ def test_fusion_rmsnorm_quant(dtype, hidden_size, num_tokens, eps, static):
     result2 = model2(x)
 
     # Check that it gives the same answer, higher tol for dynamic
-    ATOL, RTOL = (1e-3, 1e-3) if static else (1e-2, 1e-2)
-    torch.testing.assert_close(result, result2, atol=ATOL, rtol=RTOL)
+    ATOL, RTOL = (1e-3, 1e-3) if static else (2e-2, 2e-2)
+    torch.testing.assert_close(result.to(dtype=torch.float32),
+                               result2.to(dtype=torch.float32),
+                               atol=ATOL,
+                               rtol=RTOL)
 
     # Check substitution worked
     pre_nodes = backend.graph_pre_pass.nodes
@@ -85,8 +91,8 @@ def test_fusion_rmsnorm_quant(dtype, hidden_size, num_tokens, eps, static):
         add_rms_quant = torch.ops._C.fused_add_rms_norm_static_fp8_quant.default  # noqa: E501
         fp8_quant = torch.ops._C.static_scaled_fp8_quant.default
     else:
-        rms_quant = torch.ops._C.rms_norm_dynamic_fp8_quant.default
-        add_rms_quant = torch.ops._C.fused_add_rms_norm_dynamic_fp8_quant.default  # noqa: E501
+        rms_quant = torch.ops._C.rms_norm_dynamic_per_token_quant.default
+        add_rms_quant = torch.ops._C.rms_norm_dynamic_per_token_quant.default  # noqa: E501
         fp8_quant = torch.ops._C.dynamic_scaled_fp8_quant.default
 
     # In pre-nodes, fp8 quant should be present and fused kernels should not

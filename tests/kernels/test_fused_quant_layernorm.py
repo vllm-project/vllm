@@ -8,8 +8,8 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 
 DTYPES = [torch.bfloat16, torch.float]
 QUANT_DTYPES = [torch.int8, torch.float8_e4m3fn]
-NUM_TOKENS = [1, 7, 83, 4096]  # Arbitrary values for testing
-HIDDEN_SIZES = [1, 2, 3, 4, 16, 67, 768, 2048, 5120, 5137, 8192,
+NUM_TOKENS = [1, 7, 83, 2048, 4096]  # Arbitrary values for testing
+HIDDEN_SIZES = [1, 2, 3, 4, 16, 64, 67, 768, 2048, 5120, 5137, 8192,
                 8193]  # Arbitrary values for testing
 HIDDEN_SIZES += list(range(1024, 1033))  # vectorized conversion edge cases
 ADD_RESIDUAL = [False, True]

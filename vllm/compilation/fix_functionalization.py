@@ -60,18 +60,14 @@ class FixFunctionalizationPass(VllmInductorPass):
             elif at_target == torch.ops._C.fused_add_rms_norm_static_fp8_quant.default:  # noqa: E501
                 mutated_args = {1: 'result', 2: 'residual'}
                 self.defunctionalize(graph, node, mutated_args)
-            elif at_target == torch.ops._C.fused_add_rms_norm_dynamic_fp8_quant.default:  # noqa: E501
-                mutated_args = {1: 'result', 2: 'residual', 3: 'scale'}
+            elif at_target == torch.ops._C.rms_norm_dynamic_per_token_quant.default:  # noqa: E501
+                mutated_args = {1: 'result', 2: 'scale', 3: 'residual'}
                 self.defunctionalize(graph, node, mutated_args)
-
             elif at_target in [
                     torch.ops._C.rms_norm.default,
                     torch.ops._C.rms_norm_static_fp8_quant.default
             ]:
                 mutated_args = {1: 'result'}
-                self.defunctionalize(graph, node, mutated_args)
-            elif at_target == torch.ops._C.rms_norm_dynamic_fp8_quant.default:
-                mutated_args = {1: 'result', 2: 'scale'}
                 self.defunctionalize(graph, node, mutated_args)
 
             elif at_target == torch.ops._C.silu_and_mul.default:
