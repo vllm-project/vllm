@@ -122,6 +122,7 @@ class XPUWorker(LoraNotSupportedWorkerBase, Worker):
         # Profile the memory usage of the model and get the maximum number of
         # cache blocks that can be allocated with the remaining free memory.
         torch.xpu.empty_cache()
+        before_memory = torch.xpu.memory.memory_reserved()
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
@@ -154,6 +155,20 @@ class XPUWorker(LoraNotSupportedWorkerBase, Worker):
         num_cpu_blocks = max(num_cpu_blocks, 0)
         gc.collect()
         torch.xpu.empty_cache()
+        flag = os.getenv("IPEX_LLM_MAX_INPUT_LENGTH_DETAIL", None)
+        if flag is not None:
+            in_len = int(self.scheduler_config.max_num_batched_tokens / 1024)
+            logger.info(f"before_memory {before_memory/(1024**3)} GB")
+            logger.info(f"total_gpu_memory = {total_gpu_memory/(1024**3)} GB")
+            logger.info(f"peak_memory {peak_memory/(1024**3)} GB")
+            add_memory = peak_memory-before_memory
+            logger.info(f"add_memory {add_memory} B")
+            total_add_memory = total_gpu_memory*self.cache_config.gpu_memory_utilization-before_memory
+            max_input = total_add_memory / (1024/self.cache_config.block_size*cache_block_size + add_memory/in_len)
+            logger.info(f"total_add_memory {total_add_memory} B")
+            logger.info(f"max-num-batched-tokens {in_len} K")
+            logger.info(f"theoretical max input length {max_input} K")
+            logger.info(f"num_gpu_blocks actually support max input length {num_gpu_blocks*self.cache_config.block_size/1024} K")
         return num_gpu_blocks, num_cpu_blocks
 
     def _warm_up_model(self) -> None:
