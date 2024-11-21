@@ -548,7 +548,7 @@ class GPUModelRunner:
         if not self.use_cuda_graph:
             logger.warning(
                 "Skipping CUDA graph capture. Please add "
-                "-O 3 to use CUDA graphs.", CompilationLevel.PIECEWISE)
+                "-O %s to use CUDA graphs.", CompilationLevel.PIECEWISE)
             return
 
         start_time = time.perf_counter()
