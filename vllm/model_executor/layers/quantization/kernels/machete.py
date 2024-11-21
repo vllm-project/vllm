@@ -8,7 +8,7 @@ from vllm.model_executor.layers.quantization.utils.machete_utils import (
     MACHETE_SUPPORTED_GROUP_SIZES, check_machete_supports_shape,
     query_machete_supported_quant_types)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    pack_weights_into_int32, unpack_weights_into_int32)
+    pack_quantized_values_into_int32, unpack_quantized_values_into_int32)
 from vllm.model_executor.parameter import (BasevLLMParameter,
                                            permute_param_layout_)
 
@@ -71,15 +71,17 @@ class MacheteLinearKernel(MPLinearKernel):
             assert isinstance(x, BasevLLMParameter)
             permute_param_layout_(x, input_dim=0, output_dim=1, packed_dim=0)
             if c.has_g_idx:
-                x_unpacked = unpack_weights_into_int32(x.data,
-                                                       c.weight_type,
-                                                       packed_dim=0)
+                x_unpacked = unpack_quantized_values_into_int32(x.data,
+                                                                c.weight_type,
+                                                                packed_dim=0)
                 x_perm = x_unpacked[perm, :]
-                x.data = pack_weights_into_int32(x_perm,
-                                                 c.weight_type,
-                                                 packed_dim=0)
+                x.data = pack_quantized_values_into_int32(x_perm,
+                                                          c.weight_type,
+                                                          packed_dim=0)
             x.data = ops.machete_prepack_B(x.data.t().contiguous().t(),
-                                           self.config.weight_type)
+                                           a_type=c.act_type,
+                                           b_type=c.weight_type,
+                                           group_scales_type=c.act_type)
             return x
 
         def transform_w_s(x):
@@ -105,12 +107,12 @@ class MacheteLinearKernel(MPLinearKernel):
         if c.has_g_idx:
             x_2d = self.act_perm(x_2d)
 
-        output = ops.machete_gemm(a=x_2d,
-                                  b_q=w_q,
-                                  b_type=c.weight_type,
-                                  b_zeros=None,
-                                  b_scales=w_s,
-                                  b_group_size=c.group_size)
+        output = ops.machete_mm(a=x_2d,
+                                b_q=w_q,
+                                b_type=c.weight_type,
+                                b_group_zeros=None,
+                                b_group_scales=w_s,
+                                b_group_size=c.group_size)
 
         if bias is not None:
             output.add_(bias)  # In-place add

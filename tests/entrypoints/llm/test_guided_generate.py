@@ -5,11 +5,10 @@ import weakref
 import jsonschema
 import pytest
 
+from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.entrypoints.llm import LLM
 from vllm.outputs import RequestOutput
-from vllm.sampling_params import SamplingParams
-
-from ...conftest import cleanup
+from vllm.sampling_params import GuidedDecodingParams, SamplingParams
 
 MODEL_NAME = "HuggingFaceH4/zephyr-7b-beta"
 
@@ -23,7 +22,7 @@ def llm():
     with llm.deprecate_legacy_api():
         yield weakref.proxy(llm)
         del llm
-    cleanup()
+    cleanup_dist_env_and_memory()
 
 
 @pytest.mark.skip_global_cleanup
@@ -31,14 +30,12 @@ def test_guided_regex(sample_regex, llm):
     sampling_params = SamplingParams(
         temperature=0.8,
         top_p=0.95,
-    )
-    outputs = llm.generate(
-        prompts=[
-            f"Give an example IPv4 address with this regex: {sample_regex}"
-        ] * 2,
-        sampling_params=sampling_params,
-        use_tqdm=True,
-        guided_options_request=dict(guided_regex=sample_regex))
+        guided_decoding=GuidedDecodingParams(regex=sample_regex))
+    outputs = llm.generate(prompts=[
+        f"Give an example IPv4 address with this regex: {sample_regex}"
+    ] * 2,
+                           sampling_params=sampling_params,
+                           use_tqdm=True)
 
     assert outputs is not None
     for output in outputs:
@@ -57,15 +54,13 @@ def test_guided_json_completion(sample_json_schema, llm):
     sampling_params = SamplingParams(
         temperature=1.0,
         max_tokens=1000,
-    )
-    outputs = llm.generate(
-        prompts=[
-            f"Give an example JSON for an employee profile "
-            f"that fits this schema: {sample_json_schema}"
-        ] * 2,
-        sampling_params=sampling_params,
-        use_tqdm=True,
-        guided_options_request=dict(guided_json=sample_json_schema))
+        guided_decoding=GuidedDecodingParams(json=sample_json_schema))
+    outputs = llm.generate(prompts=[
+        f"Give an example JSON for an employee profile "
+        f"that fits this schema: {sample_json_schema}"
+    ] * 2,
+                           sampling_params=sampling_params,
+                           use_tqdm=True)
 
     assert outputs is not None
 
@@ -86,12 +81,11 @@ def test_guided_choice_completion(sample_guided_choice, llm):
     sampling_params = SamplingParams(
         temperature=0.8,
         top_p=0.95,
-    )
+        guided_decoding=GuidedDecodingParams(choice=sample_guided_choice))
     outputs = llm.generate(
         prompts="The best language for type-safe systems programming is ",
         sampling_params=sampling_params,
-        use_tqdm=True,
-        guided_options_request=dict(guided_choice=sample_guided_choice))
+        use_tqdm=True)
 
     assert outputs is not None
     for output in outputs:
@@ -112,13 +106,13 @@ def test_guided_grammar(sample_sql_statements, llm):
         temperature=0.8,
         top_p=0.95,
         max_tokens=1000,
-    )
+        guided_decoding=GuidedDecodingParams(grammar=sample_sql_statements))
     outputs = llm.generate(
         prompts=("Generate a sql state that select col_1 from "
                  "table_1 where it is equals to 1"),
         sampling_params=sampling_params,
         use_tqdm=True,
-        guided_options_request=dict(guided_grammar=sample_sql_statements))
+    )
 
     assert outputs is not None
     for output in outputs:
@@ -140,3 +134,28 @@ def test_guided_grammar(sample_sql_statements, llm):
         assert generated_text.strip() == ground_truth
 
         print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+
+
+@pytest.mark.skip_global_cleanup
+def test_guided_options_request_deprecation_warning(sample_regex, llm):
+    sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
+
+    with pytest.warns(DeprecationWarning, match="guided_options_request"):
+        llm.generate(prompts="This should fail",
+                     sampling_params=sampling_params,
+                     use_tqdm=True,
+                     guided_options_request=dict(guided_regex=sample_regex))
+
+
+@pytest.mark.skip_global_cleanup
+def test_validation_against_both_guided_decoding_options(sample_regex, llm):
+    sampling_params = SamplingParams(
+        temperature=0.8,
+        top_p=0.95,
+        guided_decoding=GuidedDecodingParams(regex=sample_regex))
+
+    with pytest.raises(ValueError, match="Cannot set both"):
+        llm.generate(prompts="This should fail",
+                     sampling_params=sampling_params,
+                     use_tqdm=True,
+                     guided_options_request=dict(guided_regex=sample_regex))

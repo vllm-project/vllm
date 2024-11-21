@@ -1,4 +1,3 @@
-# coding=utf-8
 # Adapted from
 # https://huggingface.co/Qwen/Qwen-7B/blob/main/modeling_qwen.py
 # Copyright (c) Alibaba Cloud.
@@ -9,7 +8,7 @@ import math
 import re
 from functools import partial
 from typing import (Any, Callable, Dict, Iterable, List, Literal, Mapping,
-                    Optional, Tuple, TypedDict, Union)
+                    Optional, Set, Tuple, TypedDict, Union)
 
 import numpy as np
 import torch
@@ -20,34 +19,38 @@ from torchvision.transforms import InterpolationMode
 from transformers import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
-from vllm.config import CacheConfig, MultiModalConfig
+from vllm.compilation.decorators import support_torch_compile
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
-from vllm.inputs import INPUT_REGISTRY, InputContext, LLMInputs
+from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
+                         InputContext, token_inputs)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul, get_act_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
                                                QKVParallelLinear,
+                                               ReplicatedLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.resampler import Resampler2, get_abs_pos
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.interfaces import SupportsMultiModal
+from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.base import MultiModalInputs
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.sequence import IntermediateTensors, SequenceData
 from vllm.utils import is_list_of
 
-from .utils import flatten_bn, is_pp_missing_parameter, make_layers
+from .interfaces import SupportsLoRA, SupportsMultiModal, SupportsPP
+from .utils import (flatten_bn, is_pp_missing_parameter,
+                    make_empty_intermediate_tensors_factory, make_layers,
+                    maybe_prefix)
 
 logger = init_logger(__name__)
 
@@ -121,8 +124,8 @@ class VisualAttention(nn.Module):
         # Strided linear layer.
         assert self._qkv_same_embed_dim, \
                 'Visual Attention implementation only supports self-attention'
-        self.in_proj = nn.Linear(embed_dim, 3 * embed_dim)
-        self.out_proj = nn.Linear(embed_dim, embed_dim)
+        self.in_proj = ReplicatedLinear(embed_dim, 3 * embed_dim)
+        self.out_proj = ReplicatedLinear(embed_dim, embed_dim)
         self.norm_factor = math.sqrt(self.hidden_size_per_attention_head)
 
     def forward(
@@ -132,7 +135,7 @@ class VisualAttention(nn.Module):
     ) -> torch.Tensor:
         # query/key/value: [sq, b, h]
         sq, b, _ = x.size()
-        mixed_x_layer = self.in_proj(x)
+        mixed_x_layer, _ = self.in_proj(x)
 
         # [sq, b, (np * 3 * hn)] --> [sq, b, np, 3 * hn]
         new_tensor_shape = mixed_x_layer.size()[:-1] + \
@@ -181,7 +184,7 @@ class VisualAttention(nn.Module):
             (self.hidden_size_per_partition,)
         context_layer = context_layer.view(*new_context_layer_shape)
 
-        output = self.out_proj(context_layer)
+        output, _ = self.out_proj(context_layer)
 
         return output
 
@@ -200,7 +203,7 @@ class QwenVMLP(nn.Module):
                                          intermediate_size,
                                          bias=True,
                                          quant_config=quant_config)
-        self.act_fn = get_act_fn("gelu", quant_config, intermediate_size)
+        self.act_fn = get_act_fn("gelu")
         self.c_proj = RowParallelLinear(
             intermediate_size,
             hidden_size,
@@ -546,16 +549,16 @@ class QWenBlock(nn.Module):
         return hidden_states, residual
 
 
+@support_torch_compile
 class QWenModel(nn.Module):
 
-    def __init__(
-        self,
-        config: PretrainedConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+
         self.config = config
         self.vocab_size = config.vocab_size
 
@@ -568,9 +571,15 @@ class QWenModel(nn.Module):
             lambda prefix: QWenBlock(config, cache_config, quant_config),
             prefix=f"{prefix}.h")
         self.ln_f = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
+        self.make_empty_intermediate_tensors = (
+            make_empty_intermediate_tensors_factory(
+                ["hidden_states", "residual"], config.hidden_size))
         self.visual = VisionTransformer(**config.visual,
                                         quant_config=quant_config) if hasattr(
                                             config, "visual") else None
+
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.wte(input_ids)
 
     def forward(
         self,
@@ -580,7 +589,8 @@ class QWenModel(nn.Module):
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors],
         pixel_values: Optional[QwenImageInputs],
-    ) -> torch.Tensor:
+        inputs_embeds: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, IntermediateTensors]:
         img_pos = None
         # If pixel / visual embeddings are provided, this is a visual model
         if pixel_values is not None and self.visual is not None:
@@ -600,6 +610,10 @@ class QWenModel(nn.Module):
                 )
 
         if get_pp_group().is_first_rank:
+            if inputs_embeds is not None:
+                hidden_states = inputs_embeds
+            else:
+                hidden_states = self.get_input_embeddings(input_ids)
             hidden_states = self.wte(input_ids)
             # Merge the image embeddings into the hidden states if actually have
             # visual features and the corresponding image tokens
@@ -649,30 +663,30 @@ def get_image_text(image_num: int, padding: bool) -> str:
 
 
 def input_processor_for_qwen(ctx: InputContext,
-                             llm_inputs: LLMInputs) -> LLMInputs:
+                             inputs: DecoderOnlyInputs) -> DecoderOnlyInputs:
     """Processes the inputs, which may or may not be multimodal.
     Multimodal inputs will only be processed if the model has a "visual"
     component in its model config, otherwise they'll be ignored.
 
     Args:
         ctx: Context of the loaded model.
-        llm_inputs: LLM inputs which may have a multi_modal_data attribute.
+        inputs: LLM inputs which may have a multi_modal_data attribute.
 
     Returns:
         If the model is language only or not multimodal inputs were provided,
-        returns llm_inputs unmodified. Otherwise, processes the multimodal
+        returns inputs unmodified. Otherwise, processes the multimodal
         images / image embeddings and adds the fixed-length image placeholders.
     """
-    multi_modal_data = llm_inputs.get("multi_modal_data")
+    multi_modal_data = inputs.get("multi_modal_data")
 
     # Only process images if we have multimodal data and a visual config
     hf_config = ctx.get_hf_config()
     if (multi_modal_data is None or "image" not in multi_modal_data
             or not hasattr(hf_config, "visual")):
-        return llm_inputs
+        return inputs
 
-    prompt = llm_inputs.get("prompt")
-    prompt_token_ids = llm_inputs["prompt_token_ids"]
+    prompt = inputs.get("prompt")
+    prompt_token_ids = inputs["prompt_token_ids"]
     model_config = ctx.model_config
     tokenizer = cached_get_tokenizer(
         model_config.tokenizer,
@@ -710,13 +724,13 @@ def input_processor_for_qwen(ctx: InputContext,
 
     new_prompt_token_ids = tokenizer.encode(new_prompt)
 
-    return LLMInputs(prompt=new_prompt,
-                     prompt_token_ids=new_prompt_token_ids,
-                     multi_modal_data=multi_modal_data)
+    return token_inputs(prompt=new_prompt,
+                        prompt_token_ids=new_prompt_token_ids,
+                        multi_modal_data=multi_modal_data)
 
 
-def input_mapper_for_qwen(ctx: InputContext, data: object) -> MultiModalInputs:
-    """Maps the input data to its MultiModalInputs (if any).
+def input_mapper_for_qwen(ctx: InputContext, data: object) -> MultiModalKwargs:
+    """Maps the input data to its MultiModalKwargs (if any).
 
     Args:
         ctx: Context of the loaded model.
@@ -724,7 +738,7 @@ def input_mapper_for_qwen(ctx: InputContext, data: object) -> MultiModalInputs:
             to pixel_values in .forward() for a visual QWenLMHeadModel model.
 
     Returns:
-        MultiModalInputs containing the stacked normalized images tensor or
+        MultiModalKwargs containing the stacked normalized images tensor or
         image embeddings.
     """
     # Early exit if we have provided an image to a language only Qwen model
@@ -733,7 +747,7 @@ def input_mapper_for_qwen(ctx: InputContext, data: object) -> MultiModalInputs:
         logger.warning(
             "Images were provided but this model has no visual config; "
             "multimodal inputs will not be forwarded to the model.")
-        return MultiModalInputs()
+        return MultiModalKwargs()
 
     model_config = ctx.model_config
     tokenizer = cached_get_tokenizer(
@@ -777,7 +791,7 @@ def input_mapper_for_qwen(ctx: InputContext, data: object) -> MultiModalInputs:
             data = [data]
         transformed_images = [transform(datum) for datum in data]
         pixel_values = torch.stack(transformed_images, dim=0)
-    return MultiModalInputs({"pixel_values": pixel_values})
+    return MultiModalKwargs({"pixel_values": pixel_values})
 
 
 def build_normalization_transform(image_size: int) -> transforms.Compose:
@@ -802,7 +816,7 @@ def dummy_data_for_qwen(
     ctx: InputContext,
     seq_len: int,
     mm_counts: Mapping[str, int],
-) -> Tuple[SequenceData, Optional[Dict]]:
+) -> DummyData:
     """Build dummy data for warming up Qwen models; this will only contain text
     matching the defaults for VLLM unless the model has a visual config.
 
@@ -819,9 +833,9 @@ def dummy_data_for_qwen(
     # The presence of a visual config indicates this is a multimodal model.
     # If we don't have it, the model is considered an LLM for warmup purposes.
     if not hasattr(hf_config, "visual"):
-        seq_data = SequenceData.from_token_counts((0, seq_len))
+        seq_data = SequenceData.from_prompt_token_counts((0, seq_len))
         mm_data = None
-        return seq_data, mm_data
+        return DummyData(seq_data, mm_data)
 
     # We have a visual component - use images to warm up
     num_images = mm_counts["image"]
@@ -853,34 +867,31 @@ def dummy_data_for_qwen(
     # the data will get resized and the # of tokens per image is constant
     image = Image.new("RGB", (224, 224), color=0)
     mm_data = {"image": image if num_images == 1 else [image] * num_images}
-    return seq_data, mm_data
+    return DummyData(seq_data, mm_data)
 
 
-@MULTIMODAL_REGISTRY.register_image_input_mapper(input_mapper_for_qwen)
-@MULTIMODAL_REGISTRY.register_max_image_tokens(MAX_QWEN_IMG_TOKENS)
-@INPUT_REGISTRY.register_dummy_data(dummy_data_for_qwen)
-@INPUT_REGISTRY.register_input_processor(input_processor_for_qwen)
-class QWenLMHeadModel(nn.Module, SupportsMultiModal):
+class QWenBaseModel(nn.Module, SupportsPP, SupportsLoRA):
 
-    def __init__(
-        self,
-        config: PretrainedConfig,
-        multimodal_config: MultiModalConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-    ):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
+        multimodal_config = vllm_config.model_config.multimodal_config
         self.config = config
         self.multimodal_config = multimodal_config
         self.quant_config = quant_config
-        self.transformer = QWenModel(config, cache_config, quant_config)
+        self.transformer = QWenModel(vllm_config=vllm_config,
+                                     prefix=maybe_prefix(
+                                         prefix, "transformer"))
         self.lm_head = ParallelLMHead(config.vocab_size,
                                       config.hidden_size,
                                       quant_config=quant_config)
         if self.config.tie_word_embeddings:
             self.lm_head.weight = self.transformer.wte.weight
         self.logits_processor = LogitsProcessor(config.vocab_size)
-        self.sampler = Sampler()
+        self.sampler = get_sampler()
+        self.make_empty_intermediate_tensors = (
+            self.transformer.make_empty_intermediate_tensors)
 
     def _get_image_input_type(
             self,
@@ -912,32 +923,29 @@ class QWenLMHeadModel(nn.Module, SupportsMultiModal):
                 )
         return None
 
-    def forward(self,
-                input_ids: torch.Tensor,
-                positions: torch.Tensor,
-                kv_caches: List[torch.Tensor],
-                attn_metadata: AttentionMetadata,
-                intermediate_tensors: Optional[IntermediateTensors] = None,
-                pixel_values: Optional[torch.Tensor] = None) -> torch.Tensor:
-        pixel_values = self._get_image_input_type(pixel_values)
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.transformer.get_input_embeddings(input_ids)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        positions: torch.Tensor,
+        kv_caches: List[torch.Tensor],
+        attn_metadata: AttentionMetadata,
+        intermediate_tensors: Optional[IntermediateTensors] = None,
+        pixel_values: Optional[torch.Tensor] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+    ) -> Union[torch.Tensor, IntermediateTensors]:
+        if intermediate_tensors is not None:
+            input_ids = None
+            pixel_values = None
+        else:
+            pixel_values = self._get_image_input_type(pixel_values)
+
         hidden_states = self.transformer(input_ids, positions, kv_caches,
                                          attn_metadata, intermediate_tensors,
-                                         pixel_values)
+                                         pixel_values, inputs_embeds)
         return hidden_states
-
-    def make_empty_intermediate_tensors(
-            self, batch_size: int, dtype: torch.dtype,
-            device: torch.device) -> IntermediateTensors:
-        return IntermediateTensors({
-            "hidden_states":
-            torch.zeros((batch_size, self.config.hidden_size),
-                        dtype=dtype,
-                        device=device),
-            "residual":
-            torch.zeros((batch_size, self.config.hidden_size),
-                        dtype=dtype,
-                        device=device),
-        })
 
     def compute_logits(
         self,
@@ -956,13 +964,15 @@ class QWenLMHeadModel(nn.Module, SupportsMultiModal):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("gate_up_proj", "w2", 0),
             ("gate_up_proj", "w1", 1),
         ]
         params_dict = dict(self.named_parameters())
+        loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -991,3 +1001,89 @@ class QWenLMHeadModel(nn.Module, SupportsMultiModal):
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params
+
+
+class QWenLLM(QWenBaseModel):
+    packed_modules_mapping = {
+        "c_attn": ["c_attn"],
+        "gate_up_proj": [
+            "w2",
+            "w1",
+        ],
+    }
+    # LoRA specific attributes
+    supported_lora_modules = [
+        "c_attn",
+        "gate_up_proj",
+        "c_proj",
+    ]
+
+    embedding_modules = {}
+    embedding_padding_modules = []
+
+
+class QWenVL(QWenBaseModel, SupportsMultiModal):
+    packed_modules_mapping = {
+        "c_attn": ["c_attn"],
+        "gate_up_proj": [
+            "w2",
+            "w1",
+        ],
+    }
+    # LoRA specific attributes
+    supported_lora_modules = [
+        "c_attn",
+        "gate_up_proj",
+        "c_proj",
+        # visual module
+        "out_proj",
+        "in_proj",
+        "c_fc",
+        # resampler
+        "kv_proj",
+    ]
+
+    embedding_modules = {}
+    embedding_padding_modules = []
+
+    def get_mm_mapping(self) -> MultiModelKeys:
+        """
+        Get the module prefix in multimodal models
+        """
+        return MultiModelKeys.from_string_field(
+            language_model="transformer.h",
+            connector="transformer.visual.attn_pool",
+            tower_model="transformer.visual.transformer")
+
+
+@MULTIMODAL_REGISTRY.register_image_input_mapper(input_mapper_for_qwen)
+@MULTIMODAL_REGISTRY.register_max_image_tokens(MAX_QWEN_IMG_TOKENS)
+@INPUT_REGISTRY.register_dummy_data(dummy_data_for_qwen)
+@INPUT_REGISTRY.register_input_processor(input_processor_for_qwen)
+class QWenLMHeadModel(QWenBaseModel, SupportsMultiModal, SupportsLoRA):
+    """
+    QWenLMHeadModel is not only applicable to LLM  but also to VL, which is not 
+    conducive to the current integration logic of LoRA in vLLM. Therefore, it 
+    is necessary to separate them.
+    """
+    # Ensure that the LoRA support check passes when the class is not
+    # initialized, but set all these attributes to empty.
+    packed_modules_mapping = {}
+    supported_lora_modules = []
+    embedding_modules = {}
+    embedding_padding_modules = []
+
+    def __new__(
+        cls,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+    ) -> None:
+        config = vllm_config.model_config.hf_config
+        # Initialize VL
+        if hasattr(config, "visual"):
+            return QWenVL(vllm_config=vllm_config, prefix=prefix)
+        # Initialize LLM
+        else:
+            return QWenLLM(vllm_config=vllm_config, prefix=prefix)

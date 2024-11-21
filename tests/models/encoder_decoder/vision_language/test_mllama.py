@@ -4,15 +4,19 @@ import pytest
 from transformers import (AutoConfig, AutoModelForVision2Seq, AutoTokenizer,
                           BatchEncoding)
 
+from vllm.attention.selector import (_Backend, _cached_get_attn_backend,
+                                     global_force_attn_backend_context_manager)
 from vllm.multimodal.utils import rescale_image_size
 from vllm.sequence import SampleLogprobs
 
 from ....conftest import (IMAGE_ASSETS, HfRunner, PromptImageInput, VllmRunner,
                           _ImageAssets)
-from ....utils import multi_gpu_test
+from ....utils import large_gpu_test
 from ...utils import check_logprobs_close
 
-_LIMIT_IMAGE_PER_PROMPT = 1
+_LIMIT_IMAGE_PER_PROMPT = 3
+
+LIST_ENC_DEC_SUPPORTED_BACKENDS = [_Backend.XFORMERS, _Backend.FLASH_ATTN]
 
 HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
     "stop_sign":
@@ -47,12 +51,44 @@ def vllm_to_hf_output(vllm_output: Tuple[List[int], str,
         if token_id != image_token_id or output_ids[idx - 1] != image_token_id
     ]
 
-    assert output_str[0] == " "
-    hf_output_str = output_str[1:]
+    hf_output_str = output_str
     if hf_output_ids[-1] == eos_token_id:
         hf_output_str = hf_output_str + tokenizer.decode(eos_token_id)
 
     return hf_output_ids, hf_output_str, out_logprobs
+
+
+def _get_inputs(
+    image_assets: _ImageAssets,
+    *,
+    size_factors: Optional[List[float]] = None,
+    sizes: Optional[List[Tuple[int, int]]] = None,
+) -> List[Tuple[List[str], PromptImageInput]]:
+    images = [asset.pil_image for asset in image_assets]
+
+    if size_factors is not None:
+        inputs_per_image = [(
+            [prompt for _ in size_factors],
+            [rescale_image_size(image, factor) for factor in size_factors],
+        ) for image, prompt in zip(images, HF_IMAGE_PROMPTS)]
+    elif sizes is not None:
+        inputs_per_image = [(
+            [
+                prompt if size is not None else text_only_prompts[0]
+                for size in sizes
+            ],
+            [
+                image.resize(size) if size is not None else None
+                for size in sizes
+            ],
+        ) for image, prompt in zip(images, HF_IMAGE_PROMPTS)]
+        if len(sizes) == 0:
+            inputs_per_image.append(
+                (text_only_prompts, [None] * len(text_only_prompts)))
+    else:
+        raise ValueError("You must provide either `size_factors` or `sizes`")
+
+    return inputs_per_image
 
 
 @overload
@@ -103,39 +139,17 @@ def run_test(
     tensor_parallel_size: int,
     distributed_executor_backend: Optional[str] = None,
 ):
-    images = [asset.pil_image for asset in image_assets]
-
-    if size_factors is not None:
-        inputs_per_image = [(
-            [prompt for _ in size_factors],
-            [rescale_image_size(image, factor) for factor in size_factors],
-        ) for image, prompt in zip(images, HF_IMAGE_PROMPTS)]
-    elif sizes is not None:
-        inputs_per_image = [(
-            [
-                prompt if size is not None else text_only_prompts[0]
-                for size in sizes
-            ],
-            [
-                image.resize(size) if size is not None else None
-                for size in sizes
-            ],
-        ) for image, prompt in zip(images, HF_IMAGE_PROMPTS)]
-        if len(sizes) == 0:
-            inputs_per_image.append(
-                (text_only_prompts, [None] * len(text_only_prompts)))
-    else:
-        raise ValueError("You must provide either `size_factors` or `sizes`")
-
-    _run_test(hf_runner,
-              vllm_runner,
-              inputs_per_image,
-              model,
-              dtype=dtype,
-              max_tokens=max_tokens,
-              num_logprobs=num_logprobs,
-              tensor_parallel_size=tensor_parallel_size,
-              distributed_executor_backend=distributed_executor_backend)
+    _run_test(
+        hf_runner,
+        vllm_runner,
+        _get_inputs(image_assets, size_factors=size_factors, sizes=sizes),
+        model,
+        dtype=dtype,
+        max_tokens=max_tokens,
+        num_logprobs=num_logprobs,
+        tensor_parallel_size=tensor_parallel_size,
+        distributed_executor_backend=distributed_executor_backend,
+    )
 
 
 def _run_test(
@@ -167,8 +181,8 @@ def _run_test(
     # max_model_len should be greater than image_feature_size
     with vllm_runner(model,
                      dtype=dtype,
-                     max_num_seqs=16,
                      max_model_len=4096,
+                     max_num_seqs=2,
                      tensor_parallel_size=tensor_parallel_size,
                      distributed_executor_backend=distributed_executor_backend,
                      enforce_eager=True,
@@ -182,17 +196,12 @@ def _run_test(
             for prompts, images in inputs
         ]
 
-    def process(hf_inputs: BatchEncoding):
+    def process(hf_inputs: BatchEncoding, **kwargs):
         return hf_inputs
 
-    from transformers import AutoConfig
-    from transformers.models.mllama import MllamaConfig as MllamaConfigHf
-
-    # use transformer's MllamaConfig for hf_runner
-    # and vllm's MllamaConfig for vllm_runner
-    AutoConfig.register("mllama", MllamaConfigHf, exist_ok=True)
     with hf_runner(model,
                    dtype=dtype,
+                   model_kwargs={"device_map": "auto"},
                    postprocess_inputs=process,
                    auto_cls=AutoModelForVision2Seq) as hf_model:
         hf_outputs_per_image = [
@@ -203,8 +212,6 @@ def _run_test(
             for prompts, images in inputs
         ]
 
-    from vllm.transformers_utils.configs.mllama import MllamaConfig
-    AutoConfig.register("mllama", MllamaConfig, exist_ok=True)
     for hf_outputs, vllm_outputs in zip(hf_outputs_per_image,
                                         vllm_outputs_per_image):
         check_logprobs_close(
@@ -218,6 +225,15 @@ def _run_test(
         )
 
 
+@pytest.fixture(autouse=True)
+def clear_cache():
+    """Fixture to clear backend cache before each test."""
+    _cached_get_attn_backend.cache_clear()  # Clear the cache
+    yield  # This allows the test to run
+
+
+@large_gpu_test(min_gb=48)
+@pytest.mark.core_model
 @pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize(
     "sizes",
@@ -236,48 +252,116 @@ def _run_test(
          (1024, 1024), (512, 1536), (512, 2028), None],
         # mllama has 8 possible aspect ratios, carefully set the sizes
         # to cover all of them
-    ],
-)
+    ])
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [5])
-def test_models(hf_runner, vllm_runner, image_assets, model, sizes, dtype,
-                max_tokens, num_logprobs) -> None:
-    run_test(
-        hf_runner,
-        vllm_runner,
-        image_assets,
-        model,
-        sizes=sizes,
-        dtype=dtype,
-        max_tokens=max_tokens,
-        num_logprobs=num_logprobs,
-        tensor_parallel_size=1,
-    )
+@pytest.mark.parametrize("attn_backend", LIST_ENC_DEC_SUPPORTED_BACKENDS)
+def test_models_single_leading_image(hf_runner, vllm_runner, image_assets,
+                                     model, sizes, dtype, max_tokens,
+                                     num_logprobs,
+                                     attn_backend: _Backend) -> None:
+    with global_force_attn_backend_context_manager(attn_backend):
+        if attn_backend == _Backend.FLASH_ATTN:
+            # Flash Attention works only with bfloat16 data-type
+            dtype = 'bfloat16'
+        run_test(
+            hf_runner,
+            vllm_runner,
+            image_assets,
+            model,
+            sizes=sizes,
+            dtype=dtype,
+            max_tokens=max_tokens,
+            num_logprobs=num_logprobs,
+            tensor_parallel_size=1,
+        )
 
 
-@multi_gpu_test(num_gpus=2)
+@large_gpu_test(min_gb=48)
+@pytest.mark.core_model
 @pytest.mark.parametrize("model", models)
-@pytest.mark.parametrize(
-    "sizes",
-    [
-        [(512, 512), (1024, 512), (1536, 512), (2048, 512), (512, 1024),
-         (1024, 1024), (512, 1536), (512, 2028), None],
-    ],
-)
 @pytest.mark.parametrize("dtype", ["bfloat16"])
 @pytest.mark.parametrize("max_tokens", [128])
 @pytest.mark.parametrize("num_logprobs", [5])
-def test_models_distributed(hf_runner, vllm_runner, image_assets, model, sizes,
-                            dtype, max_tokens, num_logprobs) -> None:
-    run_test(
-        hf_runner,
-        vllm_runner,
-        image_assets,
-        model,
-        sizes=sizes,
-        dtype=dtype,
-        max_tokens=max_tokens,
-        num_logprobs=num_logprobs,
-        tensor_parallel_size=2,
-    )
+@pytest.mark.parametrize("attn_backend", LIST_ENC_DEC_SUPPORTED_BACKENDS)
+def test_models_multi_leading_images(hf_runner, vllm_runner, image_assets,
+                                     model, dtype, max_tokens, num_logprobs,
+                                     attn_backend: _Backend) -> None:
+
+    stop_sign = image_assets[0].pil_image
+    cherry_blossom = image_assets[1].pil_image
+
+    inputs = [(
+        [
+            "<|image|><|image|><|begin_of_text|>Describe 2 images.",  # noqa: E501
+            "<|image|><|image|><|begin_of_text|>Describe 2 images.",  # noqa: E501
+            "<|image|><|image|><|image|><|begin_of_text|>Describe 3 images.",  # noqa: E501
+        ],
+        [
+            [stop_sign, cherry_blossom],
+            # Images with different sizes.
+            [
+                stop_sign.resize((512, 512)),
+                stop_sign,
+            ],
+            [
+                stop_sign,
+                stop_sign.resize((512, 1536)),
+                cherry_blossom.resize((512, 1024)),
+            ],
+        ])]
+    with global_force_attn_backend_context_manager(attn_backend):
+        if attn_backend == _Backend.FLASH_ATTN:
+            # Flash Attention works only with bfloat16 data-type
+            dtype = 'bfloat16'
+        _run_test(
+            hf_runner,
+            vllm_runner,
+            inputs,
+            model,
+            dtype=dtype,
+            max_tokens=max_tokens,
+            num_logprobs=num_logprobs,
+            tensor_parallel_size=1,
+        )
+
+
+@large_gpu_test(min_gb=48)
+@pytest.mark.core_model
+@pytest.mark.parametrize("model", models)
+@pytest.mark.parametrize("dtype", ["bfloat16"])
+@pytest.mark.parametrize("max_tokens", [128])
+@pytest.mark.parametrize("num_logprobs", [5])
+@pytest.mark.parametrize("attn_backend", LIST_ENC_DEC_SUPPORTED_BACKENDS)
+def test_models_interleaved_images(hf_runner, vllm_runner, image_assets, model,
+                                   dtype, max_tokens, num_logprobs,
+                                   attn_backend: _Backend) -> None:
+
+    stop_sign = image_assets[0].pil_image
+    cherry_blossom = image_assets[1].pil_image
+
+    inputs = [(
+        [
+            "<|begin_of_text|>The content of the image <|image|> is",  # noqa: E501
+            "<|begin_of_text|>Between the first image <|image|> and the second image<|image|>, "  # noqa: E501
+            "which is a stop sign and which is a cherry blossom?",  # noqa: E501
+        ],
+        [
+            [stop_sign],
+            [stop_sign, cherry_blossom],
+        ])]
+    with global_force_attn_backend_context_manager(attn_backend):
+        if attn_backend == _Backend.FLASH_ATTN:
+            # Flash Attention works only with bfloat16 data-type
+            dtype = 'bfloat16'
+        _run_test(
+            hf_runner,
+            vllm_runner,
+            inputs,
+            model,
+            dtype=dtype,
+            max_tokens=max_tokens,
+            num_logprobs=num_logprobs,
+            tensor_parallel_size=1,
+        )

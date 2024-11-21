@@ -1,6 +1,5 @@
-# coding=utf-8
 # Adapted from
-# https://huggingface.co/core42/jais-30b-chat-v3/blob/main/modeling_jais.py
+# https://huggingface.co/inceptionai/jais-30b-chat-v3/blob/main/modeling_jais.py
 # Copyright 2023 The vLLM team.
 # Copyright 2023 the Jais authors and HuggingFace Inc. team.  All rights
 # reserved.
@@ -20,22 +19,22 @@
 """Inference-only Jais model compatible with HuggingFace weights."""
 
 import math
-from typing import Iterable, List, Optional, Tuple, Union
+from typing import Iterable, List, Optional, Set, Tuple, Union
 
 import torch
 from torch import nn
 
 from vllm.attention import Attention, AttentionMetadata
-from vllm.config import CacheConfig
+from vllm.compilation.decorators import support_torch_compile
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                QKVParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
+from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead, VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -43,7 +42,10 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs import JAISConfig
 
-from .utils import is_pp_missing_parameter, make_layers
+from .interfaces import SupportsPP
+from .utils import (is_pp_missing_parameter,
+                    make_empty_intermediate_tensors_factory, make_layers,
+                    maybe_prefix)
 
 
 class SwiGLUActivation(nn.Module):
@@ -211,16 +213,16 @@ class JAISBlock(nn.Module):
         return hidden_states
 
 
+@support_torch_compile
 class JAISModel(nn.Module):
 
-    def __init__(
-        self,
-        config: JAISConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        prefix: str = "",
-    ):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+
         self.config = config
         assert not config.add_cross_attention
         assert not config.scale_attn_by_inverse_layer_idx
@@ -244,6 +246,12 @@ class JAISModel(nn.Module):
         )
 
         self.ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
+        self.make_empty_intermediate_tensors = (
+            make_empty_intermediate_tensors_factory(["hidden_states"],
+                                                    config.n_embd))
+
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.wte(input_ids)
 
     def forward(
         self,
@@ -252,9 +260,11 @@ class JAISModel(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[IntermediateTensors, torch.Tensor]:
         if get_pp_group().is_first_rank:
-            inputs_embeds = self.wte(input_ids)
+            if inputs_embeds is None:
+                inputs_embeds = self.get_input_embeddings(input_ids)
             if self.wpe is not None:
                 position_embeds = self.wpe(position_ids)
                 hidden_states = inputs_embeds + position_embeds
@@ -279,18 +289,17 @@ class JAISModel(nn.Module):
         return hidden_states
 
 
-class JAISLMHeadModel(nn.Module):
+class JAISLMHeadModel(nn.Module, SupportsPP):
 
-    def __init__(
-        self,
-        config: JAISConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-    ):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
-        self.transformer = JAISModel(config, cache_config, quant_config)
+        self.transformer = JAISModel(vllm_config=vllm_config,
+                                     prefix=maybe_prefix(
+                                         prefix, "transformer"))
         if self.config.tie_word_embeddings:
             self.lm_head = self.transformer.wte
         else:
@@ -303,7 +312,12 @@ class JAISLMHeadModel(nn.Module):
                                         config.mup_width_scale)
         self.logits_processor = LogitsProcessor(vocab_size=config.vocab_size,
                                                 scale=self.output_logits_scale)
-        self.sampler = Sampler()
+        self.sampler = get_sampler()
+        self.make_empty_intermediate_tensors = (
+            self.transformer.make_empty_intermediate_tensors)
+
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.transformer.get_input_embeddings(input_ids)
 
     def forward(
         self,
@@ -312,9 +326,11 @@ class JAISLMHeadModel(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[IntermediateTensors, torch.Tensor]:
         hidden_states = self.transformer(input_ids, positions, kv_caches,
-                                         attn_metadata, intermediate_tensors)
+                                         attn_metadata, intermediate_tensors,
+                                         inputs_embeds)
         return hidden_states
 
     def compute_logits(
@@ -326,16 +342,6 @@ class JAISLMHeadModel(nn.Module):
                                        sampling_metadata)
         return logits
 
-    def make_empty_intermediate_tensors(
-            self, batch_size: int, dtype: torch.dtype,
-            device: torch.device) -> IntermediateTensors:
-        return IntermediateTensors({
-            "hidden_states":
-            torch.zeros((batch_size, self.config.hidden_size),
-                        dtype=dtype,
-                        device=device),
-        })
-
     def sample(
         self,
         logits: torch.Tensor,
@@ -344,8 +350,10 @@ class JAISLMHeadModel(nn.Module):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         params_dict = dict(self.named_parameters(remove_duplicate=False))
+        loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
             if "lm_head.weight" in name:
                 # GPT-2 ties the weights of the embedding layer and the final
@@ -376,3 +384,5 @@ class JAISLMHeadModel(nn.Module):
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
             weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params

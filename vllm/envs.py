@@ -27,14 +27,17 @@ if TYPE_CHECKING:
     VLLM_USAGE_SOURCE: str = ""
     VLLM_CONFIGURE_LOGGING: int = 1
     VLLM_LOGGING_LEVEL: str = "INFO"
+    VLLM_LOGGING_PREFIX: str = ""
     VLLM_LOGGING_CONFIG_PATH: Optional[str] = None
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_ATTENTION_BACKEND: Optional[str] = None
     VLLM_USE_FLASHINFER_SAMPLER: bool = False
     VLLM_USE_FLASHINFER_REJECTION_SAMPLER: bool = False
+    VLLM_FLASHINFER_FORCE_TENSOR_CORES: bool = False
     VLLM_PP_LAYER_PARTITION: Optional[str] = None
     VLLM_CPU_KVCACHE_SPACE: int = 0
     VLLM_CPU_OMP_THREADS_BIND: str = ""
+    VLLM_OPENVINO_DEVICE: str = "CPU"
     VLLM_OPENVINO_KVCACHE_SPACE: int = 0
     VLLM_OPENVINO_CPU_KV_CACHE_PRECISION: Optional[str] = None
     VLLM_OPENVINO_ENABLE_QUANTIZED_WEIGHTS: bool = False
@@ -46,7 +49,8 @@ if TYPE_CHECKING:
     VLLM_WORKER_MULTIPROC_METHOD: str = "fork"
     VLLM_ASSETS_CACHE: str = os.path.join(VLLM_CACHE_ROOT, "assets")
     VLLM_IMAGE_FETCH_TIMEOUT: int = 5
-    VLLM_AUDIO_FETCH_TIMEOUT: int = 5
+    VLLM_VIDEO_FETCH_TIMEOUT: int = 15
+    VLLM_AUDIO_FETCH_TIMEOUT: int = 10
     VLLM_TARGET_DEVICE: str = "cuda"
     MAX_JOBS: Optional[str] = None
     NVCC_THREADS: Optional[str] = None
@@ -62,8 +66,10 @@ if TYPE_CHECKING:
     VLLM_TORCH_PROFILER_DIR: Optional[str] = None
     VLLM_USE_TRITON_AWQ: bool = False
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
-    VLLM_ALLOW_DEPRECATED_BEAM_SEARCH: bool = False
     VLLM_SKIP_P2P_CHECK: bool = False
+    VLLM_DISABLED_KERNELS: List[str] = []
+    VLLM_USE_V1: bool = False
+    VLLM_ENABLE_V1_MULTIPROCESSING: bool = False
 
 
 def get_default_cache_root():
@@ -197,23 +203,6 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda: (os.environ.get("VLLM_USE_TRITON_FLASH_ATTN", "True").lower() in
              ("true", "1")),
 
-    # If set, allowing the use of deprecated beam search implementation
-    "VLLM_ALLOW_DEPRECATED_BEAM_SEARCH":
-    lambda: os.environ.get("VLLM_ALLOW_DEPRECATED_BEAM_SEARCH", "0") == "1",
-
-    # Internal flag to enable Dynamo graph capture
-    "VLLM_TEST_DYNAMO_GRAPH_CAPTURE":
-    lambda: int(os.environ.get("VLLM_TEST_DYNAMO_GRAPH_CAPTURE", "0")),
-    "VLLM_DYNAMO_USE_CUSTOM_DISPATCHER":
-    lambda:
-    (os.environ.get("VLLM_DYNAMO_USE_CUSTOM_DISPATCHER", "True").lower() in
-     ("true", "1")),
-
-    # Internal flag to control whether we use custom op,
-    # or use the native pytorch implementation
-    "VLLM_TEST_COMPILE_NO_CUSTOM_OPS":
-    lambda: int(os.environ.get("VLLM_TEST_COMPILE_NO_CUSTOM_OPS", "0")),
-
     # Internal flag to enable Dynamo fullgraph capture
     "VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE":
     lambda: bool(
@@ -268,6 +257,10 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_LOGGING_LEVEL":
     lambda: os.getenv("VLLM_LOGGING_LEVEL", "INFO"),
 
+    # if set, VLLM_LOGGING_PREFIX will be prepended to all log messages
+    "VLLM_LOGGING_PREFIX":
+    lambda: os.getenv("VLLM_LOGGING_PREFIX", ""),
+
     # Trace function calls
     # If set to 1, vllm will trace function calls
     # Useful for debugging
@@ -288,6 +281,11 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_USE_FLASHINFER_SAMPLER":
     lambda: bool(int(os.getenv("VLLM_USE_FLASHINFER_SAMPLER", "0"))),
 
+    # If set, vllm will force flashinfer to use tensor cores;
+    # otherwise will use heuristic based on model architecture.
+    "VLLM_FLASHINFER_FORCE_TENSOR_CORES":
+    lambda: bool(int(os.getenv("VLLM_FLASHINFER_FORCE_TENSOR_CORES", "0"))),
+
     # Pipeline stage partition strategy
     "VLLM_PP_LAYER_PARTITION":
     lambda: os.getenv("VLLM_PP_LAYER_PARTITION", None),
@@ -301,6 +299,11 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # "0,1,2", "0-31,33". CPU cores of different ranks are separated by '|'.
     "VLLM_CPU_OMP_THREADS_BIND":
     lambda: os.getenv("VLLM_CPU_OMP_THREADS_BIND", "all"),
+
+    # OpenVINO device selection
+    # default is CPU
+    "VLLM_OPENVINO_DEVICE":
+    lambda: os.getenv("VLLM_OPENVINO_DEVICE", "CPU").upper(),
 
     # OpenVINO key-value cache space
     # default is 4GB
@@ -356,10 +359,15 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     "VLLM_IMAGE_FETCH_TIMEOUT":
     lambda: int(os.getenv("VLLM_IMAGE_FETCH_TIMEOUT", "5")),
 
+    # Timeout for fetching videos when serving multimodal models
+    # Default is 15 seconds
+    "VLLM_VIDEO_FETCH_TIMEOUT":
+    lambda: int(os.getenv("VLLM_VIDEO_FETCH_TIMEOUT", "15")),
+
     # Timeout for fetching audio when serving multimodal models
-    # Default is 5 seconds
+    # Default is 10 seconds
     "VLLM_AUDIO_FETCH_TIMEOUT":
-    lambda: int(os.getenv("VLLM_AUDIO_FETCH_TIMEOUT", "5")),
+    lambda: int(os.getenv("VLLM_AUDIO_FETCH_TIMEOUT", "10")),
 
     # Path to the XLA persistent cache directory.
     # Only used for XLA devices such as TPUs.
@@ -396,6 +404,8 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     lambda:
     (os.environ.get("VLLM_TEST_FORCE_FP8_MARLIN", "0").strip().lower() in
      ("1", "true")),
+    "VLLM_TEST_FORCE_LOAD_FORMAT":
+    lambda: os.getenv("VLLM_TEST_FORCE_LOAD_FORMAT", "dummy"),
 
     # Time in ms for the zmq client to wait for a response from the backend
     # server for simple data operations
@@ -431,6 +441,22 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # and trust the driver's peer-to-peer capability report.
     "VLLM_SKIP_P2P_CHECK":
     lambda: os.getenv("VLLM_SKIP_P2P_CHECK", "0") == "1",
+
+    # List of quantization kernels that should be disabled, used for testing
+    # and performance comparisons. Currently only affects MPLinearKernel
+    # selection
+    # (kernels: MacheteLinearKernel, MarlinLinearKernel, ExllamaLinearKernel)
+    "VLLM_DISABLED_KERNELS":
+    lambda: [] if "VLLM_DISABLED_KERNELS" not in os.environ else os.environ[
+        "VLLM_DISABLED_KERNELS"].split(","),
+
+    # If set, use the V1 code path.
+    "VLLM_USE_V1":
+    lambda: bool(int(os.getenv("VLLM_USE_V1", "0"))),
+
+    # If set, enable multiprocessing in LLM for the V1 code path.
+    "VLLM_ENABLE_V1_MULTIPROCESSING":
+    lambda: bool(int(os.getenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0"))),
 }
 
 # end-env-vars-definition

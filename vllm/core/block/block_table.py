@@ -220,7 +220,6 @@ class BlockTable:
         occupied by each block. After freeing all the blocks, the `_blocks` list
         is set to `None`.
         """
-        assert self._is_allocated
         for block in self.blocks:
             self._allocator.free(block)
         self._blocks.reset()
@@ -239,7 +238,6 @@ class BlockTable:
             List[int]: A list of physical block indices for the blocks in the
                 BlockTable.
         """
-        assert self._is_allocated
         return self._blocks.ids()
 
     def get_unseen_token_ids(self, sequence_token_ids: List[int]) -> List[int]:

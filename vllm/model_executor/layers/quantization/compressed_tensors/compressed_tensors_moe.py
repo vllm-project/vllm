@@ -3,18 +3,20 @@ from enum import Enum
 from typing import Callable, List, Optional
 
 import torch
+from compressed_tensors import CompressionFormat
+from compressed_tensors.quantization import QuantizationStrategy
 
+import vllm.model_executor.layers.fused_moe  # noqa
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.fused_moe import (FusedMoE, FusedMoEMethodBase,
                                                   FusedMoeWeightScaleSupported)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     WNA16_SUPPORTED_BITS)
-from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
-    CompressionFormat, QuantizationStrategy)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     all_close_1d, normalize_e4m3fn_to_e4m3fnuz, per_tensor_dequantize)
 from vllm.model_executor.utils import set_weight_attrs
-from vllm.utils import is_hip, print_warning_once
+from vllm.platforms import current_platform
+from vllm.utils import print_warning_once
 
 
 class GPTQMarlinState(Enum):
@@ -150,7 +152,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 layer.w2_input_scale.max(), requires_grad=False)
 
         # If rocm, normalize the weights and scales to e4m3fnuz
-        if is_hip():
+        if current_platform.is_rocm():
             # Normalize the weights and scales
             w13_weight, w13_weight_scale, w13_input_scale = \
                 normalize_e4m3fn_to_e4m3fnuz(
@@ -245,7 +247,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         config = self.quant_config.target_scheme_map["Linear"].get("weights")
         self.num_bits = config.num_bits
         self.packed_factor = 32 // config.num_bits
-        self.strategy = config.strategy.value
+        self.strategy = config.strategy
         self.group_size = config.group_size
         assert config.symmetric, (
             "Only symmetric quantization is supported for MoE")
@@ -480,10 +482,6 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         topk_group: Optional[int] = None,
         custom_routing_function: Optional[Callable] = None,
     ) -> torch.Tensor:
-
-        from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
-            fused_marlin_moe)
-
         topk_weights, topk_ids = FusedMoE.select_experts(
             hidden_states=x,
             router_logits=router_logits,
@@ -494,18 +492,18 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             num_expert_group=num_expert_group,
             custom_routing_function=custom_routing_function)
 
-        return fused_marlin_moe(
+        return torch.ops.vllm.fused_marlin_moe(
             x,
             layer.w13_weight_packed,
             layer.w2_weight_packed,
+            layer.w13_weight_scale,
+            layer.w2_weight_scale,
             router_logits,
-            layer.w13_g_idx,
-            layer.w2_g_idx,
-            layer.w13_g_idx_sort_indices,
-            layer.w2_g_idx_sort_indices,
             topk_weights,
             topk_ids,
-            w1_scale=layer.w13_weight_scale,
-            w2_scale=layer.w2_weight_scale,
+            g_idx1=layer.w13_g_idx,
+            g_idx2=layer.w2_g_idx,
+            sort_indices1=layer.w13_g_idx_sort_indices,
+            sort_indices2=layer.w2_g_idx_sort_indices,
             num_bits=self.num_bits,
         )

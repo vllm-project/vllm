@@ -17,7 +17,6 @@ NUM_PROMPTS = [10]
 
 DEFAULT_SERVER_ARGS: List[str] = [
     "--disable-log-requests",
-    "--use-v2-block-manager",
     "--worker-use-ray",
     "--gpu-memory-utilization",
     "0.85",
@@ -142,3 +141,85 @@ async def test_multi_step(
         name_0="hf",
         name_1="vllm",
     )
+
+
+@pytest.mark.parametrize(("tp_size, pp_size"), [
+    (1, 2),
+])
+@pytest.mark.asyncio
+async def test_multi_step_pp_smoke(
+    tp_size: int,
+    pp_size: int,
+    monkeypatch,
+) -> None:
+    """
+    Smoke test for the vLLM engine with multi-step scheduling in an
+    OpenAI-protocol client/server environment.
+
+    This tests compares the outputs between multi-step scheduling and
+    single-step scheduling. Notably, this test lets the engines generate
+    more tokens (default is 5) and test for an exact match over all the
+    tokens.
+
+    Args:
+      tp_size: degree of tensor-parallelism
+      pp_size: degree of pipeline-parallelism
+      eager_mode
+    """
+
+    model = "JackFram/llama-160m"
+    num_scheduler_steps = 8
+    attention_backend = "FLASH_ATTN"
+    max_num_seqs = 3
+
+    override_backend_env_variable(monkeypatch, attention_backend)
+
+    # Prompt from the ShareGPT dataset
+    prompts = [
+        "in the jtbd context whats a push?",  # codespell:ignore
+        "in the jtbd context whats a push?",  # codespell:ignore
+        "in the jtbd context whats a push?",  # codespell:ignore
+        "in the jtbd context whats a push?",  # codespell:ignore
+    ]
+    # Use varying max_tokens to introduce scheduling randomness.
+    max_tokens = [10 * i for i in range(1, len(prompts) + 1)]
+    assert len(prompts) == len(max_tokens)
+
+    test_args = [
+        "--tensor-parallel-size",
+        str(tp_size), "--pipeline-parallel-size",
+        str(pp_size), "--max-num-seqs",
+        str(max_num_seqs)
+    ]
+
+    server_args = DEFAULT_SERVER_ARGS + test_args
+    ms_server_args = DEFAULT_SERVER_ARGS + \
+       ["--num-scheduler-steps", f"{num_scheduler_steps}"] + \
+       test_args
+
+    # Spin up client/server & issue completion API requests.
+    # Default `max_wait_seconds` is 240 but was empirically
+    # was raised 3x to 720 *just for this test* due to
+    # observed timeouts in GHA CI
+    ref_completions = await completions_with_server_args(
+        prompts=prompts,
+        model_name=model,
+        server_cli_args=server_args,
+        num_logprobs=None,
+        max_wait_seconds=5 * 240,
+        max_tokens=max_tokens)
+
+    test_completions = await completions_with_server_args(
+        prompts=prompts,
+        model_name=model,
+        server_cli_args=ms_server_args,
+        num_logprobs=None,
+        max_wait_seconds=5 * 240,
+        max_tokens=max_tokens)
+
+    # Assert multi-step scheduling produces identical tokens
+    # to single-step scheduling.
+    ref_generations = get_client_text_generations(ref_completions)
+    test_generations = get_client_text_generations(test_completions)
+
+    assert ref_generations == test_generations

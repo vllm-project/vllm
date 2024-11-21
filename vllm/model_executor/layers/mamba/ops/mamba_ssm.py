@@ -7,6 +7,7 @@ import triton.language as tl
 from packaging import version
 
 from vllm import _custom_ops as ops
+from vllm.attention.backends.utils import PAD_SLOT_ID
 
 TRITON3 = version.parse(triton.__version__) >= version.parse("3.0.0")
 
@@ -48,6 +49,7 @@ def _selective_scan_update_kernel(
     z_ptr,
     out_ptr,
     state_batch_indices_ptr,
+    pad_slot_id,
     # Matrix dimensions
     batch,
     nheads,
@@ -141,10 +143,11 @@ def _selective_scan_update_kernel(
     if HAS_Z:
         z_ptrs = z_ptr + offs_m * stride_z_dim
     out_ptrs = out_ptr + offs_m * stride_out_dim
+    mask = (offs_m[:, None] < dim) & (offs_n[None, :] < dstate)
+    if HAS_STATE_BATCH_INDICES:
+        mask &= (state_batch_idx != pad_slot_id)
+    state = tl.load(state_ptrs, mask=mask, other=0.0)
 
-    state = tl.load(state_ptrs,
-                    mask=(offs_m[:, None] < dim) & (offs_n[None, :] < dstate),
-                    other=0.0)
     x = tl.load(x_ptrs, mask=offs_m < dim, other=0.0).to(tl.float32)
     if not TIE_HDIM:
         dt = tl.load(dt_ptrs, mask=offs_m < dim, other=0.0).to(tl.float32)
@@ -175,9 +178,11 @@ def _selective_scan_update_kernel(
 
     dB = B[None, :] * dt[:, None] if not TIE_HDIM else B * dt
     state = state * dA + dB * x[:, None]
-    tl.store(state_ptrs,
-             state,
-             mask=(offs_m[:, None] < dim) & (offs_n[None, :] < dstate))
+
+    mask = (offs_m[:, None] < dim) & (offs_n[None, :] < dstate)
+    if HAS_STATE_BATCH_INDICES:
+        mask &= (state_batch_idx != pad_slot_id)
+    tl.store(state_ptrs, state, mask=mask)
     out = tl.sum(state * C[None, :], axis=1)
     if HAS_D:
         out += x * D
@@ -196,7 +201,8 @@ def selective_state_update(state,
                            z=None,
                            dt_bias=None,
                            dt_softplus=False,
-                           state_batch_indices=None):
+                           state_batch_indices=None,
+                           pad_slot_id=PAD_SLOT_ID):
     """
     Argument:
         state: (batch, dim, dstate) or (batch, nheads, dim, dstate)
@@ -208,6 +214,12 @@ def selective_state_update(state,
         D: (dim,) or (nheads, dim)
         z: (batch, dim) or (batch, nheads, dim)
         dt_bias: (dim,) or (nheads, dim)
+        pad_slot_id: int
+            if cache_indices is passed, lets the kernel identify padded 
+            entries that will not be processed, 
+            for example: cache_indices = [pad_slot_id, 1, 20, pad_slot_id] 
+            in this case, the kernel will not process entries at 
+            indices 0 and 3
     Return:
         out: (batch, dim) or (batch, nheads, dim)
     """
@@ -274,6 +286,7 @@ def selective_state_update(state,
             z,
             out,
             state_batch_indices,
+            pad_slot_id,
             batch,
             nheads,
             dim,
@@ -318,6 +331,7 @@ def selective_state_update(state,
 
 
 def selective_scan_fn(u,
+                      ssm_states,
                       delta,
                       A,
                       B,
@@ -326,11 +340,45 @@ def selective_scan_fn(u,
                       z=None,
                       delta_bias=None,
                       delta_softplus=False,
-                      return_last_state=False,
-                      position_indices=None,
-                      prev_state=None):
-    """if return_last_state is True, returns (out, last_state)
-    last_state has shape (batch, dim, dstate). 
+                      query_start_loc=None,
+                      cache_indices=None,
+                      has_initial_state=None,
+                      pad_slot_id=PAD_SLOT_ID) -> torch.Tensor:
+    """
+    u: (dim, total_length) for varlen or (batch, dim, seqlen) 
+        applies changes in place.
+    ssm_states: (batch, dim, dstate) or (batch, nheads, dim, dstate)
+        applies changes in place.
+    delta: (dim, total_length) for varlen or (batch, dim, seqlen)
+    A: (dim, dstate) 
+    B: (ngroups, dstate, total_length) for varlen or 
+                                        (batch,ngroups,dstate,seqlen)
+    C: (ngroups, dstate, total_length) for varlen or 
+                                        (batch,ngroups,dstate,seqlen)
+    D: (dim,) 
+    z: (dim, total_length) for varlen or (batch, dim, seqlen) 
+    dt_bias: (dim,) or (dim)
+    query_start_loc: (batch + 1) int32
+        The cumulative sequence lengths of the sequences in
+        the batch, used to index into sequence. prepended with 0.
+        for example: query_start_loc = torch.Tensor([0,10,16,17]), 
+        x.shape=(dim,17)
+    cache_indices: (batch) int32
+        A tensor with each cell is a correspondent 
+        input and output ssm_state index
+    has_initial_state: (batch) bool
+        A tensor populated with ones and zeros, 
+        indicate if the ssm_state at the corresponding index should be 
+        used as initial state. Not providing argument assumes 
+        there's no initial state
+    pad_slot_id: int
+        if cache_indices is passed, lets the kernel identify padding entries 
+        that will not be processed, 
+        for example: cache_indices = [pad_slot_id, 1 ,20 ,pad_slot_id] 
+        in this case, the kernel will not process entries at indices 0 and 3
+    returns
+        output: (dim, total_length) for varlen or (batch, dim, seqlen) 
+                supports inplace replacement
     """
     if u.stride(-1) != 1:
         u = u.contiguous()
@@ -344,28 +392,20 @@ def selective_scan_fn(u,
         C = C.contiguous()
     if z is not None and z.stride(-1) != 1:
         z = z.contiguous()
-    if B.dim() == 3:
+    if B.dim() == 3 and query_start_loc is None:
         B = B.unsqueeze(1)
-    if C.dim() == 3:
+    if B.dim() == 2 and query_start_loc is not None:
+        B = B.unsqueeze(0)
+    if C.dim() == 3 and query_start_loc is None:
         C = C.unsqueeze(1)
-    n_chunks = int((u.shape[-1] + 2048 - 1) / 2048)
-    x = torch.zeros((
-        u.shape[0],
-        u.shape[1],
-        n_chunks,
-        int(A.shape[1] * 2),
-    ),
-                    device=u.device,
-                    dtype=torch.float32,
-                    requires_grad=False)
-    x[:, :, 0, 0::2] = 1
-    if prev_state is not None:
-        x[:, :, 0, 1::2].copy_(prev_state)
-    out, *rest = ops.selective_scan_fwd(u, delta, A, B, C, D, z, delta_bias,
-                                        delta_softplus, position_indices, x)
-    last_state = x[:, :, -1, 1::2]  # (batch, dim, dstate)
+    if C.dim() == 2 and query_start_loc is not None:
+        C = C.unsqueeze(0)
+
+    ops.selective_scan_fwd(u, delta, A, B, C, D, z, delta_bias, delta_softplus,
+                           query_start_loc, cache_indices, has_initial_state,
+                           ssm_states, pad_slot_id)
+
     if z is None:
-        return out if not return_last_state else (out, last_state)
+        return delta  # output written inplace to delta
     else:
-        out_z = rest[0]
-        return out_z if not return_last_state else (out_z, last_state)
+        return z  # output written inplace to z

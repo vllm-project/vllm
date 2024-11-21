@@ -12,6 +12,10 @@ from vllm.attention.backends.utils import CommonAttentionState
 class PallasAttentionBackend(AttentionBackend):
 
     @staticmethod
+    def get_name() -> str:
+        return "PALLAS"
+
+    @staticmethod
     def get_impl_cls() -> Type["PallasAttentionBackendImpl"]:
         return PallasAttentionBackendImpl
 
@@ -61,6 +65,7 @@ class PallasMetadata(AttentionMetadata):
     # or all decoding.
     block_tables: Optional[torch.Tensor] = None
     context_lens: Optional[torch.Tensor] = None
+    effective_query_lens: Optional[torch.Tensor] = None
 
     @property
     def prefill_metadata(self) -> Optional["PallasMetadata"]:
@@ -68,8 +73,6 @@ class PallasMetadata(AttentionMetadata):
             return None
 
         assert self.num_decode_tokens == 0
-        assert self.block_tables is None
-        assert self.context_lens is None
         return self
 
     @property
@@ -182,61 +185,101 @@ class PallasAttentionBackendImpl(AttentionImpl):
 
         query = query * self.scale
         if attn_metadata.num_prefills > 0:
-            assert seq_len % 16 == 0, (
-                "Pallas FlashAttention kernel requires seq_len to be a "
-                f"multiple of 16 but got {seq_len}")
+            if attn_metadata.block_tables is None:
+                # Prefill without paged KV cache.
+                assert seq_len % 16 == 0, (
+                    "Pallas FlashAttention kernel requires seq_len to be a "
+                    f"multiple of 16 but got {seq_len}")
 
-            # Handle GQA/MQA.
-            if self.num_kv_heads != self.num_heads:
-                key = key.repeat_interleave(self.num_queries_per_kv, dim=-2)
-                key = key.view(batch_size, seq_len, self.num_heads,
-                               self.head_size)
-                value = value.repeat_interleave(self.num_queries_per_kv,
+                # Handle GQA/MQA.
+                if self.num_kv_heads != self.num_heads:
+                    key = key.repeat_interleave(self.num_queries_per_kv,
                                                 dim=-2)
-                value = value.view(batch_size, seq_len, self.num_heads,
+                    key = key.view(batch_size, seq_len, self.num_heads,
                                    self.head_size)
-            # FlashAttention requires [batch_size, num_heads, seq_len, d_model]
-            # while the input is [batch_size, seq_len, num_heads, d_model].
-            # Permute the input to match the required format.
-            output = torch.ops.xla.flash_attention(
-                query.permute(0, 2, 1, 3),
-                key.permute(0, 2, 1, 3),
-                value.permute(0, 2, 1, 3),
-                True,
-            )
-            output = output.permute(0, 2, 1, 3)
+                    value = value.repeat_interleave(self.num_queries_per_kv,
+                                                    dim=-2)
+                    value = value.view(batch_size, seq_len, self.num_heads,
+                                       self.head_size)
+                # FlashAttention kernel requires the input shape to be
+                # [batch_size, num_heads, seq_len, d_model]
+                # while the input is [batch_size, seq_len, num_heads, d_model].
+                # Permute the input to match the required format.
+                output = torch.ops.xla.flash_attention(
+                    query.permute(0, 2, 1, 3),
+                    key.permute(0, 2, 1, 3),
+                    value.permute(0, 2, 1, 3),
+                    True,
+                )
+                output = output.permute(0, 2, 1, 3)
+            else:
+                # Prefill with paged KV cache.
+                # TODO(woosuk): Tune the below knobs.
+                num_kv_pages_per_compute_block = 16
+                num_queries_per_compute_block = 16
+                assert seq_len % num_queries_per_compute_block == 0
+                output = torch.ops.xla.multi_queries_paged_attention(
+                    query,
+                    key_cache,
+                    value_cache,
+                    attn_metadata.context_lens,
+                    attn_metadata.block_tables,
+                    attn_metadata.effective_query_lens,
+                    num_kv_pages_per_compute_block,
+                    num_queries_per_compute_block,
+                    use_kernel=True,
+                )
         else:
             # Decoding run.
             assert kv_cache[0].numel() > 0
-
+            query = query.squeeze(dim=1)
             pages_per_compute_block = 16  # TODO(woosuk): Tune this value.
-            if self.megacore_mode == "batch" and batch_size % 2 != 0:
-                megacore_mode = None
-            else:
-                megacore_mode = self.megacore_mode
 
-            # NOTE(woosuk): A temporary workaround to avoid the error:
-            # "xla::paged_attention() Expected a value of type 'str' for
-            # argument 'megacore_mode' but instead found type 'NoneType'."
-            if megacore_mode is not None:
-                output = torch.ops.xla.paged_attention(
-                    query.squeeze(dim=1),
+            assert attn_metadata.block_tables is not None
+            assert attn_metadata.context_lens is not None
+            # NOTE(woosuk): The PagedAttention Pallas kernel stores the entire
+            # block table in SMEM. Therefore, if the block table is too large,
+            # the kernel compilation will fail. To avoid this, we split the
+            # batch dimension into smaller chunks and run the kernel multiple
+            # times.
+            MAX_SMEM_USAGE = 512 * 1024
+            size_per_seq = 4 * attn_metadata.block_tables.shape[1]
+            max_num_seq = MAX_SMEM_USAGE // size_per_seq
+
+            if batch_size <= max_num_seq:
+                output = paged_attention(
+                    query,
                     key_cache,
                     value_cache,
                     attn_metadata.context_lens,
                     attn_metadata.block_tables,
                     pages_per_compute_block,
-                    megacore_mode=megacore_mode,
+                    self.megacore_mode,
                 )
             else:
-                output = torch.ops.xla.paged_attention(
-                    query.squeeze(dim=1),
-                    key_cache,
-                    value_cache,
-                    attn_metadata.context_lens,
-                    attn_metadata.block_tables,
-                    pages_per_compute_block,
-                )
+                chunk_size = max_num_seq
+                # Make sure the chunk size is a multiple of 2.
+                chunk_size = chunk_size // 2 * 2
+                num_chunks = (batch_size + chunk_size - 1) // chunk_size
+
+                output = torch.empty_like(query)
+                for chunk_idx in range(num_chunks):
+                    chunk_start = chunk_idx * chunk_size
+                    chunk_end = chunk_start + chunk_size
+                    # NOTE(woosuk): We skip this line because it causes Dynamo
+                    # compilation error. Instead, we rely on the slice operation
+                    # to handle the out-of-bound case.
+                    # chunk_end = min(chunk_end, batch_size)
+                    chunk_output = paged_attention(
+                        query[chunk_start:chunk_end],
+                        key_cache,
+                        value_cache,
+                        attn_metadata.context_lens[chunk_start:chunk_end],
+                        attn_metadata.block_tables[chunk_start:chunk_end],
+                        pages_per_compute_block,
+                        self.megacore_mode,
+                    )
+                    output[chunk_start:chunk_end] = chunk_output
 
         # Reshape the output tensor.
         return output.reshape(batch_size, seq_len, hidden_size)
@@ -258,3 +301,43 @@ def write_to_kv_cache(
     value_cache = value_cache.flatten(0, 2)
     key_cache.index_copy_(0, slot_mapping, key)
     value_cache.index_copy_(0, slot_mapping, value)
+
+
+def paged_attention(
+    query: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    context_lens: torch.Tensor,
+    block_tables: torch.Tensor,
+    pages_per_compute_block: int,
+    megacore_mode: Optional[str],
+) -> torch.Tensor:
+    batch_size = query.shape[0]
+    if megacore_mode == "batch" and batch_size % 2 != 0:
+        megacore_mode = None
+    else:
+        megacore_mode = megacore_mode
+
+    # NOTE(woosuk): A temporary workaround to avoid the error:
+    # "xla::paged_attention() Expected a value of type 'str' for
+    # argument 'megacore_mode' but instead found type 'NoneType'."
+    if megacore_mode is not None:
+        output = torch.ops.xla.paged_attention(
+            query,
+            key_cache,
+            value_cache,
+            context_lens,
+            block_tables,
+            pages_per_compute_block,
+            megacore_mode=megacore_mode,
+        )
+    else:
+        output = torch.ops.xla.paged_attention(
+            query,
+            key_cache,
+            value_cache,
+            context_lens,
+            block_tables,
+            pages_per_compute_block,
+        )
+    return output
