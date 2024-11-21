@@ -504,11 +504,12 @@ class CPUModelRunner(CPUModelRunnerBase[ModelInputForCPUWithSamplingMetadata]):
         if model_input.multi_modal_kwargs is not None:
             multimodal_kwargs = MultiModalKwargs.as_kwargs(
                 model_input.multi_modal_kwargs, device=self.device)
-        
+
         previous_hidden_states_kwargs = {}
         if previous_hidden_states is not None:
-            previous_hidden_states_kwargs =
-                {"previous_hidden_states": previous_hidden_states}
+            previous_hidden_states_kwargs = {
+                "previous_hidden_states": previous_hidden_states
+            }
 
         hidden_states = model_executable(
             input_ids=model_input.input_tokens,
