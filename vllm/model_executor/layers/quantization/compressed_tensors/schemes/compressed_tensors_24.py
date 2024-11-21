@@ -87,7 +87,6 @@ class CompressedTensors24(CompressedTensorsScheme):
             bias=bias
         )
 
-        out = out.t()
         assert out.is_contiguous()
         return out
 
