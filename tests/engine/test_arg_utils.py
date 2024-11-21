@@ -31,6 +31,34 @@ def test_limit_mm_per_prompt_parser(arg, expected):
     assert args.limit_mm_per_prompt == expected
 
 
+def test_compilation_config():
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+
+    # default value
+    args = parser.parse_args([])
+    assert args.compilation_config is None
+
+    # set to O3
+    args = parser.parse_args(["-O3"])
+    assert args.compilation_config.level == 3
+
+    # set to O 3 (space)
+    args = parser.parse_args(["-O", "3"])
+    assert args.compilation_config.level == 3
+
+    # set to O 3 (equals)
+    args = parser.parse_args(["-O=3"])
+    assert args.compilation_config.level == 3
+
+    # set to json
+    args = parser.parse_args(["--compilation-config", '{"level": 3}'])
+    assert args.compilation_config.level == 3
+
+    # set to json
+    args = parser.parse_args(['--compilation-config={"level": 3}'])
+    assert args.compilation_config.level == 3
+
+
 def test_valid_pooling_config():
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
     args = parser.parse_args([

@@ -1192,6 +1192,10 @@ class FlexibleArgumentParser(argparse.ArgumentParser):
                 else:
                     processed_args.append('--' +
                                           arg[len('--'):].replace('_', '-'))
+            elif arg.startswith('-O') and arg != '-O' and len(arg) == 2:
+                # allow -O flag to be used without space, e.g. -O3
+                processed_args.append('-O')
+                processed_args.append(arg[2:])
             else:
                 processed_args.append(arg)
 
