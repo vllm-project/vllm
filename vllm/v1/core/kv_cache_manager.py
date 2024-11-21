@@ -317,6 +317,24 @@ class KVCacheManager:
                                                              KVCacheBlock]],
         block_size: int,
     ) -> None:
+        """Cache a list of full blocks for prefix caching.
+
+        This function takes a list of blocks that will have their block hash
+        metadata to be updated and cached. Given a request, it computes the
+        block hashes for the blocks starting from `blk_start_idx` to the end
+        of the request's full blocks, updating the metadata for each block
+        and caching them in the `cached_block_hash_to_block`.
+
+        Args:
+            request: The request to cache the blocks.
+            blk_start_idx: The index of the first block in the request's blocks
+                to cache.
+            full_blocks: The list of blocks to update hash metadata.
+            prev_block: The previous block in the chain.
+            cached_block_hash_to_block: The cache of block hashes.
+            block_size: The size of a block.
+        """
+
         # Some of the full blocks may be computed blocks cached previously.
         # Remove them from the cache.
         for blk in full_blocks:
