@@ -5,7 +5,7 @@ class LoRAResolver(ABC):
     @abstractmethod
     async def resolve_lora(self, lora_name: str) -> LoRARequest | None:
         """
-        Abstract method to resolve and optionally fetch a LoRA model adapter.
+        Abstract method to resolve and fetch a LoRA model adapter.
         
         This method should implement the logic to locate and/or download a LoRA
         adapter based on the provided name. Implementations might fetch from a blob
