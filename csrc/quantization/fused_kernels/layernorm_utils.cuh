@@ -7,6 +7,12 @@
 #include "vectorization.cuh"
 #include "quant_conversions.cuh"
 
+#ifndef USE_ROCM
+  #include <cub/cub.cuh>
+#else
+  #include <hipcub/hipcub.hpp>
+#endif
+
 namespace vllm {
 
 // has_residual must be true, if residual is not a nullptr
@@ -26,7 +32,11 @@ __device__ void compute_rms(float* rms, scalar_t const* __restrict__ input,
 
     ss += x * x;
   }
-  ss = blockReduceSum<float>(ss);
+
+  using BlockReduce = cub::BlockReduce<float, 1024>;
+  __shared__ typename BlockReduce::TempStorage reduceStore;
+  ss = BlockReduce(reduceStore).Reduce(ss, cub::Sum{}, blockDim.x);
+
   __shared__ float s_rms;
   if (threadIdx.x == 0) {
     s_rms = rsqrtf(ss / hidden_size + epsilon);
@@ -56,7 +66,12 @@ __device__ void compute_dynamic_per_token_scales(
     x = static_cast<float>(static_cast<scalar_t>(x * rms) * weight[i]);
     block_absmax_val_maybe = fmaxf(block_absmax_val_maybe, fabsf(x));
   }
-  block_absmax_val_maybe = blockReduceMax(block_absmax_val_maybe);
+
+  using BlockReduce = cub::BlockReduce<float, 1024>;
+  __shared__ typename BlockReduce::TempStorage reduceStore;
+  block_absmax_val_maybe =
+      BlockReduce(reduceStore)
+          .Reduce(block_absmax_val_maybe, cub::Max{}, blockDim.x);
 
   __shared__ float s_token_scale;
   if (threadIdx.x == 0) {
@@ -147,7 +162,10 @@ __device__ void compute_rms(float* rms, scalar_t const* __restrict__ input,
     ss += x.w * x.w;
   }
 
-  ss = blockReduceSum<float>(ss);
+  using BlockReduce = cub::BlockReduce<float, 1024>;
+  __shared__ typename BlockReduce::TempStorage reduceStore;
+  ss = BlockReduce(reduceStore).Reduce(ss, cub::Sum{}, blockDim.x);
+
   __shared__ float s_rms;
   if (threadIdx.x == 0) {
     s_rms = rsqrtf(ss / hidden_size + epsilon);
@@ -212,7 +230,11 @@ __device__ void compute_dynamic_per_token_scales(
         block_absmax_val_maybe, fabs(static_cast<scalar_t>(x.w * rms) * w.w));
   }
 
-  block_absmax_val_maybe = blockReduceMax(block_absmax_val_maybe);
+  using BlockReduce = cub::BlockReduce<float, 1024>;
+  __shared__ typename BlockReduce::TempStorage reduceStore;
+  block_absmax_val_maybe =
+      BlockReduce(reduceStore)
+          .Reduce(block_absmax_val_maybe, cub::Max{}, blockDim.x);
 
   __shared__ float s_token_scale;
   if (threadIdx.x == 0) {
