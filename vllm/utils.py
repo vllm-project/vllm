@@ -20,11 +20,12 @@ import warnings
 import weakref
 from asyncio import FIRST_COMPLETED, AbstractEventLoop, Future, Task
 from collections.abc import Mapping
+from dataclasses import dataclass, field
 from functools import lru_cache, partial, wraps
 from platform import uname
-from typing import (Any, AsyncGenerator, Awaitable, Callable, Dict, Generic,
-                    Hashable, List, Literal, Optional, OrderedDict, Set, Tuple,
-                    Type, TypeVar, Union, overload)
+from typing import (Any, AsyncGenerator, Awaitable, Callable, Dict, Generator,
+                    Generic, Hashable, List, Literal, Optional, OrderedDict,
+                    Set, Tuple, Type, TypeVar, Union, overload)
 from uuid import uuid4
 
 import numpy as np
@@ -1612,3 +1613,81 @@ def resolve_obj_by_qualname(qualname: str) -> Any:
     module_name, obj_name = qualname.rsplit(".", 1)
     module = importlib.import_module(module_name)
     return getattr(module, obj_name)
+
+
+@dataclass
+class MemorySnapshot:
+    """Memory snapshot."""
+    cuda_memory_in_bytes: int = 0
+    torch_memory_in_bytes: int = 0
+    timestamp: float = 0.0
+
+    def measure(self):
+        self.cuda_memory_in_bytes = torch.cuda.mem_get_info(
+        )[1] - torch.cuda.mem_get_info()[0]
+        self.torch_memory_in_bytes = torch.cuda.memory_stats(
+        )["allocated_bytes.all.current"]
+        self.timestamp = time.time()
+
+    def __sub__(self, other: "MemorySnapshot") -> "MemorySnapshot":
+        """support a - b"""
+        return MemorySnapshot(
+            cuda_memory_in_bytes=self.cuda_memory_in_bytes -
+            other.cuda_memory_in_bytes,
+            torch_memory_in_bytes=self.torch_memory_in_bytes -
+            other.torch_memory_in_bytes,
+            timestamp=self.timestamp - other.timestamp)
+
+
+@dataclass
+class MemoryProfilingResult:
+    """Memory profiling result.
+
+    The memory in one GPU can be classified into 3 categories:
+    1. (marked by -) memory used by other processes.
+    2. (marked by +) memory used by torch in this process.
+    3. (marked by *) memory used in this process, but not by torch.
+
+    torch API `torch.cuda.memory_stats()["allocated_bytes.all.current"]` can only get the memory used by torch in this process, which is the second category.
+    We don't have direct APIs to get the first and third categories.
+    There's one API from cuda `torch.cuda.mem_get_info()[1] - torch.cuda.mem_get_info()[0]` , which is the sum of all the three categories.
+
+    Because of the limitation of the APIs, to make profiling possible, we have the following assumptions:
+    - Before profiling, in this process, only torch is using the GPU memory. (technically, there will be some memory used by this processes but not by torch, e.g. cuda context of this process. Since they are constant during the profiling, and we cannot directly measure them, we can classify them into the first category, i.e. treat them as memory used by other processes.)
+    - The memory used by other processes is constant during the profiling.
+    - The memory used in this process, but not by torch, will only grow during the profiling. Examples of this kind of memory are memory used by NCCL.
+    - The memory used by torch in this process can grow and shrink during the profiling.
+
+    Illustration:
+
+                                |              cuda memory          |
+                                |            | torch memory |       |
+    Before profiling:            | --------- | +++++++++ |  |
+    During profiling (peak):     | --------- | +++++++++++++ | *** |
+    After profiling:             | --------- | +++++++++++ | *** |
+    """ # noqa
+    memory_used_by_other_process_in_bytes: int = 0
+    torch_peak_memory_in_bytes: int = 0
+    non_torch_memory_in_bytes: int = 0
+    before_profile: MemorySnapshot = field(default_factory=MemorySnapshot)
+    after_profile: MemorySnapshot = field(default_factory=MemorySnapshot)
+    profile_time: float = 0.0
+
+
+@contextlib.contextmanager
+def memory_profiling() -> Generator[MemoryProfilingResult, None, None]:
+    """Memory profiling context manager."""
+    result = MemoryProfilingResult()
+    result.before_profile.measure()
+
+    result.memory_used_by_other_process_in_bytes = result.before_profile.cuda_memory_in_bytes - result.before_profile.torch_memory_in_bytes  # noqa
+
+    yield result
+
+    result.after_profile.measure()
+
+    result.torch_peak_memory_in_bytes = torch.cuda.memory_stats(
+    )["allocated_bytes.all.peak"]
+    diff = result.after_profile - result.before_profile
+    result.non_torch_memory_in_bytes = diff.cuda_memory_in_bytes - diff.torch_memory_in_bytes  # noqa
+    result.profile_time = diff.timestamp
