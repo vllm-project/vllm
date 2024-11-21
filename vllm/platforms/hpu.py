@@ -1,7 +1,9 @@
+from typing import TYPE_CHECKING
+
 import torch
 
 from .interface import Platform, PlatformEnum, _Backend
-from typing import TYPE_CHECKING
+
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 else:

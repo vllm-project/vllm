@@ -49,12 +49,14 @@ class TpuPlatform(Platform):
         if compilation_config.backend == "":
             compilation_config.backend = "openxla"
 
-        assert vllm_config.speculative_config is None, "TPU does not support speculative decoding"
+        assert vllm_config.speculative_config is None, \
+            "TPU does not support speculative decoding"
 
         parallel_config = vllm_config.parallel_config
         scheduler_config = vllm_config.scheduler_config
         if parallel_config.worker_cls == "auto":
             if scheduler_config.is_multi_step:
-                parallel_config.worker_cls = "vllm.worker.multi_step_tpu_worker.MultiStepTPUWorker"
+                parallel_config.worker_cls = \
+                    "vllm.worker.multi_step_tpu_worker.MultiStepTPUWorker"
             else:
                 parallel_config.worker_cls = "vllm.worker.tpu_worker.TPUWorker"

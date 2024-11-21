@@ -4,7 +4,7 @@ pynvml. However, it should not initialize cuda context.
 
 import os
 from functools import lru_cache, wraps
-from typing import Callable, List, Tuple, TypeVar
+from typing import TYPE_CHECKING, Callable, List, Tuple, TypeVar
 
 import pynvml
 import torch
@@ -15,7 +15,7 @@ import vllm._C  # noqa
 from vllm.logger import init_logger
 
 from .interface import DeviceCapability, Platform, PlatformEnum
-from typing import TYPE_CHECKING
+
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 else:

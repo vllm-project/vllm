@@ -1,5 +1,7 @@
-from .interface import Platform, PlatformEnum
 from typing import TYPE_CHECKING
+
+from .interface import Platform, PlatformEnum
+
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 else:
@@ -18,4 +20,5 @@ class NeuronPlatform(Platform):
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         parallel_config = vllm_config.parallel_config
         if parallel_config.worker_cls == "auto":
-            parallel_config.worker_cls = "vllm.worker.neuron_worker.NeuronWorker"
+            parallel_config.worker_cls = \
+                "vllm.worker.neuron_worker.NeuronWorker"

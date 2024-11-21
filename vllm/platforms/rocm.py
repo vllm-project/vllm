@@ -1,12 +1,13 @@
 import os
 from functools import lru_cache
+from typing import TYPE_CHECKING
 
 import torch
 
 from vllm.logger import init_logger
 
 from .interface import DeviceCapability, Platform, PlatformEnum, _Backend
-from typing import TYPE_CHECKING
+
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 else:

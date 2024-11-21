@@ -1,3 +1,5 @@
+from typing import TYPE_CHECKING
+
 import torch
 
 import vllm.envs as envs
@@ -5,7 +7,6 @@ from vllm.logger import init_logger
 
 from .interface import Platform, PlatformEnum, _Backend
 
-from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 else:
@@ -53,4 +54,5 @@ class OpenVinoPlatform(Platform):
         ), "OpenVINOExecutor only supports single CPU socket currently."
 
         if parallel_config.worker_cls == "auto":
-            parallel_config.worker_cls = "vllm.worker.openvino_worker.OpenVINOWorker"
+            parallel_config.worker_cls = \
+                "vllm.worker.openvino_worker.OpenVINOWorker"
