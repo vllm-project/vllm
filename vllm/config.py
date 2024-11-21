@@ -2370,7 +2370,7 @@ class VllmConfig:
 
         if self.compilation_config is None:
             self.compilation_config = CompilationConfig()
-        if envs.VLLM_USE_V1:
+        if envs.VLLM_USE_V1 and not self.model_config.enforce_eager:
             # NOTE(woosuk): Currently, we use inductor because the piecewise
             # CUDA graphs do not work properly with the custom CUDA kernels.
             # FIXME(woosuk): Disable inductor to reduce the compilation time
@@ -2380,6 +2380,7 @@ class VllmConfig:
             self.compilation_config.use_inductor = True
             self.compilation_config.pass_config.enable_fusion = False
             self.compilation_config.pass_config.enable_reshape = False
+            self.compilation_config.level = CompilationLevel.PIECEWISE
 
         current_platform.check_and_update_config(self)
 
