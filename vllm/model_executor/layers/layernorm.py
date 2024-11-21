@@ -4,10 +4,11 @@ from typing import Optional, Tuple, Union
 import torch
 import torch.nn as nn
 
-from vllm.distributed import (tensor_model_parallel_all_reduce,
+from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size,
-                              get_tensor_model_parallel_rank)
+                              tensor_model_parallel_all_reduce)
 from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.utils import set_weight_attrs
 
 
 @CustomOp.register("rms_norm")
@@ -143,6 +144,7 @@ class RMSNorm(CustomOp):
         s += f", eps={self.variance_epsilon}"
         return s
 
+
 @CustomOp.register("parallel_rms_norm")
 class ParallelRMSNorm(CustomOp):
     """Root mean square normalization.
@@ -170,16 +172,16 @@ class ParallelRMSNorm(CustomOp):
                                        else var_hidden_size)
         self.tp_size = get_tensor_model_parallel_world_size()
 
-        assert(hidden_size % tp_size == 0)
+        assert (hidden_size % self.tp_size == 0)
         hidden_size = hidden_size // self.tp_size
         self.weight = nn.Parameter(torch.ones(hidden_size))
         set_weight_attrs(self.weight,
-        {"weight_loader": self._parallel_weight_loader})
+                         {"weight_loader": self._parallel_weight_loader})
 
     # TODO: can this use a built-in util now that it's it's only 1D TP?
     def _parallel_weight_loader(self, param: torch.Tensor,
                                 loaded_weight: torch.Tensor):
-        tp_rank = get_tensor_parallel_rank()
+        tp_rank = get_tensor_model_parallel_rank()
         shard_size = param.data.shape[0]
         start_idx = tp_rank * shard_size
         loaded_weight = loaded_weight.narrow(0, start_idx, shard_size)
@@ -200,7 +202,7 @@ class ParallelRMSNorm(CustomOp):
 
         # Compute local sum and then reduce to obtain global sum
         local_sums = x.pow(2).sum(dim=-1, keepdim=False)
-        global_sums = tensor_parallel_all_reduce(local_sums)
+        global_sums = tensor_model_parallel_all_reduce(local_sums)
 
         # Calculate the variance
         count = self.tp_size * x.shape[-1]
