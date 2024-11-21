@@ -2291,8 +2291,8 @@ class VllmConfig:
     cache_config: CacheConfig = field(default=None, init=True)  # type: ignore
     parallel_config: ParallelConfig = field(default_factory=ParallelConfig,
                                             init=True)
-    scheduler_config: SchedulerConfig = field(default=None,
-                                              init=True)  # type: ignore
+    scheduler_config: SchedulerConfig = field(default_factory=SchedulerConfig,
+                                              init=True)
     device_config: DeviceConfig = field(default=None,
                                         init=True)  # type: ignore
     load_config: LoadConfig = field(default=None, init=True)  # type: ignore
