@@ -16,40 +16,6 @@ from .vllm_inductor_pass import VllmInductorPass, is_func
 logger = init_logger(__name__)
 
 
-# TODO temp
-@torch.library.custom_op("_C::rms_norm_dynamic_fp8_quant",
-                         mutates_args=("result", "scale"))
-def rms_norm_dynamic_fp8_quant(result: torch.Tensor, input: torch.Tensor,
-                               weight: torch.Tensor, scale: torch.Tensor,
-                               epsilon: float) -> None:
-    # Last two are scale_ub, residual
-    torch.ops._C.rms_norm_dynamic_per_token_quant(result, input, weight, scale, epsilon, None, None)
-
-
-@torch.library.register_fake("_C::rms_norm_dynamic_fp8_quant")
-def _(result: torch.Tensor, input: torch.Tensor, weight: torch.Tensor,
-      scale: torch.Tensor, epsilon: float):
-    return None
-
-
-@torch.library.custom_op("_C::fused_add_rms_norm_dynamic_fp8_quant",
-                         mutates_args=("result", "residual", "scale"))
-def fused_add_rms_norm_dynamic_fp8_quant(result: torch.Tensor,
-                                         input: torch.Tensor,
-                                         residual: torch.Tensor,
-                                         weight: torch.Tensor,
-                                         scale: torch.Tensor,
-                                         epsilon: float) -> None:
-    # Last two are scale_ub, residual
-    torch.ops._C.rms_norm_dynamic_per_token_quant(result, input, weight, scale, epsilon, None, residual)
-
-
-@torch.library.register_fake("_C::rms_norm_dynamic_fp8_quant")
-def _(result: torch.Tensor, input: torch.Tensor, weight: torch.Tensor,
-      scale: torch.Tensor, epsilon: float):
-    return None
-
-
 def empty_bf16(*args, **kwargs):
     return torch.empty(*args, **kwargs, dtype=torch.bfloat16, device="cuda")
 
@@ -372,12 +338,14 @@ class RMSNormDynamicFP8QuantPattern(RMSNormQuantPattern):
                         input: torch.Tensor, weight: torch.Tensor,
                         scale: torch.Tensor):
             at = auto_functionalized(
-                torch.ops._C.rms_norm_static_fp8_quant.default,
+                torch.ops._C.rms_norm_dynamic_per_token_quant.default,
                 result=result,
                 input=input,
                 weight=weight,
                 scale=scale,
-                epsilon=self.epsilon)
+                epsilon=self.epsilon,
+                scale_ub=None,
+                residual=None)
 
             # result, scale
             return at[1], at[2]
@@ -413,7 +381,7 @@ class RMSNormDynamicFP8QuantPattern(RMSNormQuantPattern):
             # The auto_fn node returns a tuple of (None, result, scale).
             #
             # The resulting graph looks like this:
-            # at = auto_functionalized(torch.ops._C.rms_norm_static_fp8_quant.default, ...)  # noqa
+            # at = auto_functionalized(torch.ops._C.rms_norm_dynamic_per_token_quant.default, ...)  # noqa
             # result_node_new = at[1]
             # scale_node_new = at[2]
             with self.inserting_after_match():
@@ -421,10 +389,12 @@ class RMSNormDynamicFP8QuantPattern(RMSNormQuantPattern):
 
                 # Scalars cannot be inputs to the pattern
                 kwargs["epsilon"] = rms_node.kwargs["epsilon"]
+                kwargs["scale_ub"] = None  # not used but required
+                kwargs["residual"] = None  # not used but required
                 del kwargs["result_rms"]  # not used in the fused op
 
                 fused_node = self.insert_auto_fn(
-                    torch.ops._C.rms_norm_dynamic_fp8_quant.default,
+                    torch.ops._C.rms_norm_dynamic_per_token_quant.default,
                     kwargs=kwargs)
 
                 getitem_nodes = self.insert_getitems(fused_node, (1, 2))
@@ -466,16 +436,17 @@ class FusedAddRMSNormDynamicFP8QuantPattern(RMSNormQuantPattern):
                         residual: torch.Tensor, weight: torch.Tensor,
                         scale: torch.Tensor):
             at = auto_functionalized(
-                torch.ops._C.fused_add_rms_norm_dynamic_fp8_quant.default,
+                torch.ops._C.rms_norm_dynamic_per_token_quant.default,
                 result=result,
                 input=input,
-                residual=residual,
                 weight=weight,
                 scale=scale,
-                epsilon=self.epsilon)
+                epsilon=self.epsilon,
+                scale_ub=None,
+                residual=residual)
 
             # result, residual, scale
-            return at[1], at[2], at[3]  # TODO confirm signature
+            return at[1], at[3], at[2]
 
         inputs = [
             empty_fp8(5, 4),  # result
@@ -508,22 +479,23 @@ class FusedAddRMSNormDynamicFP8QuantPattern(RMSNormQuantPattern):
             # The auto_fn node returns a tuple (None, result, scale, residual).
             #
             # The resulting graph looks like this:
-            # at = auto_functionalized(torch.ops._C.fused_add_rms_norm_dynamic_fp8_quant.default, ...)  # noqa
+            # at = auto_functionalized(torch.ops._C.rms_norm_dynamic_per_token_quant.default, ...)  # noqa
             # result_node_new = at[1]
-            # residual_node_new = at[2]
-            # scale_node_new = at[3]
+            # scale_node_new = at[2]
+            # residual_node_new = at[3]
             with self.inserting_after_match():
                 kwargs = self.match.kwargs.copy()
 
                 # Scalars cannot be inputs to the pattern
                 kwargs["epsilon"] = rms_node.kwargs["epsilon"]
+                kwargs["scale_ub"] = None  # not used but required
 
                 fused_node = self.insert_auto_fn(
-                    torch.ops._C.fused_add_rms_norm_dynamic_fp8_quant.default,
+                    torch.ops._C.rms_norm_dynamic_per_token_quant.default,
                     kwargs=kwargs)
 
                 getitem_ns = self.insert_getitems(fused_node, (1, 2, 3))
-                result_node_new, residual_node_new, scale_node_new = getitem_ns
+                result_node_new, scale_node_new, residual_node_new = getitem_ns
 
             # Rebind the users of match getitem nodes to use the new nodes.
             # The old nodes will be removed by DCE at the end of the pass.
@@ -588,12 +560,12 @@ class FusionPass(VllmInductorPass):
                 self.patterns, self.record_match)
 
             # Fuse rms_norm + dynamic_scaled_fp8_quant into
-            # rms_norm_dynamic_fp8_quant
+            # rms_norm_dynamic_per_token_quant
             RMSNormDynamicFP8QuantPattern(epsilon).register(
                 self.patterns, self.record_match)
 
             # Fuse fused_add_rms_norm + dynamic_scaled_fp8_quant into
-            # fused_add_rms_norm_dynamic_fp8_quant
+            # rms_norm_dynamic_per_token_quant
             FusedAddRMSNormDynamicFP8QuantPattern(epsilon).register(
                 self.patterns, self.record_match)
 

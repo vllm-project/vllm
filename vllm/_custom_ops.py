@@ -272,19 +272,14 @@ def rms_norm_dynamic_per_token_quant(
 # TODO is this necessary?
 @register_fake("_C::rms_norm_dynamic_per_token_quant")
 def _rms_norm_dynamic_per_token_quant_fake(
-    input: torch.Tensor,
-    weight: torch.Tensor,
-    epsilon: float,
-    quant_dtype: torch.dtype,
-    scale_ub: Optional[torch.Tensor] = None,
-    residual: Optional[torch.Tensor] = None
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    output = torch.empty_like(input, dtype=quant_dtype)
-    scales = torch.empty((input.numel() // input.shape[-1], 1),
-                         device=input.device,
-                         dtype=torch.float32)
-
-    return output, scales
+        output: torch.Tensor,
+        input: torch.Tensor,
+        weight: torch.Tensor,
+        scales: torch.Tensor,
+        epsilon: float,
+        scale_ub: Optional[torch.Tensor] = None,
+        residual: Optional[torch.Tensor] = None) -> None:
+    return None
 
 
 # quantization ops
