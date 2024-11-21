@@ -25,7 +25,12 @@ echo "Version: $version"
 
 # If the version contains "dev", rename it to v1.0.0.dev for consistency
 if [[ $version == *dev* ]]; then
-    new_version="1.0.0.dev"
+    suffix="${version##*.}"
+    if [[ $suffix == cu* ]]; then
+        new_version="1.0.0.dev+${suffix}"
+    else
+        new_version="1.0.0.dev"
+    fi
     new_wheel="${wheel/$version/$new_version}"
     mv -- "$wheel" "$new_wheel"
     wheel="$new_wheel"
