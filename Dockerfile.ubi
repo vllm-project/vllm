@@ -2,8 +2,11 @@
 ARG BASE_UBI_IMAGE_TAG=9.4
 ARG PYTHON_VERSION=3.12
 
-ARG TORCH_CUDA_ARCH_LIST="7.0 7.5 8.0 8.6 8.9 9.0+PTX"
-ARG vllm_fa_cmake_gpu_arches='80-real;90-real'
+# ARG TORCH_CUDA_ARCH_LIST="7.0 7.5 8.0 8.6 8.9 9.0+PTX"
+# ARG vllm_fa_cmake_gpu_arches='80-real;90-real'
+
+ARG TORCH_CUDA_ARCH_LIST="8.0"
+ARG vllm_fa_cmake_gpu_arches='80-real'
 
 ## Base Layer ##################################################################
 FROM registry.access.redhat.com/ubi9/ubi-minimal:${BASE_UBI_IMAGE_TAG} as base
