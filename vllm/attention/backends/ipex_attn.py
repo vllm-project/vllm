@@ -292,6 +292,7 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
 
                 if attn_metadata.attn_bias is None:
                     if self.alibi_slopes is not None:
+                        self.alibi_slopes = self.alibi_slopes.to(query.device)
                         att_masks = _make_alibi_bias(
                             self.alibi_slopes, query.dtype,
                             attn_metadata.seq_lens)  # type: ignore
