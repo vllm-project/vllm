@@ -4,28 +4,11 @@ from typing import List, Optional, Set, Tuple
 import torch
 
 from vllm.model_executor.layers.sampler import SamplerOutput
-from vllm.platforms import current_platform
 from vllm.sequence import ExecuteModelRequest
 from vllm.spec_decode.interfaces import SpeculativeProposals
 from vllm.spec_decode.proposer_worker_base import NonLLMProposerWorkerBase
+from vllm.spec_decode.selector import DEVICE_TYPE
 from vllm.spec_decode.top1_proposer import Top1Proposer
-
-if current_platform.is_cuda_alike():
-    DEVICE_TYPE = "cuda"
-elif current_platform.is_neuron():
-    DEVICE_TYPE = "neuron"
-elif current_platform.is_hpu():
-    DEVICE_TYPE = "hpu"
-elif current_platform.is_openvino():
-    DEVICE_TYPE = "openvino"
-elif current_platform.is_cpu():
-    DEVICE_TYPE = "cpu"
-elif current_platform.is_tpu():
-    DEVICE_TYPE = "tpu"
-elif current_platform.is_xpu():
-    DEVICE_TYPE = "xpu"
-else:
-    raise ValueError(f"Unsupported platform: {current_platform}")
 
 
 class NGramWorker(NonLLMProposerWorkerBase):
