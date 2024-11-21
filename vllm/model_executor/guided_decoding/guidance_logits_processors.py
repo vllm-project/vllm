@@ -8,7 +8,7 @@ import llguidance  # type: ignore[import-untyped]
 import numpy as np
 import torch
 from guidance._schema import LLInterpreterResponse
-from guidance.models import TransformersTokenizer
+from vllm.model_executor.guided_decoding.guidance_utils import TransformersTokenizer
 from pydantic import BaseModel
 from transformers import PreTrainedTokenizerBase
 
@@ -75,9 +75,10 @@ class GuidanceLogitsProcessor:
                 # whitespace_flexible is available in main-repo or later version
                 args["whitespace_flexible"] = whitespaces_config.get(
                     "whitespace_flexible", False)
-
-            self.schema = guidance.json(**args)
-            self.serialized_grammar = self.schema.ll_serialize()
+                
+            compiler = llguidance.JsonCompiler()
+            grammar_inner = compiler.compile(json.dumps(schema))
+            self.serialized_grammar = json.dumps({"grammars": [json.loads(grammar_inner)]})
         elif self.mode.lower() in ["regex", "choice"]:
             self.serialized_grammar = guidance.gen(
                 regex=self.guide, temperature=0.0).ll_serialize()
