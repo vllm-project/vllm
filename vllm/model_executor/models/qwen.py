@@ -1023,6 +1023,18 @@ class QWenLLM(QWenBaseModel):
     embedding_modules = {}
     embedding_padding_modules = []
 
+    default_bitsandbytes_target_modules = [
+        ".c_attn.",
+        ".c_proj.",
+        ".w1.",
+        ".w2.",
+    ]
+    bitsandbytes_stacked_params_mapping = {
+        # shard_name, weight_name, index
+        "w2": ("gate_up_proj", 0),
+        "w1": ("gate_up_proj", 1),
+    }
+
 
 class QWenVL(QWenBaseModel, SupportsMultiModal):
     packed_modules_mapping = {
