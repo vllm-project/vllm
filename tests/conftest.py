@@ -910,6 +910,14 @@ class VllmRunner:
         req_outputs = self.model.encode(inputs)
         return [req_output.outputs.embedding for req_output in req_outputs]
 
+    def score(
+        self,
+        text_1: Union[str, List[str]],
+        text_2: Union[str, List[str]],
+    ) -> List[List[float]]:
+        req_outputs = self.model.score(text_1, text_2)
+        return [req_output.outputs.embedding for req_output in req_outputs]
+
     def __enter__(self):
         return self
 
