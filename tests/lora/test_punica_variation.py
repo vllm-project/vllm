@@ -7,7 +7,6 @@ import pytest
 import torch
 
 # Enable custom op register
-#
 import vllm.lora.ops.bgmv_expand
 import vllm.lora.ops.bgmv_expand_slice
 import vllm.lora.ops.bgmv_shrink
