@@ -378,20 +378,3 @@ def test_punica_expand_nslices(
 
         slice_offset += hidden_size
     assert_close(our_outputs, ref_outputs)
-
-
-if __name__ == "__main__":
-    from itertools import product
-
-    for ele in product(
-            BATCHES,
-            NUM_LORA,
-            MAX_RANKS,
-            HIDDEN_SIZES,
-            SCALES,
-            DTYPES,
-        ["shrink", "expand"],
-            SEED,
-            CUDA_DEVICES,
-    ):
-        test_punica_sgmv(*ele)
