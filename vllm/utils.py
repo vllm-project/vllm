@@ -1669,6 +1669,7 @@ class MemoryProfilingResult:
     memory_used_by_other_process_in_bytes: int = 0
     torch_peak_memory_in_bytes: int = 0
     non_torch_memory_in_bytes: int = 0
+    peak_memory_in_this_process_in_bytes: int = 0
     before_profile: MemorySnapshot = field(default_factory=MemorySnapshot)
     after_profile: MemorySnapshot = field(default_factory=MemorySnapshot)
     profile_time: float = 0.0
@@ -1691,3 +1692,4 @@ def memory_profiling() -> Generator[MemoryProfilingResult, None, None]:
     diff = result.after_profile - result.before_profile
     result.non_torch_memory_in_bytes = diff.cuda_memory_in_bytes - diff.torch_memory_in_bytes  # noqa
     result.profile_time = diff.timestamp
+    result.peak_memory_in_this_process_in_bytes = result.non_torch_memory_in_bytes + result.torch_peak_memory_in_bytes  # noqa

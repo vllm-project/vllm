@@ -201,11 +201,9 @@ class Worker(LocalOrDistributedWorkerBase):
 
         self._assert_memory_footprint_increased_during_profiling()
 
-        peak_memory_in_this_process = result.torch_peak_memory_in_bytes + result.non_torch_memory_in_bytes  # noqa
-
         available_kv_cache_memory = (
             total_gpu_memory * self.cache_config.gpu_memory_utilization -
-            peak_memory_in_this_process)
+            result.peak_memory_in_this_process)
 
         # Calculate the number of blocks that can be allocated with the
         # profiled peak memory.
