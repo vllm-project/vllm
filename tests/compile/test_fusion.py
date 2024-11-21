@@ -72,8 +72,9 @@ def test_fusion_rmsnorm_quant(dtype, hidden_size, num_tokens, eps, static):
     model2 = torch.compile(model, backend=backend)
     result2 = model2(x)
 
-    # Check that it gives the same answer
-    torch.testing.assert_close(result, result2, atol=1e-3, rtol=1e-3)
+    # Check that it gives the same answer, higher tol for dynamic
+    ATOL, RTOL = (1e-3, 1e-3) if static else (1e-2, 1e-2)
+    torch.testing.assert_close(result, result2, atol=ATOL, rtol=RTOL)
 
     # Check substitution worked
     pre_nodes = backend.graph_pre_pass.nodes

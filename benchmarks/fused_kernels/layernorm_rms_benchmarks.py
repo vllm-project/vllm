@@ -52,7 +52,7 @@ def unfused_int8_impl(rms_norm_layer: RMSNorm, x: torch.Tensor,
         torch_out, _ = rms_norm_layer.forward_cuda(x, residual)
 
     # Quant
-    torch_out, _ = ops.scaled_int8_quant(torch_out)
+    torch_out, _, _ = ops.scaled_int8_quant(torch_out)
 
 
 def unfused_fp8_impl(rms_norm_layer: RMSNorm, x: torch.Tensor,
