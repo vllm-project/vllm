@@ -22,6 +22,7 @@ if not current_platform.is_tpu() and not current_platform.is_hpu():
 supports_moe_ops = False
 with contextlib.suppress(ImportError):
     import vllm._moe_C  # noqa: F401
+
     supports_moe_ops = True
 
 # neuron has torch version that doesn't even have impl_abstract
@@ -241,7 +242,6 @@ def advance_step_flashinfer(num_seqs: int, num_queries: int, block_size: int,
                             paged_kv_indptr: torch.Tensor,
                             paged_kv_last_page_len: torch.Tensor,
                             block_table_bound: torch.Tensor) -> None:
-
     return torch.ops._C.advance_step_flashinfer(
         num_seqs, num_queries, block_size, input_tokens, sampled_token_ids,
         input_positions, seq_lens, slot_mapping, block_tables,
@@ -258,7 +258,6 @@ def rms_norm_dynamic_per_token_quant(
     scale_ub: Optional[torch.Tensor] = None,
     residual: Optional[torch.Tensor] = None
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-
     output = torch.empty_like(input, dtype=quant_dtype)
     scales = torch.empty((input.numel() // input.shape[-1], 1),
                          device=input.device,
@@ -267,6 +266,24 @@ def rms_norm_dynamic_per_token_quant(
     torch.ops._C.rms_norm_dynamic_per_token_quant(output, input, weight,
                                                   scales, epsilon, scale_ub,
                                                   residual)
+    return output, scales
+
+
+# TODO is this necessary?
+@register_fake("_C::rms_norm_dynamic_per_token_quant")
+def _rms_norm_dynamic_per_token_quant_fake(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    epsilon: float,
+    quant_dtype: torch.dtype,
+    scale_ub: Optional[torch.Tensor] = None,
+    residual: Optional[torch.Tensor] = None
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    output = torch.empty_like(input, dtype=quant_dtype)
+    scales = torch.empty((input.numel() // input.shape[-1], 1),
+                         device=input.device,
+                         dtype=torch.float32)
+
     return output, scales
 
 
@@ -726,7 +743,7 @@ def scaled_fp8_quant(
     shape: Union[Tuple[int, int], torch.Size] = input.shape
     # For rocm, the output fp8 dtype is torch.float_e3m3fnuz
     out_dtype: torch.dtype = torch.float8_e4m3fnuz \
-            if current_platform.is_rocm() else torch.float8_e4m3fn
+        if current_platform.is_rocm() else torch.float8_e4m3fn
     if num_token_padding:
         shape = (max(num_token_padding, input.shape[0]), shape[1])
     output = torch.empty(shape, device=input.device, dtype=out_dtype)
@@ -1009,9 +1026,9 @@ for k, v in names_and_values.items():
     # the case when users use `import __annotations__` to turn type
     # hints into strings.
     if isinstance(v, fn_type) \
-        and v.__code__.co_filename == __file__ \
-        and any(arg is torch.Tensor or arg == "torch.Tensor"
-                for arg in v.__annotations__.values()):
+            and v.__code__.co_filename == __file__ \
+            and any(arg is torch.Tensor or arg == "torch.Tensor"
+                    for arg in v.__annotations__.values()):
         names_and_values_to_update[k] = hint_on_error(v)
 
 names_and_values.update(names_and_values_to_update)

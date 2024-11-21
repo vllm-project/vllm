@@ -22,9 +22,8 @@ logger = init_logger(__name__)
 def rms_norm_dynamic_fp8_quant(result: torch.Tensor, input: torch.Tensor,
                                weight: torch.Tensor, scale: torch.Tensor,
                                epsilon: float) -> None:
-    result_rms = torch.empty_like(input)
-    torch.ops._C.rms_norm(result_rms, input, weight, epsilon)
-    torch.ops._C.dynamic_scaled_fp8_quant(result, result_rms, scale)
+    # Last two are scale_ub, residual
+    torch.ops._C.rms_norm_dynamic_per_token_quant(result, input, weight, scale, epsilon, None, None)
 
 
 @torch.library.register_fake("_C::rms_norm_dynamic_fp8_quant")
@@ -41,8 +40,8 @@ def fused_add_rms_norm_dynamic_fp8_quant(result: torch.Tensor,
                                          weight: torch.Tensor,
                                          scale: torch.Tensor,
                                          epsilon: float) -> None:
-    torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
-    torch.ops._C.dynamic_scaled_fp8_quant(result, input, scale)
+    # Last two are scale_ub, residual
+    torch.ops._C.rms_norm_dynamic_per_token_quant(result, input, weight, scale, epsilon, None, residual)
 
 
 @torch.library.register_fake("_C::rms_norm_dynamic_fp8_quant")
