@@ -379,12 +379,12 @@ class MultiModalProcessor:
 
     def _find_and_replace_token_text_matches(
         self,
-        tokenizer: AnyTokenizer,
         token_ids: list[int],
         prompt_repls: Sequence[_BoundPromptReplacement[_T]],
         mm_items_by_modality: Mapping[str, list[_T]],
         hf_inputs: BatchFeature,
     ) -> list[int]:
+        tokenizer = self.ctx.tokenizer
         token_text = _decode(tokenizer, token_ids)
 
         prompt_repls_by_target_text = {
@@ -416,23 +416,27 @@ class MultiModalProcessor:
 
         return _encode(tokenizer, "".join(out_texts))
 
-    def apply(
+    def _apply_hf_processor(
         self,
         prompt: str,
         mm_data: MultiModalDataDict,
         mm_processor_kwargs: Mapping[str, object],
-    ) -> MultiModalInputsV2:
-        tokenizer = self.ctx.tokenizer
+    ) -> BatchFeature:
         hf_processor = self.ctx.get_hf_processor()
 
-        hf_inputs = hf_processor(
+        return hf_processor(
             text=prompt,  # type: ignore
             **mm_data,
             **mm_processor_kwargs,
         )
-        new_token_ids, = hf_inputs.pop("input_ids").tolist()
-        mm_kwargs = MultiModalKwargs(hf_inputs)
 
+    def _apply_prompt_replacements(
+        self,
+        mm_data: MultiModalDataDict,
+        hf_inputs: BatchFeature,
+        new_token_ids: list[int],
+    ) -> tuple[list[int], list[_BoundPlaceholderRange]]:
+        tokenizer = self.ctx.tokenizer
         all_prompt_repls = [
             prompt_repl for modality, metadata in self.metadata.items()
             if modality in mm_data
@@ -446,11 +450,11 @@ class MultiModalProcessor:
         # Otherwise, we insert them ourselves
         if not all_placeholder_ranges:
             mm_items = to_multi_format(mm_data)
-
             token_id_matches = self._find_token_id_matches(
                 new_token_ids,
                 all_prompt_repls,
             )
+
             if len(token_id_matches) == len(mm_items):
                 new_token_ids = self._replace_token_id_matches(
                     new_token_ids,
@@ -461,7 +465,6 @@ class MultiModalProcessor:
                 )
             else:
                 new_token_ids = self._find_and_replace_token_text_matches(
-                    tokenizer,
                     new_token_ids,
                     all_prompt_repls,
                     mm_items,
@@ -471,6 +474,30 @@ class MultiModalProcessor:
             all_placeholder_ranges = list(
                 self._extract_placeholder_ranges(all_prompt_repls,
                                                  new_token_ids))
+
+        return new_token_ids, all_placeholder_ranges
+
+    def apply(
+        self,
+        prompt: str,
+        mm_data: MultiModalDataDict,
+        mm_processor_kwargs: Mapping[str, object],
+    ) -> MultiModalInputsV2:
+        tokenizer = self.ctx.tokenizer
+
+        hf_inputs = self._apply_hf_processor(prompt, mm_data,
+                                             mm_processor_kwargs)
+        new_token_ids, = hf_inputs.pop("input_ids").tolist()
+        mm_kwargs = MultiModalKwargs(hf_inputs)
+
+        (
+            new_token_ids,
+            all_placeholder_ranges,
+        ) = self._apply_prompt_replacements(
+            mm_data,
+            hf_inputs,
+            new_token_ids,
+        )
 
         mm_placeholders = {
             modality: [
