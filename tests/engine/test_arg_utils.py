@@ -54,6 +54,10 @@ def test_compilation_config():
     args = parser.parse_args(["--compilation-config", '{"level": 3}'])
     assert args.compilation_config.level == 3
 
+    # set to json
+    args = parser.parse_args(['--compilation-config={"level": 3}'])
+    assert args.compilation_config.level == 3
+
 
 def test_valid_pooling_config():
     parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
