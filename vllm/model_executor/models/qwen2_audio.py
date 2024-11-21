@@ -212,7 +212,7 @@ def input_processor_for_qwen2_audio(
 
     return token_inputs(
         prompt_token_ids=new_input_ids,
-        prompt=inputs['prompt'],
+        prompt=inputs.get("prompt"),
         multi_modal_data=multi_modal_data,
     )
 
