@@ -160,7 +160,8 @@ def test_spec_decode_chunked_prefill_tp2(model, common_llm_kwargs,
                                          per_test_common_llm_kwargs,
                                          baseline_llm_kwargs, test_llm_kwargs,
                                          batch_size: int, seed: int):
-    """Verify spec decode works well with smaller tp for draft models.
+    """Verify spec decode works well with same and different TP size for
+    the draft model with chunked prefill.
     """
     run_equality_correctness_test_tp(model,
                                      common_llm_kwargs,
