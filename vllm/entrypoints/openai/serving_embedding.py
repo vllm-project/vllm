@@ -148,8 +148,8 @@ class OpenAIServingEmbedding(OpenAIServing):
                     chat_template=request.chat_template or self.chat_template,
                     chat_template_content_format=self.
                     chat_template_content_format,
-                    add_generation_prompt=request.add_generation_prompt,
-                    continue_final_message=request.continue_final_message,
+                    add_generation_prompt=False,
+                    continue_final_message=False,
                     truncate_prompt_tokens=truncate_prompt_tokens,
                     add_special_tokens=request.add_special_tokens,
                 )

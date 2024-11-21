@@ -760,22 +760,6 @@ class EmbeddingChatRequest(OpenAIBaseModel):
     # doc: end-chat-embedding-pooling-params
 
     # doc: begin-chat-embedding-extra-params
-    add_generation_prompt: bool = Field(
-        default=True,
-        description=
-        ("If true, the generation prompt will be added to the chat template. "
-         "This is a parameter used by chat template in tokenizer config of the "
-         "model."),
-    )
-    continue_final_message: bool = Field(
-        default=False,
-        description=
-        ("If this is set, the chat will be formatted so that the final "
-         "message in the chat is open-ended, without any EOS tokens. The "
-         "model will continue this message rather than starting a new one. "
-         "This allows you to \"prefill\" part of the model's response for it. "
-         "Cannot be used at the same time as `add_generation_prompt`."),
-    )
     add_special_tokens: bool = Field(
         default=False,
         description=(
