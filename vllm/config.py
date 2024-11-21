@@ -14,7 +14,8 @@ from transformers import PretrainedConfig
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
+from vllm.model_executor.layers.quantization import (QUANTIZATION_METHODS,
+                                                     get_quantization_config)
 from vllm.model_executor.models import ModelRegistry
 from vllm.platforms import current_platform
 from vllm.tracing import is_otel_available, otel_import_error_traceback
@@ -370,7 +371,7 @@ class ModelConfig:
         return quant_cfg
 
     def _verify_quantization(self) -> None:
-        supported_quantization = [*QUANTIZATION_METHODS]
+        supported_quantization = QUANTIZATION_METHODS
         rocm_supported_quantization = [
             "awq", "gptq", "fp8", "compressed_tensors", "compressed-tensors",
             "fbgemm_fp8"
@@ -392,7 +393,8 @@ class ModelConfig:
             quant_method = quant_cfg.get("quant_method", "").lower()
 
             # Detect which checkpoint is it
-            for _, method in QUANTIZATION_METHODS.items():
+            for name in QUANTIZATION_METHODS:
+                method = get_quantization_config(name)
                 quantization_override = method.override_quantization_method(
                     quant_cfg, self.quantization)
                 if quantization_override:
@@ -2089,13 +2091,15 @@ class CompilationConfig(BaseModel):
                 - 'none,+op1,+op2' to enable only op1 and op2
             By default, all custom ops are enabled when running without Inductor
                 and disabled when running with Inductor (compile_level >= Inductor).
+        - splitting_ops: a list of ops to split the full graph into subgraphs, used in piecewise compilation.
     - CudaGraph capture:
         - use_cudagraph: whether to use cudagraph inside compilation.
             - False: cudagraph inside compilation is not used.
             - True: cudagraph inside compilation is used. It requires
-                that all input buffers have fixed addresses.
-            Note that this is orthogonal to the cudagraph capture out
-            side of compilation.
+                that all input buffers have fixed addresses, and all
+                splitting ops write their outputs to input buffers.
+            Note that this is orthogonal to the cudagraph capture logic
+            outside of compilation.
             TODO: move outside cudagraph logic into compilation.
             torch.compile will handle cudagraph capture logic in the future.
         - cudagraph_capture_sizes: sizes to capture cudagraph.
@@ -2149,6 +2153,11 @@ class CompilationConfig(BaseModel):
     level: int = 0
     backend: str = ""
     custom_ops: List[str] = Field(default_factory=list)
+    splitting_ops: List[str] = Field(default_factory=lambda: [
+        "vllm.unified_flash_attention",
+        "vllm.unified_flash_infer",
+        "vllm.unified_v1_flash_attention",
+    ])
 
     use_inductor: bool = True
     inductor_specialize_for_cudagraph_no_more_than: Optional[int] = None
@@ -2157,7 +2166,6 @@ class CompilationConfig(BaseModel):
     inductor_passes: Dict[str, str] = Field(default_factory=dict)
 
     use_cudagraph: bool = False
-    non_cudagraph_ops: List[str] = Field(default_factory=list)
     cudagraph_num_of_warmups: int = 0
     cudagraph_capture_sizes: Optional[List[int]] = None
     cudagraph_copy_inputs: bool = False
@@ -2348,9 +2356,6 @@ class VllmConfig:
             # and avoid any potential issues with the inductor.
             self.compilation_config.custom_ops = ["none"]
             self.compilation_config.use_cudagraph = True
-            self.compilation_config.non_cudagraph_ops = [
-                "vllm.unified_v1_flash_attention"
-            ]
             self.compilation_config.use_inductor = True
             self.compilation_config.enable_fusion = False
 
