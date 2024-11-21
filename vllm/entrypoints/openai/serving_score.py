@@ -120,14 +120,14 @@ class OpenAIServingScores(OpenAIServing):
             if prompt_adapter_request is not None:
                 raise NotImplementedError("Prompt adapter is not supported "
                                           "for embedding models")
-            
+
             if isinstance(tokenizer, MistralTokenizer):
                 raise ValueError(
                     "MistralTokenizer not supported for cross-encoding")
 
             if not self.model_config.is_cross_encoder:
                 raise ValueError("Model is not cross encoder.")
-    
+
         except ValueError as e:
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
@@ -151,10 +151,10 @@ class OpenAIServingScores(OpenAIServing):
             engine_prompt = TokensPrompt(
                 prompt_token_ids=prompt_inputs["input_ids"],
                 token_type_ids=prompt_inputs.get("token_type_ids"))
-            
+
             request_prompts.append(request_prompt)
-            engine_prompts.append(engine_prompt)            
-            
+            engine_prompts.append(engine_prompt)
+
         try:
             pooling_params = request.to_pooling_params()
 

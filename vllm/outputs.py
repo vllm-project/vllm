@@ -60,12 +60,11 @@ class EmbeddingOutput:
         embedding: The embedding vector, which is a list of floats. The
         length of vector depends on the model as listed in the embedding guide.
     """
-
     embedding: List[float]
 
-    # def __repr__(self) -> str:
-    #     return (f"EmbeddingOutput("
-    #             f"embedding={len(self.embedding)})")
+    def __repr__(self) -> str:
+        return (f"EmbeddingOutput("
+                f"embedding={len(self.embedding)})")
 
 
 class RequestOutput:
@@ -373,10 +372,10 @@ class ScoreRequestOutput:
         request_id (str): A unique identifier for the score request.
         outputs (score): The embedding results for the given input.
     """
+
     def __init__(self, request_id: str, outputs: "ScoreOutput"):
         self.request_id = request_id
         self.outputs = outputs
-    
 
     def __repr__(self):
         """

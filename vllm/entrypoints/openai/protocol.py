@@ -809,8 +809,6 @@ EmbeddingRequest = Union[EmbeddingCompletionRequest, EmbeddingChatRequest]
 
 
 class ScoreRequest(OpenAIBaseModel):
-    # Ordered by official OpenAI API documentation
-    # https://platform.openai.com/docs/api-reference/embeddings
     model: str
     text_1: Union[List[str], str]
     text_2: Union[List[str], str]

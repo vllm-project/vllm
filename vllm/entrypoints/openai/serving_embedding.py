@@ -1,8 +1,7 @@
 import asyncio
 import base64
 import time
-from typing import (AsyncGenerator, Final, List, Literal, Optional, Union, 
-                    cast)
+from typing import AsyncGenerator, Final, List, Literal, Optional, Union, cast
 
 import numpy as np
 from fastapi import Request
@@ -17,8 +16,7 @@ from vllm.entrypoints.openai.protocol import (EmbeddingChatRequest,
                                               EmbeddingResponse,
                                               EmbeddingResponseData,
                                               ErrorResponse, UsageInfo)
-from vllm.entrypoints.openai.serving_engine import (BaseModelPath,
-                                                    OpenAIServing)
+from vllm.entrypoints.openai.serving_engine import BaseModelPath, OpenAIServing
 from vllm.logger import init_logger
 from vllm.outputs import EmbeddingOutput, EmbeddingRequestOutput
 from vllm.utils import merge_async_iterators, random_uuid
@@ -138,34 +136,31 @@ class OpenAIServingEmbedding(OpenAIServing):
                 raise NotImplementedError("Prompt adapter is not supported "
                                           "for embedding models")
 
+            if isinstance(request, EmbeddingChatRequest):
+                (
+                    _,
+                    request_prompts,
+                    engine_prompts,
+                ) = await self._preprocess_chat(
+                    request,
+                    tokenizer,
+                    request.messages,
+                    chat_template=request.chat_template or self.chat_template,
+                    chat_template_content_format=self.
+                    chat_template_content_format,
+                    add_generation_prompt=request.add_generation_prompt,
+                    continue_final_message=request.continue_final_message,
+                    truncate_prompt_tokens=truncate_prompt_tokens,
+                    add_special_tokens=request.add_special_tokens,
+                )
             else:
-                if isinstance(request, EmbeddingChatRequest):
-                    (
-                        _,
-                        request_prompts,
-                        engine_prompts,
-                    ) = await self._preprocess_chat(
-                        request,
-                        tokenizer,
-                        request.messages,
-                        chat_template=request.chat_template
-                        or self.chat_template,
-                        chat_template_content_format=self.
-                        chat_template_content_format,
-                        add_generation_prompt=request.add_generation_prompt,
-                        continue_final_message=request.continue_final_message,
-                        truncate_prompt_tokens=truncate_prompt_tokens,
-                        add_special_tokens=request.add_special_tokens,
-                    )
-                else:
-                    request_prompts, engine_prompts = self\
-                        ._preprocess_completion(
-                        request,
-                        tokenizer,
-                        request.input,
-                        truncate_prompt_tokens=truncate_prompt_tokens,
-                        add_special_tokens=request.add_special_tokens,
-                    )
+                request_prompts, engine_prompts = self._preprocess_completion(
+                    request,
+                    tokenizer,
+                    request.input,
+                    truncate_prompt_tokens=truncate_prompt_tokens,
+                    add_special_tokens=request.add_special_tokens,
+                )
         except ValueError as e:
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
