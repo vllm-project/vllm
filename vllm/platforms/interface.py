@@ -17,6 +17,7 @@ class _Backend(enum.Enum):
     XFORMERS = enum.auto()
     ROCM_FLASH = enum.auto()
     TORCH_SDPA = enum.auto()
+    SAGE_ATTTN = enum.auto()
     OPENVINO = enum.auto()
     FLASHINFER = enum.auto()
     HPU_ATTN = enum.auto()
