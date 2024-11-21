@@ -358,6 +358,8 @@ class MultiModalProcessor:
                               end_idx)) in enumerate(sorted_matches):
             prompt_repl = prompt_repls_by_target_text[target_text]
             mm_items = mm_items_by_modality[prompt_repl.modality]
+            if i >= len(mm_items):
+                break
 
             repl_count = prompt_repl.repl_count(mm_items[i], hf_inputs, i)
             repl_ids = prompt_repl.repl_unit.token_ids * repl_count
@@ -405,6 +407,8 @@ class MultiModalProcessor:
         for i, (target_text, match) in enumerate(sorted_matches):
             prompt_repl = prompt_repls_by_target_text[target_text]
             mm_items = mm_items_by_modality[prompt_repl.modality]
+            if i >= len(mm_items):
+                break
 
             repl_count = prompt_repl.repl_count(mm_items[i], hf_inputs, i)
             repl_text = prompt_repl.repl_unit.text * repl_count
@@ -455,7 +459,7 @@ class MultiModalProcessor:
                 all_prompt_repls,
             )
 
-            if len(token_id_matches) == len(mm_items):
+            if len(token_id_matches) >= len(mm_items):
                 new_token_ids = self._replace_token_id_matches(
                     new_token_ids,
                     all_prompt_repls,
