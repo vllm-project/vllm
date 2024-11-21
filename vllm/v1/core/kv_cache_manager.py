@@ -207,11 +207,11 @@ class KVCacheManager:
         # Concatenate the computed block IDs and the new block IDs.
         new_blocks = self._get_new_blocks(num_new_blocks)
         self.req_to_blocks[request.request_id] = computed_blocks + new_blocks
-        self._touch(computed_blocks)
 
         if not self.enable_caching:
             return new_blocks
 
+        self._touch(computed_blocks)
         num_computed_tokens = len(computed_blocks) * self.block_size
         num_full_blocks = (num_computed_tokens + num_tokens) // self.block_size
 
@@ -269,11 +269,40 @@ class KVCacheManager:
         while idx < num_blocks:
             curr_block = self.free_block_queue.popleft()
             assert curr_block.ref_cnt == 0
+
+            if self.enable_caching:
+                self._reset_cached_block(
+                    curr_block, self.cached_block_hash_to_block
+                )
+
             curr_block.incr_ref()
             ret.append(curr_block)
             idx += 1
 
         return ret
+
+    @staticmethod
+    def _reset_cached_block(
+        block: KVCacheBlock,
+        cached_block_hash_to_block: Dict[
+            BlockHashType, Dict[int, KVCacheBlock]
+        ],
+    ) -> None:
+        """
+        If a block is hashed in `cached_block_hash_to_block`, we reset its hash
+        metadata and remove it from the cache.
+
+        Args:
+            block: The block to reset.
+            cached_block_hash_to_block: The cache of block hashes.
+        """
+        block_hash = block.block_hash
+        if block_hash and block_hash in cached_block_hash_to_block:
+            block.reset_hash_metadata()
+            del cached_block_hash_to_block[block_hash][block.block_id]
+
+            if len(cached_block_hash_to_block[block_hash]) == 0:
+                del cached_block_hash_to_block[block_hash]
 
     def _get_cached_block(self,
                           block_hash: BlockHashType) -> Optional[KVCacheBlock]:
@@ -334,18 +363,6 @@ class KVCacheManager:
             cached_block_hash_to_block: The cache of block hashes.
             block_size: The size of a block.
         """
-
-        # Some of the full blocks may be computed blocks cached previously.
-        # Remove them from the cache.
-        for blk in full_blocks:
-            blk.reset_hash_metadata()
-
-            if blk.block_hash in cached_block_hash_to_block:
-                del cached_block_hash_to_block[blk.block_hash][blk.block_id]
-
-                if len(cached_block_hash_to_block[blk.block_hash]) == 0:
-                    del cached_block_hash_to_block[blk.block_hash]
-
         # Update the new blocks with the block hashes through the chain.
         prev_block_hash = (prev_block.block_hash
                            if prev_block is not None else None)
