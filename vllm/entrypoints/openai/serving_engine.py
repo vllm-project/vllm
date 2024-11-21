@@ -27,6 +27,7 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
 from vllm.inputs.parse import parse_and_batch_prompt
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.lora.resolver import LoRAResolver
 from vllm.model_executor.guided_decoding import (
     get_guided_decoding_logits_processor)
 from vllm.pooling_params import PoolingParams
@@ -76,6 +77,7 @@ class OpenAIServing:
         base_model_paths: List[BaseModelPath],
         *,
         lora_modules: Optional[List[LoRAModulePath]],
+        lora_resolver: Optional[LoRAResolver],
         prompt_adapters: Optional[List[PromptAdapterPath]],
         request_logger: Optional[RequestLogger],
         return_tokens_as_token_ids: bool = False,
@@ -90,6 +92,7 @@ class OpenAIServing:
 
         self.lora_id_counter = AtomicCounter(0)
         self.lora_requests = []
+        self.lora_resolver = lora_resolver
         if lora_modules is not None:
             self.lora_requests = [
                 LoRARequest(lora_name=lora.name,
@@ -185,6 +188,10 @@ class OpenAIServing:
             return None
         if request.model in [lora.lora_name for lora in self.lora_requests]:
             return None
+        if self.lora_resolver and (lora_request := await self.lora_resolver.resolve_lora(request.model)):
+            if lora_request.lora_int_id not in {lora.lora_int_id for lora in self.lora_requests}:
+                self.lora_requests.append(lora_request)
+                return None
         if request.model in [
                 prompt_adapter.prompt_adapter_name
                 for prompt_adapter in self.prompt_adapter_requests
