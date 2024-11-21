@@ -98,9 +98,9 @@ class OpenAIServing:
         base_model_paths: List[BaseModelPath],
         *,
         lora_modules: Optional[List[LoRAModulePath]],
-        lora_resolver: Optional[LoRAResolver],
         prompt_adapters: Optional[List[PromptAdapterPath]],
         request_logger: Optional[RequestLogger],
+        lora_resolver: Optional[LoRAResolver] = None,
         return_tokens_as_token_ids: bool = False,
     ):
         super().__init__()
