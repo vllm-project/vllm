@@ -930,8 +930,8 @@ class LoadConfig:
 class ParallelConfig:
     """Configuration for the distributed execution."""
 
-    pipeline_parallel_size: int  # Number of pipeline parallel groups.
-    tensor_parallel_size: int  # Number of tensor parallel groups.
+    pipeline_parallel_size: int = 1  # Number of pipeline parallel groups.
+    tensor_parallel_size: int = 1  # Number of tensor parallel groups.
 
     # Deprecated, use distributed_executor_backend instead.
     worker_use_ray: Optional[bool] = None
@@ -2292,8 +2292,8 @@ class VllmConfig:
 
     model_config: ModelConfig = field(default=None, init=True)  # type: ignore
     cache_config: CacheConfig = field(default=None, init=True)  # type: ignore
-    parallel_config: ParallelConfig = field(default=None,
-                                            init=True)  # type: ignore
+    parallel_config: ParallelConfig = field(default_factory=ParallelConfig,
+                                            init=True)
     scheduler_config: SchedulerConfig = field(default=None,
                                               init=True)  # type: ignore
     device_config: DeviceConfig = field(default=None,
