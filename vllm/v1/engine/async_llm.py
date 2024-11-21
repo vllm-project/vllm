@@ -346,10 +346,10 @@ class AsyncLLM(EngineClient):
         logger.debug("Called check_health.")
 
     async def start_profile(self) -> None:
-        raise ValueError("Not supported on V1 yet.")
+        await self.engine_core.profile(True)
 
     async def stop_profile(self) -> None:
-        raise ValueError("Not supported on V1 yet.")
+        await self.engine_core.profile(False)
 
     @property
     def is_running(self) -> bool:

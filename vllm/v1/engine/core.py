@@ -16,7 +16,8 @@ from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
 from vllm.v1.core.scheduler import Scheduler
 from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
-                            EngineCoreRequest, EngineCoreRequestType)
+                            EngineCoreProfile, EngineCoreRequest,
+                            EngineCoreRequestType)
 from vllm.v1.engine.mm_input_mapper import MMInputMapper
 from vllm.v1.executor.gpu_executor import GPUExecutor
 from vllm.v1.request import Request, RequestStatus
@@ -125,6 +126,9 @@ class EngineCore:
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, output)
         return engine_core_outputs
+
+    def profile(self, is_start=True):
+        self.model_executor.worker.profile(is_start)
 
 
 class EngineCoreProc(EngineCore):
@@ -312,11 +316,14 @@ class EngineCoreProc(EngineCore):
             self._last_logging_time = now
 
     def _handle_client_request(
-            self, request: Union[EngineCoreRequest, List[str]]) -> None:
+        self, request: Union[EngineCoreRequest, EngineCoreProfile,
+                             List[str]]) -> None:
         """Handle EngineCoreRequest or EngineCoreABORT from Client."""
 
         if isinstance(request, EngineCoreRequest):
             self.add_request(request)
+        elif isinstance(request, EngineCoreProfile):
+            self.model_executor.worker.profile(request.is_start)
         else:
             # TODO: make an EngineCoreAbort wrapper
             assert isinstance(request, list)
