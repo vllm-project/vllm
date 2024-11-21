@@ -31,7 +31,8 @@ def test_prefill():
     # Fully cache miss
     # Incomplete 1 block (7 tokens)
     unique_token_ids = [3] * 7
-    req0 = make_request("0", common_token_ids + unique_token_ids)
+    all_token_ids = common_token_ids + unique_token_ids
+    req0 = make_request("0", all_token_ids)
     computed_blocks = manager.get_computed_blocks(req0)
     assert not computed_blocks
     blocks = manager.allocate_slots(req0, 55, computed_blocks)
@@ -40,13 +41,12 @@ def test_prefill():
     # Check full block metadata
     parent_block_hash = None
     for block_id in (0, 1, 2):
-        block_hash = hash_block_tokens(parent_block_hash,
-                                       manager.block_pool[block_id].token_ids)
+        block_tokens = tuple(all_token_ids[block_id * 16:(block_id + 1) * 16])
+        block_hash = hash_block_tokens(parent_block_hash, block_tokens)
         assert manager.block_pool[block_id].block_hash == block_hash
         assert manager.block_pool[block_id].ref_cnt == 1
         assert manager.block_pool[block_id].num_hashed_tokens == 16 * (
             block_id + 1)
-        assert manager.block_pool[block_id].token_ids == tuple([block_id] * 16)
         parent_block_hash = block_hash
 
     # Check partial/preallocated block metadata
@@ -54,10 +54,6 @@ def test_prefill():
         assert manager.block_pool[block_id].block_hash is None
         assert manager.block_pool[block_id].ref_cnt == 1
         assert manager.block_pool[block_id].num_hashed_tokens == 0
-        if block_id == 3:
-            assert manager.block_pool[block_id].token_ids == [3] * 7
-        else:
-            assert not manager.block_pool[block_id].token_ids
 
     # Cache hit in the common prefix when the original block is still in use.
     # Incomplete 1 block (5 tokens)
@@ -113,7 +109,7 @@ def test_prefill():
     req3 = make_request("3", [99] * (16 * 9))
     computed_blocks = manager.get_computed_blocks(req3)
     assert not computed_blocks
-    blocks = manager.allocate_slots(req2, 16 * 9, computed_blocks)
+    blocks = manager.allocate_slots(req3, 16 * 9, computed_blocks)
     # This block ID order also checks the eviction order.
     assert [b.block_id for b in blocks] == [9, 4, 3, 6, 5, 8, 7, 2, 1, 0]
     assert manager.free_block_queue.num_free_blocks == 0
@@ -148,7 +144,6 @@ def test_decode():
         req0.append_output_token_ids(8)
     new_blocks = manager.append_slots(req0, 4)
     assert new_blocks is not None and len(new_blocks) == 0
-    assert len(manager.block_pool[3].token_ids) == 11
 
     # Append slots without allocating a new block, but start using the
     # preallocated block.
@@ -159,8 +154,6 @@ def test_decode():
         req0.append_output_token_ids(7)
     new_blocks = manager.append_slots(req0, 15)
     assert new_blocks is not None and len(new_blocks) == 0
-    assert len(manager.block_pool[3].token_ids) == 16
-    assert len(manager.block_pool[4].token_ids) == 10
 
     # Append slots with allocating a new block.
     req0.num_computed_tokens = 74
@@ -171,9 +164,6 @@ def test_decode():
     new_blocks = manager.append_slots(req0, 17)
     # Plus one preallocated block.
     assert new_blocks is not None and len(new_blocks) == 2
-    assert len(manager.block_pool[4].token_ids) == 16
-    assert len(manager.block_pool[5].token_ids) == 11
-    assert len(manager.block_pool[6].token_ids) == 0
 
 
 def test_evict():
