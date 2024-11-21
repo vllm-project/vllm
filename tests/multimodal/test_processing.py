@@ -2,7 +2,7 @@ import pytest
 from transformers import PreTrainedTokenizerBase
 
 from vllm.multimodal.processing import (find_token_match_by_text,
-                                        iter_token_runs)
+                                        iter_token_runs, replace_by_text)
 from vllm.multimodal.utils import cached_get_tokenizer
 
 
@@ -43,7 +43,6 @@ def test_iter_token_runs(token_ids, expected):
     "microsoft/Phi-3.5-vision-instruct",
     "Qwen/Qwen2-VL-2B-Instruct",
 ])
-@pytest.mark.parametrize("add_special_tokens", [True, False])
 @pytest.mark.parametrize(
     "text",
     [
@@ -83,11 +82,12 @@ def test_iter_token_runs(token_ids, expected):
         "<s>",
         "</s>",
     ])
+@pytest.mark.parametrize("add_special_tokens", [True, False])
 def test_token_match_by_text(
     tokenizer_id,
-    add_special_tokens,
     text,
     match_str,
+    add_special_tokens,
 ):
     tokenizer = cached_get_tokenizer(tokenizer_id)
     assert isinstance(tokenizer, PreTrainedTokenizerBase)
@@ -120,3 +120,65 @@ def test_token_match_by_text(
         )
     else:
         assert match is None
+
+
+@pytest.mark.parametrize("tokenizer_id", ["llava-hf/llava-1.5-7b-hf"])
+@pytest.mark.parametrize(("input_text", "replacement_count", "expected_text"),
+                         [
+                             ("foo", 0, ""),
+                             ("bar", 0, "bar"),
+                             ("food", 0, "d"),
+                             ("foo", 1, "bar"),
+                             ("bar", 1, "bar"),
+                             ("food", 1, "bard"),
+                             ("foo", 2, "barbar"),
+                             ("bar", 2, "bar"),
+                             ("food", 2, "barbard"),
+                         ])
+@pytest.mark.parametrize("add_special_tokens", [True, False])
+def test_replace_by_text(
+    tokenizer_id,
+    input_text,
+    replacement_count,
+    expected_text,
+    add_special_tokens,
+):
+    tokenizer = cached_get_tokenizer(tokenizer_id)
+    assert isinstance(tokenizer, PreTrainedTokenizerBase)
+
+    vocab = tokenizer.get_vocab()
+    missing_tokens = {"▁foo", "▁bar", "▁food"} - vocab.keys()
+    assert not missing_tokens, missing_tokens
+    assert "▁bard" not in vocab
+
+    input_ids = tokenizer.encode(input_text,
+                                 add_special_tokens=add_special_tokens)
+    bar_id = vocab["bar"]
+
+    output_ids, output_text, replacement = replace_by_text(
+        tokenizer,
+        input_ids[:],  # Copy
+        input_text,
+        "foo",
+        bar_id,
+        replacement_count,
+    )
+
+    # These are only shown in the output if the test fails
+    print("input_ids:", input_ids)
+    print("output_ids:", output_ids)
+    print("output_text:", output_text)
+    print("replacement:", replacement)
+
+    # Invariants
+    if replacement is None:
+        assert output_ids == input_ids
+    else:
+        offset = replacement["offset"]
+        repl_len = replacement["length"]
+
+        assert output_ids[offset:offset + repl_len] == [bar_id] * repl_len
+        assert repl_len == replacement_count
+
+    # Manually constructed results
+    assert output_text == expected_text
