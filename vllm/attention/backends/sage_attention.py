@@ -21,7 +21,7 @@ class SageAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "TORCH_SDPA"
+        return "SAGE_ATTTN"
 
     @staticmethod
     def get_impl_cls() -> Type["SageAttentionBackendImpl"]:
