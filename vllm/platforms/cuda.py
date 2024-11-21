@@ -99,8 +99,14 @@ def device_id_to_physical_device_id(device_id: int) -> int:
     if "CUDA_VISIBLE_DEVICES" in os.environ:
         device_ids = os.environ["CUDA_VISIBLE_DEVICES"].split(",")
         if device_ids == [""]:
-            raise RuntimeError("CUDA_VISIBLE_DEVICES is set to empty string,"
-                               " which means GPU support is disabled.")
+            msg = (
+                "CUDA_VISIBLE_DEVICES is set to empty string, which means"
+                " GPU support is disabled. If you are using ray, please unset"
+                " the environment variable `CUDA_VISIBLE_DEVICES` inside the"
+                " worker/actor. "
+                "Check https://github.com/vllm-project/vllm/issues/8402 for"
+                " more information.")
+            raise RuntimeError(msg)
         physical_device_id = device_ids[device_id]
         return int(physical_device_id)
     else:
