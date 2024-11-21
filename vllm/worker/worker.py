@@ -188,9 +188,6 @@ class Worker(LocalOrDistributedWorkerBase):
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
 
-        # Profiling may cause allocations within torch and outside of torch, we
-        # measure these separately.
-        free_memory_pre_profile, total_gpu_memory = torch.cuda.mem_get_info()
         start_time = time.time()
 
         # Execute a forward pass with dummy inputs to profile the memory usage
@@ -199,30 +196,26 @@ class Worker(LocalOrDistributedWorkerBase):
 
         self._assert_memory_footprint_increased_during_profiling()
 
-        model_memory_usage = self.init_gpu_memory - free_memory_pre_profile
-
-        # Get the peak memory recorded by torch during profiling.
-        # We assume that no significant temporary allocations occur outside of
-        # torch during the profiling
-        peak_torch_memory_usage = torch.cuda.memory_stats(
-        )["allocated_bytes.all.peak"] - torch_memory_pre_profile
-
-        # Check for persistent memory allocated outside of torch. NCCL
-        # operations, for example, can allocate a few GB
-        gc.collect()
         torch.cuda.empty_cache()
-        torch_memory_usage = torch.cuda.memory_stats(
-        )["allocated_bytes.all.current"] - torch_memory_pre_profile
-        total_memory_usage = self.init_gpu_memory - torch.cuda.mem_get_info(
-        )[0]
-        non_torch_memory_usage = (total_memory_usage - torch_memory_usage -
-                                  model_memory_usage)
 
-        # Peak memory usage expected during inference
-        peak_memory = peak_torch_memory_usage + non_torch_memory_usage
+        free_memory, total_gpu_memory = torch.cuda.mem_get_info()
+        memory_stats = torch.cuda.memory_stats()
+        torch_memory = memory_stats["allocated_bytes.all.current"]
+        torch_peak = memory_stats["allocated_bytes.all.peak"]
+
+        # The baseline memory usage with no inference requests
+        # This includes any persistent memory allocated during profiling,
+        # eg from NCCL or internal buffers for quantization
+        baseline_memory = self.init_gpu_memory - free_memory
+
+        # The spike in memory recorded by torch during profiling.
+        # We assume that no significant temporary allocations occur outside of
+        # torch during inference
+        inference_memory_spike = torch_peak - torch_memory
+
         available_kv_cache_memory = (
             total_gpu_memory * self.cache_config.gpu_memory_utilization -
-            model_memory_usage - peak_memory)
+            baseline_memory - inference_memory_spike)
 
         # Calculate the number of blocks that can be allocated with the
         # profiled peak memory.
@@ -239,24 +232,20 @@ class Worker(LocalOrDistributedWorkerBase):
 
         logger.info(
             "Memory profiling results:"
-            "duration=%.2f seconds, "
+            " duration=%.2f seconds,"
             " total_gpu_memory=%.2fGiB"
             " gpu_memory_utilization=%.2f"
             " target_allocation=%.2fGiB"
-            " model_size=%.2fGiB"
-            " peak_memory=%.2fGiB"
-            " torch_memory=%.2fGiB"
-            " non_torch_memory=%.2fGiB"
+            " baseline=%.2fGiB"
+            " max_inference_spike=%.2fGiB"
             " kv_cache_size=%.2fGiB",
             time.time() - start_time,
             total_gpu_memory / (1024**3),
             self.cache_config.gpu_memory_utilization,
             total_gpu_memory / (1024**3) *
             self.cache_config.gpu_memory_utilization,
-            model_memory_usage / (1024**3),
-            peak_memory / (1024**3),
-            peak_torch_memory_usage / (1024**3),
-            non_torch_memory_usage / (1024**3),
+            baseline_memory / (1024**3),
+            inference_memory_spike / (1024**3),
             available_kv_cache_memory / (1024**3),
         )
 
