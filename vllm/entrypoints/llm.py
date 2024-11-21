@@ -1,11 +1,11 @@
 import itertools
+import json
 import warnings
 from contextlib import contextmanager
 from typing import (Any, ClassVar, Dict, List, Optional, Sequence, Tuple, Type,
                     Union, cast, overload)
 
 from tqdm import tqdm
-import json
 
 from vllm import envs
 from vllm.beam_search import (BeamSearchInstance, BeamSearchOutput,
