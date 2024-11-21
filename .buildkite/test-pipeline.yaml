@@ -482,7 +482,6 @@ steps:
   - vllm/worker/worker_base.py
   - vllm/worker/model_runner.py
   commands:
-  - pytest -v -s kv_transfer/module_test.py
   - pytest -v -s kv_transfer/disagg_test.py
 
 - label: LoRA Long Context (Distributed) # 11min

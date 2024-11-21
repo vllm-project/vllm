@@ -1782,6 +1782,9 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         # check if the current run is prefill
         is_prefill_run = prefill_meta is not None
 
+        if self.vllm_config.kv_transfer_config is None:
+            return False
+
         return self.vllm_config.kv_transfer_config.is_kv_consumer and (
             not is_profile_run) and is_prefill_run
 
@@ -1803,6 +1806,9 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         is_profile_run = (kv_caches[0].numel() == 0)
         # check if the current run is prefill
         is_prefill_run = prefill_meta is not None
+
+        if self.vllm_config.kv_transfer_config is None:
+            return False
 
         return self.vllm_config.kv_transfer_config.is_kv_producer and (
             not is_profile_run) and is_prefill_run
