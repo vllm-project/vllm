@@ -10,6 +10,7 @@ logger = init_logger(__name__)
 
 class OpenVinoPlatform(Platform):
     _enum = PlatformEnum.OPENVINO
+    device_type: str = "openvino"
 
     @classmethod
     def get_default_attn_backend(cls, selected_backend: _Backend) -> _Backend:

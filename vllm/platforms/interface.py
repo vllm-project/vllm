@@ -56,6 +56,7 @@ class DeviceCapability(NamedTuple):
 
 class Platform:
     _enum: PlatformEnum
+    device_type: str
 
     def is_cuda(self) -> bool:
         return self._enum == PlatformEnum.CUDA

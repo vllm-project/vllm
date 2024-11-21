@@ -29,6 +29,7 @@ if os.environ.get("VLLM_WORKER_MULTIPROC_METHOD", None) in ["fork", None]:
 
 class RocmPlatform(Platform):
     _enum = PlatformEnum.ROCM
+    device_type: str = "cuda"
 
     @classmethod
     def get_default_attn_backend(cls, selected_backend: _Backend) -> _Backend:

@@ -1193,21 +1193,8 @@ class DeviceConfig:
     def __init__(self, device: str = "auto") -> None:
         if device == "auto":
             # Automated device type detection
-            if current_platform.is_cuda_alike():
-                self.device_type = "cuda"
-            elif current_platform.is_neuron():
-                self.device_type = "neuron"
-            elif current_platform.is_hpu():
-                self.device_type = "hpu"
-            elif current_platform.is_openvino():
-                self.device_type = "openvino"
-            elif current_platform.is_tpu():
-                self.device_type = "tpu"
-            elif current_platform.is_cpu():
-                self.device_type = "cpu"
-            elif current_platform.is_xpu():
-                self.device_type = "xpu"
-            else:
+            self.device_type = current_platform.device_type
+            if self.device_type is None:
                 raise RuntimeError("Failed to infer device type")
         else:
             # Device type is assigned explicitly
