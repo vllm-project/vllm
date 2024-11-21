@@ -9,6 +9,8 @@ import torch
 import triton
 import triton.language as tl
 
+from vllm.utils import direct_register_custom_op
+
 
 @triton.jit
 def _sgmv_shrink_kernel(
@@ -190,9 +192,29 @@ def _sgmv_shrink(
     return
 
 
+def sgmv_shrink_fake(
+    inputs: torch.Tensor,
+    lora_a_weights: torch.Tensor,
+    output_tensor: torch.Tensor,
+    b_seq_start_loc: torch.Tensor,
+    seq_len_tensor: torch.Tensor,
+    lora_indices_tensor: torch.Tensor,
+    batches: int,
+    max_seq_length: int,
+    token_nums: int,
+    scaling: float,
+) -> None:
+    return
+
+
 try:
-    sgmv_shrink = torch.library.custom_op("lora::sgmv_shrink",
-                                          _sgmv_shrink,
-                                          mutates_args=["output_tensor"])
+    direct_register_custom_op(
+        op_name="sgmv_shrink",
+        op_func=_sgmv_shrink,
+        mutates_args=["output_tensor"],
+        fake_impl=sgmv_shrink_fake,
+    )
+    sgmv_shrink = torch.ops.vllm.sgmv_shrink
+
 except AttributeError:
     sgmv_shrink = _sgmv_shrink
