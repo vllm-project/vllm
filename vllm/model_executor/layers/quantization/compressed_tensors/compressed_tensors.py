@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional, cast
+from typing import Any, Dict, List, Literal, Optional, cast
 
 import torch
 from compressed_tensors.config import CompressionFormat
@@ -29,7 +29,8 @@ from compressed_tensors.config import SparsityCompressionConfig, SparsityStructu
 
 __all__ = ["CompressedTensorsLinearMethod"]
 
-
+SPARSITY_CONFIG_NAME: Literal["sparsity_config"] = "sparsity_config"
+QUANTIZATION_SCHEME_MAP_TYPE = Dict[str, Optional[Dict[str, QuantizationArgs]]]
 class CompressedTensorsConfig(QuantizationConfig):
 
     def __init__(self,
@@ -37,8 +38,8 @@ class CompressedTensorsConfig(QuantizationConfig):
                  ignore: List[str],
                  quant_format: str,
                  kv_cache_scheme: Optional[Dict[str, Any]] = None,
-                 model_compressor: Optional[ModelCompressor] = None,
-                 sparsity_scheme_map: Optional[Dict[str, Any]] = None
+                 sparsity_scheme_map: Optional[Dict[str, SparsityCompressionConfig]] = None,
+                 config: Optional[Dict[str, Any]] = None,
                  ):
 
         self.ignore = ignore
@@ -46,8 +47,8 @@ class CompressedTensorsConfig(QuantizationConfig):
         # Map from [target -> scheme]
         self.target_scheme_map = target_scheme_map
         self.kv_cache_scheme = kv_cache_scheme
-        self.model_compressor = model_compressor
         self.sparsity_scheme_map = sparsity_scheme_map
+        self.config = config
 
     def get_linear_method(self) -> "CompressedTensorsLinearMethod":
         return CompressedTensorsLinearMethod(self)
@@ -92,28 +93,40 @@ class CompressedTensorsConfig(QuantizationConfig):
         ignore: List[str] = cast(List[str], config.get("ignore", []))
         quant_format = cast(str, config.get("format"))
         target_scheme_map = cls._quantization_scheme_map_from_config(config=config)
-        model_compressor = ModelCompressor.from_compression_config(config)
-        sparsity_scheme_map = cls._sparsity_scheme_map_from_config(sparsity_config=model_compressor.sparsity_config)
+        sparsity_scheme_map = cls._sparsity_scheme_map_from_config(config=config)
 
         return cls(
             target_scheme_map=target_scheme_map,
             ignore=ignore,
             quant_format=quant_format,
-            model_compressor=model_compressor,
             sparsity_scheme_map=sparsity_scheme_map,
+            config=config,
         )
     
     @classmethod
-    def _sparsity_scheme_map_from_config(cls, sparsity_config: SparsityCompressionConfig):
-        sparse_targets = cast(List[str], sparsity_config.targets) if sparsity_config else []
+    def _sparsity_scheme_map_from_config(cls, config: Dict[str, Any]) -> Dict[str, SparsityCompressionConfig]:
+        """
+        :param config: The `quantization_config` dictionary from config.json
+        :return: A dictionary mapping target layer names to their corresponding
+            sparsity compression configurations
+        """
+        if (sparsity_config:=config.get(SPARSITY_CONFIG_NAME)) is None:
+            return dict()
+        
+        sparsity_config = SparsityCompressionConfig.model_validate(sparsity_config)
         sparse_scheme_map: Dict[str, SparsityCompressionConfig] = {
             target: sparsity_config
-            for target in sparse_targets
+            for target in sparsity_config.targets or list()
         }
         return sparse_scheme_map
 
     @classmethod
-    def _quantization_scheme_map_from_config(cls, config: Dict[str, Any]):
+    def _quantization_scheme_map_from_config(cls, config: Dict[str, Any]) -> QUANTIZATION_SCHEME_MAP_TYPE:
+        """
+        :param config: The `quantization_config` dictionary from config.json
+        :return: A dictionary mapping target layer names to their corresponding
+            quantization_args for weights and input activations
+        """
         target_scheme_map: Dict[str, Any] = dict()
         quant_format = cast(str, config.get("format"))
 
@@ -366,14 +379,13 @@ class CompressedTensorsConfig(QuantizationConfig):
             # Have a valid sparsity scheme and the layer is supported by the Cutlass 2:4 Kernel
             needs_decompression = sparsity_scheme.format != CompressionFormat.dense.value
             is_quantized = weight_quant is not None or input_quant is not None 
-            
             scheme = CompressedTensors24(
-                model_compressor=self.model_compressor,
                 layer_name=layer_name,
                 quantized=is_quantized,
                 do_decompress=needs_decompression,
                 weight_quant=weight_quant,
-                input_quant=input_quant
+                input_quant=input_quant,
+                config=self.config,
             )
         else:
         # Find the quant_scheme

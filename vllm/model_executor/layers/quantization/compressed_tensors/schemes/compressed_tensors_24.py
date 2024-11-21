@@ -1,4 +1,4 @@
-from typing import List, Callable, Optional
+from typing import Any, Dict, List, Callable, Optional
 import torch
 
 from compressed_tensors.compressors import ModelCompressor
@@ -13,19 +13,23 @@ __all__ = ["CompressedTensors24"]
 class CompressedTensors24(CompressedTensorsScheme):
     def __init__(
             self, 
-            model_compressor: Optional[ModelCompressor] = None, 
             layer_name: Optional[str] = None,
             quantized: bool = False,
             do_decompress: bool = False,
             weight_quant = None,
             input_quant = None,
+            config: Optional[Dict[str, Any]] = None,
             ):
-        self.model_compressor = model_compressor
         self.layer_name = layer_name
         self.quantized = quantized
         self.do_decompress = do_decompress
         self.weight_quant = weight_quant
         self.input_quant = input_quant
+        self.model_compressor = (
+            ModelCompressor.from_compression_config(compression_config=config)
+            if self.do_decompress and config is not None
+            else None
+            )
 
 
     @classmethod
