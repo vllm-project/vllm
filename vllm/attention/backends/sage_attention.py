@@ -274,14 +274,17 @@ class SageAttentionMetadata(AttentionMetadata, PagedAttentionMetadata):
             raise AttributeError(f"Invalid attention type {str(attn_type)}")
 
 
-class SageAttentionMetadataBuilder(AttentionMetadataBuilder[SageAttentionMetadata]):
+class SageAttentionMetadataBuilder(
+    AttentionMetadataBuilder[SageAttentionMetadata]
+):
 
     def __init__(self, input_builder: ModelInputForCPUBuilder) -> None:
         self.chunked_prefill = input_builder.chunked_prefill
         self.input_data = input_builder.input_data
 
     def build(self, seq_lens: List[int], query_lens: List[int],
-              cuda_graph_pad_size: int, batch_size: int) -> SageAttentionMetadata:
+              cuda_graph_pad_size: int, 
+              batch_size: int) -> SageAttentionMetadata:
         input_data = self.input_data
         prefill_seq_lens = seq_lens[0:input_data.num_prefills]
         prefill_query_lens = query_lens[0:input_data.num_prefills]
