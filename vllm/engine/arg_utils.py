@@ -84,7 +84,7 @@ def nullable_kvs(val: str) -> Optional[Mapping[str, int]]:
 
 
 @dataclass
-class EngineArgs:
+class _EngineArgs:
     """Arguments for vLLM engine."""
     model: str = 'facebook/opt-125m'
     served_model_name: Optional[Union[str, List[str]]] = None
@@ -1166,18 +1166,16 @@ class EngineArgs:
 
 
 @dataclass
-class EngineArgsV1(EngineArgs):
+class EngineArgsV1(_EngineArgs):
     """Arguments for vLLM engine v1."""
 
     # V1's default values that differ from the default values in EngineArgs.
     # This allows to switch between V1 and V0's default behaviour transparently.
     enable_prefix_caching: bool = True
-    max_num_seqs: int = 1024
-    max_num_batched_tokens: Optional[int] = None
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
-        parser = EngineArgs.add_cli_args(parser)
+        parser = _EngineArgs.add_cli_args(parser)
         return parser
 
     def create_engine_config(self,
@@ -1187,13 +1185,17 @@ class EngineArgsV1(EngineArgs):
                 is not None), "usage_context must be provided for EngineArgsV1"
 
         if self.max_num_batched_tokens is None:
+            # When no user override, set the default values based on the
+            # usage context.
             if usage_context == UsageContext.LLM_CLASS:
                 logger.warning("Setting max_num_batched_tokens to 8192 "
                                "for LLM_CLASS usage context.")
+                self.max_num_seqs = 1024
                 self.max_num_batched_tokens = 8192
             elif usage_context == UsageContext.OPENAI_API_SERVER:
                 logger.warning("Setting max_num_batched_tokens to 2048 "
                                "for OPENAI_API_SERVER usage context.")
+                self.max_num_seqs = 1024
                 self.max_num_batched_tokens = 2048
 
         engine_config = super().create_engine_config(usage_context)
@@ -1206,6 +1208,8 @@ class EngineArgsV1(EngineArgs):
             engine_config.cache_config.enable_prefix_caching = False
         return engine_config
 
+
+EngineArgs = _EngineArgs  # type: ignore
 
 if envs.VLLM_USE_V1:
     # Overwrite EngineArgs to use EngineArgsV1
