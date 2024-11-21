@@ -5,8 +5,8 @@ ARG PYTHON_VERSION=3.12
 # ARG TORCH_CUDA_ARCH_LIST="7.0 7.5 8.0 8.6 8.9 9.0+PTX"
 # ARG vllm_fa_cmake_gpu_arches='80-real;90-real'
 
-ARG TORCH_CUDA_ARCH_LIST="8.0"
-ARG vllm_fa_cmake_gpu_arches='80-real'
+ARG TORCH_CUDA_ARCH_LIST="7.0 7.5 8.0 8.6 8.9 9.0+PTX"
+ARG vllm_fa_cmake_gpu_arches='80-real;90-real'
 
 ## Base Layer ##################################################################
 FROM registry.access.redhat.com/ubi9/ubi-minimal:${BASE_UBI_IMAGE_TAG} as base
@@ -212,7 +212,9 @@ USER root
 
 RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=bind,from=build,src=/workspace/dist,target=/workspace/dist \
-    uv pip install $(echo /workspace/dist/*.whl)'[tensorizer]' vllm-tgis-adapter==0.5.3
+    uv pip install $(echo /workspace/dist/*.whl)'[tensorizer]' && \
+    uv pip install \
+        "git+https://github.com/opendatahub-io/vllm-tgis-adapter@ibm-20241106-adapter"
 
 RUN echo "Local dir and dist:" && pwd && ls -l /workspace/dist
 
