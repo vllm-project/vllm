@@ -6,7 +6,8 @@ import torch.cuda
 from vllm.model_executor.models import (is_embedding_model,
                                         is_text_generation_model,
                                         supports_multimodal)
-from vllm.model_executor.models.registry import (_EMBEDDING_MODELS,
+from vllm.model_executor.models.registry import (_CROSS_ENCODER_MODELS,
+                                                 _EMBEDDING_MODELS,
                                                  _MULTIMODAL_MODELS,
                                                  _SPECULATIVE_DECODING_MODELS,
                                                  _TEXT_GENERATION_MODELS,
@@ -29,8 +30,9 @@ def test_registry_imports(model_arch):
             model_arch in _TEXT_GENERATION_MODELS
             or model_arch in _MULTIMODAL_MODELS)
 
+        embedding_models = {**_EMBEDDING_MODELS, **_CROSS_ENCODER_MODELS}
         assert is_embedding_model(model_cls) is (model_arch
-                                                 in _EMBEDDING_MODELS)
+                                                 in embedding_models)
 
         assert supports_multimodal(model_cls) is (model_arch
                                                   in _MULTIMODAL_MODELS)
@@ -54,6 +56,17 @@ def test_registry_is_multimodal(model_arch, is_mm, init_cuda):
                 "This model no longer initializes CUDA on import. "
                 "Please test using a different one.",
                 stacklevel=2)
+
+
+@fork_new_process_for_each_test
+@pytest.mark.parametrize("model_arch,is_ce", [
+    ("LlamaForCausalLM", False),
+    ("BertForSequenceClassification", True),
+    ("RobertaForSequenceClassification", True),
+    ("XLMRobertaForSequenceClassification", True),
+])
+def test_registry_is_cross_encoder(model_arch, is_ce):
+    assert ModelRegistry.is_cross_encoder_model(model_arch) is is_ce
 
 
 @fork_new_process_for_each_test
