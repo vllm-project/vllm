@@ -13,15 +13,6 @@ from abc import ABC, abstractmethod
 import torch
 import numpy as np
 
-@dataclass
-class BatchInputs:
-    """
-    Batch data reprensented as numpy arrays for model execute.
-    """
-    input_tokens_cpu_tensor : torch.Tensor
-    input_positions_np : np.array
-    slot_mapping_cpu_tensor : torch.Tensor
-
 @dataclass(slots=True)
 class CPUTensor:
     tensor: torch.Tensor 
@@ -31,7 +22,6 @@ class CPUTensor:
     def build(tensor: torch.Tensor) -> "CPUTensor":
         return CPUTensor(tensor, tensor.numpy())
 
-# TODO (varun) : Make the torch tensors first class ?
 @dataclass
 class BatchCPUSamplingTensors:
     temperature: CPUTensor
@@ -229,15 +219,14 @@ class RequestBatchAbstract(ABC):
     def prepare_inputs(self,
                         num_scheduled_tokens: np.array,
                         block_size: int,
-                        block_table_device_tensor: Optional[torch.Tensor] = None,
-                        input_tokens_device_tensor: Optional[torch.Tensor] = None,
-                        input_positions_device_tensor: Optional[torch.Tensor] = None,
-                        slot_mapping_device_tensor: Optional[torch.Tensor] = None) -> Optional[BatchInputs]:
+                        block_table_device_tensor: torch.Tensor,
+                        input_tokens_device_tensor: torch.Tensor,
+                        input_positions_device_tensor: torch.Tensor,
+                        slot_mapping_device_tensor: torch.Tensor) -> None:
 
         """
-        Translate batch into numpy arrays for model execute.
-        When device_tensors are available, kickoff a non-blocking cpu-to-device transfer as soon as
-        the cpu tensors are prepared. 
+        Translate batch into model-input numpy arrays and kickoff a non-blocking
+        cpu-to-device transfer as soon as a particular tensor is prepared.
         """
         raise NotImplementedError
     
@@ -578,32 +567,6 @@ class RequestBatchBase(RequestBatchAbstract):
         of the requests based on cpu_tensors.num_computed_tokens_np
         """
         return self.cpu_tensors.num_computed_tokens_np[:self.num_reqs()]  + num_scheduled_tokens
-
-    @abstractmethod
-    def prepare_inputs(self,
-                        num_scheduled_tokens: np.array,
-                        block_size: int,
-                        block_table_device_tensor: Optional[torch.Tensor] = None,
-                        input_tokens_device_tensor: Optional[torch.Tensor] = None,
-                        input_positions_device_tensor: Optional[torch.Tensor] = None,
-                        slot_mapping_device_tensor: Optional[torch.Tensor] = None) -> Optional[BatchInputs]:
-
-        """
-        Translate batch into numpy arrays for model execute.
-        When device_tensors are available, kickoff a non-blocking cpu-to-device transfer as soon as
-        the cpu tensors are prepared. 
-        """
-        raise NotImplementedError
-    
-    @abstractmethod
-    def make_sampling_metadata(self,
-        sampling_device_tensors: ModelRunnerDeviceSamplingTensors,
-        skip_copy: bool = False) -> SamplingMetadata:
-        """
-        Transfer cpu sampling to device, if a copy is required, and
-        translate the batch into SamplingMetadata for model sampling.
-        """
-        raise NotImplementedError
 
     def request_ids(self) -> List[str]:
         return self.req_ids[:self.num_reqs()]

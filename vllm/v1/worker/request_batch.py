@@ -5,7 +5,7 @@ ModelRunner input batch
 from typing import Optional, List, Dict
 
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.worker.request_batch_base import RequestBatchBase, BatchInputs
+from vllm.v1.worker.request_batch_base import RequestBatchBase
 from vllm.v1.core.scheduler import  RunningRequestData
 from vllm.v1.worker.model_runner_device_tensors import ModelRunnerDeviceSamplingTensors
 
@@ -25,10 +25,10 @@ class RequestBatch(RequestBatchBase):
     def prepare_inputs(self,
                        num_scheduled_tokens: np.array,
                        block_size: int,
-                       block_table_device_tensor: Optional[torch.Tensor] = None,
-                       input_tokens_device_tensor: Optional[torch.Tensor] = None,
-                       input_positions_device_tensor: Optional[torch.Tensor] = None,
-                       slot_mapping_device_tensor: Optional[torch.Tensor] = None) -> Optional[BatchInputs]:
+                       block_table_device_tensor: torch.Tensor,
+                       input_tokens_device_tensor: torch.Tensor,
+                       input_positions_device_tensor: torch.Tensor,
+                       slot_mapping_device_tensor: torch.Tensor) -> None:
         """
         Translate batch into numpy arrays for model execute.
         When device_tensors are available, kickoff a non-blocking cpu-to-device transfer as soon as
@@ -40,11 +40,10 @@ class RequestBatch(RequestBatchBase):
             # Empty batch
             return None
 
-        if block_table_device_tensor is not None:
-            # Trigger block table copy
-            block_table_device_tensor[:num_reqs].copy_(
-                self.cpu_tensors.block_table.tensor[:num_reqs],
-                non_blocking=True)
+        # Trigger block table copy
+        block_table_device_tensor[:num_reqs].copy_(
+            self.cpu_tensors.block_table.tensor[:num_reqs],
+            non_blocking=True)
 
         assert len(num_scheduled_tokens) == num_reqs
         indices = np.arange(num_reqs)
@@ -55,10 +54,10 @@ class RequestBatch(RequestBatchBase):
         # Input positions
         token_positions: torch.Tensor = self.make_token_positions(num_scheduled_tokens, req_indices)
         assert len(token_positions) == total_num_scheduled_tokens
-        if input_positions_device_tensor is not None:
-            input_positions_device_tensor[:total_num_scheduled_tokens].copy_(
-                token_positions,
-                non_blocking=True)
+        # Trigger input positions copy
+        input_positions_device_tensor[:total_num_scheduled_tokens].copy_(
+            token_positions,
+            non_blocking=True)
 
         # Token indices
         # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
@@ -69,23 +68,18 @@ class RequestBatch(RequestBatchBase):
         # Input tokens 
         token_ids: torch.Tensor = self.make_token_ids(token_indices)
         assert len(token_ids) == total_num_scheduled_tokens
-        if input_tokens_device_tensor is not None:
-            input_tokens_device_tensor[:total_num_scheduled_tokens].copy_(
+        # Trigger token indices copy
+        input_tokens_device_tensor[:total_num_scheduled_tokens].copy_(
                 token_ids,
                 non_blocking=True)
 
         # Slot mapping
         slot_mapping: torch.Tensor = self.make_slot_mapping(token_indices, block_size)
         assert len(slot_mapping) == total_num_scheduled_tokens
-        if slot_mapping_device_tensor is not None:
-            slot_mapping_device_tensor[:total_num_scheduled_tokens].copy_(
+        # Trigger slot mapping copy
+        slot_mapping_device_tensor[:total_num_scheduled_tokens].copy_(
                 slot_mapping,
                 non_blocking=True)
-        
-        return BatchInputs(input_tokens_cpu_tensor=token_ids,
-                           input_positions_np=token_positions,
-                           slot_mapping_cpu_tensor=slot_mapping)
-
 
     def make_sampling_metadata(self,
         device_tensors: ModelRunnerDeviceSamplingTensors,

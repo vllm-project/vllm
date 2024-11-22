@@ -159,10 +159,10 @@ class LoRARequestBatch(RequestBatchAbstract):
     def prepare_inputs(self,
                        num_scheduled_tokens: np.array,
                        block_size: int,
-                       block_table_device_tensor: Optional[torch.Tensor] = None,
-                       input_tokens_device_tensor: Optional[torch.Tensor] = None,
-                       input_positions_device_tensor: Optional[torch.Tensor] = None,
-                       slot_mapping_device_tensor: Optional[torch.Tensor] = None) -> Optional[BatchInputs]:
+                       block_table_device_tensor: torch.Tensor,
+                       input_tokens_device_tensor: torch.Tensor,
+                       input_positions_device_tensor: torch.Tensor,
+                       slot_mapping_device_tensor: torch.Tensor) -> None:
 
         total_num_reqs: int = self.num_reqs()
         assert len(num_scheduled_tokens) == total_num_reqs, ""
@@ -191,9 +191,6 @@ class LoRARequestBatch(RequestBatchAbstract):
             start_token_offset = end_token_offset
         assert start_req_offset == total_num_reqs
         assert start_token_offset == total_num_scheduled_tokens
-
-        # TODO (varun) : Remove BatchInputs
-        return None
 
     def make_sampling_metadata(self,
         device_tensors: ModelRunnerDeviceSamplingTensors,
