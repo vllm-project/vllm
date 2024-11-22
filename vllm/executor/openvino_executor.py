@@ -14,6 +14,7 @@ from vllm.platforms import current_platform
 from vllm.sequence import ExecuteModelRequest
 from vllm.utils import (GiB_bytes, get_distributed_init_method, get_ip,
                         get_open_port, make_async)
+from vllm.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
 
@@ -38,15 +39,12 @@ class OpenVINOExecutor(ExecutorBase):
         self._init_worker()
 
     def _init_worker(self):
-        from vllm.worker.openvino_worker import OpenVINOWorker
 
-        assert (
-            self.parallel_config.world_size == 1
-        ), "OpenVINOExecutor only supports single CPU socket currently."
+        wrapper = WorkerWrapperBase(vllm_config=self.vllm_config)
 
         distributed_init_method = get_distributed_init_method(
             get_ip(), get_open_port())
-        self.driver_worker = OpenVINOWorker(
+        self.driver_worker = wrapper.init_worker(
             ov_core=self.ov_core,
             vllm_config=self.vllm_config,
             local_rank=0,
