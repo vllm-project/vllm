@@ -119,6 +119,7 @@ class Worker:
             You may limit the usage of GPU memory
             by adjusting the `gpu_memory_utilization` parameter.
         """
+        logger.info("determining num available blocks.")
         # Profile the memory usage of the model and get the maximum number of
         # cache blocks that can be allocated with the remaining free memory.
         torch.cuda.empty_cache()
@@ -173,6 +174,8 @@ class Worker:
                              "Try increasing `gpu_memory_utilization` when "
                              "initializing the engine.")
 
+        logger.info("initializing cache.")
+
         max_seq_len = self.cache_config.block_size * num_gpu_blocks
         max_model_len = self.model_config.max_model_len
         if max_model_len > max_seq_len:
@@ -186,6 +189,7 @@ class Worker:
         self.model_runner.initialize_kv_cache(num_gpu_blocks)
 
     def compile_or_warm_up_model(self) -> None:
+        logger.info("compiling/warming up model.")
         if not self.model_config.enforce_eager:
             self.model_runner.capture_model()
         # Reset the seed to ensure that the random state is not affected by
@@ -296,9 +300,11 @@ class WorkerProc:
         else:
             self.model_output_mq = None
 
-        logger.info("initializing and loading model.")
+        logger.info("initializing model.")
         self.worker.initialize()
+        logger.info("loading model.")
         self.worker.load_model()
+        logger.info("done loading model.")
 
     # TODO: WHY is this needed?
     def __del__(self):
@@ -339,7 +345,8 @@ class WorkerProc:
         }
         # Run EngineCore busy loop in background process.
         proc = context.Process(target=WorkerProc.run_worker,
-                               kwargs=process_kwargs)
+                               kwargs=process_kwargs,
+                               daemon=True)
         proc.start()
 
         # Wait for startup
@@ -460,6 +467,7 @@ class WorkerProc:
 
     # Main busy loop for Multiprocessing Workers
     def execute_model_busy_loop(self):
+        logger.info("Begin model execution busy loop.")
         with torch.profiler.profile(
                 activities=[
                     torch.profiler.ProfilerActivity.CPU,
