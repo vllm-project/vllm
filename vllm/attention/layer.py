@@ -91,7 +91,8 @@ class Attention(nn.Module):
                              alibi_slopes, sliding_window, kv_cache_dtype,
                              blocksparse_params, logits_soft_cap)
 
-        self.use_direct_call = envs.VLLM_USE_V1 or current_platform.is_tpu()
+        self.use_direct_call = envs.VLLM_USE_V1 or current_platform.is_tpu() \
+            or current_platform.is_neuron()
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
@@ -168,4 +169,5 @@ direct_register_custom_op(
     op_func=unified_attention,
     mutates_args=["kv_cache"],
     fake_impl=unified_attention_fake,
+    dispatch_key=current_platform.dispatch_key,
 )
