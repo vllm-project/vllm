@@ -87,7 +87,7 @@ class RayTPUExecutor(TPUExecutor):
                 resources={"TPU": 1},
                 scheduling_strategy=scheduling_strategy,
                 **ray_remote_kwargs,
-            )(RayWorkerWrapper).remote(vllm_config=self.vllm_config, )
+            )(RayWorkerWrapper).remote(vllm_config=self.vllm_config)
             if override_env:
                 worker.override_env_vars.remote(override_env)
 
