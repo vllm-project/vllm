@@ -1,4 +1,4 @@
-from typing import Dict, List, Mapping, Optional, Type, Union
+from typing import Dict, List, Mapping, Optional, Union
 
 from vllm.config import VllmConfig
 from vllm.engine.arg_utils import EngineArgs
@@ -17,7 +17,6 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.detokenizer import Detokenizer
 from vllm.v1.engine.processor import Processor
-from vllm.v1.executor.gpu_executor import GPUExecutor
 
 logger = init_logger(__name__)
 
@@ -113,7 +112,7 @@ class LLMEngine:
         return executor_class
 
     def stop_remote_worker_execution_loop(self) -> None:
-        raise NotImplementedError("TP not implemented yet.")
+        self.engine_core.shutdown()
 
     def get_num_unfinished_requests(self) -> int:
         return self.detokenizer.get_num_unfinished_requests()

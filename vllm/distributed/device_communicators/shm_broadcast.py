@@ -1,12 +1,14 @@
 import os
-import pickle
+import struct
+import sys
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from multiprocessing import shared_memory
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from unittest.mock import patch
 
+import msgspec
 import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
@@ -20,6 +22,13 @@ from vllm.utils import get_ip, get_open_port, is_valid_ipv6_address
 VLLM_RINGBUFFER_WARNING_INTERVAL = envs.VLLM_RINGBUFFER_WARNING_INTERVAL
 
 logger = init_logger(__name__)
+
+# We prefer to use os.sched_yield as it results in tighter polling loops,
+# measured to be around 3e-7 seconds. However on python < 3.11.1,
+# os.sched_yield() does not release the GIL, so we fall back to time.sleep(0)
+USE_SCHED_YIELD = False
+if sys.version_info[:3] >= (3, 11, 1):
+    USE_SCHED_YIELD = True
 
 
 class ShmRingBuffer:
@@ -74,7 +83,7 @@ class ShmRingBuffer:
         NOTE: the order is important here, first reset the reader flags (so that we are still in case 1), then mark the block as written. The state transition is atomic. If we do it in the reverse order, it will go through case 3 and then back to case 2, and readers might read the intermediate case 3, which is not correct.
 
         During creation, `name` is None and the buffer is created. We can pass the
-        created object to other processes by pickling it. The other processes will
+        created object to other processes by serializing it. The other processes will
         get the name of the shared memory and open it, so that they can access the
         same shared memory buffer.
         """# noqa
@@ -114,6 +123,10 @@ class ShmRingBuffer:
                     # and we should suppress the error
                     pass
 
+    def handle(self):
+        return (self.n_reader, self.max_chunk_bytes, self.max_chunks,
+                self.shared_memory.name)
+
     def __reduce__(self):
         return (
             self.__class__,
@@ -147,12 +160,17 @@ class Handle:
     connect_ip: str
     local_reader_ranks: List[int] = field(default_factory=list)
 
-    buffer: Optional[ShmRingBuffer] = None
+    buffer_handle: Optional[Tuple[int, int, int, str]] = None
     local_subscribe_port: Optional[int] = None
     remote_subscribe_port: Optional[int] = None
 
 
 class MessageQueue:
+
+    # Use 4 bytes to store size of each message (we omit this for ZMQ).
+    # This is needed for decoding the message.
+    SIZE_PREFIX_FORMAT = '!I'  # unsigned int, 4 bytes, network byte order
+    SIZE_PREFIX_LEN = struct.calcsize(SIZE_PREFIX_FORMAT)
 
     def __init__(
         self,
@@ -228,7 +246,7 @@ class MessageQueue:
         self.handle = Handle(
             connect_ip=connect_ip,
             local_reader_ranks=local_reader_ranks,
-            buffer=self.buffer,
+            buffer_handle=self.buffer.handle(),
             local_subscribe_port=local_subscribe_port,
             remote_subscribe_port=remote_subscribe_port,
         )
@@ -247,8 +265,8 @@ class MessageQueue:
         context = Context()
 
         if rank in handle.local_reader_ranks:
-            assert handle.buffer is not None
-            self.buffer = handle.buffer
+            assert handle.buffer_handle is not None
+            self.buffer = ShmRingBuffer(*handle.buffer_handle)
             self.current_idx = 0
             self.local_reader_rank = handle.local_reader_ranks.index(rank)
             self._is_local_reader = True
@@ -329,7 +347,10 @@ class MessageQueue:
                     # we need to wait until it is read by all readers
 
                     # Release the processor to other threads
-                    os.sched_yield()
+                    if USE_SCHED_YIELD:
+                        os.sched_yield()
+                    else:
+                        time.sleep(1e-5)
 
                     # if we wait for a long time, we should warn the user
                     if (time.monotonic() - start_time >
@@ -383,7 +404,10 @@ class MessageQueue:
                     # we need to wait until it is written
 
                     # Release the processor to other threads
-                    os.sched_yield()
+                    if USE_SCHED_YIELD:
+                        os.sched_yield()
+                    else:
+                        time.sleep(0)
 
                     # if we wait for a long time, we should warn the user
                     if (time.monotonic() - start_time >
@@ -408,34 +432,49 @@ class MessageQueue:
 
     def enqueue(self, obj):
         assert self._is_writer, "Only writers can enqueue"
-        serialized_obj = pickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL)
+
+        encoder = msgspec.msgpack.Encoder()
+        serialized_obj = encoder.encode(obj)
+        size_to_write = self.SIZE_PREFIX_LEN + len(serialized_obj)
+
         if self.n_local_reader > 0:
-            if len(serialized_obj) >= self.buffer.max_chunk_bytes:
+            if size_to_write >= self.buffer.max_chunk_bytes:
                 with self.acquire_write() as buf:
                     buf[0] = 1  # overflow
                 self.local_socket.send(serialized_obj)
             else:
                 with self.acquire_write() as buf:
                     buf[0] = 0  # not overflow
-                    buf[1:len(serialized_obj) + 1] = serialized_obj
+                    obj_offset = 1 + self.SIZE_PREFIX_LEN
+
+                    # Write size prefix
+                    buf[1:obj_offset] = struct.pack(self.SIZE_PREFIX_FORMAT,
+                                                    len(serialized_obj))
+
+                    buf[obj_offset:obj_offset +
+                        len(serialized_obj)] = serialized_obj
         if self.n_remote_reader > 0:
             self.remote_socket.send(serialized_obj)
 
-    def dequeue(self):
+    def dequeue(self, obj_type):
+        decoder = msgspec.msgpack.Decoder(obj_type)
+
         if self._is_local_reader:
             with self.acquire_read() as buf:
                 overflow = buf[0] == 1
                 if not overflow:
-                    # no need to know the size of serialized object
-                    # pickle format contains the size information internally
-                    # see https://docs.python.org/3/library/pickle.html
-                    obj = pickle.loads(buf[1:])
+                    obj_offset = 1 + self.SIZE_PREFIX_LEN
+                    size_bytes = buf[1:obj_offset]
+                    msg_size = struct.unpack(self.SIZE_PREFIX_FORMAT,
+                                             size_bytes)[0]
+
+                    obj = decoder.decode(buf[obj_offset:obj_offset + msg_size])
             if overflow:
                 recv = self.local_socket.recv()
-                obj = pickle.loads(recv)
+                obj = decoder.decode(recv)
         elif self._is_remote_reader:
             recv = self.remote_socket.recv()
-            obj = pickle.loads(recv)
+            obj = decoder.decode(recv)
         else:
             raise RuntimeError("Only readers can dequeue")
         return obj
@@ -445,7 +484,7 @@ class MessageQueue:
             self.enqueue(obj)
             return obj
         else:
-            return self.dequeue()
+            return self.dequeue(obj)
 
     @staticmethod
     def create_from_process_group(pg: ProcessGroup,

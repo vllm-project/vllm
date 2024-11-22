@@ -19,11 +19,12 @@ import warnings
 import weakref
 from asyncio import FIRST_COMPLETED, AbstractEventLoop, Future, Task
 from collections.abc import Mapping
+from contextlib import contextmanager
 from functools import lru_cache, partial, wraps
 from platform import uname
 from typing import (Any, AsyncGenerator, Awaitable, Callable, Dict, Generic,
-                    Hashable, List, Literal, Optional, OrderedDict, Set, Tuple,
-                    Type, TypeVar, Union, overload)
+                    Hashable, Iterator, List, Literal, Optional, OrderedDict,
+                    Set, Tuple, Type, TypeVar, Union, overload)
 from uuid import uuid4
 
 import numpy as np
@@ -32,6 +33,7 @@ import psutil
 import torch
 import torch.types
 import yaml
+import zmq
 from packaging.version import Version
 from torch.library import Library
 from typing_extensions import ParamSpec, TypeIs, assert_never
@@ -513,6 +515,30 @@ def get_distributed_init_method(ip: str, port: int) -> str:
 def get_open_zmq_ipc_path() -> str:
     base_rpc_path = envs.VLLM_RPC_BASE_PATH
     return f"ipc://{base_rpc_path}/{uuid4()}"
+
+
+@contextmanager
+def make_zmq_socket(path: str, type: Any) -> Iterator[zmq.Socket]:
+    """Context manager for use """
+
+    ctx = zmq.Context()
+    try:
+        socket = ctx.socket(type)
+
+        if type == zmq.constants.PULL:
+            socket.connect(path)
+        elif type == zmq.constants.PUSH:
+            socket.bind(path)
+        else:
+            raise ValueError(f"Unknown Socket Type: {type}")
+
+        yield socket
+
+    except KeyboardInterrupt:
+        logger.debug("Worker had Keyboard Interrupt.")
+
+    finally:
+        ctx.destroy(linger=0)
 
 
 def get_open_port() -> int:

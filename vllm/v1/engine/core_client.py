@@ -95,6 +95,9 @@ class InprocClient(EngineCoreClient):
     def abort_requests(self, request_ids: List[str]) -> None:
         self.engine_core.abort_requests(request_ids)
 
+    def shutdown(self):
+        self.engine_core.shutdown()
+
 
 class MPClient(EngineCoreClient):
     """

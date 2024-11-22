@@ -24,12 +24,14 @@ MODELS = [
 
 TARGET_TEST_SUITE = os.environ.get("TARGET_TEST_SUITE", "L4")
 
+
 @pytest.fixture(autouse=True)
 def v1(run_with_both_engines):
     # Simple autouse wrapper to run both engines for each test
     # This can be promoted up to conftest.py to run for every
     # test in a package
     pass
+
 
 def test_vllm_gc_ed():
     """Verify vllm instance is GC'ed when it is deleted"""

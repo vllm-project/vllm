@@ -2,10 +2,9 @@ import multiprocessing
 import queue
 import threading
 import time
-from contextlib import contextmanager
 from multiprocessing.process import BaseProcess
 from multiprocessing.sharedctypes import Synchronized
-from typing import Any, Iterator, List, Tuple, Type, Union
+from typing import List, Tuple, Type, Union
 
 import zmq
 import zmq.asyncio
@@ -14,6 +13,7 @@ from msgspec import msgpack
 from vllm.config import CacheConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
+from vllm.utils import make_zmq_socket
 from vllm.v1.core.scheduler import Scheduler
 from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
                             EngineCoreRequest, EngineCoreRequestType)
@@ -126,6 +126,9 @@ class EngineCore:
             scheduler_output, output)
         return engine_core_outputs
 
+    def shutdown(self):
+        self.model_executor.shutdown()
+
 
 class EngineCoreProc(EngineCore):
     """ZMQ-wrapper for running EngineCore in background process."""
@@ -162,31 +165,8 @@ class EngineCoreProc(EngineCore):
                          daemon=True).start()
 
         # Send Readiness signal to EngineClient.
-        with self.make_socket(ready_path, zmq.constants.PUSH) as ready_socket:
+        with make_zmq_socket(ready_path, zmq.constants.PUSH) as ready_socket:
             ready_socket.send_string(EngineCoreProc.READY_STR)
-
-    @contextmanager
-    def make_socket(self, path: str, type: Any) -> Iterator[zmq.Socket]:
-        """Context manager for use """
-
-        ctx = zmq.Context()
-        try:
-            socket = ctx.socket(type)
-
-            if type == zmq.constants.PULL:
-                socket.connect(path)
-            elif type == zmq.constants.PUSH:
-                socket.bind(path)
-            else:
-                raise ValueError(f"Unknown Socket Type: {type}")
-
-            yield socket
-
-        except KeyboardInterrupt:
-            logger.debug("EngineCore had Keyboard Interrupt.")
-
-        finally:
-            ctx.destroy(linger=0)
 
     @staticmethod
     def wait_for_startup(
@@ -329,7 +309,7 @@ class EngineCoreProc(EngineCore):
         decoder_add_req = PickleEncoder()
         decoder_abort_req = PickleEncoder()
 
-        with self.make_socket(input_path, zmq.constants.PULL) as socket:
+        with self.make_zmq_socket(input_path, zmq.constants.PULL) as socket:
             while True:
                 # (RequestType, RequestData)
                 type_frame, data_frame = socket.recv_multipart(copy=False)
@@ -355,7 +335,7 @@ class EngineCoreProc(EngineCore):
         # Reuse send buffer.
         buffer = bytearray()
 
-        with self.make_socket(output_path, zmq.constants.PUSH) as socket:
+        with self.make_zmq_socket(output_path, zmq.constants.PUSH) as socket:
             while True:
                 engine_core_outputs = self.output_queue.get()
                 outputs = EngineCoreOutputs(outputs=engine_core_outputs)
