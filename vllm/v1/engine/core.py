@@ -10,7 +10,7 @@ from typing import Any, Iterator, List, Tuple, Type, Union
 import zmq
 import zmq.asyncio
 from msgspec import msgpack
-
+import pickle
 from vllm.config import CacheConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
@@ -348,6 +348,8 @@ class EngineCoreProc(EngineCore):
                     request = decoder_add_req.decode(request_data)
                 elif request_type == EngineCoreRequestType.ABORT.value:
                     request = decoder_abort_req.decode(request_data)
+                elif request_type == EngineCoreRequestType.PROFILE.value:
+                    request = pickle.loads(request_data)
                 else:
                     raise ValueError(f"Unknown RequestType: {request_type}")
 
