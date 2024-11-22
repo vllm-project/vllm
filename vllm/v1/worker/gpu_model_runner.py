@@ -39,6 +39,7 @@ class GPUModelRunner:
     def __init__(
         self,
         vllm_config: VllmConfig,
+        device: torch.device,
         input_registry: InputRegistry = INPUT_REGISTRY,
     ):
         self.vllm_config = vllm_config
@@ -48,7 +49,6 @@ class GPUModelRunner:
         self.load_config = vllm_config.load_config
         self.parallel_config = vllm_config.parallel_config
         self.scheduler_config = vllm_config.scheduler_config
-        self.device_config = vllm_config.device_config
         self.speculative_config = vllm_config.speculative_config
         self.prompt_adapter_config = vllm_config.prompt_adapter_config
         self.observability_config = vllm_config.observability_config
@@ -57,7 +57,7 @@ class GPUModelRunner:
         cache_config = self.cache_config
         scheduler_config = self.scheduler_config
         parallel_config = self.parallel_config
-        self.device = self.device_config.device
+        self.device = device
         self.pin_memory = is_pin_memory_available()
         self.dtype = self.model_config.dtype
         if cache_config.cache_dtype == "auto":
@@ -470,9 +470,7 @@ class GPUModelRunner:
             sampling_metadata=sampling_metadata,
         )
 
-        # NOTE: CPU-GPU synchronization happens here.
-        sampled_token_ids = sampler_output.sampled_token_ids.cpu()
-        sampled_token_ids_list = sampled_token_ids.tolist()
+        sampled_token_ids = sampler_output.sampled_token_ids
         # TODO(woosuk): The following loop can be slow since it iterates over
         # the requests one by one. Optimize.
         num_reqs = self.input_batch.num_reqs
@@ -483,7 +481,7 @@ class GPUModelRunner:
             assert seq_len <= req_state.num_tokens
             if seq_len == req_state.num_tokens:
                 # Append the sampled token to the output token ids.
-                token_id = sampled_token_ids_list[i]
+                token_id = sampled_token_ids[i]
                 self.input_batch.token_ids_cpu[i, seq_len] = token_id
                 req_state.output_token_ids.append(token_id)
             else:

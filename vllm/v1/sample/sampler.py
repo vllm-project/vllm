@@ -38,7 +38,7 @@ class Sampler(nn.Module):
             topk_indices = None
 
         sampler_output = SamplerOutput(
-            sampled_token_ids=sampled,
+            sampled_token_ids=sampled.tolist(),
             logprob_token_ids=topk_indices,
             logprobs=topk_logprobs,
             prompt_logprob_token_ids=None,

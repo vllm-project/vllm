@@ -10,6 +10,7 @@ from vllm.config import CacheConfig, ModelConfig, ParallelConfig, VllmConfig
 from vllm.distributed import (ensure_model_parallel_initialized,
                               init_distributed_environment,
                               set_custom_all_reduce)
+from vllm.distributed.device_communicators.shm_broadcast import MessageQueue
 from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
 from vllm.platforms import current_platform
@@ -55,8 +56,6 @@ class Worker:
             from vllm.utils import init_cached_hf_modules
             init_cached_hf_modules()
 
-        self.model_runner = GPUModelRunner(vllm_config)
-
     def initialize(self):
         if self.device_config.device.type == "cuda":
             # torch.distributed.all_reduce does not free the input tensor until
@@ -85,6 +84,9 @@ class Worker:
                                             self.local_rank)
         # Set random seed.
         set_random_seed(self.model_config.seed)
+
+        # Construct the model runner
+        self.model_runner = GPUModelRunner(self.vllm_config, self.device)
 
     def load_model(self) -> None:
         self.model_runner.load_model()
@@ -168,8 +170,87 @@ class Worker:
         scheduler_output: "SchedulerOutput",
     ) -> ModelRunnerOutput:
         output = self.model_runner.execute_model(scheduler_output)
-        # TODO(woosuk): Send the output to the engine process.
         return output
+
+
+# Wraps Worker for the multiprocessing, multi-gpu case.
+class MultiprocessingWorker:
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        local_rank: int,
+        rank: int,
+        distributed_init_method: str,
+    ):
+        self.worker = Worker(vllm_config, local_rank, rank,
+                             distributed_init_method)
+
+    def initialize_message_queues(self, scheduler_output_receiver_handle):
+        # Initialize MessageQueue for receiving SchedulerOutput
+        # Add 1 rank to account for driver process
+        self.scheduler_output_receiver = MessageQueue.create_from_handle(
+            scheduler_output_receiver_handle, self.worker.rank)
+
+        # Initialize group coordinator for sending the ModelRunnerOutput
+        # to the driver process
+        if self.worker.rank == 0:
+            self.model_output_sender = MessageQueue(1, 1)
+            return self.model_output_sender.export_handle()
+        else:
+            self.model_output_sender = None
+            return None
+
+    # Message queues are not valid until all readers and writers call
+    # wait_until_ready()
+    def finish_message_queue_initialization(self):
+        self.scheduler_output_receiver.wait_until_ready()
+        if self.worker.rank == 0:
+            self.model_output_sender.wait_until_ready()
+
+    # Main busy loop for Multiprocessing Workers
+    def execute_model_busy_loop(self):
+        with torch.profiler.profile(
+                activities=[
+                    torch.profiler.ProfilerActivity.CPU,
+                    torch.profiler.ProfilerActivity.CUDA,
+                ],
+                schedule=torch.profiler.schedule(
+                    wait=1000,  # Wait 1000 steps so we profile middle iters
+                    warmup=10,  # Warm up the scheduler
+                    active=3,  # Run a small number of steps so it's legible
+                    repeat=1,
+                ),
+                on_trace_ready=torch.profiler.tensorboard_trace_handler(
+                    "./traces/",
+                    worker_name=f"worker_{self.worker.rank}",
+                ),
+                with_stack=True,
+        ) as p:
+
+            while True:
+                scheduler_output = self.scheduler_output_receiver.dequeue()
+                output = self.worker.execute_model(scheduler_output)
+                if self.worker.rank == 0:
+                    self.model_output_sender.enqueue(output)
+
+                p.step()
+
+    # Wrapper methods defined here
+    def initialize(self):
+        self.worker.initialize()
+
+    def load_model(self):
+        self.worker.load_model()
+
+    def determine_num_available_blocks(self) -> Tuple[int, int]:
+        return self.worker.determine_num_available_blocks()
+
+    def initialize_cache(self, num_gpu_blocks: int) -> None:
+        self.worker.initialize_cache(num_gpu_blocks)
+
+    def compile_or_warm_up_model(self) -> None:
+        self.worker.compile_or_warm_up_model()
 
 
 def init_worker_distributed_environment(

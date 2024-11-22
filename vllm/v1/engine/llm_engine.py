@@ -28,7 +28,7 @@ class LLMEngine:
     def __init__(
         self,
         vllm_config: VllmConfig,
-        executor_class: Type[GPUExecutor],
+        executor_class,
         log_stats: bool,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
@@ -99,7 +99,18 @@ class LLMEngine:
 
     @classmethod
     def _get_executor_cls(cls, vllm_config: VllmConfig):
-        return GPUExecutor
+        distributed_executor_backend = (
+            vllm_config.parallel_config.distributed_executor_backend)
+        if distributed_executor_backend == "mp":
+            from vllm.v1.executor.multiproc_gpu_executor import (
+                MultiprocessingGPUExecutor)
+            executor_class = MultiprocessingGPUExecutor
+        else:
+            assert (distributed_executor_backend is None)
+            from vllm.v1.executor.gpu_executor import GPUExecutor
+            executor_class = GPUExecutor
+
+        return executor_class
 
     def stop_remote_worker_execution_loop(self) -> None:
         raise NotImplementedError("TP not implemented yet.")
