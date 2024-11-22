@@ -15,6 +15,10 @@ if TYPE_CHECKING:
 
 
 class AttentionType:
+    """
+    Attention type.
+    Use string to be compatible with `torch.compile`.
+    """
     # Decoder attention between previous layer Q/K/V
     DECODER = "decoder"
     # Encoder attention between previous layer Q/K/V for encoder-decoder
