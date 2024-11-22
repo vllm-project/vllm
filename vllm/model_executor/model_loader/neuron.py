@@ -136,8 +136,8 @@ class NeuronSpeculationCausalLM(nn.Module):
 
         # Mark the end of accepted specualtive tokens for each sequence with the
         # speculation termination id.
-        mask = torch.arange(tokens.size(1)).repeat(tokens.size(0),
-                                                   1) >= counts.unsqueeze(-1)
+        batch_size, steps = tokens.shape
+        mask = torch.arange(steps).expand(batch_size, -1) >= counts
         tokens[mask] = self.SPECULATION_TERMINATION_ID
 
         return tokens
