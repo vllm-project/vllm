@@ -171,8 +171,8 @@ class Transformer(nn.Module):
         self.layers = nn.ModuleList([
             TransformerLayer(config,
                              quant_config=quant_config,
-                             prefix=f"{prefix}.layer.{_}")
-            for _ in range(config.num_hidden_layers)
+                             prefix=f"{prefix}.layer.{layer_idx}")
+            for layer_idx in range(config.num_hidden_layers)
         ])
 
     def forward(self, hidden_states):

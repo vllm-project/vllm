@@ -617,8 +617,8 @@ class BartEncoder(nn.Module):
             BartEncoderLayer(config,
                              cache_config,
                              quant_config,
-                             prefix=f"{prefix}.layers.{_}")
-            for _ in range(config.encoder_layers)
+                             prefix=f"{prefix}.layers.{layer_idx}")
+            for layer_idx in range(config.encoder_layers)
         ])
 
         self.layernorm_embedding = nn.LayerNorm(embed_dim)
@@ -703,8 +703,8 @@ class BartDecoder(nn.Module):
 
         self.layers = nn.ModuleList(
             [BartDecoderLayer(config,cache_config,quant_config,
-            prefix=f"{prefix}.layers.{_}") \
-             for _ in range(config.decoder_layers)])
+            prefix=f"{prefix}.layers.{layer_idx}") \
+             for layer_idx in range(config.decoder_layers)])
 
         self.layernorm_embedding = nn.LayerNorm(config.d_model)
 
