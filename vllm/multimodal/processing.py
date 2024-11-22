@@ -91,8 +91,7 @@ _T = TypeVar("_T")
 _S = TypeVar("_S", str, list[int])
 _S_co = TypeVar("_S_co", bound=PromptSegment, covariant=True)
 
-ReplacementCount: TypeAlias = Union[Callable[[_T, BatchFeature, int], int],
-                                    int]
+ReplacementCount = Union[Callable[[_T, BatchFeature, int], int], int]
 """
 Given the original data item, HF-processed data, and index of the processed
 item, output the number of repetitions.

@@ -308,18 +308,26 @@ def test_find_text_matches(prompt, target_by_key, expected_by_key):
         (
             "Image:<image>Image:<image><image>!",
             {
+                # We use `<image>` before `Image:` to test matches that
+                # occur out of order
                 "pattern_1": "<image>",
                 "pattern_2": "Image:",
                 "pattern_3": "!",
             },
             {
+                # Test whether target is confused with repl_unit
                 "pattern_1": ("<image><image>", 1),
+                # Test empty repl_unit
                 "pattern_2": ("", 1),
+                # Test multiple repl_count
                 "pattern_3": ("?", 2),
             },
             {
+                # Test no replacement
                 0: "Image:<image>Image:<image><image>!",
+                # Test single replacement
                 1: "<image><image>Image:<image><image>??",
+                # Test repeated replacement
                 2: "<image><image><image><image><image>??",
             },
         ),
