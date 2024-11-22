@@ -91,15 +91,6 @@ _T = TypeVar("_T")
 _S = TypeVar("_S", str, list[int])
 _S_co = TypeVar("_S_co", bound=PromptSegment, covariant=True)
 
-ReplacementCount = Union[Callable[[_T, BatchFeature, int], int], int]
-"""
-Given the original data item, HF-processed data, and index of the processed
-item, output the number of repetitions.
-
-For convenience, you can pass in an integer if the number of repetitions is
-a constant.
-"""
-
 
 @dataclass
 class PromptReplacement(Generic[_S_co, _T]):
@@ -113,10 +104,14 @@ class PromptReplacement(Generic[_S_co, _T]):
     See :code:`repl_count` for more details.
     """
 
-    repl_count: ReplacementCount[_T]
+    repl_count: Union[Callable[[_T, BatchFeature, int], int], int]
     """
-    The number of repetitions of :code:`repl_unit` to build up the
+    Given the original data item, HF-processed data, and index of the processed
+    item, output the number of repetitions of :code:`repl_unit` to build up the
     replacement prompt segment.
+
+    For convenience, you can pass in an integer if the number of repetitions is
+    a constant.
     """
 
     def __repr__(self) -> str:
@@ -205,7 +200,7 @@ class _BoundPromptReplacement(Generic[_T]):
     modality: str
     target: _BoundPromptSegment
     repl_unit: _BoundPromptSegment
-    repl_count: ReplacementCount[_T]
+    repl_count: Union[Callable[[_T, BatchFeature, int], int], int]
 
     def get_count(
         self,
