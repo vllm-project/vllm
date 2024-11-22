@@ -424,6 +424,12 @@ Text Generation
     - Example HF Models
     - :ref:`LoRA <lora>`
     - :ref:`PP <distributed_serving>`
+  * - :code:`AriaForConditionalGeneration`
+    - Aria
+    - T + I
+    - :code:`rhymes-ai/Aria-sequential_mlp`
+    - 
+    - ✅︎
   * - :code:`Blip2ForConditionalGeneration`
     - BLIP-2
     - T + I\ :sup:`E`
