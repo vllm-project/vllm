@@ -23,10 +23,8 @@ import torch
 from torch import nn
 from transformers import PretrainedConfig
 from vllm.config import CacheConfig, VllmConfig
-from vllm.attention import Attention, AttentionMetadata
-from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.model_executor.layers.linear import (QKVParallelLinear,
-                                               RowParallelLinear)
+from vllm.attention import AttentionMetadata
+from vllm.model_executor.layers.linear import RowParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
@@ -37,7 +35,6 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
-from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.model_executor.models.llama import LlamaModel
 from vllm.model_executor.models.llama import LlamaMLP
 from vllm.model_executor.models.llama import LlamaAttention
@@ -56,7 +53,8 @@ class TeleChat2MLP(LlamaMLP):
         bias: bool = False,
         prefix: str = "",
     ) -> None:
-        super().__init__(hidden_size, intermediate_size, hidden_act, quant_config, bias, prefix)
+        super().__init__(hidden_size, intermediate_size, 
+            hidden_act, quant_config, bias, prefix)
         self.down_proj = RowParallelLinear(
             input_size=intermediate_size,
             output_size=hidden_size,
