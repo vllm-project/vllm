@@ -8,7 +8,7 @@ from transformers import LlamaConfig
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, QuantizationConfig, VllmConfig
-from vllm.distributed import get_tensor_model_parallel_rank
+from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
 from vllm.inputs import INPUT_REGISTRY, token_inputs
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.fused_moe import FusedMoE
@@ -135,13 +135,12 @@ class CrossAttention(nn.Module):
     def __init__(self, kv_dim, embed_dim, num_heads, drop_out_rate=0):
         super().__init__()
         self.num_heads = num_heads
-        self.q_proj = ColumnParallelLinear(embed_dim, embed_dim, bias=False)
-        self.kv_proj = MergedColumnParallelLinear(kv_dim,
-                                                  [embed_dim, embed_dim],
-                                                  bias=False)
+        self.q_proj = nn.Linear(embed_dim, embed_dim, bias=False)
+        self.k_proj = nn.Linear(kv_dim, embed_dim, bias=False)
+        self.v_proj = nn.Linear(kv_dim, embed_dim, bias=False)
 
         self.multihead_attn = nn.MultiheadAttention(embed_dim, num_heads)
-        self.linear = RowParallelLinear(embed_dim, embed_dim)
+        self.linear = nn.Linear(embed_dim, embed_dim)
         self.dropout = nn.Dropout(drop_out_rate)
 
         self.layer_norm = nn.LayerNorm(embed_dim)
@@ -149,24 +148,20 @@ class CrossAttention(nn.Module):
 
     def forward(self, x, hidden_states, attn_mask=None, add_residual=False):
         normed_hidden_states = self.layer_norm(hidden_states)
-        query = self.q_proj(normed_hidden_states)[0].permute(1, 0, 2)
+        query = self.q_proj(normed_hidden_states).permute(1, 0, 2)
 
         x = self.ln_kv(x)
-        key_value = self.kv_proj(x)[0].permute(1, 0, 2)
-        key, value = key_value.chunk(2, dim=-1)
+        key = self.k_proj(x).permute(1, 0, 2)
+        value = self.v_proj(x).permute(1, 0, 2)
 
-        attn_output, _ = self.multihead_attn(query,
-                                             key,
-                                             value,
-                                             attn_mask=attn_mask)
+        attn_output, _ = self.multihead_attn(query, key, value, attn_mask=attn_mask)
 
         attn_output = attn_output.permute(1, 0, 2)
 
         if add_residual:
-            attn_output = hidden_states + self.dropout(
-                self.linear(attn_output)[0])
+            attn_output = hidden_states + self.dropout(self.linear(attn_output))
         else:
-            attn_output = self.dropout(self.linear(attn_output)[0])
+            attn_output = self.dropout(self.linear(attn_output))
 
         return attn_output
 
@@ -237,33 +232,6 @@ class AriaProjector(nn.Module):
 
         return out
 
-    def load_weights(self, weights: Iterable[Tuple[str,
-                                                   torch.Tensor]]) -> Set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            (".kv_proj", ".k_proj", 0),
-            (".kv_proj", ".v_proj", 1),
-        ]
-        params_dict = dict(self.named_parameters())
-        loaded_params: Set[str] = set()
-        for name, loaded_weight in weights:
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                weight_loader(param, loaded_weight)
-
-            loaded_params.add(name)
-        return loaded_params
-
 
 class AriaFusedMoE(FusedMoE):
 
@@ -291,7 +259,7 @@ class AriaFusedMoE(FusedMoE):
             # (num_experts, moe_intermediate_size, hidden_size)
             if self.tp_size > 1:
                 down_current_rank = loaded_weight.chunk(self.tp_size,
-                                                        dim=1)[self.tp_rank]
+                                                        dim=1)[tp_rank]
                 param.data.copy_(down_current_rank.transpose(1, 2))
             else:
                 param.data.copy_(loaded_weight.transpose(1, 2))
