@@ -53,9 +53,9 @@ class ColumnParallelLinearWithShardedLoRA(ColumnParallelLinearWithLoRA):
             offset = lora_a.shape[-1] // 2
             left_weight = lora_a[:, tp_rank * shard_size:(tp_rank + 1) *
                                  shard_size]
-            right_weigt = lora_a[:, offset + tp_rank * shard_size:offset +
+            right_weight = lora_a[:, offset + tp_rank * shard_size:offset +
                                  (tp_rank + 1) * shard_size]
-            lora_a = torch.cat([left_weight, right_weigt], dim=1)
+            lora_a = torch.cat([left_weight, right_weight], dim=1)
         # Applicable to cases where the base_layer is
         # ColumnParallelLinear.
         else:
