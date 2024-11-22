@@ -1074,15 +1074,19 @@ class SchedulerConfig:
     max_model_len: int = 8192
 
     # Maximum number of sequences that can be partially prefilled concurrently
-    max_num_partial_prefills: int = 1,
+    max_num_partial_prefills: int = 1
 
-    # Maximum number of “very long prompt” sequences that can be prefilled
+    # Maximum number of "very long prompt" sequences that can be prefilled
     # concurrently (long is defined by long_prefill_threshold)
-    max_long_partial_prefills: int = 1,
+    max_long_partial_prefills: int = 1
 
-    # Set a percentage of the context length that determines which 
-    # sequences are considered "long
+    # Set a percentage of the context length that determines which
+    # sequences are considered "long"
     long_prefill_threshold: float = 0.04
+
+    # calculate context length that determines which sequences are
+    # considered "long"
+    long_prefill_token_threshold = int(max_model_len * long_prefill_threshold)
 
     # The number of slots to allocate per sequence per
     # step, beyond the known token ids. This is used in speculative
