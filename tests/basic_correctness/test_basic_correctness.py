@@ -14,11 +14,12 @@ from vllm import LLM
 from vllm.platforms import current_platform
 from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
 
+from ..conftest import VllmRunner
 from ..models.utils import check_outputs_equal
 from ..utils import multi_gpu_test
 
 MODELS = [
-    "facebook/opt-125m",
+    "google/gemma-2-2b-it",
     "meta-llama/Llama-3.2-1B",
 ]
 
@@ -42,7 +43,6 @@ def test_vllm_gc_ed():
 @pytest.mark.parametrize("enforce_eager", [False, True])
 def test_models(
     hf_runner,
-    vllm_runner,
     example_prompts,
     model: str,
     backend: str,
@@ -59,10 +59,11 @@ def test_models(
     with hf_runner(model, dtype=dtype) as hf_model:
         hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
 
-    with vllm_runner(model,
-                     dtype=dtype,
-                     enforce_eager=enforce_eager,
-                     gpu_memory_utilization=0.7) as vllm_model:
+    with VllmRunner(model,
+                    max_model_len=8192,
+                    dtype=dtype,
+                    enforce_eager=enforce_eager,
+                    gpu_memory_utilization=0.7) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
 
     check_outputs_equal(
