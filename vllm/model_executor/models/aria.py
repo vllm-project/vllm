@@ -641,8 +641,6 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
             },
             orig_to_new_suffix={
                 "router.weight": "router_weight",
-                # "experts.fc1.weight": "experts.w13_weight",
-                # "experts.fc2.weight": "experts.w2_weight",
             },
         )
 
