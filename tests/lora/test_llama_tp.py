@@ -1,5 +1,7 @@
 from typing import List
 
+import ray
+
 import vllm
 from tests.utils import fork_new_process_for_each_test
 from vllm.lora.request import LoRARequest
@@ -53,6 +55,58 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> List[str]:
     return generated_texts
 
 
+@fork_new_process_for_each_test
+def test_llama_lora(sql_lora_files):
+
+    llm = vllm.LLM(MODEL_PATH,
+                   enable_lora=True,
+                   max_num_seqs=16,
+                   max_loras=4,
+                   tensor_parallel_size=1)
+
+    print("lora adapter created")
+    assert do_sample(llm, sql_lora_files, lora_id=0) == EXPECTED_NO_LORA_OUTPUT
+
+    print("lora 1")
+    assert do_sample(llm, sql_lora_files, lora_id=1) == EXPECTED_LORA_OUTPUT
+
+    print("no lora")
+    assert do_sample(llm, sql_lora_files, lora_id=0) == EXPECTED_NO_LORA_OUTPUT
+
+    print("lora 2")
+    assert do_sample(llm, sql_lora_files, lora_id=2) == EXPECTED_LORA_OUTPUT
+
+    print("removing lora")
+
+
+@fork_new_process_for_each_test
+def test_llama_lora_warmup(sql_lora_files):
+    """Test that the LLM initialization works with a warmup LORA path and
+    is more conservative"""
+
+    @ray.remote(num_gpus=1)
+    def get_num_gpu_blocks_lora():
+        llm = vllm.LLM(MODEL_PATH, enable_lora=True, max_num_seqs=16)
+        num_gpu_blocks_lora_warmup = llm.llm_engine.cache_config.num_gpu_blocks
+        return num_gpu_blocks_lora_warmup
+
+    @ray.remote(num_gpus=1)
+    def get_num_gpu_blocks_no_lora():
+        llm = vllm.LLM(MODEL_PATH, max_num_seqs=16)
+        num_gpu_blocks_no_lora_warmup = (
+            llm.llm_engine.cache_config.num_gpu_blocks)
+        return num_gpu_blocks_no_lora_warmup
+
+    num_gpu_blocks_lora_warmup = ray.get(get_num_gpu_blocks_lora.remote())
+    num_gpu_blocks_no_lora_warmup = ray.get(
+        get_num_gpu_blocks_no_lora.remote())
+    assert num_gpu_blocks_lora_warmup < num_gpu_blocks_no_lora_warmup, (
+        "The warmup with lora should be more "
+        "conservative than without lora, therefore the number of "
+        "memory blocks for the KV cache should be "
+        "less when using lora than when not using lora")
+
+
 @multi_gpu_test(num_gpus=4)
 @fork_new_process_for_each_test
 def test_llama_lora_tp4(sql_lora_files):
@@ -90,6 +144,7 @@ def test_llama_lora_tp4_fully_sharded_loras(sql_lora_files):
         max_num_seqs=16,
         max_loras=4,
         tensor_parallel_size=4,
+        fully_sharded_loras=True,
     )
     print("lora adapter created")
     assert do_sample(llm, sql_lora_files, lora_id=0) == EXPECTED_NO_LORA_OUTPUT

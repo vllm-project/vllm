@@ -2,7 +2,6 @@ from typing import List
 
 import vllm
 from tests.utils import fork_new_process_for_each_test
-from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.lora.request import LoRARequest
 
 from ..utils import multi_gpu_test
@@ -47,7 +46,7 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> List[str]:
 
 
 @fork_new_process_for_each_test
-def test_chatglm3_lora_tp1(chatglm3_lora_files):
+def test_chatglm3_lora(chatglm3_lora_files):
     llm = vllm.LLM(MODEL_PATH,
                    max_model_len=1024,
                    enable_lora=True,
@@ -56,19 +55,12 @@ def test_chatglm3_lora_tp1(chatglm3_lora_files):
                    tensor_parallel_size=1,
                    trust_remote_code=True)
 
-    EXPECTED_LORA_OUTPUT = [
-        "SELECT count(*) FROM singer",
-        "SELECT avg(age) ,  min(age) ,  max(age) FROM singer WHERE country  =  'France'",  # noqa: E501
-        "SELECT name ,  country ,  age FROM singer ORDER BY age",
-    ]
-
     output1 = do_sample(llm, chatglm3_lora_files, lora_id=1)
     for i in range(len(EXPECTED_LORA_OUTPUT)):
         assert output1[i] == EXPECTED_LORA_OUTPUT[i]
     output2 = do_sample(llm, chatglm3_lora_files, lora_id=2)
     for i in range(len(EXPECTED_LORA_OUTPUT)):
         assert output2[i] == EXPECTED_LORA_OUTPUT[i]
-    cleanup_dist_env_and_memory()
 
 
 @multi_gpu_test(num_gpus=4)
@@ -83,11 +75,6 @@ def test_chatglm3_lora_tp4(chatglm3_lora_files):
                    trust_remote_code=True,
                    fully_sharded_loras=False)
 
-    EXPECTED_LORA_OUTPUT = [
-        "SELECT count(*) FROM singer",
-        "SELECT avg(age) ,  min(age) ,  max(age) FROM singer WHERE country  =  'France'",  # noqa: E501
-        "SELECT name ,  country ,  age FROM singer ORDER BY age",
-    ]
 
     output1 = do_sample(llm, chatglm3_lora_files, lora_id=1)
     for i in range(len(EXPECTED_LORA_OUTPUT)):
@@ -95,7 +82,7 @@ def test_chatglm3_lora_tp4(chatglm3_lora_files):
     output2 = do_sample(llm, chatglm3_lora_files, lora_id=2)
     for i in range(len(EXPECTED_LORA_OUTPUT)):
         assert output2[i] == EXPECTED_LORA_OUTPUT[i]
-    cleanup_dist_env_and_memory()
+
 
 
 @multi_gpu_test(num_gpus=4)
@@ -115,4 +102,3 @@ def test_chatglm3_lora_tp4_fully_sharded_loras(chatglm3_lora_files):
     output2 = do_sample(llm, chatglm3_lora_files, lora_id=2)
     for i in range(len(EXPECTED_LORA_OUTPUT)):
         assert output2[i] == EXPECTED_LORA_OUTPUT[i]
-    cleanup_dist_env_and_memory()
