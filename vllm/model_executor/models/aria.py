@@ -41,6 +41,7 @@ from vllm.multimodal.utils import (cached_get_tokenizer,
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.aria import (AriaMoELMConfig,
                                                   AriaVisionConfig)
+from vllm.distributed import get_tensor_model_parallel_rank
 
 
 class AriaVisionTransformer(Idefics2VisionTransformer):
@@ -266,6 +267,35 @@ class AriaProjector(nn.Module):
         return loaded_params
 
 
+class AriaFusedMoE(FusedMoE):
+
+    def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor, shard_id: str) -> Set[str]:
+        # Override the weight_loader to handle the expert weights in the Aria
+        # model, which are already packed with experts, and merge the gate and
+        # up weights for each expert.
+        # Note: Loading expert weights with quantization is not supported
+        tp_rank = get_tensor_model_parallel_rank()
+        if shard_id == 'w13':
+            # the shape of loaded_weight is (num_experts, hidden_size, 2 * moe_intermediate_size)
+            if self.tp_size > 1:
+                up, gate = loaded_weight.chunk(2, dim=-1)
+                up_current_rank = up.chunk(self.tp_size, dim=-1)[tp_rank]
+                gate_current_rank = gate.chunk(self.tp_size, dim=-1)[tp_rank]
+                up_and_gate = torch.cat(
+                    [up_current_rank, gate_current_rank], dim=-1
+                ).transpose(1, 2)
+                param.data.copy_(up_and_gate)
+            else:
+                param.data.copy_(loaded_weight.transpose(1, 2))
+        elif shard_id == 'w2':
+            # the shape of loaded_weight is (num_experts, moe_intermediate_size, hidden_size)
+            if self.tp_size > 1:
+                down_current_rank = loaded_weight.chunk(self.tp_size, dim=1)[self.tp_rank]
+                param.data.copy_(down_current_rank.transpose(1, 2))
+            else:
+                param.data.copy_(loaded_weight.transpose(1, 2))
+
+
 class MoELayer(nn.Module):
     """
     Mixture of Experts (MoE) Layer for the AriaMoE model.
@@ -288,7 +318,7 @@ class MoELayer(nn.Module):
             torch.empty(
                 (self.config.moe_num_experts, self.config.hidden_size)))
 
-        self.experts = FusedMoE(
+        self.experts = AriaFusedMoE(
             num_experts=config.moe_num_experts,
             top_k=config.moe_topk,
             hidden_size=config.hidden_size,
@@ -393,8 +423,8 @@ class AriaMoELMModel(LlamaModel):
             ]
         ]
 
-    # Adapted from LlamaModel.load_weights with the modification of adding the
-    # expert_params_mapping
+    # Adapted from LlamaModel.load_weights with the modification of adding
+    # the expert weights mapping to `stacked_params_mapping`
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
@@ -404,16 +434,9 @@ class AriaMoELMModel(LlamaModel):
             (".qkv_proj", ".v_proj", "v"),
             (".gate_up_proj", ".gate_proj", 0),
             (".gate_up_proj", ".up_proj", 1),
+            ("experts.w13_weight", "experts.fc1.weight", 'w13'),
+            ("experts.w2_weight", "experts.fc2.weight", 'w2'),
         ]
-
-        # Params for weights, fp8 weight scales, fp8 activation scales
-        # (param_name, weight_name, expert_id, shard_id)
-        expert_params_mapping = self._make_expert_params_mapping(
-            ckpt_gate_proj_name="gate_proj",
-            ckpt_down_proj_name="down_proj",
-            ckpt_up_proj_name="up_proj",
-            num_experts=self.config.moe_num_experts)
-
         params_dict = dict(self.named_parameters())
         loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
@@ -436,15 +459,6 @@ class AriaMoELMModel(LlamaModel):
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
-                # We have mlp.experts.experts[0].gate_proj in the checkpoint.
-                # Since we handle the experts below in expert_params_mapping, we
-                # need to skip here BEFORE we update the name, otherwise name
-                # will be updated to mlp.experts.experts[0].gate_up_proj, which
-                # will then be updated below in expert_params_mapping for
-                # mlp.experts.experts[0].gate_gate_up_proj, which breaks load.
-                if (("mlp.experts.experts." in name)
-                        and name not in params_dict):
-                    continue
                 name = name.replace(weight_name, param_name)
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
@@ -458,39 +472,21 @@ class AriaMoELMModel(LlamaModel):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                for mapping in expert_params_mapping:
-                    param_name, weight_name, expert_id, shard_id = mapping
-                    if weight_name not in name:
-                        continue
-                    name = name.replace(weight_name, param_name)
+                # Skip loading extra bias for GPTQ models.
+                if name.endswith(".bias") and name not in params_dict:
+                    continue
+                # Remapping the name of FP8 kv-scale.
+                name = maybe_remap_kv_scale_name(name, params_dict)
+                if name is None:
+                    continue
 
-                    if is_pp_missing_parameter(name, self):
-                        continue
+                if is_pp_missing_parameter(name, self):
+                    continue
 
-                    param = params_dict[name]
-                    weight_loader = param.weight_loader
-                    weight_loader(param,
-                                  loaded_weight,
-                                  name,
-                                  shard_id=shard_id,
-                                  expert_id=expert_id)
-                    break
-                else:
-                    # Skip loading extra bias for GPTQ models.
-                    if name.endswith(".bias") and name not in params_dict:
-                        continue
-                    # Remapping the name of FP8 kv-scale.
-                    name = maybe_remap_kv_scale_name(name, params_dict)
-                    if name is None:
-                        continue
-
-                    if is_pp_missing_parameter(name, self):
-                        continue
-
-                    param = params_dict[name]
-                    weight_loader = getattr(param, "weight_loader",
-                                            default_weight_loader)
-                    weight_loader(param, loaded_weight)
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader",
+                                        default_weight_loader)
+                weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
 
@@ -696,6 +692,8 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
             },
             orig_to_new_suffix={
                 "router.weight": "router_weight",
+                # "experts.fc1.weight": "experts.w13_weight",
+                # "experts.fc2.weight": "experts.w2_weight",
             },
         )
 

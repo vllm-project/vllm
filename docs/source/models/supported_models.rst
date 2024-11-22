@@ -427,7 +427,7 @@ Text Generation
   * - :code:`AriaForConditionalGeneration`
     - Aria
     - T + I
-    - :code:`rhymes-ai/Aria-sequential_mlp`
+    - :code:`rhymes-ai/Aria`
     - 
     - ✅︎
   * - :code:`Blip2ForConditionalGeneration`
