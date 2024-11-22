@@ -329,6 +329,8 @@ class InternLM2ForCausalLM(nn.Module, SupportsPP):
         if init_model:
             self.model = InternLM2Model(vllm_config=vllm_config,
                                         prefix=maybe_prefix(prefix, "model"))
+            self.make_empty_intermediate_tensors = (
+                self.model.make_empty_intermediate_tensors)
         self.output = ParallelLMHead(config.vocab_size,
                                      config.hidden_size,
                                      quant_config=quant_config,
@@ -337,8 +339,6 @@ class InternLM2ForCausalLM(nn.Module, SupportsPP):
             self.output.weight = self.model.tok_embeddings.weight
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = get_sampler()
-        self.make_empty_intermediate_tensors = (
-            self.model.make_empty_intermediate_tensors)
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.get_input_embeddings(input_ids)

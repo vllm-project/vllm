@@ -165,3 +165,5 @@ class InternLM2VEForCausalLM(InternLM2ForCausalLM):
 
         self.model = InternLM2VEModel(vllm_config=vllm_config,
                                       prefix=maybe_prefix(prefix, "model"))
+        self.make_empty_intermediate_tensors = (
+            self.model.make_empty_intermediate_tensors)
