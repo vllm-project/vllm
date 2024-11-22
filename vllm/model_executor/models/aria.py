@@ -292,6 +292,7 @@ class MoELayer(nn.Module):
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
             quant_config=quant_config,
+            reduce_results=True,
         )
         self.shared_experts = LlamaMLP(
             config.hidden_size,
