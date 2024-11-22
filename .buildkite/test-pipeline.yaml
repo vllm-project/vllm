@@ -476,7 +476,6 @@ steps:
   - pytest -v -s distributed/test_pipeline_parallel.py
 
 - label: LoRA TP Test  (Distributed)
-
   num_gpus: 4
   soft_fail: true
   source_file_dependencies:
