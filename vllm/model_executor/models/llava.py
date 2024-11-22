@@ -204,7 +204,41 @@ def input_processor_for_llava(ctx: InputContext, inputs: DecoderOnlyInputs):
 
 class LlavaLikeConfig(Protocol):
     vision_config: PretrainedConfig
-    vision_feature_layer: int
+    vision_feature_layer: Union[int, List[int]]
+
+
+def _get_num_hidden_layers(hf_config: LlavaLikeConfig) -> int:
+    """Determine the number of hidden layers to initialize up to in the
+    visual encoder.
+    
+    Args:
+        hf_config: Model config with vision feature layer(s).
+    """
+    feature_layers = hf_config.vision_feature_layer
+    num_hidden_layers = hf_config.vision_config.num_hidden_layers
+    # If we have one feature layer, initialize up to that layer
+    if isinstance(feature_layers, int):
+        return _get_layer_index(feature_layers, num_hidden_layers)
+    # If we have multiple feature layers, initialize up to the deepest one
+    elif isinstance(feature_layers, (list, tuple)):
+        return max(
+            _get_layer_index(idx, num_hidden_layers) for idx in feature_layers)
+    raise TypeError(f"vision_layer_feature type: {type(feature_layers)}"
+                    " is not supported")
+
+
+def _get_layer_index(feature_layer_index: int, num_hidden_layers: int) -> int:
+    """Given an signed vision feature layer, get the number of hidden layers
+    needed to leverage it.
+
+    Args:
+        feature_layer_index: Index of a required layer in the visual encoder.
+        num_hidden_layers: The total number of hidden layers in the visual
+            encoder.
+    """
+    if feature_layer_index < 0:
+        return num_hidden_layers + feature_layer_index + 1
+    return feature_layer_index + 1
 
 
 def init_vision_tower_for_llava(
@@ -216,13 +250,8 @@ def init_vision_tower_for_llava(
 ):
     vision_config = hf_config.vision_config
 
-    # Initialize the vision tower only up to the required feature layer
-    vision_feature_layer = hf_config.vision_feature_layer
-    if vision_feature_layer < 0:
-        num_hidden_layers = hf_config.vision_config.num_hidden_layers \
-            + vision_feature_layer + 1
-    else:
-        num_hidden_layers = vision_feature_layer + 1
+    # Initialize the vision tower only up to the deepest required feature layer
+    num_hidden_layers = _get_num_hidden_layers(hf_config)
 
     if isinstance(vision_config, CLIPVisionConfig):
         return CLIPVisionModel(
