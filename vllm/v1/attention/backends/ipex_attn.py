@@ -114,7 +114,7 @@ class IPEXAttentionImpl(AttentionImpl):
             "key/v_scale is not supported in IPEXAttention.")
 
         output = torch.empty_like(query)
-        torch.ops.vllm.ipex_attn(
+        torch.ops.vllm.ipex_attn_chunked_prefill(
         # ipex_attn(
             output,
             query,
@@ -159,6 +159,78 @@ def ipex_attn_fake(output: torch.Tensor, query: torch.Tensor, key: torch.Tensor,
               alibi_slopes: Optional[torch.Tensor] = None,
               logits_soft_cap: Optional[float] = None,) -> None:
     pass
+
+@torch.library.custom_op("vllm::ipex_attn_chunked_prefill",
+                         mutates_args=["output", "kv_cache"])
+def ipex_attn_chunked_prefill(
+    output: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    num_heads: int,
+    head_size: int,
+    num_kv_heads: int,
+    kv_cache: torch.Tensor,
+    kv_cache_dtype: str,
+    k_scale: float,
+    v_scale: float,
+    scale: float,
+    sliding_window: Optional[List[int]] = None,
+    alibi_slopes: Optional[torch.Tensor] = None,
+    logits_soft_cap: Optional[float] = None,
+) -> None:
+    current_metadata = get_forward_context()
+    if current_metadata is None:
+        # Profiling run.
+        return
+    
+    assert current_metadata is not None
+    assert isinstance(current_metadata, IPEXAttentionMetadata)
+    attn_metadata: IPEXAttentionMetadata = current_metadata
+    num_actual_tokens = attn_metadata.num_actual_tokens
+    
+    query = query.view(-1, num_heads, head_size)
+    key = key.view(-1, num_kv_heads, head_size)
+    value = value.view(-1, num_kv_heads, head_size)
+    
+    # Reshape the input keys and values and store them in the cache.
+    key_cache = kv_cache[0]
+    value_cache = kv_cache[1]
+    
+    ipex_ops.reshape_and_cache(
+        key[:num_actual_tokens],
+        value[:num_actual_tokens],
+        key_cache,
+        value_cache,
+        attn_metadata.slot_mapping,
+        kv_cache_dtype,
+        k_scale,
+        v_scale,
+    )
+    
+    attn_output = torch.ops.torch_ipex.chunked_prefill(
+            query=query[:num_actual_tokens],
+            key=key,
+            value=value,
+            out_=output,
+            cu_seqlens_q=attn_metadata.query_start_loc,
+            cu_seqlens_k=attn_metadata.seq_start_loc,
+            seqused_k=None,
+            block_table=attn_metadata.block_table,
+            alibi_slopes_=alibi_slopes,
+            max_seqlen_q=attn_metadata.max_query_len,
+            max_seqlen_k=attn_metadata.max_seq_len,
+            p_dropout=0.0,
+            softmax_scale=scale,
+            zero_tensors=False,
+            is_causal=True,
+            return_softmax=False,
+            gen_=None,
+        )
+    attn_output = attn_output.view(num_actual_tokens, -1)
+    output[:num_actual_tokens].copy_(attn_output)
+
+
 # @torch.library.custom_op("vllm::ipex_attn",
 #                          mutates_args=["output", "kv_cache"])
 def ipex_attn(output: torch.Tensor, query: torch.Tensor, key: torch.Tensor,
