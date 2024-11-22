@@ -77,7 +77,8 @@ class StablelmAttention(nn.Module):
     def __init__(self,
                  config: PretrainedConfig,
                  cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None) -> None:
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = "") -> None:
         super().__init__()
         self.config = config
         self.hidden_size = config.hidden_size
@@ -131,7 +132,8 @@ class StablelmAttention(nn.Module):
                               self.scaling,
                               num_kv_heads=self.num_key_value_heads,
                               cache_config=cache_config,
-                              quant_config=quant_config)
+                              quant_config=quant_config,
+                              prefix=f"{prefix}.attn")
 
     def forward(
         self,
@@ -155,9 +157,13 @@ class StablelmDecoderLayer(nn.Module):
         config: PretrainedConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
-        self.self_attn = StablelmAttention(config, cache_config, quant_config)
+        self.self_attn = StablelmAttention(config,
+                                           cache_config,
+                                           quant_config,
+                                           prefix=f"{prefix}.self_attn")
         self.mlp = StablelmMLP(config, quant_config)
         norm_eps = getattr(config, "norm_eps",
                            getattr(config, "layer_norm_eps", 1e-05))
@@ -207,8 +213,8 @@ class StableLMEpochModel(nn.Module):
         )
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: StablelmDecoderLayer(config, cache_config,
-                                                quant_config),
+            lambda prefix: StablelmDecoderLayer(
+                config, cache_config, quant_config, prefix=prefix),
             prefix=f"{prefix}.layers",
         )
         norm_eps = getattr(config, "norm_eps",

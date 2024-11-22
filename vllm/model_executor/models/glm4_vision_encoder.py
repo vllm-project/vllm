@@ -135,11 +135,14 @@ class TransformerLayer(nn.Module):
         self,
         config,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = '',
     ):
         super().__init__()
         self.input_layernorm = LayerNorm(config.hidden_size,
                                          eps=config.layer_norm_eps)
-        self.attention = Attention(config, quant_config=quant_config)
+        self.attention = Attention(config,
+                                   quant_config=quant_config,
+                                   prefix=f"{prefix}.attention")
         self.mlp = MLP(config, quant_config=quant_config)
         self.post_attention_layernorm = LayerNorm(config.hidden_size,
                                                   eps=config.layer_norm_eps)
@@ -161,10 +164,13 @@ class Transformer(nn.Module):
         self,
         config,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = '',
     ):
         super().__init__()
         self.layers = nn.ModuleList([
-            TransformerLayer(config, quant_config=quant_config)
+            TransformerLayer(config,
+                             quant_config=quant_config,
+                             prefix=f"{prefix}.layer.{_}")
             for _ in range(config.num_hidden_layers)
         ])
 
@@ -252,12 +258,14 @@ class EVA2CLIPModel(nn.Module):
         self,
         config,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = '',
     ):
         super().__init__()
         vision_config = Namespace(**config.vision_config)
         self.patch_embedding = PatchEmbedding(vision_config)
         self.transformer = Transformer(vision_config,
-                                       quant_config=quant_config)
+                                       quant_config=quant_config,
+                                       prefix=f"{prefix}.transformer")
         self.linear_proj = GLU(config,
                                in_features=config.hidden_size,
                                quant_config=quant_config)

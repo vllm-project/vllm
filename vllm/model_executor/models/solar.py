@@ -167,6 +167,7 @@ class SolarAttention(nn.Module):
             num_kv_heads=self.num_kv_heads,
             cache_config=cache_config,
             quant_config=quant_config,
+            prefix=f"{prefix}.attn",
         )
 
     def forward(
