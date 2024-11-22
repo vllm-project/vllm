@@ -78,7 +78,7 @@
         {%- if messages[0]['content'] is string %}
             {%- set first_user_message = messages[0]['content']|trim %}
         {%- else %}
-            {%- set first_user_message = messages[0]['content']['text']|trim %}
+            {%- set first_user_message = messages[0]['content'] | selectattr('type', 'equalto', 'text') | map(attribute='text') | map('trim') | join('\n') %}
         {%- endif %}
         {%- set messages = messages[1:] %}
     {%- else %}
@@ -127,7 +127,11 @@
         {%- if message.content is string %}
             {{- { "output": message.content } | tojson }}
         {%- else %}
-            {{- message.content | tojson }}
+            {%- for content in message['content']  %}
+                {%- if content['type']  == 'text' %}
+                    {{- { "output": content['text']  } | tojson }}
+                {%- endif %}
+            {%- endfor %}
         {%- endif %}
         {{- "<|eot_id|>" }}
     {%- endif %}
