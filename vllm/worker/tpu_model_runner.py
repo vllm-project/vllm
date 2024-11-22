@@ -3,7 +3,7 @@
 import enum
 import time
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple,
+from typing import (TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, Set,
                     Type, Union)
 from unittest.mock import patch
 
@@ -17,8 +17,12 @@ from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import VllmConfig
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.logger import init_logger
+from vllm.lora.layers import LoRAMapping
+from vllm.lora.request import LoRARequest
+from vllm.lora.worker_manager import LRUCacheWorkerLoRAManager
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.model_loader import get_model
+from vllm.model_executor.models import supports_lora
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import (CompletionSequenceGroupOutput, IntermediateTensors,
                            Logprob, SequenceGroupMetadata, SequenceOutput)
@@ -62,6 +66,8 @@ class ModelInputForTPU(ModelRunnerInputBase):
     num_samples: int
     n: List[int]
     seq_groups: List[List[int]]
+    lora_mapping: Optional["LoRAMapping"] = None
+    lora_requests: Optional[Set[LoRARequest]] = None
     is_first_multi_step: bool = True
     is_last_step: bool = True
     virtual_engine: int = 0
@@ -72,6 +78,8 @@ class ModelInputForTPU(ModelRunnerInputBase):
         tensor_dict = {
             "token_ids": self.token_ids,
             "position_ids": self.position_ids,
+            "lora_requests": self.lora_requests,
+            "lora_mapping": self.lora_mapping,
             "input_lens": self.input_lens,
             "t": self.t,
             "p": self.p,
@@ -122,6 +130,9 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             False,
         )
         self.cached_step_outputs: List[torch.Tensor] = []
+        
+        # LoRA support
+        self.lora_manager: Optional[LRUCacheWorkerLoRAManager] = None
 
         smem_size = 512 * 1024
         block_table_size = 4 * self.block_tables.size
@@ -154,16 +165,37 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             model = get_model(vllm_config=self.vllm_config)
         model = model.eval()
         xm.wait_device_ops()
-        model = ModelWrapper(model)
+        self.model = model
+        
+        if self.lora_config:
+            assert supports_lora(
+                self.model
+            ), f"{self.model.__class__.__name__} does not support LoRA yet."
+
+            max_pos_embeddings = self.model.config.max_position_embeddings
+            
+            self.lora_manager = LRUCacheWorkerLoRAManager(
+                self.scheduler_config.max_num_seqs,
+                self.scheduler_config.max_num_batched_tokens,
+                self.model_config.get_vocab_size(),
+                self.lora_config,
+                self.device,
+                self.model.embedding_modules,
+                self.model.embedding_padding_modules,
+                max_position_embeddings=max_pos_embeddings,
+            )
+            self.model = self.lora_manager.create_lora_manager(self.model)
+        
+        self.model = ModelWrapper(self.model)
         self.model = torch.compile(model,
-                                   backend="openxla",
-                                   fullgraph=True,
-                                   dynamic=False)
+                        backend="openxla",
+                        fullgraph=True,
+                        dynamic=False)
 
     def get_model(self) -> nn.Module:
         return self.model.model
 
-    def _dummy_run(
+    def _dummy_run( # KRAI-TODO: Add lora config here
         self,
         batch_size: int,
         seq_len: int,
@@ -600,6 +632,15 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         num_steps: int = 1,
     ) -> List[SamplerOutput]:
         assert intermediate_tensors is None
+        
+        print(f"\e[0;31m SELF LORA CONFIG {self.lora_config} \033[0m")
+        
+        if self.lora_config:
+            assert model_input.lora_requests is not None
+            assert model_input.lora_mapping is not None
+            self.set_active_loras(model_input.lora_requests,
+                                  model_input.lora_mapping)
+        
         if not model_input.is_first_multi_step:
             if not model_input.is_last_step:
                 return []
@@ -765,7 +806,38 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
             sampler_output = _make_decode_output(next_token_ids,
                                                  model_input.seq_groups)
             return [sampler_output]
+        
+    def remove_all_loras(self):
+        if not self.lora_manager:
+            raise RuntimeError("LoRA is not enabled.")
+        self.lora_manager.remove_all_adapters()
 
+    def set_active_loras(self, lora_requests: Set[LoRARequest],
+                         lora_mapping: LoRAMapping) -> None:
+        if not self.lora_manager:
+            raise RuntimeError("LoRA is not enabled.")
+        print("\e[0;31mSetting active loras\033[0m")
+        self.lora_manager.set_active_adapters(lora_requests, lora_mapping)
+
+    def add_lora(self, lora_request: LoRARequest) -> bool:
+        if not self.lora_manager:
+            raise RuntimeError("LoRA is not enabled.")
+        return self.lora_manager.add_adapter(lora_request)
+
+    def remove_lora(self, lora_id: int) -> bool:
+        if not self.lora_manager:
+            raise RuntimeError("LoRA is not enabled.")
+        return self.lora_manager.remove_adapter(lora_id)
+
+    def pin_lora(self, lora_id: int) -> bool:
+        if not self.lora_manager:
+            raise RuntimeError("LoRA is not enabled.")
+        return self.lora_manager.pin_adapter(lora_id)
+
+    def list_loras(self) -> Set[int]:
+        if not self.lora_manager:
+            raise RuntimeError("LoRA is not enabled.")
+        return self.lora_manager.list_adapters()
 
 class ModelWrapper(nn.Module):
 
