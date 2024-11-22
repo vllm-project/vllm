@@ -5,9 +5,11 @@ from typing import Any, List, Type, Union
 import llguidance  # type: ignore[import-untyped]
 import numpy as np
 import torch
-from vllm.model_executor.guided_decoding.guidance_utils import TransformersTokenizer, LLInterpreterResponse
 from pydantic import BaseModel
 from transformers import PreTrainedTokenizerBase
+
+from vllm.model_executor.guided_decoding.guidance_utils import (
+    LLInterpreterResponse, TransformersTokenizer)
 
 
 class GuidanceLogitsProcessor:
@@ -56,14 +58,16 @@ class GuidanceLogitsProcessor:
             elif isinstance(self.guide, BaseModel):
                 schema = json.dumps(self.guide.model_json_schema())
             else:
-                schema = self.guide
+                schema = str(self.guide)
 
             whitespaces_config = {}
             if isinstance(self.whitespace_pattern, str):
                 whitespaces_config = json.loads(self.whitespace_pattern)
 
-            whitespace_flexible = whitespaces_config.get("whitespace_flexible", False)
-            compiler = llguidance.JsonCompiler(whitespace_flexible=whitespace_flexible)
+            whitespace_flexible = whitespaces_config.get(
+                "whitespace_flexible", False)
+            compiler = llguidance.JsonCompiler(
+                whitespace_flexible=whitespace_flexible)
             self.serialized_grammar = json.loads(compiler.compile(schema))
         elif self.mode.lower() in ["regex", "choice"]:
             compiler = llguidance.RegexCompiler()
