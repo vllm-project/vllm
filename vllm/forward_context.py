@@ -15,8 +15,11 @@ class ForwardContext:
 _forward_context: Optional[ForwardContext] = None
 
 
-def get_forward_context() -> Optional[ForwardContext]:
+def get_forward_context() -> ForwardContext:
     """Get the current forward context."""
+    assert _forward_context is not None, (
+        "Forward context is not set. "
+        "Please use `set_forward_context` to set the forward context.")
     return _forward_context
 
 

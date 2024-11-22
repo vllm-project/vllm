@@ -140,7 +140,6 @@ def unified_attention(
     layer_name: str,
 ) -> torch.Tensor:
     forward_context: ForwardContext = get_forward_context()
-    assert forward_context is not None
     attn_metadata = forward_context.dynamic_forward_context
     self = forward_context.static_forward_context[layer_name]
     return self.impl.forward(query,

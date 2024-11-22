@@ -174,7 +174,6 @@ def unified_v1_flash_attention(
     logits_soft_cap: Optional[float] = None,
 ) -> None:
     context = get_forward_context()
-    assert context is not None
     current_metadata = context.dynamic_forward_context
     if current_metadata is None:
         # Profiling run.
