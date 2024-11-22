@@ -61,13 +61,5 @@ class LoRAModelRunnerMixin:
         if not self.lora_manager:
             raise RuntimeError("LoRA is not enabled.")
 
-        lora_mapping, lora_request_ids = request_batch.prepare_lora_inputs(num_scheduled_tokens)
-
-        # Get lora requests
-        # TODO (varun) : LoRA request batch assumes that the adapters are uniquely identifiable based
-        # on the lora ID --- Use that here for better or worse !
-        lora_requests = map(lambda req_id: self.requests[req_id].lora_request ,lora_request_ids) 
-        lora_requests = filter(lambda x: x is not None, lora_requests)
-        lora_requests: set[LoRARequest] = set(lora_requests)
-
+        lora_mapping, lora_requests = request_batch.prepare_lora_inputs(num_scheduled_tokens)
         self.lora_manager.set_active_adapters(lora_requests, lora_mapping)

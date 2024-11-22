@@ -59,6 +59,7 @@ class LoRARequestBatch(RequestBatchAbstract):
         self.req_id_to_lora_id: Dict[str, LoRAID] = {}
         self.lora_id_to_batch: Dict[LoRAID, RequestBatch] = \
             {self.NO_LORA_ID: self._make_request_batch()} 
+        self.lora_id_to_lora_request: Dict[LoRAID, LoRARequest] = {}
 
     def remove_requests(self, req_ids: List[str]) -> None:
         for req_id in req_ids:
@@ -72,8 +73,15 @@ class LoRARequestBatch(RequestBatchAbstract):
         Add the new or resumed requests to the persistent batch.
         """
         lora_id: LoRAID = self._get_lora_id_from_request(request) 
-        if not lora_id in self.lora_id_to_batch:
+        if lora_id not in self.lora_id_to_batch:
             self.lora_id_to_batch[lora_id] = self._make_request_batch()
+            self.lora_id_to_lora_request[lora_id] = request.lora_request
+
+        # Requests with the same LoRA ID must have the same LoRA request
+        assert self.lora_id_to_lora_request[lora_id] == request.lora_request, \
+            ("Encountered 2 different LoRA requests with the same LoRA ID"
+             f"LoRA request A : {self.lora_id_to_lora_request[lora_id]}"
+             f"LoRA request B : {request.lora_request}")
 
         self.lora_id_to_batch[lora_id].add_request(request)
         self.req_id_to_lora_id[request.req_id] = lora_id
@@ -235,13 +243,11 @@ class LoRARequestBatch(RequestBatchAbstract):
             max_num_logprobs=self.max_num_logprobs(),
         )
 
-    def prepare_lora_inputs(self,
-                         num_scheduled_tokens: np.array) -> Tuple[LoRAMapping, List[str]]:
-
+    def prepare_lora_inputs(self, num_scheduled_tokens: np.array) \
+            -> Tuple[LoRAMapping, set[LoRARequest]]:
         """
-        Construct and return LoRAMapping and a list of all lora request ids.
+        Construct and return LoRAMapping and the set of all LoRA Requests.
         """
-
         def batch_num_prompt_mapping(batch: RequestBatch,
                                      batch_req_offset: int):
             if batch.no_prompt_logprob():
@@ -263,11 +269,11 @@ class LoRARequestBatch(RequestBatchAbstract):
             return num_prompt_mapping
 
         num_tokens: int = np.sum(num_scheduled_tokens)
-        lora_request_ids: List[str] = []
         index_mapping: np.array = np.empty((num_tokens,), dtype=np.int32)
         # prompt_mapping could be as big as num_tokens depending on the
         # requests requesting prompt_logprobs
         prompt_mapping: np.array = np.empty((num_tokens,), dtype=np.int32)
+        lora_requests: set[LoRARequest] = set()
 
         token_offset: int = 0
         req_offset: int = 0
@@ -278,7 +284,7 @@ class LoRARequestBatch(RequestBatchAbstract):
                 continue
 
             if lora_id != self.NO_LORA_ID:
-                lora_request_ids.extend(list(batch.request_id_to_index().keys()))
+                lora_requests.add(self.lora_id_to_lora_request[lora_id])
 
             batch_num_tokens = np.sum(num_scheduled_tokens[req_offset:req_offset + batch_num_reqs])
             index_mapping[token_offset : token_offset + batch_num_tokens] = lora_id
@@ -295,4 +301,4 @@ class LoRARequestBatch(RequestBatchAbstract):
         # needs some investigation.
         return LoRAMapping(index_mapping = tuple(index_mapping[:token_offset]),
                            prompt_mapping = tuple(prompt_mapping[:prompt_mapping_offset]),
-                           is_prefill=True), lora_request_ids
+                           is_prefill=True), lora_requests
