@@ -84,3 +84,5 @@ class CpuPlatform(Platform):
                             "distributed executor backend."),
                            parallel_config.distributed_executor_backend)
             parallel_config.distributed_executor_backend = "mp"
+        if parallel_config.worker_cls == "auto":
+            parallel_config.worker_cls = "vllm.worker.cpu_worker.CPUWorker"

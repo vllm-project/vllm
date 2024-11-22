@@ -90,7 +90,7 @@ class MultiprocessingGPUExecutor(DistributedGPUExecutor):
                     result_handler,
                     partial(
                         create_worker,
-                        **self._get_create_worker_kwargs(
+                        **self._get_worker_kwargs(
                             rank=rank,
                             local_rank=rank,
                             distributed_init_method=distributed_init_method,
