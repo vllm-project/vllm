@@ -7,11 +7,11 @@ from torch.nn.init import trunc_normal_
 from transformers import LlamaConfig
 
 from vllm.attention import AttentionMetadata
-from vllm.config import CacheConfig, LoRAConfig, QuantizationConfig, VllmConfig
+from vllm.config import CacheConfig, QuantizationConfig, VllmConfig
+from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.inputs import INPUT_REGISTRY, token_inputs
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.fused_moe import FusedMoE
-from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                MergedColumnParallelLinear,
                                                RowParallelLinear)
@@ -26,8 +26,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.models.idefics2_vision_model import (
     Idefics2VisionTransformer)
 from vllm.model_executor.models.interfaces import SupportsMultiModal
-from vllm.model_executor.models.llama import (LlamaAttention,
-                                              LlamaDecoderLayer, LlamaMLP,
+from vllm.model_executor.models.llama import (LlamaDecoderLayer, LlamaMLP,
                                               LlamaModel)
 from vllm.model_executor.models.utils import (AutoWeightsLoader, WeightsMapper,
                                               is_pp_missing_parameter,
@@ -41,7 +40,6 @@ from vllm.multimodal.utils import (cached_get_tokenizer,
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.aria import (AriaMoELMConfig,
                                                   AriaVisionConfig)
-from vllm.distributed import get_tensor_model_parallel_rank
 
 
 class AriaVisionTransformer(Idefics2VisionTransformer):
@@ -269,28 +267,31 @@ class AriaProjector(nn.Module):
 
 class AriaFusedMoE(FusedMoE):
 
-    def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor, shard_id: str) -> Set[str]:
+    def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor,
+                      shard_id: str) -> Set[str]:
         # Override the weight_loader to handle the expert weights in the Aria
         # model, which are already packed with experts, and merge the gate and
         # up weights for each expert.
         # Note: Loading expert weights with quantization is not supported
         tp_rank = get_tensor_model_parallel_rank()
         if shard_id == 'w13':
-            # the shape of loaded_weight is (num_experts, hidden_size, 2 * moe_intermediate_size)
+            # the shape of loaded_weight is
+            # (num_experts, hidden_size, 2 * moe_intermediate_size)
             if self.tp_size > 1:
                 up, gate = loaded_weight.chunk(2, dim=-1)
                 up_current_rank = up.chunk(self.tp_size, dim=-1)[tp_rank]
                 gate_current_rank = gate.chunk(self.tp_size, dim=-1)[tp_rank]
-                up_and_gate = torch.cat(
-                    [up_current_rank, gate_current_rank], dim=-1
-                ).transpose(1, 2)
+                up_and_gate = torch.cat([up_current_rank, gate_current_rank],
+                                        dim=-1).transpose(1, 2)
                 param.data.copy_(up_and_gate)
             else:
                 param.data.copy_(loaded_weight.transpose(1, 2))
         elif shard_id == 'w2':
-            # the shape of loaded_weight is (num_experts, moe_intermediate_size, hidden_size)
+            # the shape of loaded_weight is
+            # (num_experts, moe_intermediate_size, hidden_size)
             if self.tp_size > 1:
-                down_current_rank = loaded_weight.chunk(self.tp_size, dim=1)[self.tp_rank]
+                down_current_rank = loaded_weight.chunk(self.tp_size,
+                                                        dim=1)[self.tp_rank]
                 param.data.copy_(down_current_rank.transpose(1, 2))
             else:
                 param.data.copy_(loaded_weight.transpose(1, 2))
@@ -309,7 +310,6 @@ class MoELayer(nn.Module):
         self,
         config: AriaMoELMConfig,
         quant_config: Optional[QuantizationConfig],
-        lora_config: Optional[LoRAConfig],
     ) -> None:
         super().__init__()
         self.config = config
@@ -365,13 +365,10 @@ class MoEDecoderLayer(LlamaDecoderLayer):
         config: LlamaConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
-        lora_config: Optional[LoRAConfig] = None,
         prefix: str = "",
     ) -> None:
-        super().__init__(config, cache_config, quant_config, lora_config, prefix)
-        self.mlp = MoELayer(config,
-                            quant_config=quant_config,
-                            lora_config=lora_config)
+        super().__init__(config, cache_config, quant_config, prefix)
+        self.mlp = MoELayer(config, quant_config=quant_config)
 
 
 class AriaMoELMModel(LlamaModel):
@@ -402,26 +399,6 @@ class AriaMoELMModel(LlamaModel):
             ),
             prefix=f"{prefix}.layers",
         )
-
-    # Adapted from FusedMoE.make_expert_params_mapping with the modification
-    # of changing the prefix of the weight names
-    def _make_expert_params_mapping(
-            self, ckpt_gate_proj_name: str, ckpt_down_proj_name: str,
-            ckpt_up_proj_name: str,
-            num_experts: int) -> List[Tuple[str, str, int, str]]:
-
-        return [
-            # (param_name, weight_name, expert_id, shard_id)
-            ("experts.w13_" if weight_name
-             in [ckpt_gate_proj_name, ckpt_up_proj_name] else "experts.w2_",
-             f"experts.experts.{expert_id}.{weight_name}.", expert_id, shard_id
-             ) for expert_id in range(num_experts)
-            for shard_id, weight_name in [
-                ("w1", ckpt_gate_proj_name),
-                ("w2", ckpt_down_proj_name),
-                ("w3", ckpt_up_proj_name),
-            ]
-        ]
 
     # Adapted from LlamaModel.load_weights with the modification of adding
     # the expert weights mapping to `stacked_params_mapping`
