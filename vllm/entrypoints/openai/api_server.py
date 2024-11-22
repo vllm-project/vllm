@@ -594,7 +594,8 @@ def init_app_state(
         model_config,
         base_model_paths,
         request_logger=request_logger
-    ) if model_config.task == "embedding" else None
+    ) if (model_config.task == "embedding" \
+          and model_config.is_cross_encoder) else None
     state.openai_serving_tokenization = OpenAIServingTokenization(
         engine_client,
         model_config,
