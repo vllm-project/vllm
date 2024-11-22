@@ -100,12 +100,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Request states.
         self.requests: Dict[str, CachedRequestState] = {}
         # Persistent batch. All tensors maintained by the batch are on the CPU.
-        self.request_batch = LoRARequestBatch(
-            max_num_reqs=self.scheduler_config.max_num_seqs,
-            max_model_len=self.max_model_len,
-            max_num_blocks_per_req=self.max_num_blocks_per_req,
-            pin_memory=self.pin_memory,
-        )
+        request_batch_kwargs = {'max_num_reqs' : self.scheduler_config.max_num_seqs,
+                              'max_model_len' : self.max_model_len,
+                              'max_num_blocks_per_req' : self.max_num_blocks_per_req,
+                              'pin_memory' : self.pin_memory}
+        self.request_batch = LoRARequestBatch(**request_batch_kwargs) \
+                    if self.lora_config else RequestBatch(**request_batch_kwargs)
 
         # Device Tensors
         self.device_tensors = ModelRunnerDeviceTensors.make(
@@ -523,9 +523,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             logprobs = None
         else:
             logprobs = sampler_output.logprobs.cpu()
+
+        req_id_to_index: Dict[str, int] = {req_id : idx for idx, req_id in enumerate(self.request_batch.request_ids())}
         model_runner_output = ModelRunnerOutput(
             req_ids=self.request_batch.request_ids(),
-            req_id_to_index={req_id : idx for idx, req_id in self.request_batch.request_ids()},
+            req_id_to_index=req_id_to_index,
             sampled_token_ids_cpu=sampled_token_ids,
             logprob_token_ids_cpu=logprob_token_ids,
             logprobs_cpu=logprobs,
