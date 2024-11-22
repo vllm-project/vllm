@@ -1,5 +1,5 @@
 from functools import partial
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Type, Union
 
 import torch
 from torch import nn
@@ -250,11 +250,12 @@ class InternLMDecoderLayer(nn.Module):
 @support_torch_compile
 class InternLM2Model(nn.Module):
 
-    def __init__(self,
-                 *,
-                 vllm_config: VllmConfig,
-                 prefix: str = "",
-                 layer_type: type = InternLMDecoderLayer):
+    def __init__(
+            self,
+            *,
+            vllm_config: VllmConfig,
+            prefix: str = "",
+            layer_type: Type[InternLMDecoderLayer] = InternLMDecoderLayer):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
@@ -324,7 +325,7 @@ class InternLM2ForCausalLM(nn.Module, SupportsPP):
                  *,
                  vllm_config: VllmConfig,
                  prefix: str = "",
-                 model_type: type = InternLM2Model):
+                 model_type: Type[InternLM2Model] = InternLM2Model):
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
