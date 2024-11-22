@@ -173,7 +173,8 @@ def unified_v1_flash_attention(
     alibi_slopes: Optional[torch.Tensor] = None,
     logits_soft_cap: Optional[float] = None,
 ) -> None:
-    current_metadata = get_forward_context()
+    context = get_forward_context()
+    current_metadata = context.dynamic_forward_context
     if current_metadata is None:
         # Profiling run.
         return

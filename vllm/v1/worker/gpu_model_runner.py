@@ -447,7 +447,7 @@ class GPUModelRunner:
 
         # Run the decoder.
         # Use persistent buffers for CUDA graphs.
-        with set_forward_context(attn_metadata):
+        with set_forward_context(attn_metadata, self.vllm_config):
             hidden_states = self.model(
                 input_ids=None,
                 positions=self.positions[:num_input_tokens],
@@ -523,7 +523,7 @@ class GPUModelRunner:
         num_tokens: int,
         kv_caches: List[torch.Tensor],
     ) -> torch.Tensor:
-        with set_forward_context(None):
+        with set_forward_context(None, self.vllm_config):
             hidden_states = model(
                 input_ids=None,
                 positions=self.positions[:num_tokens],

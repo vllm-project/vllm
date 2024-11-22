@@ -192,6 +192,7 @@ class MiniCPMAttention(nn.Module):
         max_position_embeddings: int = 8192,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -246,7 +247,8 @@ class MiniCPMAttention(nn.Module):
                               self.scaling,
                               num_kv_heads=self.num_kv_heads,
                               cache_config=cache_config,
-                              quant_config=quant_config)
+                              quant_config=quant_config,
+                              prefix=f"{prefix}.attn")
 
     def forward(
         self,
@@ -273,6 +275,7 @@ class MiniCPMDecoderLayer(nn.Module):
         config: PretrainedConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.config = config
@@ -283,6 +286,7 @@ class MiniCPMDecoderLayer(nn.Module):
         self.rope_scaling = getattr(config, "rope_scaling", None)
         self.max_position_embeddings = getattr(config,
                                                "max_position_embeddings", 8192)
+        self.prefix = prefix
         self._init_attn_block()
         self._init_ffn_block()
 
@@ -298,6 +302,7 @@ class MiniCPMDecoderLayer(nn.Module):
             max_position_embeddings=self.max_position_embeddings,
             cache_config=self.cache_config,
             quant_config=self.quant_config,
+            prefix=f"{self.prefix}.self_attn",
         )
 
     def _init_ffn_block(self):
@@ -388,8 +393,8 @@ class MiniCPMModel(nn.Module):
     ):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: MiniCPMDecoderLayer(config, cache_config,
-                                               quant_config),
+            lambda prefix: MiniCPMDecoderLayer(
+                config, cache_config, quant_config, prefix=prefix),
             prefix=f"{prefix}.layers")
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:

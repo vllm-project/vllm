@@ -57,6 +57,10 @@ class DeviceCapability(NamedTuple):
 class Platform:
     _enum: PlatformEnum
     device_type: str
+    # available dispatch keys:
+    # check https://github.com/pytorch/pytorch/blob/313dac6c1ca0fa0cde32477509cce32089f8532a/torchgen/model.py#L134 # noqa
+    # use "CPU" as a fallback for platforms not registered in PyTorch
+    dispatch_key: str = "CPU"
 
     def is_cuda(self) -> bool:
         return self._enum == PlatformEnum.CUDA

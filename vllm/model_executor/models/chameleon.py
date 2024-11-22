@@ -223,6 +223,7 @@ class ChameleonAttention(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
         bias: bool = False,
         cache_config: Optional[CacheConfig] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -276,7 +277,8 @@ class ChameleonAttention(nn.Module):
                               self.scaling,
                               num_kv_heads=self.num_kv_heads,
                               cache_config=cache_config,
-                              quant_config=quant_config)
+                              quant_config=quant_config,
+                              prefix=f"{prefix}.attn")
 
     def _apply_qk_norm(self, q: torch.Tensor,
                        k: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -313,6 +315,7 @@ class ChameleonDecoderLayer(nn.Module):
         config: ChameleonConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -336,6 +339,7 @@ class ChameleonDecoderLayer(nn.Module):
             quant_config=quant_config,
             bias=False,
             cache_config=cache_config,
+            prefix=f"{prefix}.self_attn",
         )
         self.mlp = ChameleonMLP(
             hidden_size=self.hidden_size,
@@ -386,6 +390,7 @@ class ChameleonSwinDecoderLayer(nn.Module):
         config: ChameleonConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -409,6 +414,7 @@ class ChameleonSwinDecoderLayer(nn.Module):
             quant_config=quant_config,
             bias=False,
             cache_config=cache_config,
+            prefix=f"{prefix}.self_attn",
         )
         self.mlp = ChameleonMLP(
             hidden_size=self.hidden_size,
@@ -855,7 +861,8 @@ class ChameleonModel(nn.Module):
             config.num_hidden_layers,
             lambda prefix: decoder_layer(config=config,
                                          cache_config=cache_config,
-                                         quant_config=quant_config),
+                                         quant_config=quant_config,
+                                         prefix=prefix),
             prefix=f"{prefix}.layers",
         )
 

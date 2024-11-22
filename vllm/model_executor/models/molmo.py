@@ -370,6 +370,7 @@ class MolmoAttention(nn.Module):
         config: PretrainedConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -427,7 +428,8 @@ class MolmoAttention(nn.Module):
                               self.scaling,
                               num_kv_heads=self.num_kv_heads,
                               cache_config=cache_config,
-                              quant_config=quant_config)
+                              quant_config=quant_config,
+                              prefix=f"{prefix}.attn")
 
         # Attention output projection.
         self.o_proj = RowParallelLinear(
@@ -517,10 +519,14 @@ class MolmoDecoderLayer(nn.Module):
         config: PretrainedConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         # Attention block.
-        self.self_attn = MolmoAttention(config, cache_config, quant_config)
+        self.self_attn = MolmoAttention(config,
+                                        cache_config,
+                                        quant_config,
+                                        prefix=f"{prefix}.self_attn")
 
         # MLP block.
         self.mlp = MolmoMLP(config, quant_config=quant_config)
@@ -738,7 +744,8 @@ class MolmoModel(nn.Module):
             else MolmoDecoderLayer
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: decoder_layer(config, cache_config, quant_config),
+            lambda prefix: decoder_layer(
+                config, cache_config, quant_config, prefix=prefix),
             prefix=f"{prefix}.layers",
         )
 

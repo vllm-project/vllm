@@ -414,7 +414,7 @@ class ROCmFlashAttentionImpl(AttentionImpl):
         attn_metadata: ROCmFlashAttentionMetadata,
         k_scale: float = 1.0,
         v_scale: float = 1.0,
-        attn_type: AttentionType = AttentionType.DECODER,
+        attn_type: str = AttentionType.DECODER,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention and PagedAttention.
 

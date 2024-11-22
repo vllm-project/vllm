@@ -140,7 +140,7 @@ class HPUAttentionImpl(AttentionImpl, torch.nn.Module):
         attn_metadata: HPUAttentionMetadata,
         k_scale: float = 1.0,
         v_scale: float = 1.0,
-        attn_type: AttentionType = AttentionType.DECODER,
+        attn_type: str = AttentionType.DECODER,
     ) -> torch.Tensor:
         """Forward pass with xFormers and PagedAttention.
 
