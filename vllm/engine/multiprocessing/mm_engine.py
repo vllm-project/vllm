@@ -29,7 +29,7 @@ POLLING_TIMEOUT_MS = 10000
 HEALTHY_RESPONSE = (pickle.dumps(VLLM_RPC_SUCCESS_STR), )
 
 
-class MQLLMEngine:
+class MMLLMEngine:
     """A multiprocessing wrapper for :class:`LLMEngine`.
 
     This class is used to wrap the :class:`LLMEngine` class to enable use
@@ -67,14 +67,18 @@ class MQLLMEngine:
         # output is immediately pickled and send over the socket, which frees
         # the python object to be reused again.
         kwargs['use_cached_outputs'] = True
-
-        self.engine = LLMEngine(*args, **kwargs)
+        
+        # get configs from args and kwargs, determine how many models to load
+        models_load = []
+        self.engines  = []
+        for model in models_load:
+            self.engines.append(LLMEngine(model=model, *args, **kwargs))
         self.log_requests = log_requests
 
         self.use_async_sockets = use_async_sockets
-        if self.use_async_sockets:
-            self.engine.process_request_outputs_callback = \
-                self._async_socket_engine_callback
+        # if self.use_async_sockets:
+        #     self.engine.process_request_outputs_callback = \
+        #         self._async_socket_engine_callback
 
         self.ctx = zmq.Context()  # type: ignore[attr-defined]
 
@@ -143,7 +147,7 @@ class MQLLMEngine:
         """Cleanup zeromq state on shutdown."""
         # Closes all sockets and destroys context.
         self.ctx.destroy(linger=0)
-        del self.engine
+        del self.engines
 
     @contextmanager
     def make_data_socket(
@@ -166,7 +170,7 @@ class MQLLMEngine:
 
                 # Handle the query from the Client.
                 if request == RPCStartupRequest.IS_SERVER_READY:
-                    tracing_enabled = self.engine.is_tracing_enabled()
+                    tracing_enabled = self.engines[0].is_tracing_enabled()
                     response = RPCStartupResponse(
                         tracing_enabled=tracing_enabled)
 
@@ -180,13 +184,14 @@ class MQLLMEngine:
         """Core busy loop of the LLMEngine."""
 
         while True:
-            if not self.engine.has_unfinished_requests():
+            if not any(engine.has_unfinished_requests() for engine in self.engines):
                 # Poll until there is work to do.
                 while self.input_socket.poll(timeout=POLLING_TIMEOUT_MS) == 0:
                     # When there's no work, check on engine health and send
                     # health status back to client
                     self._health_check()
-                    self.engine.do_log_stats()
+                    for engine in self.engines:
+                        engine.do_log_stats()
                     logger.debug("Waiting for new requests in engine loop.")
 
             # Handle any input from the client.
@@ -202,7 +207,10 @@ class MQLLMEngine:
     def engine_step(self) -> List[RequestOutput]:
         """Engine step wrapper with error handling."""
         try:
-            return self.engine.step()
+            res = []
+            for engine in self.engines:
+                res.append(engine.step())
+            return res
         except SystemExit:
             raise
         except BaseException as e:
@@ -243,6 +251,7 @@ class MQLLMEngine:
             self._send_unhealthy(e)
             raise e
 
+    # FIXME: add model field in RPCProcessRequest, and dispatch to the correct engine
     def _handle_process_request(self, request: RPCProcessRequest):
         """Handle RPCProcessRequest by adding it to the LLMEngine."""
         request_id = request.request_id
@@ -279,6 +288,7 @@ class MQLLMEngine:
             # Remove request from the engine.
             self.engine.abort_request(request_id)
 
+    # FIXME: add model field in RPCAbortRequest, and dispatch to the correct engine
     def _handle_abort_request(self, request: RPCAbortRequest):
         self.engine.abort_request(request.request_id)
         if self.log_requests:
@@ -289,7 +299,8 @@ class MQLLMEngine:
         if self._errored_with is not None:
             self._send_unhealthy(self._errored_with)
         try:
-            self.engine.check_health()
+            for engine in self.engines:
+                engine.check_health()
             self._send_healthy()
         except Exception as e:
             self._set_errored(e)
@@ -334,27 +345,28 @@ class MQLLMEngine:
         if self._errored_with is None:
             self._errored_with = e
 
+    # only enable for engine(model) 0
     def start_profile(self) -> None:
-        if type(self.engine.model_executor) is GPUExecutor:
-            self.engine.model_executor.start_profile()
+        if type(self.engines[0].model_executor) is GPUExecutor:
+            self.engines[0].model_executor.start_profile()
         else:
-            self.engine.model_executor._run_workers("start_profile")
+            self.engines[0].model_executor._run_workers("start_profile")
 
     def stop_profile(self) -> None:
-        if type(self.engine.model_executor) is GPUExecutor:
-            self.engine.model_executor.stop_profile()
+        if type(self.engines[0].model_executor) is GPUExecutor:
+            self.engines[0].model_executor.stop_profile()
         else:
-            self.engine.model_executor._run_workers("stop_profile")
+            self.engines[0].model_executor._run_workers("stop_profile")
 
 
 def signal_handler(*_) -> None:
     raise KeyboardInterrupt("MQLLMEngine terminated")
 
 
-def run_mp_engine(engine_args: AsyncEngineArgs, usage_context: UsageContext,
+def run_mm_engine(engine_args: AsyncEngineArgs, usage_context: UsageContext,
                   ipc_path: str, engine_alive):
     try:
-        engine = MQLLMEngine.from_engine_args(engine_args=engine_args,
+        engine = MMLLMEngine.from_engine_args(engine_args=engine_args,
                                               usage_context=usage_context,
                                               ipc_path=ipc_path)
 
