@@ -44,25 +44,16 @@ class ColumnParallelLinearWithShardedLoRA(ColumnParallelLinearWithLoRA):
     Based on S-LoRA, slicing happens along the rank dim.
     """
 
+    # For all LoRA layers where the `base_layer` is `ColumnParallelLinear`,
+    # their `lora_a` and `lora_b` have different sharding patterns. After
+    # completing the `lora_a` GEMM , a gather operation is performed.
+    # Therefore, the sharding of `lora_a` only needs to correspond with the
+    # gather operation.
     def slice_lora_a(self, lora_a: torch.Tensor) -> torch.Tensor:
-        # Applicable to cases where the base_layer is
-        # MergedColumnParallelLinear.
-        if self.is_merged_col_linear:
-            tp_rank = get_tensor_model_parallel_rank()
-            shard_size = self.lora_a_stacked.shape[2] // 2
-            offset = lora_a.shape[-1] // 2
-            left_weight = lora_a[:, tp_rank * shard_size:(tp_rank + 1) *
-                                 shard_size]
-            right_weight = lora_a[:, offset + tp_rank * shard_size:offset +
-                                  (tp_rank + 1) * shard_size]
-            lora_a = torch.cat([left_weight, right_weight], dim=1)
-        # Applicable to cases where the base_layer is
-        # ColumnParallelLinear.
-        else:
-            tp_rank = get_tensor_model_parallel_rank()
-            shard_size = self.lora_a_stacked.shape[2]
-            start_idx = tp_rank * shard_size
-            lora_a = lora_a[:, start_idx:start_idx + shard_size]
+        tp_rank = get_tensor_model_parallel_rank()
+        shard_size = self.lora_a_stacked.shape[2]
+        start_idx = tp_rank * shard_size
+        lora_a = lora_a[:, start_idx:start_idx + shard_size]
         return lora_a
 
     def apply(self, x: torch.Tensor,

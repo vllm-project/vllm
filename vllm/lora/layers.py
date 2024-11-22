@@ -801,7 +801,7 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
 class QKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
     """
     ColumnParallelLinear layer that is specifically designed for
-    qkv_proj. Certain models, such as chtglm3 and baichuan-7b,
+    qkv_proj. Certain models, such as chatglm3 and baichuan-7b,
     only contains a single LoRA within their qkv_proj layer.
 
     During inference with Tensor Parallel, the weights of lora_b
