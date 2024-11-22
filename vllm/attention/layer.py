@@ -12,6 +12,7 @@ from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
+from vllm.platforms import current_platform
 from vllm.plugins import get_current_vllm_config
 from vllm.utils import direct_register_custom_op
 
@@ -90,7 +91,7 @@ class Attention(nn.Module):
                              alibi_slopes, sliding_window, kv_cache_dtype,
                              blocksparse_params, logits_soft_cap)
 
-        self.use_v1 = envs.VLLM_USE_V1
+        self.use_direct_call = envs.VLLM_USE_V1 or current_platform.is_tpu()
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
@@ -107,7 +108,7 @@ class Attention(nn.Module):
         attn_type: str = AttentionType.DECODER,
     ) -> torch.Tensor:
 
-        if self.use_v1:
+        if self.use_direct_call:
             return self.impl.forward(query,
                                      key,
                                      value,
