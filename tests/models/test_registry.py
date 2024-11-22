@@ -6,6 +6,8 @@ import torch.cuda
 from vllm.model_executor.models import (is_embedding_model,
                                         is_text_generation_model,
                                         supports_multimodal)
+# yapf conflicts with isort for this block
+# yapf: disable
 from vllm.model_executor.models.registry import (_CROSS_ENCODER_MODELS,
                                                  _EMBEDDING_MODELS,
                                                  _MULTIMODAL_MODELS,
