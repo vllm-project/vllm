@@ -39,13 +39,18 @@ def test_registry_imports(model_arch):
 
 
 @fork_new_process_for_each_test
-@pytest.mark.parametrize("model_arch,is_mm,init_cuda", [
-    ("LlamaForCausalLM", False, False),
-    ("MllamaForConditionalGeneration", True, False),
-    ("LlavaForConditionalGeneration", True, True),
+@pytest.mark.parametrize("model_arch,is_mm,init_cuda,is_ce", [
+    ("LlamaForCausalLM", False, False, False),
+    ("MllamaForConditionalGeneration", True, False, False),
+    ("LlavaForConditionalGeneration", True, True, False),
+    ("BertForSequenceClassification", False, False, True),
+    ("RobertaForSequenceClassification", False, False, True),
+    ("XLMRobertaForSequenceClassification", False, False, True),
 ])
-def test_registry_is_multimodal(model_arch, is_mm, init_cuda):
+def test_registry_model_property(model_arch, is_mm, init_cuda, is_ce):
     assert ModelRegistry.is_multimodal_model(model_arch) is is_mm
+
+    assert ModelRegistry.is_cross_encoder_model(model_arch) is is_ce
 
     if init_cuda and current_platform.is_cuda_alike():
         assert not torch.cuda.is_initialized()
@@ -56,17 +61,6 @@ def test_registry_is_multimodal(model_arch, is_mm, init_cuda):
                 "This model no longer initializes CUDA on import. "
                 "Please test using a different one.",
                 stacklevel=2)
-
-
-@fork_new_process_for_each_test
-@pytest.mark.parametrize("model_arch,is_ce", [
-    ("LlamaForCausalLM", False),
-    ("BertForSequenceClassification", True),
-    ("RobertaForSequenceClassification", True),
-    ("XLMRobertaForSequenceClassification", True),
-])
-def test_registry_is_cross_encoder(model_arch, is_ce):
-    assert ModelRegistry.is_cross_encoder_model(model_arch) is is_ce
 
 
 @fork_new_process_for_each_test
