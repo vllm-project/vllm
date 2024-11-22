@@ -75,14 +75,12 @@ def test_chatglm3_lora_tp4(chatglm3_lora_files):
                    trust_remote_code=True,
                    fully_sharded_loras=False)
 
-
     output1 = do_sample(llm, chatglm3_lora_files, lora_id=1)
     for i in range(len(EXPECTED_LORA_OUTPUT)):
         assert output1[i] == EXPECTED_LORA_OUTPUT[i]
     output2 = do_sample(llm, chatglm3_lora_files, lora_id=2)
     for i in range(len(EXPECTED_LORA_OUTPUT)):
         assert output2[i] == EXPECTED_LORA_OUTPUT[i]
-
 
 
 @multi_gpu_test(num_gpus=4)
