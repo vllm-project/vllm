@@ -5,6 +5,7 @@ from torch import fx as fx
 from vllm.config import CompilationConfig
 from vllm.logger import init_logger
 
+from .collective_fusion import CollectiveFusionPass
 from .fix_functionalization import FixFunctionalizationPass
 from .fusion import FusionPass
 from .inductor_pass import InductorPass
@@ -46,6 +47,9 @@ class PostGradPassManager:
 
         if pass_config.enable_fusion:
             self.passes += [FusionPass.instance(pass_config)]
+
+        if pass_config.enable_collective_fusion:
+            self.passes += [CollectiveFusionPass.instance(pass_config)]
 
         self.fix_functionalization = FixFunctionalizationPass(pass_config)
 

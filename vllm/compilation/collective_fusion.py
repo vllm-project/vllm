@@ -8,7 +8,7 @@ from torch._inductor.pattern_matcher import (Match, PatternMatcherPass,
 
 import vllm.envs as envs
 from vllm.config import CompilationConfig
-from vllm.compilation.inductor_pass import InductorPass
+from .vllm_inductor_pass import VllmInductorPass
 from vllm.compilation.utils import (find_auto_fn, find_fn, find_getitem,
                                     last_node_in_match)
 from vllm.distributed import (tensor_model_parallel_all_gather,
@@ -333,7 +333,7 @@ direct_register_custom_op("gemm_ag_final",
                           fake_impl=gemm_ag_final_fake)
 
 
-class CollectiveFusionPass(InductorPass):
+class CollectiveFusionPass(VllmInductorPass):
 
     _instance: 'Optional[CollectiveFusionPass]' = None
 
