@@ -2,7 +2,6 @@
 import gc
 import multiprocessing
 import os
-import time
 from dataclasses import dataclass
 from multiprocessing.process import BaseProcess
 from typing import TYPE_CHECKING, Optional, Tuple
@@ -245,17 +244,6 @@ class WorkerProcHandle:
                              zmq.constants.PUSH) as socket:
             socket.send_multipart(
                 (WorkerInitRequestType.BEGIN_MODEL_EXECUTION.value, ))
-
-    def terminate(self) -> None:
-        self.proc.terminate()
-        start_time = time.time()
-
-        while time.time() - start_time < 5:
-            if not self.proc.is_alive():
-                return  # Process terminated successfully
-            time.sleep(0.1)  # Short sleep to avoid CPU spinning
-
-        self.proc.kill()
 
 
 class WorkerProc:

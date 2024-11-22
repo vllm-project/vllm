@@ -1,3 +1,4 @@
+import atexit
 import os
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Tuple
@@ -20,8 +21,8 @@ logger = init_logger(__name__)
 class MultiprocessingGPUExecutor:
 
     def __init__(self, vllm_config: VllmConfig) -> None:
-        # Store early so we can count on using it at shutdown
-        self._TERMINATE_VALUE = ExecutorMsgType.TERMINATE.value
+        # Register self.shutdown so we can make sure to call it on exit
+        atexit.register(self.shutdown)
 
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
@@ -143,14 +144,16 @@ class MultiprocessingGPUExecutor:
 
     def shutdown(self):
         """Properly shut down the executor and its workers"""
-        termination_msg = ExecutorMsg(self._TERMINATE_VALUE, None)
-        self.scheduler_output_mq.enqueue(termination_msg)
-
-        # Shutdown the worker processes if needed.
-        self.run_on_workers('terminate')
+        if not (self._shutdown_called and hasattr(self, 'scheduler_output_mq')
+                and self.scheduler_output_mq is not None):
+            termination_msg = ExecutorMsg(ExecutorMsgType.TERMINATE.value,
+                                          None)
+            self.scheduler_output_mq.enqueue(termination_msg)
+            self.scheduler_output_mq = None
 
     def __del__(self):
-        self.shutdown()
+        if hasattr(self, 'shutdown'):
+            self.shutdown()
 
     def check_health(self) -> None:
         # GPUExecutor will always be healthy as long as
