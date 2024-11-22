@@ -676,7 +676,7 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
         return image_embeds
 
-    def process_mm_inputs(self, **kwargs):
+    def get_multimodal_embeddings(self, **kwargs):
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None
@@ -706,7 +706,7 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         if intermediate_tensors is not None:
             inputs_embeds = None
         elif inputs_embeds is None:
-            vision_embeddings = self.process_mm_inputs(**kwargs)
+            vision_embeddings = self.get_multimodal_embeddings(**kwargs)
             # always pass the input via `inputs_embeds`
             # to make sure the computation graph is consistent
             inputs_embeds = self.get_input_embeddings(input_ids,
