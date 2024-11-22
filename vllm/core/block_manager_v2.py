@@ -13,6 +13,7 @@ from vllm.core.block.utils import check_no_caching_or_swa_for_blockmgr_encdec
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
 from vllm.utils import Device
+from vllm.worker.swap.interface import SwapSpaceManagerBase
 
 SeqId = int
 EncoderSeqId = str
@@ -67,6 +68,9 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         watermark: float = 0.01,
         sliding_window: Optional[int] = None,
         enable_caching: bool = False,
+        enable_memory_tiering: bool = False,
+        enable_chunked_prefill: bool = False,
+        swap_manager: Optional[SwapSpaceManagerBase] = None,
     ) -> None:
         self.block_size = block_size
         self.num_total_gpu_blocks = num_gpu_blocks
@@ -89,6 +93,8 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         assert watermark >= 0.0
 
         self.enable_caching = enable_caching
+        self.enable_memory_tiering = enable_memory_tiering
+        self.enable_chunked_prefill = enable_chunked_prefill
 
         self.watermark_blocks = int(watermark * num_gpu_blocks)
 
@@ -100,6 +106,10 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         )
 
         self.block_tables: Dict[SeqId, BlockTable] = {}
+        # Mappng: seq_id -> BlockTable (CPU):
+        # Only used for eviction from HBM to DRAM
+        self.evict_block_tables: Dict[SeqId, BlockTable] = {}
+
         self.cross_block_tables: Dict[EncoderSeqId, BlockTable] = {}
 
         self._computed_blocks_tracker = ComputedBlocksTracker(
@@ -135,8 +145,8 @@ class BlockSpaceManagerV2(BlockSpaceManager):
             device=Device.GPU)
 
         # Use watermark to avoid frequent cache eviction.
-        if (self.num_total_gpu_blocks - num_required_blocks <
-                self.watermark_blocks):
+        if (self.num_total_gpu_blocks - num_required_blocks
+                < self.watermark_blocks):
             return AllocStatus.NEVER
         if num_free_gpu_blocks - num_required_blocks >= self.watermark_blocks:
             return AllocStatus.OK
@@ -153,7 +163,11 @@ class BlockSpaceManagerV2(BlockSpaceManager):
 
         return block_table
 
-    def allocate(self, seq_group: SequenceGroup) -> None:
+    #TODO: Support BlockManagerV2
+    def allocate(
+        self, seq_group: SequenceGroup
+    ) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int]], List[Tuple[
+            int, int, int, int]], List[Tuple[int, int, int, int]]]:
 
         # Allocate self-attention block tables for decoder sequences
         waiting_seqs = seq_group.get_seqs(status=SequenceStatus.WAITING)
@@ -195,6 +209,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
             assert encoder_seq is not None
             block_table = self._allocate_sequence(encoder_seq)
             self.cross_block_tables[request_id] = block_table
+        return [], [], [], []
 
     def can_append_slots(self, seq_group: SequenceGroup,
                          num_lookahead_slots: int) -> bool:
@@ -229,7 +244,9 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         self,
         seq: Sequence,
         num_lookahead_slots: int,
-    ) -> List[Tuple[int, int]]:
+    ) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int]], List[Tuple[
+            int, int]], List[Tuple[int, int, int, int]], List[Tuple[
+                int, int, int, int]]]:
 
         block_table = self.block_tables[seq.seq_id]
 
@@ -240,7 +257,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         )
         # Return any new copy-on-writes.
         new_cows = self.block_allocator.clear_copy_on_writes()
-        return new_cows
+        return new_cows, [], [], [], []
 
     def free(self, seq: Sequence) -> None:
         seq_id = seq.seq_id
@@ -348,7 +365,32 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         return self._can_swap(seq_group, Device.GPU, SequenceStatus.SWAPPED,
                               num_lookahead_slots)
 
-    def swap_in(self, seq_group: SequenceGroup) -> List[Tuple[int, int]]:
+    def adjust_swap(
+        self,
+        new_swap_in: List[Tuple[int, int]],
+        new_swap_out: List[Tuple[int, int]],
+        old_swap_in: List[Tuple[int, int]],
+        old_swap_out: List[Tuple[int, int]],
+        old_swap_copy: List[Tuple[int, int]],
+    ) -> None:
+        #TODO: Add support. Only do basic for now
+        old_swap_out.extend(new_swap_out)
+        old_swap_in.extend(new_swap_in)
+        return
+
+    def free_evict(self, seq: Sequence) -> None:
+        #TODO: Add support
+        raise NotImplementedError("Block level swap not implemented for "
+                                  "Block Manager V2 yet")
+
+    def make_swappable(self, seq: Sequence) -> None:
+        raise NotImplementedError("Context Caching with block level "
+                                  "not implemented for Block Manager V2")
+
+    def swap_in(
+        self, seq_group: SequenceGroup
+    ) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int]], List[Tuple[
+            int, int, int, int]], List[Tuple[int, int, int, int]]]:
         """Returns the block id mapping (from CPU to GPU) generated by
         swapping in the given seq_group with num_lookahead_slots.
 
@@ -383,7 +425,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
             physical_block_id_mapping.extend(
                 list(seq_physical_block_id_mapping.items()))
 
-        return physical_block_id_mapping
+        return physical_block_id_mapping, [], [], []
 
     def can_swap_out(self, seq_group: SequenceGroup) -> bool:
         """Returns whether we can swap out the given sequence_group 
@@ -403,7 +445,9 @@ class BlockSpaceManagerV2(BlockSpaceManager):
             return True
         return False
 
-    def swap_out(self, seq_group: SequenceGroup) -> List[Tuple[int, int]]:
+    def swap_out(
+        self, seq_group: SequenceGroup
+    ) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int, int, int]]]:
         """Returns the block id mapping (from GPU to CPU) generated by
         swapping out the given sequence_group with num_lookahead_slots.
 
@@ -413,8 +457,12 @@ class BlockSpaceManagerV2(BlockSpaceManager):
         Returns:
             List[Tuple[int, int]]: The mapping of swapping block from 
                 GPU to CPU.
+            List[Tuple[int, int, int, int]]: The mapping of swapped block 
+                from CPU to Disk
         """
         physical_block_id_mapping = []
+        physical_block_id_mapping_cpu_to_disk: List[Tuple[int, int, int,
+                                                          int]] = []
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
             blocks = self.block_tables[seq.seq_id].blocks
             if len(blocks) == 0:
@@ -438,7 +486,7 @@ class BlockSpaceManagerV2(BlockSpaceManager):
             physical_block_id_mapping.extend(
                 list(seq_physical_block_id_mapping.items()))
 
-        return physical_block_id_mapping
+        return physical_block_id_mapping, physical_block_id_mapping_cpu_to_disk
 
     def get_num_free_gpu_blocks(self) -> int:
         return self.block_allocator.get_num_free_blocks(Device.GPU)

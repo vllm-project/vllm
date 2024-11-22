@@ -5,6 +5,7 @@ from typing import (Any, AsyncGenerator, Callable, Dict, Iterable, List,
                     Mapping, Optional, Set, Tuple, Type, Union)
 
 import vllm.envs as envs
+from vllm.caching_params import CachingParams
 from vllm.config import (DecodingConfig, EngineConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig)
 from vllm.core.scheduler import SchedulerOutputs
@@ -19,7 +20,8 @@ from vllm.inputs import PromptInputs
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
-from vllm.outputs import EmbeddingRequestOutput, RequestOutput
+from vllm.outputs import (CachingRequestOutput, EmbeddingRequestOutput,
+                          RequestOutput)
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
@@ -147,7 +149,8 @@ class RequestTracker:
 
     def process_request_output(self,
                                request_output: Union[RequestOutput,
-                                                     EmbeddingRequestOutput],
+                                                     EmbeddingRequestOutput,
+                                                     CachingRequestOutput],
                                *,
                                verbose: bool = False) -> None:
         """Process a request output from the engine."""
@@ -330,7 +333,12 @@ class _AsyncLLMEngine(LLMEngine):
                 finished_requests_ids=finished_requests_ids,
                 # We use ExecuteModelRequest to pass the last sampled_token_ids
                 # to each of the non-last PP stages for in-place prepare_input.
-                last_sampled_token_ids=last_sampled_token_ids)
+                last_sampled_token_ids=last_sampled_token_ids,
+                blocks_to_swap_in_from_disk=scheduler_outputs.
+                blocks_to_swap_in_from_disk,
+                blocks_to_swap_out_to_disk=scheduler_outputs.
+                blocks_to_swap_out_to_disk,
+            )
 
             if allow_async_output_proc:
                 execute_model_req.async_callback = self.async_callbacks[
@@ -403,7 +411,7 @@ class _AsyncLLMEngine(LLMEngine):
         self,
         request_id: str,
         inputs: PromptInputs,
-        params: Union[SamplingParams, PoolingParams],
+        params: Union[SamplingParams, PoolingParams, CachingParams],
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
@@ -755,7 +763,7 @@ class AsyncLLMEngine:
         self,
         request_id: str,
         inputs: PromptInputs,
-        params: Union[SamplingParams, PoolingParams],
+        params: Union[SamplingParams, PoolingParams, CachingParams],
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
@@ -865,6 +873,16 @@ class AsyncLLMEngine:
                 prompt_adapter_request=prompt_adapter_request,
         ):
             yield LLMEngine.validate_output(output, RequestOutput)
+
+    async def caching(self, inputs: PromptInputs, request_id: str,
+                      expired_at: Optional[float],
+                      ttl: Optional[float]) -> RequestOutput:
+        # assert isinstance(inputs, TokensPrompt)
+        async for output in await self.add_request(
+                request_id, inputs,
+                CachingParams(expired_at=expired_at, ttl=ttl)):
+            # TODO: Only yield once
+            return LLMEngine.validate_output(output, RequestOutput)
 
     async def encode(
         self,

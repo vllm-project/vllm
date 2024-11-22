@@ -27,7 +27,8 @@ from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.cli_args import make_arg_parser
 # yapf conflicts with isort for this block
 # yapf: disable
-from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
+from vllm.entrypoints.openai.protocol import (CachingRequest, CachingResponse,
+                                              ChatCompletionRequest,
                                               ChatCompletionResponse,
                                               CompletionRequest,
                                               CompletionResponse,
@@ -41,6 +42,7 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               UnloadLoraAdapterRequest)
 from vllm.entrypoints.openai.rpc.client import AsyncEngineRPCClient
 from vllm.entrypoints.openai.rpc.server import run_rpc_server
+from vllm.entrypoints.openai.serving_caching import OpenAIServingCaching
 # yapf: enable
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
@@ -61,6 +63,7 @@ openai_serving_completion: OpenAIServingCompletion
 openai_serving_embedding: OpenAIServingEmbedding
 openai_serving_tokenization: OpenAIServingTokenization
 prometheus_multiproc_dir: tempfile.TemporaryDirectory
+openai_serving_caching: OpenAIServingCaching
 
 # Cannot use __name__ (https://github.com/vllm-project/vllm/pull/4765)
 logger = init_logger('vllm.entrypoints.openai.api_server')
@@ -299,6 +302,17 @@ async def create_chat_completion(request: ChatCompletionRequest,
     return StreamingResponse(content=generator, media_type="text/event-stream")
 
 
+@router.post("/v1/caching")
+async def create_caching(request: CachingRequest, raw_request: Request):
+    response = await openai_serving_caching.create_caching(
+        request, raw_request)
+    if isinstance(response, ErrorResponse):
+        return JSONResponse(content=response.model_dump(),
+                            status_code=response.code)
+    assert isinstance(response, CachingResponse)
+    return JSONResponse(content=response.model_dump())
+
+
 @router.post("/v1/completions")
 async def create_completion(request: CompletionRequest, raw_request: Request):
     generator = await openai_serving_completion.create_completion(
@@ -450,6 +464,7 @@ async def init_app(
     global openai_serving_completion
     global openai_serving_embedding
     global openai_serving_tokenization
+    global openai_serving_caching
 
     openai_serving_chat = OpenAIServingChat(
         async_engine_client,
@@ -472,6 +487,15 @@ async def init_app(
         request_logger=request_logger,
         return_tokens_as_token_ids=args.return_tokens_as_token_ids,
     )
+    openai_serving_caching = OpenAIServingCaching(
+        async_engine_client,
+        model_config,
+        served_model_names,
+        args.response_role,
+        lora_modules=None,
+        prompt_adapters=None,
+        request_logger=request_logger,
+        chat_template=args.chat_template)
     openai_serving_embedding = OpenAIServingEmbedding(
         async_engine_client,
         model_config,

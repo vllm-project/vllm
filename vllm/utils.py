@@ -153,9 +153,10 @@ class _Sentinel:
 ALL_PINNED_SENTINEL = _Sentinel()
 
 
-class Device(enum.Enum):
-    GPU = enum.auto()
-    CPU = enum.auto()
+class Device(enum.IntEnum):
+    GPU = 0
+    CPU = 1
+    SWAP = 2
 
 
 class Counter:
@@ -1253,3 +1254,27 @@ class AtomicCounter:
     @property
     def value(self):
         return self._value
+
+
+def size_to_bytes(size_str: str):
+    size_str = size_str.strip()
+
+    if size_str[-1].isdigit():
+        return int(size_str)
+
+    size_str = size_str.upper()
+    size_value = int(size_str[:-1])
+    size_unit = size_str[-1]
+
+    unit_multipliers = {
+        'K': 1 << 10,
+        'M': 1 << 20,
+        'G': 1 << 30,
+        'T': 1 << 40,
+        'P': 1 << 50,
+    }
+
+    if size_unit not in unit_multipliers:
+        raise ValueError(f"Unknown unit: {size_unit}")
+
+    return size_value * unit_multipliers[size_unit]

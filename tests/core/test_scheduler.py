@@ -5,11 +5,13 @@ from unittest.mock import MagicMock
 
 import pytest  # noqa
 
+from vllm import CachingParams
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.core.interfaces import AllocStatus
 from vllm.core.scheduler import Scheduler, SchedulingBudget
 from vllm.lora.request import LoRARequest
 from vllm.sequence import SequenceGroup, SequenceStatus
+from vllm.utils import Device
 
 from .utils import (append_new_token, append_new_token_seq_group,
                     create_dummy_prompt, get_sequence_groups,
@@ -568,7 +570,7 @@ def test_decode_swap_beam_search():
         cannot_append_second_group)
     scheduler.block_manager.swap_out = MagicMock()
     expected_swap_mapping = [("5", "7")]
-    scheduler.block_manager.swap_out.return_value = expected_swap_mapping
+    scheduler.block_manager.swap_out.return_value = expected_swap_mapping, []
 
     output = scheduler._schedule_running(budget, curr_loras)
     remainig_running = scheduler.running
@@ -602,7 +604,8 @@ def test_schedule_decode_blocks_to_copy_update():
 
     # The last request should be swapped out.
     scheduler.block_manager.append_slots = MagicMock()
-    scheduler.block_manager.append_slots.return_value = [(2, 3)]
+    scheduler.block_manager.append_slots.return_value = [(2, 3)
+                                                         ], [], [], [], []
 
     budget = create_token_budget()
     output = scheduler._schedule_running(budget, curr_loras)
@@ -623,10 +626,12 @@ def test_schedule_swapped_simple():
     scheduler = initialize_scheduler()
     curr_loras = None
     blocks_to_swap_out: List[Tuple[int, int]] = []
+    blocks_to_swap_out_to_disk: List[Tuple[int, int, int, int]] = []
     _, seq_group = create_dummy_prompt("1", prompt_length=60, best_of=2)
     scheduler._allocate_and_set_running(seq_group)
     append_new_token_seq_group(60, seq_group, 1)
-    scheduler._swap_out(seq_group, blocks_to_swap_out)
+    scheduler._swap_out(seq_group, blocks_to_swap_out,
+                        blocks_to_swap_out_to_disk)
     scheduler._add_seq_group_to_swapped(seq_group)
 
     budget = create_token_budget()
@@ -648,11 +653,13 @@ def test_schedule_swapped_max_token_budget():
     scheduler = initialize_scheduler()
     curr_loras = None
     blocks_to_swap_out: List[Tuple[int, int]] = []
+    blocks_to_swap_out_to_disk: List[Tuple[int, int, int, int]] = []
     for _ in range(2):
         _, seq_group = create_dummy_prompt("1", prompt_length=60, best_of=2)
         scheduler._allocate_and_set_running(seq_group)
         append_new_token_seq_group(60, seq_group, 1)
-        scheduler._swap_out(seq_group, blocks_to_swap_out)
+        scheduler._swap_out(seq_group, blocks_to_swap_out,
+                            blocks_to_swap_out_to_disk)
         scheduler._add_seq_group_to_swapped(seq_group)
 
     budget = create_token_budget(token_budget=1)
@@ -680,11 +687,13 @@ def test_schedule_swapped_max_seqs():
     scheduler = initialize_scheduler()
     curr_loras = None
     blocks_to_swap_out: List[Tuple[int, int]] = []
+    blocks_to_swap_out_to_disk: List[Tuple[int, int, int, int]] = []
     for i in range(4):
         _, seq_group = create_dummy_prompt(str(i), prompt_length=60)
         scheduler._allocate_and_set_running(seq_group)
         append_new_token_seq_group(60, seq_group, 1)
-        scheduler._swap_out(seq_group, blocks_to_swap_out)
+        scheduler._swap_out(seq_group, blocks_to_swap_out,
+                            blocks_to_swap_out_to_disk)
         scheduler._add_seq_group_to_swapped(seq_group)
 
     budget = create_token_budget(max_num_seqs=2)
@@ -711,6 +720,7 @@ def test_schedule_swapped_max_loras():
     scheduler = initialize_scheduler(lora_config=lora_config)
     curr_loras: Set[int] = set()
     blocks_to_swap_out: List[Tuple[int, int]] = []
+    blocks_to_swap_out_to_disk: List[Tuple[int, int, int, int]] = []
     for i in range(2):
         _, seq_group = create_dummy_prompt(str(i),
                                            prompt_length=60,
@@ -720,7 +730,8 @@ def test_schedule_swapped_max_loras():
                                                lora_path="abc"))
         scheduler._allocate_and_set_running(seq_group)
         append_new_token_seq_group(60, seq_group, 1)
-        scheduler._swap_out(seq_group, blocks_to_swap_out)
+        scheduler._swap_out(seq_group, blocks_to_swap_out,
+                            blocks_to_swap_out_to_disk)
         scheduler._add_seq_group_to_swapped(seq_group)
 
     budget = create_token_budget()
@@ -738,11 +749,13 @@ def test_schedule_swapped_cannot_swap_in():
     scheduler = initialize_scheduler()
     curr_loras = None
     blocks_to_swap_out: List[Tuple[int, int]] = []
+    blocks_to_swap_out_to_disk: List[Tuple[int, int, int, int]] = []
     for _ in range(2):
         _, seq_group = create_dummy_prompt("1", prompt_length=60, best_of=2)
         scheduler._allocate_and_set_running(seq_group)
         append_new_token_seq_group(60, seq_group, 1)
-        scheduler._swap_out(seq_group, blocks_to_swap_out)
+        scheduler._swap_out(seq_group, blocks_to_swap_out,
+                            blocks_to_swap_out_to_disk)
         scheduler._add_seq_group_to_swapped(seq_group)
 
     # The last request should be swapped out.
@@ -763,11 +776,13 @@ def test_infeasible_swap():
     scheduler = initialize_scheduler()
     curr_loras = None
     blocks_to_swap_out: List[Tuple[int, int]] = []
+    blocks_to_swap_out_to_disk: List[Tuple[int, int, int, int]] = []
     for _ in range(2):
         _, seq_group = create_dummy_prompt("1", prompt_length=60, best_of=2)
         scheduler._allocate_and_set_running(seq_group)
         append_new_token_seq_group(60, seq_group, 1)
-        scheduler._swap_out(seq_group, blocks_to_swap_out)
+        scheduler._swap_out(seq_group, blocks_to_swap_out,
+                            blocks_to_swap_out_to_disk)
         scheduler._add_seq_group_to_swapped(seq_group)
 
     # The last request should be swapped out.
@@ -792,12 +807,15 @@ def test_schedule_swapped_blocks_to_copy():
     scheduler._allocate_and_set_running(seq_group)
     append_new_token_seq_group(60, seq_group, 1)
     blocks_to_swap_out: List[Tuple[int, int]] = []
-    scheduler._swap_out(seq_group, blocks_to_swap_out)
+    blocks_to_swap_out_to_disk: List[Tuple[int, int, int, int]] = []
+    scheduler._swap_out(seq_group, blocks_to_swap_out,
+                        blocks_to_swap_out_to_disk)
     scheduler._add_seq_group_to_swapped(seq_group)
 
     # The last request should be swapped out.
     scheduler.block_manager.append_slots = MagicMock()
-    scheduler.block_manager.append_slots.return_value = [(2, 3)]
+    scheduler.block_manager.append_slots.return_value = [(2, 3)
+                                                         ], [], [], [], []
 
     budget = create_token_budget()
     output = scheduler._schedule_swapped(budget, curr_loras)
@@ -850,3 +868,260 @@ def test_scheduling_budget():
     assert budget.num_curr_seqs == 0
     budget.subtract_num_seqs(seq_group.request_id, 2)
     assert budget.num_curr_seqs == 0
+
+
+def test_schedule_context_caching_no_swap():
+    block_size = 4
+    scheduler_config = SchedulerConfig(max_num_batched_tokens=1000,
+                                       max_num_seqs=1000,
+                                       max_model_len=1000)
+    cache_config = CacheConfig(block_size,
+                               1.0,
+                               1,
+                               "auto",
+                               enable_prefix_caching=True)
+    cache_config.num_cpu_blocks = 8
+    cache_config.num_gpu_blocks = 8
+    scheduler = Scheduler(scheduler_config, cache_config, None)
+    # Set ttl to 30 in our case:
+    cc_ttl = 10
+    caching_params = CachingParams(ttl=cc_ttl)
+    _, seq_group = create_dummy_prompt(str(0),
+                                       prompt_length=12,
+                                       block_size=block_size,
+                                       prompt_tokens=list(range(0, 12)),
+                                       caching_params=caching_params)
+    scheduler.add_seq_group(seq_group)
+    metas, out, _ = scheduler.schedule()
+    for s, meta in zip(out.scheduled_seq_groups, metas):
+        s.seq_group.update_num_computed_tokens(meta.token_chunk_size)
+        if s.seq_group.caching_params:
+            for seq in seq_group.get_seqs():
+                seq.status = SequenceStatus.FIXED
+    scheduler.move_caching_from_running_to_fixed()
+    block_tables = scheduler.block_manager.block_tables
+    block_table = block_tables[seq_group.get_seqs()[0].seq_id]
+    for block in block_table:
+        rmaps = scheduler.block_manager.gpu_allocator.get_rmap(block)
+        assert rmaps is not None
+        for rmap in rmaps:
+            assert block_tables[rmap[0]][rmap[1]] == block
+        assert (block.block_hash
+                in scheduler.block_manager.gpu_allocator.swapper)
+        assert (block.block_hash
+                in scheduler.block_manager.gpu_allocator.cached_blocks)
+
+    # Now we have another same sequence group without CC
+    _, seq_group = create_dummy_prompt(str(1),
+                                       prompt_length=12,
+                                       block_size=block_size,
+                                       prompt_tokens=list(range(0, 12)))
+    scheduler.add_seq_group(seq_group)
+    metas, out, _ = scheduler.schedule()
+    for s, meta in zip(out.scheduled_seq_groups, metas):
+        s.seq_group.update_num_computed_tokens(meta.token_chunk_size)
+    block_table_prefix = block_tables[seq_group.get_seqs()[0].seq_id].copy()
+    block_table_prefix = [
+        block for block in block_table_prefix if block.computed
+    ]
+
+    assert len(block_table_prefix) == len(block_table)
+    for block in block_table_prefix:
+        rmaps = scheduler.block_manager.gpu_allocator.get_rmap(block)
+        assert rmaps is not None
+        for rmap in rmaps:
+            assert block_tables[rmap[0]][rmap[1]] == block
+        assert (block.block_hash
+                not in scheduler.block_manager.gpu_allocator.swapper)
+        assert (block.block_hash
+                in scheduler.block_manager.gpu_allocator.cached_blocks)
+
+    # Abort the previous sequence group
+    scheduler.abort_seq_group("1")
+    block_table_copy = block_table.copy()
+    for block in block_table:
+        rmaps = scheduler.block_manager.gpu_allocator.get_rmap(block)
+        assert rmaps is not None
+        for rmap in rmaps:
+            assert block_tables[rmap[0]][rmap[1]] == block
+        # Added to the swapper
+        assert (block.block_hash
+                in scheduler.block_manager.gpu_allocator.swapper)
+        assert (block.block_hash
+                in scheduler.block_manager.gpu_allocator.cached_blocks)
+
+    # Expire the CC
+    time.sleep(cc_ttl)
+    scheduler.free_expired_context_caching()
+    for block in block_table_copy:
+        rmaps = scheduler.block_manager.gpu_allocator.get_rmap(block)
+        # rmap removed
+        assert rmaps is None
+        # Removed from the swapper to move to the evictor
+        assert (block.block_hash
+                not in scheduler.block_manager.gpu_allocator.swapper)
+        assert (block.block_hash
+                not in scheduler.block_manager.gpu_allocator.cached_blocks)
+        assert (block.block_hash
+                in scheduler.block_manager.gpu_allocator.evictor)
+
+
+def test_schedule_context_caching_swap():
+    block_size = 4
+    scheduler_config = SchedulerConfig(max_num_batched_tokens=1000,
+                                       max_num_seqs=1000,
+                                       max_model_len=1000)
+    cache_config = CacheConfig(block_size,
+                               1.0,
+                               1,
+                               "auto",
+                               enable_prefix_caching=True,
+                               enable_memory_tiering=True)
+    cache_config.num_cpu_blocks = 8
+    cache_config.num_gpu_blocks = 8
+    scheduler = Scheduler(scheduler_config, cache_config, None)
+    # Set ttl to 30 in our case:
+    cc_ttl = 10
+    caching_params = CachingParams(ttl=cc_ttl)
+    # The CC request should take all the blocks
+    _, seq_group = create_dummy_prompt(str(0),
+                                       prompt_length=31,
+                                       block_size=block_size,
+                                       prompt_tokens=list(range(0, 31)),
+                                       caching_params=caching_params)
+    scheduler.add_seq_group(seq_group)
+    metas, out, _ = scheduler.schedule()
+    for s, meta in zip(out.scheduled_seq_groups, metas):
+        s.seq_group.update_num_computed_tokens(meta.token_chunk_size)
+        if s.seq_group.caching_params:
+            for seq in seq_group.get_seqs():
+                seq.status = SequenceStatus.FIXED
+    scheduler.move_caching_from_running_to_fixed()
+    block_tables = scheduler.block_manager.block_tables
+    cc_seq_id = seq_group.get_seqs()[0].seq_id
+    block_table = block_tables[cc_seq_id]
+    for block in block_table:
+        rmaps = scheduler.block_manager.gpu_allocator.get_rmap(block)
+        assert rmaps is not None
+        for rmap in rmaps:
+            assert block_tables[rmap[0]][rmap[1]] == block
+        assert (block.block_hash
+                in scheduler.block_manager.gpu_allocator.swapper)
+        assert (block.block_hash
+                in scheduler.block_manager.gpu_allocator.cached_blocks)
+
+    # Now we have another sequence group which should kick out
+    # half of the blocks
+    _, seq_group = create_dummy_prompt(str(1),
+                                       prompt_length=15,
+                                       block_size=block_size,
+                                       prompt_tokens=list(range(32, 47)))
+    scheduler.add_seq_group(seq_group)
+    metas, out, _ = scheduler.schedule()
+    for s, meta in zip(out.scheduled_seq_groups, metas):
+        s.seq_group.update_num_computed_tokens(meta.token_chunk_size)
+    for s in out.scheduled_seq_groups:
+        scheduler.block_manager.free_evict(s.seq_group.seqs[0])
+    block_table_prefix = block_tables[seq_group.get_seqs()[0].seq_id].copy()
+    for block in block_table_prefix:
+        # Should be removed from the block table
+        assert block.ref_count == 1
+        assert block not in block_table
+        rmaps = scheduler.block_manager.gpu_allocator.get_rmap(block)
+        # rmap should be migrated to the CPU allocator
+        assert rmaps is None
+        assert (block.block_hash
+                not in scheduler.block_manager.gpu_allocator.swapper)
+        assert (block.block_hash
+                in scheduler.block_manager.gpu_allocator.cached_blocks)
+        if block.prev_computed:
+            # The original block with the block hash should be migrated to
+            # the CPU allocator
+            assert (block.prev_block_hash
+                    in scheduler.block_manager.cpu_allocator.swapper)
+            assert (block.prev_block_hash
+                    in scheduler.block_manager.cpu_allocator.cached_blocks)
+            cpu_block = scheduler.block_manager.cpu_allocator.cached_blocks[
+                block.prev_block_hash]
+            rmaps = scheduler.block_manager.cpu_allocator.get_rmap(cpu_block)
+            for rmap in rmaps:
+                assert block_tables[rmap[0]][rmap[1]] == cpu_block
+
+    cpu_blocks = []
+    for block in block_table:
+        assert block.ref_count == 1
+        assert block.device == Device.GPU or block.device == Device.CPU
+        if block.device == Device.GPU:
+            assert scheduler.block_manager.gpu_allocator.get_rmap(
+                block) is not None
+        elif block.device == Device.CPU:
+            assert scheduler.block_manager.cpu_allocator.get_rmap(
+                block) is not None
+            cpu_blocks.append(block)
+
+    # Abort the previous sequence group and add another sequence group
+    # which should swap in the blocks
+    scheduler.abort_seq_group("1")
+    _, seq_group = create_dummy_prompt(str(2),
+                                       prompt_length=31,
+                                       block_size=block_size,
+                                       prompt_tokens=list(range(0, 31)))
+    scheduler.add_seq_group(seq_group)
+    metas, out, _ = scheduler.schedule()
+    for s, meta in zip(out.scheduled_seq_groups, metas):
+        s.seq_group.update_num_computed_tokens(meta.token_chunk_size)
+    for s in out.scheduled_seq_groups:
+        scheduler.block_manager.free_evict(s.seq_group.seqs[0])
+    block_table_prefix = block_tables[seq_group.get_seqs()[0].seq_id].copy()
+    block_table_prefix = [
+        block for block in block_table_prefix if block.computed
+    ]
+    for block in block_table_prefix:
+        rmaps = scheduler.block_manager.gpu_allocator.get_rmap(block)
+        assert rmaps is not None
+        for rmap in rmaps:
+            assert block_tables[rmap[0]][rmap[1]] == block
+        # Added to the swapper
+        assert (block.block_hash
+                not in scheduler.block_manager.gpu_allocator.swapper)
+        assert (block.block_hash
+                in scheduler.block_manager.gpu_allocator.cached_blocks)
+    for block in block_table:
+        assert block.ref_count == 2
+        assert block.device == Device.GPU
+        assert scheduler.block_manager.gpu_allocator.get_rmap(
+            block) is not None
+        rmaps = scheduler.block_manager.gpu_allocator.get_rmap(block)
+        assert len(rmaps) == 1
+        for rmap in rmaps:
+            assert block_tables[rmap[0]][rmap[1]] == block
+    # CPU blocks should be freed. No rmap. No ref count.
+    # Not in the swapper or cached blocks
+    for block in cpu_blocks:
+        assert block.ref_count == 0
+        assert block.device == Device.CPU
+        assert scheduler.block_manager.cpu_allocator.get_rmap(block) is None
+        assert (block.block_hash
+                not in scheduler.block_manager.cpu_allocator.swapper)
+        assert (block.block_hash
+                not in scheduler.block_manager.cpu_allocator.cached_blocks)
+        assert (block.block_hash
+                in scheduler.block_manager.cpu_allocator.evictor)
+    block_table_copy = block_table.copy()
+
+    # Expire the CC. Keep the sequence
+    time.sleep(cc_ttl)
+    scheduler.free_expired_context_caching()
+    assert cc_seq_id not in block_tables
+    for block in block_table_copy:
+        rmaps = scheduler.block_manager.gpu_allocator.get_rmap(block)
+        # rmap removed
+        assert rmaps is None
+        # Removed from the swapper to move to the evictor
+        assert (block.block_hash
+                not in scheduler.block_manager.gpu_allocator.swapper)
+        assert (block.block_hash
+                in scheduler.block_manager.gpu_allocator.cached_blocks)
+        assert (block.block_hash
+                not in scheduler.block_manager.gpu_allocator.evictor)
+        assert block.ref_count == 1

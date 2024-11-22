@@ -136,3 +136,8 @@ void swap_blocks(torch::Tensor& src, torch::Tensor& dst,
                  const torch::Tensor& block_mapping) {
   TORCH_CHECK(false, "swap_blocks is unsupported on CPU.")
 }
+
+void copy_blocks_one_layer(torch::Tensor& key_cache, torch::Tensor& value_cache,
+                           const torch::Tensor& block_mapping) {
+  TORCH_CHECK(false, "swap_blocks is unsupported on CPU.")
+}

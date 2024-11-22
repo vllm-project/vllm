@@ -1490,6 +1490,28 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                                    is_prompt=is_prompt,
                                    virtual_engine=virtual_engine)
 
+    def add_kv_cache_for_layered_transfer(
+            self,
+            model_input: ModelInputForGPUWithSamplingMetadata,
+            cuda_stream: Optional[torch.cuda.Stream] = None,
+            blocks_to_swap_in: Optional[torch.Tensor] = None,
+            blocks_to_swap_out: Optional[torch.Tensor] = None,
+            blocks_to_copy: Optional[torch.Tensor] = None,
+            gpu_caches: Optional[List[torch.Tensor]] = None,
+            cpu_caches: Optional[List[torch.Tensor]] = None):
+        if model_input.attn_metadata is not None:
+            attn_backend_name = self.attn_backend.get_name()
+            if (attn_backend_name != "xformers"
+                    and attn_backend_name != "flash-attn"
+                    and attn_backend_name != "flashinfer"):
+                raise NotImplementedError("Layered transfer unsupported")
+            model_input.attn_metadata.enable_layered_transfer = True
+            model_input.attn_metadata.add_kv_cache_for_layered_transfer(
+                self.model_config.get_num_attention_layers(
+                    self.parallel_config), blocks_to_swap_in,
+                blocks_to_swap_out, blocks_to_copy, gpu_caches, cpu_caches,
+                cuda_stream)
+
     @torch.inference_mode()
     @dump_input_when_exception(exclude_args=[0], exclude_kwargs=["self"])
     def execute_model(

@@ -93,6 +93,31 @@ __global__ void copy_blocks_kernel(int64_t* key_cache_ptrs,
   }
 }
 
+template <typename scalar_t>
+__global__ void copy_blocks_one_layer_kernel(
+    int64_t key_cache_ptr, int64_t value_cache_ptr,
+    const int64_t* __restrict__ block_mapping, const int numel_per_block) {
+  const int pair_idx = blockIdx.y;
+
+  scalar_t* key_cache = reinterpret_cast<scalar_t*>(key_cache_ptr);
+  scalar_t* value_cache = reinterpret_cast<scalar_t*>(value_cache_ptr);
+  int64_t src_block_number = block_mapping[2 * pair_idx];
+  int64_t dst_block_number = block_mapping[2 * pair_idx + 1];
+
+  const int64_t src_block_offset = src_block_number * numel_per_block;
+  const int64_t dst_block_offset = dst_block_number * numel_per_block;
+  for (int i = threadIdx.x; i < numel_per_block; i += blockDim.x) {
+    int64_t src_offset = src_block_offset + i;
+    int64_t dst_offset = dst_block_offset + i;
+    key_cache[dst_offset] = key_cache[src_offset];
+  }
+  for (int i = threadIdx.x; i < numel_per_block; i += blockDim.x) {
+    int64_t src_offset = src_block_offset + i;
+    int64_t dst_offset = dst_block_offset + i;
+    value_cache[dst_offset] = value_cache[src_offset];
+  }
+}
+
 }  // namespace vllm
 
 // Note: the key_caches and value_caches vectors are constant but
@@ -144,6 +169,34 @@ void copy_blocks(std::vector<torch::Tensor> const& key_caches,
             key_cache_ptrs_tensor.data_ptr<int64_t>(),
             value_cache_ptrs_tensor.data_ptr<int64_t>(),
             block_mapping.data_ptr<int64_t>(), numel_per_block);
+      }));
+}
+
+void copy_blocks_one_layer(torch::Tensor& key_cache, torch::Tensor& value_cache,
+                           const torch::Tensor& block_mapping) {
+  torch::Device cache_device = key_cache.device();
+  TORCH_CHECK(cache_device.is_cuda());
+
+  // Create data structures for the kernel.
+  // Create an array of pointers to the key and value caches.
+  int64_t key_cache_ptr = reinterpret_cast<int64_t>(key_cache.data_ptr());
+  int64_t value_cache_ptr = reinterpret_cast<int64_t>(value_cache.data_ptr());
+
+  // block_mapping is a 2D tensor with shape (num_pairs, 2).
+  int num_pairs = block_mapping.size(0);
+
+  // Launch the kernel.
+  const int numel_per_block = key_cache[0].numel();
+  dim3 grid(1, num_pairs);
+  dim3 block(std::min(1024, numel_per_block));
+  const at::cuda::OptionalCUDAGuard device_guard(cache_device);
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  VLLM_DISPATCH_FLOATING_AND_BYTE_TYPES(
+      key_cache.scalar_type(), "copy_blocks_one_layer_kernel", ([&] {
+        vllm::copy_blocks_one_layer_kernel<scalar_t>
+            <<<grid, block, 0, stream>>>(key_cache_ptr, value_cache_ptr,
+                                         block_mapping.data_ptr<int64_t>(),
+                                         numel_per_block);
       }));
 }
 

@@ -16,6 +16,7 @@ from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
                            SequenceGroupMetadata, SequenceGroupMetadataDelta,
                            SequenceStatus)
 from vllm.utils import Device, PyObjectCache
+from vllm.worker.swap.interface import SwapSpaceManagerBase
 
 logger = init_logger(__name__)
 
@@ -133,10 +134,15 @@ class SchedulerOutputs:
     # The number of requests in the running queue
     running_queue_size: int
     preempted: int
+    # The blocks to swap in from disk to either HBM or DRAM
+    blocks_to_swap_in_from_disk: List[Tuple[int, int, int, int]]
+    # The blocks to swap out to disk from either HBM or DRAM
+    blocks_to_swap_out_to_disk: List[Tuple[int, int, int, int]]
 
     def __post_init__(self):
         # Swap in and swap out should never happen at the same time.
-        assert not (self.blocks_to_swap_in and self.blocks_to_swap_out)
+        # NOTE: Right now the correctness depends on transmission order
+        # swap out -> copy -> swap in and they have to be sync.
 
         self.num_loras: int = len(self.lora_requests)
         if self.num_loras > 0:
@@ -147,7 +153,9 @@ class SchedulerOutputs:
     def is_empty(self) -> bool:
         # NOTE: We do not consider the ignored sequence groups.
         return (not self.scheduled_seq_groups and not self.blocks_to_swap_in
-                and not self.blocks_to_swap_out and not self.blocks_to_copy)
+                and not self.blocks_to_swap_out and not self.blocks_to_copy
+                and not self.blocks_to_swap_in_from_disk
+                and not self.blocks_to_swap_out_to_disk)
 
     def _sort_by_lora_ids(self):
         self.scheduled_seq_groups = sorted(
@@ -187,12 +195,18 @@ class SchedulerRunningOutputs:
     preempted: List[SequenceGroup]
     # Sequences that are swapped out.
     swapped_out: List[SequenceGroup]
+    # The blocks to swap in.
+    blocks_to_swap_in: List[Tuple[int, int]]
     # The blocks to swap out.
     blocks_to_swap_out: List[Tuple[int, int]]
     # The blocks to copy.
     blocks_to_copy: List[Tuple[int, int]]
     # The number of slots for lookahead decoding.
     num_lookahead_slots: int
+    # The blocks to swap in from disk to either HBM or DRAM
+    blocks_to_swap_in_from_disk: List[Tuple[int, int, int, int]]
+    # The blocks to swap out to disk from either HBM or DRAM
+    blocks_to_swap_out_to_disk: List[Tuple[int, int, int, int]]
 
     # Optimization for fast-access to seq_group lists
     decode_seq_groups_list: List[SequenceGroup]
@@ -205,11 +219,14 @@ class SchedulerRunningOutputs:
             prefill_seq_groups=[],
             preempted=[],
             swapped_out=[],
+            blocks_to_swap_in=[],
             blocks_to_swap_out=[],
             blocks_to_copy=[],
             num_lookahead_slots=0,
             decode_seq_groups_list=[],
             prefill_seq_groups_list=[],
+            blocks_to_swap_in_from_disk=[],
+            blocks_to_swap_out_to_disk=[],
         )
 
 
@@ -227,23 +244,30 @@ class SchedulerSwappedInOutputs:
     prefill_seq_groups: List[ScheduledSequenceGroup]
     # The blocks to swap in.
     blocks_to_swap_in: List[Tuple[int, int]]
+    # The blocks to swap out.
+    blocks_to_swap_out: List[Tuple[int, int]]
     # The blocks to copy.
     blocks_to_copy: List[Tuple[int, int]]
     # The number of slots for lookahead decoding.
     num_lookahead_slots: int
     # Infeasible sequence groups.
     infeasible_seq_groups: List[SequenceGroup]
+    # The blocks to swap in from disk to either HBM or DRAM
+    blocks_to_swap_in_from_disk: List[Tuple[int, int, int, int]]
+    # The blocks to swap out to disk from either HBM or DRAM
+    blocks_to_swap_out_to_disk: List[Tuple[int, int, int, int]]
 
     @classmethod
     def create_empty(cls) -> "SchedulerSwappedInOutputs":
-        return SchedulerSwappedInOutputs(
-            decode_seq_groups=[],
-            prefill_seq_groups=[],
-            blocks_to_swap_in=[],
-            blocks_to_copy=[],
-            num_lookahead_slots=0,
-            infeasible_seq_groups=[],
-        )
+        return SchedulerSwappedInOutputs(decode_seq_groups=[],
+                                         prefill_seq_groups=[],
+                                         blocks_to_swap_in=[],
+                                         blocks_to_swap_out=[],
+                                         blocks_to_copy=[],
+                                         num_lookahead_slots=0,
+                                         infeasible_seq_groups=[],
+                                         blocks_to_swap_in_from_disk=[],
+                                         blocks_to_swap_out_to_disk=[])
 
 
 @dataclass
@@ -258,14 +282,27 @@ class SchedulerPrefillOutputs:
     # Ignored sequence groups.
     ignored_seq_groups: List[SequenceGroup]
     num_lookahead_slots: int
+    # The blocks to swap in.
+    blocks_to_swap_in: List[Tuple[int, int]]
+    # The blocks to swap out.
+    blocks_to_swap_out: List[Tuple[int, int]]
+    # The blocks to copy
+    blocks_to_copy: List[Tuple[int, int]]
+    # The blocks to swap in from disk to either HBM or DRAM
+    blocks_to_swap_in_from_disk: List[Tuple[int, int, int, int]]
+    # The blocks to swap out to disk from either HBM or DRAM
+    blocks_to_swap_out_to_disk: List[Tuple[int, int, int, int]]
 
     @classmethod
     def create_empty(cls) -> "SchedulerPrefillOutputs":
-        return SchedulerPrefillOutputs(
-            seq_groups=[],
-            ignored_seq_groups=[],
-            num_lookahead_slots=0,
-        )
+        return SchedulerPrefillOutputs(seq_groups=[],
+                                       ignored_seq_groups=[],
+                                       blocks_to_swap_in=[],
+                                       blocks_to_swap_out=[],
+                                       blocks_to_copy=[],
+                                       num_lookahead_slots=0,
+                                       blocks_to_swap_in_from_disk=[],
+                                       blocks_to_swap_out_to_disk=[])
 
 
 def seq_group_metadata_builder():
@@ -281,9 +318,12 @@ def scheduler_running_outputs_builder():
                                    prefill_seq_groups=[],
                                    preempted=[],
                                    swapped_out=[],
+                                   blocks_to_swap_in=[],
                                    blocks_to_swap_out=[],
                                    blocks_to_copy=[],
                                    num_lookahead_slots=0,
+                                   blocks_to_swap_in_from_disk=[],
+                                   blocks_to_swap_out_to_disk=[],
                                    prefill_seq_groups_list=[],
                                    decode_seq_groups_list=[])
 
@@ -303,6 +343,7 @@ class Scheduler:
         lora_config: Optional[LoRAConfig],
         pipeline_parallel_size: int = 1,
         output_proc_callback: Optional[Callable] = None,
+        swap_manager: Optional[SwapSpaceManagerBase] = None,
     ) -> None:
         self.scheduler_config = scheduler_config
         self.cache_config = cache_config
@@ -310,6 +351,10 @@ class Scheduler:
         # simple and NOT fair. It can lead to starvation of some
         # LoRAs. This should be improved in the future.
         self.lora_config = lora_config
+
+        # NOTE: swap_manager only contains a reference here and
+        # is shared by different schedulers
+        self.swap_manager = swap_manager
 
         version = "v1"
         if self.scheduler_config.use_v2_block_manager:
@@ -334,17 +379,21 @@ class Scheduler:
             num_gpu_blocks=num_gpu_blocks,
             num_cpu_blocks=num_cpu_blocks,
             sliding_window=self.cache_config.sliding_window,
-            enable_caching=self.cache_config.enable_prefix_caching)
+            enable_caching=self.cache_config.enable_prefix_caching,
+            enable_memory_tiering=self.cache_config.enable_memory_tiering,
+            swap_manager=self.swap_manager)
 
         # Sequence groups in the WAITING state.
         # Contain new prefill or preempted requests.
         self.waiting: Deque[SequenceGroup] = deque()
         # Sequence groups in the RUNNING state.
-        # Contain decode requests.
+        # Contain decode requests and caching request.
         self.running: Deque[SequenceGroup] = deque()
         # Sequence groups in the SWAPPED state.
         # Contain decode requests that are swapped out.
         self.swapped: Deque[SequenceGroup] = deque()
+        # Contain caching request
+        self.fixed: Deque[SequenceGroup] = deque()
         # Sequence groups finished requests ids since last step iteration.
         # It lets the model know that any state associated with these requests
         # can and must be released after the current step.
@@ -514,8 +563,11 @@ class Scheduler:
         """
         ret: SchedulerRunningOutputs = \
             self._scheduler_running_outputs_cache[self.cache_id].get_object()
+        ret.blocks_to_swap_in.clear()
         ret.blocks_to_swap_out.clear()
         ret.blocks_to_copy.clear()
+        ret.blocks_to_swap_in_from_disk.clear()
+        ret.blocks_to_swap_out_to_disk.clear()
         ret.decode_seq_groups.clear()
         ret.prefill_seq_groups.clear()
         ret.preempted.clear()
@@ -528,8 +580,13 @@ class Scheduler:
         ret.prefill_seq_groups_list.clear()
 
         # Blocks that need to be swapped or copied before model execution.
+        blocks_to_swap_in: List[Tuple[int, int]] = ret.blocks_to_swap_in
         blocks_to_swap_out: List[Tuple[int, int]] = ret.blocks_to_swap_out
         blocks_to_copy: List[Tuple[int, int]] = ret.blocks_to_copy
+        blocks_to_swap_in_from_disk: List[Tuple[
+            int, int, int, int]] = ret.blocks_to_swap_in_from_disk
+        blocks_to_swap_out_to_disk: List[Tuple[
+            int, int, int, int]] = ret.blocks_to_swap_out_to_disk
 
         decode_seq_groups: List[ScheduledSequenceGroup] = ret.decode_seq_groups
         prefill_seq_groups: List[
@@ -541,12 +598,18 @@ class Scheduler:
         assert len(self._async_stopped) == 0
         while running_queue:
             seq_group = running_queue[0]
+            # import pdb; pdb.set_trace()
             num_running_tokens = self._get_num_new_tokens(
                 seq_group, SequenceStatus.RUNNING, enable_chunking, budget)
 
             if num_running_tokens == 0:
-                # No budget => Stop
-                break
+                # Remove the current sequence group and continue
+                running_queue.popleft()
+                # If this sequence group has no tokens to process, 
+                # it might be finished
+                if seq_group.is_finished():
+                    self._free_finished_seq_group(seq_group)
+                continue
 
             running_queue.popleft()
 
@@ -602,7 +665,8 @@ class Scheduler:
                 # Do preemption
                 if do_preempt:
                     preempted_mode = self._preempt(victim_seq_group,
-                                                   blocks_to_swap_out)
+                                                   blocks_to_swap_out,
+                                                   blocks_to_swap_out_to_disk)
                     if preempted_mode == PreemptionMode.RECOMPUTE:
                         preempted.append(victim_seq_group)
                     else:
@@ -611,7 +675,10 @@ class Scheduler:
                 if not cont_loop:
                     break
             else:
-                self._append_slots(seq_group, blocks_to_copy)
+                self._append_slots(seq_group, blocks_to_swap_in,
+                                   blocks_to_swap_out, blocks_to_copy,
+                                   blocks_to_swap_in_from_disk,
+                                   blocks_to_swap_out_to_disk)
                 is_prefill = seq_group.is_prefill()
 
                 scheduled_seq_group: ScheduledSequenceGroup = \
@@ -640,6 +707,18 @@ class Scheduler:
 
         self._scheduler_running_outputs_cache[self.next_cache_id].reset()
         self._scheduled_seq_group_cache[self.next_cache_id].reset()
+        if (blocks_to_swap_in != [] or blocks_to_swap_out != []
+                or blocks_to_copy != [] or blocks_to_swap_in_from_disk != []
+                or blocks_to_swap_out_to_disk != []):
+            logger.debug("Running: ")
+            logger.debug("Seq ID: %s",
+                         [seq.seq_group.seqs for seq in decode_seq_groups] +
+                         [seq.seq_group.seqs for seq in prefill_seq_groups])
+            logger.debug("Swap_in: %s", blocks_to_swap_in)
+            logger.debug("Swap_out: %s", blocks_to_swap_out)
+            logger.debug("Copy: %s", blocks_to_copy)
+            logger.debug("Swap in from disk: %s", blocks_to_swap_in_from_disk)
+            logger.debug("Swap out from disk %s", blocks_to_swap_out_to_disk)
 
         return ret
 
@@ -670,7 +749,10 @@ class Scheduler:
         """
         # Blocks that need to be swapped or copied before model execution.
         blocks_to_swap_in: List[Tuple[int, int]] = []
+        blocks_to_swap_out: List[Tuple[int, int]] = []
         blocks_to_copy: List[Tuple[int, int]] = []
+        blocks_to_swap_in_from_disk: List[Tuple[int, int, int, int]] = []
+        blocks_to_swap_out_to_disk: List[Tuple[int, int, int, int]] = []
         decode_seq_groups: List[ScheduledSequenceGroup] = []
         prefill_seq_groups: List[ScheduledSequenceGroup] = []
         infeasible_seq_groups: List[SequenceGroup] = []
@@ -726,8 +808,13 @@ class Scheduler:
             if lora_int_id > 0 and curr_loras is not None:
                 curr_loras.add(lora_int_id)
             swapped_queue.popleft()
-            self._swap_in(seq_group, blocks_to_swap_in)
-            self._append_slots(seq_group, blocks_to_copy)
+            self._swap_in(seq_group, blocks_to_swap_in, blocks_to_swap_out,
+                          blocks_to_copy, blocks_to_swap_in_from_disk,
+                          blocks_to_swap_out_to_disk)
+            self._append_slots(seq_group, blocks_to_swap_in,
+                               blocks_to_swap_out, blocks_to_copy,
+                               blocks_to_swap_in_from_disk,
+                               blocks_to_swap_out_to_disk)
             is_prefill = seq_group.is_prefill()
             if is_prefill:
                 prefill_seq_groups.append(
@@ -741,15 +828,30 @@ class Scheduler:
 
         swapped_queue.extendleft(leftover_swapped)
 
+        if (blocks_to_swap_in != [] or blocks_to_swap_out != []
+                or blocks_to_copy != [] or blocks_to_swap_in_from_disk != []
+                or blocks_to_swap_out_to_disk != []):
+            logger.debug("Swapped In: ")
+            logger.debug("Seq ID: %s",
+                         [seq.seq_group.seqs for seq in decode_seq_groups] +
+                         [seq.seq_group.seqs for seq in prefill_seq_groups])
+            logger.debug("Swap_in: %s", blocks_to_swap_in)
+            logger.debug("Swap_out: ", blocks_to_swap_out)
+            logger.debug("Copy: ", blocks_to_copy)
+            logger.debug("Swap in from disk: %s", blocks_to_swap_in_from_disk)
+            logger.debug("Swap out from disk %s", blocks_to_swap_out_to_disk)
+
         return SchedulerSwappedInOutputs(
             decode_seq_groups=decode_seq_groups,
             prefill_seq_groups=prefill_seq_groups,
             blocks_to_swap_in=blocks_to_swap_in,
+            blocks_to_swap_out=blocks_to_swap_out,
             blocks_to_copy=blocks_to_copy,
             num_lookahead_slots=self._get_num_lookahead_slots(
                 is_prefill=False),
             infeasible_seq_groups=infeasible_seq_groups,
-        )
+            blocks_to_swap_in_from_disk=blocks_to_swap_in_from_disk,
+            blocks_to_swap_out_to_disk=blocks_to_swap_out_to_disk)
 
     def _get_prompt_limit(self, seq_group: SequenceGroup) -> int:
         if self.scheduler_config.chunked_prefill_enabled:
@@ -797,6 +899,11 @@ class Scheduler:
         """
         ignored_seq_groups: List[SequenceGroup] = []
         seq_groups: List[ScheduledSequenceGroup] = []
+        blocks_to_swap_in: List[Tuple[int, int]] = []
+        blocks_to_copy: List[Tuple[int, int]] = []
+        blocks_to_swap_out: List[Tuple[int, int]] = []
+        blocks_to_swap_in_from_disk: List[Tuple[int, int, int, int]] = []
+        blocks_to_swap_out_to_disk: List[Tuple[int, int, int, int]] = []
 
         waiting_queue = self.waiting
 
@@ -865,10 +972,22 @@ class Scheduler:
             if curr_loras is not None and lora_int_id > 0:
                 curr_loras.add(lora_int_id)
             waiting_queue.popleft()
-            self._allocate_and_set_running(seq_group)
+            sg_swap_in, sg_swap_out, swap_in_from_disk, swap_out_to_disk = \
+                self._allocate_and_set_running(seq_group)
             seq_group.init_multi_step(
                 num_scheduler_steps=self._get_num_lookahead_slots(
                     is_prefill=True) + 1)
+
+            # Adjust and verify the blocks
+            if (self.cache_config.enable_prefix_caching
+                    and self.cache_config.enable_memory_tiering):
+                self.block_manager.adjust_swap(sg_swap_in, sg_swap_out,
+                                               blocks_to_swap_in,
+                                               blocks_to_swap_out,
+                                               blocks_to_copy)
+                blocks_to_swap_in_from_disk.extend(swap_in_from_disk)
+                blocks_to_swap_out_to_disk.extend(swap_out_to_disk)
+
             seq_groups.append(
                 ScheduledSequenceGroup(seq_group=seq_group,
                                        token_chunk_size=num_new_tokens))
@@ -880,10 +999,27 @@ class Scheduler:
         if len(seq_groups) > 0:
             self.prev_prompt = True
 
+        if (blocks_to_swap_in != [] or blocks_to_swap_out != []
+                or blocks_to_copy != [] or blocks_to_swap_in_from_disk != []
+                or blocks_to_swap_out_to_disk != []):
+            logger.debug("Prefill: ")
+            logger.debug("Seq ID: %s",
+                         [seq.seq_group.seqs for seq in seq_groups])
+            logger.debug("Swap_in: %s", blocks_to_swap_in)
+            logger.debug("Swap_out: %s", blocks_to_swap_out)
+            logger.debug("Copy: %s", blocks_to_copy)
+            logger.debug("Swap in from disk: %s", blocks_to_swap_in_from_disk)
+            logger.debug("Swap out from disk %s", blocks_to_swap_out_to_disk)
+
         return SchedulerPrefillOutputs(
             seq_groups=seq_groups,
             ignored_seq_groups=ignored_seq_groups,
-            num_lookahead_slots=self._get_num_lookahead_slots(is_prefill=True))
+            blocks_to_swap_in=blocks_to_swap_in,
+            blocks_to_swap_out=blocks_to_swap_out,
+            blocks_to_copy=blocks_to_copy,
+            num_lookahead_slots=self._get_num_lookahead_slots(is_prefill=True),
+            blocks_to_swap_in_from_disk=blocks_to_swap_in_from_disk,
+            blocks_to_swap_out_to_disk=blocks_to_swap_out_to_disk)
 
     def _schedule_default(self) -> SchedulerOutputs:
         """Schedule queued requests.
@@ -898,6 +1034,10 @@ class Scheduler:
             token_budget=self.scheduler_config.max_num_batched_tokens,
             max_num_seqs=self.scheduler_config.max_num_seqs,
         )
+
+        # Check context caching and free
+        self.free_expired_context_caching()
+
         # Make sure we include num running seqs before scheduling prefill,
         # so that we don't schedule beyond max_num_seqs for prefill.
         for seq_group in self.running:
@@ -931,8 +1071,8 @@ class Scheduler:
                     running_scheduled.swapped_out) == 0:
                 swapped_in = self._schedule_swapped(budget, curr_loras)
 
-        assert (budget.num_batched_tokens <=
-                self.scheduler_config.max_num_batched_tokens)
+        assert (budget.num_batched_tokens
+                <= self.scheduler_config.max_num_batched_tokens)
         assert budget.num_curr_seqs <= self.scheduler_config.max_num_seqs
 
         # Update waiting requests.
@@ -966,24 +1106,43 @@ class Scheduler:
             scheduled_seq_groups = running_scheduled.decode_seq_groups
         scheduled_seq_groups.extend(swapped_in.decode_seq_groups)
 
-        blocks_to_copy = running_scheduled.blocks_to_copy
-        blocks_to_copy.extend(swapped_in.blocks_to_copy)
-
         ignored_seq_groups = prefills.ignored_seq_groups
         ignored_seq_groups.extend(swapped_in.infeasible_seq_groups)
+
+        if (hasattr(self.block_manager, "evict_block_tables")
+                and self.block_manager.evict_block_tables != {}):
+            for sg in scheduled_seq_groups:
+                for seq in sg.seq_group.seqs:
+                    self.block_manager.free_evict(seq)
+            assert self.block_manager.evict_block_tables == {}
+        if self.swap_manager is not None:
+            self.swap_manager.free_block_tables()
 
         return SchedulerOutputs(
             scheduled_seq_groups=scheduled_seq_groups,
             num_prefill_groups=num_prefill_groups,
             num_batched_tokens=budget.num_batched_tokens,
-            blocks_to_swap_in=swapped_in.blocks_to_swap_in,
-            blocks_to_swap_out=running_scheduled.blocks_to_swap_out,
-            blocks_to_copy=blocks_to_copy,
+            blocks_to_swap_in=(swapped_in.blocks_to_swap_in +
+                               running_scheduled.blocks_to_swap_in +
+                               prefills.blocks_to_swap_in),
+            blocks_to_swap_out=(swapped_in.blocks_to_swap_out +
+                                running_scheduled.blocks_to_swap_out +
+                                prefills.blocks_to_swap_out),
+            blocks_to_copy=(swapped_in.blocks_to_copy +
+                            running_scheduled.blocks_to_copy +
+                            prefills.blocks_to_copy),
             ignored_seq_groups=ignored_seq_groups,
             num_lookahead_slots=running_scheduled.num_lookahead_slots,
             running_queue_size=len(self.running),
             preempted=preempted,
-        )
+            blocks_to_swap_in_from_disk=(
+                prefills.blocks_to_swap_in_from_disk +
+                running_scheduled.blocks_to_swap_in_from_disk +
+                swapped_in.blocks_to_swap_in_from_disk),
+            blocks_to_swap_out_to_disk=(
+                prefills.blocks_to_swap_out_to_disk +
+                running_scheduled.blocks_to_swap_out_to_disk +
+                swapped_in.blocks_to_swap_out_to_disk))
 
     def _schedule_chunked_prefill(self) -> SchedulerOutputs:
         """Schedule queued requests.
@@ -999,6 +1158,12 @@ class Scheduler:
         inter token latency because decodes requests don't need to be blocked
         by prefill requests.
         """
+        blocks_to_swap_in: List[Tuple[int, int]] = []
+        blocks_to_swap_out: List[Tuple[int, int]] = []
+        blocks_to_copy: List[Tuple[int, int]] = []
+        blocks_to_swap_in_from_disk: List[Tuple[int, int, int, int]] = []
+        blocks_to_swap_out_to_disk: List[Tuple[int, int, int, int]] = []
+
         budget = SchedulingBudget(
             token_budget=self.scheduler_config.max_num_batched_tokens,
             max_num_seqs=self.scheduler_config.max_num_seqs,
@@ -1012,20 +1177,48 @@ class Scheduler:
         running_scheduled = self._schedule_running(budget,
                                                    curr_loras,
                                                    enable_chunking=True)
+        blocks_to_swap_in.extend(running_scheduled.blocks_to_swap_in)
+        blocks_to_swap_out.extend(running_scheduled.blocks_to_swap_out)
+        blocks_to_copy.extend(running_scheduled.blocks_to_copy)
+        blocks_to_swap_in_from_disk.extend(
+            running_scheduled.blocks_to_swap_in_from_disk)
+        blocks_to_swap_out_to_disk.extend(
+            running_scheduled.blocks_to_swap_out_to_disk)
 
         # Schedule swapped out requests.
         # If preemption happens, it means we don't have space for swap-in.
         if len(running_scheduled.preempted) + len(
                 running_scheduled.swapped_out) == 0:
             swapped_in = self._schedule_swapped(budget, curr_loras)
+            blocks_to_copy.extend(swapped_in.blocks_to_copy)
+            self.block_manager.adjust_swap(swapped_in.blocks_to_swap_in,
+                                           swapped_in.blocks_to_swap_out,
+                                           blocks_to_swap_in,
+                                           blocks_to_swap_out, blocks_to_copy)
+            blocks_to_swap_in_from_disk.extend(
+                swapped_in.blocks_to_swap_in_from_disk)
+            blocks_to_swap_out_to_disk.extend(
+                swapped_in.blocks_to_swap_out_to_disk)
 
-        # Schedule new prefills.
-        prefills = self._schedule_prefills(budget,
-                                           curr_loras,
-                                           enable_chunking=True)
+        # Schedule new prefills when there is space
+        if len(running_scheduled.preempted) + len(
+                running_scheduled.swapped_out) == 0:
+            # Now the only problem is swapped_in requests
+            prefills = self._schedule_prefills(budget,
+                                               curr_loras,
+                                               enable_chunking=True)
+            blocks_to_copy.extend(prefills.blocks_to_copy)
+            self.block_manager.adjust_swap(prefills.blocks_to_swap_in,
+                                           prefills.blocks_to_swap_out,
+                                           blocks_to_swap_in,
+                                           blocks_to_swap_out, blocks_to_copy)
+            blocks_to_swap_in_from_disk.extend(
+                prefills.blocks_to_swap_in_from_disk)
+            blocks_to_swap_out_to_disk.extend(
+                prefills.blocks_to_swap_out_to_disk)
 
-        assert (budget.num_batched_tokens <=
-                self.scheduler_config.max_num_batched_tokens)
+        assert (budget.num_batched_tokens
+                <= self.scheduler_config.max_num_batched_tokens)
         assert budget.num_curr_seqs <= self.scheduler_config.max_num_seqs
 
         # Update waiting requests.
@@ -1047,26 +1240,38 @@ class Scheduler:
 
         # Update swapped requests.
         self.swapped.extend(running_scheduled.swapped_out)
+
+        scheduled_seq_groups = (prefills.seq_groups +
+                                running_scheduled.prefill_seq_groups +
+                                swapped_in.prefill_seq_groups +
+                                running_scheduled.decode_seq_groups +
+                                swapped_in.decode_seq_groups)
+        # Delayed free swapped-in sequences
+        if (hasattr(self.block_manager, "evict_block_tables")
+                and self.block_manager.evict_block_tables != {}):
+            for sg in scheduled_seq_groups:
+                for seq in sg.seq_group.seqs:
+                    self.block_manager.free_evict(seq)
+        if self.swap_manager is not None:
+            self.swap_manager.free_block_tables()
+
         return SchedulerOutputs(
-            scheduled_seq_groups=(prefills.seq_groups +
-                                  running_scheduled.prefill_seq_groups +
-                                  swapped_in.prefill_seq_groups +
-                                  running_scheduled.decode_seq_groups +
-                                  swapped_in.decode_seq_groups),
+            scheduled_seq_groups=scheduled_seq_groups,
             num_prefill_groups=(len(prefills.seq_groups) +
                                 len(swapped_in.prefill_seq_groups) +
                                 len(running_scheduled.prefill_seq_groups)),
             num_batched_tokens=budget.num_batched_tokens,
-            blocks_to_swap_in=swapped_in.blocks_to_swap_in,
-            blocks_to_swap_out=running_scheduled.blocks_to_swap_out,
-            blocks_to_copy=running_scheduled.blocks_to_copy +
-            swapped_in.blocks_to_copy,
+            blocks_to_swap_in=blocks_to_swap_in,
+            blocks_to_swap_out=blocks_to_swap_out,
+            blocks_to_copy=blocks_to_copy,
             ignored_seq_groups=prefills.ignored_seq_groups +
             swapped_in.infeasible_seq_groups,
             num_lookahead_slots=running_scheduled.num_lookahead_slots,
             running_queue_size=len(self.running),
             preempted=(len(running_scheduled.preempted) +
                        len(running_scheduled.swapped_out)),
+            blocks_to_swap_in_from_disk=blocks_to_swap_in_from_disk,
+            blocks_to_swap_out_to_disk=blocks_to_swap_out_to_disk,
         )
 
     def _schedule(self) -> SchedulerOutputs:
@@ -1175,10 +1380,9 @@ class Scheduler:
                 # NOTE: We use get_len instead of get_prompt_len because when
                 # a sequence is preempted, prefill includes previous generated
                 # output tokens.
-                if (token_chunk_size + num_computed_tokens <
-                        seqs[0].data.get_len()):
+                if (token_chunk_size + num_computed_tokens
+                        < seqs[0].data.get_len() or seq_group.caching_params):
                     do_sample = False
-
             # It assumes the scheduled_seq_groups is ordered by
             # prefill < decoding.
             if is_first_prefill or not self.scheduler_config.send_delta_data:
@@ -1190,6 +1394,7 @@ class Scheduler:
                     block_tables=block_tables,
                     do_sample=do_sample,
                     pooling_params=seq_group.pooling_params,
+                    caching_params=seq_group.caching_params,
                     token_chunk_size=token_chunk_size,
                     lora_request=seq_group.lora_request,
                     computed_block_nums=common_computed_block_nums,
@@ -1301,15 +1506,59 @@ class Scheduler:
 
             self._async_stopped.clear()
 
-    def _allocate_and_set_running(self, seq_group: SequenceGroup) -> None:
-        self.block_manager.allocate(seq_group)
+    def move_caching_from_running_to_fixed(self) -> None:
+        """
+        move the finished context caching requests
+        from running to fixed queue
+        """
+        remaining: Deque[SequenceGroup] = deque()
+        for seq_group in self.running:
+            if seq_group.is_fixed():
+                self.fixed.append(seq_group)
+                for seq in seq_group.seqs:
+                    self.block_manager.make_swappable(seq)
+            else:
+                remaining.append(seq_group)
+        self.running = remaining
+
+    def free_expired_context_caching(self) -> None:
+        """
+        !! note that this method also physically free the blocks
+        """
+        remaining: Deque[SequenceGroup] = deque()
+        for seq_group in self.fixed:
+            if seq_group.is_expired():
+                assert len(seq_group.seqs) == 1
+                # CC SG can only have one sequence
+                seqs = seq_group.get_seqs()
+                assert len(seqs) == 1
+                from vllm.core.block_manager_v1 import BlockSpaceManagerV1
+                assert isinstance(
+                    self.block_manager, BlockSpaceManagerV1
+                ), "Context Caching only implemented with block manager v1 now"
+                self.block_manager.free_context_cache(seqs[0])
+            else:
+                remaining.append(seq_group)
+        self.fixed = remaining
+
+    def _allocate_and_set_running(
+        self, seq_group: SequenceGroup
+    ) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int]], List[Tuple[
+            int, int, int, int]], List[Tuple[int, int, int, int]]]:
+        swap_in, swap_out, swap_in_from_disk, swap_out_to_disk = \
+            self.block_manager.allocate(seq_group)
         for seq in seq_group.get_seqs(status=SequenceStatus.WAITING):
             seq.status = SequenceStatus.RUNNING
+        return swap_in, swap_out, swap_in_from_disk, swap_out_to_disk
 
     def _append_slots(
         self,
         seq_group: SequenceGroup,
+        blocks_to_swap_in: List[Tuple[int, int]],
+        blocks_to_swap_out: List[Tuple[int, int]],
         blocks_to_copy: List[Tuple[int, int]],
+        blocks_to_swap_in_from_disk: List[Tuple[int, int, int, int]],
+        blocks_to_swap_out_to_disk: List[Tuple[int, int, int, int]],
     ) -> None:
         """Appends new slots to the sequences in the given sequence group.
 
@@ -1326,14 +1575,21 @@ class Scheduler:
         seq_group.init_multi_step(num_scheduler_steps=num_lookahead_slots + 1)
 
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
-            cows = self.block_manager.append_slots(seq, num_lookahead_slots)
+            cows, swap_in, swap_out, swap_in_from_disk, swap_out_to_disk = \
+                self.block_manager.append_slots(seq, num_lookahead_slots)
             if len(cows) > 0:
                 blocks_to_copy.extend(cows)
+            self.block_manager.adjust_swap(swap_in, swap_out,
+                                           blocks_to_swap_in,
+                                           blocks_to_swap_out, blocks_to_copy)
+            blocks_to_swap_in_from_disk.extend(swap_in_from_disk)
+            blocks_to_swap_out_to_disk.extend(swap_out_to_disk)
 
     def _preempt(
         self,
         seq_group: SequenceGroup,
         blocks_to_swap_out: List[Tuple[int, int]],
+        blocks_to_swap_out_to_disk: List[Tuple[int, int, int, int]],
         preemption_mode: Optional[PreemptionMode] = None,
     ) -> PreemptionMode:
         # If preemption mode is not specified, we determine the mode as follows:
@@ -1358,20 +1614,21 @@ class Scheduler:
         else:
             preemption_mode = PreemptionMode.RECOMPUTE
 
-        if self.num_cumulative_preemption % 50 == 0:
-            logger.warning(
-                "Sequence group %s is preempted by %s mode because there is "
-                "not enough KV cache space. This can affect the end-to-end "
-                "performance. Increase gpu_memory_utilization or "
-                "tensor_parallel_size to provide more KV cache memory. "
-                "total_num_cumulative_preemption=%d", seq_group.request_id,
-                preemption_mode, self.num_cumulative_preemption + 1)
+        #if self.num_cumulative_preemption % 50 == 0:
+        logger.warning(
+            "Sequence group %s is preempted by %s mode because there is "
+            "not enough KV cache space. This can affect the end-to-end "
+            "performance. Increase gpu_memory_utilization or "
+            "tensor_parallel_size to provide more KV cache memory. "
+            "total_num_cumulative_preemption=%d", seq_group.request_id,
+            preemption_mode, self.num_cumulative_preemption + 1)
         self.num_cumulative_preemption += 1
 
         if preemption_mode == PreemptionMode.RECOMPUTE:
             self._preempt_by_recompute(seq_group)
         elif preemption_mode == PreemptionMode.SWAP:
-            self._preempt_by_swap(seq_group, blocks_to_swap_out)
+            self._preempt_by_swap(seq_group, blocks_to_swap_out,
+                                  blocks_to_swap_out_to_disk)
         else:
             raise AssertionError("Invalid preemption mode.")
         return preemption_mode
@@ -1391,32 +1648,43 @@ class Scheduler:
         self,
         seq_group: SequenceGroup,
         blocks_to_swap_out: List[Tuple[int, int]],
+        blocks_to_swap_out_to_disk: List[Tuple[int, int, int, int]],
     ) -> None:
-        self._swap_out(seq_group, blocks_to_swap_out)
+        self._swap_out(seq_group, blocks_to_swap_out,
+                       blocks_to_swap_out_to_disk)
 
     def _swap_in(
-        self,
-        seq_group: SequenceGroup,
-        blocks_to_swap_in: List[Tuple[int, int]],
-    ) -> None:
-        mapping = self.block_manager.swap_in(seq_group)
-        blocks_to_swap_in.extend(mapping)
+            self, seq_group: SequenceGroup,
+            blocks_to_swap_in: List[Tuple[int, int]],
+            blocks_to_swap_out: List[Tuple[int, int]],
+            blocks_to_copy: List[Tuple[int, int]],
+            blocks_to_swap_in_from_disk: List[Tuple[int, int, int, int]],
+            blocks_to_swap_out_to_disk: List[Tuple[int, int, int,
+                                                   int]]) -> None:
+        mapping, swap_out, swap_in_from_disk, swap_out_to_disk = \
+            self.block_manager.swap_in(seq_group)
+        self.block_manager.adjust_swap(mapping, swap_out, blocks_to_swap_in,
+                                       blocks_to_swap_out, blocks_to_copy)
+        blocks_to_swap_in_from_disk.extend(swap_in_from_disk)
+        blocks_to_swap_out_to_disk.extend(swap_out_to_disk)
         for seq in seq_group.get_seqs(status=SequenceStatus.SWAPPED):
             seq.status = SequenceStatus.RUNNING
 
     def _swap_out(
-        self,
-        seq_group: SequenceGroup,
-        blocks_to_swap_out: List[Tuple[int, int]],
-    ) -> None:
+            self, seq_group: SequenceGroup,
+            blocks_to_swap_out: List[Tuple[int, int]],
+            blocks_to_swap_out_to_disk: List[Tuple[int, int, int,
+                                                   int]]) -> None:
+        # TODO: Make a better decision here for better utilization.
         if not self.block_manager.can_swap_out(seq_group):
             # FIXME(woosuk): Abort the sequence group instead of aborting the
             # entire engine.
             raise RuntimeError(
                 "Aborted due to the lack of CPU swap space. Please increase "
                 "the swap space to avoid this error.")
-        mapping = self.block_manager.swap_out(seq_group)
+        mapping, blocks_to_disk = self.block_manager.swap_out(seq_group)
         blocks_to_swap_out.extend(mapping)
+        blocks_to_swap_out_to_disk.extend(blocks_to_disk)
         for seq in seq_group.get_seqs(status=SequenceStatus.RUNNING):
             seq.status = SequenceStatus.SWAPPED
 
@@ -1428,10 +1696,9 @@ class Scheduler:
         if self.scheduler_config.delay_factor > 0 and self.waiting:
             earliest_arrival_time = min(
                 [e.metrics.arrival_time for e in self.waiting])
-            passed_delay = (
-                (now - earliest_arrival_time) >
-                (self.scheduler_config.delay_factor * self.last_prompt_latency)
-                or not self.running)
+            passed_delay = ((now - earliest_arrival_time)
+                            > (self.scheduler_config.delay_factor *
+                               self.last_prompt_latency) or not self.running)
         else:
             passed_delay = True
         return passed_delay
@@ -1466,7 +1733,7 @@ class Scheduler:
         seqs = seq_group.get_seqs(status=status)
         for seq in seqs:
             num_new_tokens += seq.get_num_new_tokens()
-        assert num_new_tokens > 0
+        # assert num_new_tokens > 0
         # Chunk if a running request cannot fit in the given budget.
         # If number of seq > 1, it means it is doing beam search
         # in a decode phase. Do not chunk.

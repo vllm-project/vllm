@@ -4,6 +4,7 @@ from typing import Sequence as GenericSequence
 from typing import Tuple
 
 from vllm import SamplingParams
+from vllm.caching_params import CachingParams
 from vllm.lora.request import LoRARequest
 from vllm.sequence import Logprob, Sequence, SequenceGroup
 
@@ -16,6 +17,7 @@ def create_dummy_prompt(
     use_beam_search: bool = False,
     best_of: int = 1,
     prompt_tokens: Optional[List[int]] = None,
+    caching_params: Optional[CachingParams] = None,
 ) -> Tuple[Sequence, SequenceGroup]:
     if not block_size:
         block_size = prompt_length
@@ -37,7 +39,9 @@ def create_dummy_prompt(
                               sampling_params=SamplingParams(
                                   use_beam_search=use_beam_search,
                                   best_of=best_of),
-                              lora_request=lora_request)
+                              lora_request=lora_request,
+                              caching_params=caching_params.clone()
+                              if caching_params is not None else None)
 
     return prompt, seq_group
 

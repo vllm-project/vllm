@@ -26,6 +26,10 @@ class Evictor(ABC):
         pass
 
     @abstractmethod
+    def __len__(self):
+        pass
+
+    @abstractmethod
     def evict(self) -> PhysicalTokenBlock:
         """Runs the eviction algorithm and returns the evicted block"""
         pass
@@ -64,6 +68,9 @@ class LRUEvictor(Evictor):
     def __contains__(self, block_hash: int) -> bool:
         return block_hash in self.free_table
 
+    def __len__(self):
+        return len(self.free_table)
+
     def evict(self) -> PhysicalTokenBlock:
         if len(self.free_table) == 0:
             raise ValueError("No usable cache memory left")
@@ -80,11 +87,16 @@ class LRUEvictor(Evictor):
 
         self.free_table.pop(evicted_block.block_hash)
 
+        #NOTE: It is uncertain that the block is computed
+        evicted_block.prev_computed = evicted_block.computed
         evicted_block.computed = False
+        assert evicted_block.is_evicted is False
+        evicted_block.is_evicted = True
         return evicted_block
 
     def add(self, block: PhysicalTokenBlock):
         self.free_table[block.block_hash] = block
+        block.is_evicted = False
 
     def remove(self, block_hash: int) -> PhysicalTokenBlock:
         if block_hash not in self.free_table:
@@ -92,6 +104,7 @@ class LRUEvictor(Evictor):
                 "Attempting to remove block that's not in the evictor")
         block: PhysicalTokenBlock = self.free_table[block_hash]
         self.free_table.pop(block_hash)
+        block.is_evicted = False
         return block
 
     @property

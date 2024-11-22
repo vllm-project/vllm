@@ -223,6 +223,17 @@ class ModelRunnerBase(ABC, Generic[T]):
         """
         raise NotImplementedError
 
+    def add_kv_cache_for_layered_transfer(
+            self,
+            model_input: T,
+            cuda_stream: Optional[torch.cuda.Stream] = None,
+            blocks_to_swap_in: Optional[torch.Tensor] = None,
+            blocks_to_swap_out: Optional[torch.Tensor] = None,
+            blocks_to_copy: Optional[torch.Tensor] = None,
+            gpu_caches: Optional[List[torch.Tensor]] = None,
+            cpu_caches: Optional[List[torch.Tensor]] = None):
+        pass
+
     @current_platform.inference_mode()
     def execute_model(
         self,

@@ -7,6 +7,7 @@ from vllm.core.block.common import (CacheMetricData, CopyOnWriteTracker,
 from vllm.core.block.interfaces import Block, BlockAllocator, BlockId, Device
 from vllm.core.block.naive_block import (BlockPool, NaiveBlock,
                                          NaiveBlockAllocator)
+from vllm.core.block.radix_cache import RadixCache
 from vllm.core.evictor_v2 import EvictionPolicy, Evictor, make_evictor
 from vllm.utils import cdiv
 
@@ -113,6 +114,8 @@ class PrefixCachingBlockAllocator(BlockAllocator):
 
         self.metric_data = CacheMetricData()
 
+        self._prefix_tree = RadixCache()
+
     # Implements Block.Factory.
     def _create_block(
         self,
@@ -159,6 +162,20 @@ class PrefixCachingBlockAllocator(BlockAllocator):
                                             physical_block_id=None)
         assert block.content_hash is not None
 
+        # place the prefix matching in the radix tree
+        matched_value, last_node = self._prefix_tree.match_prefix(token_ids)
+        if len(matched_value) > 0:
+            # Found matching prefix in tree, reuse cached block
+            self.metric_data.query(hit=True)
+            block = self._block_pool.init_block(
+                prev_block=prev_block,
+                token_ids=token_ids,
+                block_size=self._block_size,
+                physical_block_id=matched_value[-1] # Use last matched block ID
+            )
+            self._incr_refcount_cached_block(block)
+            return block
+        # If not cached in the prefix tree, then refer to the cahced blocks
         cached_block_id = self._cached_blocks.get(block.content_hash, None)
         if cached_block_id is not None:
             self.metric_data.query(hit=True)
@@ -171,6 +188,8 @@ class PrefixCachingBlockAllocator(BlockAllocator):
         # No cached block => Allocate a new block
         block = self.allocate_mutable_block(prev_block)
         block.append_token_ids(token_ids)
+        # Add new block to radix tree
+        self._prefix_tree.insert(token_ids, [block.block_id])
         return block
 
     def allocate_immutable_blocks(
@@ -344,6 +363,9 @@ class PrefixCachingBlockAllocator(BlockAllocator):
     def free(self, block: Block, keep_block_object: bool = False) -> None:
         """Release the block (look at free_block_id(..) docs)
         """
+        if block.content_hash is not None:
+            # Only removed from the radix tree，the block still in _cached_blocks
+            self._prefix_tree.evict(1, lambda _: None)
         # Release the physical block index
         self._free_block_id(block)
 
@@ -448,6 +470,8 @@ class PrefixCachingBlockAllocator(BlockAllocator):
             # because other sequences in the same batch cannot reuse
             # this block.
             self._cached_blocks[block.content_hash] = block.block_id
+            # Add new immutable block to radix tree
+            self._prefix_tree.insert(block.token_ids, [block.block_id])
             # Mark this block as touched so that it can be marked as
             # computed after the entire batch of sequences are scheduled.
             self._touched_blocks.add(block.block_id)

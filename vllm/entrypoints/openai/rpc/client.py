@@ -17,13 +17,15 @@ from vllm.entrypoints.openai.rpc import (RPC_REQUEST_TYPE,
                                          VLLM_RPC_SOCKET_LIMIT_CUTOFF,
                                          VLLM_RPC_SUCCESS_STR,
                                          VLLM_RPC_ZMQ_HWM, RPCAbortRequest,
-                                         RPCGenerateRequest, RPCUtilityRequest)
+                                         RPCCachingRequest, RPCGenerateRequest,
+                                         RPCUtilityRequest)
 # yapf: enable
 from vllm.envs import VLLM_RPC_GET_DATA_TIMEOUT_MS
 from vllm.inputs import PromptInputs
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.outputs import EmbeddingRequestOutput, RequestOutput
+from vllm.outputs import (CachingRequestOutput, EmbeddingRequestOutput,
+                          RequestOutput)
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
@@ -422,6 +424,28 @@ class AsyncEngineRPCClient:
             # Request was canceled by the client.
             if not finished and not self._errored:
                 await self.abort(request_id)
+
+    async def caching(self, inputs: PromptInputs, request_id: str,
+                      expired_at: Optional[float],
+                      ttl: Optional[float]) -> CachingRequestOutput:
+        """
+        Send an RPCCacheRequest to the RPCServer and return response
+        """
+        with self.to_proxy_socket() as socket:
+            await socket.send_multipart([
+                cloudpickle.dumps(
+                    RPCCachingRequest(inputs=inputs,
+                                      request_id=request_id,
+                                      expired_at=expired_at,
+                                      ttl=ttl))
+            ])
+            message = await socket.recv()
+            caching_request_output = cloudpickle.loads(message)
+
+            if isinstance(caching_request_output, Exception):
+                raise caching_request_output
+
+            return caching_request_output
 
     async def check_health(self, socket: Optional[Socket] = None) -> None:
         """Raise if unhealthy"""

@@ -1,6 +1,7 @@
 """Sequence and its related classes."""
 import copy
 import enum
+import time
 from abc import ABC, abstractmethod
 from array import array
 from collections import defaultdict
@@ -12,6 +13,7 @@ from typing import Set, Tuple, Union, cast
 import msgspec
 import torch
 
+from vllm.caching_params import CachingParams
 from vllm.inputs.parse import is_valid_encoder_decoder_llm_inputs
 from vllm.lora.request import LoRARequest
 from vllm.pooling_params import PoolingParams
@@ -61,10 +63,16 @@ class SequenceStatus(enum.IntEnum):
     FINISHED_LENGTH_CAPPED = 4
     FINISHED_ABORTED = 5
     FINISHED_IGNORED = 6
+    # Caching requests
+    FIXED = 7
 
     @staticmethod
     def is_finished(status: "SequenceStatus") -> bool:
-        return status > SequenceStatus.SWAPPED
+        return status < SequenceStatus.FIXED and status > SequenceStatus.SWAPPED
+
+    @staticmethod
+    def is_fixed(status: "SequenceStatus") -> bool:
+        return status == SequenceStatus.FIXED
 
     @staticmethod
     def get_finished_reason(status: "SequenceStatus") -> Union[str, None]:
@@ -568,6 +576,9 @@ class Sequence:
     def is_finished(self) -> bool:
         return SequenceStatus.is_finished(self.status)
 
+    def is_fixed(self) -> bool:
+        return SequenceStatus.is_fixed(self.status)
+
     def fork(self, new_seq_id: int) -> "Sequence":
         new_seq = copy.deepcopy(self)
         new_seq.seq_id = new_seq_id
@@ -635,6 +646,7 @@ class SequenceGroup:
         embeddings: Optional[List[float]] = None,
         pooling_params: Optional[PoolingParams] = None,
         encoder_seq: Optional[Sequence] = None,
+        caching_params: Optional[CachingParams] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
     ) -> None:
@@ -656,6 +668,7 @@ class SequenceGroup:
         self.pooling_params = pooling_params
         self.prompt_adapter_request = prompt_adapter_request
         self.encoder_seq = encoder_seq
+        self.caching_params = caching_params
         self.trace_headers = trace_headers
 
     @property
@@ -858,6 +871,20 @@ class SequenceGroup:
 
         return all(seq.is_finished() for seq in self.seqs)
 
+    def is_fixed(self) -> bool:
+        return all(seq.is_fixed() for seq in self.seqs)
+
+    def is_expired(self) -> bool:
+        assert all(seq.is_fixed() for seq in self.seqs)
+        now = time.time()
+        assert self.caching_params
+        if self.caching_params.expired_at is not None:
+            return now > self.caching_params.expired_at
+        elif self.caching_params.ttl is not None:
+            return now > self.caching_params.ttl + self.metrics.arrival_time
+        else:
+            raise ValueError("expired_at and ttl must specify one")
+
     def is_prefill(self) -> bool:
         # Every sequence should be in the same stage.
         return self.seqs[0].is_prefill()
@@ -932,6 +959,7 @@ class SequenceGroupMetadata(
     block_tables: Dict[int, List[int]]
     do_sample: bool = True
     pooling_params: Optional[PoolingParams] = None
+    caching_params: Optional[CachingParams] = None
     lora_request: Optional[LoRARequest] = None
     computed_block_nums: Optional[List[int]] = None
     state: Optional[SequenceGroupState] = msgspec.field(
@@ -1268,6 +1296,16 @@ class ExecuteModelRequest(
     # Async callback
     async_callback: Optional[Callable] = None
 
+    # Blocks to disk.
+    # NOTE: Add as additional field as we don't fix the format yet
+    # For now, the format is block_id, block_id, from_dev, to_dev
+    blocks_to_swap_in_from_disk: List[Tuple[int, int, int,
+                                            int]] = msgspec.field(
+                                                default_factory=list)
+    blocks_to_swap_out_to_disk: List[Tuple[int, int, int,
+                                           int]] = msgspec.field(
+                                               default_factory=list)
+
     @property
     def is_first_multi_step(self) -> bool:
         # TODO(will) make this be able to handle batches with variable number of
@@ -1313,4 +1351,6 @@ class ExecuteModelRequest(
             finished_requests_ids=self.finished_requests_ids,
             last_sampled_token_ids=self.last_sampled_token_ids.clone()
             if self.last_sampled_token_ids is not None else None,
-            async_callback=self.async_callback)
+            async_callback=self.async_callback,
+            blocks_to_swap_in_from_disk=self.blocks_to_swap_in_from_disk,
+            blocks_to_swap_out_to_disk=self.blocks_to_swap_out_to_disk)

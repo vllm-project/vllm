@@ -101,6 +101,20 @@ class CacheEngine:
     def copy(self, src_to_dsts: torch.Tensor) -> None:
         self.attn_backend.copy_blocks(self.gpu_cache, src_to_dsts)
 
+    def swap_in_one_layer(self, src_to_dst: torch.Tensor, layer: int) -> None:
+        self.attn_backend.swap_blocks(self.cpu_cache[layer],
+                                      self.gpu_cache[layer], src_to_dst)
+
+    def swap_out_one_layer(self, src_to_dst: torch.Tensor, layer: int) -> None:
+        self.attn_backend.swap_blocks(self.gpu_cache[layer],
+                                      self.cpu_cache[layer], src_to_dst)
+
+    def copy_one_layer(self, src_to_dsts: torch.Tensor, layer: int) -> None:
+        self.attn_backend.copy_blocks_one_layer(self.gpu_cache[layer],
+                                                src_to_dsts)
+
+    #TODO: Consider layer-by-layer copy later.
+
     @staticmethod
     def get_cache_block_size(
         cache_config: CacheConfig,

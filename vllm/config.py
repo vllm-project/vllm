@@ -1,6 +1,7 @@
 import enum
 import json
 from dataclasses import dataclass, field, fields
+from pathlib import Path
 from typing import (TYPE_CHECKING, Any, ClassVar, Dict, List, Mapping,
                     Optional, Tuple, Type, Union)
 
@@ -534,13 +535,17 @@ class ModelConfig:
         return num_heads // parallel_config.tensor_parallel_size
 
     def get_num_layers(self, parallel_config: "ParallelConfig") -> int:
+        start, end = self.get_layers(parallel_config)
+        return end - start
+
+    def get_layers(self, parallel_config: "ParallelConfig") -> Tuple[int, int]:
         from vllm.distributed.utils import get_pp_indices
         total_num_hidden_layers = getattr(self.hf_text_config,
                                           "num_hidden_layers", 0)
         pp_rank = parallel_config.rank // parallel_config.tensor_parallel_size
         pp_size = parallel_config.pipeline_parallel_size
         start, end = get_pp_indices(total_num_hidden_layers, pp_rank, pp_size)
-        return end - start
+        return start, end
 
     def contains_seqlen_agnostic_layers(
             self, parallel_config: "ParallelConfig") -> bool:
@@ -606,6 +611,8 @@ class CacheConfig:
         cache_dtype: Data type for kv cache storage.
         num_gpu_blocks_override: Number of GPU blocks to use. This overrides the
             profiled num_gpu_blocks if specified. Does nothing if None.
+        num_cpu_blocks_override: Number of CPU blocks to use. This overrides the
+            profiled num_cpu_blocks if specified. Does nothing if None.
     """
 
     def __init__(
@@ -615,18 +622,29 @@ class CacheConfig:
         swap_space: float,
         cache_dtype: str,
         num_gpu_blocks_override: Optional[int] = None,
+        num_cpu_blocks_override: Optional[int] = None,
         sliding_window: Optional[int] = None,
         enable_prefix_caching: bool = False,
+        enable_memory_tiering: bool = False,
+        enable_layered_transfer: bool = False,
+        enable_disk_swap: bool = False,
+        disk_swap_config: str = "swap.cfg",
         cpu_offload_gb: float = 0,
     ) -> None:
         self.block_size = block_size
         self.gpu_memory_utilization = gpu_memory_utilization
         self.swap_space_bytes = swap_space * GiB_bytes
         self.num_gpu_blocks_override = num_gpu_blocks_override
+        self.num_cpu_blocks_override = num_cpu_blocks_override
         self.cache_dtype = cache_dtype
         self.sliding_window = sliding_window
         self.enable_prefix_caching = enable_prefix_caching
+        self.enable_memory_tiering = enable_memory_tiering
+        self.enable_layered_transfer = enable_layered_transfer
         self.cpu_offload_gb = cpu_offload_gb
+        self.enable_disk_swap = enable_disk_swap
+        self.disk_swap_config_path = disk_swap_config
+
         self._verify_args()
         self._verify_cache_dtype()
         self._verify_prefix_caching()
@@ -634,6 +652,12 @@ class CacheConfig:
         # Will be set after profiling.
         self.num_gpu_blocks = None
         self.num_cpu_blocks = None
+
+        if self.enable_disk_swap:
+            with open(disk_swap_config, encoding="utf-8", mode="r") as file:
+                self.disk_swap_config = dict(json.loads(file.read()))
+        else:
+            self.disk_swap_config = dict()
 
     def metrics_info(self):
         # convert cache_config to dict(key: str, value: str) for prometheus
@@ -645,6 +669,16 @@ class CacheConfig:
             raise ValueError(
                 "GPU memory utilization must be less than 1.0. Got "
                 f"{self.gpu_memory_utilization}.")
+        if self.enable_disk_swap and (self.swap_space_bytes <= 0
+                                      or not self.enable_memory_tiering):
+            raise ValueError(
+                "For now, disk swap must be enabled with DRAM swap and "
+                "block-level memory tiering.")
+        path = Path(self.disk_swap_config_path)
+        if self.enable_disk_swap and (not path.exists() or not path.is_file()):
+            raise ValueError(
+                f"Disk swap file {self.disk_swap_config_path} does not exist "
+                "or not a file.")
 
     def _verify_cache_dtype(self) -> None:
         if self.cache_dtype == "auto":
@@ -1470,8 +1504,8 @@ class SpeculativeConfig:
                              "typical_acceptance_sampler.")
 
         if (self.draft_token_acceptance_method != 'rejection_sampler'
-                and self.draft_token_acceptance_method !=
-                'typical_acceptance_sampler'):
+                and self.draft_token_acceptance_method
+                != 'typical_acceptance_sampler'):
             raise ValueError(
                 "Expected draft_token_acceptance_method to be either "
                 "rejection_sampler or typical_acceptance_sampler. Instead it "

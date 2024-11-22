@@ -216,6 +216,13 @@ class FlashAttentionBackend(AttentionBackend):
         value_caches = [kv_cache[1] for kv_cache in kv_caches]
         ops.copy_blocks(key_caches, value_caches, src_to_dists)
 
+    @staticmethod
+    def copy_blocks_one_layer(
+        kv_cache: torch.Tensor,
+        src_to_dists: torch.Tensor,
+    ) -> None:
+        ops.copy_blocks_one_layer(kv_cache[0], kv_cache[1], src_to_dists)
+
 
 @dataclass
 class FlashAttentionMetadata(AttentionMetadata):
@@ -296,6 +303,7 @@ class FlashAttentionMetadata(AttentionMetadata):
             num_prefill_tokens=self.num_prefill_tokens,
             num_decode_tokens=0,
             slot_mapping=self.slot_mapping[:self.num_prefill_tokens],
+            enable_layered_transfer=False,
             seq_lens=self.seq_lens[:self.num_prefills],
             seq_lens_tensor=self.seq_lens_tensor[:self.num_prefills],
             max_query_len=self.max_query_len,
@@ -324,6 +332,7 @@ class FlashAttentionMetadata(AttentionMetadata):
             num_prefill_tokens=0,
             num_decode_tokens=self.num_decode_tokens,
             slot_mapping=self.slot_mapping[self.num_prefill_tokens:],
+            enable_layered_transfer=False,
             seq_lens=None,
             seq_lens_tensor=self.seq_lens_tensor[self.num_prefills:],
             max_query_len=None,
@@ -389,6 +398,25 @@ class FlashAttentionMetadata(AttentionMetadata):
                                    seq_lens=self.seq_lens_tensor,
                                    slot_mapping=self.slot_mapping,
                                    block_tables=self.block_tables)
+
+    def add_kv_cache_for_layered_transfer(
+            self,
+            num_hidden_layers: int,
+            blocks_to_swap_in: Optional[torch.Tensor] = None,
+            blocks_to_swap_out: Optional[torch.Tensor] = None,
+            blocks_to_copy: Optional[torch.Tensor] = None,
+            gpu_caches: Optional[List[torch.Tensor]] = None,
+            cpu_caches: Optional[List[torch.Tensor]] = None,
+            cuda_stream: Optional[torch.cuda.Stream] = None):
+        self.enable_layered_transfer = True
+        self.blocks_to_swap_in = blocks_to_swap_in
+        self.blocks_to_swap_out = blocks_to_swap_out
+        self.blocks_to_copy = blocks_to_copy
+        self.cpu_caches = cpu_caches
+        self.gpu_caches = gpu_caches
+        self.num_hidden_layers = num_hidden_layers
+        self.current_layer = 1
+        self.cuda_stream = cuda_stream
 
 
 class FlashAttentionMetadataBuilder(
@@ -558,6 +586,7 @@ class FlashAttentionMetadataBuilder(
             slot_mapping=slot_mapping_tensor,
             num_prefill_tokens=self.num_prefill_tokens,
             num_decode_tokens=num_decode_tokens,
+            enable_layered_transfer=False,
             seq_lens=seq_lens,
             seq_lens_tensor=seq_lens_tensor,
             max_query_len=max_query_len,
@@ -664,6 +693,74 @@ class FlashAttentionImpl(AttentionImpl):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
+
+        # First fetch the next layer
+        if attn_metadata.enable_layered_transfer:
+            # Wait for the previous layer to finish.
+            if attn_metadata.cuda_stream is not None:
+                dev = kv_cache.device
+                torch.cuda.default_stream(dev).wait_stream(
+                    attn_metadata.cuda_stream)
+
+            if attn_metadata.current_layer < attn_metadata.num_hidden_layers:
+                # Swap out
+                if (attn_metadata.blocks_to_swap_out is not None
+                        and attn_metadata.blocks_to_swap_out.numel() > 0
+                        and attn_metadata.gpu_caches is not None
+                        and attn_metadata.cpu_caches is not None):
+                    if attn_metadata.cuda_stream is not None:
+                        with torch.cuda.stream(attn_metadata.cuda_stream):
+                            FlashAttentionBackend.swap_blocks(
+                                attn_metadata.gpu_caches[
+                                    attn_metadata.current_layer],
+                                attn_metadata.cpu_caches[
+                                    attn_metadata.current_layer],
+                                attn_metadata.blocks_to_swap_out)
+                    else:
+                        FlashAttentionBackend.swap_blocks(
+                            attn_metadata.gpu_caches[
+                                attn_metadata.current_layer],
+                            attn_metadata.cpu_caches[
+                                attn_metadata.current_layer],
+                            attn_metadata.blocks_to_swap_out)
+                if (attn_metadata.blocks_to_copy is not None
+                        and attn_metadata.blocks_to_copy.numel() > 0
+                        and attn_metadata.gpu_caches is not None):
+                    if attn_metadata.cuda_stream is not None:
+                        with torch.cuda.stream(attn_metadata.cuda_stream):
+                            FlashAttentionBackend.copy_blocks_one_layer(
+                                attn_metadata.gpu_caches[
+                                    attn_metadata.current_layer],
+                                attn_metadata.blocks_to_copy)
+                    else:
+                        FlashAttentionBackend.copy_blocks_one_layer(
+                            attn_metadata.gpu_caches[
+                                attn_metadata.current_layer],
+                            attn_metadata.blocks_to_copy)
+                if (attn_metadata.blocks_to_swap_in is not None
+                        and attn_metadata.blocks_to_swap_in.numel() > 0
+                        and attn_metadata.gpu_caches is not None
+                        and attn_metadata.cpu_caches is not None):
+                    if attn_metadata.cuda_stream is not None:
+                        with torch.cuda.stream(attn_metadata.cuda_stream):
+                            FlashAttentionBackend.swap_blocks(
+                                attn_metadata.cpu_caches[
+                                    attn_metadata.current_layer],
+                                attn_metadata.gpu_caches[
+                                    attn_metadata.current_layer],
+                                attn_metadata.blocks_to_swap_in)
+                    else:
+                        FlashAttentionBackend.swap_blocks(
+                            attn_metadata.cpu_caches[
+                                attn_metadata.current_layer],
+                            attn_metadata.gpu_caches[
+                                attn_metadata.current_layer],
+                            attn_metadata.blocks_to_swap_in)
+                attn_metadata.current_layer += 1
+            elif attn_metadata.current_layer == attn_metadata.num_hidden_layers:
+                # NOTE: Prevent it from being freed but is it necessary?
+                attn_metadata.current_layer = 1
+
         if attn_type != AttentionType.DECODER:
             raise NotImplementedError("Encoder self-attention and "
                                       "encoder/decoder cross-attention "

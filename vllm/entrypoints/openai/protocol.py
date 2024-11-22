@@ -886,3 +886,33 @@ class LoadLoraAdapterRequest(BaseModel):
 class UnloadLoraAdapterRequest(BaseModel):
     lora_name: str
     lora_int_id: Optional[int] = Field(default=None)
+
+
+class CachingRequest(OpenAIBaseModel):
+    # https://platform.moonshot.cn/docs/api/caching
+
+    model: str
+    messages: List[ChatCompletionMessageParam]
+    # expired_at and ttl should pass one of them
+    expired_at: Optional[float] = None
+    ttl: Optional[float] = None
+
+    # Tools
+    tools: Optional[List[ChatCompletionToolsParam]] = None  # TODO
+    # Notes
+    name: Optional[str] = None
+    description: Optional[str] = None
+    metadata: Optional[List[Dict[str, str]]] = None
+
+    # Redundant fields for compatibility
+    max_tokens: Optional[int] = None
+
+
+class CachingResponse(OpenAIBaseModel):
+    id: str
+    status: Literal["pending", "ready", "error", "inactive"]
+    object: str
+    created_at: float
+    expired_at: float
+    tokens: int
+    error: Optional[Dict[str, str]] = None

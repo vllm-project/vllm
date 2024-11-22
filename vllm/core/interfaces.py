@@ -47,8 +47,12 @@ class BlockSpaceManager(ABC):
     def can_allocate(self, seq_group: SequenceGroup) -> AllocStatus:
         pass
 
+    # Return: swapin, swapout, swap_in_from_disk, swap_out_to_disk
     @abstractmethod
-    def allocate(self, seq_group: SequenceGroup) -> None:
+    def allocate(
+        self, seq_group: SequenceGroup
+    ) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int]], List[Tuple[
+            int, int, int, int]], List[Tuple[int, int, int, int]]]:
         pass
 
     @abstractmethod
@@ -61,7 +65,9 @@ class BlockSpaceManager(ABC):
         self,
         seq: Sequence,
         num_lookahead_slots: int,
-    ) -> List[Tuple[int, int]]:
+    ) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int]], List[Tuple[
+            int, int]], List[Tuple[int, int, int, int]], List[Tuple[
+                int, int, int, int]]]:
         pass
 
     @abstractmethod
@@ -74,7 +80,10 @@ class BlockSpaceManager(ABC):
         pass
 
     @abstractmethod
-    def swap_in(self, seq_group: SequenceGroup) -> List[Tuple[int, int]]:
+    def swap_in(
+        self, seq_group: SequenceGroup
+    ) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int]], List[Tuple[
+            int, int, int, int]], List[Tuple[int, int, int, int]]]:
         pass
 
     @abstractmethod
@@ -82,11 +91,22 @@ class BlockSpaceManager(ABC):
         pass
 
     @abstractmethod
-    def swap_out(self, seq_group: SequenceGroup) -> List[Tuple[int, int]]:
+    def swap_out(
+        self, seq_group: SequenceGroup
+    ) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int, int, int]]]:
         pass
 
     @abstractmethod
     def free(self, seq: Sequence) -> None:
+        pass
+
+    @abstractmethod
+    def make_swappable(self, seq: Sequence) -> None:
+        """
+        Make the whole sequence as swappable with out freeing it
+        rmap_walk will be used to operate the corresponding page 
+        table since we don't free it.
+        """
         pass
 
     @abstractmethod

@@ -25,9 +25,12 @@ class EmbeddingModelBlockSpaceManager(BlockSpaceManager):
         # Always return OK for dummy purposes
         return AllocStatus.OK
 
-    def allocate(self, seq_group: SequenceGroup) -> None:
+    def allocate(
+        self, seq_group: SequenceGroup
+    ) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int]], List[Tuple[
+            int, int, int, int]], List[Tuple[int, int, int, int]]]:
         # No actual allocation logic needed
-        pass
+        return [], [], [], []
 
     def can_append_slots(self, seq_group: SequenceGroup,
                          num_lookahead_slots: int) -> bool:
@@ -37,8 +40,10 @@ class EmbeddingModelBlockSpaceManager(BlockSpaceManager):
         self,
         seq: Sequence,
         num_lookahead_slots: int,
-    ) -> List[Tuple[int, int]]:
-        return None  # type: ignore
+    ) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int]], List[Tuple[
+            int, int]], List[Tuple[int, int, int, int]], List[Tuple[
+                int, int, int, int]]]:
+        return None, None, None, None, None  # type: ignore
 
     def fork(self, parent_seq: Sequence, child_seq: Sequence) -> None:
         pass
@@ -47,17 +52,38 @@ class EmbeddingModelBlockSpaceManager(BlockSpaceManager):
                     num_lookahead_slots: int) -> AllocStatus:
         return AllocStatus.OK
 
-    def swap_in(self, seq_group: SequenceGroup) -> List[Tuple[int, int]]:
-        return None  # type: ignore
+    def swap_in(
+        self, seq_group: SequenceGroup
+    ) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int]], List[Tuple[
+            int, int, int, int]], List[Tuple[int, int, int, int]]]:
+        return None, None, None, None  # type: ignore
 
     def can_swap_out(self, seq_group: SequenceGroup) -> bool:
         return True
 
-    def swap_out(self, seq_group: SequenceGroup) -> List[Tuple[int, int]]:
+    def swap_out(
+        self, seq_group: SequenceGroup
+    ) -> Tuple[List[Tuple[int, int]], List[Tuple[int, int, int, int]]]:
         return None  # type: ignore
+
+    def adjust_swap(
+        self,
+        new_swap_in: List[Tuple[int, int]],
+        new_swap_out: List[Tuple[int, int]],
+        old_swap_in: List[Tuple[int, int]],
+        old_swap_out: List[Tuple[int, int]],
+        old_swap_copy: List[Tuple[int, int]],
+    ) -> None:
+        return
 
     def free(self, seq: Sequence) -> None:
         # No operation on free
+        return
+
+    def free_evict(self, seq: Sequence) -> None:
+        return
+
+    def make_swappable(self, seq: Sequence) -> None:
         return
 
     def get_block_table(self, seq: Sequence) -> List[int]:

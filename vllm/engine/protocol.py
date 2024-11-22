@@ -6,7 +6,8 @@ from vllm.core.scheduler import SchedulerOutputs
 from vllm.inputs.data import PromptInputs
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
-from vllm.outputs import EmbeddingRequestOutput, RequestOutput
+from vllm.outputs import (CachingRequestOutput, EmbeddingRequestOutput,
+                          RequestOutput)
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import SamplingParams
@@ -44,6 +45,11 @@ class AsyncEngineClient(Protocol):
     ) -> AsyncGenerator[RequestOutput, None]:
         """Generates outputs for a request"""
         ...
+
+    async def caching(self, inputs: PromptInputs, request_id: str,
+                      expired_at: Optional[float],
+                      ttl: Optional[float]) -> CachingRequestOutput:
+        """Create context caching for a request"""
 
     def encode(
         self,

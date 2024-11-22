@@ -81,6 +81,13 @@ class FlashInferBackend(AttentionBackend):
         PagedAttention.copy_blocks(kv_caches, src_to_dists)
 
     @staticmethod
+    def copy_blocks_one_layer(
+        kv_cache: torch.Tensor,
+        src_to_dists: torch.Tensor,
+    ) -> None:
+        PagedAttention.copy_blocks_one_layer(kv_cache, src_to_dists)
+
+    @staticmethod
     def get_supported_head_sizes() -> List[int]:
         return [64, 128, 256]
 
@@ -210,6 +217,7 @@ class FlashInferState(AttentionState):
         attn_metadata = self.runner.attn_backend.make_metadata(
             num_prefills=0,
             slot_mapping=self._graph_slot_mapping[:batch_size],
+            enable_layered_transfer=False,
             num_prefill_tokens=0,
             num_decode_tokens=batch_size,
             max_prefill_seq_len=0,
@@ -445,6 +453,25 @@ class FlashInferMetadata(AttentionMetadata):
             paged_kv_indptr=self.paged_kv_indptr,
             paged_kv_last_page_len=self.paged_kv_last_page_len,
             block_table_bound=self.block_table_bound)
+
+    def add_kv_cache_for_layered_transfer(
+            self,
+            num_hidden_layers: int,
+            blocks_to_swap_in: Optional[torch.Tensor] = None,
+            blocks_to_swap_out: Optional[torch.Tensor] = None,
+            blocks_to_copy: Optional[torch.Tensor] = None,
+            gpu_caches: Optional[List[torch.Tensor]] = None,
+            cpu_caches: Optional[List[torch.Tensor]] = None,
+            cuda_stream: Optional[torch.cuda.Stream] = None):
+        self.enable_layered_transfer = True
+        self.blocks_to_swap_in = blocks_to_swap_in
+        self.blocks_to_swap_out = blocks_to_swap_out
+        self.blocks_to_copy = blocks_to_copy
+        self.cpu_caches = cpu_caches
+        self.gpu_caches = gpu_caches
+        self.num_hidden_layers = num_hidden_layers
+        self.current_layer = 1
+        self.cuda_stream = cuda_stream
 
 
 class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
@@ -683,6 +710,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             slot_mapping=slot_mapping_tensor,
             num_prefill_tokens=self.num_prefill_tokens,
             num_decode_tokens=num_decode_tokens,
+            enable_layered_transfer=False,
             max_prefill_seq_len=max_prefill_seq_len,
             block_tables=block_tables,
             paged_kv_indptr=paged_kv_indptr_tensor,
@@ -746,6 +774,76 @@ class FlashInferImpl(AttentionImpl):
         v_scale: float = 1.0,
         attn_type: AttentionType = AttentionType.DECODER,
     ) -> torch.Tensor:
+
+        # First fetch the next layer
+        if attn_metadata.enable_layered_transfer:
+            # Wait for the previous layer to finish.
+            if attn_metadata.cuda_stream is not None and kv_cache is not None:
+                dev = kv_cache.device
+                torch.cuda.default_stream(dev).wait_stream(
+                    attn_metadata.cuda_stream)
+            if attn_metadata.current_layer < attn_metadata.num_hidden_layers:
+                # Swap out
+                if (attn_metadata.blocks_to_swap_out is not None
+                        and attn_metadata.blocks_to_swap_out.numel() > 0
+                        and attn_metadata.gpu_caches is not None
+                        and attn_metadata.cpu_caches is not None):
+                    if attn_metadata.cuda_stream is not None:
+                        with torch.cuda.stream(attn_metadata.cuda_stream):
+                            PagedAttention.swap_blocks(
+                                attn_metadata.gpu_caches[
+                                    attn_metadata.current_layer],
+                                attn_metadata.cpu_caches[
+                                    attn_metadata.current_layer],
+                                attn_metadata.blocks_to_swap_out)
+                    else:
+                        PagedAttention.swap_blocks(
+                            attn_metadata.gpu_caches[
+                                attn_metadata.current_layer],
+                            attn_metadata.cpu_caches[
+                                attn_metadata.current_layer],
+                            attn_metadata.blocks_to_swap_out)
+
+                if (attn_metadata.blocks_to_copy is not None
+                        and attn_metadata.blocks_to_copy.numel() > 0
+                        and attn_metadata.gpu_caches is not None):
+                    if attn_metadata.cuda_stream is not None:
+                        with torch.cuda.stream(attn_metadata.cuda_stream):
+                            PagedAttention.copy_blocks_one_layer(
+                                attn_metadata.gpu_caches[
+                                    attn_metadata.current_layer],
+                                attn_metadata.blocks_to_copy)
+                    else:
+                        PagedAttention.copy_blocks_one_layer(
+                            attn_metadata.gpu_caches[
+                                attn_metadata.current_layer],
+                            attn_metadata.blocks_to_copy)
+
+                if (attn_metadata.blocks_to_swap_in is not None
+                        and attn_metadata.blocks_to_swap_in.numel() > 0
+                        and attn_metadata.gpu_caches is not None
+                        and attn_metadata.cpu_caches is not None):
+                    if attn_metadata.cuda_stream is not None:
+                        with torch.cuda.stream(attn_metadata.cuda_stream):
+                            PagedAttention.swap_blocks(
+                                attn_metadata.cpu_caches[
+                                    attn_metadata.current_layer],
+                                attn_metadata.gpu_caches[
+                                    attn_metadata.current_layer],
+                                attn_metadata.blocks_to_swap_in)
+                    else:
+                        PagedAttention.swap_blocks(
+                            attn_metadata.cpu_caches[
+                                attn_metadata.current_layer],
+                            attn_metadata.gpu_caches[
+                                attn_metadata.current_layer],
+                            attn_metadata.blocks_to_swap_in)
+
+                attn_metadata.current_layer += 1
+            elif attn_metadata.current_layer == attn_metadata.num_hidden_layers:
+                # NOTE: Prevent it from being freed but is it necessary?
+                attn_metadata.current_layer = 1
+
         assert k_scale == 1.0 and v_scale == 1.0, (
             "key/v_scale is not supported in FlashInfer.")
         if attn_type != AttentionType.DECODER:

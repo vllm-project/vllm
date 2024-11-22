@@ -212,6 +212,7 @@ class BlocksparseFlashAttentionMetadata(AttentionMetadata):
             num_prefill_tokens=self.num_prefill_tokens,
             num_decode_tokens=0,
             slot_mapping=self.slot_mapping[:self.num_prefill_tokens],
+            enable_layered_transfer=False,
             seq_lens=self.seq_lens[:self.num_prefills],
             seq_lens_tensor=self.seq_lens_tensor[:self.num_prefills],
             max_query_len=self.max_query_len,
@@ -240,6 +241,7 @@ class BlocksparseFlashAttentionMetadata(AttentionMetadata):
             num_prefill_tokens=0,
             num_decode_tokens=self.num_decode_tokens,
             slot_mapping=self.slot_mapping[self.num_prefill_tokens:],
+            enable_layered_transfer=False,
             seq_lens=None,
             seq_lens_tensor=self.seq_lens_tensor[self.num_prefills:],
             max_query_len=None,
@@ -252,6 +254,25 @@ class BlocksparseFlashAttentionMetadata(AttentionMetadata):
             use_cuda_graph=self.use_cuda_graph,
         )
         return self._cached_decode_metadata
+
+    def add_kv_cache_for_layered_transfer(
+            self,
+            num_hidden_layers: int,
+            blocks_to_swap_in: Optional[torch.Tensor] = None,
+            blocks_to_swap_out: Optional[torch.Tensor] = None,
+            blocks_to_copy: Optional[torch.Tensor] = None,
+            gpu_caches: Optional[List[torch.Tensor]] = None,
+            cpu_caches: Optional[List[torch.Tensor]] = None,
+            cuda_stream: Optional[torch.cuda.Stream] = None):
+        self.enable_layered_transfer = True
+        self.blocks_to_swap_in = blocks_to_swap_in
+        self.blocks_to_swap_out = blocks_to_swap_out
+        self.blocks_to_copy = blocks_to_copy
+        self.cpu_caches = cpu_caches
+        self.gpu_caches = gpu_caches
+        self.num_hidden_layers = num_hidden_layers
+        self.current_layer = 1
+        self.cuda_stream = cuda_stream
 
 
 class BlocksparseFlashAttentionMetadataBuilder(

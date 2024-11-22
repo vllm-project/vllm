@@ -1,6 +1,6 @@
 import time
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Dict, List, Literal, Optional
 from typing import Sequence as GenericSequence
 from typing import Union
 
@@ -258,6 +258,81 @@ class EmbeddingRequestOutput:
                 f"finished={self.finished})")
 
 
+class CachingRequestOutput:
+    """The output data of a context caching request to the LLM
+    Args:
+        request_id: str | the unique ID of the request
+        id: str | the unique ID of the context cache
+        status: Literal["pending", "ready", "error", "inactive"]
+        object: str | type, default as "context-cache"
+        created_at: float | create time
+        expired_at: float | expire time
+        tokens: int | number of token cached
+        error: Dict[str, str] | {"type": xxx, "message": xxx}
+    """
+
+    def __init__(self,
+                 request_id: str,
+                 id: str,
+                 status: Literal["pending", "ready", "error", "inactive"],
+                 created_at: float,
+                 expired_at: float,
+                 tokens: int,
+                 error: Optional[Dict[str, str]] = None,
+                 object: str = "context-cache"):
+        self.request_id = request_id
+        self.id = id
+        self.status = status
+        self.created_at = created_at
+        self.expired_at = expired_at
+        self.tokens = tokens
+        self.error = error
+        self.object = object
+
+        # for compatibility
+        self.finished = status in ["ready", "error", "inactive"]
+
+    @classmethod
+    def from_seq_group(cls,
+                       seq_group: 'SequenceGroup') -> "CachingRequestOutput":
+        if seq_group.caching_params is None:
+            raise ValueError("caching_params are missing in seq_group for "
+                             "CachingRequestOutput.")
+
+        created_at = seq_group.metrics.arrival_time
+        expired_at = None
+        if seq_group.caching_params.expired_at:
+            expired_at = seq_group.caching_params.expired_at
+        elif seq_group.caching_params.ttl:
+            expired_at = created_at + seq_group.caching_params.ttl
+        else:
+            raise ValueError("expired_at and ttl must specify one")
+
+        assert len(seq_group.seqs) == 1
+        seq = seq_group.get_seqs()[0]
+        assert seq.get_len() == seq.data.get_num_computed_tokens()
+        tokens = seq.get_len()
+
+        return cls(request_id=seq_group.request_id,
+                   id="id_unimplemented",
+                   status="ready",
+                   created_at=created_at,
+                   expired_at=expired_at,
+                   tokens=tokens,
+                   error=None)
+
+    def __repr__(self) -> str:
+        return (f"CachingRequestOutput(request_id={self.request_id}, "
+                f"request_id={self.request_id}, "
+                f"id={self.id}, "
+                f"status={self.status}, "
+                f"created_at={self.created_at}, "
+                f"expired_at={self.expired_at}, "
+                f"tokens={self.tokens}, "
+                f"error={self.error}, "
+                f"object={self.object})")
+
+
 class RequestOutputFactory:
 
     @staticmethod
@@ -266,5 +341,9 @@ class RequestOutputFactory:
         if hasattr(seq_group,
                    'embeddings') and seq_group.embeddings is not None:
             return EmbeddingRequestOutput.from_seq_group(seq_group)
+        elif hasattr(
+            seq_group, "caching_params") and \
+                seq_group.caching_params is not None:
+            return CachingRequestOutput.from_seq_group(seq_group)
         else:
             return RequestOutput.from_seq_group(seq_group)

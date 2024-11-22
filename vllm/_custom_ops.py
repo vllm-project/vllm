@@ -802,6 +802,12 @@ def copy_blocks(key_caches: List[torch.Tensor],
     torch.ops._C_cache_ops.copy_blocks(key_caches, value_caches, block_mapping)
 
 
+def copy_blocks_one_layer(key_cache: torch.Tensor, value_cache: torch.Tensor,
+                          block_mapping: torch.Tensor) -> None:
+    torch.ops._C_cache_ops.copy_blocks_one_layer(key_cache, value_cache,
+                                                 block_mapping)
+
+
 def swap_blocks(src: torch.Tensor, dst: torch.Tensor,
                 block_mapping: torch.Tensor) -> None:
     torch.ops._C_cache_ops.swap_blocks(src, dst, block_mapping)

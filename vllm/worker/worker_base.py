@@ -132,6 +132,9 @@ class WorkerInput:
     blocks_to_copy: Optional[torch.Tensor] = None
     virtual_engine: int = 0
     num_steps: int = 1
+    # TODO: We put list here for now. We will check later the correctness
+    blocks_to_swap_in_from_disk: Optional[torch.Tensor] = None
+    blocks_to_swap_out_to_disk: Optional[torch.Tensor] = None
 
     @classmethod
     def from_broadcasted_tensor_dict(
@@ -149,6 +152,10 @@ class WorkerInput:
             blocks_to_copy=tensor_dict.pop("blocks_to_copy"),
             virtual_engine=tensor_dict["virtual_engine"],
             num_steps=tensor_dict.pop("num_steps"),
+            blocks_to_swap_in_from_disk=tensor_dict.pop(
+                "blocks_to_swap_in_from_disk"),
+            blocks_to_swap_out_to_disk=tensor_dict.pop(
+                "blocks_to_swap_out_to_disk"),
         )
 
     def as_broadcastable_tensor_dict(
@@ -163,6 +170,8 @@ class WorkerInput:
             "blocks_to_copy": self.blocks_to_copy,
             "virtual_engine": self.virtual_engine,
             "num_steps": self.num_steps,
+            "blocks_to_swap_in_from_disk": self.blocks_to_swap_in_from_disk,
+            "blocks_to_swap_out_to_disk": self.blocks_to_swap_out_to_disk
         }
 
         return tensor_dict
@@ -203,6 +212,10 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         from WorkerBase instead.
         """
         raise NotImplementedError
+
+    @property
+    def enable_layered_transfer(self) -> bool:
+        return False
 
     @abstractmethod
     def prepare_worker_input(
@@ -307,6 +320,24 @@ class LocalOrDistributedWorkerBase(WorkerBase):
         model_input, worker_input, kwargs = inputs
         num_steps = worker_input.num_steps
 
+        # Update model_input here because otherwise we broadcast full kv cache
+        if self.enable_layered_transfer:
+            virtual_engine = worker_input.virtual_engine
+            self.model_runner.add_kv_cache_for_layered_transfer(
+                model_input,
+                self.layered_transfer_stream if hasattr(
+                    self, "layered_transfer_stream") else None,
+                worker_input.blocks_to_swap_in,
+                worker_input.blocks_to_swap_out,
+                worker_input.blocks_to_copy,
+                gpu_caches=self.kv_cache[virtual_engine]
+                if self.kv_cache is not None else None,
+                cpu_caches=self.cache_engine[virtual_engine].cpu_cache if
+                (hasattr(self, "cache_engine")
+                 and self.cache_engine is not None) else None,
+            )
+
+        # For profiling and tracing
         self.execute_worker(worker_input)
 
         # If there is no input, we don't need to execute the model.

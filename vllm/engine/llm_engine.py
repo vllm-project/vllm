@@ -12,6 +12,7 @@ import torch
 from typing_extensions import TypeVar
 
 import vllm.envs as envs
+from vllm.caching_params import CachingParams
 from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
                          EngineConfig, LoadConfig, LoRAConfig, ModelConfig,
                          ObservabilityConfig, ParallelConfig,
@@ -34,8 +35,8 @@ from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
-from vllm.outputs import (EmbeddingRequestOutput, RequestOutput,
-                          RequestOutputFactory)
+from vllm.outputs import (CachingRequestOutput, EmbeddingRequestOutput,
+                          RequestOutput, RequestOutputFactory)
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import RequestOutputKind, SamplingParams
@@ -53,6 +54,7 @@ from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
                                   usage_message)
 from vllm.utils import Counter, Device
 from vllm.version import __version__ as VLLM_VERSION
+from vllm.worker.swap.interface import SwapSpaceManagerBuilder
 
 logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
@@ -97,8 +99,8 @@ class SchedulerContext:
 
     def __init__(self):
         self.output_queue: Deque[OutputData] = deque()
-        self.request_outputs: List[Union[RequestOutput,
-                                         EmbeddingRequestOutput]] = []
+        self.request_outputs: List[Union[RequestOutput, EmbeddingRequestOutput,
+                                         CachingRequestOutput]] = []
         self.seq_group_metadata_list: Optional[
             List[SequenceGroupMetadata]] = None
         self.scheduler_outputs: Optional[SchedulerOutputs] = None
@@ -314,6 +316,13 @@ class LLMEngine:
         self.input_processor = input_registry.create_input_processor(
             model_config)
 
+        # Create the SwapManager
+        if cache_config.enable_disk_swap:
+            version = "default"
+            self.swap_manager = SwapSpaceManagerBuilder.build(version)
+        else:
+            self.swap_manager = None
+
         self.model_executor = executor_class(
             model_config=model_config,
             cache_config=cache_config,
@@ -392,6 +401,10 @@ class LLMEngine:
         # of request outputs to asyncio queues
         self.process_request_outputs_callback: Optional[Callable] = None
 
+        # Add device to the SwapManager
+        if cache_config.enable_disk_swap:
+            self.swap_manager.parse_and_add_swap_device(cache_config)
+
         # Create the scheduler.
         # NOTE: the cache_config here have been updated with the numbers of
         # GPU and CPU blocks, which are profiled in the distributed executor.
@@ -400,7 +413,8 @@ class LLMEngine:
                 scheduler_config, cache_config, lora_config,
                 parallel_config.pipeline_parallel_size,
                 self.async_callbacks[v_id]
-                if model_config.use_async_output_proc else None)
+                if model_config.use_async_output_proc else None,
+                self.swap_manager)
             for v_id in range(parallel_config.pipeline_parallel_size)
         ]
 
@@ -466,6 +480,14 @@ class LLMEngine:
                 "num_gpu_blocks_override=%d", num_gpu_blocks,
                 num_gpu_blocks_override)
             num_gpu_blocks = num_gpu_blocks_override
+
+        if self.cache_config.num_cpu_blocks_override is not None:
+            num_cpu_blocks_override = self.cache_config.num_cpu_blocks_override
+            logger.info(
+                "Overriding num_cpu_blocks=%d with "
+                "num_cpu_blocks_override=%d", num_cpu_blocks,
+                num_cpu_blocks_override)
+            num_cpu_blocks = num_cpu_blocks_override
 
         self.cache_config.num_gpu_blocks = num_gpu_blocks
         self.cache_config.num_cpu_blocks = num_cpu_blocks
@@ -612,7 +634,7 @@ class LLMEngine:
         self,
         request_id: str,
         processed_inputs: Union[LLMInputs, EncoderDecoderLLMInputs],
-        params: Union[SamplingParams, PoolingParams],
+        params: Union[SamplingParams, PoolingParams, CachingParams],
         arrival_time: float,
         lora_request: Optional[LoRARequest],
         prompt_adapter_request: Optional[PromptAdapterRequest],
@@ -628,6 +650,7 @@ class LLMEngine:
                        lora_request, prompt_adapter_request)
 
         encoder_seq = None
+        # import pdb; pdb.set_trace()
         if 'encoder_prompt_token_ids' in processed_inputs:
             encoder_seq = Sequence(seq_id,
                                    processed_inputs,
@@ -657,9 +680,15 @@ class LLMEngine:
                 lora_request=lora_request,
                 prompt_adapter_request=prompt_adapter_request,
                 encoder_seq=encoder_seq)
+        elif isinstance(params, CachingParams):
+            seq_group = self._create_sequence_group_with_caching(
+                request_id, 
+                seq, 
+                params, 
+                arrival_time=arrival_time)
         else:
-            raise ValueError(
-                "Either SamplingParams or PoolingParams must be provided.")
+            raise ValueError("Either SamplingParams, PoolingParams "
+                             "or CachingParams must be provided.")
 
         # Add the sequence group to the scheduler with least unfinished seqs.
         costs = [
@@ -676,7 +705,7 @@ class LLMEngine:
         self,
         request_id: str,
         inputs: PromptInputs,
-        params: Union[SamplingParams, PoolingParams],
+        params: Union[SamplingParams, PoolingParams, CachingParams],
         arrival_time: Optional[float] = None,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
@@ -810,6 +839,22 @@ class LLMEngine:
             pooling_params=pooling_params,
             prompt_adapter_request=prompt_adapter_request,
             encoder_seq=encoder_seq)
+        return seq_group
+
+    def _create_sequence_group_with_caching(
+        self,
+        request_id: str,
+        seq: Sequence,
+        caching_params: CachingParams,
+        arrival_time: float,
+    ) -> SequenceGroup:
+        caching_params = caching_params.clone()
+        seq_group = SequenceGroup(
+            request_id=request_id,
+            seqs=[seq],
+            arrival_time=arrival_time,
+            caching_params=caching_params,
+            sampling_params=SamplingParams(max_tokens=1))  # use default sampling_params
         return seq_group
 
     def abort_request(self, request_id: Union[str, Iterable[str]]) -> None:
@@ -975,6 +1020,11 @@ class LLMEngine:
                         else:
                             seq_group.metrics.model_execute_time = (
                                 o.model_execute_time)
+            # TODO: Check whether we have to check async
+            if seq_group.caching_params:
+                for seq in seq_group.get_seqs():
+                    seq.status = SequenceStatus.FIXED
+                continue
 
             if self.model_config.embedding_mode:
                 self._process_sequence_group_outputs(seq_group, output)
@@ -992,6 +1042,11 @@ class LLMEngine:
             scheduled_seq_group = scheduler_outputs.scheduled_seq_groups[i]
 
             seq_group = scheduled_seq_group.seq_group
+            # process Caching requests output
+            if seq_group.caching_params:
+                request_output = RequestOutputFactory.create(seq_group)
+                ctx.request_outputs.append(request_output)
+                continue
             seq_group.maybe_set_first_token_time(now)
             request_output = RequestOutputFactory.create(seq_group)
             if request_output:
@@ -1012,6 +1067,8 @@ class LLMEngine:
         # Free currently finished requests
         if finished_now:
             for scheduler in self.scheduler:
+                # Handle moving first to prevent them fall to finished
+                scheduler.move_caching_from_running_to_fixed()
                 scheduler.free_finished_seq_groups()
 
         # For multi-step, do not create outputs each iteration
@@ -1094,7 +1151,10 @@ class LLMEngine:
                 seq = seq_group.seqs[0]
                 seq.append_token_id(sample.output_token, sample.logprobs)
 
-    def step(self) -> List[Union[RequestOutput, EmbeddingRequestOutput]]:
+    def step(
+        self
+    ) -> List[Union[RequestOutput, EmbeddingRequestOutput,
+                    CachingRequestOutput]]:
         """Performs one decoding iteration and returns newly generated results.
 
         .. figure:: https://i.imgur.com/sv2HssD.png
@@ -1153,7 +1213,7 @@ class LLMEngine:
         # For llm_engine, there is no pipeline parallel support, so the engine
         # used is always 0.
         virtual_engine = 0
-
+        # # import pdb; pdb.set_trace()
         # These are cached outputs from previous iterations. None if on first
         # iteration
         cached_outputs = self.cached_scheduler_outputs[virtual_engine]
@@ -1214,7 +1274,11 @@ class LLMEngine:
                 finished_requests_ids=finished_requests_ids,
                 # We use ExecuteModelRequest to pass the last sampled_token_ids
                 # to each of the non-last PP stages for in-place prepare_input.
-                last_sampled_token_ids=last_sampled_token_ids)
+                last_sampled_token_ids=last_sampled_token_ids,
+                blocks_to_swap_in_from_disk=scheduler_outputs.
+                blocks_to_swap_in_from_disk,
+                blocks_to_swap_out_to_disk=scheduler_outputs.
+                blocks_to_swap_out_to_disk)
 
             if allow_async_output_proc:
                 execute_model_req.async_callback = self.async_callbacks[
@@ -1272,7 +1336,7 @@ class LLMEngine:
         else:
             # Multi-step case
             return ctx.request_outputs
-
+        # # import pdb; pdb.set_trace()
         if not self.has_unfinished_requests():
             # Drain async postprocessor (if exists)
             if len(ctx.output_queue) > 0:
