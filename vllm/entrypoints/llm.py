@@ -1,5 +1,4 @@
 import itertools
-import json
 import warnings
 from contextlib import contextmanager
 from typing import (Any, ClassVar, Dict, List, Optional, Sequence, Tuple, Type,
@@ -185,8 +184,12 @@ class LLM:
             kwargs["disable_log_stats"] = True
 
         if compilation_config is not None:
-            compilation_config_instance = CompilationConfig.from_cli(
-                json.dumps(compilation_config))
+            if type(compilation_config) is int:
+                compilation_config_instance = CompilationConfig(
+                    level=compilation_config)
+            else:
+                compilation_config_instance = CompilationConfig.model_validate(
+                    compilation_config)
         else:
             compilation_config_instance = None
 
