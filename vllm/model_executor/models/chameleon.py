@@ -981,13 +981,14 @@ class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
             data=self._validate_pixel_values(pixel_values),
         )
 
-    def get_multimodal_embeddings(self, **kwargs) -> torch.Tensor:
+    def get_multimodal_embeddings(self, **kwargs) -> Optional[torch.Tensor]:
         image_input = self._parse_and_validate_image_input(**kwargs)
+        if image_input is None:
+            return None
 
-        if image_input is not None:
-            assert self.model.vqmodel is not None
-            image_tokens = self.model.get_image_tokens(image_input["data"].to(
-                self.config.torch_dtype))
+        assert self.model.vqmodel is not None
+        image_tokens = self.model.get_image_tokens(image_input["data"].to(
+            self.config.torch_dtype))
         vision_embeddings = self.model.get_input_embeddings(image_tokens)
         return vision_embeddings
 
