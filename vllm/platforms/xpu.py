@@ -1,10 +1,28 @@
+from typing import TYPE_CHECKING
+
 import torch
 
-from .interface import DeviceCapability, Platform, PlatformEnum
+from vllm.logger import init_logger
+
+from .interface import DeviceCapability, Platform, PlatformEnum, _Backend
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
+else:
+    VllmConfig = None
+
+logger = init_logger(__name__)
 
 
 class XPUPlatform(Platform):
     _enum = PlatformEnum.XPU
+    device_type: str = "xpu"
+
+    @classmethod
+    def get_default_attn_backend(cls, selected_backend: _Backend) -> _Backend:
+        if selected_backend != _Backend.IPEX:
+            logger.info("Cannot use %s backend on XPU.", selected_backend)
+        return _Backend.IPEX
 
     @staticmethod
     def get_device_capability(device_id: int = 0) -> DeviceCapability:
@@ -24,3 +42,33 @@ class XPUPlatform(Platform):
     @staticmethod
     def inference_mode():
         return torch.no_grad()
+
+    @classmethod
+    def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+        # check and update model config
+        model_config = vllm_config.model_config
+        if model_config.dtype == torch.bfloat16:
+            logger.warning(
+                "bfloat16 is not fully supported on XPU, casting to float16.")
+            model_config.dtype = torch.float16
+        if not model_config.enforce_eager:
+            logger.warning(
+                "CUDA graph is not supported on XPU, fallback to the eager "
+                "mode.")
+            model_config.enforce_eager = True
+
+        if vllm_config.speculative_config is not None:
+            raise NotImplementedError(
+                "XPU does not support speculative decoding")
+
+        # check and update parallel config
+        parallel_config = vllm_config.parallel_config
+        if (parallel_config.distributed_executor_backend is not None
+                and parallel_config.distributed_executor_backend != "ray"):
+            logger.warning(
+                "%s is not supported on XPU, fallback to ray distributed"
+                " executor backend.",
+                parallel_config.distributed_executor_backend)
+            parallel_config.distributed_executor_backend = "ray"
+        if parallel_config.worker_cls == "auto":
+            parallel_config.worker_cls = "vllm.worker.xpu_worker.XPUWorker"

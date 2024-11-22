@@ -1,6 +1,8 @@
+from dataclasses import asdict
+
 import pytest
 
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, PoolerConfig
 from vllm.model_executor.layers.pooler import PoolingType
 from vllm.platforms import current_platform
 
@@ -108,7 +110,7 @@ def test_get_sliding_window():
                     reason="Xformers backend is not supported on ROCm.")
 def test_get_pooling_config():
     model_id = "sentence-transformers/all-MiniLM-L12-v2"
-    minilm_model_config = ModelConfig(
+    model_config = ModelConfig(
         model_id,
         task="auto",
         tokenizer=model_id,
@@ -119,39 +121,31 @@ def test_get_pooling_config():
         revision=None,
     )
 
-    minilm_pooling_config = minilm_model_config._init_pooler_config(
-        pooling_type=None,
-        pooling_norm=None,
-        pooling_returned_token_ids=None,
-        pooling_softmax=None,
-        pooling_step_tag_id=None)
+    pooling_config = model_config._init_pooler_config(None)
+    assert pooling_config is not None
 
-    assert minilm_pooling_config.pooling_norm
-    assert minilm_pooling_config.pooling_type == PoolingType.MEAN.name
+    assert pooling_config.normalize
+    assert pooling_config.pooling_type == PoolingType.MEAN.name
 
 
 @pytest.mark.skipif(current_platform.is_rocm(),
                     reason="Xformers backend is not supported on ROCm.")
 def test_get_pooling_config_from_args():
     model_id = "sentence-transformers/all-MiniLM-L12-v2"
-    minilm_model_config = ModelConfig(model_id,
-                                      task="auto",
-                                      tokenizer=model_id,
-                                      tokenizer_mode="auto",
-                                      trust_remote_code=False,
-                                      seed=0,
-                                      dtype="float16",
-                                      revision=None)
+    model_config = ModelConfig(model_id,
+                               task="auto",
+                               tokenizer=model_id,
+                               tokenizer_mode="auto",
+                               trust_remote_code=False,
+                               seed=0,
+                               dtype="float16",
+                               revision=None)
 
-    minilm_pooling_config = minilm_model_config._init_pooler_config(
-        pooling_type='CLS',
-        pooling_norm=True,
-        pooling_returned_token_ids=None,
-        pooling_softmax=None,
-        pooling_step_tag_id=None)
+    override_config = PoolerConfig(pooling_type='CLS', normalize=True)
 
-    assert minilm_pooling_config.pooling_norm
-    assert minilm_pooling_config.pooling_type == PoolingType.CLS.name
+    pooling_config = model_config._init_pooler_config(override_config)
+    assert pooling_config is not None
+    assert asdict(pooling_config) == asdict(override_config)
 
 
 @pytest.mark.skipif(current_platform.is_rocm(),
@@ -243,6 +237,8 @@ def test_rope_customization():
     assert longchat_model_config.max_model_len == 4096
 
 
+@pytest.mark.skipif(current_platform.is_rocm(),
+                    reason="Encoder Decoder models not supported on ROCm.")
 @pytest.mark.parametrize(("model_id", "is_encoder_decoder"), [
     ("facebook/opt-125m", False),
     ("facebook/bart-base", True),

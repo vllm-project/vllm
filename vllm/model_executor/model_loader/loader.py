@@ -4,6 +4,8 @@ import copy
 import dataclasses
 import fnmatch
 import glob
+import inspect
+import itertools
 import json
 import math
 import os
@@ -26,8 +28,12 @@ from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
-from vllm.model_executor.layers.linear import (ReplicatedLinear,
+from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
+                                               QKVParallelLinear,
+                                               ReplicatedLinear,
                                                RowParallelLinear)
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizeMethodBase)
 from vllm.model_executor.model_loader.tensorizer import (
     TensorizerConfig, is_vllm_tensorized, load_with_tensorizer,
     serialize_vllm_model, tensorizer_weights_iterator)
@@ -41,6 +47,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     safetensors_weights_iterator)
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
+from vllm.plugins import set_current_vllm_config
 from vllm.utils import is_pin_memory_available
 
 
@@ -88,11 +95,41 @@ def device_loading_context(module: torch.nn.Module,
 logger = init_logger(__name__)
 
 
-def _initialize_model(vllm_config: VllmConfig) -> nn.Module:
+def _initialize_model(vllm_config: VllmConfig, prefix: str = "") -> nn.Module:
     """Initialize a model with the given configurations."""
     model_config = vllm_config.model_config
     model_class, _ = get_model_architecture(model_config)
-    return model_class(vllm_config=vllm_config)
+    signatures = inspect.signature(model_class.__init__)
+    all_params = [param.name for param in signatures.parameters.values()]
+    if "vllm_config" in all_params and "prefix" in all_params:
+        # new-style model class
+        with set_current_vllm_config(vllm_config):
+            return model_class(vllm_config=vllm_config, prefix=prefix)
+    msg = ("vLLM model class should accept `vllm_config` and `prefix` as "
+           "input arguments. Possibly you have an old-style model class"
+           " registered from out of tree and it is used for new vLLM version. "
+           "Check https://docs.vllm.ai/en/latest/design/arch_overview.html "
+           "for the design and update the model class accordingly.")
+    logger.warning(msg)
+    logger.warning(
+        "Trying to guess the arguments for old-style model class %s",
+        model_class)
+    # try to be compatible with old-style model class
+    kwargs = {}
+    if "prefix" in all_params:
+        kwargs["prefix"] = prefix
+    if "config" in all_params:
+        kwargs["config"] = model_config.hf_config
+    if "cache_config" in all_params:
+        kwargs["cache_config"] = vllm_config.cache_config
+    if "quant_config" in all_params:
+        kwargs["quant_config"] = vllm_config.quant_config
+    if "lora_config" in all_params:
+        kwargs["lora_config"] = vllm_config.lora_config
+    if "scheduler_config" in all_params:
+        kwargs["scheduler_config"] = vllm_config.scheduler_config
+    with set_current_vllm_config(vllm_config):
+        return model_class(**kwargs)
 
 
 class BaseModelLoader(ABC):
@@ -302,11 +339,21 @@ class DefaultModelLoader(BaseModelLoader):
             with target_device:
                 model = _initialize_model(vllm_config=vllm_config)
 
-            model.load_weights(self._get_all_weights(model_config, model))
+            weights_to_load = {name for name, _ in model.named_parameters()}
+            loaded_weights = model.load_weights(
+                self._get_all_weights(model_config, model))
+            # We only enable strict check for non-quantiized models
+            # that have loaded weights tracking currently.
+            if model_config.quantization is None and loaded_weights is not None:
+                weights_not_loaded = weights_to_load - loaded_weights
+                if weights_not_loaded:
+                    raise ValueError(
+                        "Following weights were not initialized from "
+                        f"checkpoint: {weights_not_loaded}")
 
             for _, module in model.named_modules():
                 quant_method = getattr(module, "quant_method", None)
-                if quant_method is not None:
+                if isinstance(quant_method, QuantizeMethodBase):
                     # When quant methods need to process weights after loading
                     # (for repacking, quantizing, etc), they expect parameters
                     # to be on the global target device. This scope is for the
@@ -892,6 +939,34 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                     end_index = total_size // tp_size * (tp_rank + 1)
                     weight_sub_tensor = weight_tensor[...,
                                                       start_index:end_index]
+                # Weights have fused on disk. In this case, we assume that the
+                # weight and module use same name.
+                elif any(
+                        weight_name.startswith(module)
+                        for module in self.maybe_fused_weights_modules):
+                    # special case for fused weights
+                    # get the size of each shard weight tensor
+                    total_shard_sizes = next(
+                        (sizes for module, sizes in
+                         self.maybe_fused_weights_modules.items()
+                         if weight_name.startswith(module)))
+                    total_size = weight_tensor.size(0)
+                    assert total_size == sum(total_shard_sizes)
+                    # get the start/end index of each shard weight tensor
+                    total_start_index = list(
+                        itertools.accumulate([0] + total_shard_sizes))[:-1]
+                    shard_weights_index = [
+                        (idx + size // tp_size * tp_rank,
+                         idx + size // tp_size * (tp_rank + 1))
+                        for idx, size in zip(total_start_index,
+                                             total_shard_sizes)
+                    ]
+                    # slice and reorder the weight tensor
+                    weight_tensor = [
+                        weight_tensor[start_index:end_index, ...]
+                        for start_index, end_index in shard_weights_index
+                    ]
+                    weight_sub_tensor = torch.cat(weight_tensor, dim=0)
                 # Shard by row
                 else:
                     total_size = weight_tensor.size(0)
@@ -941,12 +1016,22 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             else:
                 self.target_modules = self.default_target_modules
 
+        # Modules whose weights might have fused on disk
+        # we need their output_sizes to make shard in flight correctly with TP
+        self.maybe_fused_weights_modules: Dict[str, List[int]] = {}
+
         for name, module in model.named_modules():
             # Some modules like `ReplicatedLinear` should not have their weights
             # sharded. The reason for implementing it this way is to avoid new
             # static variable in the model implementation.
             if isinstance(module, (ReplicatedLinear, )):
                 self.unsharded_weights_modules.append(name)
+            # `QKVParallelLinear` and `MergedColumnParallelLinear` might have
+            # fused weights on disk. We need to use the output sizes of these
+            # modules to shard the weights correctly.
+            elif isinstance(module,
+                            (QKVParallelLinear, MergedColumnParallelLinear)):
+                self.maybe_fused_weights_modules[name] = module.output_sizes
             # In TP, these weights are partitioned along the column
             # dimension (dim=-1)
             elif isinstance(module, (RowParallelLinear, )):
@@ -991,7 +1076,13 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
         param_dict = dict(model.named_parameters())
         stacked_quant_state_dict: Dict[str, Dict[int, Any]] = {}
+        # TODO: Change this lazy import to normal import
+        # after the checks are updated to run on a new version
+        from vllm.model_executor.models.utils import is_pp_missing_parameter
         for quant_param_name in quant_state_dict:
+            if is_pp_missing_parameter(quant_param_name, model):
+                continue
+
             non_stacked_param_name = quant_param_name
 
             shard_index = 0
