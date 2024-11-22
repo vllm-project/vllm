@@ -985,7 +985,6 @@ class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None
-
         assert self.model.vqmodel is not None
         image_tokens = self.model.get_image_tokens(image_input["data"].to(
             self.config.torch_dtype))

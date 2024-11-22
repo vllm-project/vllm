@@ -610,7 +610,7 @@ class Blip2ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
 
         return self.language_projection(query_output)
 
-    def get_multimodal_embeddings(self, **kwargs):
+    def get_multimodal_embeddings(self, **kwargs) -> Optional[torch.Tensor]:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None
