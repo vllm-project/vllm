@@ -78,6 +78,7 @@ class BloomAttention(nn.Module):
         config: BloomConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -116,7 +117,8 @@ class BloomAttention(nn.Module):
                               scaling,
                               alibi_slopes=alibi_slopes,
                               cache_config=cache_config,
-                              quant_config=quant_config)
+                              quant_config=quant_config,
+                              prefix=f"{prefix}.attn")
 
     def forward(
         self,
@@ -168,14 +170,17 @@ class BloomBlock(nn.Module):
         config: BloomConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         hidden_size = config.hidden_size
 
         self.input_layernorm = nn.LayerNorm(hidden_size,
                                             eps=config.layer_norm_epsilon)
-        self.self_attention = BloomAttention(config, cache_config,
-                                             quant_config)
+        self.self_attention = BloomAttention(config,
+                                             cache_config,
+                                             quant_config,
+                                             prefix=f"{prefix}.self_attention")
         self.post_attention_layernorm = nn.LayerNorm(
             hidden_size, eps=config.layer_norm_epsilon)
         self.mlp = BloomMLP(config, quant_config)
@@ -242,7 +247,8 @@ class BloomModel(nn.Module):
         # Transformer blocks
         self.start_layer, self.end_layer, self.h = make_layers(
             config.num_hidden_layers,
-            lambda prefix: BloomBlock(config, cache_config, quant_config),
+            lambda prefix: BloomBlock(
+                config, cache_config, quant_config, prefix=prefix),
             prefix=f"{prefix}.h")
 
         # Final Layer Norm

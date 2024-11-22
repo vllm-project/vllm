@@ -13,6 +13,7 @@ else:
 class HpuPlatform(Platform):
     _enum = PlatformEnum.HPU
     device_type: str = "hpu"
+    dispatch_key: str = "HPU"
 
     @classmethod
     def get_default_attn_backend(cls, selected_backend: _Backend) -> _Backend:

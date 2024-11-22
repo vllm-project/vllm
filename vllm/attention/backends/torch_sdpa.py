@@ -141,7 +141,7 @@ class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata):
 
     def get_seq_lens(
         self,
-        attn_type: AttentionType,
+        attn_type: str,
     ):
         '''
         Extract appropriate sequence lengths from attention metadata
@@ -174,7 +174,7 @@ class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata):
 
     def get_attn_bias(
         self,
-        attn_type: AttentionType,
+        attn_type: str,
     ) -> Optional[List[torch.Tensor]]:
         '''
         Extract appropriate attention bias from attention metadata
@@ -203,7 +203,7 @@ class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata):
     def set_attn_bias(
         self,
         attn_bias: List[torch.Tensor],
-        attn_type: AttentionType,
+        attn_type: str,
     ) -> None:
         '''
         Update appropriate attention bias field of attention metadata,
@@ -229,7 +229,7 @@ class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata):
 
     def get_seq_len_block_table_args(
         self,
-        attn_type: AttentionType,
+        attn_type: str,
     ) -> tuple:
         '''
         The particular choice of sequence-length- and block-table-related
@@ -426,7 +426,7 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
         attn_metadata: TorchSDPAMetadata,  # type: ignore
         k_scale: float = 1.0,
         v_scale: float = 1.0,
-        attn_type: AttentionType = AttentionType.DECODER,
+        attn_type: str = AttentionType.DECODER,
     ) -> torch.Tensor:
         """Forward pass with torch SDPA and PagedAttention.
 
@@ -574,7 +574,7 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
         key: torch.Tensor,
         value: torch.Tensor,
         attn_metadata: TorchSDPAMetadata,
-        attn_type: AttentionType = AttentionType.DECODER,
+        attn_type: str = AttentionType.DECODER,
     ) -> None:
         if self.num_kv_heads != self.num_heads:
             key = key.repeat_interleave(self.num_queries_per_kv, dim=1)

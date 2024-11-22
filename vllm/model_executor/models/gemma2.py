@@ -95,7 +95,8 @@ class Gemma2Attention(nn.Module):
                  rope_theta: float,
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None,
-                 attn_logits_soft_cap: Optional[float] = None) -> None:
+                 attn_logits_soft_cap: Optional[float] = None,
+                 prefix: str = "") -> None:
         super().__init__()
         self.layer_idx = layer_idx
         self.config = config
@@ -154,7 +155,8 @@ class Gemma2Attention(nn.Module):
                               num_kv_heads=self.num_kv_heads,
                               cache_config=cache_config,
                               quant_config=quant_config,
-                              logits_soft_cap=attn_logits_soft_cap)
+                              logits_soft_cap=attn_logits_soft_cap,
+                              prefix=f"{prefix}.attn")
 
     def forward(
         self,
@@ -179,6 +181,7 @@ class Gemma2DecoderLayer(nn.Module):
         config: Gemma2Config,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -194,6 +197,7 @@ class Gemma2DecoderLayer(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             attn_logits_soft_cap=config.attn_logit_softcapping,
+            prefix=f"{prefix}.self_attn",
         )
         self.hidden_size = config.hidden_size
         self.mlp = Gemma2MLP(
@@ -257,8 +261,11 @@ class Gemma2Model(nn.Module):
         )
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: Gemma2DecoderLayer(int(prefix.split(".")[
-                -1]), config, cache_config, quant_config),
+            lambda prefix: Gemma2DecoderLayer(int(prefix.split(".")[-1]),
+                                              config,
+                                              cache_config,
+                                              quant_config,
+                                              prefix=prefix),
             prefix=f"{prefix}.layers")
         self.norm = GemmaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 

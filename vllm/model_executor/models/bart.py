@@ -126,6 +126,7 @@ class BartEncoderAttention(nn.Module):
         config: Optional[BartConfig] = None,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.d_model = config.d_model
@@ -178,7 +179,8 @@ class BartEncoderAttention(nn.Module):
                               self.scaling,
                               num_kv_heads=self.num_kv_heads,
                               cache_config=cache_config,
-                              quant_config=quant_config)
+                              quant_config=quant_config,
+                              prefix=f"{prefix}.attn")
 
     def forward(self, hidden_states: torch.Tensor, kv_cache: torch.Tensor,
                 attn_metadata: AttentionMetadata) -> torch.Tensor:
@@ -208,6 +210,7 @@ class BartDecoderSelfAttention(nn.Module):
         config: Optional[BartConfig] = None,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.d_model = config.d_model
@@ -260,7 +263,8 @@ class BartDecoderSelfAttention(nn.Module):
                               self.scaling,
                               num_kv_heads=self.num_kv_heads,
                               cache_config=cache_config,
-                              quant_config=quant_config)
+                              quant_config=quant_config,
+                              prefix=f"{prefix}.attn")
 
     def forward(self, hidden_states: torch.Tensor, kv_cache: torch.Tensor,
                 attn_metadata: AttentionMetadata) -> torch.Tensor:
@@ -290,6 +294,7 @@ class BartCrossAttention(nn.Module):
         config: Optional[BartConfig] = None,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.d_model = config.d_model
@@ -342,7 +347,8 @@ class BartCrossAttention(nn.Module):
                               self.scaling,
                               num_kv_heads=self.num_kv_heads,
                               cache_config=cache_config,
-                              quant_config=quant_config)
+                              quant_config=quant_config,
+                              prefix=f"{prefix}.attn")
 
     def forward(
         self,
@@ -384,6 +390,7 @@ class BartEncoderLayer(nn.Module):
         config: BartConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.embed_dim = config.d_model
@@ -393,7 +400,9 @@ class BartEncoderLayer(nn.Module):
             num_heads=config.encoder_attention_heads,
             config=config,
             cache_config=cache_config,
-            quant_config=quant_config)
+            quant_config=quant_config,
+            prefix=f"{prefix}.self_attn",
+        )
         self.self_attn_layer_norm = nn.LayerNorm(self.embed_dim)
         self.activation_fn = get_act_fn(config.activation_function)
 
@@ -464,6 +473,7 @@ class BartDecoderLayer(nn.Module):
         config: BartConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.embed_dim = config.d_model
@@ -473,7 +483,9 @@ class BartDecoderLayer(nn.Module):
             num_heads=config.decoder_attention_heads,
             config=config,
             cache_config=cache_config,
-            quant_config=quant_config)
+            quant_config=quant_config,
+            prefix=f"{prefix}.self_attn",
+        )
         self.activation_fn = get_act_fn(config.activation_function)
 
         self.self_attn_layer_norm = nn.LayerNorm(self.embed_dim)
@@ -486,6 +498,7 @@ class BartDecoderLayer(nn.Module):
             self.embed_dim,
             config.decoder_attention_heads,
             config=config,
+            prefix=f"{prefix}.encoder_attn",
         )
         self.encoder_attn_layer_norm = nn.LayerNorm(self.embed_dim)
 
@@ -578,7 +591,8 @@ class BartEncoder(nn.Module):
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None,
                  lora_config: Optional[LoRAConfig] = None,
-                 embed_tokens: Optional[nn.Embedding] = None):
+                 embed_tokens: Optional[nn.Embedding] = None,
+                 prefix: str = ""):
         super().__init__()
 
         self.cache_config = cache_config
@@ -599,9 +613,13 @@ class BartEncoder(nn.Module):
             config.max_position_embeddings,
             embed_dim,
         )
-        self.layers = nn.ModuleList(
-            [BartEncoderLayer(config,cache_config,quant_config) \
-             for _ in range(config.encoder_layers)])
+        self.layers = nn.ModuleList([
+            BartEncoderLayer(config,
+                             cache_config,
+                             quant_config,
+                             prefix=f"{prefix}.layers.{layer_idx}")
+            for layer_idx in range(config.encoder_layers)
+        ])
 
         self.layernorm_embedding = nn.LayerNorm(embed_dim)
 
@@ -661,6 +679,7 @@ class BartDecoder(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
         lora_config: Optional[LoRAConfig] = None,
         embed_tokens: Optional[nn.Embedding] = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.cache_config = cache_config
@@ -683,8 +702,9 @@ class BartDecoder(nn.Module):
         )
 
         self.layers = nn.ModuleList(
-            [BartDecoderLayer(config,cache_config,quant_config) \
-             for _ in range(config.decoder_layers)])
+            [BartDecoderLayer(config,cache_config,quant_config,
+            prefix=f"{prefix}.layers.{layer_idx}") \
+             for layer_idx in range(config.decoder_layers)])
 
         self.layernorm_embedding = nn.LayerNorm(config.d_model)
 
@@ -759,10 +779,12 @@ class BartModel(nn.Module):
 
         self.encoder = BartEncoder(config,
                                    cache_config,
-                                   quant_config=quant_config)
+                                   quant_config=quant_config,
+                                   prefix=f"{prefix}.encoder")
         self.decoder = BartDecoder(config,
                                    cache_config,
-                                   quant_config=quant_config)
+                                   quant_config=quant_config,
+                                   prefix=f"{prefix}.decoder")
 
     def forward(self, input_ids: torch.Tensor, positions: torch.Tensor,
                 encoder_input_ids: torch.Tensor,

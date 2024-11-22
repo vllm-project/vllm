@@ -174,6 +174,7 @@ class ExaoneAttention(nn.Module):
             num_kv_heads=self.num_kv_heads,
             cache_config=cache_config,
             quant_config=quant_config,
+            prefix=f"{prefix}.attn",
         )
 
     def forward(
@@ -219,7 +220,7 @@ class ExaoneBlockAttention(nn.Module):
             quant_config=quant_config,
             bias=bias,
             cache_config=cache_config,
-            prefix=prefix,
+            prefix=f"{prefix}.attention",
         )
 
     def forward(

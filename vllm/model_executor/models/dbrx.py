@@ -154,6 +154,7 @@ class DbrxAttention(nn.Module):
         config: DbrxConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.d_model = config.d_model
@@ -208,7 +209,8 @@ class DbrxAttention(nn.Module):
                               self.scaling,
                               num_kv_heads=self.num_kv_heads,
                               cache_config=cache_config,
-                              quant_config=quant_config)
+                              quant_config=quant_config,
+                              prefix=f"{prefix}.attn")
 
     def forward(
         self,
@@ -234,10 +236,14 @@ class DbrxFusedNormAttention(nn.Module):
         config: DbrxConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.d_model = config.d_model
-        self.attn = DbrxAttention(config, cache_config, quant_config)
+        self.attn = DbrxAttention(config,
+                                  cache_config,
+                                  quant_config,
+                                  prefix=f"{prefix}.attn")
         self.norm_1 = nn.LayerNorm(self.d_model)
         self.norm_2 = nn.LayerNorm(self.d_model)
 
@@ -269,10 +275,14 @@ class DbrxBlock(nn.Module):
         config: DbrxConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
-        self.norm_attn_norm = DbrxFusedNormAttention(config, cache_config,
-                                                     quant_config)
+        self.norm_attn_norm = DbrxFusedNormAttention(
+            config,
+            cache_config,
+            quant_config,
+            prefix=f"{prefix}.norm_attn_norm")
         self.ffn = DbrxMoE(config, quant_config)
 
     def forward(
@@ -308,7 +318,8 @@ class DbrxModel(nn.Module):
         )
         self.start_layer, self.end_layer, self.blocks = make_layers(
             config.n_layers,
-            lambda prefix: DbrxBlock(config, cache_config, quant_config),
+            lambda prefix: DbrxBlock(
+                config, cache_config, quant_config, prefix=prefix),
             prefix=f"{prefix}.blocks",
         )
         self.norm_f = nn.LayerNorm(config.d_model, eps=1e-5)

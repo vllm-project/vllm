@@ -223,6 +223,7 @@ class ArcticAttention(nn.Module):
         layer_idx: Optional[int] = None,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.config = config
@@ -274,7 +275,8 @@ class ArcticAttention(nn.Module):
                               self.scaling,
                               num_kv_heads=self.num_kv_heads,
                               cache_config=cache_config,
-                              quant_config=quant_config)
+                              quant_config=quant_config,
+                              prefix=f"{prefix}.attn")
 
     def forward(
         self,
@@ -299,6 +301,7 @@ class ArcticDecoderLayer(nn.Module):
         layer_idx: int,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.layer_idx = layer_idx
@@ -308,7 +311,8 @@ class ArcticDecoderLayer(nn.Module):
         self.self_attn = ArcticAttention(config,
                                          layer_idx,
                                          cache_config,
-                                         quant_config=quant_config)
+                                         quant_config=quant_config,
+                                         prefix=f"{prefix}.self_attn")
         self.block_sparse_moe = ArcticMoE(
             config,
             layer_id=layer_idx,
@@ -380,8 +384,11 @@ class ArcticModel(nn.Module):
             org_num_embeddings=self.vocab_size)
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: ArcticDecoderLayer(config, int(
-                prefix.split(".")[-1]), cache_config, quant_config),
+            lambda prefix: ArcticDecoderLayer(config,
+                                              int(prefix.split(".")[-1]),
+                                              cache_config,
+                                              quant_config,
+                                              prefix=prefix),
             prefix=f"{prefix}.layers")
         self._attn_implementation = config._attn_implementation
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
