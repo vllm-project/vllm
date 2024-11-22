@@ -2,6 +2,7 @@
 import argparse
 import dataclasses
 import json
+import os
 import random
 import time
 from typing import List
@@ -15,120 +16,6 @@ from vllm.entrypoints.openai.api_server import (
     build_async_engine_client_from_engine_args)
 from vllm.sampling_params import GuidedDecodingParams
 from vllm.utils import FlexibleArgumentParser, merge_async_iterators
-
-SCHEMA = {
-    "$schema":
-    "https://json-schema.org/draft/2020-12/schema",
-    "title":
-    "User Profile",
-    "type":
-    "object",
-    "properties": {
-        "userId": {
-            "type": "string",
-            "description": "Unique identifier for the user."
-        },
-        "personalInfo": {
-            "type": "object",
-            "properties": {
-                "firstName": {
-                    "type": "string",
-                    "description": "The user's first name."
-                },
-                "lastName": {
-                    "type": "string",
-                    "description": "The user's last name."
-                },
-                "age": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "description": "The user's age."
-                },
-                "phoneNumbers": {
-                    "type":
-                    "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "type": {
-                                "type": "string",
-                                "enum": ["home", "work", "mobile"],
-                                "description": "Type of phone number."
-                            },
-                            "number": {
-                                "type": "string",
-                                "pattern": "^\\+?[1-9]\\d{1,14}$",
-                                "description": "Phone number in E.164 format."
-                            }
-                        },
-                        "required": ["type", "number"]
-                    },
-                    "description":
-                    "List of phone numbers associated with the user."
-                }
-            },
-            "required": ["firstName", "lastName"]
-        },
-        "address": {
-            "type": "object",
-            "properties": {
-                "street": {
-                    "type": "string",
-                    "description": "Street address."
-                },
-                "city": {
-                    "type": "string",
-                    "description": "City name."
-                },
-                "state": {
-                    "type": "string",
-                    "description": "State or province."
-                },
-                "postalCode": {
-                    "type": "string",
-                    "pattern": "^\\d{5}(-\\d{4})?$",
-                    "description": "Postal code."
-                },
-                "country": {
-                    "type": "string",
-                    "description": "Country name."
-                }
-            },
-            "required": ["street", "city", "state", "postalCode", "country"]
-        },
-        "preferences": {
-            "type": "object",
-            "properties": {
-                "newsletterSubscribed": {
-                    "type":
-                    "boolean",
-                    "description":
-                    "Indicates if the user is subscribed to the newsletter."
-                },
-                "favoriteCategories": {
-                    "type": "array",
-                    "items": {
-                        "type": "string"
-                    },
-                    "description": "List of user's favorite categories."
-                }
-            },
-            "required": ["newsletterSubscribed"]
-        },
-        "accountStatus": {
-            "type": "string",
-            "enum": ["active", "inactive", "suspended"],
-            "description": "Current status of the user's account."
-        },
-        "registrationDate": {
-            "type": "string",
-            "format": "date-time",
-            "description": "ISO 8601 formatted date-time of user registration."
-        }
-    },
-    "required":
-    ["userId", "personalInfo", "address", "accountStatus", "registrationDate"]
-}
 
 
 @dataclasses.dataclass
@@ -146,6 +33,7 @@ class SampleRequest:
     prompt_len: int
     expected_output_len: int
     schema: dict
+    structure_type: str = 'json'
     completion: str = None
 
 
@@ -171,7 +59,8 @@ def run_vllm(requests: List[SampleRequest],
                 ignore_eos=True,
                 max_tokens=request.expected_output_len,
                 guided_decoding=GuidedDecodingParams(
-                    json=request.schema) if guided_decoding else None,
+                    **{request.structure_type: request.schema})
+                if guided_decoding else None,
             ))
 
     start = time.perf_counter()
@@ -267,15 +156,83 @@ async def run_vllm_async(requests: List[SampleRequest],
 
 def sample_requests(tokenizer: PreTrainedTokenizerBase,
                     args: argparse.Namespace) -> List[SampleRequest]:
-    if args.dataset == 'single_schema':
-        prompt = f"Generate an example of a user profile given the following schema: {json.dumps(SCHEMA)}"  # noqa: E501
+    if args.dataset == 'json':
+        if args.json_schema_path is None:
+            dir_path = os.path.dirname(os.path.realpath(__file__))
+            args.json_schema_path = os.path.join(dir_path,
+                                                 "structured_schemas",
+                                                 "structured_schema_1.json")
+        with open(args.json_schema_path) as f:
+            schema = json.load(f)
+        prompt = f"Generate an example of a user profile given the following schema: {json.dumps(schema)}"  # noqa: E501
         input_len = len(tokenizer(prompt).input_ids)
         print(f"Input length of the prompt: {input_len} tokens")
         requests = [
             SampleRequest(prompt=prompt,
                           prompt_len=input_len,
                           expected_output_len=args.output_len,
-                          schema=SCHEMA) for _ in range(args.num_prompts)
+                          schema=schema,
+                          structure_type='json')
+            for _ in range(args.num_prompts)
+        ]
+
+    elif args.dataset == "grammar":
+        schema = """
+            ?start: select_statement
+
+            ?select_statement: "SELECT " column_list " FROM " table_name
+
+            ?column_list: column_name ("," column_name)*
+
+            ?table_name: identifier
+
+            ?column_name: identifier
+
+            ?identifier: /[a-zA-Z_][a-zA-Z0-9_]*/
+        """
+        prompt = "Generate an SQL query to show the 'username' \
+            and 'email' from the 'users' table."
+
+        input_len = len(tokenizer(prompt).input_ids)
+        print(f"Input length of the prompt: {input_len} tokens")
+        requests = [
+            SampleRequest(prompt=prompt,
+                          prompt_len=input_len,
+                          expected_output_len=args.output_len,
+                          schema=schema,
+                          structure_type='grammar')
+            for _ in range(args.num_prompts)
+        ]
+
+    elif args.dataset == "regex":
+        regex = r"\w+@\w+\.com\n"
+        prompt = "Generate an email address for Alan Turing, \
+            who works in Enigma. End in .com and new line. \
+                Example result: alan.turing@enigma.com\n"
+
+        input_len = len(tokenizer(prompt).input_ids)
+        print(f"Input length of the prompt: {input_len} tokens")
+        requests = [
+            SampleRequest(prompt=prompt,
+                          prompt_len=input_len,
+                          expected_output_len=args.output_len,
+                          schema=regex,
+                          structure_type='regex')
+            for _ in range(args.num_prompts)
+        ]
+
+    elif args.dataset == "choice":
+        choice = ["Positive", "Negative"]
+        prompt = "Classify this sentiment: vLLM is wonderful!"
+        input_len = len(tokenizer(prompt).input_ids)
+        print(f"Input length of the prompt: {input_len} tokens")
+        requests = [
+            SampleRequest(prompt=prompt,
+                          prompt_len=input_len,
+                          expected_output_len=args.output_len,
+                          schema=choice,
+                          structure_type='choice')
+            for _ in range(args.num_prompts)
         ]
 
     elif args.dataset == "xgrammar_bench":
@@ -391,8 +348,13 @@ if __name__ == "__main__":
                         type=int,
                         help="Output length for each request. Overrides the "
                         "output length from the dataset.")
-    parser.add_argument("--dataset",
-                        choices=['single_schema', 'xgrammar_bench'])
+    parser.add_argument(
+        "--dataset",
+        choices=['json', 'grammar', 'regex', 'choice', 'xgrammar_bench'])
+    parser.add_argument("--json_schema_path",
+                        type=str,
+                        default=None,
+                        help="Path to json schema.")
     parser.add_argument("--n",
                         type=int,
                         default=1,
