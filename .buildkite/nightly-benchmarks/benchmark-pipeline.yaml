@@ -13,7 +13,8 @@ steps:
   - wait
 
   - label: "A100"
-    skip: "use this flag to conditionally skip the benchmark step, useful for PR testing"
+    # skip: "use this flag to conditionally skip the benchmark step, useful for PR testing"
+    priority: 1
     agents:
       queue: A100
     plugins:
@@ -31,6 +32,8 @@ steps:
             - name: devshm
               mountPath: /dev/shm
             env:
+            - name: VLLM_USE_V1
+              value: 1
             - name: VLLM_USAGE_SOURCE
               value: ci-test
             - name: HF_TOKEN
@@ -69,7 +72,8 @@ steps:
         - VLLM_USE_V1=1
 
   - label: "H100"
-    skip: "use this flag to conditionally skip the benchmark step, useful for PR testing"
+    # skip: "use this flag to conditionally skip the benchmark step, useful for PR testing"
+    priority: 1
     agents:
       queue: H100
     plugins:
@@ -87,3 +91,4 @@ steps:
         environment:
         - VLLM_USAGE_SOURCE
         - HF_TOKEN
+        - VLLM_USE_V1=1
