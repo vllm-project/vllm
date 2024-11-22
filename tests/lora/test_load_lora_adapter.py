@@ -36,16 +36,16 @@ def send_request(llm, lora_request):
     print("The request is sent.")
     return llm
 
-def compare_layers(base_layers, lora_layers):
+def compare_layers(first_model_layers, second_model_layers):
     print("Comparing layers...")
-    print(f"There are {len(base_layers)} LoRA layers in the base model.")
-    print(f"There are {len(lora_layers)} LoRA layers in the LoRA adapter.")
+    print(f"There are {len(first_model_layers)} LoRA adapters in the first model.")
+    print(f"There are {len(second_model_layers)} LoRA adapters in the second model.")
 
-    base_set = set(name for adapter in base_layers for name in adapter)
-    lora_set = set(name for adapter in lora_layers for name in adapter)
+    first_set = set(name for adapter in first_model_layers for name in adapter)
+    second_set = set(name for adapter in second_model_layers for name in adapter)
 
-    added_layers = lora_set - base_set
-    removed_layers = base_set - lora_set
+    added_layers = second_set - first_set
+    removed_layers = first_set - second_set
 
     if added_layers or removed_layers:
         print("Layer differences detected:")
