@@ -2139,8 +2139,7 @@ class CompilationConfig(BaseModel):
     backend: str = ""
     custom_ops: List[str] = Field(default_factory=list)
     splitting_ops: List[str] = Field(default_factory=lambda: [
-        "vllm.unified_flash_attention",
-        "vllm.unified_flash_infer",
+        "vllm.unified_attention",
         "vllm.unified_v1_flash_attention",
     ])
 

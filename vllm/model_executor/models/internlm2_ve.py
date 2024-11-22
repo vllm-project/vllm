@@ -14,6 +14,7 @@ from vllm.model_executor.models.internlm2 import (InternLM2Attention,
                                                   InternLM2MLP, InternLM2Model)
 from vllm.sequence import IntermediateTensors
 
+
 class InternLM2VEDecoderLayer(nn.Module):
 
     def __init__(
