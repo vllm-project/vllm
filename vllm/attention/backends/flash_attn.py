@@ -639,7 +639,7 @@ class FlashAttentionImpl(AttentionImpl):
         attn_metadata: FlashAttentionMetadata,
         k_scale: float = 1.0,
         v_scale: float = 1.0,
-        attn_type: AttentionType = AttentionType.DECODER,
+        attn_type: str = AttentionType.DECODER,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention.
 
@@ -680,7 +680,7 @@ class FlashAttentionImpl(AttentionImpl):
             k_scale,
             v_scale,
             self.scale,
-            attn_type.value,
+            attn_type,
             self.sliding_window,
             self.alibi_slopes,
             self.logits_soft_cap,
@@ -692,7 +692,7 @@ class FlashAttentionImpl(AttentionImpl):
 def _get_query_key_seq_metadata(
     attn_metadata,
     is_prompt: bool,
-    attn_type: AttentionType,
+    attn_type: str,
 ) -> tuple:
     """
     Returns sequence metadata for key and query based on the specified 
@@ -754,7 +754,7 @@ def _get_query_key_seq_metadata(
         raise AttributeError(f"Invalid attention type {str(attn_type)}")
 
 
-def _get_causal_option(attn_type: AttentionType) -> bool:
+def _get_causal_option(attn_type: str) -> bool:
     """
     Determine whether the given attention type is suitable for causal 
     attention mechanisms.
@@ -784,18 +784,11 @@ def unified_flash_attention(
     k_scale: float,
     v_scale: float,
     softmax_scale: float,
-    attn_type_int_val: int,
+    attn_type: str,
     window_size: Optional[List[int]] = None,
     alibi_slopes: Optional[torch.Tensor] = None,
     logits_soft_cap: Optional[float] = None,
 ) -> torch.Tensor:
-
-    # Convert integer attn_type to enum
-    try:
-        attn_type = AttentionType(attn_type_int_val)
-    except ValueError as err:
-        raise AttributeError(
-            f"Invalid attention type {str(attn_type_int_val)}") from err
 
     current_metadata = get_forward_context()
     assert current_metadata is not None
