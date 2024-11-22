@@ -92,6 +92,8 @@ class Attention(nn.Module):
 
         self.use_v1 = envs.VLLM_USE_V1
         compilation_config = get_current_vllm_config().compilation_config
+        if prefix in compilation_config.static_forward_context:
+            raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
         self.layer_name = prefix
 
