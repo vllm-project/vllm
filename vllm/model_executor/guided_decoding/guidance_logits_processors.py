@@ -1,14 +1,11 @@
-import inspect
 import json
 import os
 from typing import Any, List, Type, Union
 
-import guidance
 import llguidance  # type: ignore[import-untyped]
 import numpy as np
 import torch
-from guidance._schema import LLInterpreterResponse
-from vllm.model_executor.guided_decoding.guidance_utils import TransformersTokenizer
+from vllm.model_executor.guided_decoding.guidance_utils import TransformersTokenizer, LLInterpreterResponse
 from pydantic import BaseModel
 from transformers import PreTrainedTokenizerBase
 
@@ -54,10 +51,10 @@ class GuidanceLogitsProcessor:
             return
 
         if self.mode.lower() == "json":
-            if isinstance(self.guide, str):
-                schema = json.loads(self.guide)
+            if isinstance(self.guide, dict):
+                schema = json.dumps(self.guide)
             elif isinstance(self.guide, BaseModel):
-                schema = self.guide.model_json_schema()
+                schema = json.dumps(self.guide.model_json_schema())
             else:
                 schema = self.guide
 
@@ -65,27 +62,16 @@ class GuidanceLogitsProcessor:
             if isinstance(self.whitespace_pattern, str):
                 whitespaces_config = json.loads(self.whitespace_pattern)
 
-            args = {
-                "schema": schema,
-                "temperature": 0.0,
-            }
-
-            json_func_sigs = inspect.signature(guidance.json).parameters
-            if "whitespace_flexible" in json_func_sigs:
-                # whitespace_flexible is available in main-repo or later version
-                args["whitespace_flexible"] = whitespaces_config.get(
-                    "whitespace_flexible", False)
-                
-            compiler = llguidance.JsonCompiler()
-            grammar_inner = compiler.compile(json.dumps(schema))
-            self.serialized_grammar = json.dumps({"grammars": [json.loads(grammar_inner)]})
+            whitespace_flexible = whitespaces_config.get("whitespace_flexible", False)
+            compiler = llguidance.JsonCompiler(whitespace_flexible=whitespace_flexible)
+            self.serialized_grammar = json.loads(compiler.compile(schema))
         elif self.mode.lower() in ["regex", "choice"]:
-            self.serialized_grammar = guidance.gen(
-                regex=self.guide, temperature=0.0).ll_serialize()
+            compiler = llguidance.RegexCompiler()
+            self.serialized_grammar = compiler.compile(regex=self.guide)
         elif self.mode.lower() == "grammar":
             serialized_grammar = self.guide
-            if isinstance(self.guide, str):
-                serialized_grammar = json.loads(self.guide)
+            if isinstance(self.guide, dict):
+                serialized_grammar = json.dumps(self.guide)
             self.serialized_grammar = serialized_grammar
 
         if f"guidance_tokenizer_{self.tokenizer_name}" not in self.metadata:
@@ -106,7 +92,7 @@ class GuidanceLogitsProcessor:
 
         self.ll_interpreter = llguidance.LLInterpreter(
             self.ll_tokenizer,
-            json.dumps(self.serialized_grammar),
+            self.serialized_grammar,
             enable_backtrack=False,
             log_level=int(os.environ.get("LLGUIDANCE_LOG_LEVEL", "1")),
         )
@@ -130,7 +116,7 @@ class GuidanceLogitsProcessor:
             self.ll_interpreter.process_prompt(prompt_tokens_ids)
 
         if self.new_sampling and len(past_tokens_ids) > 0:
-            backtrack, ff_tokens = self.ll_interpreter.post_process(
+            backtrack, ff_tokens = self.ll_interpreter.commit_token(
                 past_tokens_ids[-1])
             if len(ff_tokens) > 0 and backtrack == 0:
                 # first token is last generated token
@@ -148,7 +134,7 @@ class GuidanceLogitsProcessor:
             masked_logits[ff_token] = 200.0
             return masked_logits
 
-        mask, resp = self.ll_interpreter.mid_process()
+        mask, resp = self.ll_interpreter.compute_mask()
         r = LLInterpreterResponse.model_validate_json(resp)
 
         if r.stop:
