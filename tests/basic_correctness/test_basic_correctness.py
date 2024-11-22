@@ -56,6 +56,8 @@ def test_models(
     os.environ["VLLM_ATTENTION_BACKEND"] = backend
 
     # 5042 tokens for gemma2
+    # gemma2 has alternating sliding window size of 4096
+    # we need a prompt with more than 4096 tokens to test the sliding window
     prompt = "The following numbers of the sequence " + ", ".join(
         str(i) for i in range(1024)) + " are:"
     example_prompts = [prompt]
