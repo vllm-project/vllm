@@ -43,7 +43,6 @@ def test_vllm_gc_ed():
 @pytest.mark.parametrize("enforce_eager", [False, True])
 def test_models(
     hf_runner,
-    example_prompts,
     model: str,
     backend: str,
     dtype: str,
@@ -55,6 +54,11 @@ def test_models(
         pytest.skip("Flashinfer does not support ROCm/HIP.")
 
     os.environ["VLLM_ATTENTION_BACKEND"] = backend
+
+    # 5042 tokens for gemma2
+    prompt = "The following numbers of the sequence " + ", ".join(
+        str(i) for i in range(1024)) + " are:"
+    example_prompts = [prompt]
 
     with hf_runner(model, dtype=dtype) as hf_model:
         hf_outputs = hf_model.generate_greedy(example_prompts, max_tokens)
