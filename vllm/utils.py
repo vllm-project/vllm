@@ -1563,44 +1563,6 @@ def import_from_path(module_name: str, file_path: Union[str, os.PathLike]):
     return module
 
 
-# Copied from sentence_transformers
-def import_from_string(dotted_path: str) -> type:
-    """
-    Import a dotted module path and return the attribute/class designated by 
-    the last name in the path. Raise ImportError if the import failed.
-
-    Args:
-        dotted_path (str): The dotted module path.
-
-    Returns:
-        Any: The attribute/class designated by the last name in the path.
-
-    Raises:
-        ImportError: If the import failed.
-
-    Example:
-        >>> import_from_string(
-                'sentence_transformers.losses.MultipleNegativesRankingLoss')
-    """
-    try:
-        module_path, class_name = dotted_path.rsplit(".", 1)
-    except ValueError as e:
-        msg = f"{dotted_path} doesn't look like a module path"
-        raise ImportError(msg) from e
-
-    try:
-        module = importlib.import_module(dotted_path)
-    except Exception:
-        module = importlib.import_module(module_path)
-
-    try:
-        return getattr(module, class_name)
-    except AttributeError as e:
-        msg = f'Module "{module_path}" does not define a "{class_name}"'
-        ' attribute/class'
-        raise ImportError(msg) from e
-
-
 # create a library to hold the custom op
 vllm_lib = Library("vllm", "FRAGMENT")  # noqa
 

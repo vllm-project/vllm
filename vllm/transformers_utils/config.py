@@ -32,7 +32,7 @@ from vllm.transformers_utils.configs import (ChatGLMConfig, DbrxConfig,
                                              UltravoxConfig)
 # yapf: enable
 from vllm.transformers_utils.utils import check_gguf_file
-from vllm.utils import import_from_string
+from vllm.utils import resolve_obj_by_qualname
 
 if VLLM_USE_MODELSCOPE:
     from modelscope import AutoConfig
@@ -589,6 +589,6 @@ def get_cross_encoder_activation_function(config: PretrainedConfig):
         assert function_name.startswith("torch.nn.modules."), \
             "Loading of activation functions is restricted to " \
             "torch.nn.modules for security reasons"
-        return import_from_string(function_name)()
+        return resolve_obj_by_qualname(function_name)()
     else:
         return nn.Sigmoid() if config.num_labels == 1 else nn.Identity()
