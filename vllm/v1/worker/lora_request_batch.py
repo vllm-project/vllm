@@ -113,18 +113,6 @@ class LoRARequestBatch(RequestBatchAbstract):
         lora_id: LoRAID = self.req_id_to_lora_id[request_id]
         self.lora_id_to_batch[lora_id].rewind_generator(request_id)
 
-    def request_id_to_index(self) -> Dict[str, int]:
-        req_id_to_index_map: Dict[str, int] = {}
-        req_offset: int = 0
-
-        for batch in self.lora_id_to_batch.values():
-            if batch.num_reqs() == 0:
-                continue
-            batch_req_id_to_index = {req_id : idx + req_offset for req_id, idx in batch.request_id_to_index().items()}
-            req_id_to_index_map.update(batch_req_id_to_index)
-            req_offset += batch.num_reqs()
-        return req_id_to_index_map
-
     def request_ids(self) -> List[str]:
         return sum([batch.request_ids() for batch in self.lora_id_to_batch.values()], [])
 

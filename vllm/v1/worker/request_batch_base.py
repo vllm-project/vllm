@@ -250,15 +250,10 @@ class RequestBatchAbstract(ABC):
         translate the batch into SamplingMetadata for model sampling.
         """
         raise NotImplementedError
-    
-    @abstractmethod
-    def request_id_to_index(self) -> Dict[str, int]:
-        raise NotImplementedError
 
     @abstractmethod
     def request_ids(self) -> List[str]:
-        # Return request ids in order that they appear in the batch
-        # TODO(varun) : This makes request_id_to_index moot !! remove that 
+        # Return request ids in order that they appear in the batch.
         raise NotImplementedError
 
     @abstractmethod
@@ -609,9 +604,6 @@ class RequestBatchBase(RequestBatchAbstract):
         translate the batch into SamplingMetadata for model sampling.
         """
         raise NotImplementedError
-
-    def request_id_to_index(self) -> Dict[str, int]:
-        return self.req_id_to_index
 
     def request_ids(self) -> List[str]:
         return self.req_ids[:self.num_reqs()]

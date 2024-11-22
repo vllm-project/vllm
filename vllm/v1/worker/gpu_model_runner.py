@@ -525,7 +525,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             logprobs = sampler_output.logprobs.cpu()
         model_runner_output = ModelRunnerOutput(
             req_ids=self.request_batch.request_ids(),
-            req_id_to_index=self.request_batch.request_id_to_index(),
+            req_id_to_index={req_id : idx for idx, req_id in self.request_batch.request_ids()},
             sampled_token_ids_cpu=sampled_token_ids,
             logprob_token_ids_cpu=logprob_token_ids,
             logprobs_cpu=logprobs,
