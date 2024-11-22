@@ -40,18 +40,26 @@ class Attention(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
         blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
+        per_layer_sliding_window: Optional[int] = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        if per_layer_sliding_window is not None:
+            # per-layer sliding window
+            sliding_window = per_layer_sliding_window
+        elif cache_config is not None:
+            # model-level sliding window
+            sliding_window = cache_config.sliding_window
+        else:
+            sliding_window = None
+
         if cache_config is not None:
             kv_cache_dtype = cache_config.cache_dtype
             block_size = cache_config.block_size
-            sliding_window = cache_config.sliding_window
             is_attention_free = cache_config.is_attention_free
         else:
             kv_cache_dtype = "auto"
             block_size = 16
-            sliding_window = None
             is_attention_free = False
         if num_kv_heads is None:
             num_kv_heads = num_heads
