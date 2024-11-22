@@ -1019,12 +1019,6 @@ class Scheduler:
                 budget,
                 partial_prefill_metadata=partial_prefill_metadata)
 
-            num_new_seqs = seq_group.get_max_num_running_seqs()
-            # quick budget check
-            if num_new_tokens == 0 or not budget.can_schedule(
-                    num_new_tokens=num_new_tokens, num_new_seqs=num_new_seqs):
-                break
-
             if not enable_chunking:
                 num_prompt_tokens = waiting_seqs[0].get_len()
                 assert num_new_tokens == num_prompt_tokens
@@ -1074,6 +1068,12 @@ class Scheduler:
                     leftover_waiting_sequences.appendleft(seq_group)
                     waiting_queue.popleft()
                     continue
+
+            num_new_seqs = seq_group.get_max_num_running_seqs()
+            # quick budget check
+            if num_new_tokens == 0 or not budget.can_schedule(
+                    num_new_tokens=num_new_tokens, num_new_seqs=num_new_seqs):
+                break
 
             # Can schedule this request.
             if curr_loras is not None and lora_int_id > 0:
