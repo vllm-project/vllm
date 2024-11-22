@@ -173,9 +173,6 @@ class LLMEngine:
     def get_model_config(self):
         pass
 
-    def is_encoder_decoder_model(self):
-        pass
-
     def start_profile(self):
         pass
 
