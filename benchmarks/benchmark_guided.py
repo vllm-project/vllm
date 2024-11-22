@@ -142,10 +142,13 @@ async def run_vllm_async(requests: List[SampleRequest],
             generator = llm.generate(prompt, sp, request_id=f"test{i}")
             generators.append(generator)
         all_gens = merge_async_iterators(*generators)
-        ret = []
+        generated_texts = [''] * len(requests)
         async for i, res in all_gens:
-            generated_text = res.outputs[0].text
-            ret.append(generated_text)
+            generated_texts[i] = res.outputs[0].text
+        ret = [{
+            'generated': gt,
+            'expected': req.completion
+        } for gt, req in zip(generated_texts, requests)]
         end = time.perf_counter()
         if result_file_name:
             with open(result_file_name, 'w') as f:
