@@ -245,6 +245,89 @@ def test_hash_block_correct_reuse():
     assert manager.block_pool[blocks[0].block_id].block_hash is None
 
 
+def test_computed_blocks_not_evicted():
+    block_size = 16
+    manager = KVCacheManager(
+        block_size=block_size,
+        num_gpu_blocks=2,
+        sliding_window=False,
+        enable_caching=True,
+        num_preallocate_tokens=0,
+    )
+
+    # Allocate a block and cache it.
+    num_tokens = block_size * 1
+    req0 = make_request("0", list(range(num_tokens)))
+    computed_blocks = manager.get_computed_blocks(req0)
+    assert not computed_blocks
+    blocks = manager.allocate_slots(req0, num_tokens, computed_blocks)
+    assert len(blocks) == 1
+    assert blocks[0].block_id == 0
+
+    # Allocate another block.
+    req1 = make_request("1", list(range(num_tokens, num_tokens * 2)))
+    computed_blocks = manager.get_computed_blocks(req1)
+    assert not computed_blocks
+    blocks = manager.allocate_slots(req1, num_tokens, computed_blocks)
+    assert len(blocks) == 1
+    assert blocks[0].block_id == 1
+
+    # Free the blocks.
+    manager.free(req0)
+    manager.free(req1)
+
+    # Now if we have a cache hit on the first block, we should evict the second
+    # cached block rather than the first one.
+    req2 = make_request("2", list(range(num_tokens * 2)))
+    computed_blocks = manager.get_computed_blocks(req2)
+    assert len(computed_blocks) == 1
+    assert computed_blocks[0].block_id == 0
+
+    blocks = manager.allocate_slots(req2, num_tokens * 2 - num_tokens,
+                                    computed_blocks)
+    assert len(blocks) == 1
+    assert blocks[0].block_id == 1
+
+
+def test_basic_prefix_caching_disabled():
+    block_size = 4
+    manager = KVCacheManager(
+        block_size=block_size,
+        num_gpu_blocks=4,
+        sliding_window=False,
+        enable_caching=False,
+        num_preallocate_tokens=0,
+    )
+
+    req1 = make_request("1", list(range(10)))  # 2 blocks and some more
+
+    computed_blocks = manager.get_computed_blocks(req1)
+    assert not computed_blocks
+    blocks = manager.allocate_slots(req1, 10, computed_blocks)
+    assert len(blocks) == 3
+
+    # Free the blocks.
+    manager.free(req1)
+
+    # No caching.
+    req2 = make_request("2", list(range(16)))  # shared prefix
+    computed_blocks = manager.get_computed_blocks(req2)
+    assert not computed_blocks
+    blocks = manager.allocate_slots(req2, 16, computed_blocks)
+    assert len(blocks) == 4
+
+    # New requests should not have any blocks.
+    req3 = make_request("3", list(range(4)))
+    computed_blocks = manager.get_computed_blocks(req3)
+    assert not computed_blocks
+    blocks = manager.allocate_slots(req3, 4, computed_blocks)
+    assert not blocks
+
+
+def test_preallocate_blocks():
+    pass
+
+
 def test_cache_blocks():
     """
     This is a unit test that tests the correctness of the _cache_full_blocks

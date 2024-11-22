@@ -186,11 +186,20 @@ class KVCacheManager:
             raise ValueError(
                 f"num_tokens must be greater than 0, got {num_tokens}")
 
-        # If a computed block of a request is an eviction candidate (in the
-        # free queue and ref_cnt == 0), it cannot be counted as a free block
-        # when allocating this request.
-        num_evictable_computed_blocks = len(
-            [blk for blk in computed_blocks if blk.ref_cnt == 0])
+        # Touch the computed blocks to make sure they won't be evicted.
+        num_evictable_computed_blocks = 0
+        if self.enable_caching:
+            self._touch(computed_blocks)
+
+            # If a computed block of a request is an eviction candidate (in the
+            # free queue and ref_cnt == 0), it cannot be counted as a free block
+            # when allocating this request.
+            num_evictable_computed_blocks = len(
+                [blk for blk in computed_blocks if blk.ref_cnt == 0])
+        else:
+            assert not computed_blocks, (
+                "Computed blocks should be empty when "
+                "prefix caching is disabled")
 
         num_required_blocks = cdiv(num_tokens, self.block_size)
         if (num_required_blocks > self.free_block_queue.num_free_blocks -
@@ -203,7 +212,8 @@ class KVCacheManager:
         num_new_blocks = min(
             num_required_blocks + self.num_preallocate_blocks,
             self.free_block_queue.num_free_blocks -
-            num_evictable_computed_blocks)
+            num_evictable_computed_blocks,
+        )
 
         # Concatenate the computed block IDs and the new block IDs.
         new_blocks = self._get_new_blocks(num_new_blocks)
@@ -212,7 +222,6 @@ class KVCacheManager:
         if not self.enable_caching:
             return new_blocks
 
-        self._touch(computed_blocks)
         num_computed_tokens = len(computed_blocks) * self.block_size
         num_full_blocks = (num_computed_tokens + num_tokens) // self.block_size
 
@@ -272,7 +281,7 @@ class KVCacheManager:
             assert curr_block.ref_cnt == 0
 
             if self.enable_caching:
-                self._reset_cached_block(curr_block,
+                self._evict_cached_block(curr_block,
                                          self.cached_block_hash_to_block)
 
             curr_block.incr_ref()
@@ -282,17 +291,17 @@ class KVCacheManager:
         return ret
 
     @staticmethod
-    def _reset_cached_block(
+    def _evict_cached_block(
         block: KVCacheBlock,
         cached_block_hash_to_block: Dict[BlockHashType, Dict[int,
                                                              KVCacheBlock]],
     ) -> None:
         """
-        If a block is hashed in `cached_block_hash_to_block`, we reset its hash
-        metadata and remove it from the cache.
+        If a block is cached in `cached_block_hash_to_block`, we reset its hash
+        metadata and evict it from the cache.
 
         Args:
-            block: The block to reset.
+            block: The block to evict.
             cached_block_hash_to_block: The cache of block hashes.
         """
         block_hash = block.block_hash
