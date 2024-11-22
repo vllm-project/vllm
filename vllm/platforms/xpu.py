@@ -16,6 +16,7 @@ logger = init_logger(__name__)
 
 class XPUPlatform(Platform):
     _enum = PlatformEnum.XPU
+    device_type: str = "xpu"
 
     @classmethod
     def get_default_attn_backend(cls, selected_backend: _Backend) -> _Backend:
@@ -55,3 +56,19 @@ class XPUPlatform(Platform):
                 "CUDA graph is not supported on XPU, fallback to the eager "
                 "mode.")
             model_config.enforce_eager = True
+
+        if vllm_config.speculative_config is not None:
+            raise NotImplementedError(
+                "XPU does not support speculative decoding")
+
+        # check and update parallel config
+        parallel_config = vllm_config.parallel_config
+        if (parallel_config.distributed_executor_backend is not None
+                and parallel_config.distributed_executor_backend != "ray"):
+            logger.warning(
+                "%s is not supported on XPU, fallback to ray distributed"
+                " executor backend.",
+                parallel_config.distributed_executor_backend)
+            parallel_config.distributed_executor_backend = "ray"
+        if parallel_config.worker_cls == "auto":
+            parallel_config.worker_cls = "vllm.worker.xpu_worker.XPUWorker"
