@@ -304,6 +304,11 @@ Text Generation
     - :code:`upstage/solar-pro-preview-instruct`, etc.
     - ✅︎
     - ✅︎
+  * - :code:`TeleChat2ForCausalLM`
+    - TeleChat2
+    - :code:`TeleAI/TeleChat2-3B`, :code:`TeleAI/TeleChat2-7B`, :code:`TeleAI/TeleChat2-35B`, etc.
+    - ✅︎
+    - ✅︎
   * - :code:`XverseForCausalLM`
     - XVERSE
     - :code:`xverse/XVERSE-7B-Chat`, :code:`xverse/XVERSE-13B-Chat`, :code:`xverse/XVERSE-65B-Chat`, etc.
