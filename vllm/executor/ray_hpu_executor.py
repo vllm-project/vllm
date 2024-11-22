@@ -114,7 +114,7 @@ class RayHPUExecutor(DistributedGPUExecutor):
                 resources={'HPU': num_gpus},
                 scheduling_strategy=scheduling_strategy,
                 **ray_remote_kwargs,
-            )(RayWorkerWrapper).remote(vllm_config=self.vllm_config, )
+            )(RayWorkerWrapper).remote(vllm_config=self.vllm_config)
 
             if self.use_ray_spmd_worker:
                 self.workers.append(worker)
