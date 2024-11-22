@@ -41,10 +41,10 @@ def test_iter_token_runs(token_ids, expected):
     print("result:", result)
 
     # Manually constructed results
-    assert result == expected
+    assert [item._asdict() for item in result] == expected
 
     # Invariants
-    assert sum(run_info["length"] for run_info in result) == len(token_ids)
+    assert sum(run_info.length for run_info in result) == len(token_ids)
 
 
 # yapf: disable
