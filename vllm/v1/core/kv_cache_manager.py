@@ -123,18 +123,19 @@ class KVCacheManager:
             # slots, but we cannot allocate new blocks due to the limit.
             return None
 
-        # No new block is needed.
-        if num_required_blocks <= len(req_blocks):
-            return []
+        if num_new_blocks <= 0:
+            # No new block is needed.
+            new_blocks = []
+        else:
+            # Get new blocks from the free block pool considering
+            # preallocated blocks.
+            num_new_blocks = min(
+                num_new_blocks + self.num_preallocate_blocks,
+                self.free_block_queue.num_free_blocks,
+            )
 
-        # Get new blocks from the free block pool.
-        num_new_blocks = min(
-            num_new_blocks + self.num_preallocate_blocks,
-            self.free_block_queue.num_free_blocks,
-        )
-
-        new_blocks = self._get_new_blocks(num_new_blocks)
-        req_blocks.extend(new_blocks)
+            new_blocks = self._get_new_blocks(num_new_blocks)
+            req_blocks.extend(new_blocks)
 
         if not self.enable_caching:
             return new_blocks
@@ -159,8 +160,6 @@ class KVCacheManager:
             full_blocks=new_full_blocks,
             prev_block=req_blocks[num_computed_full_blocks - 1]
             if num_computed_full_blocks >= 1 else None,
-            cached_block_hash_to_block=self.cached_block_hash_to_block,
-            block_size=self.block_size,
         )
 
         return new_blocks
@@ -232,8 +231,6 @@ class KVCacheManager:
             full_blocks=self.req_to_blocks[request.request_id]
             [len(computed_blocks):num_full_blocks],
             prev_block=computed_blocks[-1] if computed_blocks else None,
-            cached_block_hash_to_block=self.cached_block_hash_to_block,
-            block_size=self.block_size,
         )
 
         return new_blocks
@@ -273,16 +270,16 @@ class KVCacheManager:
             raise ValueError(
                 f"Cannot get {num_blocks} free blocks from the pool")
 
-        # First allocate blocks.
         ret: List[KVCacheBlock] = []
         idx = 0
         while idx < num_blocks:
+            # First allocate blocks.
             curr_block = self.free_block_queue.popleft()
             assert curr_block.ref_cnt == 0
 
+            # If the block is cached, evict it.
             if self.enable_caching:
-                self._evict_cached_block(curr_block,
-                                         self.cached_block_hash_to_block)
+                self._evict_cached_block(curr_block)
 
             curr_block.incr_ref()
             ret.append(curr_block)
@@ -290,27 +287,21 @@ class KVCacheManager:
 
         return ret
 
-    @staticmethod
-    def _evict_cached_block(
-        block: KVCacheBlock,
-        cached_block_hash_to_block: Dict[BlockHashType, Dict[int,
-                                                             KVCacheBlock]],
-    ) -> None:
+    def _evict_cached_block(self, block: KVCacheBlock) -> None:
         """
         If a block is cached in `cached_block_hash_to_block`, we reset its hash
         metadata and evict it from the cache.
 
         Args:
             block: The block to evict.
-            cached_block_hash_to_block: The cache of block hashes.
         """
         block_hash = block.block_hash
-        if block_hash and block_hash in cached_block_hash_to_block:
-            block.reset_hash_metadata()
-            del cached_block_hash_to_block[block_hash][block.block_id]
+        if block_hash and block_hash in self.cached_block_hash_to_block:
+            block.reset_hash()
+            del self.cached_block_hash_to_block[block_hash][block.block_id]
 
-            if len(cached_block_hash_to_block[block_hash]) == 0:
-                del cached_block_hash_to_block[block_hash]
+            if len(self.cached_block_hash_to_block[block_hash]) == 0:
+                del self.cached_block_hash_to_block[block_hash]
 
     def _get_cached_block(self,
                           block_hash: BlockHashType) -> Optional[KVCacheBlock]:
@@ -344,15 +335,12 @@ class KVCacheManager:
                 self.free_block_queue.remove(block)
             block.incr_ref()
 
-    @staticmethod
     def _cache_full_blocks(
+        self,
         request: Request,
         blk_start_idx: int,
         full_blocks: List[KVCacheBlock],
         prev_block: Optional[KVCacheBlock],
-        cached_block_hash_to_block: Dict[BlockHashType, Dict[int,
-                                                             KVCacheBlock]],
-        block_size: int,
     ) -> None:
         """Cache a list of full blocks for prefix caching.
 
@@ -368,8 +356,6 @@ class KVCacheManager:
                 to cache.
             full_blocks: The list of blocks to update hash metadata.
             prev_block: The previous block in the chain.
-            cached_block_hash_to_block: The cache of block hashes.
-            block_size: The size of a block.
         """
         # Update the new blocks with the block hashes through the chain.
         prev_block_hash = (prev_block.block_hash
@@ -378,22 +364,19 @@ class KVCacheManager:
             blk_idx = blk_start_idx + i
 
             block_tokens = request.all_token_ids[blk_idx *
-                                                 block_size:(blk_idx + 1) *
-                                                 block_size]
-            assert len(block_tokens) == block_size, (
-                f"Expected {block_size} tokens, got {len(block_tokens)} at "
-                f"{blk_idx}th block for request {request.request_id}({request})"
-            )
+                                                 self.block_size:(blk_idx +
+                                                                  1) *
+                                                 self.block_size]
+            assert len(block_tokens) == self.block_size, (
+                f"Expected {self.block_size} tokens, got {len(block_tokens)} "
+                f"at {blk_idx}th block for request "
+                f"{request.request_id}({request})")
 
             # Compute the hash of the current block.
             block_hash = hash_block_tokens(prev_block_hash,
                                            tuple(block_tokens))
 
             # Update and added the full block to the cache.
-            blk.update_hash_metadata(
-                block_hash=block_hash,
-                num_hashed_tokens=(blk_idx + 1) * block_size,
-            )
-            cached_block_hash_to_block[block_hash][blk.block_id] = blk
-
+            blk.block_hash = block_hash
+            self.cached_block_hash_to_block[block_hash][blk.block_id] = blk
             prev_block_hash = block_hash

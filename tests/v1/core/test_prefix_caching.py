@@ -48,15 +48,12 @@ def test_prefill():
         block_hash = hash_block_tokens(parent_block_hash, block_tokens)
         assert manager.block_pool[block_id].block_hash == block_hash
         assert manager.block_pool[block_id].ref_cnt == 1
-        assert manager.block_pool[block_id].num_hashed_tokens == 16 * (
-            block_id + 1)
         parent_block_hash = block_hash
 
     # Check partial/preallocated block metadata
     for block_id in (3, 4):
         assert manager.block_pool[block_id].block_hash is None
         assert manager.block_pool[block_id].ref_cnt == 1
-        assert manager.block_pool[block_id].num_hashed_tokens == 0
 
     # Cache hit in the common prefix when the original block is still in use.
     # Incomplete 1 block (5 tokens)
@@ -147,6 +144,7 @@ def test_decode():
         req0.append_output_token_ids(8)
     new_blocks = manager.append_slots(req0, 4)
     assert new_blocks is not None and len(new_blocks) == 0
+    assert manager.req_to_blocks[req0.request_id][-2].block_hash is None
 
     # Append slots without allocating a new block, but start using the
     # preallocated block.
@@ -157,6 +155,7 @@ def test_decode():
         req0.append_output_token_ids(7)
     new_blocks = manager.append_slots(req0, 15)
     assert new_blocks is not None and len(new_blocks) == 0
+    assert manager.req_to_blocks[req0.request_id][-2].block_hash is not None
 
     # Append slots with allocating a new block.
     req0.num_computed_tokens = 74
@@ -384,21 +383,16 @@ def test_cache_blocks():
 
     # Test that blocks are cached correctly for 2 full blocks from the start.
     blocks = [KVCacheBlock(block_id=i) for i in range(2)]
-    cached_block_hash_to_block = manager.cached_block_hash_to_block
 
     manager._cache_full_blocks(
         request=req,
         blk_start_idx=0,
         full_blocks=blocks,
         prev_block=None,
-        cached_block_hash_to_block=cached_block_hash_to_block,
-        block_size=block_size,
     )
 
-    assert len(cached_block_hash_to_block) == 2
-    for i, block in enumerate(blocks):
-        assert block.block_hash is not None
-        assert block.num_hashed_tokens == block_size * (i + 1)
+    assert len(manager.cached_block_hash_to_block) == 2
+    assert all([block.block_hash is not None for block in blocks])
 
     # Test that blocks that don't start from the beginning are cached correctly.
     blocks = [KVCacheBlock(block_id=2)]
@@ -407,10 +401,6 @@ def test_cache_blocks():
         blk_start_idx=2,
         full_blocks=blocks,
         prev_block=None,
-        cached_block_hash_to_block=cached_block_hash_to_block,
-        block_size=block_size,
     )
-    assert len(cached_block_hash_to_block) == 3
+    assert len(manager.cached_block_hash_to_block) == 3
     assert blocks[0].block_hash is not None
-    # It should be cached at the 3rd block position.
-    assert blocks[0].num_hashed_tokens == block_size * 3
