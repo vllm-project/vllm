@@ -7,7 +7,6 @@ from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.sequence import ExecuteModelRequest
 from vllm.spec_decode.interfaces import SpeculativeProposals
 from vllm.spec_decode.proposer_worker_base import NonLLMProposerWorkerBase
-from vllm.spec_decode.selector import DEVICE_TYPE
 from vllm.spec_decode.top1_proposer import Top1Proposer
 
 
@@ -23,6 +22,7 @@ class NGramWorker(NonLLMProposerWorkerBase):
         # Get local_rank/vocab_size from kwargs attribute
         self.local_rank = kwargs["local_rank"]
         self.vocab_size = kwargs["vllm_config"].model_config.get_vocab_size()
+        self.device_type = kwargs["device_type"]
 
         # Lazy initialization list.
         self._proposer: Top1Proposer
@@ -35,7 +35,7 @@ class NGramWorker(NonLLMProposerWorkerBase):
         self.ngram_prompt_lookup_min = ngram_prompt_lookup_min
 
     def init_device(self):
-        self.device = torch.device(f"{DEVICE_TYPE}:{self.local_rank}")
+        self.device = torch.device(f"{self.device_type}:{self.local_rank}")
         self.load_model = lambda *args, **kwargs: None
 
         # Current NGramWorker only supports Top1Proposer

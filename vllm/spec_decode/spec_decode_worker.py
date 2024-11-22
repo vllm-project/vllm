@@ -153,6 +153,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         draft_parallel_config: ParallelConfig = draft_worker_kwargs[
             'vllm_config'].parallel_config
         if ngram_prompt_lookup_max > 0:
+            draft_worker_kwargs[
+                "device_type"] = scorer_worker.device_config.device.type
             proposer_worker = NGramWorker(**draft_worker_kwargs)
             proposer_worker.set_ngram_window_size(ngram_prompt_lookup_min,
                                                   ngram_prompt_lookup_max)
