@@ -917,8 +917,7 @@ class ModelInputForGPUBuilder(ModelRunnerInputBuilderBase[ModelInputForGPU]):
             lora_mapping = LoRAMapping(
                 **dict(index_mapping=lora_index_mapping,
                        prompt_mapping=lora_prompt_mapping,
-                       is_prefill = False))
-                       #is_prefill=not self.decode_only))
+                       is_prefill=not self.decode_only))
 
         # Prompt adapter data.
         prompt_adapter_requests: Set[PromptAdapterRequest] = set()
@@ -1613,9 +1612,6 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         if self.lora_config:
             assert model_input.lora_requests is not None
             assert model_input.lora_mapping is not None
-            #print (f" index mapping : {len(model_input.lora_mapping.index_mapping)} {model_input.lora_mapping.index_mapping}")
-            #print (f" prompt mapping : {len(model_input.lora_mapping.prompt_mapping)} {model_input.lora_mapping.prompt_mapping}")
-            #print (f" # lora requests : {len(model_input.lora_requests)}")
             self.set_active_loras(model_input.lora_requests,
                                   model_input.lora_mapping)
 
