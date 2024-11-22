@@ -233,20 +233,6 @@ steps:
   command: pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore lora/test_long_context.py lora/test_chatglm3_tp.py lora/test_llama_tp.py
   parallelism: 4
 
-- label: LoRA TP Test 
-  # There is some Tensor Parallelism related processing logic in LoRA that 
-  # requires multi-GPU testing for validation.
-  num_gpus: 4
-  source_file_dependencies:
-  - vllm/lora
-  - tests/lora/
-  commands:
-    - pytest -v -s -x lora/test_chatglm3_tp.py
-    - pytest -v -s -x lora/test_llama_tp.py
-
-
-
-
 - label: "PyTorch Fullgraph Smoke Test" # 9min
   fast_check: true
   source_file_dependencies:
@@ -489,18 +475,24 @@ steps:
   - pytest -v -s distributed/test_pp_cudagraph.py
   - pytest -v -s distributed/test_pipeline_parallel.py
 
-- label: LoRA Long Context (Distributed) # 11min
-  # This test runs llama 13B, so it is required to run on 4 GPUs.
+- label: LoRA TP Test  (Distributed)
+
   num_gpus: 4
   soft_fail: true
   source_file_dependencies:
   - vllm/lora
-  - tests/lora/test_long_context
+  - tests/lora
   commands:
     # FIXIT: find out which code initialize cuda before running the test
     # before the fix, we need to use spawn to test it
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+    # This test runs llama 13B, so it is required to run on 4 GPUs.
     - pytest -v -s -x lora/test_long_context.py
+    # There is some Tensor Parallelism related processing logic in LoRA that 
+    # requires multi-GPU testing for validation.
+    - pytest -v -s -x lora/test_chatglm3_tp.py
+    - pytest -v -s -x lora/test_llama_tp.py
+
 
 - label: Weight Loading Multiple GPU Test  # 33min
   working_dir: "/vllm-workspace/tests"
