@@ -148,8 +148,10 @@ class OpenAIServingEmbedding(OpenAIServing):
                     chat_template=request.chat_template or self.chat_template,
                     chat_template_content_format=self.
                     chat_template_content_format,
-                    add_generation_prompt=request.add_generation_prompt,
-                    continue_final_message=request.continue_final_message,
+                    # In embedding requests, we are not generating tokens,
+                    # so there is no need to append extra tokens to the input
+                    add_generation_prompt=False,
+                    continue_final_message=False,
                     truncate_prompt_tokens=truncate_prompt_tokens,
                     add_special_tokens=request.add_special_tokens,
                 )
