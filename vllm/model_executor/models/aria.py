@@ -545,44 +545,6 @@ def input_mapper_for_aria(ctx, data):
     return MultiModalInputs(data)
 
 
-def repeat_image_tokens(token_ids: list, image_token_id: int,
-                        repeat_times: list) -> list:
-    """
-    Repeats the image token in the token_ids list according to the repeat_times
-    list.
-
-    Args:
-        token_ids (list): List of token IDs. 
-        image_token_id (int): The token ID that represents an image. 
-        repeat_times (list): List of integers specifying how many times to 
-            repeat the image token.
-
-    Returns:
-        list: A new list with the image token repeated as specified.
-
-    Example:
-        token_ids = [1, 2, 3, 4, 3, 5] 
-        image_token_id = 3 
-        repeat_times = [2, 3]
-        result = repeat_image_tokens(token_ids, image_token_id, repeat_times) 
-        # result will be [1, 2, 3, 3, 4, 3, 3, 3, 5]
-    """
-    if len(repeat_times) != token_ids.count(image_token_id):
-        raise ValueError(
-            "The length of repeat_times is not equal to the number of images.")
-
-    result = []
-    repeat_iter = iter(repeat_times)
-
-    for x in token_ids:
-        if x == image_token_id:
-            result.extend([image_token_id] * next(repeat_iter))
-        else:
-            result.append(x)
-
-    return result
-
-
 def input_processor(ctx, llm_inputs):
     multi_modal_data = llm_inputs.get("multi_modal_data")
     # if it is pure text input, use it as is
@@ -613,9 +575,14 @@ def input_processor(ctx, llm_inputs):
     num_crops = image_inputs.pop("num_crops")
 
     prompt_token_ids = llm_inputs["prompt_token_ids"]
-    prompt_token_ids = repeat_image_tokens(prompt_token_ids,
-                                           hf_config.image_token_index,
-                                           num_crops)
+    if num_crops.sum().item() > 0:
+        _, prompt_token_ids, _ = repeat_and_pad_placeholder_tokens(
+            tokenizer,
+            None,
+            prompt_token_ids,
+            placeholder_token_id=hf_config.image_token_index,
+            repeat_count=num_crops,
+        )
 
     repeat_count = [hf_config.image_size2tokens[max_image_size]
                     ] * sum(num_crops).item()
@@ -698,9 +665,22 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
 
         # 2. Merge text and images
         if pixel_values is not None:
-            pixel_values = pixel_values.view(-1, *pixel_values.shape[-3:]).to(
-                torch.bfloat16)
-            pixel_mask = pixel_mask.view(-1, *pixel_mask.shape[-2:])
+            if isinstance(pixel_values, torch.Tensor):
+                pixel_values = pixel_values.view(
+                    -1, *pixel_values.shape[-3:]).to(torch.bfloat16)
+                pixel_mask = pixel_mask.view(-1, *pixel_mask.shape[-2:])
+            elif isinstance(pixel_values, list):
+                if not all(x.shape[-3:] == pixel_values[0].shape[-3:]
+                           for x in pixel_values):
+                    raise ValueError("All images must be the same size")
+
+                pixel_values = [
+                    x.view(-1, *x.shape[-3:]).to(torch.bfloat16)
+                    for x in pixel_values
+                ]
+                pixel_values = torch.cat(pixel_values, dim=0)
+                pixel_mask = [x.view(-1, *x.shape[-2:]) for x in pixel_mask]
+                pixel_mask = torch.cat(pixel_mask, dim=0)
             selected_image_feature, image_attn_mask = self.vision_tower(
                 pixel_values,
                 pixel_mask=pixel_mask,
