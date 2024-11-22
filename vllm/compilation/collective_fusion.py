@@ -172,6 +172,8 @@ def get_gemm_rs_ag_gemm(use_flux: bool, max_m: int, gemm_1_type: torch.dtype,
             first_layer: bool
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
 
+        #print(f"START RESIDUAL {residual.shape}")
+
         if first_layer and should_slice(residual.shape):
             slice_shape = residual_slice_shape(residual, rank)
             residual_chunk = torch.ops.aten.split.Tensor(residual, slice_shape)
@@ -180,10 +182,14 @@ def get_gemm_rs_ag_gemm(use_flux: bool, max_m: int, gemm_1_type: torch.dtype,
             my_residual = residual
             slice_shape = residual.shape[0]
 
+        #print(f"MY RESIDUAL {my_residual.shape}")
+
         if not should_slice(residual.shape):
             output = torch.ops.aten.mm.default(gemm_1_activations,
                                                gemm_1_weights.transpose(1, 0))
             reduced_output = tensor_model_parallel_all_reduce(output)
+
+            #print(f"NAIVE GEMM1 {gemm_1_activations.shape}, {gemm_1_weights.shape}, {output.shape}")
 
             torch.ops._C.fused_add_rms_norm.default(input=reduced_output,
                                                     residual=my_residual,
@@ -192,9 +198,14 @@ def get_gemm_rs_ag_gemm(use_flux: bool, max_m: int, gemm_1_type: torch.dtype,
 
             mm_2 = torch.ops.aten.mm.default(reduced_output,
                                              gemm_2_weights.transpose(1, 0))
+
+            #print(f"NAIVE GEMM2 {gemm_2_weights.shape}, {gemm_2_weights.shape}, {output.shape}")
+
             return mm_2, my_residual, my_residual.clone()
         else:
             output = gemm_rs(gemm_1_activations, gemm_1_weights)
+
+            #print(f"FLUX GEMM1 {gemm_1_activations.shape}, {gemm_1_weights.shape}, {output.shape}")
 
             torch.ops._C.fused_add_rms_norm.default(input=output,
                                                     residual=my_residual,
@@ -202,16 +213,14 @@ def get_gemm_rs_ag_gemm(use_flux: bool, max_m: int, gemm_1_type: torch.dtype,
                                                     epsilon=1e-05)
 
             residual_1 = residual if first_layer else old_my_residual
-            #if False:
-            #slice_scatter = torch.ops.aten.slice_scatter.default(
-            #    residual_1, my_residual, 0, 0, slice_shape)
-            #split_2 = torch.ops.aten.split.Tensor(slice_scatter, slice_shape)
-            #new_residual = split_2[0]
-            #else:
-            slice_scatter = my_residual
-            new_residual = residual_1
+            slice_scatter = torch.ops.aten.slice_scatter.default(
+                residual_1, my_residual, 0, 0, slice_shape)
+            split_2 = torch.ops.aten.split.Tensor(slice_scatter, slice_shape)
+            new_residual = split_2[0]
 
             mm_2 = ag_gemm(output, gemm_2_weights)
+
+            #print(f"FLUX GEMM2 {gemm_2_weights.shape}, {gemm_2_weights.shape}, {output.shape}")
 
             return mm_2[0], new_residual, slice_scatter
 
@@ -299,6 +308,8 @@ def gemm_ag_final(my_residual: torch.Tensor, gemm_1_weights: torch.Tensor,
         wait_tensor = tensor_model_parallel_all_gather(my_residual)
     else:
         wait_tensor = my_residual
+
+    #print(f"FINAL RESIDUAL {wait_tensor.shape}")
 
     torch.ops._C.fused_add_rms_norm.default(input=reduced,
                                             residual=wait_tensor,
