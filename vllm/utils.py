@@ -909,7 +909,7 @@ def full_groupby(values: Iterable[_V], *, key: Callable[[_V], _K]):
     Unlike :class:`itertools.groupby`, groups are not broken by
     non-contiguous data.
     """
-    groups: dict[_K, list[_V]] = defaultdict(list)
+    groups = defaultdict[_K, list[_V]](list)
 
     for value in values:
         groups[key(value)].append(value)
