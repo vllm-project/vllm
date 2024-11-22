@@ -153,7 +153,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # update to request_state
             num_existing_block_ids = len(req_state.block_ids) 
 
-            req_state.update(req_data)
+            req_state.update_from_running_request_data(req_data)
             self.request_batch.update_states(req_id, req_data, num_existing_block_ids)
 
         req_ids_to_add: List[str] = []
@@ -188,8 +188,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             req_id = req_data.req_id
             req_state = self.requests[req_id]
 
-            req_state.block_ids = req_data.block_ids
-            req_state.num_computed_tokens = req_data.num_computed_tokens
+            req_state.update_from_resumed_request_data(req_data)
             req_ids_to_add.append(req_id)
 
         for req_id in req_ids_to_add:
@@ -494,7 +493,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         sampled_token_ids_list = sampled_token_ids.tolist()
         # TODO(woosuk): The following loop can be slow since it iterates over
         # the requests one by one. Optimize.
-        for i, req_id in enumerate(self.request_batch.request_ids()):
+        for req_idx, req_id in enumerate(self.request_batch.request_ids()):
             # TODO (varun) : Move part of loop body into input_batch
             req_state = self.requests[req_id]
             seq_len = (req_state.num_computed_tokens +
@@ -502,7 +501,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             assert seq_len <= req_state.num_tokens
             if seq_len == req_state.num_tokens:
                 # Append the sampled token to the output token ids.
-                token_id = sampled_token_ids_list[i]
+                token_id = sampled_token_ids_list[req_idx]
                 #self.input_batch.token_ids_cpu[i, seq_len] = token_id
                 self.request_batch.append_token_id(req_id, token_id, seq_len)
                 req_state.output_token_ids.append(token_id)
