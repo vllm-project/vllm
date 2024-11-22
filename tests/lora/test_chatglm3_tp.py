@@ -3,6 +3,7 @@ from typing import List
 import pytest
 
 import vllm
+from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.lora.request import LoRARequest
 
 from ..utils import multi_gpu_test
@@ -61,6 +62,7 @@ def test_chatglm3_lora_tp1(chatglm3_lora_files):
     output2 = do_sample(llm, chatglm3_lora_files, lora_id=2)
     for i in range(len(expected_lora_output)):
         assert output2[i] == expected_lora_output[i]
+    cleanup_dist_env_and_memory()
 
 
 @multi_gpu_test(num_gpus=2)
@@ -89,6 +91,7 @@ def test_chatglm3_lora_tp2(chatglm3_lora_files, fully_sharded):
     output2 = do_sample(llm, chatglm3_lora_files, lora_id=2)
     for i in range(len(expected_lora_output)):
         assert output2[i] == expected_lora_output[i]
+    cleanup_dist_env_and_memory()
 
 
 @multi_gpu_test(num_gpus=4)
@@ -115,3 +118,4 @@ def test_chatglm3_lora_tp4(chatglm3_lora_files, fully_sharded):
     output2 = do_sample(llm, chatglm3_lora_files, lora_id=2)
     for i in range(len(expected_lora_output)):
         assert output2[i] == expected_lora_output[i]
+    cleanup_dist_env_and_memory()
