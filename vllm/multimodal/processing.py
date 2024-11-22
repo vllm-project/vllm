@@ -579,7 +579,8 @@ class MultiModalProcessor:
         hf_inputs: BatchFeature,
         token_ids: list[int],
         prompt_repls: Sequence[_BoundPromptReplacement[Any]],
-    ) -> tuple[list[int], list[_BoundPlaceholderRange]]:
+    ) -> tuple[list[int], str, list[_BoundPlaceholderRange]]:
+        tokenizer = self.ctx.tokenizer
         mm_items = to_multi_format(mm_data)
         token_matches = find_token_matches(token_ids, prompt_repls)
 
@@ -594,9 +595,10 @@ class MultiModalProcessor:
                 mm_items,
                 hf_inputs,
             )
+
+            text = _decode(tokenizer, token_ids)
             matched_repls = [match.prompt_repl for match in token_matches]
         else:
-            tokenizer = self.ctx.tokenizer
             text = _decode(tokenizer, token_ids)
 
             text_matches = find_text_matches(text, prompt_repls)
@@ -612,35 +614,39 @@ class MultiModalProcessor:
 
         placeholder_ranges = self._find_placeholders(matched_repls, token_ids)
 
-        return token_ids, placeholder_ranges
+        return token_ids, text, placeholder_ranges
 
     def apply(
         self,
-        prompt: str,
+        prompt_text: str,
         mm_data: MultiModalDataDict,
         mm_processor_kwargs: Mapping[str, object],
     ) -> MultiModalInputsV2:
         tokenizer = self.ctx.tokenizer
 
-        hf_inputs = self._apply_hf_processor(prompt, mm_data,
+        hf_inputs = self._apply_hf_processor(prompt_text, mm_data,
                                              mm_processor_kwargs)
-        token_ids, = hf_inputs.pop("input_ids").tolist()
+        prompt_ids, = hf_inputs.pop("input_ids").tolist()
         mm_kwargs = MultiModalKwargs(hf_inputs)
 
         all_prompt_repls = self._bind_prompt_replacements(mm_data)
 
         # In case HF processor already inserts placeholder tokens
-        all_placeholders = self._find_placeholders(all_prompt_repls, token_ids)
+        all_placeholders = self._find_placeholders(all_prompt_repls,
+                                                   prompt_ids)
 
         # Otherwise, we insert them ourselves
-        if not all_placeholders:
+        if all_placeholders:
+            prompt_text = _decode(tokenizer, prompt_ids)
+        else:
             (
-                token_ids,
+                prompt_ids,
+                prompt_text,
                 all_placeholders,
             ) = self._apply_prompt_replacements(
                 mm_data,
                 hf_inputs,
-                token_ids,
+                prompt_ids,
                 all_prompt_repls,
             )
 
@@ -655,8 +661,8 @@ class MultiModalProcessor:
 
         return MultiModalInputsV2(
             type="multimodal",
-            prompt=_decode(tokenizer, token_ids),
-            prompt_token_ids=token_ids,
+            prompt=prompt_text,
+            prompt_token_ids=prompt_ids,
             mm_kwargs=mm_kwargs,
             mm_placeholders=mm_placeholders,
         )
