@@ -694,7 +694,7 @@ class ChatGLM(ChatGLMBaseModel):
     embedding_padding_modules = []
 
 
-class ChatGLMV(ChatGLMBaseModel, SupportsMultiModal):
+class ChatGLM4V(ChatGLMBaseModel, SupportsMultiModal):
     packed_modules_mapping = {
         "query_key_value": ["query_key_value"],
         "dense_h_to_4h": ["dense_h_to_4h"],
@@ -747,7 +747,7 @@ class ChatGLMForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP,
         config = vllm_config.model_config.hf_config
         # Initialize VL
         if hasattr(config, "visual"):
-            return ChatGLM(vllm_config=vllm_config, prefix=prefix)
+            return ChatGLM4V(vllm_config=vllm_config, prefix=prefix)
         # Initialize LLM
         else:
-            return ChatGLMV(vllm_config=vllm_config, prefix=prefix)
+            return ChatGLM(vllm_config=vllm_config, prefix=prefix)
