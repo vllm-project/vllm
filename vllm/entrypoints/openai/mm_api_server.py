@@ -26,8 +26,8 @@ from typing_extensions import assert_never
 import vllm.envs as envs
 from vllm.config import ModelConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.engine.multiprocessing.client import MQLLMEngineClient
-from vllm.engine.multiprocessing.engine import run_mp_engine
+from vllm.engine.multiprocessing.mm_client import MMLLMEngineClient
+from vllm.engine.multiprocessing.mm_engine import run_mm_engine
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import load_chat_template
 from vllm.entrypoints.launcher import serve_http
@@ -131,7 +131,7 @@ async def build_async_engine_client_from_engine_args(
 
     # Fall back
     # TODO: fill out feature matrix.
-    if (MQLLMEngineClient.is_unsupported_config(engine_args)
+    if (MMLLMEngineClient.is_unsupported_config(engine_args)
             or envs.VLLM_USE_V1 or disable_frontend_multiprocessing):
 
         engine_config = engine_args.create_engine_config()
@@ -185,7 +185,7 @@ async def build_async_engine_client_from_engine_args(
         # not actually result in an exitcode being reported. As a result
         # we use a shared variable to communicate the information.
         engine_alive = multiprocessing.Value('b', True, lock=False)
-        engine_process = context.Process(target=run_mp_engine,
+        engine_process = context.Process(target=run_mm_engine,
                                          args=(engine_args,
                                                UsageContext.OPENAI_API_SERVER,
                                                ipc_path, engine_alive))
@@ -196,7 +196,7 @@ async def build_async_engine_client_from_engine_args(
 
         # Build RPCClient, which conforms to EngineClient Protocol.
         engine_config = engine_args.create_engine_config()
-        build_client = partial(MQLLMEngineClient, ipc_path, engine_config,
+        build_client = partial(MMLLMEngineClient, ipc_path, engine_config,
                                engine_pid)
         mq_engine_client = await asyncio.get_running_loop().run_in_executor(
             None, build_client)
@@ -615,6 +615,7 @@ async def run_server(args, **uvicorn_kwargs) -> None:
 
     async with build_async_engine_client(args) as engine_client:
         app = build_app(args)
+        print(f"args: {args}")
 
         model_config = await engine_client.get_model_config()
         init_app_state(engine_client, model_config, app.state, args)
