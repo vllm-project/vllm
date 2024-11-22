@@ -1070,9 +1070,9 @@ class Scheduler:
                     continue
 
             num_new_seqs = seq_group.get_max_num_running_seqs()
-            # quick budget check
-            if num_new_tokens == 0 or not budget.can_schedule(
-                    num_new_tokens=num_new_tokens, num_new_seqs=num_new_seqs):
+            if (num_new_tokens == 0
+                    or not budget.can_schedule(num_new_tokens=num_new_tokens,
+                                               num_new_seqs=num_new_seqs)):
                 break
 
             # Can schedule this request.
