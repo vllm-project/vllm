@@ -24,11 +24,10 @@ VLLM_RINGBUFFER_WARNING_INTERVAL = envs.VLLM_RINGBUFFER_WARNING_INTERVAL
 logger = init_logger(__name__)
 
 # We prefer to use os.sched_yield as it results in tighter polling loops,
-# measured to be around 3e-7 seconds. However on python < 3.11.1,
+# measured to be around 3e-7 seconds. However on earlier versions of Python
 # os.sched_yield() does not release the GIL, so we fall back to time.sleep(0)
-USE_SCHED_YIELD = False
-if sys.version_info[:3] >= (3, 11, 1):
-    USE_SCHED_YIELD = True
+USE_SCHED_YIELD = ((sys.version_info[:3] >= (3, 11, 1))
+                   or (sys.version_info[:3] >= (3, 10, 8)))
 
 
 class ShmRingBuffer:
