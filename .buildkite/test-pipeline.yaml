@@ -475,7 +475,7 @@ steps:
   - pytest -v -s distributed/test_pp_cudagraph.py
   - pytest -v -s distributed/test_pipeline_parallel.py
 
-- label: LoRA TP Test  (Distributed)
+- label: LoRA TP Test (Distributed)
   num_gpus: 4
   soft_fail: true
   source_file_dependencies:

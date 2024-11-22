@@ -148,7 +148,7 @@ def sql_lora_huggingface_id():
 
 
 @pytest.fixture(scope="session")
-def sql_lora_files():
+def sql_lora_files(sql_lora_huggingface_id):
     return snapshot_download(repo_id=sql_lora_huggingface_id)
 
 
