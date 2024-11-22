@@ -91,8 +91,12 @@ class Attention(nn.Module):
                              alibi_slopes, sliding_window, kv_cache_dtype,
                              blocksparse_params, logits_soft_cap)
 
-        self.use_direct_call = envs.VLLM_USE_V1 or current_platform.is_tpu() \
-            or current_platform.is_neuron()
+        # For cuda-alike (CUDA and ROCM) and cpu platforms, we control how
+        # torch.compile works by registering the attention as one giant
+        # opaque custom op. For other platforms, we directly call them
+        # and let torch.compile handle them.
+        self.use_direct_call = envs.VLLM_USE_V1 or not (
+            current_platform.is_cuda_alike() or current_platform.is_cpu())
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
