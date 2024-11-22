@@ -30,6 +30,13 @@ class SupportsMultiModal(Protocol):
     def __init__(self, *, multimodal_config: "MultiModalConfig") -> None:
         ...
 
+    def get_multimodal_embeddings(self, **kwargs) -> Optional[torch.Tensor]:
+        """
+        Returns multimodal embeddings generated from multimodal kwargs 
+        to be merged with text embeddings.
+        """
+        ...
+
 
 # We can't use runtime_checkable with ClassVar for issubclass checks
 # so we need to treat the class as an instance and use isinstance instead
