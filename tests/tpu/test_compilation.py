@@ -4,7 +4,7 @@ import tempfile
 
 import depyf
 
-from vllm.config import CompilationConfig, CompilationLevel
+from vllm.config import CompilationLevel
 
 temp_dir = tempfile.mkdtemp()
 with depyf.prepare_debug(temp_dir):
@@ -34,8 +34,7 @@ with depyf.prepare_debug(temp_dir):
     # all the control
     llm = LLM(model="google/gemma-2b",
               enforce_eager=True,
-              compilation_config=CompilationConfig(
-                  level=CompilationLevel.DYNAMO_AS_IS))
+              compilation_config={"level": CompilationLevel.DYNAMO_AS_IS})
     outputs = llm.generate(prompts, sampling_params)
     for output, answer in zip(outputs, answers):
         prompt = output.prompt
