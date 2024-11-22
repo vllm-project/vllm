@@ -13,7 +13,7 @@ steps:
   - wait
 
   - label: "A100"
-    skip: "pr testing for H100 only, to be removed before merging"
+    # skip: "use this flag to conditionally skip the benchmark step, useful for PR testing"
     agents:
       queue: A100
     plugins:
@@ -46,7 +46,7 @@ steps:
               medium: Memory
 
   - label: "H200"
-    skip: "pr testing for H100 only, to be removed before merging"
+    # skip: "use this flag to conditionally skip the benchmark step, useful for PR testing"
     agents:
       queue: H200
     plugins:
@@ -66,6 +66,7 @@ steps:
         - HF_TOKEN
 
   - label: "H100"
+    # skip: "use this flag to conditionally skip the benchmark step, useful for PR testing"
     agents:
       queue: H100
     plugins:
