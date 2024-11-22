@@ -192,6 +192,7 @@ class EngineArgs:
     override_neuron_config: Optional[Dict[str, Any]] = None
     override_pooler_config: Optional[PoolerConfig] = None
     compilation_config: Optional[CompilationConfig] = None
+    worker_cls: str = "auto"
 
     # P/D disaggregation coonfiguration
     kv_connector: Optional[str] = None
@@ -893,7 +894,16 @@ class EngineArgs:
                             'testing only. level 3 is the recommended level '
                             'for production.\n'
                             'To specify the full compilation config, '
-                            'use a JSON string.')
+                            'use a JSON string.\n'
+                            'Following the convention of traditional '
+                            'compilers, using -O without space is also '
+                            'supported. -O3 is equivalent to -O 3.')
+
+        parser.add_argument(
+            '--worker-cls',
+            type=str,
+            default="auto",
+            help='The worker class to use for distributed execution.')
 
         parser.add_argument(
             '--kv-parallel-size',
@@ -1063,6 +1073,7 @@ class EngineArgs:
             ),
             ray_workers_use_nsight=self.ray_workers_use_nsight,
             distributed_executor_backend=self.distributed_executor_backend,
+            worker_cls=self.worker_cls,
         )
         kv_transfer_config = KVTransferConfig(
             kv_parallel_size=self.kv_parallel_size,
