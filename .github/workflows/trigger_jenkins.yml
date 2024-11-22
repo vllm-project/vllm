@@ -1,7 +1,7 @@
 name: Trigger Jenkins Tests
 on:
-    pull_request_target:
-        types: [opened, reopened, edited]
+    pull_request:
+        types: [opened, reopened, edited, synchronize]
 
 permissions:
     pull-requests: write
@@ -11,6 +11,6 @@ jobs:
     steps:
         - name: Trigger Jenkins Tests
           run: |
-            curl -XPOST -H "Content-Type: application/json" \  
-            ${{ secrets.WEBHOOK_URL }} \
-            -d "${{ toJson(github.event.payload) }}"          
+            curl -XPOST -H "Content-Type: application/json" \
+            "${{ secrets.WEBHOOK_URL }}" \
+            -d '${{ toJson(github) }}'          
