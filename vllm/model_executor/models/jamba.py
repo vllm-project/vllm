@@ -1,5 +1,5 @@
 """Inference-only Jamba model."""
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, List, Optional, Set, Tuple
 
 import torch
 from torch import nn
@@ -7,7 +7,7 @@ from transformers import JambaConfig
 
 from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.attention.layer import Attention
-from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -29,6 +29,7 @@ from vllm.worker.model_runner import (_BATCH_SIZES_TO_CAPTURE,
                                       _get_graph_batch_size)
 
 from .interfaces import HasInnerState, SupportsLoRA
+from .utils import maybe_prefix
 
 KVCache = Tuple[torch.Tensor, torch.Tensor]
 
@@ -258,14 +259,14 @@ ALL_DECODER_LAYER_TYPES = {
 
 class JambaModel(nn.Module):
 
-    def __init__(
-        self,
-        config: JambaConfig,
-        quant_config: Optional[QuantizationConfig] = None,
-        cache_config: Optional[CacheConfig] = None,
-        lora_config: Optional[LoRAConfig] = None,
-    ) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+        lora_config = vllm_config.lora_config
+
         self.config = config
         self.padding_idx = config.pad_token_id
         lora_vocab = ((lora_config.lora_extra_vocab_size *
@@ -291,6 +292,9 @@ class JambaModel(nn.Module):
         self.final_layernorm = RMSNorm(config.hidden_size,
                                        eps=config.rms_norm_eps)
 
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.embed_tokens(input_ids)
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -298,8 +302,12 @@ class JambaModel(nn.Module):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         mamba_cache_params: MambaCacheParams,
+        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        hidden_states = self.embed_tokens(input_ids)
+        if inputs_embeds is not None:
+            hidden_states = inputs_embeds
+        else:
+            hidden_states = self.get_input_embeddings(input_ids)
         residual = None
         for i in range(len(self.layers)):
             layer = self.layers[i]
@@ -348,24 +356,19 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA):
     }
     embedding_padding_modules = ["lm_head"]
 
-    def __init__(
-        self,
-        config: JambaConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        lora_config: Optional[LoRAConfig] = None,
-        scheduler_config: Optional[SchedulerConfig] = None,
-    ) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        lora_config = vllm_config.lora_config
+        scheduler_config = vllm_config.scheduler_config
         assert not cache_config.enable_prefix_caching, \
             "Jamba currently does not support prefix caching"
 
         super().__init__()
         self.config = config
         self.scheduler_config = scheduler_config
-        self.model = JambaModel(config,
-                                cache_config=cache_config,
-                                quant_config=quant_config,
-                                lora_config=lora_config)
+        self.model = JambaModel(vllm_config=vllm_config,
+                                prefix=maybe_prefix(prefix, "model"))
         self.unpadded_vocab_size = config.vocab_size
         if lora_config:
             self.unpadded_vocab_size += lora_config.lora_extra_vocab_size
@@ -385,12 +388,16 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA):
                                                 config.vocab_size)
         self.sampler = get_sampler()
 
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.get_input_embeddings(input_ids)
+
     def forward(self,
                 input_ids: torch.Tensor,
                 positions: torch.Tensor,
                 kv_caches: List[KVCache],
                 attn_metadata: AttentionMetadata,
                 intermediate_tensors: Optional[IntermediateTensors] = None,
+                inputs_embeds: Optional[torch.Tensor] = None,
                 **kwargs):
         if self.mamba_cache is None:
             max_batch_size = (_get_graph_batch_size(
@@ -413,7 +420,8 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA):
                                               mamba_cache_tensors[1],
                                               state_indices_tensor)
         hidden_states = self.model(input_ids, positions, kv_caches,
-                                   attn_metadata, mamba_cache_params)
+                                   attn_metadata, mamba_cache_params,
+                                   inputs_embeds)
         return hidden_states
 
     def copy_inputs_before_cuda_graphs(self, input_buffers, **kwargs):
@@ -454,7 +462,8 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -471,6 +480,7 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA):
             num_experts=self.config.num_experts)
 
         params_dict = dict(self.named_parameters())
+        loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -526,6 +536,8 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA):
                     weight_loader = getattr(param, "weight_loader",
                                             default_weight_loader)
                     weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params
 
 
 def _is_moe_layer(name: str):

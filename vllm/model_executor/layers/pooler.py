@@ -63,14 +63,14 @@ class Pooler(nn.Module):
         return cls(
             pooling_type=PoolingType[pooler_config.pooling_type]
             if pooler_config.pooling_type is not None else pooling_type,
-            normalize=pooler_config.pooling_norm
-            if pooler_config.pooling_norm is not None else normalize,
-            softmax=pooler_config.pooling_softmax
-            if pooler_config.pooling_softmax is not None else softmax,
-            step_tag_id=pooler_config.pooling_step_tag_id
-            if pooler_config.pooling_step_tag_id is not None else step_tag_id,
-            returned_token_ids=pooler_config.pooling_returned_token_ids
-            if pooler_config.pooling_returned_token_ids is not None else
+            normalize=pooler_config.normalize
+            if pooler_config.normalize is not None else normalize,
+            softmax=pooler_config.softmax
+            if pooler_config.softmax is not None else softmax,
+            step_tag_id=pooler_config.step_tag_id
+            if pooler_config.step_tag_id is not None else step_tag_id,
+            returned_token_ids=pooler_config.returned_token_ids
+            if pooler_config.returned_token_ids is not None else
             returned_token_ids,
         )
 
@@ -110,32 +110,42 @@ class Pooler(nn.Module):
                 cumsum[end_indices - 1] - cumsum[start_indices] +
                 hidden_states[start_indices]) / prompt_lens.unsqueeze(1)
         elif self.pooling_type == PoolingType.STEP:
-            if self.returned_token_ids is not None and len(
-                    self.returned_token_ids) > 0:
-                logits = hidden_states[:,
-                                       self.returned_token_ids].softmax(dim=-1)
-            else:
-                logits = hidden_states.softmax(dim=-1)
+            returned_token_ids = self.returned_token_ids
+            if returned_token_ids is not None and len(returned_token_ids) > 0:
+                hidden_states = hidden_states[:, returned_token_ids]
+
+            step_tag_id = self.step_tag_id
+
             offset = 0
             pooled_data = []
             for prompt_len, seq_data_i in zip(
                     prompt_lens, pooling_metadata.seq_data.values()):
-                if self.step_tag_id is None:
-                    pooled_data.append(logits[offset:offset + prompt_len])
-                else:
-                    step_idxs = torch.tensor(
-                        seq_data_i.prompt_token_ids) == self.step_tag_id
-                    pooled_data.append(logits[offset:offset +
-                                              prompt_len][step_idxs])
+                pooled_data_i = hidden_states[offset:offset + prompt_len]
+                if step_tag_id is not None:
+                    token_ids = torch.tensor(seq_data_i.prompt_token_ids)
+                    pooled_data_i = pooled_data_i[token_ids == step_tag_id]
+
                 offset += prompt_len
+                pooled_data.append(pooled_data_i)
         else:
             raise ValueError(f"Invalid pooling type: {self.pooling_type}")
 
         if self.normalize:
-            pooled_data = nn.functional.normalize(pooled_data, p=2, dim=1)
+            if isinstance(pooled_data, list):
+                pooled_data = [
+                    nn.functional.normalize(data, p=2, dim=1)
+                    for data in pooled_data
+                ]
+            else:
+                pooled_data = nn.functional.normalize(pooled_data, p=2, dim=1)
 
         if self.softmax:
-            pooled_data = nn.functional.softmax(pooled_data, dim=-1)
+            if isinstance(pooled_data, list):
+                pooled_data = [
+                    nn.functional.softmax(data, dim=-1) for data in pooled_data
+                ]
+            else:
+                pooled_data = nn.functional.softmax(pooled_data, dim=-1)
 
         pooled_outputs = [
             EmbeddingSequenceGroupOutput(data.tolist()) for data in pooled_data

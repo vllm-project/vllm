@@ -7,18 +7,14 @@ import torch
 from torch.nn.functional import scaled_dot_product_attention
 
 from vllm.attention.backends.abstract import (AttentionBackend, AttentionImpl,
-                                              AttentionMetadata, AttentionType)
+                                              AttentionMetadata,
+                                              AttentionMetadataBuilder,
+                                              AttentionType)
 from vllm.attention.backends.utils import CommonAttentionState
+from vllm.attention.ops.ipex_attn import PagedAttention
 from vllm.attention.ops.paged_attn import PagedAttentionMetadata
-from vllm.platforms import current_platform
-
-if current_platform.is_cpu():
-    try:
-        from vllm.attention.ops.ipex_attn import PagedAttention
-    except ImportError:
-        from vllm.attention.ops.paged_attn import PagedAttention
-else:
-    from vllm.attention.ops.paged_attn import PagedAttention
+from vllm.utils import make_tensor_with_pad
+from vllm.worker.cpu_model_runner import ModelInputForCPUBuilder
 
 
 class TorchSDPABackend(AttentionBackend):
@@ -38,6 +34,10 @@ class TorchSDPABackend(AttentionBackend):
     @staticmethod
     def get_state_cls() -> Type["CommonAttentionState"]:
         return CommonAttentionState
+
+    @staticmethod
+    def get_builder_cls() -> Type["TorchSDPAMetadataBuilder"]:
+        return TorchSDPAMetadataBuilder
 
     @staticmethod
     def get_kv_cache_shape(
@@ -71,9 +71,15 @@ class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata):
     """
     # Currently, input sequences can only contain all prompts
     # or all decoding. True if all sequences are prompts.
-    is_prompt: bool
-    slot_mapping: torch.Tensor
-    seq_lens: Optional[List[int]]
+    chunked_prefill: bool
+    seq_lens: Optional[List[int]] = None  # For non-chunked prefill
+
+    # For chunked prefill only
+    max_query_len: Optional[int] = None
+    max_kv_len: Optional[int] = None
+    query_start_loc: Optional[torch.Tensor] = None
+    kv_start_loc: Optional[torch.Tensor] = None
+    prefill_block_tables: Optional[torch.Tensor] = None
 
     # Begin encoder attn & enc/dec cross-attn fields...
     # Encoder sequence lengths representation
@@ -123,20 +129,14 @@ class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata):
 
     @property
     def prefill_metadata(self) -> Optional["TorchSDPAMetadata"]:
-        # Currently chunked prefill is not supported
-        if self.num_decode_tokens == 0:
-            assert self.num_prefills > 0
-            return self
-
-        return None
+        if self.num_prefill_tokens == 0:
+            return None
+        return self
 
     @property
     def decode_metadata(self) -> Optional["TorchSDPAMetadata"]:
-        # Currently chunked prefill is not supported
-        if self.num_prefills > 0:
-            assert self.num_decode_tokens == 0
+        if self.num_decode_tokens == 0:
             return None
-
         return self
 
     def get_seq_lens(
@@ -158,7 +158,8 @@ class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata):
         * Appropriate sequence lengths tensor for key & value
         '''
 
-        if attn_type == AttentionType.DECODER:
+        if (attn_type == AttentionType.DECODER
+                or attn_type == AttentionType.ENCODER_ONLY):
             seq_lens_q = self.seq_lens
             seq_lens_kv = self.seq_lens
         elif attn_type == AttentionType.ENCODER:
@@ -189,7 +190,8 @@ class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata):
         * Appropriate attention bias value given the attention type
         '''
 
-        if attn_type == AttentionType.DECODER:
+        if (attn_type == AttentionType.DECODER
+                or attn_type == AttentionType.ENCODER_ONLY):
             return self.attn_bias
         elif attn_type == AttentionType.ENCODER:
             return self.encoder_attn_bias
@@ -215,7 +217,8 @@ class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata):
                     encoder/decoder cross-attention
         '''
 
-        if attn_type == AttentionType.DECODER:
+        if (attn_type == AttentionType.DECODER
+                or attn_type == AttentionType.ENCODER_ONLY):
             self.attn_bias = attn_bias
         elif attn_type == AttentionType.ENCODER:
             self.encoder_attn_bias = attn_bias
@@ -252,7 +255,8 @@ class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata):
         * Appropriate block tables (or None)
         '''
 
-        if attn_type == AttentionType.DECODER:
+        if (attn_type == AttentionType.DECODER
+                or attn_type == AttentionType.ENCODER_ONLY):
             # Decoder self-attention
             # Choose max_seq_len based on whether we are in prompt_run
             return (self.seq_lens_tensor, self.max_decode_seq_len,
@@ -268,6 +272,105 @@ class TorchSDPAMetadata(AttentionMetadata, PagedAttentionMetadata):
                     None)
         else:
             raise AttributeError(f"Invalid attention type {str(attn_type)}")
+
+
+class TorchSDPAMetadataBuilder(AttentionMetadataBuilder[TorchSDPAMetadata]):
+
+    def __init__(self, input_builder: ModelInputForCPUBuilder) -> None:
+        self.chunked_prefill = input_builder.chunked_prefill
+        self.input_data = input_builder.input_data
+
+    def build(self, seq_lens: List[int], query_lens: List[int],
+              cuda_graph_pad_size: int, batch_size: int) -> TorchSDPAMetadata:
+        input_data = self.input_data
+        prefill_seq_lens = seq_lens[0:input_data.num_prefills]
+        prefill_query_lens = query_lens[0:input_data.num_prefills]
+        slot_mapping = torch.tensor(input_data.slot_mapping,
+                                    dtype=torch.long,
+                                    device="cpu")
+
+        # For chunked-prefill
+        if self.chunked_prefill and input_data.num_prefill_tokens != 0:
+            prefill_block_tables = make_tensor_with_pad(
+                self.input_data.prefill_block_tables,
+                pad=0,
+                dtype=torch.int32,
+                device="cpu",
+            )
+            query_lens_tensor = torch.tensor(prefill_query_lens,
+                                             dtype=torch.int32,
+                                             device="cpu")
+            kv_lens_tensor = torch.tensor(prefill_seq_lens,
+                                          dtype=torch.int32,
+                                          device="cpu")
+            query_start_loc = torch.zeros(input_data.num_prefills + 1,
+                                          dtype=torch.int32,
+                                          device="cpu")
+            kv_start_loc = torch.zeros(input_data.num_prefills + 1,
+                                       dtype=torch.int32,
+                                       device="cpu")
+            torch.cumsum(query_lens_tensor,
+                         dim=0,
+                         dtype=torch.int32,
+                         out=query_start_loc[1:])
+            torch.cumsum(kv_lens_tensor,
+                         dim=0,
+                         dtype=torch.int32,
+                         out=kv_start_loc[1:])
+            max_query_len = max(prefill_query_lens)
+            max_kv_len = max(prefill_seq_lens)
+        else:
+            prefill_block_tables = None
+            query_start_loc = None
+            kv_start_loc = None
+            max_query_len = None
+            max_kv_len = None
+
+        # For paged attention
+        if input_data.num_decode_tokens != 0:
+            seq_lens_tensor = torch.tensor(
+                input_data.seq_lens[input_data.num_prefills:],
+                dtype=torch.int32,
+                device="cpu",
+            )
+            block_tables = make_tensor_with_pad(
+                self.input_data.decode_block_tables,
+                pad=0,
+                dtype=torch.int32,
+                device="cpu",
+            )
+        else:
+            block_tables = torch.tensor([])
+            seq_lens_tensor = torch.tensor([])
+
+        # For multi-modal models
+        placeholder_index_maps = None
+        if len(input_data.multi_modal_inputs_list) != 0:
+            placeholder_index_maps = {
+                modality: placeholder_map.index_map()
+                for modality, placeholder_map in
+                input_data.multi_modal_placeholder_maps.items()
+            }
+
+        attn_metadata = TorchSDPAMetadata(
+            chunked_prefill=self.chunked_prefill,
+            seq_lens=prefill_seq_lens,
+            seq_lens_tensor=seq_lens_tensor,
+            max_query_len=max_query_len,
+            max_kv_len=max_kv_len,
+            query_start_loc=query_start_loc,
+            kv_start_loc=kv_start_loc,
+            max_decode_seq_len=input_data.max_decode_seq_len,
+            num_prefills=input_data.num_prefills,
+            num_prefill_tokens=input_data.num_prefill_tokens,
+            num_decode_tokens=input_data.num_decode_tokens,
+            block_tables=block_tables,
+            prefill_block_tables=prefill_block_tables,
+            slot_mapping=slot_mapping,
+            multi_modal_placeholder_index_maps=placeholder_index_maps,
+        )
+
+        return attn_metadata
 
 
 class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
@@ -405,21 +508,39 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
             assert key.shape[0] == num_prefill_tokens + num_decode_tokens
             assert value.shape[0] == num_prefill_tokens + num_decode_tokens
 
+        output = torch.empty_like(query)
         if prefill_meta := attn_metadata.prefill_metadata:
             assert attn_metadata.seq_lens is not None
-            if (kv_cache.numel() == 0
-                    or prefill_meta.block_tables.numel() == 0):
-                output = self._run_sdpa_forward(query,
-                                                key,
-                                                value,
-                                                prefill_meta,
-                                                attn_type=attn_type)
+            if not prefill_meta.prefill_metadata.chunked_prefill:  # type: ignore
+                self._run_sdpa_forward(output,
+                                       query,
+                                       key,
+                                       value,
+                                       prefill_meta,
+                                       attn_type=attn_type)
             else:
                 # prefix-enabled attention
-                raise RuntimeError(
-                    "Torch SDPA backend doesn't support prefix decoding.")
+                assert not self.need_mask
+                import intel_extension_for_pytorch.llm.modules as ipex_modules
+                output = torch.empty_like(query)
+                ipex_modules.PagedAttention.flash_attn_varlen_func(
+                    output[:prefill_meta.num_prefill_tokens, :, :],
+                    query[:prefill_meta.num_prefill_tokens, :, :],
+                    key_cache,
+                    value_cache,
+                    prefill_meta.query_start_loc,
+                    prefill_meta.kv_start_loc,
+                    prefill_meta.max_query_len,
+                    prefill_meta.max_kv_len,
+                    self.scale,
+                    True,
+                    prefill_meta.prefill_block_tables,
+                    self.alibi_slopes,
+                )
 
         if decode_meta := attn_metadata.decode_metadata:
+            assert attn_type != AttentionType.ENCODER_ONLY, (
+                "Encoder-only models should not have decode metadata.")
             # Decoding run.
             (
                 seq_lens_arg,
@@ -427,8 +548,9 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
                 block_tables_arg,
             ) = decode_meta.get_seq_len_block_table_args(attn_type)
 
-            output = PagedAttention.forward_decode(
-                query,
+            PagedAttention.forward_decode(
+                output[attn_metadata.num_prefill_tokens:, :, :],
+                query[attn_metadata.num_prefill_tokens:, :, :],
                 key_cache,
                 value_cache,
                 block_tables_arg,
@@ -447,12 +569,13 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
 
     def _run_sdpa_forward(
         self,
+        output: torch.Tensor,
         query: torch.Tensor,
         key: torch.Tensor,
         value: torch.Tensor,
         attn_metadata: TorchSDPAMetadata,
         attn_type: AttentionType = AttentionType.DECODER,
-    ):
+    ) -> None:
         if self.num_kv_heads != self.num_heads:
             key = key.repeat_interleave(self.num_queries_per_kv, dim=1)
             value = value.repeat_interleave(self.num_queries_per_kv, dim=1)
@@ -473,7 +596,6 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
                 attn_masks = [None] * len(seq_lens)
             attn_metadata.set_attn_bias(attn_masks, attn_type)
 
-        output = torch.empty_like(query)
         query = query.movedim(0, query.dim() - 2)
         key = key.movedim(0, key.dim() - 2)
         value = value.movedim(0, value.dim() - 2)
@@ -496,7 +618,6 @@ class TorchSDPABackendImpl(AttentionImpl[TorchSDPAMetadata]):
                 scale=self.scale).squeeze(0).movedim(query.dim() - 2, 0)
             output[start_q:end_q, :, :] = sub_out
             start_q, start_kv = end_q, end_kv
-        return output
 
 
 def _make_alibi_bias(

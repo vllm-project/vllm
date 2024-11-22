@@ -8,18 +8,17 @@ import torch.distributed
 from vllm.attention.backends.abstract import (AttentionBackend,
                                               AttentionMetadata)
 from vllm.attention.backends.utils import PAD_SLOT_ID
-from vllm.attention.selector import (_Backend, get_env_variable_attn_backend,
-                                     get_global_forced_attn_backend,
-                                     global_force_attn_backend)
-from vllm.config import ModelConfig, VllmConfig
+from vllm.attention.selector import (get_env_variable_attn_backend,
+                                     get_global_forced_attn_backend)
+from vllm.config import VllmConfig
 from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.sampler import SamplerOutput
-from vllm.model_executor.model_loader.utils import get_architecture_class_name
-from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalInputs,
+from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalKwargs,
                              MultiModalRegistry)
+from vllm.platforms import _Backend
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (IntermediateTensors, PoolerOutput,
                            SequenceGroupMetadata)
@@ -34,11 +33,6 @@ from vllm.worker.model_runner_base import (
 from vllm.worker.utils import assert_enc_dec_mr_supported_scenario
 
 logger = init_logger(__name__)
-
-# The Mllama model has PagedAttention specific logic because of which it
-# can only be run with the XFORMERS backend
-# TODO Make Mllama model work with Flash Attention backend.
-_XFORMERS_ONLY_ENCODER_DECODER_ARCHS = ["MllamaForConditionalGeneration"]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -97,7 +91,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         models) but these arguments are present here for compatibility with 
         the base-class constructor.
         '''
-        self._maybe_force_supported_attention_backend(vllm_config.model_config)
+        self._maybe_force_supported_attention_backend()
 
         super().__init__(
             vllm_config=vllm_config,
@@ -108,12 +102,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         # Crash for unsupported encoder/scenarios
         assert_enc_dec_mr_supported_scenario(self)
 
-    def _is_xformers_only_encoder_decoder_model(self,
-                                                model: ModelConfig) -> bool:
-        return get_architecture_class_name(
-            model) in _XFORMERS_ONLY_ENCODER_DECODER_ARCHS
-
-    def _maybe_force_supported_attention_backend(self, model: ModelConfig):
+    def _maybe_force_supported_attention_backend(self):
         '''
         Force vLLM to use the XFormers attention backend,
         which is currently the only supported option.
@@ -128,23 +117,13 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         maybe_global_forced_backend = get_global_forced_attn_backend()
         is_forced_by_global = maybe_global_forced_backend is not None
         is_forced_by_env_var = maybe_env_var_forced_backend is not None
-
-        if not (is_forced_by_global or is_forced_by_env_var) \
-            and self._is_xformers_only_encoder_decoder_model(model):
-            # The user has not already specified an attention backend
-            # override
-            logger.info(
-                "Encoder-Decoder Model Architecture %s requires XFormers "
-                "backend; overriding backend auto-selection and "
-                "forcing XFormers.", get_architecture_class_name(model))
-            global_force_attn_backend(_Backend.XFORMERS)
-        elif is_forced_by_global:
+        if is_forced_by_global:  # noqa: SIM102
             # Backend override enforced by global variable takes
             # precedence over vLLM backend environment variable.
             if maybe_global_forced_backend not in\
                  [_Backend.XFORMERS, _Backend.FLASH_ATTN]:
                 raise_backend_err()
-        elif is_forced_by_env_var:
+        elif is_forced_by_env_var:  # noqa: SIM102
             # Backend override enforced by vLLM backend
             # environment variable
             if maybe_env_var_forced_backend not in\
@@ -206,7 +185,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
                 kv_caches=kv_caches,
                 attn_metadata=model_input.attn_metadata,
                 intermediate_tensors=intermediate_tensors,
-                **MultiModalInputs.as_kwargs(multi_modal_kwargs,
+                **MultiModalKwargs.as_kwargs(multi_modal_kwargs,
                                              device=self.device),
                 **seqlen_agnostic_kwargs)
 

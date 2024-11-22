@@ -62,6 +62,32 @@ completion = client.chat.completions.create(
 )
 ```
 
+### Extra HTTP Headers
+
+Only `X-Request-Id` HTTP request header is supported for now.
+
+```python
+completion = client.chat.completions.create(
+  model="NousResearch/Meta-Llama-3-8B-Instruct",
+  messages=[
+    {"role": "user", "content": "Classify this sentiment: vLLM is wonderful!"}
+  ],
+  extra_headers={
+    "x-request-id": "sentiment-classification-00001",
+  }
+)
+print(completion._request_id)
+
+completion = client.completions.create(
+  model="NousResearch/Meta-Llama-3-8B-Instruct",
+  prompt="A robot may not injure a human being",
+  extra_headers={
+    "x-request-id": "completion-test",
+  }
+)
+print(completion._request_id)
+```
+
 ### Extra Parameters for Completions API
 
 The following [sampling parameters (click through to see documentation)](../dev/sampling_params.rst) are supported.
@@ -136,7 +162,7 @@ vllm serve <model> --chat-template ./path-to-chat-template.jinja
 vLLM community provides a set of chat templates for popular models. You can find them in the examples
 directory [here](https://github.com/vllm-project/vllm/tree/main/examples/)
 
-With the inclusion of multi-modal chat APIs, the OpenAI spec now accepts chat messages in a new format which specifies 
+With the inclusion of multi-modal chat APIs, the OpenAI spec now accepts chat messages in a new format which specifies
 both a `type` and a `text` field. An example is provided below:
 ```python
 completion = client.chat.completions.create(
@@ -146,12 +172,20 @@ completion = client.chat.completions.create(
   ]
 )
 ```
-Most chat templates for LLMs expect the `content` to be a `string` but there are some newer models like 
-`meta-llama/Llama-Guard-3-1B` that expect the content to be parsed with the new OpenAI spec. In order to choose which
-format the content needs to be parsed in by vLLM, please use the `--chat-template-text-format` argument to specify
-between `string` or `openai`. The default value is `string` and vLLM internally converts both spec formats to match 
-this, unless explicitly specified.
 
+Most chat templates for LLMs expect the `content` field to be a string, but there are some newer models like 
+`meta-llama/Llama-Guard-3-1B` that expect the content to be formatted according to the OpenAI schema in the
+request. vLLM provides best-effort support to detect this automatically, which is logged as a string like
+*"Detected the chat template content format to be..."*, and internally converts incoming requests to match
+the detected format, which can be one of:
+
+- `"string"`: A string.
+  - Example: `"Hello world"`
+- `"openai"`: A list of dictionaries, similar to OpenAI schema.
+  - Example: `[{"type": "text", "text": "Hello world!"}]`
+
+If the result is not what you expect, you can set the `--chat-template-content-format` CLI argument
+to override which format to use.
 
 ## Command line arguments for the server
 
@@ -160,20 +194,13 @@ this, unless explicitly specified.
 :func: create_parser_for_docs
 :prog: vllm serve
 ```
-## Tool Calling in the Chat Completion API
-### Named Function Calling
-vLLM supports only named function calling in the chat completion API by default. It does so using Outlines, so this is 
-enabled by default, and will work with any supported model. You are guaranteed a validly-parsable function call - not a 
-high-quality one. 
 
-To use a named function, you need to define the functions in the `tools` parameter of the chat completion request, and 
-specify the `name` of one of the tools in the `tool_choice` parameter of the chat completion request. 
 
 ### Config file
 
 The `serve` module can also accept arguments from a config file in
-`yaml` format. The arguments in the yaml must be specified using the 
-long form of the argument outlined [here](https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html#command-line-arguments-for-the-server): 
+`yaml` format. The arguments in the yaml must be specified using the
+long form of the argument outlined [here](https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html#command-line-arguments-for-the-server):
 
 For example:
 
@@ -189,34 +216,44 @@ uvicorn-log-level: "info"
 $ vllm serve SOME_MODEL --config config.yaml
 ```
 ---
-**NOTE**  
+**NOTE**
 In case an argument is supplied simultaneously using command line and the config file, the value from the commandline will take precedence.
 The order of priorities is `command line > config file values > defaults`.
 
 ---
 
 ## Tool calling in the chat completion API
-vLLM supports only named function calling in the chat completion API. The `tool_choice` options `auto` and `required` are **not yet supported** but on the roadmap.
+vLLM currently supports named function calling, as well as the `auto` and `none` options for the `tool_choice` field in the chat completion API. The `tool_choice` option `required` is **not yet supported** but on the roadmap.
 
 It is the callers responsibility to prompt the model with the tool information, vLLM will not automatically manipulate the prompt.
+Please see below for recommended configuration and chat templates to use when function calling is to be used with the different models.
+
+
+### Named Function Calling
+vLLM supports named function calling in the chat completion API by default. It does so using Outlines, so this is
+enabled by default, and will work with any supported model. You are guaranteed a validly-parsable function call - not a
+high-quality one.
 
 vLLM will use guided decoding to ensure the response matches the tool parameter object defined by the JSON schema in the `tools` parameter.
+
+To use a named function, you need to define the functions in the `tools` parameter of the chat completion request, and
+specify the `name` of one of the tools in the `tool_choice` parameter of the chat completion request.
 
 
 ### Automatic Function Calling
 To enable this feature, you should set the following flags:
-* `--enable-auto-tool-choice` -- **mandatory** Auto tool choice. tells vLLM that you want to enable the model to generate its own tool calls when it 
+* `--enable-auto-tool-choice` -- **mandatory** Auto tool choice. tells vLLM that you want to enable the model to generate its own tool calls when it
 deems appropriate.
-* `--tool-call-parser` -- select the tool parser to use (listed below). Additional tool parsers 
+* `--tool-call-parser` -- select the tool parser to use (listed below). Additional tool parsers
 will continue to be added in the future, and also can register your own tool parsers in the `--tool-parser-plugin`.
 * `--tool-parser-plugin` -- **optional** tool parser plugin used to register user defined tool parsers into vllm, the registered tool parser name can be specified in `--tool-call-parser`.
-* `--chat-template` -- **optional** for auto tool choice. the path to the chat template which handles `tool`-role messages and `assistant`-role messages 
-that contain previously generated tool calls. Hermes, Mistral and Llama models have tool-compatible chat templates in their 
-`tokenizer_config.json` files, but you can specify a custom template. This argument can be set to `tool_use` if your model has a tool use-specific chat 
+* `--chat-template` -- **optional** for auto tool choice. the path to the chat template which handles `tool`-role messages and `assistant`-role messages
+that contain previously generated tool calls. Hermes, Mistral and Llama models have tool-compatible chat templates in their
+`tokenizer_config.json` files, but you can specify a custom template. This argument can be set to `tool_use` if your model has a tool use-specific chat
 template configured in the `tokenizer_config.json`. In this case, it will be used per the `transformers` specification. More on this [here](https://huggingface.co/docs/transformers/en/chat_templating#why-do-some-models-have-multiple-templates)
 from HuggingFace; and you can find an example of this in a `tokenizer_config.json` [here](https://huggingface.co/NousResearch/Hermes-2-Pro-Llama-3-8B/blob/main/tokenizer_config.json)
 
-If your favorite tool-calling model is not supported, please feel free to contribute a parser & tool use chat template! 
+If your favorite tool-calling model is not supported, please feel free to contribute a parser & tool use chat template!
 
 
 #### Hermes Models (`hermes`)
@@ -227,8 +264,8 @@ All Nous Research Hermes-series models newer than Hermes 2 Pro should be support
 * `NousResearch/Hermes-3-*`
 
 
-_Note that the Hermes 2 **Theta** models are known to have degraded tool call quality & capabilities due to the merge 
-step in their creation_. 
+_Note that the Hermes 2 **Theta** models are known to have degraded tool call quality & capabilities due to the merge
+step in their creation_.
 
 Flags: `--tool-call-parser hermes`
 
@@ -240,9 +277,9 @@ Supported models:
 * Additional mistral function-calling models are compatible as well.
 
 Known issues:
-1. Mistral 7B struggles to generate parallel tool calls correctly. 
-2. Mistral's `tokenizer_config.json` chat template requires tool call IDs that are exactly 9 digits, which is 
-much shorter than what vLLM generates. Since an exception is thrown when this condition 
+1. Mistral 7B struggles to generate parallel tool calls correctly.
+2. Mistral's `tokenizer_config.json` chat template requires tool call IDs that are exactly 9 digits, which is
+much shorter than what vLLM generates. Since an exception is thrown when this condition
 is not met, the following additional chat templates are provided:
 
 * `examples/tool_chat_template_mistral.jinja` - this is the "official" Mistral chat template, but tweaked so that
@@ -262,11 +299,11 @@ Supported models:
 * `meta-llama/Meta-Llama-3.1-405B-Instruct`
 * `meta-llama/Meta-Llama-3.1-405B-Instruct-FP8`
 
-The tool calling that is supported is the [JSON based tool calling](https://llama.meta.com/docs/model-cards-and-prompt-formats/llama3_1/#json-based-tool-calling).
+The tool calling that is supported is the [JSON based tool calling](https://llama.meta.com/docs/model-cards-and-prompt-formats/llama3_1/#json-based-tool-calling). For [pythonic tool calling](https://github.com/meta-llama/llama-models/blob/main/models/llama3_2/text_prompt_format.md#zero-shot-function-calling) in Llama-3.2 models, see the `pythonic` tool parser below.
 Other tool calling formats like the built in python tool calling or custom tool calling are not supported.
 
 Known issues:
-1. Parallel tool calls are not supported. 
+1. Parallel tool calls are not supported.
 2. The model can generate parameters with a wrong format, such as generating
    an array serialized as string instead of an array.
 
@@ -274,6 +311,21 @@ The `tool_chat_template_llama3_json.jinja` file contains the "official" Llama ch
 it works better with vLLM.
 
 Recommended flags: `--tool-call-parser llama3_json --chat-template examples/tool_chat_template_llama3_json.jinja`
+
+#### IBM Granite
+
+Supported models:
+* `ibm-granite/granite-3.0-8b-instruct`
+
+Recommended flags: `--tool-call-parser granite --chat-template examples/tool_chat_template_granite.jinja`
+
+`examples/tool_chat_template_granite.jinja`: this is a modified chat template from the original on Huggingface. Parallel function calls are supported.
+
+* `ibm-granite/granite-20b-functioncalling`
+
+Recommended flags: `--tool-call-parser granite-20b-fc --chat-template examples/tool_chat_template_granite_20b_fc.jinja`
+
+`examples/tool_chat_template_granite_20b_fc.jinja`: this is a modified chat template from the original on Huggingface, which is not vLLM compatible. It blends function description elements from the Hermes template and follows the same system prompt as "Response Generation" mode from [the paper](https://arxiv.org/abs/2407.00121). Parallel function calls are supported.
 
 
 #### InternLM Models (`internlm`)
@@ -297,14 +349,32 @@ AI21's Jamba-1.5 models are supported.
 Flags: `--tool-call-parser jamba`
 
 
-#### IBM Granite (`granite-20b-fc`)
+#### Models with Pythonic Tool Calls (`pythonic`)
 
-Supported models:
-* `ibm-granite/granite-20b-functioncalling`
+A growing number of models output a python list to represent tool calls instead of using JSON. This has the advantage of inherently supporting parallel tool calls and removing ambiguity around the JSON schema required for tool calls. The `pythonic` tool parser can support such models.
 
-Flags: `--tool-call-parser granite-20b-fc --chat-template examples/tool_chat_template_granite_20b_fc.jinja`
+As a concrete example, these models may look up the weather in San Francisco and Seattle by generating:
+```python
+[get_weather(city='San Francisco', metric='celsius'), get_weather(city='Seattle', metric='celsius')]
+```
 
-The example chat template deviates slightly from the original on Huggingface, which is not vLLM compatible. It blends function description elements from the Hermes template and follows the same system prompt as "Response Generation" mode from [the paper](https://arxiv.org/abs/2407.00121). Parallel function calls are supported.
+Limitations:
+* The model must not generate both text and tool calls in the same generation. This may not be hard to change for a specific model, but the community currently lacks consensus on which tokens to emit when starting and ending tool calls.  (In particular, the Llama 3.2 models emit no such tokens.)
+* Llama's smaller models struggle to use tools effectively.
+
+Example supported models:
+* `meta-llama/Llama-3.2-1B-Instruct`\* (use with `examples/tool_chat_template_llama3.2_pythonic.jinja`)
+* `meta-llama/Llama-3.2-3B-Instruct`\* (use with `examples/tool_chat_template_llama3.2_pythonic.jinja`)
+* `Team-ACE/ToolACE-8B` (use with `examples/tool_chat_template_toolace.jinja`)
+* `fixie-ai/ultravox-v0_4-ToolACE-8B` (use with `examples/tool_chat_template_toolace.jinja`)
+
+Flags: `--tool-call-parser pythonic --chat-template {see_above}`
+
+---
+**WARNING**
+Llama's smaller models frequently fail to emit tool calls in the correct format. Your mileage may vary.
+
+---
 
 
 ### How to write a tool parser plugin

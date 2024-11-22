@@ -1,12 +1,11 @@
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, List, Optional, Set, Tuple
 
 import torch
 from torch import nn
 from transformers import BertConfig
 
 from vllm.attention import Attention, AttentionMetadata, AttentionType
-from vllm.attention.backends.xformers import XFormersImpl
-from vllm.config import CacheConfig, PoolerConfig
+from vllm.config import CacheConfig, PoolerConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
@@ -20,6 +19,8 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.sequence import IntermediateTensors, PoolerOutput
+
+from .utils import maybe_prefix
 
 
 class BertEmbedding(nn.Module):
@@ -216,11 +217,6 @@ class BertSelfAttention(nn.Module):
                               quant_config=quant_config,
                               prefix=f"{prefix}.attn")
 
-        if not isinstance(self.attn.impl, XFormersImpl):
-            raise ValueError(
-                "Encoder-only models currently require XFORMERS attention "
-                "backend. Set VLLM_ATTENTION_BACKEND=XFORMERS to use BERT.")
-
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -310,12 +306,15 @@ class BertOutput(nn.Module):
 class BertModel(nn.Module):
 
     def __init__(self,
-                 config: BertConfig,
-                 cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 prefix: str = ""):
+                 *,
+                 vllm_config: VllmConfig,
+                 prefix: str = "",
+                 embedding_class: type = BertEmbedding):
         super().__init__()
-        self.embeddings = BertEmbedding(config)
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
+        self.embeddings = embedding_class(config)
         self.encoder = BertEncoder(config,
                                    cache_config,
                                    quant_config,
@@ -338,7 +337,8 @@ class BertModel(nn.Module):
 
         return self.encoder(hidden_states, kv_caches, attn_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "query", "q"),
@@ -347,6 +347,7 @@ class BertModel(nn.Module):
         ]
 
         params_dict = dict(self.named_parameters())
+        loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
             if "pooler" in name:
                 continue
@@ -369,6 +370,8 @@ class BertModel(nn.Module):
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params
 
 
 class BertEmbeddingModel(nn.Module):
@@ -382,20 +385,12 @@ class BertEmbeddingModel(nn.Module):
        _pooler: An instance of Pooler used for pooling operations.
    """
 
-    def __init__(
-        self,
-        config: BertConfig,
-        cache_config: Optional[CacheConfig] = None,
-        quant_config: Optional[QuantizationConfig] = None,
-        pooler_config: Optional[PoolerConfig] = None,
-    ) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
-        self.model = BertModel(config, cache_config, quant_config)
-        self._pooler = Pooler.from_config_with_defaults(
-            pooler_config,
-            pooling_type=PoolingType.CLS,
-            normalize=True,
-            softmax=False)
+        pooler_config = vllm_config.model_config.pooler_config
+        self.model = self._build_model(vllm_config=vllm_config,
+                                       prefix=maybe_prefix(prefix, "model"))
+        self._pooler = self._build_pooler(pooler_config)
 
     def forward(
         self,
@@ -422,3 +417,16 @@ class BertEmbeddingModel(nn.Module):
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
         self.model.load_weights(weights)
+
+    def _build_model(self,
+                     vllm_config: VllmConfig,
+                     prefix: str = "") -> BertModel:
+        return BertModel(vllm_config=vllm_config,
+                         prefix=prefix,
+                         embedding_class=BertEmbedding)
+
+    def _build_pooler(self, pooler_config: PoolerConfig) -> Pooler:
+        return Pooler.from_config_with_defaults(pooler_config,
+                                                pooling_type=PoolingType.CLS,
+                                                normalize=True,
+                                                softmax=False)
