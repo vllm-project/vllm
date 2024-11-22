@@ -175,10 +175,10 @@ def test_processor_prompt_replacements(
     repl_count,
     mm_count,
 ):
-    model_config = cast(ModelConfig, object())
+    mock_config = cast(ModelConfig, object())
     tokenizer = cached_get_tokenizer(tokenizer_id)
 
-    ctx = InputProcessingContext(model_config, tokenizer)
+    ctx = InputProcessingContext(mock_config, tokenizer)
     metadata = ModalityProcessingMetadata(prompt_repls=[
         PromptReplacement(repl_target_str, repl_unit_str,
                           lambda *args, **kwargs: repl_count),
@@ -194,6 +194,7 @@ def test_processor_prompt_replacements(
         dummy_mm_data,
         BatchFeature(),
         prompt_ids,
+        processor._bind_prompt_replacements(dummy_mm_data),
     )
 
     repl_unit_ids = tokenizer.encode(repl_unit_str)

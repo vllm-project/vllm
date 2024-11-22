@@ -1,16 +1,18 @@
 import re
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from functools import lru_cache
 from itertools import groupby
 from typing import (Any, Callable, Generic, Iterable, Mapping, NamedTuple,
                     Optional, Sequence, TypeVar, Union)
 
+import numpy as np
 from transformers import BatchFeature
 from typing_extensions import TypeAlias, TypedDict
 
 from vllm.inputs import InputProcessingContext
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
-from vllm.utils import full_groupby, is_list_of
+from vllm.utils import flatten_2d_lists, full_groupby, is_list_of
 
 from .inputs import (AudioItem, ImageItem, MultiModalDataDict,
                      MultiModalInputsV2, MultiModalKwargs, PlaceholderRange,
@@ -85,8 +87,9 @@ def bind_segment(
     )
 
 
-_S_co = TypeVar("_S_co", bound=PromptSegment, covariant=True)
 _T = TypeVar("_T")
+_S = TypeVar("_S", str, list[int])
+_S_co = TypeVar("_S_co", bound=PromptSegment, covariant=True)
 
 
 @dataclass
@@ -119,6 +122,38 @@ class PromptReplacement(Generic[_S_co, _T]):
             repl_unit=bind_segment(self.repl_unit, tokenizer),
             repl_count=self.repl_count,
         )
+
+
+@dataclass
+class ModalityProcessingMetadata(Generic[_T]):
+    prompt_repls: Sequence[PromptReplacement[PromptSegment, _T]]
+    """
+    Defines each segment to replace in the HF-processed prompt.
+
+    This is skipped if the HF-processed prompt is found to already contain
+    the replacement prompts.
+    """
+
+
+class MultiModalProcessingMetadataBuiltins(TypedDict, total=False):
+    """Type annotations for modality types predefined by vLLM."""
+
+    image: ModalityProcessingMetadata[ImageItem]
+    video: ModalityProcessingMetadata[VideoItem]
+    audio: ModalityProcessingMetadata[AudioItem]
+
+
+MultiModalProcessingMetadata: TypeAlias = \
+    Mapping[str, ModalityProcessingMetadata[Any]]
+"""
+A dictionary containing an entry for each modality type to process.
+
+Note:
+    This dictionary also accepts modality keys defined outside
+    :class:`MultiModalProcessingMetadataBuiltins` as long as a customized plugin
+    is registered through the :class:`~vllm.multimodal.MULTIMODAL_REGISTRY`.
+    Read more on that :ref:`here <adding_multimodal_plugin>`.
+"""
 
 
 @dataclass
@@ -155,48 +190,6 @@ class _BoundPromptReplacement(Generic[_T]):
     target: _BoundPromptSegment
     repl_unit: _BoundPromptSegment
     repl_count: Callable[[_T, BatchFeature, int], int]
-
-
-@dataclass
-class ModalityProcessingMetadata(Generic[_T]):
-    prompt_repls: Sequence[PromptReplacement[PromptSegment, _T]]
-    """
-    Defines each segment to replace in the HF-processed prompt.
-
-    This is skipped if the HF-processed prompt is found to already contain
-    the replacement prompts.
-    """
-
-    def bind_prompt_repls(
-        self,
-        modality: str,
-        tokenizer: AnyTokenizer,
-    ) -> list[_BoundPromptReplacement[_T]]:
-        return [
-            prompt_repl.bind(modality, tokenizer)
-            for prompt_repl in self.prompt_repls
-        ]
-
-
-class MultiModalProcessingMetadataBuiltins(TypedDict, total=False):
-    """Type annotations for modality types predefined by vLLM."""
-
-    image: ModalityProcessingMetadata[ImageItem]
-    video: ModalityProcessingMetadata[VideoItem]
-    audio: ModalityProcessingMetadata[AudioItem]
-
-
-MultiModalProcessingMetadata: TypeAlias = \
-    Mapping[str, ModalityProcessingMetadata[Any]]
-"""
-A dictionary containing an entry for each modality type to process.
-
-Note:
-    This dictionary also accepts modality keys defined outside
-    :class:`MultiModalProcessingMetadataBuiltins` as long as a customized plugin
-    is registered through the :class:`~vllm.multimodal.MULTIMODAL_REGISTRY`.
-    Read more on that :ref:`here <adding_multimodal_plugin>`.
-"""
 
 
 def to_multi_format(data: MultiModalDataDict) -> dict[str, list[Any]]:
@@ -265,6 +258,147 @@ def iter_token_matches(
             yield _TokenMatch(start_idx, end_idx)
 
 
+class _PromptReplacementMatch(ABC, Generic[_T, _S_co]):
+    prompt_repl: _BoundPromptReplacement[_T]
+
+    @abstractmethod
+    def get_start_idx(self) -> int:
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_end_idx(self) -> int:
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_repl(
+        self,
+        mm_items: list[_T],
+        hf_inputs: BatchFeature,
+        item_idx: int,
+    ) -> _S_co:
+        raise NotImplementedError
+
+
+@dataclass
+class _PromptReplacementTokenMatch(_PromptReplacementMatch[_T, list[int]]):
+    prompt_repl: _BoundPromptReplacement[_T]
+    match: _TokenMatch
+
+    def get_start_idx(self) -> int:
+        return self.match.start_idx
+
+    def get_end_idx(self) -> int:
+        return self.match.end_idx
+
+    def get_repl(
+        self,
+        mm_items: list[_T],
+        hf_inputs: BatchFeature,
+        item_idx: int,
+    ) -> list[int]:
+        prompt_repl = self.prompt_repl
+        count = prompt_repl.repl_count(mm_items[item_idx], hf_inputs, item_idx)
+        return prompt_repl.repl_unit.token_ids * count
+
+
+@dataclass
+class _PromptReplacementTextMatch(_PromptReplacementMatch[_T, str]):
+    prompt_repl: _BoundPromptReplacement[_T]
+    match: re.Match[str]
+
+    def get_start_idx(self) -> int:
+        return self.match.start()
+
+    def get_end_idx(self) -> int:
+        return self.match.end()
+
+    def get_repl(
+        self,
+        mm_items: list[_T],
+        hf_inputs: BatchFeature,
+        item_idx: int,
+    ) -> str:
+        prompt_repl = self.prompt_repl
+        count = prompt_repl.repl_count(mm_items[item_idx], hf_inputs, item_idx)
+        return prompt_repl.repl_unit.text * count
+
+
+def find_token_matches(
+    prompt: list[int],
+    prompt_repls: Sequence[_BoundPromptReplacement[_T]],
+) -> list[_PromptReplacementTokenMatch[_T]]:
+    return [
+        _PromptReplacementTokenMatch(prompt_repl, match)
+        for prompt_repl in prompt_repls
+        for match in iter_token_matches(prompt, prompt_repl.target.token_ids)
+    ]
+
+
+def find_text_matches(
+    prompt: str,
+    prompt_repls: Sequence[_BoundPromptReplacement[_T]],
+) -> list[_PromptReplacementTextMatch[_T]]:
+    return [
+        _PromptReplacementTextMatch(prompt_repl, match)
+        for prompt_repl in prompt_repls
+        for match in re.finditer(re.escape(prompt_repl.target.text), prompt)
+    ]
+
+
+def validate_and_sort_matches(
+    prompt: _S,
+    matches: Sequence[_PromptReplacementMatch[_T, _S]],
+) -> list[_PromptReplacementMatch[_T, _S]]:
+    num_matches_by_idx = np.zeros(len(prompt), dtype=int)
+    for match in matches:
+        num_matches_by_idx[match.get_start_idx():match.get_end_idx()] += 1
+
+    duplicate_matches_idxs, = np.nonzero(num_matches_by_idx > 1)
+    if len(duplicate_matches_idxs) > 0:
+        raise ValueError("Unable to find a unique replacement "
+                         f"at indices={duplicate_matches_idxs} "
+                         f"of prompt={prompt}")
+
+    return sorted(matches, key=lambda x: x.get_start_idx())
+
+
+def replace_matches(
+    prompt: _S,
+    matches: Sequence[_PromptReplacementMatch[_T, _S]],
+    mm_items_by_modality: Mapping[str, list[_T]],
+    hf_inputs: BatchFeature,
+) -> list[_S]:
+    # Earlier matches take priority over later ones
+    matches = validate_and_sort_matches(prompt, matches)
+    print("matches", matches)
+
+    num_replaced_by_modality = {
+        modality: 0
+        for modality in mm_items_by_modality
+    }
+
+    out_prompt_segments = list[_S]()
+    prev_end_idx = 0
+
+    for match in matches:
+        prompt_repl = match.prompt_repl
+        modality = prompt_repl.modality
+        mm_items = mm_items_by_modality[modality]
+
+        item_idx = num_replaced_by_modality[modality]
+        if item_idx >= len(mm_items):
+            continue
+
+        start_idx = match.get_start_idx()
+        end_idx = match.get_end_idx()
+        repl_ids = match.get_repl(mm_items, hf_inputs, item_idx)
+
+        out_prompt_segments.append(prompt[prev_end_idx:start_idx] + repl_ids)
+        prev_end_idx = end_idx
+
+    return out_prompt_segments
+
+
 class _BoundPlaceholderRange(TypedDict):
     modality: str
     offset: int
@@ -325,61 +459,26 @@ class MultiModalProcessor:
                             length=run_info["length"],
                         )
 
-    def _find_token_id_matches(
+    def _replace_token_matches(
         self,
         token_ids: list[int],
-        prompt_repls: Sequence[_BoundPromptReplacement[_T]],
-    ) -> list[tuple[str, _TokenMatch]]:
-        return [(prompt_repl.target.text, match)
-                for prompt_repl in prompt_repls for match in
-                iter_token_matches(token_ids, prompt_repl.target.token_ids)]
-
-    def _replace_token_id_matches(
-        self,
-        token_ids: list[int],
-        prompt_repls: Sequence[_BoundPromptReplacement[_T]],
-        matches: Sequence[tuple[str, _TokenMatch]],
+        matches: Sequence[_PromptReplacementMatch[_T, list[int]]],
         mm_items_by_modality: Mapping[str, list[_T]],
         hf_inputs: BatchFeature,
     ) -> list[int]:
-        prompt_repls_by_target_text = {
-            prompt_repl.target.text: prompt_repl
-            for prompt_repl in prompt_repls
-        }
+        if not matches:
+            return token_ids
 
-        # To ensure that later replacements don't affect
-        # the placeholder ranges of earlier ones
-        sorted_matches = sorted(matches, key=lambda x: x[1].start_idx)
+        token_segments = replace_matches(
+            token_ids,
+            matches,
+            mm_items_by_modality,
+            hf_inputs,
+        )
 
-        out_token_ids = list[int]()
-        prev_end_idx = 0
+        return flatten_2d_lists(token_segments)
 
-        for i, (target_text, (start_idx,
-                              end_idx)) in enumerate(sorted_matches):
-            prompt_repl = prompt_repls_by_target_text[target_text]
-            mm_items = mm_items_by_modality[prompt_repl.modality]
-            if i >= len(mm_items):
-                break
-
-            repl_count = prompt_repl.repl_count(mm_items[i], hf_inputs, i)
-            repl_ids = prompt_repl.repl_unit.token_ids * repl_count
-
-            out_token_ids.extend(token_ids[prev_end_idx:start_idx] + repl_ids)
-            prev_end_idx = end_idx
-
-        return out_token_ids
-
-    def _iter_text_matches(
-        self,
-        token_text: str,
-        prompt_repls: Sequence[_BoundPromptReplacement[_T]],
-    ) -> Iterable[tuple[str, re.Match]]:
-        for prompt_repl in prompt_repls:
-            target_text = prompt_repl.target.text
-            for match in re.finditer(re.escape(target_text), token_text):
-                yield target_text, match
-
-    def _find_and_replace_token_text_matches(
+    def _find_replace_text_matches(
         self,
         token_ids: list[int],
         prompt_repls: Sequence[_BoundPromptReplacement[_T]],
@@ -387,38 +486,20 @@ class MultiModalProcessor:
         hf_inputs: BatchFeature,
     ) -> list[int]:
         tokenizer = self.ctx.tokenizer
-        token_text = _decode(tokenizer, token_ids)
+        text = _decode(tokenizer, token_ids)
 
-        prompt_repls_by_target_text = {
-            prompt_repl.target.text: prompt_repl
-            for prompt_repl in prompt_repls
-        }
+        matches = find_text_matches(text, prompt_repls)
+        if not matches:
+            return token_ids
 
-        # To ensure that later replacements don't affect
-        # the placeholder ranges of earlier ones
-        sorted_matches = sorted(
-            self._iter_text_matches(token_text, prompt_repls),
-            key=lambda x: x[1].start(),
+        text_segments = replace_matches(
+            text,
+            matches,
+            mm_items_by_modality,
+            hf_inputs,
         )
 
-        out_texts = list[str]()
-        prev_end_idx = 0
-
-        for i, (target_text, match) in enumerate(sorted_matches):
-            prompt_repl = prompt_repls_by_target_text[target_text]
-            mm_items = mm_items_by_modality[prompt_repl.modality]
-            if i >= len(mm_items):
-                break
-
-            repl_count = prompt_repl.repl_count(mm_items[i], hf_inputs, i)
-            repl_text = prompt_repl.repl_unit.text * repl_count
-
-            out_texts.extend(token_text[prev_end_idx:match.start()] +
-                             repl_text)
-
-            prev_end_idx = match.end()
-
-        return _encode(tokenizer, "".join(out_texts))
+        return _encode(tokenizer, "".join(text_segments))
 
     def _apply_hf_processor(
         self,
@@ -434,52 +515,48 @@ class MultiModalProcessor:
             **mm_processor_kwargs,
         )
 
+    def _bind_prompt_replacements(
+        self,
+        mm_data: MultiModalDataDict,
+    ) -> list[_BoundPromptReplacement[Any]]:
+        tokenizer = self.ctx.tokenizer
+
+        return [
+            prompt_repl.bind(modality, tokenizer)
+            for modality, metadata in self.metadata.items()
+            if modality in mm_data for prompt_repl in metadata.prompt_repls
+        ]
+
     def _apply_prompt_replacements(
         self,
         mm_data: MultiModalDataDict,
         hf_inputs: BatchFeature,
-        new_token_ids: list[int],
+        token_ids: list[int],
+        prompt_repls: Sequence[_BoundPromptReplacement[Any]],
     ) -> tuple[list[int], list[_BoundPlaceholderRange]]:
-        tokenizer = self.ctx.tokenizer
-        all_prompt_repls = [
-            prompt_repl for modality, metadata in self.metadata.items()
-            if modality in mm_data
-            for prompt_repl in metadata.bind_prompt_repls(modality, tokenizer)
-        ]
+        mm_items = to_multi_format(mm_data)
+        token_id_matches = find_token_matches(token_ids, prompt_repls)
+        print("token_id_matches", token_id_matches)
 
-        # In case HF processor already inserts placeholder tokens
-        all_placeholder_ranges = list(
-            self._extract_placeholder_ranges(all_prompt_repls, new_token_ids))
-
-        # Otherwise, we insert them ourselves
-        if not all_placeholder_ranges:
-            mm_items = to_multi_format(mm_data)
-            token_id_matches = self._find_token_id_matches(
-                new_token_ids,
-                all_prompt_repls,
+        if len(token_id_matches) >= len(mm_items):
+            token_ids = self._replace_token_matches(
+                token_ids,
+                token_id_matches,
+                mm_items,
+                hf_inputs,
+            )
+        else:
+            token_ids = self._find_replace_text_matches(
+                token_ids,
+                prompt_repls,
+                mm_items,
+                hf_inputs,
             )
 
-            if len(token_id_matches) >= len(mm_items):
-                new_token_ids = self._replace_token_id_matches(
-                    new_token_ids,
-                    all_prompt_repls,
-                    token_id_matches,
-                    mm_items,
-                    hf_inputs,
-                )
-            else:
-                new_token_ids = self._find_and_replace_token_text_matches(
-                    new_token_ids,
-                    all_prompt_repls,
-                    mm_items,
-                    hf_inputs,
-                )
+        placeholder_ranges = list(
+            self._extract_placeholder_ranges(prompt_repls, token_ids))
 
-            all_placeholder_ranges = list(
-                self._extract_placeholder_ranges(all_prompt_repls,
-                                                 new_token_ids))
-
-        return new_token_ids, all_placeholder_ranges
+        return token_ids, placeholder_ranges
 
     def apply(
         self,
@@ -494,14 +571,24 @@ class MultiModalProcessor:
         new_token_ids, = hf_inputs.pop("input_ids").tolist()
         mm_kwargs = MultiModalKwargs(hf_inputs)
 
-        (
-            new_token_ids,
-            all_placeholder_ranges,
-        ) = self._apply_prompt_replacements(
-            mm_data,
-            hf_inputs,
-            new_token_ids,
-        )
+        all_prompt_repls = self._bind_prompt_replacements(mm_data)
+
+        # In case HF processor already inserts placeholder tokens
+        all_placeholder_ranges = list(
+            self._extract_placeholder_ranges(all_prompt_repls, new_token_ids))
+        print("all_placeholder_ranges", all_placeholder_ranges)
+
+        # Otherwise, we insert them ourselves
+        if not all_placeholder_ranges:
+            (
+                new_token_ids,
+                all_placeholder_ranges,
+            ) = self._apply_prompt_replacements(
+                mm_data,
+                hf_inputs,
+                new_token_ids,
+                all_prompt_repls,
+            )
 
         mm_placeholders = {
             modality: [
