@@ -17,7 +17,7 @@ from vllm.attention.backends.utils import (
     get_seq_len_block_table_args, is_all_cross_attn_metadata_set,
     is_all_encoder_attn_metadata_set, is_block_tables_empty)
 from vllm.multimodal import MultiModalPlaceholderMap
-from vllm.utils import (async_tensor_h2d, make_tensor_with_pad)
+from vllm.utils import async_tensor_h2d, make_tensor_with_pad
 
 if TYPE_CHECKING:
     from vllm.worker.model_runner import (ModelInputForGPUBuilder,
@@ -690,9 +690,9 @@ class FlashAttentionImpl(AttentionImpl):
             #  a. When the Attention Type is ENCODER. In this phase, we compute
             #     only the encoder attention without updating the cache.
             #  b. When both Key and Value are None. This occurs during
-            #     cross-attention computation in the decoding phase, where the KV
-            #     cache is already populated with the cross-attention tensor.
-            #     Thus, we skip cache updates during this time.
+            #     cross-attention computation in the decoding phase, where the
+            #     KV cache is already populated with the cross-attention
+            #     tensor. Thus, we skip cache updates during this time.
             if (attn_type != AttentionType.ENCODER) and (key is not None) and (
                     value is not None):
                 if attn_type == AttentionType.ENCODER_DECODER:
@@ -704,7 +704,8 @@ class FlashAttentionImpl(AttentionImpl):
 
                 # Reshape the input keys and values and store them in the cache.
                 # If kv_cache is not provided, the new key and value tensors are
-                # not cached. This happens during the initial memory profiling run.
+                # not cached. This happens during the initial memory
+                # profiling run.
                 torch.ops._C_cache_ops.reshape_and_cache_flash(
                     key,
                     value,
