@@ -24,7 +24,9 @@ from vllm.spec_decode.batch_expansion import BatchExpansionTop1Scorer
 if current_platform.is_cuda_alike():
     from vllm.spec_decode.draft_model_runner import TP1DraftModelRunner
 elif current_platform.is_cpu():
-    from vllm.spec_decode.cpu_draft_model_runner import CPUTP1DraftModelRunner
+    from vllm.spec_decode.cpu_draft_model_runner import (CPUTP1DraftModelRunner
+                                                         as
+                                                         TP1DraftModelRunner)
 
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeScorer, SpeculativeScores)
@@ -35,6 +37,7 @@ from vllm.spec_decode.mqa_scorer import MQAScorer
 from vllm.spec_decode.multi_step_worker import MultiStepWorker
 from vllm.spec_decode.ngram_worker import NGramWorker
 from vllm.spec_decode.proposer_worker_base import ProposerWorkerBase
+from vllm.spec_decode.selector import WorkerCls
 from vllm.spec_decode.smaller_tp_proposer_worker import SmallerTpProposerWorker
 from vllm.spec_decode.target_model_runner import TargetModelRunner
 from vllm.spec_decode.util import (Timer, create_logprobs_output,
@@ -43,21 +46,6 @@ from vllm.spec_decode.util import (Timer, create_logprobs_output,
                                    get_sampled_token_logprobs, nvtx_range,
                                    split_batch_by_proposal_len)
 from vllm.worker.worker_base import LoraNotSupportedWorkerBase, WorkerBase
-
-if current_platform.is_neuron():
-    from vllm.worker.neuron_worker import NeuronWorker as WorkerCls
-elif current_platform.is_hpu():
-    from vllm.worker.hpu_worker import HPUWorker as WorkerCls
-elif current_platform.is_openvino():
-    from vllm.worker.openvino_worker import OpenVINOWorker as WorkerCls
-elif current_platform.is_cpu():
-    from vllm.worker.cpu_worker import CPUWorker as WorkerCls
-elif current_platform.is_tpu():
-    from vllm.worker.tpu_worker import TPUWorker as WorkerCls
-elif current_platform.is_xpu():
-    from vllm.worker.xpu_worker import XPUWorker as WorkerCls
-else:
-    from vllm.worker.worker import Worker as WorkerCls
 
 logger = init_logger(__name__)
 
@@ -178,15 +166,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                 proposer_worker = MedusaWorker(**draft_worker_kwargs)
             else:
                 if draft_tp == 1:
-                    if current_platform.is_cuda_alike():
-                        draft_worker_kwargs[
-                            "model_runner_cls"] = TP1DraftModelRunner
-                    elif current_platform.is_cpu():
-                        draft_worker_kwargs[
-                            "model_runner_cls"] = CPUTP1DraftModelRunner
-                    else:
-                        raise NotImplementedError(
-                            "current platform does not support EAGLE.")
+                    draft_worker_kwargs[
+                        "model_runner_cls"] = TP1DraftModelRunner
                 else:
                     if draft_model_config.hf_config.model_type == "eagle":
                         raise NotImplementedError(
