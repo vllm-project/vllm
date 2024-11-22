@@ -8,12 +8,11 @@ from transformers import LlamaConfig
 
 from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, QuantizationConfig, VllmConfig
-from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
+from vllm.distributed import get_tensor_model_parallel_rank
 from vllm.inputs import INPUT_REGISTRY, token_inputs
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               MergedColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
@@ -154,12 +153,16 @@ class CrossAttention(nn.Module):
         key = self.k_proj(x).permute(1, 0, 2)
         value = self.v_proj(x).permute(1, 0, 2)
 
-        attn_output, _ = self.multihead_attn(query, key, value, attn_mask=attn_mask)
+        attn_output, _ = self.multihead_attn(query,
+                                             key,
+                                             value,
+                                             attn_mask=attn_mask)
 
         attn_output = attn_output.permute(1, 0, 2)
 
         if add_residual:
-            attn_output = hidden_states + self.dropout(self.linear(attn_output))
+            attn_output = hidden_states + self.dropout(
+                self.linear(attn_output))
         else:
             attn_output = self.dropout(self.linear(attn_output))
 
