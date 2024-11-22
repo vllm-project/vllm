@@ -229,7 +229,7 @@ class FlashInferState(AttentionState):
             wrapper=self._wrapper)
         # we don't need to pass logits and scale to begin_forward
         # since in forward, it already gets it.
-        attn_metadata.begin_forward(None, None)
+        attn_metadata.begin_forward(None, None, (-1, -1))
         return attn_metadata
 
     def get_graph_input_buffers(self,
@@ -248,6 +248,10 @@ class FlashInferState(AttentionState):
     def begin_forward(self, model_input, model):
         assert not self._is_graph_capturing
         state = self
+
+        # sliding window needed for new kernel in begin_forward
+        sliding_window = self.runner.sliding_window
+        window_left = sliding_window[0] if sliding_window is not None else -1
 
         try:
             scale = getattr(model.model.layers[0].self_attn.attn.impl, "scale",
@@ -272,7 +276,7 @@ class FlashInferState(AttentionState):
             model_input.attn_metadata.cuda_wrapper = state._get_cuda_wrapper()
 
         model_input.attn_metadata.wrapper = state._get_wrapper()
-        model_input.attn_metadata.begin_forward(scale, logits_soft_cap)
+        model_input.attn_metadata.begin_forward(scale, logits_soft_cap, window_left)
 
 
 @dataclass
@@ -343,7 +347,7 @@ class FlashInferMetadata(AttentionMetadata):
                 f"received {self.head_dim}.")
 
     def begin_forward(self, scale: Optional[float],
-                      logits_soft_cap: Optional[float]):
+                      logits_soft_cap: Optional[float], window_left: Optional[int]):
         if self.paged_kv_indices is None:
             return
 
@@ -396,7 +400,8 @@ class FlashInferMetadata(AttentionMetadata):
                                   self.page_size,
                                   causal=True,
                                   sm_scale=scale,
-                                  logits_soft_cap=logits_soft_cap)
+                                  logits_soft_cap=logits_soft_cap,
+                                  window_left=window_left)
 
             # Case 2: Decode only
             elif self.num_prefill_tokens == 0 and self.num_decode_tokens > 0:
@@ -425,7 +430,8 @@ class FlashInferMetadata(AttentionMetadata):
                                       self.page_size,
                                       causal=True,
                                       sm_scale=scale,
-                                      logits_soft_cap=logits_soft_cap)
+                                      logits_soft_cap=logits_soft_cap,
+                                      window_left=window_left)
                 else:
                     assert self.cuda_wrapper is not None
                     self.cuda_wrapper.end_forward()
@@ -468,7 +474,8 @@ class FlashInferMetadata(AttentionMetadata):
                     self.page_size,
                     causal=True,
                     sm_scale=scale,
-                    logits_soft_cap=logits_soft_cap)
+                    logits_soft_cap=logits_soft_cap,
+                    window_left=window_left)
 
     def asdict_zerocopy(self,
                         skip_fields: Optional[Set[str]] = None
@@ -946,9 +953,8 @@ class FlashInferImpl(AttentionImpl):
         if alibi_slopes is not None:
             alibi_slopes = torch.tensor(alibi_slopes, dtype=torch.float32)
         self.alibi_slopes = alibi_slopes
-        if sliding_window is not None:
-            raise ValueError("Sliding window is not supported in FlashInfer.")
-        self.sliding_window = (-1, -1)
+        self.sliding_window = ((sliding_window - 1,
+                                0) if sliding_window is not None else (-1, -1))
         self.kv_cache_dtype = kv_cache_dtype
         self.logits_soft_cap = logits_soft_cap
 
@@ -1052,6 +1058,8 @@ def unified_flash_infer(
     assert prefill_query.shape[0] == num_prefill_tokens
     assert decode_query.shape[0] == num_decode_tokens
 
+    window_left = window_size[0] if window_size is not None else -1
+
     if kv_cache.numel() == 0:
         return flash_attn_varlen_func(
             q=query,
@@ -1080,7 +1088,8 @@ def unified_flash_infer(
                 sm_scale=softmax_scale,
                 logits_soft_cap=logits_soft_cap,
                 k_scale=k_scale,
-                v_scale=v_scale)
+                v_scale=v_scale,
+                window_left=window_left)
         else:
             assert attn_metadata.wrapper is not None
             output = attn_metadata.wrapper.run(decode_query, kv_cache)
