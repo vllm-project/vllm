@@ -229,6 +229,7 @@ class LLMEngine:
         input_registry: InputRegistry = INPUT_REGISTRY,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
         use_cached_outputs: bool = False,
+        model: str=None,
     ) -> None:
 
         self.model_config = vllm_config.model_config

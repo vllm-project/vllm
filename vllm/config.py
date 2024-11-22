@@ -2318,6 +2318,7 @@ class VllmConfig:
     quant_config: Optional[QuantizationConfig] = None
     compilation_config: CompilationConfig = field(default=None,
                                                   init=True)  # type: ignore
+    model_configs: List[ModelConfig] = field(default=None, init=True)  # type: ignore
 
     @staticmethod
     def _get_quantization_config(
