@@ -14,9 +14,6 @@ from vllm.model_executor.models.internlm2 import (InternLM2Attention,
                                                   InternLM2MLP, InternLM2Model)
 from vllm.sequence import IntermediateTensors
 
-from .utils import maybe_prefix
-
-
 class InternLM2VEDecoderLayer(nn.Module):
 
     def __init__(
@@ -153,9 +150,4 @@ class InternLM2VEForCausalLM(InternLM2ForCausalLM):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config,
                          prefix=prefix,
-                         init_model=False)
-
-        self.model = InternLM2VEModel(vllm_config=vllm_config,
-                                      prefix=maybe_prefix(prefix, "model"))
-        self.make_empty_intermediate_tensors = (
-            self.model.make_empty_intermediate_tensors)
+                         model_type=InternLM2VEModel)
