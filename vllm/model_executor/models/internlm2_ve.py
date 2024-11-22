@@ -159,7 +159,9 @@ class InternLM2VEModel(InternLM2Model):
 class InternLM2VEForCausalLM(InternLM2ForCausalLM):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__(vllm_config=vllm_config, prefix=prefix)
+        super().__init__(vllm_config=vllm_config,
+                         prefix=prefix,
+                         init_model=False)
 
         self.model = InternLM2VEModel(vllm_config=vllm_config,
                                       prefix=maybe_prefix(prefix, "model"))

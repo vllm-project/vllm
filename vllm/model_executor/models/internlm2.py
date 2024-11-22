@@ -316,14 +316,19 @@ class InternLM2Model(nn.Module):
 
 class InternLM2ForCausalLM(nn.Module, SupportsPP):
 
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(self,
+                 *,
+                 vllm_config: VllmConfig,
+                 prefix: str = "",
+                 init_model: bool = True):
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         self.config = config
         self.quant_config = quant_config
-        self.model = InternLM2Model(vllm_config=vllm_config,
-                                    prefix=maybe_prefix(prefix, "model"))
+        if init_model:
+            self.model = InternLM2Model(vllm_config=vllm_config,
+                                        prefix=maybe_prefix(prefix, "model"))
         self.output = ParallelLMHead(config.vocab_size,
                                      config.hidden_size,
                                      quant_config=quant_config,
