@@ -523,9 +523,9 @@ class ColumnParallelLinearWithLoRA(BaseLayerWithLoRA):
 
             left_weight = lora_b[:, tp_rank * shard_size:(tp_rank + 1) *
                                  shard_size]
-            right_weigt = lora_b[:, offset + tp_rank * shard_size:offset +
+            right_weight = lora_b[:, offset + tp_rank * shard_size:offset +
                                  (tp_rank + 1) * shard_size]
-            lora_b = torch.cat([left_weight, right_weigt], dim=1)
+            lora_b = torch.cat([left_weight, right_weight], dim=1)
         # Applicable to cases where the base_layer is
         # ColumnParallelLinear.
         else:
