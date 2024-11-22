@@ -1,4 +1,5 @@
 import multiprocessing
+import pickle
 import queue
 import threading
 import time
@@ -10,7 +11,7 @@ from typing import Any, Iterator, List, Tuple, Type, Union
 import zmq
 import zmq.asyncio
 from msgspec import msgpack
-import pickle
+
 from vllm.config import CacheConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
