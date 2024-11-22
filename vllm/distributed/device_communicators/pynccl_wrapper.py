@@ -331,16 +331,6 @@ class NCCLLibrary:
     def ncclCommDestroy(self, comm: ncclComm_t) -> None:
         self.NCCL_CHECK(self._funcs["ncclCommDestroy"](comm))
 
-    def ncclAllGather(self, sendbuff: buffer_type, recvbuff: buffer_type,
-                      count: int, datatype: int, comm: ncclComm_t,
-                      stream: cudaStream_t) -> None:
-        # `datatype` actually should be `ncclDataType_t`
-        # which is an aliases of `ctypes.c_int`
-        # when we pass int to a function, it will be converted to `ctypes.c_int`
-        # by ctypes automatically
-        self.NCCL_CHECK(self._funcs["ncclAllGather"](sendbuff, recvbuff, count,
-                                                     datatype, comm, stream))
-
 
 __all__ = [
     "NCCLLibrary", "ncclDataTypeEnum", "ncclRedOpTypeEnum", "ncclUniqueId",

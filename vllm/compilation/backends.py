@@ -484,7 +484,9 @@ def wrap_inductor(graph: fx.GraphModule,
 
     from torch._inductor import config
 
+    # Enable support for symmetric memory ops in the inductor.
     torch._inductor.config._micro_pipeline_tp = True
+
     current_config = config.get_config_copy()
     from torch._inductor.compile_fx import compile_fx
 

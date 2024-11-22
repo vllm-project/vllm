@@ -7,7 +7,7 @@ from torch._inductor.pattern_matcher import (Match, PatternMatcherPass,
                                              fwd_only, register_replacement)
 
 import vllm.envs as envs
-from vllm.compilation.config import CompilationConfig
+from vllm.config import CompilationConfig
 from vllm.compilation.inductor_pass import InductorPass
 from vllm.compilation.utils import (find_auto_fn, find_fn, find_getitem,
                                     last_node_in_match)
@@ -350,7 +350,7 @@ class CollectiveFusionPass(InductorPass):
             cls._instance.config = config
         return cls._instance
 
-    def __init__(self, config):
+    def __init__(self, config: CompilationConfig):
         assert self.__class__._instance is None, \
             "FusionPass singleton instance already exists"
         super().__init__(config)
