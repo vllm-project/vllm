@@ -309,7 +309,7 @@ class EngineCoreProc(EngineCore):
         decoder_add_req = PickleEncoder()
         decoder_abort_req = PickleEncoder()
 
-        with self.make_zmq_socket(input_path, zmq.constants.PULL) as socket:
+        with make_zmq_socket(input_path, zmq.constants.PULL) as socket:
             while True:
                 # (RequestType, RequestData)
                 type_frame, data_frame = socket.recv_multipart(copy=False)
@@ -335,7 +335,7 @@ class EngineCoreProc(EngineCore):
         # Reuse send buffer.
         buffer = bytearray()
 
-        with self.make_zmq_socket(output_path, zmq.constants.PUSH) as socket:
+        with make_zmq_socket(output_path, zmq.constants.PUSH) as socket:
             while True:
                 engine_core_outputs = self.output_queue.get()
                 outputs = EngineCoreOutputs(outputs=engine_core_outputs)
