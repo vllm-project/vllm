@@ -988,8 +988,7 @@ class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
             assert self.model.vqmodel is not None
             image_tokens = self.model.get_image_tokens(image_input["data"].to(
                 self.config.torch_dtype))
-        vision_embeddings = self.language_model.get_input_embeddings(
-            image_tokens)
+        vision_embeddings = self.model.get_input_embeddings(image_tokens)
         return vision_embeddings
 
     def get_input_embeddings(
