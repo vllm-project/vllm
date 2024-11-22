@@ -109,16 +109,17 @@ class LLM:
         hf_overrides: If a dictionary, contains arguments to be forwarded to the
             HuggingFace config. If a callable, it is called to update the
             HuggingFace config.
-        compilation_config: Either an integer or a dictionary. If it is an integer,
-            it is used as the level of compilation optimization. If it is a dictionary,
-            it can specify the full compilation configuration.
+        compilation_config: Either an integer or a dictionary. If it is an
+            integer, it is used as the level of compilation optimization.
+            If it is a dictionary, it can specify the full compilation
+            configuration.
         **kwargs: Arguments for :class:`~vllm.EngineArgs`. (See
             :ref:`engine_args`)
 
     Note:
         This class is intended to be used for offline inference. For online
         serving, use the :class:`~vllm.AsyncLLMEngine` class instead.
-    """ # noqa
+    """
 
     DEPRECATE_LEGACY: ClassVar[bool] = False
     """A flag to toggle whether to deprecate the legacy generate/encode API."""
