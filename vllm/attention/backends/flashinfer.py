@@ -772,8 +772,9 @@ class FlashInferImpl(AttentionImpl):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: FlashInferMetadata,
-        k_scale: float = 1.0,
-        v_scale: float = 1.0,
+        quant_group: Optional[int],
+        k_scales: torch.Tensor,
+        v_scales: torch.Tensor,
         attn_type: AttentionType = AttentionType.DECODER,
     ) -> torch.Tensor:
         if attn_type != AttentionType.DECODER:
@@ -791,8 +792,9 @@ class FlashInferImpl(AttentionImpl):
             self.num_kv_heads,
             kv_cache,
             self.kv_cache_dtype,
-            k_scale,
-            v_scale,
+            quant_group,
+            k_scales,
+            v_scales,
             self.scale,
             self.sliding_window,
             self.alibi_slopes,
@@ -809,8 +811,9 @@ def unified_flash_infer(
     num_kv_heads: int,
     kv_cache: torch.Tensor,
     kv_cache_dtype: str,
-    k_scale: float,
-    v_scale: float,
+    quant_group: Optional[int],
+    k_scales: torch.Tensor,
+    v_scales: torch.Tensor,
     softmax_scale: float,
     window_size: Optional[List[int]] = None,
     alibi_slopes: Optional[torch.Tensor] = None,
@@ -836,8 +839,9 @@ def unified_flash_infer(
             kv_cache[:, 1],
             attn_metadata.slot_mapping.flatten(),
             kv_cache_dtype,
-            k_scale,
-            v_scale,
+            quant_group,
+            k_scales,
+            v_scales,
         )
         # The FlashInfer api requires data to be in fp8_e4m3 or fp8_e5m2
         # to process the cache when the kv_cache_dtype is fp8

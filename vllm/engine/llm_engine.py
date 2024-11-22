@@ -256,6 +256,9 @@ class LLMEngine:
             "pipeline_parallel_size=%d, "
             "disable_custom_all_reduce=%s, quantization=%s, "
             "enforce_eager=%s, kv_cache_dtype=%s, "
+            "kv_quant_group=%s, "
+            "kv_quant_params=%s, "
+            "kv_quant_params_path=%s, "
             "quantization_param_path=%s, device_config=%s, "
             "decoding_config=%r, observability_config=%r, "
             "seed=%d, served_model_name=%s, "
@@ -284,6 +287,9 @@ class LLMEngine:
             model_config.quantization,
             model_config.enforce_eager,
             cache_config.cache_dtype,
+            cache_config.kv_quant_group,
+            cache_config.kv_quant_params,
+            cache_config.kv_quant_params_path,
             model_config.quantization_param_path,
             device_config.device,
             decoding_config,

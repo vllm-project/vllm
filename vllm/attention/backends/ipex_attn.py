@@ -170,8 +170,9 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: IpexAttnMetadata,  # type: ignore
-        k_scale: float = 1.0,
-        v_scale: float = 1.0,
+        quant_group: Optional[int],
+        k_scales: torch.Tensor,
+        v_scales: torch.Tensor,
         attn_type: AttentionType = AttentionType.DECODER,
     ) -> torch.Tensor:
         """Forward pass with IPEX varlen_attention and PagedAttention.
@@ -209,8 +210,9 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
                 value_cache,
                 attn_metadata.slot_mapping.flatten(),
                 self.kv_cache_dtype,
-                k_scale,
-                v_scale,
+                quant_group,
+                k_scales, 
+                v_scales,
             )
 
         if attn_metadata.is_prompt:
@@ -295,8 +297,9 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
                     max_seq_len,
                     self.alibi_slopes,
                     self.kv_cache_dtype,
-                    k_scale,
-                    v_scale,
+                    quant_group,
+                    k_scales,
+                    v_scales,
                 )
             else:
                 # Run PagedAttention V2.
@@ -328,8 +331,9 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
                     max_seq_len,
                     self.alibi_slopes,
                     self.kv_cache_dtype,
-                    k_scale,
-                    v_scale,
+                    quant_group,
+                    k_scales,
+                    v_scales,
                 )
 
             # Reshape the output tensor.

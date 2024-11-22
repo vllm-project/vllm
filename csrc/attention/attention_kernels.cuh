@@ -24,6 +24,10 @@
 
 #include "attention_dtypes.h"
 #include "attention_utils.cuh"
+#include <string>
+#include <cstdint>
+#include "dtype_fp8.cuh"
+#include "../quantization/int8_kvcache/quant_utils.cuh"
 
 #ifdef USE_ROCM
   #include <hip/hip_bf16.h>
@@ -105,7 +109,10 @@ __device__ void paged_attention_kernel(
     const int max_num_blocks_per_seq,
     const float* __restrict__ alibi_slopes,  // [num_heads]
     const int q_stride, const int kv_block_stride, const int kv_head_stride,
-    const float k_scale, const float v_scale, const int tp_rank,
+    const int quant_group,
+    const float* __restrict__ k_scales,
+    const float* __restrict__ v_scales,
+    const int tp_rank,
     const int blocksparse_local_blocks, const int blocksparse_vert_stride,
     const int blocksparse_block_size, const int blocksparse_head_sliding_step) {
   const int seq_idx = blockIdx.y;
@@ -151,6 +158,16 @@ __device__ void paged_attention_kernel(
   const int num_heads = gridDim.x;
   const int num_queries_per_kv = num_heads / num_kv_heads;
   const int kv_head_idx = head_idx / num_queries_per_kv;
+  float k_scale = 0;
+  float v_scale = 0;
+  if constexpr (KV_DTYPE == Fp8KVCacheDataType::kInt8Group128) {
+    int64_t tgt_kvs_idx = floor((kv_head_idx*HEAD_SIZE)/quant_group);
+    k_scale = *reinterpret_cast<const float*>(k_scales+tgt_kvs_idx);
+    v_scale = *reinterpret_cast<const float*>(v_scales+tgt_kvs_idx);
+  } else {
+    k_scale = *reinterpret_cast<const float*>(k_scales);
+    v_scale = *reinterpret_cast<const float*>(v_scales);
+  }
   const float alibi_slope =
       alibi_slopes == nullptr ? 0.f : alibi_slopes[head_idx];
 
@@ -280,6 +297,17 @@ __device__ void paged_attention_kernel(
         if constexpr (KV_DTYPE == Fp8KVCacheDataType::kAuto) {
           k_vecs[j] = *reinterpret_cast<const K_vec*>(
               k_ptr + offset1 * BLOCK_SIZE * x + offset2);
+        // int8 kv-cache
+        } else if constexpr (KV_DTYPE == Fp8KVCacheDataType::kInt8Group0) {
+          Quant_vec k_vec_quant = *reinterpret_cast<const Quant_vec*>(
+              k_ptr + offset1 * BLOCK_SIZE * x + offset2);
+          k_vecs[j] = int8::scaled_vec_conversion_int8<K_vec, Quant_vec>(
+              k_vec_quant, k_scale, 0);
+        } else if constexpr (KV_DTYPE == Fp8KVCacheDataType::kInt8Group128) {
+          Quant_vec k_vec_quant = *reinterpret_cast<const Quant_vec*>(
+              k_ptr + offset1 * BLOCK_SIZE * x + offset2);
+          k_vecs[j] = int8::scaled_vec_conversion_int8<K_vec, Quant_vec>(
+              k_vec_quant, k_scale, 0);
         } else {
           // Vector conversion from Quant_vec to K_vec.
           Quant_vec k_vec_quant = *reinterpret_cast<const Quant_vec*>(
@@ -410,6 +438,21 @@ __device__ void paged_attention_kernel(
 
         if constexpr (KV_DTYPE == Fp8KVCacheDataType::kAuto) {
           v_vec = *reinterpret_cast<const V_vec*>(v_ptr + offset);
+        // int8 kv-cache
+        } else if constexpr (KV_DTYPE == Fp8KVCacheDataType::kInt8Group0) {
+          V_quant_vec v_quant_vec =
+              *reinterpret_cast<const V_quant_vec*>(v_ptr + offset);
+          // Vector conversion from V_quant_vec to V_vec.
+          v_vec = int8::scaled_vec_conversion_int8<V_vec, V_quant_vec>(v_quant_vec,
+                                                                    v_scale, 
+                                                                    0);
+        } else if constexpr (KV_DTYPE == Fp8KVCacheDataType::kInt8Group128) {
+          V_quant_vec v_quant_vec =
+              *reinterpret_cast<const V_quant_vec*>(v_ptr + offset);
+          // Vector conversion from V_quant_vec to V_vec.
+          v_vec = int8::scaled_vec_conversion_int8<V_vec, V_quant_vec>(v_quant_vec,
+                                                                    v_scale, 
+                                                                    0);
         } else {
           V_quant_vec v_quant_vec =
               *reinterpret_cast<const V_quant_vec*>(v_ptr + offset);
@@ -513,7 +556,10 @@ __global__ void paged_attention_v1_kernel(
     const int max_num_blocks_per_seq,
     const float* __restrict__ alibi_slopes,  // [num_heads]
     const int q_stride, const int kv_block_stride, const int kv_head_stride,
-    const float k_scale, const float v_scale, const int tp_rank,
+    const int quant_group,
+    const float* __restrict__ k_scales,
+    const float* __restrict__ v_scales,
+    const int tp_rank,
     const int blocksparse_local_blocks, const int blocksparse_vert_stride,
     const int blocksparse_block_size, const int blocksparse_head_sliding_step) {
   paged_attention_kernel<scalar_t, cache_t, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS,
@@ -521,7 +567,8 @@ __global__ void paged_attention_v1_kernel(
       /* exp_sums */ nullptr, /* max_logits */ nullptr, out, q, k_cache,
       v_cache, num_kv_heads, scale, block_tables, seq_lens,
       max_num_blocks_per_seq, alibi_slopes, q_stride, kv_block_stride,
-      kv_head_stride, k_scale, v_scale, tp_rank, blocksparse_local_blocks,
+      kv_head_stride, quant_group, k_scales, v_scales,
+      tp_rank, blocksparse_local_blocks,
       blocksparse_vert_stride, blocksparse_block_size,
       blocksparse_head_sliding_step);
 }
@@ -549,14 +596,17 @@ __global__ void paged_attention_v2_kernel(
     const int max_num_blocks_per_seq,
     const float* __restrict__ alibi_slopes,  // [num_heads]
     const int q_stride, const int kv_block_stride, const int kv_head_stride,
-    const float k_scale, const float v_scale, const int tp_rank,
+    const int quant_group,
+    const float* __restrict__ k_scales,
+    const float* __restrict__ v_scales,
+    const int tp_rank,
     const int blocksparse_local_blocks, const int blocksparse_vert_stride,
     const int blocksparse_block_size, const int blocksparse_head_sliding_step) {
   paged_attention_kernel<scalar_t, cache_t, HEAD_SIZE, BLOCK_SIZE, NUM_THREADS,
                          KV_DTYPE, IS_BLOCK_SPARSE, PARTITION_SIZE>(
       exp_sums, max_logits, tmp_out, q, k_cache, v_cache, num_kv_heads, scale,
       block_tables, seq_lens, max_num_blocks_per_seq, alibi_slopes, q_stride,
-      kv_block_stride, kv_head_stride, k_scale, v_scale, tp_rank,
+      kv_block_stride, kv_head_stride, quant_group, k_scales, v_scales, tp_rank,
       blocksparse_local_blocks, blocksparse_vert_stride, blocksparse_block_size,
       blocksparse_head_sliding_step);
 }
