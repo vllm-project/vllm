@@ -1,3 +1,5 @@
+from typing import TYPE_CHECKING
+
 import torch
 
 import vllm.envs as envs
@@ -5,11 +7,18 @@ from vllm.logger import init_logger
 
 from .interface import Platform, PlatformEnum, _Backend
 
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
+else:
+    VllmConfig = None
+
 logger = init_logger(__name__)
 
 
 class OpenVinoPlatform(Platform):
     _enum = PlatformEnum.OPENVINO
+    device_type: str = "openvino"
+    dispatch_key: str = "CPU"
 
     @classmethod
     def get_default_attn_backend(cls, selected_backend: _Backend) -> _Backend:
@@ -37,3 +46,14 @@ class OpenVinoPlatform(Platform):
     def is_pin_memory_available(self) -> bool:
         logger.warning("Pin memory is not supported on OpenViNO.")
         return False
+
+    @classmethod
+    def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+        parallel_config = vllm_config.parallel_config
+        assert (
+            parallel_config.world_size == 1
+        ), "OpenVINOExecutor only supports single CPU socket currently."
+
+        if parallel_config.worker_cls == "auto":
+            parallel_config.worker_cls = \
+                "vllm.worker.openvino_worker.OpenVINOWorker"

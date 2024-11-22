@@ -275,7 +275,8 @@ class TP1DraftModelRunner(ModelRunner):
                 if previous_hidden_states is not None else {}
 
             # Run model
-            with set_forward_context(model_input.attn_metadata):
+            with set_forward_context(model_input.attn_metadata,
+                                     self.vllm_config):
                 hidden_states = model_executable(
                     input_ids=model_input.input_tokens,
                     positions=model_input.input_positions,

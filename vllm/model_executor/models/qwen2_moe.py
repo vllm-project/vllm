@@ -168,6 +168,7 @@ class Qwen2MoeAttention(nn.Module):
         max_position_embeddings: int = 8192,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -220,7 +221,8 @@ class Qwen2MoeAttention(nn.Module):
                               self.scaling,
                               num_kv_heads=self.num_kv_heads,
                               cache_config=cache_config,
-                              quant_config=quant_config)
+                              quant_config=quant_config,
+                              prefix=f"{prefix}.attn")
 
     def forward(
         self,
@@ -245,6 +247,7 @@ class Qwen2MoeDecoderLayer(nn.Module):
         layer_idx: int,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -261,6 +264,7 @@ class Qwen2MoeDecoderLayer(nn.Module):
             max_position_embeddings=max_position_embeddings,
             cache_config=cache_config,
             quant_config=quant_config,
+            prefix=f"{prefix}.self_attn",
         )
 
         # Note: Qwen/Qwen2-57B-A14B-Instruct does not have
@@ -336,7 +340,8 @@ class Qwen2MoeModel(nn.Module):
                                                 layer_idx=int(
                                                     prefix.split(".")[-1]),
                                                 cache_config=cache_config,
-                                                quant_config=quant_config),
+                                                quant_config=quant_config,
+                                                prefix=prefix),
             prefix=f"{prefix}.layers",
         )
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
