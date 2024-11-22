@@ -56,6 +56,7 @@ class Attention(nn.Module):
         self,
         config,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = '',
     ):
         super().__init__()
         self.hidden_size = config.hidden_size

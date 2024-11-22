@@ -507,11 +507,15 @@ class ChatGLMModel(nn.Module):
         self.num_layers = config.num_layers
         self.multi_query_group_num = config.multi_query_group_num
         self.kv_channels = config.kv_channels
-        self.encoder = GLMTransformer(config, cache_config, quant_config)
+        self.encoder = GLMTransformer(config,
+                                      cache_config,
+                                      quant_config,
+                                      prefix=f"{prefix}.encoder")
 
         self.output_layer = ParallelLMHead(config.padded_vocab_size,
                                            config.hidden_size,
-                                           quant_config=quant_config)
+                                           quant_config=quant_config,
+                                           prefix=f"{prefix}.output_layer")
 
         vision_config_flag = getattr(config, 'vision_config', None)
         if vision_config_flag is not None:
