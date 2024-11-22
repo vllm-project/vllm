@@ -366,7 +366,7 @@ class MMLLMEngineClient(EngineClient):
 
     #TODO:check usage
     async def get_model_config(self) -> ModelConfig:
-        return self.model_config
+        return self.model_configs[0]
 
     async def is_tracing_enabled(self) -> bool:
         return self.tracing_flag

@@ -9,7 +9,7 @@ import json
 import ssl
 from typing import List, Optional, Sequence, Union, get_args
 
-from vllm.engine.arg_utils import AsyncEngineArgs, nullable_str
+from vllm.engine.mm_arg_utils import AsyncEngineArgs, nullable_str
 from vllm.entrypoints.chat_utils import (ChatTemplateContentFormatOption,
                                          validate_chat_template)
 from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,

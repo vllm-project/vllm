@@ -25,7 +25,7 @@ from typing_extensions import assert_never
 
 import vllm.envs as envs
 from vllm.config import ModelConfig
-from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.engine.mm_arg_utils import AsyncEngineArgs
 from vllm.engine.multiprocessing.mm_client import MMLLMEngineClient
 from vllm.engine.multiprocessing.mm_engine import run_mm_engine
 from vllm.engine.protocol import EngineClient

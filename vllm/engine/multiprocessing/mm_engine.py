@@ -6,7 +6,8 @@ from typing import Iterator, List, Optional, Union
 import cloudpickle
 import zmq
 
-from vllm import AsyncEngineArgs, SamplingParams
+from vllm import SamplingParams
+from vllm.engine.mm_arg_utils import AsyncEngineArgs
 from vllm.engine.llm_engine import LLMEngine
 # yapf conflicts with isort for this block
 # yapf: disable
@@ -69,9 +70,13 @@ class MMLLMEngine:
         kwargs['use_cached_outputs'] = True
         
         # get configs from args and kwargs, determine how many models to load
-        models_load = []
+        vllm_config = kwargs.get('vllm_config')
+        print(f"aaaa {vllm_config}")
+        models_load = [model_config.model for model_config in vllm_config.model_configs ]
         self.engines  = []
+        
         for model in models_load:
+            print(f"create engine for model: {model}")
             self.engines.append(LLMEngine(model=model, *args, **kwargs))
         self.log_requests = log_requests
 
@@ -366,6 +371,7 @@ def signal_handler(*_) -> None:
 def run_mm_engine(engine_args: AsyncEngineArgs, usage_context: UsageContext,
                   ipc_path: str, engine_alive):
     try:
+        print(f"bbbb {engine_args}")
         engine = MMLLMEngine.from_engine_args(engine_args=engine_args,
                                               usage_context=usage_context,
                                               ipc_path=ipc_path)

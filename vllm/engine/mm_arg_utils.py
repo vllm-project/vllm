@@ -85,7 +85,7 @@ def nullable_kvs(val: str) -> Optional[Mapping[str, int]]:
 @dataclass
 class EngineArgs:
     """Arguments for vLLM engine."""
-    model: str = 'facebook/opt-125m'
+    model: Optional[Union[str, List[str]]] = 'facebook/opt-125m'
     served_model_name: Optional[Union[str, List[str]]] = None
     tokenizer: Optional[str] = None
     task: TaskOption = "auto"
@@ -191,8 +191,14 @@ class EngineArgs:
     override_neuron_config: Optional[Dict[str, Any]] = None
     override_pooler_config: Optional[PoolerConfig] = None
     compilation_config: Optional[CompilationConfig] = None
+    models = None
 
     def __post_init__(self):
+        if isinstance(self.model, str):
+            self.models = [self.model]
+        else:
+            self.models = self.model
+            self.model = self.models[0]
         if not self.tokenizer:
             self.tokenizer = self.model
 
@@ -207,9 +213,12 @@ class EngineArgs:
         # Model arguments
         parser.add_argument(
             '--model',
+            '--names-list',
+            nargs="*",
             type=str,
             default=EngineArgs.model,
             help='Name or path of the huggingface model to use.')
+
         parser.add_argument(
             '--task',
             default=EngineArgs.task,
@@ -894,9 +903,12 @@ class EngineArgs:
         engine_args = cls(**{attr: getattr(args, attr) for attr in attrs})
         return engine_args
 
-    def create_model_config(self) -> ModelConfig:
+    def create_model_configs(self)-> list[ModelConfig]:
+        return [self.create_model_config(model) for model in self.models]
+
+    def create_model_config(self, model:str = None) -> ModelConfig:
         return ModelConfig(
-            model=self.model,
+            model=model if model is not None else self.model,
             task=self.task,
             # We know this is not None because we set it in __post_init__
             tokenizer=cast(str, self.tokenizer),
@@ -963,6 +975,7 @@ class EngineArgs:
 
         device_config = DeviceConfig(device=self.device)
         model_config = self.create_model_config()
+        model_configs = self.create_model_configs()
 
         if model_config.is_multimodal_model:
             if self.enable_prefix_caching:
@@ -1163,6 +1176,7 @@ class EngineArgs:
             observability_config=observability_config,
             prompt_adapter_config=prompt_adapter_config,
             compilation_config=self.compilation_config,
+            model_configs=model_configs,
         )
 
 
