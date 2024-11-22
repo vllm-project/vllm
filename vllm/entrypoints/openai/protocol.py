@@ -481,14 +481,14 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 specified_function = data["tool_choice"].get("function")
                 if not specified_function:
                     raise ValueError(
-                        "Incorrectly formatted `tool_choice`. Should be like "
-                        "`{\"type\": \"function\","
+                        "Expected field `function` in `tool_choice`."
+                        " Correct usage: `{\"type\": \"function\","
                         " \"function\": {\"name\": \"my_function\"}}`")
                 specified_function_name = specified_function.get("name")
                 if not specified_function_name:
                     raise ValueError(
-                        "Incorrectly formatted `tool_choice`. Should be like "
-                        "`{\"type\": \"function\", "
+                        "Expected field `name` in `function` in `tool_choice`."
+                        "Correct usage: `{\"type\": \"function\", "
                         "\"function\": {\"name\": \"my_function\"}}`")
                 for tool in data["tools"]:
                     if tool["function"]["name"] == specified_function_name:
