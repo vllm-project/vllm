@@ -1,5 +1,5 @@
 import math
-from typing import Iterable, List, Optional, Set, Tuple
+from typing import Iterable, List, Optional, Set, Tuple, TypedDict, Union
 
 import torch
 import torch.nn as nn
@@ -39,6 +39,18 @@ from vllm.multimodal.utils import (cached_get_tokenizer,
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.aria import (AriaMoELMConfig,
                                                   AriaVisionConfig)
+
+from .utils import flatten_bn
+
+
+class AriaImagePixelInputs(TypedDict):
+    pixel_values: torch.Tensor
+    pixel_mask: Optional[torch.Tensor]
+    """
+    Shape: 
+        pixel_values: `(batch_size * num_images, num_channels, height, width)`
+        pixel_mask: `(batch_size * num_images, height, width)`
+    """
 
 
 class AriaVisionTransformer(Idefics2VisionTransformer):
@@ -486,6 +498,8 @@ def input_processor(ctx, llm_inputs):
                                               max_image_size=max_image_size,
                                               split_image=_split_image,
                                               return_tensors="pt").data
+    image_inputs['pixel_values'] = image_inputs['pixel_values'].to(
+        ctx.model_config.dtype)
     num_crops = image_inputs.pop("num_crops")
 
     prompt_token_ids = llm_inputs["prompt_token_ids"]
@@ -563,6 +577,65 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
                                                 self.vocab_size, logit_scale)
         self.sampler = Sampler()
 
+    def _validate_image_sizes(
+            self, images: List[torch.Tensor]) -> List[torch.Tensor]:
+        if not all(img.shape == images[0].shape for img in images):
+            raise ValueError("All images must be the same size")
+        return images
+
+    def _parse_and_validate_image_input(
+            self, **kwargs: object) -> Optional[AriaImagePixelInputs]:
+        pixel_values = kwargs.pop("pixel_values", None)
+        pixel_mask = kwargs.pop("pixel_mask", None)
+
+        if pixel_values is None:
+            return None
+
+        if not isinstance(pixel_values, (torch.Tensor, list)):
+            raise ValueError("Incorrect type of pixel values. "
+                             f"Got type: {type(pixel_values)}")
+
+        pixel_values = self._validate_image_sizes(pixel_values)
+        pixel_values = flatten_bn(pixel_values, concat=True)
+        if pixel_mask is not None:
+            pixel_mask = flatten_bn(pixel_mask, concat=True)
+
+        return AriaImagePixelInputs(
+            pixel_values=pixel_values,
+            pixel_mask=pixel_mask,
+        )
+
+    def _process_image_input(
+        self, image_input: AriaImagePixelInputs
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        assert self.vision_tower is not None
+
+        pixel_values = image_input['pixel_values']
+        pixel_mask = image_input['pixel_mask']
+
+        image_feature, image_attn_mask = self.vision_tower(
+            pixel_values, pixel_mask=pixel_mask)
+        return self.multi_modal_projector(image_feature, image_attn_mask)
+
+    def process_mm_inputs(self, **kwargs):
+        image_input = self._parse_and_validate_image_input(**kwargs)
+        if image_input is None:
+            return None
+        vision_embeddings = self._process_image_input(image_input)
+        return vision_embeddings
+
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+        vision_embeddings: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
+        if vision_embeddings is not None:
+            inputs_embeds = merge_multimodal_embeddings(
+                input_ids, inputs_embeds, vision_embeddings,
+                self.config.image_token_index)
+        return inputs_embeds
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -570,50 +643,23 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
         **kwargs: object,
-    ):
-        # 1. Extra the input embeddings
-        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-        pixel_values = kwargs.get("pixel_values", None)
-        pixel_mask = kwargs.get("pixel_mask", None)
-
-        # 2. Merge text and images
-        if pixel_values is not None:
-            if isinstance(pixel_values, torch.Tensor):
-                pixel_values = pixel_values.view(
-                    -1, *pixel_values.shape[-3:]).to(torch.bfloat16)
-                pixel_mask = pixel_mask.view(-1, *pixel_mask.shape[-2:])
-            elif isinstance(pixel_values, list):
-                if not all(x.shape[-3:] == pixel_values[0].shape[-3:]
-                           for x in pixel_values):
-                    raise ValueError("All images must be the same size")
-
-                pixel_values = [
-                    x.view(-1, *x.shape[-3:]).to(torch.bfloat16)
-                    for x in pixel_values
-                ]
-                pixel_values = torch.cat(pixel_values, dim=0)
-                pixel_mask = [x.view(-1, *x.shape[-2:]) for x in pixel_mask]
-                pixel_mask = torch.cat(pixel_mask, dim=0)
-            selected_image_feature, image_attn_mask = self.vision_tower(
-                pixel_values,
-                pixel_mask=pixel_mask,
-            )
-
-            image_features = self.multi_modal_projector(
-                selected_image_feature, attn_mask=image_attn_mask)
-
-            inputs_embeds = inputs_embeds.to(image_features.dtype)
-            inputs_embeds = merge_multimodal_embeddings(
-                input_ids, inputs_embeds, image_features,
-                self.config.image_token_index)
+    ) -> Union[torch.Tensor, IntermediateTensors]:
+        if inputs_embeds is None:
+            vision_embeddings = self.process_mm_inputs(**kwargs)
+            # always pass the input via `inputs_embeds`
+            # to make sure the computation graph is consistent
+            inputs_embeds = self.get_input_embeddings(input_ids,
+                                                      vision_embeddings)
+            input_ids = None
 
         hidden_states = self.language_model(
             input_ids,
             positions,
             kv_caches,
             attn_metadata,
-            None,
+            intermediate_tensors,
             inputs_embeds=inputs_embeds,
         )
 
