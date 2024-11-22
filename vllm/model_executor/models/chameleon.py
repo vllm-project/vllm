@@ -998,7 +998,7 @@ class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
         vision_embeddings: Optional[NestedTensors] = None,
     ) -> torch.Tensor:
 
-        inputs_embeds = self.language_model.get_input_embeddings(input_ids)
+        inputs_embeds = self.model.get_input_embeddings(input_ids)
         if vision_embeddings is not None:
             inputs_embeds = merge_multimodal_embeddings(
                 input_ids, inputs_embeds, vision_embeddings,
@@ -1027,12 +1027,12 @@ class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
                                                       vision_embeddings)
             input_ids = None
 
-        hidden_states = self.language_model.model(input_ids,
-                                                  positions,
-                                                  kv_caches,
-                                                  attn_metadata,
-                                                  intermediate_tensors,
-                                                  inputs_embeds=inputs_embeds)
+        hidden_states = self.model(input_ids,
+                                   positions,
+                                   kv_caches,
+                                   attn_metadata,
+                                   intermediate_tensors,
+                                   inputs_embeds=inputs_embeds)
         return hidden_states
 
     def compute_logits(
