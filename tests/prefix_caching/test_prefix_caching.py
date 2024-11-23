@@ -2,10 +2,15 @@
 
 Run `pytest tests/prefix_caching/test_prefix_caching.py`.
 """
+
 import pytest
 
+from tests.conftest import VllmRunner
+from tests.core.utils import SchedulerProxy, create_dummy_prompt
 from tests.kernels.utils import override_backend_env_variable
 from vllm import SamplingParams, TokensPrompt
+from vllm.core.scheduler import Scheduler
+from vllm.engine.llm_engine import LLMEngine
 
 from ..models.utils import check_outputs_equal
 
@@ -27,6 +32,7 @@ UNSTABLE_PROMPT_SEQUENCE = [
 @pytest.mark.parametrize("dtype", ["half"])
 @pytest.mark.parametrize("max_tokens", [5])
 @pytest.mark.parametrize("cached_position", [0, 1])
+@pytest.mark.parametrize("enable_chunked_prefill", [True, False])
 @pytest.mark.parametrize("block_size", [16])
 def test_mixed_requests(
     hf_runner,
@@ -37,6 +43,7 @@ def test_mixed_requests(
     dtype: str,
     max_tokens: int,
     cached_position: int,
+    enable_chunked_prefill: bool,
     block_size: int,
     monkeypatch,
 ) -> None:
@@ -55,6 +62,7 @@ def test_mixed_requests(
             model,
             dtype=dtype,
             enable_prefix_caching=True,
+            enable_chunked_prefill=enable_chunked_prefill,
             block_size=block_size,
     ) as vllm_model:
         # Run the first prompt so the cache is populated
@@ -72,13 +80,13 @@ def test_mixed_requests(
                     block_size) * block_size
             else:
                 expected_num_cached_tokens = 0
-            assert req_outputs[
-                i].num_cached_tokens == expected_num_cached_tokens
+            assert (
+                req_outputs[i].num_cached_tokens == expected_num_cached_tokens)
 
-        vllm_outputs = [
-            (output.prompt_token_ids + list(output.outputs[0].token_ids),
-             output.prompt + output.outputs[0].text) for output in req_outputs
-        ]
+        vllm_outputs = [(
+            output.prompt_token_ids + list(output.outputs[0].token_ids),
+            output.prompt + output.outputs[0].text,
+        ) for output in req_outputs]
 
     check_outputs_equal(
         outputs_0_lst=hf_outputs,
@@ -105,3 +113,89 @@ def test_unstable_prompt_sequence(
         for prompt in UNSTABLE_PROMPT_SEQUENCE:
             vllm_model.generate(TokensPrompt(prompt_token_ids=prompt),
                                 SamplingParams(max_tokens=1))
+
+
+@pytest.mark.parametrize("model", MODELS)
+def test_fully_cached_prefill_needs_uncached_token(model):
+    block_size = 16
+    max_num_batched_tokens = 16
+    num_output_tokens = 5
+    # Make a vllm engine
+    runner = VllmRunner(
+        model_name=model,
+        gpu_memory_utilization=0.7,
+        enable_chunked_prefill=True,
+        enforce_eager=True,
+        enable_prefix_caching=True,
+        block_size=block_size,
+        max_num_batched_tokens=max_num_batched_tokens,
+        max_num_seqs=max_num_batched_tokens,
+    )
+    engine: LLMEngine = runner.model.llm_engine
+
+    scheduler: Scheduler = SchedulerProxy(engine.scheduler[0])  # type: ignore
+    engine.scheduler[0] = scheduler
+
+    # SeqA
+    seqA_tokens = list(range(2 * block_size))
+    seqA, seq_groupA = create_dummy_prompt(
+        request_id="0",
+        prompt_tokens=seqA_tokens,
+        max_tokens=num_output_tokens,
+        block_size=block_size,
+    )
+
+    scheduler.add_seq_group(seq_groupA)
+
+    assert seqA.data.get_num_computed_tokens() == 0
+
+    # Prefill seqA
+    while not seqA.is_finished():
+        engine.step()
+
+    # seqB
+    seqB_tokens = [t + 1 for t in seqA_tokens]  # shift by 1
+    seqB, seq_groupB = create_dummy_prompt(
+        request_id="1",
+        prompt_tokens=seqB_tokens,
+        max_tokens=num_output_tokens,
+        block_size=block_size,
+    )
+
+    # seqC is the same as seqA
+    seqC, seq_groupC = create_dummy_prompt(
+        request_id="2",
+        prompt_tokens=seqA_tokens,
+        max_tokens=num_output_tokens,
+        block_size=block_size,
+    )
+
+    scheduler.add_seq_group(seq_groupB)
+    scheduler.add_seq_group(seq_groupC)
+
+    # Even seqC is fully cached, it should not be prefilled since we
+    # require at least 1 uncached token.
+    engine.step()
+
+    sched_metas, sched_out, _ = scheduler.last_schedule_ret()
+    assert len(sched_out.scheduled_seq_groups) == 1
+    assert (sched_out.scheduled_seq_groups[0].seq_group.request_id ==
+            seq_groupB.request_id)
+    assert (sched_out.scheduled_seq_groups[0].token_chunk_size ==
+            max_num_batched_tokens)
+
+    # When seqB is finished, seqC could be prefilled.
+    while not seqB.is_finished():
+        engine.step()
+        sched_metas, sched_out, _ = scheduler.last_schedule_ret()
+        assert len(sched_out.scheduled_seq_groups) == 1
+        assert (sched_out.scheduled_seq_groups[0].seq_group.request_id ==
+                seq_groupB.request_id)
+
+    engine.step()
+    sched_metas, sched_out, _ = scheduler.last_schedule_ret()
+    assert len(sched_out.scheduled_seq_groups) == 1
+    assert (sched_out.scheduled_seq_groups[0].seq_group.request_id ==
+            seq_groupC.request_id)
+    assert sched_out.scheduled_seq_groups[0].token_chunk_size == len(
+        seqA_tokens)
