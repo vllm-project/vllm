@@ -1,3 +1,4 @@
+import gc
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
@@ -446,7 +447,7 @@ class GPUModelRunner:
 
         # Run the decoder.
         # Use persistent buffers for CUDA graphs.
-        with set_forward_context(attn_metadata):
+        with set_forward_context(attn_metadata, self.vllm_config):
             hidden_states = self.model(
                 input_ids=None,
                 positions=self.positions[:num_input_tokens],
@@ -515,7 +516,25 @@ class GPUModelRunner:
         logger.info("Loading model weights took %.4f GB",
                     self.model_memory_usage / float(2**30))
 
-    def _dummy_run(self, model: nn.Module, num_tokens: int) -> None:
+    @torch.inference_mode()
+    def _dummy_run(
+        self,
+        model: nn.Module,
+        num_tokens: int,
+        kv_caches: List[torch.Tensor],
+    ) -> torch.Tensor:
+        with set_forward_context(None, self.vllm_config):
+            hidden_states = model(
+                input_ids=None,
+                positions=self.positions[:num_tokens],
+                kv_caches=kv_caches,
+                attn_metadata=None,
+                inputs_embeds=self.inputs_embeds[:num_tokens])
+        return hidden_states
+
+    def profile_run(self) -> None:
+        # TODO(woosuk): Profile the max memory usage of the encoder and
+        # the encoder cache.
         # use an empty tensor instead of `None`` to force Dynamo to pass
         # it by reference, rather by specializing on the value `None`.
         # the `dtype` argument does not matter, and we use `float32` as
@@ -527,45 +546,32 @@ class GPUModelRunner:
             torch.tensor([], dtype=torch.float32, device=self.device)
             for _ in range(self.num_attn_layers)
         ]
-        with set_forward_context(None):  # noqa: SIM117
-            with set_compile_context(self.cudagraph_batch_sizes):
-                # Trigger compilation for general shape.
-                model(input_ids=None,
-                      positions=self.positions,
-                      kv_caches=dummy_kv_caches,
-                      attn_metadata=None,
-                      inputs_embeds=self.inputs_embeds)
-
-    @torch.inference_mode()
-    def profile_run(self) -> None:
-        # TODO(woosuk): Profile the max memory usage of the encoder and
-        # the encoder cache.
-        self._dummy_run(self.model, self.max_num_tokens)
+        with set_compile_context(self.cudagraph_batch_sizes):
+            # Trigger compilation for general shape.
+            hidden_states = self._dummy_run(self.model, self.max_num_tokens,
+                                            dummy_kv_caches)
+        logits = self.model.compute_logits(hidden_states, None)
+        logits = logits[:self.max_num_tokens]
+        # TODO(woosuk): Consider the memory usage of the sampler.
         torch.cuda.synchronize()
+        del hidden_states, logits
+        gc.collect()
 
-    @torch.inference_mode()
     def capture_model(self) -> None:
         if not self.use_cuda_graph:
             logger.warning(
                 "Skipping CUDA graph capture. Please add "
-                "-O 3 to use CUDA graphs.", CompilationLevel.PIECEWISE)
+                "-O %s to use CUDA graphs.", CompilationLevel.PIECEWISE)
             return
 
         start_time = time.perf_counter()
         start_free_gpu_memory = torch.cuda.mem_get_info()[0]
 
-        with set_forward_context(None):
-            # Trigger CUDA graph capture for specific shapes.
-            # Capture the large shapes first so that the smaller shapes
-            # can reuse the memory pool allocated for the large shapes.
-            for num_tokens in reversed(self.cudagraph_batch_sizes):
-                self.model(
-                    input_ids=None,
-                    positions=self.positions[:num_tokens],
-                    kv_caches=self.kv_caches,
-                    attn_metadata=None,
-                    inputs_embeds=self.inputs_embeds[:num_tokens],
-                )
+        # Trigger CUDA graph capture for specific shapes.
+        # Capture the large shapes first so that the smaller shapes
+        # can reuse the memory pool allocated for the large shapes.
+        for num_tokens in reversed(self.cudagraph_batch_sizes):
+            self._dummy_run(self.model, num_tokens, self.kv_caches)
 
         end_time = time.perf_counter()
         end_free_gpu_memory = torch.cuda.mem_get_info()[0]
