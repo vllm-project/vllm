@@ -238,17 +238,18 @@ class ModelConfig:
                     self.hf_text_config.sliding_window)
 
                 print_warning_once(
-                    f"{self.hf_text_config.model_type} has interleaved attention, "
-                    "which is currently not supported by the XFORMERS backend. Disabling sliding "
-                    "window and capping the max length to the sliding window size "
+                    f"{self.hf_text_config.model_type} has interleaved "
+                    "attention, which is currently not supported by the "
+                    "XFORMERS backend. Disabling sliding window and capping "
+                    "the max length to the sliding window size "
                     f"({sliding_window_len_min}).")
                 self.disable_sliding_window = True
             else:
                 # for a model with interleaved attention,
                 # the scheduler and the model treat it as full attention
                 # (i.e., not dropping any tokens outside the window).
-                # only the attention layer itself is aware of the sliding window,
-                # and use the window size to compute the attention.
+                # only the attention layer itself is aware of the sliding
+                # window, and use the window size to compute the attention.
                 self.hf_text_config.interleaved_sliding_window = sliding_window
                 delattr(self.hf_text_config, "sliding_window")
                 sliding_window = None
