@@ -52,6 +52,7 @@ steps:
   - tests/worker
   - tests/test_lazy_torch_compile.py
   commands:
+  - echo "Running test_lazy_torch_compile.py..." # print running script to enhance CI log readability
   - python3 test_lazy_torch_compile.py
   - pytest -v -s mq_llm_engine # MQLLMEngine
   - pytest -v -s async_engine # AsyncLLMEngine
@@ -182,15 +183,25 @@ steps:
   - examples/
   commands:
     - pip install awscli tensorizer # for llava example and tensorizer test
+    - echo "Running offline_inference.py..." # print running script to enhance CI log readability
     - python3 offline_inference.py
+    - echo "Running cpu_offload.py..."
     - python3 cpu_offload.py
+    - echo "Running offline_inference_chat.py..."
     - python3 offline_inference_chat.py
+    - echo "Running offline_inference_with_prefix.py..."
     - python3 offline_inference_with_prefix.py
+    - echo "Running llm_engine_example.py..."
     - python3 llm_engine_example.py
+    - echo "Running offline_inference_vision_language.py..."
     - python3 offline_inference_vision_language.py
+    - echo "Running offline_inference_vision_language_multi_image.py..."
     - python3 offline_inference_vision_language_multi_image.py
+    - echo "Running tensorize_vllm_model.py..."
     - python3 tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors
+    - echo "Running offline_inference_encoder_decoder.py..."
     - python3 offline_inference_encoder_decoder.py
+    - echo "Running offline_profile.py..."
     - python3 offline_profile.py --model facebook/opt-125m
 
 - label: Prefix Caching Test # 9min
