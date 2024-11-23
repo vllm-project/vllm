@@ -131,6 +131,48 @@ class PyNcclCommunicator:
                                 ncclRedOpTypeEnum.from_torch(op), self.comm,
                                 cudaStream_t(stream.cuda_stream))
 
+    def all_gather(self,
+                   output_tensor: torch.Tensor,
+                   input_tensor: torch.Tensor,
+                   stream=None):
+        if self.disabled:
+            return
+        # nccl communicator created on a specific device
+        # will only work on tensors on the same device
+        # otherwise it will cause "illegal memory access"
+        assert input_tensor.device == self.device, (
+            f"this nccl communicator is created to work on {self.device}, "
+            f"but the input tensor is on {input_tensor.device}")
+        if stream is None:
+            stream = self.stream
+        self.nccl.ncclAllGather(
+            buffer_type(input_tensor.data_ptr()),
+            buffer_type(output_tensor.data_ptr()), input_tensor.numel(),
+            ncclDataTypeEnum.from_torch(input_tensor.dtype), self.comm,
+            cudaStream_t(stream.cuda_stream))
+
+    def reduce_scatter(self,
+                       output_tensor: torch.Tensor,
+                       input_tensor: torch.Tensor,
+                       op: ReduceOp = ReduceOp.SUM,
+                       stream=None):
+        if self.disabled:
+            return
+        # nccl communicator created on a specific device
+        # will only work on tensors on the same device
+        # otherwise it will cause "illegal memory access"
+        assert input_tensor.device == self.device, (
+            f"this nccl communicator is created to work on {self.device}, "
+            f"but the input tensor is on {input_tensor.device}")
+        if stream is None:
+            stream = self.stream
+        self.nccl.ncclReduceScatter(
+            buffer_type(input_tensor.data_ptr()),
+            buffer_type(output_tensor.data_ptr()), output_tensor.numel(),
+            ncclDataTypeEnum.from_torch(input_tensor.dtype),
+            ncclRedOpTypeEnum.from_torch(op), self.comm,
+            cudaStream_t(stream.cuda_stream))
+
     def send(self, tensor: torch.Tensor, dst: int, stream=None):
         if self.disabled:
             return
