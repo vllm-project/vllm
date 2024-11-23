@@ -276,7 +276,7 @@ def iter_token_runs(token_ids: list[int]) -> Iterable[_TokenRun]:
         start_idx += length
 
 
-class _BoundPlaceholderInfo(NamedTuple):
+class _PlaceholderInfo(NamedTuple):
     modality: str
     offset: int
     length: int
@@ -290,7 +290,7 @@ def iter_placeholders(
     token_ids: list[int],
     *,
     min_placeholder_count: int,
-) -> Iterable[_BoundPlaceholderInfo]:
+) -> Iterable[_PlaceholderInfo]:
     """Yield each set of placeholder tokens found in :code:`token_ids`."""
     repls_by_modality = full_groupby_modality(prompt_repls)
 
@@ -308,7 +308,7 @@ def iter_placeholders(
             for (modality,
                  placeholder_ids) in placeholder_ids_by_modality.items():
                 if run_info.token_id in placeholder_ids:
-                    yield _BoundPlaceholderInfo(
+                    yield _PlaceholderInfo(
                         modality=modality,
                         offset=run_info.start_idx,
                         length=run_info.length,
@@ -564,7 +564,7 @@ class MultiModalProcessor:
         # To avoid false positives from multi-input when detecting
         # whether HF processor already inserts placeholder tokens
         min_placeholder_count: int = 16,
-    ) -> list[_BoundPlaceholderInfo]:
+    ) -> list[_PlaceholderInfo]:
         return list(
             iter_placeholders(
                 all_prompt_repls,
@@ -604,7 +604,7 @@ class MultiModalProcessor:
         hf_inputs: BatchFeature,
         token_ids: list[int],
         prompt_repls: Sequence[_BoundPromptReplacement[Any]],
-    ) -> tuple[list[int], str, list[_BoundPlaceholderInfo]]:
+    ) -> tuple[list[int], str, list[_PlaceholderInfo]]:
         tokenizer = self.ctx.tokenizer
         mm_items = to_multi_format(mm_data)
         token_matches = find_token_matches(token_ids, prompt_repls)
@@ -680,7 +680,6 @@ class MultiModalProcessor:
         # there is no need for us to insert them
         all_placeholders = self._find_placeholders(all_prompt_repls,
                                                    prompt_ids)
-
         if all_placeholders:
             prompt_text = _decode(tokenizer, prompt_ids)
         else:
