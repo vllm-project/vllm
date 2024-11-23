@@ -829,6 +829,20 @@ async def test_inconsistent_tool_choice_and_tools(client: openai.AsyncOpenAI,
                     "name": "nondefined_function_name"
                 }
             })
+    with pytest.raises(openai.BadRequestError):
+        await client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=messages,
+            max_completion_tokens=1000,
+            tools=[{
+                "type": "function",
+                "function": {
+                    "name": "dummy_function_name",
+                    "description": "This is a dummy function",
+                    "parameters": sample_json_schema
+                }
+            }],
+            tool_choice={})
 
 
 @pytest.mark.asyncio
