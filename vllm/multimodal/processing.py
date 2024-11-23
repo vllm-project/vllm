@@ -605,6 +605,7 @@ class MultiModalProcessor:
         prompt_repls: Sequence[_BoundPromptReplacement[Any]],
     ) -> tuple[list[int], str, list[_PlaceholderInfo]]:
         tokenizer = self.ctx.tokenizer
+
         mm_items = to_multi_format(mm_data)
         token_matches = find_token_matches(token_ids, prompt_repls)
 
