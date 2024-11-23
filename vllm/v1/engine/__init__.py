@@ -68,6 +68,11 @@ class EngineCoreOutputs(msgspec.Struct,
     outputs: List[EngineCoreOutput]
 
 
+@dataclass
+class EngineCoreProfile:
+    is_start: bool
+
+
 class EngineCoreRequestType(enum.Enum):
     """
     Request types defined as hex byte strings, so it can be sent over sockets
@@ -75,3 +80,4 @@ class EngineCoreRequestType(enum.Enum):
     """
     ADD = b'\x00'
     ABORT = b'\x01'
+    PROFILE = b'\x02'
