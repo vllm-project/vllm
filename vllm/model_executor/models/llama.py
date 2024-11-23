@@ -167,6 +167,16 @@ class LlamaAttention(nn.Module):
             rope_scaling=rope_scaling,
             is_neox_style=is_neox_style,
         )
+
+        layer_idx: int = int(prefix.split(".")[0])
+        if isinstance(config.interleaved_sliding_window, int):
+            sliding_window = config.interleaved_sliding_window
+        elif isinstance(config.interleaved_sliding_window, list):
+            sw_idx = layer_idx % len(sliding_window)
+            sliding_window = config.interleaved_sliding_window[sw_idx]
+        else:
+            None
+
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
@@ -174,6 +184,7 @@ class LlamaAttention(nn.Module):
             num_kv_heads=self.num_kv_heads,
             cache_config=cache_config,
             quant_config=quant_config,
+            per_layer_sliding_window=sliding_window,
             prefix=f"{prefix}.attn",
         )
 
