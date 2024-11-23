@@ -852,9 +852,9 @@ class MllamaTextCrossAttention(nn.Module):
                     attn_metadata.cross_slot_mapping, "auto", 1.0, 1.0)
             else:
                 raise ValueError(
-                    f"Unsupported AttentionMetadata {type(attn_metadata)} "
-                    f"class found. Expected the AttentionMetadata to "
-                    f"be either XFormersMetadata or FlashAttentionMetadata.")
+                    f"Unsupported Attention backend {self.attn.backend} "
+                    "enum found. Expected the Attention backend to be "
+                    "FLASH_ATTN, FLASH_ATTN_VLLM_V1, XFORMERS or TORCH_SDPA.")
 
         # We have to call torch.sdpa for prefill when using a
         # custom cross-attention mask. Because the mask is not a
