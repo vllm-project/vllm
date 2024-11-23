@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Type, cast
 import torch
 
 from vllm.attention import AttentionMetadata
+from vllm.forward_context import set_forward_context
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.multimodal import MultiModalKwargs
@@ -303,7 +304,8 @@ class CPUEncoderDecoderModelRunner(
             intermediate_tensors,
         }
 
-        hidden_states = model_executable(**execute_model_kwargs)
+        with set_forward_context(model_input.attn_metadata, self.vllm_config):
+            hidden_states = model_executable(**execute_model_kwargs)
 
         # Compute the logits.
         logits = self.model.compute_logits(hidden_states,
