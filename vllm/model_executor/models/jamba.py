@@ -102,7 +102,8 @@ class JambaMambaDecoderLayer(nn.Module):
                  config: JambaConfig,
                  layer_idx: int,
                  cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None) -> None:
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = "") -> None:
         super().__init__()
         self.config = config
         self.mamba = MambaMixer(hidden_size= config.hidden_size,
@@ -157,6 +158,7 @@ class JambaAttentionDecoderLayer(nn.Module):
         layer_idx: int,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -198,6 +200,7 @@ class JambaAttentionDecoderLayer(nn.Module):
             self.scaling,
             num_kv_heads=self.num_kv_heads,
             cache_config=cache_config,
+            prefix=f"{prefix}.attn",
         )
 
         num_experts = config.layers_num_experts[layer_idx]
@@ -287,7 +290,8 @@ class JambaModel(nn.Module):
                 layer_class(config,
                             layer_idx=i,
                             cache_config=cache_config,
-                            quant_config=quant_config))
+                            quant_config=quant_config,
+                            prefix=f"{prefix}.layers.{i}"))
         self.layers = nn.ModuleList(decoder_layers)
         self.final_layernorm = RMSNorm(config.hidden_size,
                                        eps=config.rms_norm_eps)
