@@ -675,6 +675,8 @@ class MultiModalProcessor:
         2. Find and replace sequences in the token IDs with placeholder tokens.
            The number of placeholder tokens equals the feature size of the
            multi-modal data outputted by the multi-modal encoder.
+        3. Extract information about the placeholder tokens from the
+           processed token IDs.
         """
         tokenizer = self.ctx.tokenizer
 
