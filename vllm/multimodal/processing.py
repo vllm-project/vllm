@@ -562,7 +562,8 @@ class MultiModalProcessor:
         new_token_ids: list[int],
         *,
         # To avoid false positives from multi-input when detecting
-        # whether HF processor already inserts placeholder tokens
+        # whether placeholder tokens have been inserted, in case
+        # the target sequence is a subset of the replacement tokens
         min_placeholder_count: int = 16,
     ) -> list[_PlaceholderInfo]:
         return list(
