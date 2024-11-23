@@ -292,15 +292,13 @@ def iter_placeholders(
     min_placeholder_count: int,
 ) -> Iterable[_PlaceholderInfo]:
     """Yield each set of placeholder tokens found in :code:`token_ids`."""
-    repls_by_modality = full_groupby_modality(prompt_repls)
-
     placeholder_ids_by_modality = {
         modality: {
             token_id
             for prompt_repl in repls
             for token_id in prompt_repl.repl_unit.token_ids
         }
-        for modality, repls in repls_by_modality
+        for modality, repls in full_groupby_modality(prompt_repls)
     }
 
     for run_info in iter_token_runs(token_ids):
