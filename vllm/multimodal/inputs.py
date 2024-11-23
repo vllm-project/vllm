@@ -203,14 +203,7 @@ class MultiModalInputsV2(TypedDict):
     """The type of inputs."""
 
     prompt: str
-    """
-    The original, unprocessed prompt text.
-
-    Note:
-        Since prompt text is not required by vLLM internals, we leave this
-        unprocessed to save CPU computation. You can still call
-        :code:`tokenizer.decode(prompt_token_ids)` to get the processed text.
-    """
+    """The processed prompt text."""
 
     prompt_token_ids: List[int]
     """The processed token IDs which includes placeholder tokens."""
