@@ -307,7 +307,7 @@ Text Generation
   * - :code:`TeleChat2ForCausalLM`
     - TeleChat2
     - :code:`TeleAI/TeleChat2-3B`, :code:`TeleAI/TeleChat2-7B`, :code:`TeleAI/TeleChat2-35B`, etc.
-    - ✅︎
+    - 
     - ✅︎
   * - :code:`XverseForCausalLM`
     - XVERSE
