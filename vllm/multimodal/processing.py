@@ -24,7 +24,7 @@ def bind_prompt_sequence(
     tokenizer: AnyTokenizer,
 ) -> "_BoundPromptSequence":
     """
-    Bind text or token sequences to a tokenizer so that it can be
+    Bind a text or token sequence to a tokenizer so that it can be
     lazily converted into the other format on demand.
     """
     return _BoundPromptSequence(
