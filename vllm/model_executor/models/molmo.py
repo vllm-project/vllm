@@ -1140,11 +1140,11 @@ class MolmoForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     def get_input_embeddings(
         self,
         input_ids: torch.Tensor,
-        vision_embeddings: Optional[NestedTensors] = None,
+        multimodal_embeddings: Optional[NestedTensors] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.model.get_input_embeddings(input_ids)
-        if vision_embeddings is not None:
-            inputs_embeds = inputs_embeds + vision_embeddings
+        if multimodal_embeddings is not None:
+            inputs_embeds = inputs_embeds + multimodal_embeddings
         return inputs_embeds
 
     def forward(

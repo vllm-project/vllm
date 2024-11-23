@@ -576,17 +576,17 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
     def get_input_embeddings(
         self,
         input_ids: torch.Tensor,
-        vision_embeddings: Optional[NestedTensors] = None,
+        multimodal_embeddings: Optional[NestedTensors] = None,
     ) -> torch.Tensor:
 
-        if vision_embeddings is None:
+        if multimodal_embeddings is None:
             return self.language_model.get_input_embeddings(input_ids)
 
         inputs_embeds = embed_multimodal(
             input_ids,
             self.config.image_token_index,
             self.language_model.model.get_input_embeddings,
-            vision_embeddings,
+            multimodal_embeddings,
         )
         return inputs_embeds
 

@@ -9,6 +9,7 @@ from vllm.utils import supports_kw
 
 if TYPE_CHECKING:
     from vllm.config import LoRAConfig, MultiModalConfig, SchedulerConfig
+    from vllm.multimodal.inputs import NestedTensors
     from vllm.sequence import IntermediateTensors
 
 logger = init_logger(__name__)
@@ -34,6 +35,18 @@ class SupportsMultiModal(Protocol):
         """
         Returns multimodal embeddings generated from multimodal kwargs 
         to be merged with text embeddings.
+        """
+        ...
+
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: Optional["NestedTensors"] = None,
+    ) -> torch.Tensor:
+        """
+        Returns the input embeddings merged from the text embeddings from 
+        input_ids and the multimodal embeddings generated from multimodal 
+        kwargs.
         """
         ...
 

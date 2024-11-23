@@ -545,14 +545,14 @@ class ChatGLMModel(nn.Module):
     def get_input_embeddings(
         self,
         input_ids: torch.Tensor,
-        vision_embeddings: Optional[NestedTensors] = None,
+        multimodal_embeddings: Optional[NestedTensors] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.embedding(input_ids)
-        if vision_embeddings is not None:
+        if multimodal_embeddings is not None:
             inputs_embeds = merge_glm_vision_embeddings(
                 input_ids=input_ids,
                 inputs_embeds=inputs_embeds,
-                vision_embeddings=vision_embeddings,
+                vision_embeddings=multimodal_embeddings,
                 boi_token_id=self.config.boi_token_id,
                 eoi_token_id=self.config.eoi_token_id)
         return inputs_embeds
