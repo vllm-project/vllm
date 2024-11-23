@@ -648,6 +648,13 @@ class MultiModalProcessor:
             matched_repls = [match.prompt_repl for match in text_matches]
 
         placeholders = self._find_placeholders(matched_repls, token_ids)
+        assert len(placeholders) == len(matched_repls), dict(
+            # Log this information for easier debugging
+            text=text,
+            token_ids=token_ids,
+            placeholders=placeholders,
+            matched_repls=matched_repls,
+        )
 
         return token_ids, text, placeholders
 
