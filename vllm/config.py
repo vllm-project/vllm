@@ -387,7 +387,7 @@ class ModelConfig:
         supported_quantization = QUANTIZATION_METHODS
         rocm_supported_quantization = [
             "awq", "gptq", "fp8", "compressed_tensors", "compressed-tensors",
-            "fbgemm_fp8"
+            "fbgemm_fp8", "gguf"
         ]
         optimized_quantization_methods = [
             "fp8", "marlin", "modelopt", "gptq_marlin_24", "gptq_marlin",

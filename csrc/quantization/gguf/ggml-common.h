@@ -1,7 +1,7 @@
 // copied from https://github.com/ggerganov/llama.cpp/blob/b2899/ggml-common.h
 #define QK_K 256
 #define K_QUANTS_PER_ITERATION 2
-#define WARP_SIZE 32
+#define WARP_SIZE_GGUF 32
 #define K_SCALE_SIZE 12
 #define CUDA_DEQUANTIZE_BLOCK_SIZE 256
 #define CUDA_QUANTIZE_BLOCK_SIZE 256
@@ -1111,5 +1111,20 @@ static __device__ __forceinline__ int __dp4a(const int a, const int b, int c) {
     c += va[0] * vb[0] + va[1] * vb[1] + va[2] * vb[2] + va[3] * vb[3];
 #endif
     return c;
+}
+
+static __device__ __forceinline__ uint32_t __vcmpeq4(const uint32_t a, const uint32_t b) {
+    uint32_t neq = a^b;
+    return !(neq & 0xff000000) * 0xff000000 |
+           !(neq & 0x00ff0000) * 0x00ff0000 |
+           !(neq & 0x0000ff00) * 0x0000ff00 |
+           !(neq & 0x000000ff) * 0x000000ff;
+}
+
+static __device__ __forceinline__ uint32_t __vsub4(const uint32_t a, const uint32_t b) {
+    return (static_cast<uint8_t>(((a & 0xff000000) >> 24) - ((b & 0xff000000) >> 24)) << 24) +
+           (static_cast<uint8_t>(((a & 0x00ff0000) >> 16) - ((b & 0x00ff0000) >> 16)) << 16) +
+           (static_cast<uint8_t>(((a & 0x0000ff00) >>  8) - ((b & 0x0000ff00) >>  8)) <<  8) +
+           (static_cast<uint8_t>(((a & 0x000000ff) >>  0) - ((b & 0x000000ff) >>  0)) <<  0);
 }
 #endif // defined(USE_ROCM)

@@ -10,7 +10,7 @@ static __device__ __forceinline__ void mul_mat_q(
 
     const int blocks_per_row_x = ncols_x / qk;
     const int blocks_per_col_y = nrows_y / QK8_1;
-    const int blocks_per_warp = WARP_SIZE / qi;
+    const int blocks_per_warp = WARP_SIZE_GGUF / qi;
 
     const int & ncols_dst = ncols_y;
 
@@ -27,10 +27,10 @@ static __device__ __forceinline__ void mul_mat_q(
 
     allocate_tiles(&tile_x_ql, &tile_x_dm, &tile_x_qh, &tile_x_sc);
 
-    __shared__ int    tile_y_qs[mmq_x * WARP_SIZE];
-    __shared__ half2  tile_y_ds[mmq_x * WARP_SIZE/QI8_1];
+    __shared__ int    tile_y_qs[mmq_x * WARP_SIZE_GGUF];
+    __shared__ half2  tile_y_ds[mmq_x * WARP_SIZE_GGUF/QI8_1];
 
-    float sum[mmq_y/WARP_SIZE][mmq_x/nwarps] = {{0.0f}};
+    float sum[mmq_y/WARP_SIZE_GGUF][mmq_x/nwarps] = {{0.0f}};
 
     for (int ib0 = 0; ib0 < blocks_per_row_x; ib0 += blocks_per_warp) {
 
@@ -39,26 +39,26 @@ static __device__ __forceinline__ void mul_mat_q(
 
 #pragma unroll
         for (int ir = 0; ir < qr; ++ir) {
-            const int kqs = ir*WARP_SIZE + threadIdx.x;
+            const int kqs = ir*WARP_SIZE_GGUF + threadIdx.x;
             const int kbxd = kqs / QI8_1;
 
 #pragma unroll
             for (int i = 0; i < mmq_x; i += nwarps) {
                 const int col_y_eff = min(col_y_0 + threadIdx.y + i, ncols_y-1); // to prevent out-of-bounds memory accesses
                 const block_q8_1 * by0 = &y[col_y_eff*blocks_per_col_y + ib0 * (qk/QK8_1) + kbxd];
-                const int index_y = (threadIdx.y + i) * WARP_SIZE + kqs % WARP_SIZE;
+                const int index_y = (threadIdx.y + i) * WARP_SIZE_GGUF + kqs % WARP_SIZE_GGUF;
                 tile_y_qs[index_y] = get_int_from_int8_aligned(by0->qs, threadIdx.x % QI8_1);
             }
 
 #pragma unroll
             for (int ids0 = 0; ids0 < mmq_x; ids0 += nwarps * QI8_1) {
-                const int ids = (ids0 + threadIdx.y * QI8_1 + threadIdx.x / (WARP_SIZE/QI8_1)) % mmq_x;
-                const int kby = threadIdx.x % (WARP_SIZE/QI8_1);
+                const int ids = (ids0 + threadIdx.y * QI8_1 + threadIdx.x / (WARP_SIZE_GGUF/QI8_1)) % mmq_x;
+                const int kby = threadIdx.x % (WARP_SIZE_GGUF/QI8_1);
                 const int col_y_eff = min(col_y_0 + ids, ncols_y-1);
 
                 // if the sum is not needed it's faster to transform the scale to f32 ahead of time
-                const half2 * dsi_src = &y[col_y_eff*blocks_per_col_y + ib0 * (qk/QK8_1) + ir*(WARP_SIZE/QI8_1) + kby].ds;
-                half2       * dsi_dst = &tile_y_ds[ids * (WARP_SIZE/QI8_1) + kby];
+                const half2 * dsi_src = &y[col_y_eff*blocks_per_col_y + ib0 * (qk/QK8_1) + ir*(WARP_SIZE_GGUF/QI8_1) + kby].ds;
+                half2       * dsi_dst = &tile_y_ds[ids * (WARP_SIZE_GGUF/QI8_1) + kby];
                 if (need_sum) {
                     *dsi_dst = *dsi_src;
                 } else {
@@ -70,12 +70,12 @@ static __device__ __forceinline__ void mul_mat_q(
             __syncthreads();
 
 // #pragma unroll // unrolling this loop causes too much register pressure
-            for (int k = ir*WARP_SIZE/qr; k < (ir+1)*WARP_SIZE/qr; k += vdr) {
+            for (int k = ir*WARP_SIZE_GGUF/qr; k < (ir+1)*WARP_SIZE_GGUF/qr; k += vdr) {
 #pragma unroll
                 for (int j = 0; j < mmq_x; j += nwarps) {
 #pragma unroll
-                    for (int i = 0; i < mmq_y; i += WARP_SIZE) {
-                        sum[i/WARP_SIZE][j/nwarps] += vec_dot(
+                    for (int i = 0; i < mmq_y; i += WARP_SIZE_GGUF) {
+                        sum[i/WARP_SIZE_GGUF][j/nwarps] += vec_dot(
                             tile_x_ql, tile_x_dm, tile_x_qh, tile_x_sc, tile_y_qs, tile_y_ds,
                             threadIdx.x + i, threadIdx.y + j, k);
                     }
@@ -93,12 +93,12 @@ static __device__ __forceinline__ void mul_mat_q(
         }
 
 #pragma unroll
-        for (int i = 0; i < mmq_y; i += WARP_SIZE) {
+        for (int i = 0; i < mmq_y; i += WARP_SIZE_GGUF) {
             const int row_dst = row_dst_0 + threadIdx.x + i;
             if (row_dst >= nrows_dst) {
                 continue;
             }
-            dst[col_dst*nrows_dst + row_dst] = __float2half(sum[i/WARP_SIZE][j/nwarps]);
+            dst[col_dst*nrows_dst + row_dst] = __float2half(sum[i/WARP_SIZE_GGUF][j/nwarps]);
         }
     }
 }
@@ -115,7 +115,7 @@ static __device__ __forceinline__ void mul_mat_q(
 
 template <bool need_check> static __global__ void
 #if defined(USE_ROCM)
-__launch_bounds__(WARP_SIZE*NWARPS_Q4_0, 2)
+__launch_bounds__(WARP_SIZE_GGUF*NWARPS_Q4_0, 2)
 #endif
 mul_mat_q4_0(
     const void * __restrict__ vx, const void * __restrict__ vy, half * __restrict__ dst,
@@ -140,7 +140,7 @@ static void ggml_mul_mat_q4_0_q8_1_cuda(
     const int block_num_x = (nrows_x + mmq_y - 1) / mmq_y;
     const int block_num_y = (ncols_y + mmq_x - 1) / mmq_x;
     const dim3 block_nums(block_num_x, block_num_y, 1);
-    const dim3 block_dims(WARP_SIZE, nwarps, 1);
+    const dim3 block_dims(WARP_SIZE_GGUF, nwarps, 1);
 
     if (nrows_x % mmq_y == 0) {
         const bool need_check = false;
@@ -165,7 +165,7 @@ static void ggml_mul_mat_q4_0_q8_1_cuda(
 
 template <bool need_check> static __global__ void
 #if defined(USE_ROCM)
-__launch_bounds__(WARP_SIZE*NWARPS_Q4_1, 2)
+__launch_bounds__(WARP_SIZE_GGUF*NWARPS_Q4_1, 2)
 #endif
 mul_mat_q4_1(
     const void * __restrict__ vx, const void * __restrict__ vy, half * __restrict__ dst,
@@ -190,7 +190,7 @@ static void ggml_mul_mat_q4_1_q8_1_cuda(
     const int block_num_x = (nrows_x + mmq_y - 1) / mmq_y;
     const int block_num_y = (ncols_y + mmq_x - 1) / mmq_x;
     const dim3 block_nums(block_num_x, block_num_y, 1);
-    const dim3 block_dims(WARP_SIZE, nwarps, 1);
+    const dim3 block_dims(WARP_SIZE_GGUF, nwarps, 1);
 
     if (nrows_x % mmq_y == 0) {
         const bool need_check = false;
@@ -215,7 +215,7 @@ static void ggml_mul_mat_q4_1_q8_1_cuda(
 
 template <bool need_check> static __global__ void
 #if defined(USE_ROCM)
-__launch_bounds__(WARP_SIZE*NWARPS_Q5_0, 2)
+__launch_bounds__(WARP_SIZE_GGUF*NWARPS_Q5_0, 2)
 #endif
 mul_mat_q5_0(
     const void * __restrict__ vx, const void * __restrict__ vy, half * __restrict__ dst,
@@ -240,7 +240,7 @@ static void ggml_mul_mat_q5_0_q8_1_cuda(
     const int block_num_x = (nrows_x + mmq_y - 1) / mmq_y;
     const int block_num_y = (ncols_y + mmq_x - 1) / mmq_x;
     const dim3 block_nums(block_num_x, block_num_y, 1);
-    const dim3 block_dims(WARP_SIZE, nwarps, 1);
+    const dim3 block_dims(WARP_SIZE_GGUF, nwarps, 1);
 
     if (nrows_x % mmq_y == 0) {
         const bool need_check = false;
@@ -265,7 +265,7 @@ static void ggml_mul_mat_q5_0_q8_1_cuda(
 
 template <bool need_check> static __global__ void
 #if defined(USE_ROCM)
-__launch_bounds__(WARP_SIZE*NWARPS_Q5_1, 2)
+__launch_bounds__(WARP_SIZE_GGUF*NWARPS_Q5_1, 2)
 #endif
 mul_mat_q5_1(
     const void * __restrict__ vx, const void * __restrict__ vy, half * __restrict__ dst,
@@ -289,7 +289,7 @@ static void ggml_mul_mat_q5_1_q8_1_cuda(
     const int block_num_x = (nrows_x + mmq_y - 1) / mmq_y;
     const int block_num_y = (ncols_y + mmq_x - 1) / mmq_x;
     const dim3 block_nums(block_num_x, block_num_y, 1);
-    const dim3 block_dims(WARP_SIZE, nwarps, 1);
+    const dim3 block_dims(WARP_SIZE_GGUF, nwarps, 1);
 
     if (nrows_x % mmq_y == 0) {
         const bool need_check = false;
@@ -314,7 +314,7 @@ static void ggml_mul_mat_q5_1_q8_1_cuda(
 
 template <bool need_check> static __global__ void
 #if defined(USE_ROCM)
-__launch_bounds__(WARP_SIZE*NWARPS_Q8_0, 2)
+__launch_bounds__(WARP_SIZE_GGUF*NWARPS_Q8_0, 2)
 #endif
 mul_mat_q8_0(
     const void * __restrict__ vx, const void * __restrict__ vy, half * __restrict__ dst,
@@ -338,7 +338,7 @@ static void ggml_mul_mat_q8_0_q8_1_cuda(
     const int block_num_x = (nrows_x + mmq_y - 1) / mmq_y;
     const int block_num_y = (ncols_y + mmq_x - 1) / mmq_x;
     const dim3 block_nums(block_num_x, block_num_y, 1);
-    const dim3 block_dims(WARP_SIZE, nwarps, 1);
+    const dim3 block_dims(WARP_SIZE_GGUF, nwarps, 1);
 
     if (nrows_x % mmq_y == 0) {
         const bool need_check = false;
@@ -363,7 +363,7 @@ static void ggml_mul_mat_q8_0_q8_1_cuda(
 
 template <bool need_check> static __global__ void
 #if defined(USE_ROCM)
-__launch_bounds__(WARP_SIZE*NWARPS_Q2_K, 2)
+__launch_bounds__(WARP_SIZE_GGUF*NWARPS_Q2_K, 2)
 #endif
 mul_mat_q2_K(
     const void * __restrict__ vx, const void * __restrict__ vy, half * __restrict__ dst,
@@ -387,7 +387,7 @@ static void ggml_mul_mat_q2_K_q8_1_cuda(
     const int block_num_x = (nrows_x + mmq_y - 1) / mmq_y;
     const int block_num_y = (ncols_y + mmq_x - 1) / mmq_x;
     const dim3 block_nums(block_num_x, block_num_y, 1);
-    const dim3 block_dims(WARP_SIZE, nwarps, 1);
+    const dim3 block_dims(WARP_SIZE_GGUF, nwarps, 1);
 
     if (nrows_x % mmq_y == 0) {
         const bool need_check = false;
@@ -412,7 +412,7 @@ static void ggml_mul_mat_q2_K_q8_1_cuda(
 
 template <bool need_check> static __global__ void
 #if defined(USE_ROCM)
-__launch_bounds__(WARP_SIZE*NWARPS_Q3_K, 2)
+__launch_bounds__(WARP_SIZE_GGUF*NWARPS_Q3_K, 2)
 #endif
 mul_mat_q3_K(
     const void * __restrict__ vx, const void * __restrict__ vy, half * __restrict__ dst,
@@ -438,7 +438,7 @@ static void ggml_mul_mat_q3_K_q8_1_cuda(
     const int block_num_x = (nrows_x + mmq_y - 1) / mmq_y;
     const int block_num_y = (ncols_y + mmq_x - 1) / mmq_x;
     const dim3 block_nums(block_num_x, block_num_y, 1);
-    const dim3 block_dims(WARP_SIZE, nwarps, 1);
+    const dim3 block_dims(WARP_SIZE_GGUF, nwarps, 1);
 
     if (nrows_x % mmq_y == 0) {
         const bool need_check = false;
@@ -463,7 +463,7 @@ static void ggml_mul_mat_q3_K_q8_1_cuda(
 
 template <bool need_check> static __global__ void
 #if defined(USE_ROCM)
-__launch_bounds__(WARP_SIZE*NWARPS_Q4_K, 2)
+__launch_bounds__(WARP_SIZE_GGUF*NWARPS_Q4_K, 2)
 #endif
 mul_mat_q4_K(
     const void * __restrict__ vx, const void * __restrict__ vy, half * __restrict__ dst,
@@ -487,7 +487,7 @@ static void ggml_mul_mat_q4_K_q8_1_cuda(
     const int block_num_x = (nrows_x + mmq_y - 1) / mmq_y;
     const int block_num_y = (ncols_y + mmq_x - 1) / mmq_x;
     const dim3 block_nums(block_num_x, block_num_y, 1);
-    const dim3 block_dims(WARP_SIZE, nwarps, 1);
+    const dim3 block_dims(WARP_SIZE_GGUF, nwarps, 1);
 
     if (nrows_x % mmq_y == 0) {
         const bool need_check = false;
@@ -512,7 +512,7 @@ static void ggml_mul_mat_q4_K_q8_1_cuda(
 
 template <bool need_check> static __global__ void
 #if defined(USE_ROCM)
-__launch_bounds__(WARP_SIZE*NWARPS_Q5_K, 2)
+__launch_bounds__(WARP_SIZE_GGUF*NWARPS_Q5_K, 2)
 #endif
 mul_mat_q5_K(
     const void * __restrict__ vx, const void * __restrict__ vy, half * __restrict__ dst,
@@ -537,7 +537,7 @@ static void ggml_mul_mat_q5_K_q8_1_cuda(
     const int block_num_x = (nrows_x + mmq_y - 1) / mmq_y;
     const int block_num_y = (ncols_y + mmq_x - 1) / mmq_x;
     const dim3 block_nums(block_num_x, block_num_y, 1);
-    const dim3 block_dims(WARP_SIZE, nwarps, 1);
+    const dim3 block_dims(WARP_SIZE_GGUF, nwarps, 1);
 
     if (nrows_x % mmq_y == 0) {
         const bool need_check = false;
@@ -562,7 +562,7 @@ static void ggml_mul_mat_q5_K_q8_1_cuda(
 
 template <bool need_check> static __global__ void
 #if defined(USE_ROCM)
-__launch_bounds__(WARP_SIZE*NWARPS_Q6_K, 2)
+__launch_bounds__(WARP_SIZE_GGUF*NWARPS_Q6_K, 2)
 #endif
 mul_mat_q6_K(
     const void * __restrict__ vx, const void * __restrict__ vy, half * __restrict__ dst,
@@ -586,7 +586,7 @@ static void ggml_mul_mat_q6_K_q8_1_cuda(
     const int block_num_x = (nrows_x + mmq_y - 1) / mmq_y;
     const int block_num_y = (ncols_y + mmq_x - 1) / mmq_x;
     const dim3 block_nums(block_num_x, block_num_y, 1);
-    const dim3 block_dims(WARP_SIZE, nwarps, 1);
+    const dim3 block_dims(WARP_SIZE_GGUF, nwarps, 1);
 
     if (nrows_x % mmq_y == 0) {
         const bool need_check = false;
