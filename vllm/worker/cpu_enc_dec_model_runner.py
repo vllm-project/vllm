@@ -35,6 +35,7 @@ class EncoderDecoderModelInputForCPU(ModelInputForCPUWithSamplingMetadata):
             "input_positions": self.input_positions,
             "encoder_input_tokens": self.encoder_input_tokens,
             "encoder_input_positions": self.encoder_input_positions,
+            "multi_modal_kwargs": self.multi_modal_kwargs,
         }
         _add_attn_metadata_broadcastable_dict(tensor_dict, self.attn_metadata)
         _add_sampling_metadata_broadcastable_dict(tensor_dict,
