@@ -23,10 +23,6 @@ from vllm.spec_decode.batch_expansion import BatchExpansionTop1Scorer
 
 if current_platform.is_cuda_alike():
     from vllm.spec_decode.draft_model_runner import TP1DraftModelRunner
-elif current_platform.is_cpu():
-    from vllm.spec_decode.cpu_draft_model_runner import (CPUTP1DraftModelRunner
-                                                         as
-                                                         TP1DraftModelRunner)
 
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeScorer, SpeculativeScores)
@@ -44,7 +40,8 @@ from vllm.spec_decode.util import (Timer, create_logprobs_output,
                                    get_all_num_logprobs,
                                    get_sampled_token_logprobs, nvtx_range,
                                    split_batch_by_proposal_len)
-from vllm.worker.worker_base import LoraNotSupportedWorkerBase, WorkerBase, WorkerWrapperBase
+from vllm.worker.worker_base import (LoraNotSupportedWorkerBase, WorkerBase,
+                                     WorkerWrapperBase)
 
 logger = init_logger(__name__)
 
@@ -60,7 +57,11 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
     draft_worker_kwargs = kwargs.copy()
 
     kwargs["model_runner_cls"] = TargetModelRunner
-    target_worker = WorkerWrapperBase(*args, **kwargs)
+    target_worker_config = copy.deepcopy(vllm_config)
+    target_worker_config.parallel_config.worker_cls =\
+        target_worker_config.parallel_config.actual_worker_cls
+    target_worker = WorkerWrapperBase(vllm_config=target_worker_config)
+    target_worker.init_worker(*args, **kwargs)
     # Set the disable_logprobs variable in the TargetModelRunner instance
     # as per its value specified in the SpeculativeConfig.
     target_worker.model_runner.disable_logprobs =\
@@ -72,6 +73,8 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
         draft_worker_config.model_config,
         vllm_config.load_config,
     )
+    speculative_config.draft_parallel_config.worker_cls =\
+        draft_worker_config.parallel_config.actual_worker_cls
     draft_worker_config.parallel_config = speculative_config.draft_parallel_config  # noqa
     # TODO allow draft-model specific load config.
 
@@ -167,8 +170,9 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                 proposer_worker = MedusaWorker(**draft_worker_kwargs)
             else:
                 if draft_tp == 1:
-                    draft_worker_kwargs[
-                        "model_runner_cls"] = TP1DraftModelRunner
+                    if current_platform.is_cuda_alike():
+                        draft_worker_kwargs[
+                            "model_runner_cls"] = TP1DraftModelRunner
                 else:
                     if draft_model_config.hf_config.model_type == "eagle":
                         raise NotImplementedError(
