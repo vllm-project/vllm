@@ -6,7 +6,6 @@ import torch
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.utils import GiB_bytes
 
 from .interface import Platform, PlatformEnum, _Backend
 
@@ -51,6 +50,8 @@ class OpenVinoPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+        from vllm.utils import GiB_bytes
+
         parallel_config = vllm_config.parallel_config
         assert (
             parallel_config.world_size == 1
