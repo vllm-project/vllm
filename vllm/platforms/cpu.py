@@ -20,6 +20,7 @@ logger = init_logger(__name__)
 class CpuPlatform(Platform):
     _enum = PlatformEnum.CPU
     device_type: str = "cpu"
+    dispatch_key: str = "CPU"
 
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
@@ -84,3 +85,5 @@ class CpuPlatform(Platform):
                             "distributed executor backend."),
                            parallel_config.distributed_executor_backend)
             parallel_config.distributed_executor_backend = "mp"
+        if parallel_config.worker_cls == "auto":
+            parallel_config.worker_cls = "vllm.worker.cpu_worker.CPUWorker"
