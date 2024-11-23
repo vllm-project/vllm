@@ -3,7 +3,7 @@ import numpy as np
 
 from typing import Dict, TypeAlias, Optional, List, Tuple
 
-from vllm.v1.worker.request_batch_base import RequestBatchAbstract, BatchInputs
+from vllm.v1.worker.request_batch_base import RequestBatchAbstract
 from vllm.v1.worker.request_batch import RequestBatch
 from vllm.v1.worker.cached_request_state import CachedRequestState
 from vllm.v1.core.scheduler import  RunningRequestData
