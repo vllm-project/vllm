@@ -53,6 +53,10 @@ def test_models(
     if backend == "FLASHINFER" and current_platform.is_rocm():
         pytest.skip("Flashinfer does not support ROCm/HIP.")
 
+    if backend == "XFORMERS" and model == "google/gemma-2-2b-it":
+        pytest.skip(
+            "XFORMERS does not support gemma2 with full context length.")
+
     os.environ["VLLM_ATTENTION_BACKEND"] = backend
 
     # 5042 tokens for gemma2
