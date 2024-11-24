@@ -114,7 +114,7 @@ class EngineArgs:
     # NOTE(kzawora): default block size for Gaudi should be 128
     # smaller sizes still work, but very inefficiently
     block_size: int = 16 if not current_platform.is_hpu() else 128
-    enable_prefix_caching: bool = bool(envs.VLLM_USE_V1)
+    enable_prefix_caching: Optional[bool] = None
     disable_sliding_window: bool = False
     use_v2_block_manager: bool = True
     swap_space: float = 4  # GiB
@@ -196,6 +196,11 @@ class EngineArgs:
     def __post_init__(self):
         if not self.tokenizer:
             self.tokenizer = self.model
+
+        # Override the default value of enable_prefix_caching if it's not set
+        # by user.
+        if self.enable_prefix_caching is None:
+            self.enable_prefix_caching = bool(envs.VLLM_USE_V1)
 
         # Setup plugins
         from vllm.plugins import load_general_plugins

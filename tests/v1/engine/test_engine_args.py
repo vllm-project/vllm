@@ -16,7 +16,8 @@ def test_defaults():
     engine_args = EngineArgs(model="facebook/opt-125m")
 
     # Assert V1 defaults
-    assert engine_args.enable_prefix_caching
+    assert (engine_args.enable_prefix_caching
+            ), "V1 turns on prefix caching by default"
 
 
 def test_defaults_with_usage_context():
