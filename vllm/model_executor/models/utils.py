@@ -476,10 +476,11 @@ def set_cpu_offload_max_bytes(max_bytes: int) -> None:
     _CPU_OFFLOAD_MAX_BYTES = max_bytes
 
 
-def maybe_offload_to_cpu(module: torch.nn.Module) -> torch.nn.Module:
+def maybe_offload_to_cpu(module: torch.nn.Module):
 
     global _CPU_OFFLOAD_MAX_BYTES, _CPU_OFFLOAD_BYTES
-    for p in module.parameters():
+    named_params = list(module.named_parameters())
+    for name, p in named_params:
         if p.data.device == torch.device("cpu"):
             continue
         if _CPU_OFFLOAD_BYTES >= _CPU_OFFLOAD_MAX_BYTES:
@@ -489,9 +490,8 @@ def maybe_offload_to_cpu(module: torch.nn.Module) -> torch.nn.Module:
         # offload the parameter to CPU
         # it uses tensor subclasses so that whenever the tensor is used
         # in some pytorch ops, it will be automatically moved to the device
-        p.data = OffloadedTensor(p.data)
-
-    return module
+        delattr(module, name)
+        module.register_parameter(name, nn.Parameter(OffloadedTensor(p.data)))
 
 
 def make_layers(
@@ -509,7 +509,7 @@ def make_layers(
                                             get_pp_group().world_size)
     modules = torch.nn.ModuleList(
         [PPMissingLayer() for _ in range(start_layer)] + [
-            maybe_offload_to_cpu(layer_fn(prefix=f"{prefix}.{idx}"))
+            layer_fn(prefix=f"{prefix}.{idx}").apply(maybe_offload_to_cpu)
             for idx in range(start_layer, end_layer)
         ] + [PPMissingLayer() for _ in range(end_layer, num_hidden_layers)])
     return start_layer, end_layer, modules
