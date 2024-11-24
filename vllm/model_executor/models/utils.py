@@ -479,7 +479,9 @@ def set_cpu_offload_max_bytes(max_bytes: int) -> None:
 def maybe_offload_to_cpu(module: torch.nn.Module):
 
     global _CPU_OFFLOAD_MAX_BYTES, _CPU_OFFLOAD_BYTES
-    named_params = list(module.named_parameters())
+    # only process parameters of the module
+    # this function is called recursively on the module's children
+    named_params = list(module._parameters.items())
     for name, p in named_params:
         if p.data.device == torch.device("cpu"):
             continue
