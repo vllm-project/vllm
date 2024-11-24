@@ -317,18 +317,13 @@ class ArcticDecoderLayer(nn.Module):
         )
 
         self.input_layernorm = RMSNorm(config.hidden_size,
-                                       eps=config.rms_norm_eps,
-                                       prefix=f"{prefix}.input_layernorm")
-        self.post_attention_layernorm = RMSNorm(
-            config.hidden_size,
-            eps=config.rms_norm_eps,
-            prefix=f"{prefix}.post_attention_layernorm")
+                                       eps=config.rms_norm_eps)
+        self.post_attention_layernorm = RMSNorm(config.hidden_size,
+                                                eps=config.rms_norm_eps)
 
         if self.use_residual:
-            self.residual_layernorm = RMSNorm(
-                config.hidden_size,
-                eps=config.rms_norm_eps,
-                prefix=f"{prefix}.residual_layernorm")
+            self.residual_layernorm = RMSNorm(config.hidden_size,
+                                              eps=config.rms_norm_eps)
             self.residual_mlp = ArcticMLP(config,
                                           is_residual_mlp=True,
                                           reduce_results=False,
