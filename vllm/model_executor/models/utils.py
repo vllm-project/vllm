@@ -278,7 +278,7 @@ class OffloadedTensor(torch.Tensor):
             # as the original data
             return args[0]
         if str(func) in ["aten.copy_.default", "aten.slice.Tensor"]:
-            # inplace operation on the offloaded tensor
+            # inplace or view operation on the offloaded tensor
             # TODO: support more inplace operations if needed
             new_args = (x.offloaded_tensor if isinstance(x, cls) else x
                         for x in args)
@@ -287,6 +287,13 @@ class OffloadedTensor(torch.Tensor):
                 for k, v in kwargs.items()
             }
             return OffloadedTensor(func(*new_args, **new_kwargs))
+
+        if str(func) == "aten.uniform_.default":
+            # the generator will be on the device
+            # and the offloaded tensor will be on the CPU,
+            # so we cannot support this operation.
+            # we need to call `to()` and then `copy_()`
+            raise ValueError("Cannot perform uniform_ on an offloaded tensor")
 
         # for the rest of the operations, we will load the offloaded tensor
         # on the fly and perform the operation on the device
