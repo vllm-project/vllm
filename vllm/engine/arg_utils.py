@@ -84,7 +84,7 @@ def nullable_kvs(val: str) -> Optional[Mapping[str, int]]:
 
 
 @dataclass
-class _EngineArgs:
+class EngineArgs:
     """Arguments for vLLM engine."""
     model: str = 'facebook/opt-125m'
     served_model_name: Optional[Union[str, List[str]]] = None
@@ -114,7 +114,7 @@ class _EngineArgs:
     # NOTE(kzawora): default block size for Gaudi should be 128
     # smaller sizes still work, but very inefficiently
     block_size: int = 16 if not current_platform.is_hpu() else 128
-    enable_prefix_caching: bool = False
+    enable_prefix_caching: bool = bool(envs.VLLM_USE_V1)
     disable_sliding_window: bool = False
     use_v2_block_manager: bool = True
     swap_space: float = 4  # GiB
@@ -940,6 +940,9 @@ class _EngineArgs:
     def create_engine_config(self,
                              usage_context: Optional[UsageContext] = None
                              ) -> VllmConfig:
+        if envs.VLLM_USE_V1:
+            self._override_v1_args(usage_context)
+
         # gguf file needs a specific model loader and doesn't use hf_repo
         if check_gguf_file(self.model):
             self.quantization = self.load_format = "gguf"
@@ -1149,7 +1152,7 @@ class _EngineArgs:
             or "all" in detailed_trace_modules,
         )
 
-        return VllmConfig(
+        config = VllmConfig(
             model_config=model_config,
             cache_config=cache_config,
             parallel_config=parallel_config,
@@ -1164,25 +1167,15 @@ class _EngineArgs:
             compilation_config=self.compilation_config,
         )
 
+        if envs.VLLM_USE_V1:
+            config = self._override_v1_configs(config)
+        return config
 
-@dataclass
-class EngineArgsV1(_EngineArgs):
-    """Arguments for vLLM engine v1."""
-
-    # V1's default values that differ from the default values in EngineArgs.
-    # This allows to switch between V1 and V0's default behaviour transparently.
-    enable_prefix_caching: bool = True
-
-    @staticmethod
-    def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
-        parser = _EngineArgs.add_cli_args(parser)
-        return parser
-
-    def create_engine_config(self,
-                             usage_context: Optional[UsageContext] = None
-                             ) -> VllmConfig:
-        assert (usage_context
-                is not None), "usage_context must be provided for EngineArgsV1"
+    def _override_v1_args(self, usage_context: UsageContext):
+        """
+        Override the EngineArgs's args based on the usage context for V1.
+        """
+        assert envs.VLLM_USE_V1, "V1 is not enabled"
 
         if self.max_num_batched_tokens is None:
             # When no user override, set the default values based on the
@@ -1198,8 +1191,11 @@ class EngineArgsV1(_EngineArgs):
                 self.max_num_seqs = 1024
                 self.max_num_batched_tokens = 2048
 
-        engine_config = super().create_engine_config(usage_context)
-
+    def _override_v1_configs(self, engine_config: VllmConfig):
+        """
+        Override the EngineConfig's configs based on the usage context for V1.
+        """
+        assert envs.VLLM_USE_V1, "V1 is not enabled"
         # TODO (ywang96): Enable APC by default when VLM supports it.
         if engine_config.model_config.is_multimodal_model:
             logger.warning(
@@ -1207,14 +1203,6 @@ class EngineArgsV1(_EngineArgs):
                 "models and has been disabled.")
             engine_config.cache_config.enable_prefix_caching = False
         return engine_config
-
-
-EngineArgs = _EngineArgs  # type: ignore
-
-if envs.VLLM_USE_V1:
-    # Overwrite EngineArgs to use EngineArgsV1
-    # This has to be done before `AsyncEngineArgs` is imported.
-    EngineArgs = EngineArgsV1  # type: ignore
 
 
 @dataclass
