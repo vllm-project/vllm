@@ -1,4 +1,3 @@
-# coding=utf-8
 # Adapted from
 # https://github.com/huggingface/transformers/blob/v4.28.0/src/transformers/models/llama/modeling_llama.py
 # Copyright 2023 DeciAI Research Team. All rights reserved.
@@ -23,16 +22,15 @@
 # limitations under the License.
 """Inference-only DeciLM model compatible with HuggingFace weights."""
 
-from typing import Optional
+from typing import Iterable, Set, Tuple
 
 import torch
-from transformers import PretrainedConfig
 
-from vllm.config import LoRAConfig
-from vllm.model_executor.layers.linear import LinearMethodBase
+from vllm.config import VllmConfig
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.llama import LlamaForCausalLM
-from vllm.model_executor.weight_utils import (default_weight_loader,
-                                              hf_model_weights_iterator)
+
+from .utils import is_pp_missing_parameter
 
 
 class DeciLMForCausalLM(LlamaForCausalLM):
@@ -41,7 +39,7 @@ class DeciLMForCausalLM(LlamaForCausalLM):
     Based on the llama executor.
 
     The main difference is that DeciLM uses Variable Grouped Query Attention.
-    The constant number of GQA heads in the decoder is overriden with a value
+    The constant number of GQA heads in the decoder is overridden with a value
     per layer.
 
     Usually, in the HuggingFace implementation, instead of
@@ -53,23 +51,14 @@ class DeciLMForCausalLM(LlamaForCausalLM):
     instead.
     """
 
-    def __init__(
-        self,
-        config: Optional[PretrainedConfig] = None,
-        linear_method: Optional[LinearMethodBase] = None,
-        lora_config: Optional[LoRAConfig] = None,
-    ) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        config = vllm_config.model_config.hf_config
         config.num_key_value_heads = max(config.num_key_value_heads_per_layer)
         delattr(config, "num_key_value_heads_per_layer")
-        super().__init__(config=config,
-                         linear_method=linear_method,
-                         lora_config=lora_config)
+        super().__init__(vllm_config=vllm_config)
 
-    def load_weights(self,
-                     model_name_or_path: str,
-                     cache_dir: Optional[str] = None,
-                     load_format: str = "auto",
-                     revision: Optional[str] = None):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -79,8 +68,8 @@ class DeciLMForCausalLM(LlamaForCausalLM):
             ("gate_up_proj", "up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
-        for name, loaded_weight in hf_model_weights_iterator(
-                model_name_or_path, cache_dir, load_format, revision):
+        loaded_params: Set[str] = set()
+        for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
 
@@ -94,6 +83,8 @@ class DeciLMForCausalLM(LlamaForCausalLM):
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
+                if is_pp_missing_parameter(name, self):
+                    continue
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
@@ -102,10 +93,14 @@ class DeciLMForCausalLM(LlamaForCausalLM):
                 # Skip loading extra bias for GPTQ models.
                 if name.endswith(".bias") and name not in params_dict:
                     continue
+                if is_pp_missing_parameter(name, self):
+                    continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params
 
     def _degroup_weight(self, loaded_weight: torch.Tensor) -> torch.Tensor:
         hidden_size = self.config.hidden_size
