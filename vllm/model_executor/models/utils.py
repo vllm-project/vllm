@@ -17,7 +17,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MultiModalPlaceholderMap, NestedTensors
 from vllm.platforms import _Backend, current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.utils import is_pin_memory_available
+from vllm.utils import is_pin_memory_available, weak_ref_tensor
 
 logger = init_logger(__name__)
 
@@ -237,6 +237,9 @@ class OffloadedTensor(torch.Tensor):
     def __new__(cls, elem, *, requires_grad=None):
         # the wrapped tensor will have the same
         # metadata as the original tensor
+        if elem.device != torch.device("cpu"):
+            # do not hold a strong reference to the tensor
+            elem = weak_ref_tensor(elem)
         if requires_grad is None:
             return super().__new__(cls, elem)
         else:
