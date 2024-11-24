@@ -17,6 +17,7 @@ logger = init_logger(__name__)
 class XPUPlatform(Platform):
     _enum = PlatformEnum.XPU
     device_type: str = "xpu"
+    dispatch_key: str = "XPU"
 
     @classmethod
     def get_default_attn_backend(cls, selected_backend: _Backend) -> _Backend:

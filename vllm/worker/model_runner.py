@@ -1503,7 +1503,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         self._update_inputs_to_capture_for_enc_dec_model(
                             capture_inputs)
 
-                    with set_forward_context(attn_metadata):
+                    with set_forward_context(attn_metadata, self.vllm_config):
                         graph_runner.capture(**capture_inputs)
                     self.graph_memory_pool = graph_runner.graph.pool()
                     self.graph_runners[virtual_engine][batch_size] = (
@@ -1668,7 +1668,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             model_forward_start.record()
 
         if not bypass_model_exec:
-            with set_forward_context(model_input.attn_metadata):
+            with set_forward_context(model_input.attn_metadata, self.vllm_config):
                 hidden_or_intermediate_states = model_executable(
                     input_ids=model_input.input_tokens,
                     positions=model_input.input_positions,
@@ -1676,7 +1676,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
                     attn_metadata=model_input.attn_metadata,
                     intermediate_tensors=intermediate_tensors,
                     **MultiModalKwargs.as_kwargs(multi_modal_kwargs,
-                                                 device=self.device),
+                                                device=self.device),
                     **seqlen_agnostic_kwargs)
 
         if (self.observability_config is not None
