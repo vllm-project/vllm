@@ -760,7 +760,7 @@ class ChatGLMForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP,
         config = vllm_config.model_config.hf_config
         # Initialize VL
         if hasattr(config, "visual"):
-            return ChatGLM(vllm_config=vllm_config, prefix=prefix)
+            return ChatGLMV(vllm_config=vllm_config, prefix=prefix)
         # Initialize LLM
         else:
-            return ChatGLMV(vllm_config=vllm_config, prefix=prefix)
+            return ChatGLM(vllm_config=vllm_config, prefix=prefix)

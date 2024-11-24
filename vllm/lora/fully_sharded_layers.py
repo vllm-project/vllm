@@ -44,6 +44,11 @@ class ColumnParallelLinearWithShardedLoRA(ColumnParallelLinearWithLoRA):
     Based on S-LoRA, slicing happens along the rank dim.
     """
 
+    # For all LoRA layers where the `base_layer` is `ColumnParallelLinear`,
+    # their `lora_a` and `lora_b` have different sharding patterns. After
+    # completing the `lora_a` GEMM , a gather operation is performed.
+    # Therefore, the sharding of `lora_a` only needs to correspond with the
+    # gather operation.
     def slice_lora_a(self, lora_a: torch.Tensor) -> torch.Tensor:
         tp_rank = get_tensor_model_parallel_rank()
         shard_size = self.lora_a_stacked.shape[2]
