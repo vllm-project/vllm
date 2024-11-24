@@ -121,6 +121,7 @@ class Olmo1124Attention(nn.Module):
             num_kv_heads=self.num_kv_heads,
             cache_config=vllm_config.cache_config,
             quant_config=vllm_config.quant_config,
+            prefix=prefix,
         )
 
         # Attention output projection.
