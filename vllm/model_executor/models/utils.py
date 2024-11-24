@@ -260,6 +260,10 @@ class OffloadedTensor(torch.Tensor):
 
     @classmethod
     def __torch_dispatch__(cls, func, types, args=(), kwargs=None):
+        # `nn.Parameter(data)` will call `data.detach()`
+        # and make sure the returned data type is the same as the original data
+        if str(func) == "aten.detach.default":
+            return args[0]
         if kwargs is None:
             kwargs = {}
         new_args = (x.load() if isinstance(x, cls) else x for x in args)
