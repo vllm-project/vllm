@@ -244,6 +244,12 @@ class OffloadedTensor(torch.Tensor):
 
     def __init__(self, elem):
         super().__init__()
+
+        if elem.device == torch.device("cpu"):
+            # no need to offload the tensor
+            self.offloaded_tensor = elem
+            return
+
         # use pin_memory if possible, which helps cudagraph capture speed
         pin_memory = is_pin_memory_available()
         # `torch.empty_like` does not support `pin_memory` argument
@@ -268,7 +274,7 @@ class OffloadedTensor(torch.Tensor):
             # and assert the returned data type is the same
             # as the original data
             return args[0]
-        if str(func) == "aten.copy_.default":
+        if str(func) in ["aten.copy_.default", "aten.slice.Tensor"]:
             # inplace operation on the offloaded tensor
             # TODO: support more inplace operations if needed
             new_args = (x.offloaded_tensor if isinstance(x, cls) else x
@@ -277,7 +283,7 @@ class OffloadedTensor(torch.Tensor):
                 k: v.offloaded_tensor if isinstance(v, cls) else v
                 for k, v in kwargs.items()
             }
-            return func(*new_args, **new_kwargs)
+            return OffloadedTensor(func(*new_args, **new_kwargs))
 
         # for the rest of the operations, we will load the offloaded tensor
         # on the fly and perform the operation on the device
