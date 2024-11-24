@@ -38,41 +38,68 @@ For instance, vLLM's `OPT model <https://github.com/vllm-project/vllm/blob/main/
     When copying the model code, make sure to review and adhere to the code's copyright and licensing terms.
 
 
-2. Rewrite the :code:`forward` methods
+2. Make your code compatible with vLLM
 --------------------------------------
 
-Next, you need to rewrite the :meth:`~torch.nn.Module.forward` method of your model by following these steps:
+For a model to be compatible with vLLM, there are two requirements:
 
-1. Remove any unnecessary code, such as the code only used for training.
-2. Change the input parameters:
+1. Initialization code: All of vLLM's modules inside the model must be provided with a `prefix` argument in their constructor, which is usually the full name of the module in the model's state dict. The `prefix` argument is used in many places in vLLM, including but not limited to:
 
-.. code-block:: diff
+    * Optional non-uniform quantization support. A quantized checkpoint can quantize some layers, while keeping others in full precision. When `prefix` is provided before initialization, we can match the `prefix` of the current layer with the quantization config to check if we need to initialize the layer in quantized mode.
+    * Necessary runtime support. vLLM's attention operators are registered in a model's state by its full name. Every attention operator in the model must be registered with a unique name to avoid conflicts.
+
+The initialization code should look like:
+
+.. code-block:: python
+
+    from torch import nn
+    from vllm.config import VllmConfig
+    from vllm.attention import Attention
+
+
+    class MyAttention(nn.Module):
+        def __init__(self, vllm_config: LlamaConfig, prefix: str):
+            super().__init__()
+            self.attn = Attention(prefix=f"{prefix}.attn")
+
+
+    class MyDecoderLayer(nn.Module):
+        def __init__(self, vllm_config: LlamaConfig, prefix: str):
+            super().__init__()
+            self.self_attn = MyAttention(prefix=f"{prefix}.self_attn")
+
+
+    class MyModel(nn.Module):
+        def __init__(self, vllm_config: LlamaConfig, prefix: str):
+            super().__init__()
+            self.layers = nn.ModuleList(
+                [MyDecoderLayer(config, prefix=f"{prefix}.layers.{i}") for i in range(vllm_config.model_config.hf_config.num_hidden_layers)]
+            )
+
+
+    class MyModelForCausalLM(nn.Module):
+        def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
+            super().__init__()
+            self.model = MyModel(vllm_config, prefix=f"{prefix}.model")
+
+2. Computation code. You need to rewrite the :meth:`~torch.nn.Module.forward` method of your model to remove any unnecessary code, such as the code only used for training. You also need to change the input parameters as follows, treat :code:`input_ids` and :code:`positions` as flattened tensors with a single batch size dimension without max-sequence length dimension.
+
+.. code-block:: python
 
       def forward(
           self,
           input_ids: torch.Tensor,
-    -     attention_mask: Optional[torch.Tensor] = None,
-    -     position_ids: Optional[torch.LongTensor] = None,
-    -     past_key_values: Optional[List[torch.FloatTensor]] = None,
-    -     inputs_embeds: Optional[torch.FloatTensor] = None,
-    -     labels: Optional[torch.LongTensor] = None,
-    -     use_cache: Optional[bool] = None,
-    -     output_attentions: Optional[bool] = None,
-    -     output_hidden_states: Optional[bool] = None,
-    -     return_dict: Optional[bool] = None,
-    - ) -> Union[Tuple, CausalLMOutputWithPast]:
-    +     positions: torch.Tensor,
-    +     kv_caches: List[torch.Tensor],
-    +     attn_metadata: AttentionMetadata,
-    + ) -> Optional[SamplerOutput]:
-
-1. Update the code by considering that :code:`input_ids` and :code:`positions` are now flattened tensors.
-2. Replace the attention operation with either :code:`PagedAttention`, :code:`PagedAttentionWithRoPE`, or :code:`PagedAttentionWithALiBi` depending on the model's architecture.
+          positions: torch.Tensor,
+          kv_caches: List[torch.Tensor],
+          attn_metadata: AttentionMetadata,
+      ) -> Optional[SamplerOutput]:
+          ...
 
 .. note::
     Currently, vLLM supports the basic multi-head attention mechanism and its variant with rotary positional embeddings.
     If your model employs a different attention mechanism, you will need to implement a new attention layer in vLLM.
 
+For reference, check out the `LLAMA model <https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/llama.py>`__.
 
 3. (Optional) Implement tensor parallelism and quantization support
 -------------------------------------------------------------------
