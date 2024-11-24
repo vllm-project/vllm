@@ -483,6 +483,8 @@ def maybe_offload_to_cpu(module: torch.nn.Module):
     # this function is called recursively on the module's children
     named_params = list(module._parameters.items())
     for name, p in named_params:
+        if not isinstance(p, nn.Parameter):
+            continue
         if p.data.device == torch.device("cpu"):
             continue
         if _CPU_OFFLOAD_BYTES >= _CPU_OFFLOAD_MAX_BYTES:
