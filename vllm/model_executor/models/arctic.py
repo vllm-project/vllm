@@ -47,7 +47,8 @@ class ArcticMLP(nn.Module):
                  expert_id: int = -1,
                  is_residual_mlp: bool = False,
                  quant_config: Optional[QuantizationConfig] = None,
-                 reduce_results: bool = True):
+                 reduce_results: bool = True,
+                 prefix: str = ""):
         super().__init__()
         self.hidden_size = config.hidden_size
         self.expert_id = expert_id
