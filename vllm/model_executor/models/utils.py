@@ -1,4 +1,5 @@
 import itertools
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import (Any, Callable, Dict, Iterable, List, Literal, Mapping,
                     Optional, Protocol, Set, Tuple, Union, overload)
@@ -480,26 +481,25 @@ def set_cpu_offload_max_bytes(max_bytes: int) -> None:
     _CPU_OFFLOAD_MAX_BYTES = max_bytes
 
 
-def maybe_offload_to_cpu(module: torch.nn.Module):
+@contextmanager
+def maybe_offload_to_cpu():
+    old_empty = torch.empty
 
-    global _CPU_OFFLOAD_MAX_BYTES, _CPU_OFFLOAD_BYTES
-    # only process parameters of the module
-    # this function is called recursively on the module's children
-    named_params = list(module._parameters.items())
-    for name, p in named_params:
-        if not isinstance(p, nn.Parameter):
-            continue
-        if p.data.device == torch.device("cpu"):
-            continue
-        if _CPU_OFFLOAD_BYTES >= _CPU_OFFLOAD_MAX_BYTES:
-            # already offloaded enough parameters
-            break
-        _CPU_OFFLOAD_BYTES += p.data.numel() * p.data.element_size()
-        # offload the parameter to CPU
-        # it uses tensor subclasses so that whenever the tensor is used
-        # in some pytorch ops, it will be automatically moved to the device
-        delattr(module, name)
-        module.register_parameter(name, nn.Parameter(OffloadedTensor(p.data)))
+    def fake_empty(*args, **kwargs):
+        global _CPU_OFFLOAD_MAX_BYTES, _CPU_OFFLOAD_BYTES
+        tensor = old_empty(*args, **kwargs)
+        if tensor.device != torch.device("cpu") and \
+            _CPU_OFFLOAD_BYTES < _CPU_OFFLOAD_MAX_BYTES:
+            _CPU_OFFLOAD_BYTES += tensor.numel() * tensor.element_size()
+            offloaded_tensor = OffloadedTensor(tensor)
+            return offloaded_tensor
+        return tensor
+
+    torch.empty = fake_empty
+    try:
+        yield
+    finally:
+        torch.empty = old_empty
 
 
 def make_layers(
@@ -515,11 +515,13 @@ def make_layers(
     start_layer, end_layer = get_pp_indices(num_hidden_layers,
                                             get_pp_group().rank_in_group,
                                             get_pp_group().world_size)
-    modules = torch.nn.ModuleList(
-        [PPMissingLayer() for _ in range(start_layer)] + [
-            layer_fn(prefix=f"{prefix}.{idx}").apply(maybe_offload_to_cpu)
-            for idx in range(start_layer, end_layer)
-        ] + [PPMissingLayer() for _ in range(end_layer, num_hidden_layers)])
+    with maybe_offload_to_cpu():
+        modules = torch.nn.ModuleList(
+            [PPMissingLayer() for _ in range(start_layer)] + [
+                layer_fn(prefix=f"{prefix}.{idx}")
+                for idx in range(start_layer, end_layer)
+            ] +
+            [PPMissingLayer() for _ in range(end_layer, num_hidden_layers)])
     return start_layer, end_layer, modules
 
 
