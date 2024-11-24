@@ -181,7 +181,6 @@ class OlmoeDecoderLayer(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
-        layer_idx: int,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
@@ -264,11 +263,8 @@ class OlmoeModel(nn.Module):
         )
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: OlmoeDecoderLayer(config,
-                                             int(prefix.split(".")[-1]),
-                                             cache_config,
-                                             quant_config,
-                                             prefix=prefix),
+            lambda prefix: OlmoeDecoderLayer(
+                config, cache_config, quant_config, prefix=prefix),
             prefix=f"{prefix}.layers")
         self.norm = RMSNorm(config.hidden_size, eps=1e-5)
 
