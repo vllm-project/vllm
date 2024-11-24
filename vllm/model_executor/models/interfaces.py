@@ -1,5 +1,5 @@
 from typing import (TYPE_CHECKING, ClassVar, Dict, List, Literal, Optional,
-                    Protocol, Type, Union, overload, runtime_checkable)
+                    Protocol, Tuple, Type, Union, overload, runtime_checkable)
 
 import torch
 from typing_extensions import TypeIs
@@ -8,6 +8,7 @@ from vllm.logger import init_logger
 from vllm.utils import supports_kw
 
 if TYPE_CHECKING:
+    from vllm.attention import AttentionMetadata
     from vllm.config import LoRAConfig, MultiModalConfig, SchedulerConfig
     from vllm.multimodal.inputs import NestedTensors
     from vllm.sequence import IntermediateTensors
@@ -31,11 +32,23 @@ class SupportsMultiModal(Protocol):
     def __init__(self, *, multimodal_config: "MultiModalConfig") -> None:
         ...
 
-    def get_multimodal_embeddings(self, **kwargs) -> Optional[torch.Tensor]:
+    def get_multimodal_embeddings(
+        self, **kwargs
+    ) -> Optional[Union["NestedTensors", List[Tuple["NestedTensors", str]]]]:
         """
         Returns multimodal embeddings generated from multimodal kwargs 
         to be merged with text embeddings.
         """
+        ...
+
+    # Only for models that support v0 chunked prefill
+    @overload
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: Optional["NestedTensors"] = None,
+        attn_metadata: Optional["AttentionMetadata"] = None,
+    ) -> torch.Tensor:
         ...
 
     def get_input_embeddings(

@@ -981,7 +981,7 @@ class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
             data=self._validate_pixel_values(pixel_values),
         )
 
-    def get_multimodal_embeddings(self, **kwargs) -> Optional[torch.Tensor]:
+    def get_multimodal_embeddings(self, **kwargs) -> Optional[NestedTensors]:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None

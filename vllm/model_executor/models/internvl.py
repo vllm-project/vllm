@@ -642,7 +642,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
             visual_token_mask = None
         return visual_token_mask
 
-    def get_multimodal_embeddings(self, **kwargs) -> Optional[torch.Tensor]:
+    def get_multimodal_embeddings(self, **kwargs) -> Optional[NestedTensors]:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None

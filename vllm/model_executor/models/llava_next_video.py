@@ -389,7 +389,7 @@ class LlavaNextVideoForConditionalGeneration(nn.Module, SupportsMultiModal,
             raise ValueError(
                 f"Unsupported type of video input {type(video_pixels)}")
 
-    def get_multimodal_embeddings(self, **kwargs) -> Optional[torch.Tensor]:
+    def get_multimodal_embeddings(self, **kwargs) -> Optional[NestedTensors]:
         video_input = self._parse_and_validate_video_input(**kwargs)
         if video_input is None:
             return None

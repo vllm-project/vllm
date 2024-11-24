@@ -825,7 +825,8 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
         image_feature = image_feature.view(batch_frames, -1, dim)
         return image_feature
 
-    def get_multimodal_embeddings(self, **kwargs) -> Optional[torch.Tensor]:
+    def get_multimodal_embeddings(
+            self, **kwargs) -> Optional[List[Tuple[NestedTensors, str]]]:
         modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not modalities:
             return None

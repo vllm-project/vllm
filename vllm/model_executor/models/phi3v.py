@@ -676,7 +676,7 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
         return image_embeds
 
-    def get_multimodal_embeddings(self, **kwargs) -> Optional[torch.Tensor]:
+    def get_multimodal_embeddings(self, **kwargs) -> Optional[NestedTensors]:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None

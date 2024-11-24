@@ -1238,7 +1238,8 @@ class Qwen2VLForConditionalGeneration(nn.Module, SupportsMultiModal,
         inputs_embeds[mask, :] = multimodal_embeddings
         return inputs_embeds
 
-    def get_multimodal_embeddings(self, **kwargs) -> Optional[torch.Tensor]:
+    def get_multimodal_embeddings(
+            self, **kwargs) -> Optional[List[Tuple[NestedTensors, str]]]:
 
         image_input = self._parse_and_validate_image_input(**kwargs)
         video_input = self._parse_and_validate_video_input(**kwargs)

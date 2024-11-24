@@ -303,7 +303,7 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         vision_embeddings, _ = self.vision_embed_tokens(image_input["data"])
         return vision_embeddings
 
-    def get_multimodal_embeddings(self, **kwargs) -> Optional[torch.Tensor]:
+    def get_multimodal_embeddings(self, **kwargs) -> Optional[NestedTensors]:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None
