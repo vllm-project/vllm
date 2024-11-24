@@ -5,7 +5,6 @@ from typing import (Any, Callable, Dict, Iterable, List, Literal, Mapping,
 
 import torch
 import torch.nn as nn
-from torch.func import functional_call
 from transformers import PretrainedConfig
 
 import vllm.envs as envs
@@ -231,6 +230,46 @@ class AutoWeightsLoader:
         return autoloaded_weights
 
 
+class OffloadedTensor(torch.Tensor):
+
+    @staticmethod
+    def __new__(cls, elem, *, requires_grad=None):
+        # the wrapped tensor will have the same
+        # metadata as the original tensor
+        if requires_grad is None:
+            return super().__new__(cls, elem)
+        else:
+            return cls._make_subclass(cls, elem, requires_grad)
+
+    def __init__(self, elem):
+        super().__init__()
+        # use pin_memory if possible, which helps cudagraph capture speed
+        pin_memory = is_pin_memory_available()
+        # `torch.empty_like` does not support `pin_memory` argument
+        cpu_data = torch.empty_strided(size=elem.size(),
+                                       stride=elem.stride(),
+                                       dtype=elem.dtype,
+                                       layout=elem.layout,
+                                       device='cpu',
+                                       pin_memory=pin_memory)
+        cpu_data.copy_(elem)
+        self.offloaded_tensor = cpu_data
+
+    def load(self):
+        return self.offloaded_tensor.to(self.device, non_blocking=True)
+
+    @classmethod
+    def __torch_dispatch__(cls, func, types, args=(), kwargs=None):
+        if kwargs is None:
+            kwargs = {}
+        new_args = (x.load() if isinstance(x, cls) else x for x in args)
+        new_kwargs = {
+            k: v.load() if isinstance(v, cls) else v
+            for k, v in kwargs.items()
+        }
+        return func(*new_args, **new_kwargs)
+
+
 def init_vllm_registered_model(
     hf_config: PretrainedConfig,
     vllm_config: VllmConfig,
@@ -438,57 +477,19 @@ def set_cpu_offload_max_bytes(max_bytes: int) -> None:
 
 
 def maybe_offload_to_cpu(module: torch.nn.Module) -> torch.nn.Module:
-    device = next(module.parameters()).device
-
-    if device == torch.device("cpu"):
-        return module
 
     global _CPU_OFFLOAD_MAX_BYTES, _CPU_OFFLOAD_BYTES
-    if _CPU_OFFLOAD_BYTES >= _CPU_OFFLOAD_MAX_BYTES:
-        return module
-
-    pin_memory = is_pin_memory_available()
-
-    # offload parameters to CPU
-    # use pin_memory if possible, which helps cudagraph capture speed
-    offloaded_parameters = False
     for p in module.parameters():
+        if p.data.device == torch.device("cpu"):
+            continue
         if _CPU_OFFLOAD_BYTES >= _CPU_OFFLOAD_MAX_BYTES:
-            # we use per-parameter offloading
-            # one module might have some parameters offloaded and some not
+            # already offloaded enough parameters
             break
-
-        # `torch.empty_like` does not support `pin_memory` argument
-        cpu_data = torch.empty_strided(size=p.data.size(),
-                                       stride=p.data.stride(),
-                                       dtype=p.data.dtype,
-                                       layout=p.data.layout,
-                                       device='cpu',
-                                       pin_memory=pin_memory)
-        cpu_data.copy_(p.data)
-        p.data = cpu_data
         _CPU_OFFLOAD_BYTES += p.data.numel() * p.data.element_size()
-        offloaded_parameters = True
-
-    if offloaded_parameters:
-        original_forward = module.forward
-
-        def forward(*args, **kwargs):
-            module.forward = original_forward
-            device_state = {
-                # here we blindly call `to(device)`
-                # if the parameter is already on the device, it will be a no-op
-                k: v.to(device, non_blocking=True)
-                for k, v in module.state_dict().items()
-            }
-            output = functional_call(module,
-                                     device_state,
-                                     args=args,
-                                     kwargs=kwargs)
-            module.forward = forward
-            return output
-
-        module.forward = forward
+        # offload the parameter to CPU
+        # it uses tensor subclasses so that whenever the tensor is used
+        # in some pytorch ops, it will be automatically moved to the device
+        p.data = OffloadedTensor(p.data)
 
     return module
 
