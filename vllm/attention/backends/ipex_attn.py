@@ -334,7 +334,7 @@ class IpexAttnBackendImpl(AttentionImpl[IpexAttnMetadata]):
                 for seq_len, mask in zip(attn_metadata.seq_lens,
                                         attn_metadata.attn_bias):
                     end = start + seq_len
-                    if use_sdp_causal(self.head_size, query):
+                    if self.alibi_slopes is None and use_sdp_causal(self.head_size, query):
                         import xe_addons
                         if mask is not None:
                             mask = mask.unsqueeze(0)
