@@ -941,7 +941,7 @@ class EngineArgs:
                              usage_context: Optional[UsageContext] = None
                              ) -> VllmConfig:
         if envs.VLLM_USE_V1:
-            self._override_v1_args(usage_context)
+            self._override_v1_engine_args(usage_context)
 
         # gguf file needs a specific model loader and doesn't use hf_repo
         if check_gguf_file(self.model):
@@ -1168,10 +1168,10 @@ class EngineArgs:
         )
 
         if envs.VLLM_USE_V1:
-            config = self._override_v1_configs(config)
+            self._override_v1_engine_config(config)
         return config
 
-    def _override_v1_args(self, usage_context: UsageContext):
+    def _override_v1_engine_args(self, usage_context: UsageContext) -> None:
         """
         Override the EngineArgs's args based on the usage context for V1.
         """
@@ -1191,7 +1191,7 @@ class EngineArgs:
                 self.max_num_seqs = 1024
                 self.max_num_batched_tokens = 2048
 
-    def _override_v1_configs(self, engine_config: VllmConfig):
+    def _override_v1_engine_config(self, engine_config: VllmConfig) -> None:
         """
         Override the EngineConfig's configs based on the usage context for V1.
         """
@@ -1202,7 +1202,6 @@ class EngineArgs:
                 "Prefix caching is currently not supported for multimodal "
                 "models and has been disabled.")
             engine_config.cache_config.enable_prefix_caching = False
-        return engine_config
 
 
 @dataclass
