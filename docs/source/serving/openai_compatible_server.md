@@ -44,104 +44,6 @@ We currently support the following OpenAI APIs:
     - This enables multi-modal inputs to be passed to embedding models, see [Using VLMs](../models/vlm.rst).
   - *Note: You should run `vllm serve` with `--task embedding` to ensure that the model is being run in embedding mode.*
 
-## Extra Parameters
-
-vLLM supports a set of parameters that are not part of the OpenAI API.
-In order to use them, you can pass them as extra parameters in the OpenAI client.
-Or directly merge them into the JSON payload if you are using HTTP call directly.
-
-```python
-completion = client.chat.completions.create(
-  model="NousResearch/Meta-Llama-3-8B-Instruct",
-  messages=[
-    {"role": "user", "content": "Classify this sentiment: vLLM is wonderful!"}
-  ],
-  extra_body={
-    "guided_choice": ["positive", "negative"]
-  }
-)
-```
-
-### Extra HTTP Headers
-
-Only `X-Request-Id` HTTP request header is supported for now.
-
-```python
-completion = client.chat.completions.create(
-  model="NousResearch/Meta-Llama-3-8B-Instruct",
-  messages=[
-    {"role": "user", "content": "Classify this sentiment: vLLM is wonderful!"}
-  ],
-  extra_headers={
-    "x-request-id": "sentiment-classification-00001",
-  }
-)
-print(completion._request_id)
-
-completion = client.completions.create(
-  model="NousResearch/Meta-Llama-3-8B-Instruct",
-  prompt="A robot may not injure a human being",
-  extra_headers={
-    "x-request-id": "completion-test",
-  }
-)
-print(completion._request_id)
-```
-
-### Extra Parameters for Completions API
-
-The following [sampling parameters (click through to see documentation)](../dev/sampling_params.rst) are supported.
-
-```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
-:language: python
-:start-after: begin-completion-sampling-params
-:end-before: end-completion-sampling-params
-```
-
-The following extra parameters are supported:
-
-```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
-:language: python
-:start-after: begin-completion-extra-params
-:end-before: end-completion-extra-params
-```
-
-### Extra Parameters for Chat Completions API
-
-The following [sampling parameters (click through to see documentation)](../dev/sampling_params.rst) are supported.
-
-```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
-:language: python
-:start-after: begin-chat-completion-sampling-params
-:end-before: end-chat-completion-sampling-params
-```
-
-The following extra parameters are supported:
-
-```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
-:language: python
-:start-after: begin-chat-completion-extra-params
-:end-before: end-chat-completion-extra-params
-```
-
-### Extra Parameters for Embeddings API
-
-The following [pooling parameters (click through to see documentation)](../dev/pooling_params.rst) are supported.
-
-```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
-:language: python
-:start-after: begin-embedding-pooling-params
-:end-before: end-embedding-pooling-params
-```
-
-The following extra parameters are supported:
-
-```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
-:language: python
-:start-after: begin-embedding-extra-params
-:end-before: end-embedding-extra-params
-```
-
 ## Score API for Cross Encoder Models
 
 vLLM supports *cross encoders models* at the **/v1/score** endpoint, which is not an OpenAI API standard endpoint. You can find the documentation for these kind of models at [sbert.net](https://www.sbert.net/docs/package_reference/cross_encoder/cross_encoder.html).
@@ -282,6 +184,104 @@ Response:
   ],
   "usage": {}
 }
+```
+
+## Extra Parameters
+
+vLLM supports a set of parameters that are not part of the OpenAI API.
+In order to use them, you can pass them as extra parameters in the OpenAI client.
+Or directly merge them into the JSON payload if you are using HTTP call directly.
+
+```python
+completion = client.chat.completions.create(
+  model="NousResearch/Meta-Llama-3-8B-Instruct",
+  messages=[
+    {"role": "user", "content": "Classify this sentiment: vLLM is wonderful!"}
+  ],
+  extra_body={
+    "guided_choice": ["positive", "negative"]
+  }
+)
+```
+
+### Extra HTTP Headers
+
+Only `X-Request-Id` HTTP request header is supported for now.
+
+```python
+completion = client.chat.completions.create(
+  model="NousResearch/Meta-Llama-3-8B-Instruct",
+  messages=[
+    {"role": "user", "content": "Classify this sentiment: vLLM is wonderful!"}
+  ],
+  extra_headers={
+    "x-request-id": "sentiment-classification-00001",
+  }
+)
+print(completion._request_id)
+
+completion = client.completions.create(
+  model="NousResearch/Meta-Llama-3-8B-Instruct",
+  prompt="A robot may not injure a human being",
+  extra_headers={
+    "x-request-id": "completion-test",
+  }
+)
+print(completion._request_id)
+```
+
+### Extra Parameters for Completions API
+
+The following [sampling parameters (click through to see documentation)](../dev/sampling_params.rst) are supported.
+
+```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
+:language: python
+:start-after: begin-completion-sampling-params
+:end-before: end-completion-sampling-params
+```
+
+The following extra parameters are supported:
+
+```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
+:language: python
+:start-after: begin-completion-extra-params
+:end-before: end-completion-extra-params
+```
+
+### Extra Parameters for Chat Completions API
+
+The following [sampling parameters (click through to see documentation)](../dev/sampling_params.rst) are supported.
+
+```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
+:language: python
+:start-after: begin-chat-completion-sampling-params
+:end-before: end-chat-completion-sampling-params
+```
+
+The following extra parameters are supported:
+
+```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
+:language: python
+:start-after: begin-chat-completion-extra-params
+:end-before: end-chat-completion-extra-params
+```
+
+### Extra Parameters for Embeddings API
+
+The following [pooling parameters (click through to see documentation)](../dev/pooling_params.rst) are supported.
+
+```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
+:language: python
+:start-after: begin-embedding-pooling-params
+:end-before: end-embedding-pooling-params
+```
+
+The following extra parameters are supported:
+
+```{literalinclude} ../../../vllm/entrypoints/openai/protocol.py
+:language: python
+:start-after: begin-embedding-extra-params
+:end-before: end-embedding-extra-params
 ```
 
 ## Chat Template
