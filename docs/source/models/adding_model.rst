@@ -95,7 +95,7 @@ The initialization code should look like this:
     Currently, vLLM supports the basic multi-head attention mechanism and its variant with rotary positional embeddings.
     If your model employs a different attention mechanism, you will need to implement a new attention layer in vLLM.
 
-For reference, check out the `LLAMA model <https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/llama.py>`__.
+For reference, check out the `LLAMA model <https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/models/llama.py>`__. vLLM already supports a large number of models. It is recommended to find a model similar to yours and adapt it to your model's architecture. Check out the `vLLM models <https://github.com/vllm-project/vllm/tree/main/vllm/model_executor/models>`__ directory for more examples.
 
 3. (Optional) Implement tensor parallelism and quantization support
 -------------------------------------------------------------------
