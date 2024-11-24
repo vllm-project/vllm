@@ -1,15 +1,10 @@
-version: "3"
-
 services:
   vllm:
     command: # python3 -m vllm.entrypoints.openai.api_server
-      ##########################################################################
-      --model ${MODEL_NAME:-facebook/opt-125m}
+      --model ${MODEL_NAME:-nvidia/Mistral-NeMo-Minitron-8B-Instruct}
       --dtype ${DATATYPE:-auto}
       --tensor-parallel-size ${NUM_GPUS:-1}
       --gpu-memory-utilization ${GPU_MEMORY_UTILIZATION:-0.9}
-      ##########################################################################
-    #container_name: vllm
     deploy:
       resources:
         reservations:
@@ -19,6 +14,7 @@ services:
               driver: nvidia
     environment:
       - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN:-}
+      - TZ=${TZ:-}
       - VLLM_API_KEY=${VLLM_API_KEY:-}
     hostname: vllm
     image: vllm/vllm-openai:latest
@@ -27,7 +23,4 @@ services:
       - "${PORT:-8000}:8000"
     restart: on-failure:5
     volumes:
-      #- ~/.cache/huggingface:/root/.cache/huggingface
-      - ${HOME:?err}/.cache/huggingface/hub:/root/.cache/huggingface/hub
-      - /etc/localtime:/etc/localtime:ro
-      - /etc/timezone:/etc/timezone:ro
+      - ${HOME:-.}/.cache/huggingface/hub:/root/.cache/huggingface/hub
