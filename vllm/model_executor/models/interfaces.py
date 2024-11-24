@@ -42,6 +42,7 @@ class SupportsMultiModal(Protocol):
         ...
 
     # Only for models that support v0 chunked prefill
+    # TODO(ywang96): Remove this overload once v0 is deprecated
     @overload
     def get_input_embeddings(
         self,
