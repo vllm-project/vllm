@@ -109,7 +109,7 @@ class SpecDecodeBaseSampler(nn.Module):
         output.mul_(~after_false_mask).add_(
             substitute_token_ids.mul(after_false_mask))
 
-        self.num_accepted_tokens += accepted.sum()
+        self.num_accepted_tokens += accepted_mask.sum()
         self.num_emitted_tokens += (output_with_bonus_tokens != -1).sum()
         self.num_draft_tokens += batch_size * k
 
