@@ -261,12 +261,26 @@ class OffloadedTensor(torch.Tensor):
 
     @classmethod
     def __torch_dispatch__(cls, func, types, args=(), kwargs=None):
-        # `nn.Parameter(data)` will call `data.detach()`
-        # and make sure the returned data type is the same as the original data
-        if str(func) == "aten.detach.default":
-            return args[0]
         if kwargs is None:
             kwargs = {}
+        if str(func) == "aten.detach.default":
+            # `nn.Parameter(data)` will call `data.detach()`
+            # and assert the returned data type is the same
+            # as the original data
+            return args[0]
+        if str(func) == "aten.copy_.default":
+            # inplace operation on the offloaded tensor
+            # TODO: support more inplace operations if needed
+            new_args = (x.offloaded_tensor if isinstance(x, cls) else x
+                        for x in args)
+            new_kwargs = {
+                k: v.offloaded_tensor if isinstance(v, cls) else v
+                for k, v in kwargs.items()
+            }
+            return func(*new_args, **new_kwargs)
+
+        # for the rest of the operations, we will load the offloaded tensor
+        # on the fly and perform the operation on the device
         new_args = (x.load() if isinstance(x, cls) else x for x in args)
         new_kwargs = {
             k: v.load() if isinstance(v, cls) else v
