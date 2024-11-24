@@ -583,6 +583,9 @@ class Sequence:
             return 1
         return self.data.get_num_uncomputed_tokens()
 
+    def get_num_computed_tokens(self) -> int:
+        return self.data.get_num_computed_tokens()
+
     def is_prefill(self) -> bool:
         return self.data.stage == SequenceStage.PREFILL
 

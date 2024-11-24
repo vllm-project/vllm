@@ -10,6 +10,7 @@ from torch import nn
 
 from vllm.attention import AttentionMetadata, get_attn_backend
 from vllm.config import VllmConfig
+from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding
@@ -85,6 +86,7 @@ class ModelInputForCPUWithSamplingMetadata(ModelInputForCPU):
             "input_tokens": self.input_tokens,
             "input_positions": self.input_positions,
             "token_type_ids": self.token_type_ids,
+            "multi_modal_kwargs": self.multi_modal_kwargs,
         }
         _add_attn_metadata_broadcastable_dict(tensor_dict, self.attn_metadata)
         _add_sampling_metadata_broadcastable_dict(tensor_dict,
@@ -500,14 +502,15 @@ class CPUModelRunner(CPUModelRunnerBase[ModelInputForCPUWithSamplingMetadata]):
             multimodal_kwargs = MultiModalKwargs.as_kwargs(
                 model_input.multi_modal_kwargs, device=self.device)
 
-        hidden_states = model_executable(
-            input_ids=model_input.input_tokens,
-            positions=model_input.input_positions,
-            kv_caches=kv_caches,
-            attn_metadata=model_input.attn_metadata,
-            intermediate_tensors=intermediate_tensors,
-            **multimodal_kwargs,
-        )
+        with set_forward_context(model_input.attn_metadata, self.vllm_config):
+            hidden_states = model_executable(
+                input_ids=model_input.input_tokens,
+                positions=model_input.input_positions,
+                kv_caches=kv_caches,
+                attn_metadata=model_input.attn_metadata,
+                intermediate_tensors=intermediate_tensors,
+                **multimodal_kwargs,
+            )
 
         # Compute the logits.
         logits = self.model.compute_logits(hidden_states,
