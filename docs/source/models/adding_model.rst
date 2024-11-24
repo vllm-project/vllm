@@ -41,14 +41,14 @@ For instance, vLLM's `OPT model <https://github.com/vllm-project/vllm/blob/main/
 2. Make your code compatible with vLLM
 --------------------------------------
 
-For a model to be compatible with vLLM, there are two requirements:
+To ensure compatibility with vLLM, your model must meet the following requirements:
 
-1. Initialization code: All of vLLM's modules inside the model must be provided with a `prefix` argument in their constructor, which is usually the full name of the module in the model's state dict. The `prefix` argument is used in many places in vLLM, including but not limited to:
+1. Initialization Code: All vLLM modules within the model must include a `prefix` argument in their constructor. This `prefix` is typically the full name of the module in the model's state dictionary and is crucial for:
 
-    * Optional non-uniform quantization support. A quantized checkpoint can quantize some layers, while keeping others in full precision. When `prefix` is provided before initialization, we can match the `prefix` of the current layer with the quantization config to check if we need to initialize the layer in quantized mode.
-    * Necessary runtime support. vLLM's attention operators are registered in a model's state by its full name. Every attention operator in the model must be registered with a unique name to avoid conflicts.
+    * Runtime support: vLLM's attention operators are registered in a model's state by their full names. Each attention operator must have a unique prefix as its layer name to avoid conflicts.
+    * Non-uniform quantization support: A quantized checkpoint can selectively quantize certain layers while keeping others in full precision. By providing the `prefix` during initialization, vLLM can match the current layer's `prefix` with the quantization configuration to determine if the layer should be initialized in quantized mode.
 
-The initialization code should look like:
+The initialization code should look like this:
 
 .. code-block:: python
 
@@ -56,33 +56,29 @@ The initialization code should look like:
     from vllm.config import VllmConfig
     from vllm.attention import Attention
 
-
     class MyAttention(nn.Module):
-        def __init__(self, vllm_config: LlamaConfig, prefix: str):
+        def __init__(self, vllm_config: VllmConfig, prefix: str):
             super().__init__()
             self.attn = Attention(prefix=f"{prefix}.attn")
 
-
     class MyDecoderLayer(nn.Module):
-        def __init__(self, vllm_config: LlamaConfig, prefix: str):
+        def __init__(self, vllm_config: VllmConfig, prefix: str):
             super().__init__()
             self.self_attn = MyAttention(prefix=f"{prefix}.self_attn")
 
-
     class MyModel(nn.Module):
-        def __init__(self, vllm_config: LlamaConfig, prefix: str):
+        def __init__(self, vllm_config: VllmConfig, prefix: str):
             super().__init__()
             self.layers = nn.ModuleList(
-                [MyDecoderLayer(config, prefix=f"{prefix}.layers.{i}") for i in range(vllm_config.model_config.hf_config.num_hidden_layers)]
+                [MyDecoderLayer(vllm_config, prefix=f"{prefix}.layers.{i}") for i in range(vllm_config.model_config.hf_config.num_hidden_layers)]
             )
-
 
     class MyModelForCausalLM(nn.Module):
         def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
             super().__init__()
             self.model = MyModel(vllm_config, prefix=f"{prefix}.model")
 
-2. Computation code. You need to rewrite the :meth:`~torch.nn.Module.forward` method of your model to remove any unnecessary code, such as the code only used for training. You also need to change the input parameters as follows, treat :code:`input_ids` and :code:`positions` as flattened tensors with a single batch size dimension without max-sequence length dimension.
+2. Computation Code: Rewrite the :meth:`~torch.nn.Module.forward` method of your model to remove any unnecessary code, such as training-specific code. Modify the input parameters to treat `input_ids` and `positions` as flattened tensors with a single batch size dimension, without a max-sequence length dimension.
 
 .. code-block:: python
 
