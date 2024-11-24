@@ -646,7 +646,7 @@ def extract_layer_index(layer_name: str) -> int:
         try:
             int_vals.append(int(subname))
         except ValueError:
-            break
+            continue
     assert len(int_vals) == 1, (f"layer name {layer_name} should"
                                 " only contain one integer")
     return int_vals[0]
