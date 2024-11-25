@@ -2388,6 +2388,16 @@ class VllmConfig:
             self.quant_config = VllmConfig._get_quantization_config(
                 self.model_config, self.load_config)
 
+        if self.scheduler_config is not None and \
+            self.model_config is not None and \
+            self.scheduler_config.chunked_prefill_enabled and \
+            self.model_config.dtype == torch.float32 and \
+            current_platform.get_device_capability() == (7, 5):
+            print_warning_once(
+                "Turing devices tensor cores do not support float32 matmul. "
+                "To workaround this limitation, vLLM will set 'ieee' input "
+                "precision for chunked prefill triton kernels.")
+
         if self.compilation_config is None:
             self.compilation_config = CompilationConfig()
         if envs.VLLM_USE_V1 and not self.model_config.enforce_eager:
