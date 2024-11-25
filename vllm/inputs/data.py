@@ -38,6 +38,9 @@ class TokensPrompt(TypedDict):
     prompt_token_ids: List[int]
     """A list of token IDs to pass to the model."""
 
+    token_type_ids: NotRequired[List[int]]
+    """A list of token type IDs to pass to the cross encoder model."""
+
     multi_modal_data: NotRequired["MultiModalDataDict"]
     """
     DEPRECATED: Optional multi-modal data to pass to the model,
@@ -133,6 +136,9 @@ class TokenInputs(TypedDict):
     prompt_token_ids: List[int]
     """The token IDs of the prompt."""
 
+    token_type_ids: NotRequired[List[int]]
+    """The token type IDs of the prompt."""
+
     prompt: NotRequired[str]
     """
     The original prompt text corresponding to the token IDs, if available.
@@ -160,6 +166,7 @@ class TokenInputs(TypedDict):
 
 def token_inputs(
     prompt_token_ids: List[int],
+    token_type_ids: Optional[List[int]] = None,
     prompt: Optional[str] = None,
     multi_modal_data: Optional["MultiModalDataDict"] = None,
     multi_modal_placeholders: Optional["MultiModalPlaceholderDict"] = None,
@@ -170,6 +177,8 @@ def token_inputs(
 
     if prompt is not None:
         inputs["prompt"] = prompt
+    if token_type_ids is not None:
+        inputs["token_type_ids"] = token_type_ids
     if multi_modal_data is not None:
         inputs["multi_modal_data"] = multi_modal_data
     if multi_modal_placeholders is not None:
@@ -231,6 +240,15 @@ class SingletonInputsAdapter:
 
         if inputs["type"] == "token" or inputs["type"] == "multimodal":
             return inputs.get("prompt_token_ids", [])
+
+        assert_never(inputs)
+
+    @cached_property
+    def token_type_ids(self) -> List[int]:
+        inputs = self.inputs
+
+        if inputs["type"] == "token" or inputs["type"] == "multimodal":
+            return inputs.get("token_type_ids", [])
 
         assert_never(inputs)
 

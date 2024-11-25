@@ -44,6 +44,148 @@ We currently support the following OpenAI APIs:
     - This enables multi-modal inputs to be passed to embedding models, see [Using VLMs](../models/vlm.rst).
   - *Note: You should run `vllm serve` with `--task embedding` to ensure that the model is being run in embedding mode.*
 
+## Score API for Cross Encoder Models
+
+vLLM supports *cross encoders models* at the **/v1/score** endpoint, which is not an OpenAI API standard endpoint. You can find the documentation for these kind of models at [sbert.net](https://www.sbert.net/docs/package_reference/cross_encoder/cross_encoder.html).
+
+A ***Cross Encoder*** takes exactly two sentences / texts as input and either predicts a score or label for this sentence pair. It can for example predict the similarity of the sentence pair on a scale of 0 … 1.
+
+### Example of usage for a pair of a string and a list of texts
+
+In this case, the model will compare the first given text to each of the texts containing the list.
+
+```bash
+curl -X 'POST' \
+  'http://127.0.0.1:8000/v1/score' \
+  -H 'accept: application/json' \
+  -H 'Content-Type: application/json' \
+  -d '{
+  "model": "BAAI/bge-reranker-v2-m3",
+  "text_1": "What is the capital of France?",
+  "text_2": [
+    "The capital of Brazil is Brasilia.",
+    "The capital of France is Paris."
+  ]
+}'
+```
+
+Response:
+
+```bash
+{
+  "id": "score-request-id",
+  "object": "list",
+  "created": 693570,
+  "model": "BAAI/bge-reranker-v2-m3",
+  "data": [
+    {
+      "index": 0,
+      "object": "score",
+      "score": [
+        0.001094818115234375
+      ]
+    },
+    {
+      "index": 1,
+      "object": "score",
+      "score": [
+        1
+      ]
+    }
+  ],
+  "usage": {}
+}
+```
+
+### Example of usage for a pair of two lists of texts
+
+In this case, the model will compare the one by one, making pairs by same index correspondent in each list.
+
+```bash
+curl -X 'POST' \
+  'http://127.0.0.1:8000/v1/score' \
+  -H 'accept: application/json' \
+  -H 'Content-Type: application/json' \
+  -d '{
+  "model": "BAAI/bge-reranker-v2-m3",
+  "encoding_format": "float",
+  "text_1": [
+    "What is the capital of Brazil?",
+    "What is the capital of France?"
+  ],
+  "text_2": [
+    "The capital of Brazil is Brasilia.",
+    "The capital of France is Paris."
+  ]
+}'
+```
+
+Response:
+
+```bash
+{
+  "id": "score-request-id",
+  "object": "list",
+  "created": 693447,
+  "model": "BAAI/bge-reranker-v2-m3",
+  "data": [
+    {
+      "index": 0,
+      "object": "score",
+      "score": [
+        1
+      ]
+    },
+    {
+      "index": 1,
+      "object": "score",
+      "score": [
+        1
+      ]
+    }
+  ],
+  "usage": {}
+}
+```
+
+### Example of usage for a pair of two strings
+
+In this case, the model will compare the strings of texts.
+
+```bash
+curl -X 'POST' \
+  'http://127.0.0.1:8000/v1/score' \
+  -H 'accept: application/json' \
+  -H 'Content-Type: application/json' \
+  -d '{
+  "model": "BAAI/bge-reranker-v2-m3",
+  "encoding_format": "float",
+  "text_1": "What is the capital of France?",
+  "text_2": "The capital of France is Paris."
+}'
+```
+
+Response:
+
+```bash
+{
+  "id": "score-request-id",
+  "object": "list",
+  "created": 693447,
+  "model": "BAAI/bge-reranker-v2-m3",
+  "data": [
+    {
+      "index": 0,
+      "object": "score",
+      "score": [
+        1
+      ]
+    }
+  ],
+  "usage": {}
+}
+```
+
 ## Extra Parameters
 
 vLLM supports a set of parameters that are not part of the OpenAI API.

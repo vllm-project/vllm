@@ -3,11 +3,14 @@ from typing import List, Optional
 
 import torch
 import torch.nn as nn
+from transformers import PretrainedConfig
 
 from vllm.config import PoolerConfig
 from vllm.model_executor.pooling_metadata import (PoolingMetadata,
                                                   PoolingTensors)
 from vllm.sequence import EmbeddingSequenceGroupOutput, PoolerOutput
+from vllm.transformers_utils.config import (
+    get_cross_encoder_activation_function)
 
 
 class PoolingType(IntEnum):
@@ -151,4 +154,65 @@ class Pooler(nn.Module):
             EmbeddingSequenceGroupOutput(data.tolist()) for data in pooled_data
         ]
 
+        return PoolerOutput(outputs=pooled_outputs)
+
+
+class CrossEncodingPooler(nn.Module):
+    """A layer that pools specific information from hidden states.
+
+    This layer does the following:
+    1. Extracts specific tokens or aggregates data based on pooling method.
+    2. Normalizes output if specified.
+    3. Returns structured results as `PoolerOutput`.
+
+    Attributes:
+        pooling_type: The type of pooling to use.
+        normalize: Whether to normalize the pooled data.
+    """
+
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        classifier: nn.Module,
+        pooler: Optional[nn.Module] = None,
+    ):
+        super().__init__()
+        self.classifier = classifier
+        self.pooler = pooler
+        self.default_activation_function = \
+            get_cross_encoder_activation_function(config)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        pooling_metadata: PoolingMetadata,
+    ) -> PoolerOutput:
+        """Pools sentence pair scores from the hidden_states."""
+
+        prompt_lens = PoolingTensors.from_pooling_metadata(
+            pooling_metadata, hidden_states.device).prompt_lens
+
+        offset = 0
+        pooled_data_lst = []
+        for prompt_len in prompt_lens:
+            pooled_data_i = hidden_states[offset:offset + prompt_len]
+
+            if self.pooler is not None:
+                final_shape_tensor = self.pooler(pooled_data_i)
+            else:
+                final_shape_tensor = self.classifier(pooled_data_i)
+
+            pooled_data_lst.append(final_shape_tensor)
+            offset += prompt_len
+
+        pooled_output = torch.stack(pooled_data_lst)
+
+        if self.pooler is not None:
+            # apply classifier once on the full batch if possible
+            pooled_output = self.classifier(pooled_output)
+        logits = self.default_activation_function(pooled_output)
+
+        pooled_outputs = [
+            EmbeddingSequenceGroupOutput(data.tolist()) for data in logits
+        ]
         return PoolerOutput(outputs=pooled_outputs)
