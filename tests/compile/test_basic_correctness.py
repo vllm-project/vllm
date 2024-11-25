@@ -62,6 +62,16 @@ test_settings = [
         method="encode",
         fullgraph=True,
     ),
+    # encoder-based embedding model (BERT)
+    TestSetting(
+        model="BAAI/bge-base-en-v1.5",
+        model_args=["--task", "embedding"],
+        pp_size=1,
+        tp_size=1,
+        attn_backend="XFORMERS",
+        method="encode",
+        fullgraph=True,
+    ),
     # vision language model
     TestSetting(
         model="microsoft/Phi-3.5-vision-instruct",
