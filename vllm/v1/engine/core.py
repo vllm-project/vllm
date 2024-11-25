@@ -1,4 +1,5 @@
 import multiprocessing
+import pickle
 import queue
 import threading
 import time
@@ -16,7 +17,8 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils import make_zmq_socket
 from vllm.v1.core.scheduler import Scheduler
 from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
-                            EngineCoreRequest, EngineCoreRequestType)
+                            EngineCoreProfile, EngineCoreRequest,
+                            EngineCoreRequestType)
 from vllm.v1.engine.mm_input_mapper import MMInputMapper
 from vllm.v1.executor.gpu_executor import GPUExecutor
 from vllm.v1.request import Request, RequestStatus
@@ -129,6 +131,8 @@ class EngineCore:
     def shutdown(self):
         self.model_executor.shutdown()
 
+    def profile(self, is_start=True):
+        self.model_executor.profile(is_start)
 
 class EngineCoreProc(EngineCore):
     """ZMQ-wrapper for running EngineCore in background process."""
@@ -292,11 +296,14 @@ class EngineCoreProc(EngineCore):
             self._last_logging_time = now
 
     def _handle_client_request(
-            self, request: Union[EngineCoreRequest, List[str]]) -> None:
+        self, request: Union[EngineCoreRequest, EngineCoreProfile,
+                             List[str]]) -> None:
         """Handle EngineCoreRequest or EngineCoreABORT from Client."""
 
         if isinstance(request, EngineCoreRequest):
             self.add_request(request)
+        elif isinstance(request, EngineCoreProfile):
+            self.model_executor.worker.profile(request.is_start)
         else:
             # TODO: make an EngineCoreAbort wrapper
             assert isinstance(request, list)
@@ -321,6 +328,8 @@ class EngineCoreProc(EngineCore):
                     request = decoder_add_req.decode(request_data)
                 elif request_type == EngineCoreRequestType.ABORT.value:
                     request = decoder_abort_req.decode(request_data)
+                elif request_type == EngineCoreRequestType.PROFILE.value:
+                    request = pickle.loads(request_data)
                 else:
                     raise ValueError(f"Unknown RequestType: {request_type}")
 

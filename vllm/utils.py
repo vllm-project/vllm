@@ -19,7 +19,8 @@ import uuid
 import warnings
 import weakref
 from asyncio import FIRST_COMPLETED, AbstractEventLoop, Future, Task
-from collections.abc import Mapping
+from collections import defaultdict
+from collections.abc import Iterable, Mapping
 from contextlib import contextmanager
 from functools import lru_cache, partial, wraps
 from platform import uname
@@ -931,6 +932,23 @@ def flatten_2d_lists(lists: List[List[T]]) -> List[T]:
     return [item for sublist in lists for item in sublist]
 
 
+_K = TypeVar("_K", bound=Hashable)
+_V = TypeVar("_V")
+
+
+def full_groupby(values: Iterable[_V], *, key: Callable[[_V], _K]):
+    """
+    Unlike :class:`itertools.groupby`, groups are not broken by
+    non-contiguous data.
+    """
+    groups = defaultdict[_K, list[_V]](list)
+
+    for value in values:
+        groups[key(value)].append(value)
+
+    return groups.items()
+
+
 # TODO: This function can be removed if transformer_modules classes are
 # serialized by value when communicating between processes
 def init_cached_hf_modules() -> None:
@@ -1599,6 +1617,7 @@ def direct_register_custom_op(
     mutates_args: List[str],
     fake_impl: Optional[Callable] = None,
     target_lib: Optional[Library] = None,
+    dispatch_key: str = "CUDA",
 ):
     """
     `torch.library.custom_op` can have significant overhead because it
@@ -1627,7 +1646,7 @@ def direct_register_custom_op(
         schema_str = torch._custom_op.impl.infer_schema(op_func, mutates_args)
     my_lib = target_lib or vllm_lib
     my_lib.define(op_name + schema_str)
-    my_lib.impl(op_name, op_func, "CUDA")
+    my_lib.impl(op_name, op_func, dispatch_key=dispatch_key)
     if fake_impl is not None:
         my_lib._register_fake(op_name, fake_impl)
 

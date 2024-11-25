@@ -71,6 +71,9 @@ class GPUExecutor:
         output = self.worker.execute_model(scheduler_output)
         return output
 
+    def profile(self, is_start=True):
+        self.worker.profile(is_start)
+
     def check_health(self) -> None:
         # GPUExecutor will always be healthy as long as
         # it's running.

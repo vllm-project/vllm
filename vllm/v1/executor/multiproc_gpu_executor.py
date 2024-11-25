@@ -142,6 +142,9 @@ class MultiprocessingGPUExecutor:
         model_output = self.model_output_mq.dequeue(ModelRunnerOutput)
         return model_output
 
+    def profile(self, is_start=True):
+        raise NotImplementedError
+
     def shutdown(self):
         """Properly shut down the executor and its workers"""
         if not (self._shutdown_called and hasattr(self, 'scheduler_output_mq')

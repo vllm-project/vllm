@@ -9,7 +9,8 @@ import zmq.asyncio
 from vllm.logger import init_logger
 from vllm.utils import get_open_zmq_ipc_path
 from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
-                            EngineCoreRequest, EngineCoreRequestType)
+                            EngineCoreProfile, EngineCoreRequest,
+                            EngineCoreRequestType)
 from vllm.v1.engine.core import EngineCore, EngineCoreProc
 from vllm.v1.serial_utils import PickleEncoder
 
@@ -58,6 +59,9 @@ class EngineCoreClient:
     def add_request(self, request: EngineCoreRequest) -> None:
         raise NotImplementedError
 
+    async def profile(self, is_start=True) -> None:
+        raise NotImplementedError
+
     def abort_requests(self, request_ids: List[str]) -> None:
         raise NotImplementedError
 
@@ -97,6 +101,9 @@ class InprocClient(EngineCoreClient):
 
     def shutdown(self):
         self.engine_core.shutdown()
+
+    async def profile(self, is_start=True) -> None:
+        self.engine_core.profile(is_start)
 
 
 class MPClient(EngineCoreClient):
@@ -180,8 +187,10 @@ class SyncMPClient(MPClient):
         engine_core_outputs = self.decoder.decode(frame.buffer).outputs
         return engine_core_outputs
 
-    def _send_input(self, request_type: EngineCoreRequestType,
-                    request: Union[EngineCoreRequest, List[str]]) -> None:
+    def _send_input(
+        self, request_type: EngineCoreRequestType,
+        request: Union[EngineCoreRequest, EngineCoreProfile,
+                       List[str]]) -> None:
 
         # (RequestType, SerializedRequest)
         msg = (request_type.value, self.encoder.encode(request))
@@ -192,6 +201,10 @@ class SyncMPClient(MPClient):
 
     def abort_requests(self, request_ids: List[str]) -> None:
         self._send_input(EngineCoreRequestType.ABORT, request_ids)
+
+    async def profile(self, is_start=True) -> None:
+        self._send_input(EngineCoreRequestType.PROFILE,
+                         EngineCoreProfile(is_start))
 
 
 class AsyncMPClient(MPClient):
@@ -208,8 +221,9 @@ class AsyncMPClient(MPClient):
         return engine_core_outputs
 
     async def _send_input(
-            self, request_type: EngineCoreRequestType,
-            request: Union[EngineCoreRequest, List[str]]) -> None:
+        self, request_type: EngineCoreRequestType,
+        request: Union[EngineCoreRequest, EngineCoreProfile,
+                       List[str]]) -> None:
 
         msg = (request_type.value, self.encoder.encode(request))
         await self.input_socket.send_multipart(msg, copy=False)
@@ -220,3 +234,7 @@ class AsyncMPClient(MPClient):
     async def abort_requests_async(self, request_ids: List[str]) -> None:
         if len(request_ids) > 0:
             await self._send_input(EngineCoreRequestType.ABORT, request_ids)
+
+    async def profile(self, is_start=True) -> None:
+        await self._send_input(EngineCoreRequestType.PROFILE,
+                               EngineCoreProfile(is_start))
