@@ -24,6 +24,7 @@ class XPUPlatform(Platform):
     def get_default_attn_backend(cls, selected_backend: _Backend) -> _Backend:
         if selected_backend != _Backend.IPEX:
             logger.info("Cannot use %s backend on XPU.", selected_backend)
+        # return _Backend.IPEX_V1
         return _Backend.IPEX
 
     @staticmethod

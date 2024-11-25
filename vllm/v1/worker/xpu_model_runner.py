@@ -17,7 +17,7 @@ class XPUModelRunner(GPUModelRunner):
 
     @torch.inference_mode()
     def profile_run(self) -> None:
-        self._dummy_run(self.model, self.max_num_tokens)
+        # self._dummy_run(self.model, self.max_num_tokens)
         torch.xpu.synchronize()
 
     def initialize_kv_cache(self, num_blocks: int) -> None:
@@ -33,7 +33,7 @@ class XPUModelRunner(GPUModelRunner):
     def _prepare_inputs(self, scheduler_output: "SchedulerOutput"):
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
-        print(f"aaaaa :{total_num_scheduled_tokens}")
+        # print(f"aaaaa :{total_num_scheduled_tokens}")
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
 
@@ -151,7 +151,7 @@ class XPUModelRunner(GPUModelRunner):
             block_table=self.input_batch.block_table[:num_reqs],
             slot_mapping=slot_mapping,
         )
-        print(attn_metadata)
+        # print(attn_metadata)
         # NOTE(woosuk): Due to chunked prefills, there can be at most 1 partial
         # request in the batch. While we should not sample any token from this
         # partial request, we do so for simplicity. We will ignore the sampled

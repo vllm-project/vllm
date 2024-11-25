@@ -16,7 +16,7 @@ class IPEXAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "ipex-attn-vllm-v1"
+        return "IPEX_V1"
 
     @staticmethod
     def get_impl_cls() -> Type["IPEXAttentionImpl"]:
@@ -114,7 +114,7 @@ class IPEXAttentionImpl(AttentionImpl):
             "key/v_scale is not supported in IPEXAttention.")
 
         output = torch.empty_like(query)
-        torch.ops.vllm.ipex_attn_chunked_prefill(
+        torch.ops.vllm.ipex_attn(
         # ipex_attn(
             output,
             query,
@@ -314,12 +314,12 @@ def ipex_attn(output: torch.Tensor, query: torch.Tensor, key: torch.Tensor,
     elif attn_metadata.is_decode_only:
         block_size = value_cache.shape[3]
         actual_blocks_used = (attn_metadata.seq_len_q + block_size - 1) // block_size
-        print(actual_blocks_used)
+        # print(actual_blocks_used)
         
         ipex_ops.paged_attention_v1(output, query, key_cache, value_cache, num_kv_heads, scale, attn_metadata.block_table, attn_metadata.seq_len_q,
                                     block_size, attn_metadata.max_seq_len, alibi_slopes, kv_cache_dtype, k_scale, v_scale)
     else:
-        print()
+        # print()
         raise ValueError("Invalid attention mode.")
 
     
