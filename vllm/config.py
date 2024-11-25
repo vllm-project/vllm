@@ -993,20 +993,15 @@ class ParallelConfig:
                 raise ValueError(f"worker-use-ray can't be used with "
                                  f"distributed executor backend "
                                  f"'{self.distributed_executor_backend}'.")
-
-        if current_platform.is_tpu() and self.world_size > 1:
+        ray_only_devices = ["tpu", "hpu"]
+        if (current_platform.device_type in ray_only_devices
+                and self.world_size > 1):
             if self.distributed_executor_backend is None:
                 self.distributed_executor_backend = "ray"
             if self.distributed_executor_backend != "ray":
                 raise ValueError(
-                    "TPU backend only supports Ray for distributed inference.")
-
-        if current_platform.is_hpu() and self.world_size > 1:
-            if self.distributed_executor_backend is None:
-                self.distributed_executor_backend = "ray"
-            if self.distributed_executor_backend != "ray":
-                raise ValueError(
-                    "HPU backend only supports Ray for distributed inference.")
+                    f"{current_platform.device_type.upper()} backend only "
+                    "supports Ray for distributed inference.")
 
         if self.distributed_executor_backend is None and self.world_size > 1:
             # We use multiprocessing by default if world_size fits on the
