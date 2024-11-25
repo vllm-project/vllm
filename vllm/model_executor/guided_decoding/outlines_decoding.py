@@ -46,34 +46,7 @@ pair   : UNESCAPED_STRING ":" value
 %ignore WS
 """
 
-global_thread_pool = None  # used for generating logits processor fsm
-
-
-async def get_outlines_guided_decoding_logits_processor(
-    guided_params: GuidedDecodingParams, tokenizer: PreTrainedTokenizerBase
-) -> Union[JSONLogitsProcessor, RegexLogitsProcessor, CFGLogitsProcessor,
-           None]:
-    """
-    Given an OpenAI-compatible request, check for guided decoding parameters
-    and get the necessary logits processor for the given guide.
-    We cache logit processors by (guide, tokenizer), and on cache hit
-    we make a shallow copy to reuse the same underlying FSM.
-    """
-    global global_thread_pool
-    guide, mode = _get_guide_and_mode(guided_params)
-    if not guide or not mode:
-        return None
-
-    if global_thread_pool is None:
-        global_thread_pool = concurrent.futures.ThreadPoolExecutor(
-            max_workers=2)
-    loop = asyncio.get_running_loop()
-
-    return await loop.run_in_executor(global_thread_pool,
-                                      _get_logits_processor, guide, tokenizer,
-                                      mode, guided_params.whitespace_pattern)
-
-
+# FIXME: rename to remove "local"
 def get_local_outlines_guided_decoding_logits_processor(
     guided_params: GuidedDecodingParams, tokenizer: PreTrainedTokenizerBase
 ) -> Union[JSONLogitsProcessor, RegexLogitsProcessor, CFGLogitsProcessor,

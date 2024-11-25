@@ -221,11 +221,6 @@ class MQLLMEngine:
                 request = pickle.loads(frames[0].buffer)
 
                 if isinstance(request, RPCProcessRequest):
-                    if len(frames) > 1:
-                        # Use cloudpickle for logits processors
-                        assert isinstance(request.params, SamplingParams)
-                        lprocs = cloudpickle.loads(frames[1].buffer)
-                        request.params.logits_processors = lprocs
                     self._handle_process_request(request)
                 elif isinstance(request, RPCAbortRequest):
                     self._handle_abort_request(request)

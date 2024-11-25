@@ -896,6 +896,8 @@ class LLMEngine:
             raise ValueError(f"Cannot request more than "
                              f"{max_logprobs} logprobs.")
 
+        # FIXME: do not mutate SamplingParams here - just store the
+        # created logits_processors list elsewhere
         sampling_params = self._build_logits_processors(
             sampling_params, lora_request)
 

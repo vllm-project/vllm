@@ -194,6 +194,9 @@ class SamplingParams(
     spaces_between_special_tokens: bool = True
     # Optional[List[LogitsProcessor]] type. We use Any here because
     # Optional[List[LogitsProcessor]] type is not supported by msgspec.
+    # Note - this parameter only contains the user-supplied processors,
+    # not the processors that implement guided_decoding, logit_bias,
+    # allowed_token_ids, and bad_words
     logits_processors: Optional[Any] = None
     include_stop_str_in_output: bool = False
     truncate_prompt_tokens: Optional[Annotated[int, msgspec.Meta(ge=1)]] = None
@@ -448,6 +451,7 @@ class SamplingParams(
     def all_stop_token_ids(self) -> Set[int]:
         return self._all_stop_token_ids
 
+    # FIXME: probably not needed anymore
     def clone(self) -> "SamplingParams":
         """Deep copy excluding LogitsProcessor objects.
 
