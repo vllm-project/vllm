@@ -10,8 +10,8 @@ from torch.library import Library
 from vllm.compilation.compile_context import set_compile_context
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CompilationConfig, CompilationLevel, VllmConfig
-from vllm.plugins import set_current_vllm_config
+from vllm.config import (CompilationConfig, CompilationLevel, VllmConfig,
+                         set_current_vllm_config)
 from vllm.utils import direct_register_custom_op
 
 global_counter = 0
@@ -79,7 +79,7 @@ def test_simple_piecewise_compile():
     vllm_config = VllmConfig(compilation_config=CompilationConfig(
         level=CompilationLevel.PIECEWISE,
         use_cudagraph=True,
-        non_cudagraph_ops=["silly.attention"],
+        splitting_ops=["silly.attention"],
         cudagraph_copy_inputs=True,
     ))
     with set_current_vllm_config(vllm_config):

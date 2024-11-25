@@ -62,6 +62,16 @@ test_settings = [
         method="encode",
         fullgraph=True,
     ),
+    # encoder-based embedding model (BERT)
+    TestSetting(
+        model="BAAI/bge-base-en-v1.5",
+        model_args=["--task", "embedding"],
+        pp_size=1,
+        tp_size=1,
+        attn_backend="XFORMERS",
+        method="encode",
+        fullgraph=True,
+    ),
     # vision language model
     TestSetting(
         model="microsoft/Phi-3.5-vision-instruct",
@@ -103,7 +113,7 @@ def test_compile_correctness(test_setting: TestSetting):
             CompilationLevel.NO_COMPILATION,
             CompilationLevel.PIECEWISE,
     ]:
-        all_args.append(final_args + ["-O", str(level)])
+        all_args.append(final_args + [f"-O{level}"])
         all_envs.append({})
 
     # inductor will change the output, so we only compare if the output
@@ -121,7 +131,7 @@ def test_compile_correctness(test_setting: TestSetting):
             CompilationLevel.DYNAMO_AS_IS,
             CompilationLevel.DYNAMO_ONCE,
     ]:
-        all_args.append(final_args + ["-O", str(level)])
+        all_args.append(final_args + [f"-O{level}"])
         all_envs.append({})
         if level != CompilationLevel.DYNAMO_ONCE and not fullgraph:
             # "DYNAMO_ONCE" will always use fullgraph

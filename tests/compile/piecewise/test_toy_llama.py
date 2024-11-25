@@ -16,8 +16,8 @@ from torch.library import Library
 from vllm.compilation.compile_context import set_compile_context
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CompilationConfig, CompilationLevel, VllmConfig
-from vllm.plugins import set_current_vllm_config
+from vllm.config import (CompilationConfig, CompilationLevel, VllmConfig,
+                         set_current_vllm_config)
 from vllm.utils import direct_register_custom_op
 
 # create a library to hold the custom op
@@ -258,7 +258,7 @@ def run_model(llama_config,
             use_cudagraph=True,
         )
         if split_attn:
-            compilation_config.non_cudagraph_ops = ["silly.attention"]
+            compilation_config.splitting_ops = ["silly.attention"]
     else:
         compilation_config = CompilationConfig(
             level=CompilationLevel.NO_COMPILATION, )
@@ -378,7 +378,7 @@ def benchmark():
             compilation_config = CompilationConfig(
                 level=CompilationLevel.PIECEWISE,
                 use_cudagraph=True,
-                non_cudagraph_ops=["silly.attention"],
+                splitting_ops=["silly.attention"],
             )
         else:
             compilation_config = CompilationConfig(
