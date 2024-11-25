@@ -197,6 +197,13 @@ class EngineArgs:
         if not self.tokenizer:
             self.tokenizer = self.model
 
+        # support `EngineArgs(compilation_config={...})`
+        # without having to manually construct a
+        # CompilationConfig object
+        if isinstance(self.compilation_config, (int, dict)):
+            self.compilation_config = CompilationConfig.from_cli(
+                json.dumps(self.compilation_config))
+
         # Setup plugins
         from vllm.plugins import load_general_plugins
         load_general_plugins()
