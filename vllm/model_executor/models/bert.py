@@ -5,6 +5,7 @@ from torch import nn
 from transformers import BertConfig
 
 from vllm.attention import Attention, AttentionMetadata, AttentionType
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, PoolerConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
@@ -13,18 +14,17 @@ from vllm.model_executor.layers.linear import (ColumnParallelLinear,
                                                RowParallelLinear)
 from vllm.model_executor.layers.pooler import (CrossEncodingPooler, Pooler,
                                                PoolingType)
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.interfaces import SupportsCrossEncoding
 from vllm.model_executor.pooling_metadata import PoolingMetadata
 from vllm.sequence import IntermediateTensors, PoolerOutput
 from vllm.transformers_utils.config import (
     get_cross_encoder_activation_function)
 
-from .utils import maybe_prefix
+from .interfaces import SupportsCrossEncoding
+from .utils import WeightsMapper, maybe_prefix
 
 
 class BertEmbedding(nn.Module):
@@ -92,14 +92,14 @@ class BertPooler(nn.Module):
         return pooled_output
 
 
+@support_torch_compile
 class BertEncoder(nn.Module):
 
-    def __init__(self,
-                 config: BertConfig,
-                 cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 prefix: str = ""):
+    def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
         self.layer = nn.ModuleList([
             BertLayer(config=config,
                       cache_config=cache_config,
@@ -336,12 +336,8 @@ class BertModel(nn.Module):
                  add_pooling_layer: bool = False):
         super().__init__()
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
-        quant_config = vllm_config.quant_config
         self.embeddings = embedding_class(config)
-        self.encoder = BertEncoder(config,
-                                   cache_config,
-                                   quant_config,
+        self.encoder = BertEncoder(vllm_config=vllm_config,
                                    prefix=f"{prefix}.encoder")
         self.pooler = BertPooler(config) if add_pooling_layer else None
 
@@ -445,6 +441,8 @@ class BertEmbeddingModel(nn.Module):
         return self._pooler(hidden_states, pooling_metadata)
 
     def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+        hf_to_vllm_mapper = WeightsMapper(orig_to_new_prefix={"model.": ""})
+        weights = hf_to_vllm_mapper.apply(weights)
         self.model.load_weights(weights)
 
     def _build_model(self,
