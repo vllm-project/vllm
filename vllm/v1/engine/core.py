@@ -14,7 +14,6 @@ from msgspec import msgpack
 from vllm.config import CacheConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import make_zmq_socket
 from vllm.v1.core.scheduler import Scheduler
 from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
                             EngineCoreProfile, EngineCoreRequest,
@@ -23,6 +22,7 @@ from vllm.v1.engine.mm_input_mapper import MMInputMapper
 from vllm.v1.executor.gpu_executor import GPUExecutor
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import PickleEncoder
+from vllm.v1.utils import make_zmq_socket
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -133,6 +133,7 @@ class EngineCore:
 
     def profile(self, is_start=True):
         self.model_executor.profile(is_start)
+
 
 class EngineCoreProc(EngineCore):
     """ZMQ-wrapper for running EngineCore in background process."""

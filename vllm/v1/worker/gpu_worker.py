@@ -22,11 +22,12 @@ from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
 from vllm.platforms import current_platform
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size,
-                        get_open_zmq_ipc_path, make_zmq_socket)
+                        get_open_zmq_ipc_path)
 from vllm.v1.core.scheduler_output import ExecutorMsg, ExecutorMsgType
 from vllm.v1.outputs import (ModelRunnerOutput, NumBlocksMsg, NumGPUBlocks,
                              ShmHandleMsg, WorkerInitOutputType,
                              WorkerInitRequestType)
+from vllm.v1.utils import make_zmq_socket
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 logger = init_logger(__name__)

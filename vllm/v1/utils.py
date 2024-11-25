@@ -1,4 +1,11 @@
-from typing import Generic, List, TypeVar, overload
+from contextlib import contextmanager
+from typing import Any, Generic, Iterator, List, TypeVar, overload
+
+import zmq
+
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 T = TypeVar("T")
 
@@ -62,3 +69,27 @@ class ConstantList(Generic[T]):
 
     def __len__(self):
         return len(self._x)
+
+
+@contextmanager
+def make_zmq_socket(path: str, type: Any) -> Iterator[zmq.Socket]:
+    """Context manager for a ZMQ socket"""
+
+    ctx = zmq.Context()
+    try:
+        socket = ctx.socket(type)
+
+        if type == zmq.constants.PULL:
+            socket.connect(path)
+        elif type == zmq.constants.PUSH:
+            socket.bind(path)
+        else:
+            raise ValueError(f"Unknown Socket Type: {type}")
+
+        yield socket
+
+    except KeyboardInterrupt:
+        logger.debug("Worker had Keyboard Interrupt.")
+
+    finally:
+        ctx.destroy(linger=0)
