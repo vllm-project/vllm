@@ -71,7 +71,6 @@ class Worker:
             from vllm.utils import init_cached_hf_modules
             init_cached_hf_modules()
 
-        self.model_runner = GPUModelRunner(vllm_config)
         # Torch profiler. Enabled and configured through env vars:
         # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
         if envs.VLLM_TORCH_PROFILER_DIR:
@@ -397,7 +396,6 @@ class WorkerProc:
             logger.exception(e)
             raise e
         finally:
-            # TODO: Why is this del needed?
             del worker
             exit(0)
 

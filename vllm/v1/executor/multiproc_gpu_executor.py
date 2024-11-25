@@ -147,7 +147,7 @@ class MultiprocessingGPUExecutor:
 
     def shutdown(self):
         """Properly shut down the executor and its workers"""
-        if not (self._shutdown_called and hasattr(self, 'scheduler_output_mq')
+        if not (hasattr(self, 'scheduler_output_mq')
                 and self.scheduler_output_mq is not None):
             termination_msg = ExecutorMsg(ExecutorMsgType.TERMINATE.value,
                                           None)
