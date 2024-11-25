@@ -20,7 +20,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only OLMo model compatible with HuggingFace weights."""
-from typing import Iterable, List, Optional, Tuple, Union
+from typing import Iterable, List, Optional, Set, Tuple, Union
 
 import torch
 from torch import nn
@@ -62,6 +62,7 @@ class OlmoAttention(nn.Module):
         config: OlmoConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.config = config
@@ -101,7 +102,8 @@ class OlmoAttention(nn.Module):
                               self.head_dim,
                               scale=self.scaling,
                               cache_config=cache_config,
-                              quant_config=quant_config)
+                              quant_config=quant_config,
+                              prefix=f"{prefix}.attn")
 
         # Attention output projection.
         self.o_proj = RowParallelLinear(
@@ -184,10 +186,14 @@ class OlmoDecoderLayer(nn.Module):
     def __init__(self,
                  config: OlmoConfig,
                  cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None):
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = ""):
         super().__init__()
         # Attention block.
-        self.self_attn = OlmoAttention(config, cache_config, quant_config)
+        self.self_attn = OlmoAttention(config,
+                                       cache_config,
+                                       quant_config,
+                                       prefix=f"{prefix}.self_attn")
 
         # MLP block.
         self.mlp = OlmoMLP(config, quant_config)
@@ -238,8 +244,8 @@ class OlmoModel(nn.Module):
                                                    config.hidden_size)
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: OlmoDecoderLayer(config, cache_config, quant_config
-                                            ),
+            lambda prefix: OlmoDecoderLayer(
+                config, cache_config, quant_config, prefix=prefix),
             prefix=f"{prefix}.layers")
         self.norm = nn.LayerNorm(config.hidden_size,
                                  elementwise_affine=False,
@@ -356,7 +362,8 @@ class OlmoForCausalLM(nn.Module, SupportsPP):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -366,6 +373,7 @@ class OlmoForCausalLM(nn.Module, SupportsPP):
             ("gate_up_proj", "up_proj", 1),
         ]
         params_dict = dict(self.named_parameters(remove_duplicate=False))
+        loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -402,3 +410,5 @@ class OlmoForCausalLM(nn.Module, SupportsPP):
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params

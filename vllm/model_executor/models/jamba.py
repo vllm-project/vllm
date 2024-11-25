@@ -1,5 +1,5 @@
 """Inference-only Jamba model."""
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, List, Optional, Set, Tuple
 
 import torch
 from torch import nn
@@ -102,7 +102,8 @@ class JambaMambaDecoderLayer(nn.Module):
                  config: JambaConfig,
                  layer_idx: int,
                  cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None) -> None:
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = "") -> None:
         super().__init__()
         self.config = config
         self.mamba = MambaMixer(hidden_size= config.hidden_size,
@@ -157,6 +158,7 @@ class JambaAttentionDecoderLayer(nn.Module):
         layer_idx: int,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -198,6 +200,7 @@ class JambaAttentionDecoderLayer(nn.Module):
             self.scaling,
             num_kv_heads=self.num_kv_heads,
             cache_config=cache_config,
+            prefix=f"{prefix}.attn",
         )
 
         num_experts = config.layers_num_experts[layer_idx]
@@ -287,7 +290,8 @@ class JambaModel(nn.Module):
                 layer_class(config,
                             layer_idx=i,
                             cache_config=cache_config,
-                            quant_config=quant_config))
+                            quant_config=quant_config,
+                            prefix=f"{prefix}.layers.{i}"))
         self.layers = nn.ModuleList(decoder_layers)
         self.final_layernorm = RMSNorm(config.hidden_size,
                                        eps=config.rms_norm_eps)
@@ -462,7 +466,8 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -479,6 +484,7 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA):
             num_experts=self.config.num_experts)
 
         params_dict = dict(self.named_parameters())
+        loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -534,6 +540,8 @@ class JambaForCausalLM(nn.Module, HasInnerState, SupportsLoRA):
                     weight_loader = getattr(param, "weight_loader",
                                             default_weight_loader)
                     weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params
 
 
 def _is_moe_layer(name: str):

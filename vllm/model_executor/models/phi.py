@@ -34,7 +34,7 @@
 # OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 """Inference-only Phi-1.5 model compatible with HuggingFace weights."""
-from typing import Iterable, List, Optional, Tuple, Union
+from typing import Iterable, List, Optional, Set, Tuple, Union
 
 import torch
 from torch import nn
@@ -69,7 +69,8 @@ class PhiAttention(nn.Module):
     def __init__(self,
                  config: PhiConfig,
                  cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None):
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = ""):
         super().__init__()
         self.total_num_heads = config.num_attention_heads
         self.hidden_size = config.hidden_size
@@ -116,7 +117,8 @@ class PhiAttention(nn.Module):
                               self.head_size,
                               scaling,
                               cache_config=cache_config,
-                              quant_config=quant_config)
+                              quant_config=quant_config,
+                              prefix=f"{prefix}.attn")
 
     def forward(
         self,
@@ -167,11 +169,15 @@ class PhiLayer(nn.Module):
     def __init__(self,
                  config: PhiConfig,
                  cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None):
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = ""):
         super().__init__()
         self.input_layernorm = nn.LayerNorm(config.hidden_size,
                                             eps=config.layer_norm_eps)
-        self.self_attn = PhiAttention(config, cache_config, quant_config)
+        self.self_attn = PhiAttention(config,
+                                      cache_config,
+                                      quant_config,
+                                      prefix=f"{prefix}.self_attn")
         self.mlp = PhiMLP(config, quant_config)
 
     def forward(
@@ -210,7 +216,8 @@ class PhiModel(nn.Module):
                                                    config.hidden_size)
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: PhiLayer(config, cache_config, quant_config),
+            lambda prefix: PhiLayer(
+                config, cache_config, quant_config, prefix=prefix),
             prefix=f"{prefix}.layers")
         self.final_layernorm = nn.LayerNorm(config.hidden_size,
                                             eps=config.layer_norm_eps)
@@ -345,7 +352,8 @@ class PhiForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -353,6 +361,7 @@ class PhiForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             ("qkv_proj", "v_proj", "v")
         ]
         params_dict = dict(self.named_parameters())
+        loaded_params: Set[str] = set()
 
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
@@ -383,3 +392,5 @@ class PhiForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params

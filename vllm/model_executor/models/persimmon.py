@@ -19,7 +19,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only persimmon model compatible with HuggingFace weights."""
-from typing import Iterable, List, Optional, Tuple, Union
+from typing import Iterable, List, Optional, Set, Tuple, Union
 
 import torch
 from torch import nn
@@ -75,7 +75,8 @@ class PersimmonAttention(nn.Module):
     def __init__(self,
                  config: PersimmonConfig,
                  cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None):
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = ""):
         super().__init__()
         self.config = config
         tensor_parallel_world_size = get_tensor_model_parallel_world_size()
@@ -122,7 +123,8 @@ class PersimmonAttention(nn.Module):
                               self.head_dim,
                               scale=self.scaling,
                               cache_config=cache_config,
-                              quant_config=quant_config)
+                              quant_config=quant_config,
+                              prefix=f"{prefix}.attn")
 
     def _split_heads(self, x: torch.Tensor) -> torch.Tensor:
         # [seq_length, hidden_size] -> [seq_length, num_heads, head_dim]
@@ -167,12 +169,14 @@ class PersimmonDecoderLayer(nn.Module):
     def __init__(self,
                  config: PersimmonConfig,
                  cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None):
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = ""):
         super().__init__()
         self.hidden_size = config.hidden_size
         self.self_attn = PersimmonAttention(config=config,
                                             cache_config=cache_config,
-                                            quant_config=quant_config)
+                                            quant_config=quant_config,
+                                            prefix=f"{prefix}.self_attn")
         self.mlp = PersimmonMLP(config, quant_config=quant_config)
         self.input_layernorm = nn.LayerNorm(config.hidden_size,
                                             eps=config.layer_norm_eps)
@@ -226,8 +230,8 @@ class PersimmonModel(nn.Module):
                                                    config.hidden_size)
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: PersimmonDecoderLayer(config, cache_config,
-                                                 quant_config),
+            lambda prefix: PersimmonDecoderLayer(
+                config, cache_config, quant_config, prefix=prefix),
             prefix=f"{prefix}.layers")
         self.final_layernorm = nn.LayerNorm(config.hidden_size,
                                             eps=config.layer_norm_eps)
@@ -324,8 +328,10 @@ class PersimmonForCausalLM(nn.Module, SupportsPP):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         params_dict = dict(self.named_parameters(remove_duplicate=False))
+        loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -358,3 +364,5 @@ class PersimmonForCausalLM(nn.Module, SupportsPP):
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
             weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params

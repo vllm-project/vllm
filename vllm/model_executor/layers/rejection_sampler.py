@@ -368,7 +368,7 @@ class RejectionSampler(SpecDecodeStochasticBaseSampler):
 # Note that we always sample with replacement.
 # probs will be modified in place, but this is fine, as we pass
 # in a copy already.
-@torch.jit.script
+@torch.compile(dynamic=True)
 def _multinomial(
     probs: torch.Tensor,
     num_samples: int,

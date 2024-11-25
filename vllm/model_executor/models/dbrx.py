@@ -1,4 +1,4 @@
-from typing import Iterable, List, Optional, Tuple, Union
+from typing import Iterable, List, Optional, Set, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -154,6 +154,7 @@ class DbrxAttention(nn.Module):
         config: DbrxConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.d_model = config.d_model
@@ -208,7 +209,8 @@ class DbrxAttention(nn.Module):
                               self.scaling,
                               num_kv_heads=self.num_kv_heads,
                               cache_config=cache_config,
-                              quant_config=quant_config)
+                              quant_config=quant_config,
+                              prefix=f"{prefix}.attn")
 
     def forward(
         self,
@@ -234,10 +236,14 @@ class DbrxFusedNormAttention(nn.Module):
         config: DbrxConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.d_model = config.d_model
-        self.attn = DbrxAttention(config, cache_config, quant_config)
+        self.attn = DbrxAttention(config,
+                                  cache_config,
+                                  quant_config,
+                                  prefix=f"{prefix}.attn")
         self.norm_1 = nn.LayerNorm(self.d_model)
         self.norm_2 = nn.LayerNorm(self.d_model)
 
@@ -269,10 +275,14 @@ class DbrxBlock(nn.Module):
         config: DbrxConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
-        self.norm_attn_norm = DbrxFusedNormAttention(config, cache_config,
-                                                     quant_config)
+        self.norm_attn_norm = DbrxFusedNormAttention(
+            config,
+            cache_config,
+            quant_config,
+            prefix=f"{prefix}.norm_attn_norm")
         self.ffn = DbrxMoE(config, quant_config)
 
     def forward(
@@ -308,7 +318,8 @@ class DbrxModel(nn.Module):
         )
         self.start_layer, self.end_layer, self.blocks = make_layers(
             config.n_layers,
-            lambda prefix: DbrxBlock(config, cache_config, quant_config),
+            lambda prefix: DbrxBlock(
+                config, cache_config, quant_config, prefix=prefix),
             prefix=f"{prefix}.blocks",
         )
         self.norm_f = nn.LayerNorm(config.d_model, eps=1e-5)
@@ -417,13 +428,15 @@ class DbrxForCausalLM(nn.Module, SupportsPP):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
 
         expert_params_mapping = [(
             "w13_weight" if weight_name in ["w1", "v1"] else "w2_weight",
             f"mlp.{weight_name}",
         ) for weight_name in ["w1", "v1", "w2"]]
         params_dict = dict(self.named_parameters(remove_duplicate=False))
+        loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
             for param_name, weight_name in expert_params_mapping:
                 if weight_name not in name:
@@ -447,3 +460,5 @@ class DbrxForCausalLM(nn.Module, SupportsPP):
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params

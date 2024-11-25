@@ -1,6 +1,6 @@
 # Adapted from https://huggingface.co/mosaicml/mpt-7b/tree/main
 import math
-from typing import Iterable, List, Optional, Tuple, Union
+from typing import Iterable, List, Optional, Set, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -50,6 +50,7 @@ class MPTAttention(nn.Module):
         config: MPTConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.d_model = config.d_model
@@ -115,7 +116,8 @@ class MPTAttention(nn.Module):
                               alibi_slopes=alibi_slopes,
                               num_kv_heads=self.num_kv_heads,
                               cache_config=cache_config,
-                              quant_config=quant_config)
+                              quant_config=quant_config,
+                              prefix=f"{prefix}.attn")
 
     def forward(
         self,
@@ -176,11 +178,15 @@ class MPTBlock(nn.Module):
         config: MPTConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         hidden_size = config.d_model
         self.norm_1 = nn.LayerNorm(hidden_size)
-        self.attn = MPTAttention(config, cache_config, quant_config)
+        self.attn = MPTAttention(config,
+                                 cache_config,
+                                 quant_config,
+                                 prefix=f"{prefix}.attn")
         self.norm_2 = nn.LayerNorm(hidden_size)
         self.ffn = MPTMLP(config, quant_config)
 
@@ -224,7 +230,8 @@ class MPTModel(nn.Module):
         )
         self.start_layer, self.end_layer, self.blocks = make_layers(
             config.n_layers,
-            lambda prefix: MPTBlock(config, cache_config, quant_config),
+            lambda prefix: MPTBlock(
+                config, cache_config, quant_config, prefix=prefix),
             prefix=f"{prefix}.blocks")
         self.norm_f = nn.LayerNorm(config.d_model)
         if config.no_bias:
@@ -324,8 +331,10 @@ class MPTForCausalLM(nn.Module, SupportsPP):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         params_dict = dict(self.named_parameters(remove_duplicate=False))
+        loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
             # Skip loading extra bias for GPTQ models.
             if name.endswith(".bias") and name not in params_dict:
@@ -336,3 +345,5 @@ class MPTForCausalLM(nn.Module, SupportsPP):
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
             weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params

@@ -21,13 +21,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only Qwen2 model compatible with HuggingFace weights."""
-from typing import Iterable, List, Optional, Tuple, Union
+from typing import Iterable, List, Optional, Set, Tuple, Union
 
 import torch
 from torch import nn
 from transformers import Qwen2Config
 
-from vllm.attention import Attention, AttentionMetadata
+from vllm.attention import Attention, AttentionMetadata, AttentionType
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
@@ -164,11 +164,17 @@ class Qwen2Attention(nn.Module):
         hidden_states: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: AttentionMetadata,
+        attn_type: str = AttentionType.DECODER,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v, kv_cache, attn_metadata)
+        attn_output = self.attn(q,
+                                k,
+                                v,
+                                kv_cache,
+                                attn_metadata,
+                                attn_type=attn_type)
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -210,6 +216,15 @@ class Qwen2DecoderLayer(nn.Module):
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
                                                 eps=config.rms_norm_eps)
 
+        # By default, Qwen2 uses causal attention as it is a decoder-only model.
+        # You can override the HF config with `is_causal=False` to enable
+        # bidirectional attention, which is used in some embedding models
+        # (e.g. Alibaba-NLP/gte-Qwen2-7B-instruct)
+        if getattr(config, "is_causal", True):
+            self._attn_type = AttentionType.DECODER
+        else:
+            self._attn_type = AttentionType.ENCODER_ONLY
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -230,6 +245,7 @@ class Qwen2DecoderLayer(nn.Module):
             hidden_states=hidden_states,
             kv_cache=kv_cache,
             attn_metadata=attn_metadata,
+            attn_type=self._attn_type,
         )
 
         # Fully Connected
@@ -332,7 +348,8 @@ class Qwen2Model(nn.Module):
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -342,6 +359,7 @@ class Qwen2Model(nn.Module):
             ("gate_up_proj", "up_proj", 1),
         ]
         params_dict = dict(self.named_parameters(remove_duplicate=False))
+        loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -372,6 +390,8 @@ class Qwen2Model(nn.Module):
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params
 
 
 class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
@@ -494,13 +514,14 @@ class Qwen2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     ) -> Optional[PoolerOutput]:
         return self._pooler(hidden_states, pooling_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=(["lm_head."]
                            if self.config.tie_word_embeddings else None),
         )
-        loader.load_weights(weights)
+        return loader.load_weights(weights)
 
 
 class Qwen2EmbeddingModel(nn.Module, SupportsLoRA, SupportsPP):
@@ -564,7 +585,8 @@ class Qwen2EmbeddingModel(nn.Module, SupportsLoRA, SupportsPP):
     ) -> Optional[PoolerOutput]:
         return self._pooler(hidden_states, pooling_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         loader = AutoWeightsLoader(self,
                                    ignore_unexpected_prefixes=["lm_head."])
-        loader.load_weights(weights)
+        return loader.load_weights(weights)

@@ -1,5 +1,5 @@
 from functools import cached_property
-from typing import (Iterable, List, Literal, Mapping, Optional, Tuple,
+from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,
                     TypedDict, Union)
 
 import torch
@@ -288,6 +288,21 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
         pooler_config = vllm_config.model_config.pooler_config
         multimodal_config = vllm_config.model_config.multimodal_config
 
+        vision_feature_layer = config.vision_feature_layer
+        # Determine the layer up to which we will initialize the vision tower
+        if isinstance(vision_feature_layer, int):
+            vision_hidden_size = config.vision_config.hidden_size
+            self.feature_sample_layers = None
+        # Used for multimodal granite models to control encoder outputs
+        elif isinstance(vision_feature_layer, (list, tuple)):
+            vision_hidden_size = config.vision_config.hidden_size * len(
+                vision_feature_layer)
+            self.feature_sample_layers = vision_feature_layer
+        else:
+            raise TypeError(
+                f"vision_layer_feature type: {type(vision_feature_layer)}"
+                " is not supported")
+
         self.config = config
         self.multimodal_config = multimodal_config
 
@@ -300,7 +315,7 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
         self.image_newline = nn.Parameter(
             torch.empty(config.text_config.hidden_size))
         self.multi_modal_projector = LlavaMultiModalProjector(
-            vision_hidden_size=config.vision_config.hidden_size,
+            vision_hidden_size=vision_hidden_size,
             text_hidden_size=config.text_config.hidden_size,
             projector_hidden_act=config.projector_hidden_act)
 
@@ -419,7 +434,8 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
 
         # NOTE: we skip the step to select the vision feature layer since
         # this is already done inside the vision tower
-        image_features = vision_tower(pixel_values)
+        image_features = vision_tower(
+            pixel_values, feature_sample_layers=self.feature_sample_layers)
 
         return self._select_image_features(
             image_features,
@@ -654,6 +670,7 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal,
     ) -> Optional[PoolerOutput]:
         return self._pooler(hidden_states, pooling_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         loader = AutoWeightsLoader(self)
-        loader.load_weights(weights)
+        return loader.load_weights(weights)

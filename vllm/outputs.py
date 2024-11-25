@@ -5,6 +5,7 @@ from typing import Sequence as GenericSequence
 from typing import Union
 
 from vllm.lora.request import LoRARequest
+from vllm.multimodal.inputs import MultiModalPlaceholderDict
 from vllm.sampling_params import RequestOutputKind
 from vllm.sequence import (PromptLogprobs, RequestMetrics, SampleLogprobs,
                            SequenceGroup, SequenceGroupBase, SequenceStatus)
@@ -59,7 +60,6 @@ class EmbeddingOutput:
         embedding: The embedding vector, which is a list of floats. The
         length of vector depends on the model as listed in the embedding guide.
     """
-
     embedding: List[float]
 
     def __repr__(self) -> str:
@@ -103,10 +103,13 @@ class RequestOutput:
         encoder_prompt: Optional[str] = None,
         encoder_prompt_token_ids: Optional[List[int]] = None,
         num_cached_tokens: Optional[int] = None,
+        *,
+        multi_modal_placeholders: Optional[MultiModalPlaceholderDict] = None,
     ) -> None:
         self.request_id = request_id
         self.prompt = prompt
         self.prompt_token_ids = prompt_token_ids
+        self.multi_modal_placeholders = multi_modal_placeholders or {}
         self.prompt_logprobs = prompt_logprobs
         self.outputs = outputs
         self.finished = finished
@@ -275,17 +278,26 @@ class RequestOutput:
         finished_time = time.time() if finished else None
         seq_group.set_finished_time(finished_time)
 
-        init_args = (seq_group.request_id, prompt, prompt_token_ids,
-                     prompt_logprobs, outputs, finished, seq_group.metrics,
-                     seq_group.lora_request, encoder_prompt,
-                     encoder_prompt_token_ids, num_cached_tokens)
+        init_kwargs = {
+            "request_id": seq_group.request_id,
+            "prompt": prompt,
+            "prompt_token_ids": prompt_token_ids,
+            "prompt_logprobs": prompt_logprobs,
+            "outputs": outputs,
+            "finished": finished,
+            "metrics": seq_group.metrics,
+            "lora_request": seq_group.lora_request,
+            "encoder_prompt": encoder_prompt,
+            "encoder_prompt_token_ids": encoder_prompt_token_ids,
+            "num_cached_tokens": num_cached_tokens,
+            "multi_modal_placeholders": seq_group.multi_modal_placeholders
+        }
 
         if use_cache:
             request_output = seq_group.cached_request_output
-            request_output.__init__(*init_args)  # type: ignore
-
+            request_output.__init__(**init_kwargs)  # type: ignore
         else:
-            request_output = cls(*init_args)
+            request_output = cls(**init_kwargs)  # type: ignore
 
         return request_output
 
@@ -300,7 +312,8 @@ class RequestOutput:
                 f"finished={self.finished}, "
                 f"metrics={self.metrics}, "
                 f"lora_request={self.lora_request}, "
-                f"num_cached_tokens={self.num_cached_tokens})")
+                f"num_cached_tokens={self.num_cached_tokens}, "
+                f"multi_modal_placeholders={self.multi_modal_placeholders})")
 
 
 class EmbeddingRequestOutput:
@@ -347,6 +360,50 @@ class EmbeddingRequestOutput:
                 f"outputs={repr(self.outputs)}, "
                 f"prompt_token_ids={self.prompt_token_ids}, "
                 f"finished={self.finished})")
+
+
+@dataclass
+class ScoreOutput:
+    """The output data of one completion output of a request.
+
+    Args:
+        score: The score, which is a list of floats. 
+        index: The correspondent text index of the score.
+    """
+    index: int
+    score: List[float]
+
+    def __repr__(self) -> str:
+        return (f"ScoreOutput("
+                f"score={self.score}), "
+                f"index={self.index})")
+
+
+class ScoreRequestOutput:
+    """
+    The output data of an score request to the LLM.
+
+    Args:
+        request_id (str): A unique identifier for the score request.
+        outputs (score): The embedding results for the given input.
+    """
+
+    def __init__(self, request_id: str, outputs: "ScoreOutput"):
+        self.request_id = request_id
+        self.outputs = outputs
+
+    def __repr__(self):
+        """
+        Returns a string representation of an ScoreRequestOutput instance.
+
+        The representation includes the request_id and the number of outputs,
+        providing a quick overview of the embedding request's results.
+
+        Returns:
+            str: A string representation of the ScoreRequestOutput instance.
+        """
+        return (f"ScoreRequestOutput(request_id='{self.request_id}', "
+                f"outputs={repr(self.outputs)}")
 
 
 class RequestOutputFactory:

@@ -18,7 +18,7 @@
 # https://huggingface.co/stabilityai/stablelm-3b-4e1t/blob/main/config.json
 """Inference-only StabeLM (https://github.com/Stability-AI/StableLM)
 model compatible with HuggingFace weights."""
-from typing import Iterable, List, Optional, Tuple, Union
+from typing import Iterable, List, Optional, Set, Tuple, Union
 
 import torch
 from torch import nn
@@ -77,7 +77,8 @@ class StablelmAttention(nn.Module):
     def __init__(self,
                  config: PretrainedConfig,
                  cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None) -> None:
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = "") -> None:
         super().__init__()
         self.config = config
         self.hidden_size = config.hidden_size
@@ -131,7 +132,8 @@ class StablelmAttention(nn.Module):
                               self.scaling,
                               num_kv_heads=self.num_key_value_heads,
                               cache_config=cache_config,
-                              quant_config=quant_config)
+                              quant_config=quant_config,
+                              prefix=f"{prefix}.attn")
 
     def forward(
         self,
@@ -155,9 +157,13 @@ class StablelmDecoderLayer(nn.Module):
         config: PretrainedConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
-        self.self_attn = StablelmAttention(config, cache_config, quant_config)
+        self.self_attn = StablelmAttention(config,
+                                           cache_config,
+                                           quant_config,
+                                           prefix=f"{prefix}.self_attn")
         self.mlp = StablelmMLP(config, quant_config)
         norm_eps = getattr(config, "norm_eps",
                            getattr(config, "layer_norm_eps", 1e-05))
@@ -207,8 +213,8 @@ class StableLMEpochModel(nn.Module):
         )
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: StablelmDecoderLayer(config, cache_config,
-                                                quant_config),
+            lambda prefix: StablelmDecoderLayer(
+                config, cache_config, quant_config, prefix=prefix),
             prefix=f"{prefix}.layers",
         )
         norm_eps = getattr(config, "norm_eps",
@@ -306,7 +312,8 @@ class StablelmForCausalLM(nn.Module, SupportsPP):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -316,6 +323,7 @@ class StablelmForCausalLM(nn.Module, SupportsPP):
             ("gate_up_proj", "up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
+        loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -347,3 +355,5 @@ class StablelmForCausalLM(nn.Module, SupportsPP):
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params

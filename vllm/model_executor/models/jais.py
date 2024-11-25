@@ -19,7 +19,7 @@
 """Inference-only Jais model compatible with HuggingFace weights."""
 
 import math
-from typing import Iterable, List, Optional, Tuple, Union
+from typing import Iterable, List, Optional, Set, Tuple, Union
 
 import torch
 from torch import nn
@@ -76,6 +76,7 @@ class JAISAttention(nn.Module):
         config: JAISConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -114,7 +115,8 @@ class JAISAttention(nn.Module):
                               scale=self.scale,
                               alibi_slopes=alibi_slopes,
                               cache_config=cache_config,
-                              quant_config=quant_config)
+                              quant_config=quant_config,
+                              prefix=f"{prefix}.attn")
 
     def forward(
         self,
@@ -178,6 +180,7 @@ class JAISBlock(nn.Module):
         config: JAISConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         hidden_size = config.hidden_size
@@ -185,7 +188,10 @@ class JAISBlock(nn.Module):
                      hidden_size)
 
         self.ln_1 = nn.LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
-        self.attn = JAISAttention(config, cache_config, quant_config)
+        self.attn = JAISAttention(config,
+                                  cache_config,
+                                  quant_config,
+                                  prefix=f"{prefix}.attn")
         self.ln_2 = nn.LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
         self.mlp = JAISMLP(inner_dim, config, quant_config)
 
@@ -241,7 +247,8 @@ class JAISModel(nn.Module):
             config.num_hidden_layers,
             lambda prefix: JAISBlock(config=config,
                                      cache_config=cache_config,
-                                     quant_config=quant_config),
+                                     quant_config=quant_config,
+                                     prefix=prefix),
             prefix=f"{prefix}.h",
         )
 
@@ -350,8 +357,10 @@ class JAISLMHeadModel(nn.Module, SupportsPP):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         params_dict = dict(self.named_parameters(remove_duplicate=False))
+        loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
             if "lm_head.weight" in name:
                 # GPT-2 ties the weights of the embedding layer and the final
@@ -382,3 +391,5 @@ class JAISLMHeadModel(nn.Module, SupportsPP):
             weight_loader = getattr(param, "weight_loader",
                                     default_weight_loader)
             weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params

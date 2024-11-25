@@ -1,5 +1,5 @@
 from functools import cached_property
-from typing import (Any, Dict, Iterable, List, Literal, Mapping, Optional,
+from typing import (Any, Dict, Iterable, List, Literal, Mapping, Optional, Set,
                     Tuple, TypedDict, Union)
 
 import torch
@@ -223,6 +223,7 @@ class ChameleonAttention(nn.Module):
         quant_config: Optional[QuantizationConfig] = None,
         bias: bool = False,
         cache_config: Optional[CacheConfig] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -276,7 +277,8 @@ class ChameleonAttention(nn.Module):
                               self.scaling,
                               num_kv_heads=self.num_kv_heads,
                               cache_config=cache_config,
-                              quant_config=quant_config)
+                              quant_config=quant_config,
+                              prefix=f"{prefix}.attn")
 
     def _apply_qk_norm(self, q: torch.Tensor,
                        k: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -313,6 +315,7 @@ class ChameleonDecoderLayer(nn.Module):
         config: ChameleonConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -336,6 +339,7 @@ class ChameleonDecoderLayer(nn.Module):
             quant_config=quant_config,
             bias=False,
             cache_config=cache_config,
+            prefix=f"{prefix}.self_attn",
         )
         self.mlp = ChameleonMLP(
             hidden_size=self.hidden_size,
@@ -386,6 +390,7 @@ class ChameleonSwinDecoderLayer(nn.Module):
         config: ChameleonConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -409,6 +414,7 @@ class ChameleonSwinDecoderLayer(nn.Module):
             quant_config=quant_config,
             bias=False,
             cache_config=cache_config,
+            prefix=f"{prefix}.self_attn",
         )
         self.mlp = ChameleonMLP(
             hidden_size=self.hidden_size,
@@ -855,7 +861,8 @@ class ChameleonModel(nn.Module):
             config.num_hidden_layers,
             lambda prefix: decoder_layer(config=config,
                                          cache_config=cache_config,
-                                         quant_config=quant_config),
+                                         quant_config=quant_config,
+                                         prefix=prefix),
             prefix=f"{prefix}.layers",
         )
 
@@ -1034,7 +1041,8 @@ class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             (".qkv_proj", ".q_proj", "q"),
@@ -1044,6 +1052,7 @@ class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
             (".gate_up_proj", ".up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
+        loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -1111,3 +1120,5 @@ class ChameleonForConditionalGeneration(nn.Module, SupportsMultiModal,
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params

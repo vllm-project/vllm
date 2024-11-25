@@ -20,7 +20,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only GraniteMoe model."""
-from typing import Iterable, List, Optional, Tuple
+from typing import Iterable, List, Optional, Set, Tuple
 
 import torch
 from torch import nn
@@ -164,7 +164,8 @@ class GraniteMoeAttention(nn.Module):
                               self.scaling,
                               num_kv_heads=self.num_kv_heads,
                               cache_config=cache_config,
-                              quant_config=quant_config)
+                              quant_config=quant_config,
+                              prefix=f"{prefix}.attn")
 
     def forward(
         self,
@@ -419,7 +420,8 @@ class GraniteMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         new_weights = {}
         for n, p in weights:
             if n.endswith('.block_sparse_moe.input_linear.weight'):
@@ -452,4 +454,5 @@ class GraniteMoeForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 pass
             else:
                 new_weights[n] = p
-        mixtral.MixtralForCausalLM.load_weights(self, new_weights.items())
+        return mixtral.MixtralForCausalLM.load_weights(self,
+                                                       new_weights.items())

@@ -18,7 +18,7 @@
 # limitations under the License.
 """Inference-only BaiChuan model compatible with HuggingFace weights."""
 import math
-from typing import Iterable, List, Optional, Tuple, Union
+from typing import Iterable, List, Optional, Set, Tuple, Union
 
 import torch
 from torch import nn
@@ -116,6 +116,7 @@ class BaiChuanAttention(nn.Module):
         max_position_embeddings: int = 8192,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.hidden_size = hidden_size
@@ -158,7 +159,8 @@ class BaiChuanAttention(nn.Module):
                                   self.head_dim,
                                   scaling,
                                   alibi_slopes=alibi_slopes,
-                                  quant_config=quant_config)
+                                  quant_config=quant_config,
+                                  prefix=f"{prefix}.attn")
         else:
             self.rotary_emb = get_rope(
                 self.head_dim,
@@ -171,7 +173,8 @@ class BaiChuanAttention(nn.Module):
                                   self.head_dim,
                                   self.scaling,
                                   cache_config=cache_config,
-                                  quant_config=quant_config)
+                                  quant_config=quant_config,
+                                  prefix=f"{prefix}.attn")
 
     def forward(
         self,
@@ -195,7 +198,8 @@ class BaiChuanDecoderLayer(nn.Module):
                  config: PretrainedConfig,
                  position_embedding: str,
                  cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None):
+                 quant_config: Optional[QuantizationConfig] = None,
+                 prefix: str = ""):
         super().__init__()
         self.hidden_size = config.hidden_size
         rope_theta = getattr(config, "rope_theta", 10000)
@@ -209,6 +213,7 @@ class BaiChuanDecoderLayer(nn.Module):
             max_position_embeddings=max_position_embeddings,
             cache_config=cache_config,
             quant_config=quant_config,
+            prefix=f"{prefix}.self_attn",
         )
         self.mlp = BaiChuanMLP(
             hidden_size=self.hidden_size,
@@ -275,8 +280,11 @@ class BaiChuanModel(nn.Module):
         )
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: BaiChuanDecoderLayer(config, position_embedding,
-                                                cache_config, quant_config),
+            lambda prefix: BaiChuanDecoderLayer(config,
+                                                position_embedding,
+                                                cache_config,
+                                                quant_config,
+                                                prefix=prefix),
             prefix=f"{prefix}.layers",
         )
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -342,6 +350,21 @@ class BaiChuanBaseForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     embedding_modules = {}
     embedding_padding_modules = []
 
+    # BitandBytes specific attributes
+    default_bitsandbytes_target_modules = [
+        ".W_pack.",
+        ".o_proj.",
+        ".down_proj.",
+        ".up_proj.",
+        ".gate_proj.",
+        ".up_proj.",
+    ]
+    bitsandbytes_stacked_params_mapping = {
+        # shard_name, weight_name, index
+        "gate_proj": ("gate_up_proj", 0),
+        "up_proj": ("gate_up_proj", 1),
+    }
+
     def __init__(
         self,
         *,
@@ -404,13 +427,15 @@ class BaiChuanBaseForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("gate_up_proj", "gate_proj", 0),
             ("gate_up_proj", "up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
+        loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -449,6 +474,8 @@ class BaiChuanBaseForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                 weight_loader = getattr(param, "weight_loader",
                                         default_weight_loader)
                 weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params
 
 
 class BaichuanForCausalLM(BaiChuanBaseForCausalLM):
