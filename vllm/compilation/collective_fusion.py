@@ -10,7 +10,8 @@ import vllm.envs as envs
 from vllm.compilation.utils import (find_auto_fn, find_fn, find_getitem,
                                     last_node_in_match, use_cc_kernels)
 from vllm.config import CompilationConfig
-from vllm.distributed import (tensor_model_parallel_all_gather,
+from vllm.distributed import (model_parallel_is_initialized,
+                              tensor_model_parallel_all_gather,
                               tensor_model_parallel_all_reduce)
 from vllm.distributed.parallel_state import (
     get_group_from_group_name, get_tensor_model_parallel_world_size)
@@ -470,8 +471,8 @@ class CollectiveFusionPass(VllmInductorPass):
                    for node in match.nodes)
 
     def __call__(self, graph: fx.Graph):
-        if not (model_parallel_is_initialized() and
-                get_tensor_model_parallel_world_size() > 1):
+        if not (model_parallel_is_initialized()
+                and get_tensor_model_parallel_world_size() > 1):
             return
 
         # TODO: disable if chunk prefill size is too small

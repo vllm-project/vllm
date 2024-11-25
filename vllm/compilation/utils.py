@@ -7,11 +7,11 @@ import torch.fx as fx
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor.pattern_matcher import Match
 
-from vllm.distributed import get_tensor_model_parallel_rank as get_tp_rank
+# yapf: enable
 # yapf: disable
+from vllm.distributed import get_tensor_model_parallel_rank as get_tp_rank
 from vllm.distributed import (
     get_tensor_model_parallel_world_size as get_tp_world_size)
-# yapf: enable
 from vllm.distributed import model_parallel_is_initialized as p_is_init
 from vllm.logger import init_logger
 
