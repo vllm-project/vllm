@@ -43,6 +43,7 @@ class ModelInputForCPU(ModelRunnerInputBase):
     """
     input_tokens: Optional[torch.Tensor] = None
     input_positions: Optional[torch.Tensor] = None
+    token_type_ids: Optional[torch.Tensor] = None
     attn_metadata: Optional["AttentionMetadata"] = None
     multi_modal_kwargs: Optional[BatchedTensorInputs] = None
     virtual_engine: Optional[int] = None
@@ -54,6 +55,7 @@ class ModelInputForCPU(ModelRunnerInputBase):
         tensor_dict = {
             "input_tokens": self.input_tokens,
             "input_positions": self.input_positions,
+            "token_type_ids": self.token_type_ids,
             "multi_modal_kwargs": self.multi_modal_kwargs,
         }
         _add_attn_metadata_broadcastable_dict(tensor_dict, self.attn_metadata)
@@ -83,6 +85,7 @@ class ModelInputForCPUWithSamplingMetadata(ModelInputForCPU):
         tensor_dict = {
             "input_tokens": self.input_tokens,
             "input_positions": self.input_positions,
+            "token_type_ids": self.token_type_ids,
             "multi_modal_kwargs": self.multi_modal_kwargs,
         }
         _add_attn_metadata_broadcastable_dict(tensor_dict, self.attn_metadata)
@@ -112,6 +115,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
             self.input_tokens: List[int] = []
             self.input_positions: Optional[
                 List[int]] = [] if not self.use_mrope else None
+            self.token_type_ids: Optional[List[int]] = []
             self.seq_lens: List[int] = []
             self.query_lens: List[int] = []
             self.prefill_block_tables: List[List[int]] = []
@@ -165,6 +169,10 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
             if not input_data.use_mrope else input_data.input_mrope_positions,
             dtype=torch.long,
             device="cpu")
+        token_type_ids = torch.tensor(input_data.token_type_ids,
+                                    dtype=torch.long,
+                                    device="cpu") \
+                                    if input_data.token_type_ids else None
 
         # For multi-modal models
         multi_modal_kwargs = None
@@ -178,6 +186,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
         return self.model_input_cls(
             input_tokens=input_tokens,
             input_positions=input_positions,
+            token_type_ids=token_type_ids,
             seq_lens=input_data.seq_lens,
             query_lens=input_data.query_lens,
             attn_metadata=attn_metadata,
@@ -285,6 +294,7 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
         tokens = seq_data.get_token_ids()
         tokens = tokens[context_len:seq_len]
         token_positions = range(context_len, seq_len)
+        token_types = seq_group_metadata.token_type_ids
 
         # For encoder-only models, the block_table is None,
         # and there is no need to initialize the slot_mapping.
@@ -300,6 +310,9 @@ class ModelInputForCPUBuilder(ModelRunnerInputBuilderBase[ModelInputForCPU]):
         # The MROPE positions are prepared in _compute_multi_modal_input
         if data.input_positions is not None:
             data.input_positions.extend(token_positions)
+
+        if data.token_type_ids is not None:
+            data.token_type_ids.extend(token_types if token_types else [])
 
         # Update fields
         data.input_tokens.extend(tokens)
