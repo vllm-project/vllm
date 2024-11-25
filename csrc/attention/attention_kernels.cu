@@ -46,16 +46,7 @@ typedef __hip_bfloat16 __nv_bfloat16;
 #define DIVIDE_ROUND_UP(a, b) (((a) + (b) - 1) / (b))
 using namespace std;
 
-//bool to_profile = true; 
-bool to_profile = false; 
-
-
-std::chrono::duration<double, std::milli> total = std::chrono::duration<double, std::milli>(0);  
-std::chrono::high_resolution_clock::time_point start_time, end_time; 
-uint64_t step_index = 0; 
-
 namespace vllm {
-
 
 // Utility function for attention softmax.
 template <int NUM_WARPS>
@@ -157,11 +148,6 @@ __device__ void paged_attention_kernel(
     const int blocksparse_local_blocks, const int blocksparse_vert_stride,
     const int blocksparse_block_size, const int blocksparse_head_sliding_step) {
 
-  bool to_profile2 = blockIdx.x == 0 && blockIdx.y ==0 && blockIdx.z == 0 && threadIdx.x == 0; 
-  //bool to_profile2 = false; 
-  unsigned long long time1, time2, time0; 
-
-
   const int seq_idx = blockIdx.y;
   const int partition_idx = blockIdx.z;
   const int max_num_partitions = gridDim.z;
@@ -183,10 +169,6 @@ __device__ void paged_attention_kernel(
       MIN(start_block_idx + num_blocks_per_partition, num_seq_blocks);
   const int num_blocks = end_block_idx - start_block_idx;
 
-  //if(blockIdx.x ==0 && blockIdx.y == 0 && blockIdx.z == 0 && threadIdx.x == 0) {
-  //if(blockIdx.x == 0 && threadIdx.x == 0) {
-  //  printf("[%d, %d, %d, %d]: threadblocks %d num_seq_blocks %d USE_PARTITIONING %d PARTITION_SIZE %d start_block_idx %d end_block_idx %d\n", blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, gridDim.x * gridDim.y * gridDim.z,num_seq_blocks, USE_PARTITIONING, PARTITION_SIZE, start_block_idx, end_block_idx); 
-  //}
   // [start_token_idx, end_token_idx) is the range of tokens to process.
   const int start_token_idx = start_block_idx * BLOCK_SIZE;
   const int end_token_idx =
@@ -221,7 +203,6 @@ __device__ void paged_attention_kernel(
   using K_vec = typename Vec<scalar_t, VEC_SIZE>::Type;
   using Q_vec = typename Vec<scalar_t, VEC_SIZE>::Type;
   using Quant_vec = typename Vec<cache_t, VEC_SIZE>::Type;
-
 
   constexpr int NUM_ELEMS_PER_THREAD = HEAD_SIZE / THREAD_GROUP_SIZE;
   constexpr int NUM_VECS_PER_THREAD = NUM_ELEMS_PER_THREAD / VEC_SIZE;
@@ -286,15 +267,6 @@ __device__ void paged_attention_kernel(
                         1;
   }
 
-
-
-  if(to_profile2) {
-    time1 = clock64();
-    time0 = time1; 
-    myindex++; 
-  }
-
-  bool to_check = true;  
   for (int block_idx = start_block_idx + warp_idx; block_idx < end_block_idx;
        block_idx += NUM_WARPS) {
     // NOTE(woosuk): The block number is stored in int32. However, we cast it to
@@ -337,14 +309,7 @@ __device__ void paged_attention_kernel(
       const int physical_block_offset =
           (thread_group_idx + i * WARP_SIZE) % BLOCK_SIZE;
       const int token_idx = block_idx * BLOCK_SIZE + physical_block_offset;
-      //__restrict__ 
       K_vec k_vecs[NUM_VECS_PER_THREAD];
-
-  //if(to_profile2) {
-  //  time2 = clock64();
-  //  firstTime += time2 - time1; 
-  //  time1 = time2; 
-  //}
 
 #pragma unroll
       for (int j = 0; j < NUM_VECS_PER_THREAD; j++) {
@@ -367,23 +332,13 @@ __device__ void paged_attention_kernel(
         }
       }
 
-      if(to_profile2 && to_check) {
-        time1 = clock64();
-      } 
-
       // Compute dot product.
       // This includes a reduction across the threads in the same thread group.
       float qk = scale * Qk_dot<scalar_t, THREAD_GROUP_SIZE>::dot(
                              q_vecs[thread_group_offset], k_vecs);
 
-        if(to_profile2 && to_check) {
-          time2 = clock64(); 
-          firstTime += time2 - time1;  
-        }   
-
       // Add the ALiBi bias if slopes are given.
       qk += (alibi_slope != 0) ? alibi_slope * (token_idx - seq_len + 1) : 0;
-
 
       if (thread_group_offset == 0) {
         // Store the partial reductions to shared memory.
@@ -393,26 +348,10 @@ __device__ void paged_attention_kernel(
         // Update the max value.
         qk_max = mask ? qk_max : fmaxf(qk_max, qk);
       }
-
-      to_check = false; 
     }
   }
-  
-  if(to_profile2) {
-    time2 = clock64();
-    newTime += time2 - time0; 
-    time1 = time2; 
-  }
-
-
+ 
   qk_max = propogate_qk_max<NUM_WARPS, THREAD_GROUP_SIZE>(&red_smem[0], qk_max);
-
-  if(to_profile2) {
-    time2 = clock64();
-    secondTime += time2 - time1; 
-    time1 = time2; 
-  }
-
 
   // Get the sum of the exp values.
   float exp_sum = 0.f;
@@ -423,12 +362,6 @@ __device__ void paged_attention_kernel(
   }
   exp_sum = block_sum<NUM_WARPS>(&red_smem[NUM_WARPS], exp_sum);
 
-  //if(blockIdx.x ==0 && blockIdx.y == 0 && blockIdx.z == 0 && threadIdx.x == 0) {
-    //printf("[%d, %d, %d, %d]: gridDim.x-%d, gridDim.y-%d,gridDim.z-%d, blockDim.x-%d\n", blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, gridDim.x, gridDim.y, gridDim.z, blockDim.x); 
-    //int tbs = gridDim.x * gridDim.y * gridDim.z;
-    //printf("threadsblocks-%d\n", tbs);  
-    //printf(" threadBlocks-%d: gridDim.x-%d, gridDim.y-%d,gridDim.z-%d, blockDim.x-%d\n", blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, gridDim.x, gridDim.y, gridDim.z, blockDim.x); 
-  //}
   // Compute softmax.
   const float inv_sum = __fdividef(1.f, exp_sum + 1e-6f);
   for (int i = thread_idx; i < num_tokens; i += NUM_THREADS) {
@@ -447,11 +380,6 @@ __device__ void paged_attention_kernel(
     *exp_sums_ptr = exp_sum;
   }
 
-  if(to_profile2) {
-    time2 = clock64();
-    thirdTime += time2 - time1; 
-    time1 = time2; 
-  }
   // Each thread will fetch 16 bytes from the value cache at a time.
   constexpr int V_VEC_SIZE = MIN(16 / sizeof(scalar_t), BLOCK_SIZE);
   using V_vec = typename Vec<scalar_t, V_VEC_SIZE>::Type;
@@ -463,10 +391,6 @@ __device__ void paged_attention_kernel(
   constexpr int NUM_ROWS_PER_ITER = WARP_SIZE / NUM_V_VECS_PER_ROW;
   constexpr int NUM_ROWS_PER_THREAD =
       DIVIDE_ROUND_UP(HEAD_SIZE, NUM_ROWS_PER_ITER);
-  
-  //if(to_profile2 && myindex %512 == 0) {
-  //  printf("thread_idx-%d, num_tokens-%d, num_heads-%d, num_kv_heads-%d, USE_PARTITIONING-%d, NUM_ROWS_PER_THREAD-%d\n", thread_idx, num_tokens, num_heads, num_kv_heads, USE_PARTITIONING, NUM_ROWS_PER_THREAD); 
-  //}
 
   // NOTE(woosuk): We use FP32 for the accumulator for better accuracy.
   float accs[NUM_ROWS_PER_THREAD];
@@ -477,12 +401,6 @@ __device__ void paged_attention_kernel(
 
   scalar_t zero_value;
   zero(zero_value);
-
-  if(to_profile2) {
-    time2 = clock64();
-    fourthTime += time2 - time1; 
-    time1 = time2; 
-  }
 
   for (int block_idx = start_block_idx + warp_idx; block_idx < end_block_idx;
        block_idx += NUM_WARPS) {
@@ -540,11 +458,6 @@ __device__ void paged_attention_kernel(
     }
   }
 
-  if(to_profile2) {
-    time2 = clock64();
-    fifthTime += time2 - time1; 
-    time1 = time2; 
-  }
   // Perform reduction within each warp.
 #pragma unroll
   for (int i = 0; i < NUM_ROWS_PER_THREAD; i++) {
@@ -559,13 +472,6 @@ __device__ void paged_attention_kernel(
   // NOTE(woosuk): A barrier is required because the shared memory space for
   // logits is reused for the output.
   __syncthreads();
-
-  if(to_profile2) {
-    time2 = clock64();
-    sixthTime += time2 - time1; 
-    time1 = time2; 
-  }
-
 
   // Perform reduction across warps.
   float* out_smem = reinterpret_cast<float*>(shared_mem);
@@ -611,29 +517,6 @@ __device__ void paged_attention_kernel(
       if (row_idx < HEAD_SIZE && lane % NUM_V_VECS_PER_ROW == 0) {
         from_float(*(out_ptr + row_idx), accs[i]);
       }
-    }
-  }
-  
-  if(to_profile2) {
-    time2 = clock64();
-    seventhTime += time2 - time1; 
-    time1 = time2; 
-    totalTime += time2 - time0; 
-  }
-
-    if(to_profile2) {
-
-    if(myindex %512 == 0) {
-      printf("myindex %lld, firstTime-%lld, newTime-%lld, secondTime-%lld, thirdTime-%lld, fourthTime-%lld, fifthTime-%lld, sixthTime-%lld, seventhTime-%lld, totalTime-%lld, q_vecs-%p\n", myindex, firstTime, newTime, secondTime, thirdTime, fourthTime, fifthTime, sixthTime, seventhTime, totalTime, q_vecs); 
-      firstTime = 0; 
-      newTime = 0; 
-      secondTime = 0; 
-      thirdTime = 0; 
-      fourthTime = 0; 
-      fifthTime = 0; 
-      sixthTime = 0; 
-      seventhTime = 0; 
-      totalTime = 0; 
     }
   }
 }
@@ -840,11 +723,6 @@ __global__ void dattention_kernel(
   const float k_scale,
   const float v_scale 
 ) {
-  bool to_profile2 = blockIdx.x == 0 && blockIdx.y ==0 && blockIdx.z == 0 && threadIdx.x == 0; 
-  //bool to_profile2 = false; 
-  uint64_t time0, time1, time2; 
-
-
   const int seq_idx = blockIdx.y;
   const int partition_idx = blockIdx.z;
   const int max_num_partitions = gridDim.z;
@@ -855,7 +733,6 @@ __global__ void dattention_kernel(
     return;
   }
 
-   
   const int num_seq_blocks = DIVIDE_ROUND_UP(seq_len, BLOCK_SIZE);
   const int num_blocks_per_partition =
       USE_PARTITIONING ? PARTITION_SIZE / BLOCK_SIZE : num_seq_blocks;
@@ -867,12 +744,7 @@ __global__ void dattention_kernel(
       MIN(start_block_idx + num_blocks_per_partition, num_seq_blocks);
   const int num_blocks = end_block_idx - start_block_idx;
 
-  //if(blockIdx.x ==0 && blockIdx.y == 0 && blockIdx.z == 0 && threadIdx.x == 0) {
-  //if(blockIdx.x == 0 && threadIdx.x == 0) {
-  //  printf("[%d, %d, %d, %d]: threadblocks %d num_seq_blocks %d USE_PARTITIONING %d PARTITION_SIZE %d start_block_idx %d end_block_idx %d\n", blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, gridDim.x * gridDim.y * gridDim.z,num_seq_blocks, USE_PARTITIONING, PARTITION_SIZE, start_block_idx, end_block_idx); 
-    //printf("[%d, %d, %d, %d]: threadblocks %d USE_PARTITIONING %d PARTITION_SIZE %d start_block_idx %d end_block_idx %d\n", blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, gridDim.x * gridDim.y * gridDim.z, USE_PARTITIONING, PARTITION_SIZE, start_block_idx, end_block_idx); 
-  //}
-   // [start_token_idx, end_token_idx) is the range of tokens to process.
+  // [start_token_idx, end_token_idx) is the range of tokens to process.
   const int start_token_idx = start_block_idx * BLOCK_SIZE;
   const int end_token_idx =
       MIN(start_token_idx + num_blocks * BLOCK_SIZE, seq_len);
@@ -914,13 +786,6 @@ __global__ void dattention_kernel(
   const int thread_group_idx = thread_idx / THREAD_GROUP_SIZE;
   const int thread_group_offset = thread_idx % THREAD_GROUP_SIZE;
 
-
-  //if(blockIdx.x ==0 && blockIdx.y == 0 && blockIdx.z == 0 && threadIdx.x == 0) {
-    //printf("[%d, %d, %d, %d]: gridDim.x-%d, gridDim.y-%d,gridDim.z-%d, blockDim.x-%d\n", blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, gridDim.x, gridDim.y, gridDim.z, blockDim.x); 
-    //int tbs = gridDim.x * gridDim.y * gridDim.z;
-    //printf("threadsblocks-%d\n", tbs);  
-    //printf(" threadBlocks-%d: gridDim.x-%d, gridDim.y-%d,gridDim.z-%d, blockDim.x-%d\n", blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, gridDim.x, gridDim.y, gridDim.z, blockDim.x); 
-  //}
   // Load the query to registers.
   // Each thread in a thread group has a different part of the query.
   // For example, if the the thread group size is 4, then the first thread in
@@ -939,8 +804,6 @@ __global__ void dattention_kernel(
         *reinterpret_cast<const Q_vec*>(q_ptr + vec_idx * VEC_SIZE);
   }
   
-  //if(to_profile2)
-  //  printf("Q_vec-%ld, q_vecs-%ld\n", sizeof(Q_vec), sizeof(q_vecs));
   __syncthreads();  // TODO(naed90): possible speedup if this is replaced with a
                     // memory wall right before we use q_vecs
 
@@ -979,13 +842,6 @@ __global__ void dattention_kernel(
   // NOTE: cache_row_idx or cache_col_idx can be -1 if the token is padded
   const cache_t * cache_start = reinterpret_cast<cache_t *>(cache_row_mapping[seq_idx]) + layer_offset + kv_head_idx * KV_HEAD_STRIDE;
 
-  if(to_profile2) {
-    time0 = clock64();
-    myindex++; 
-  }
-
-  
-  bool to_check = true;  
   // Iterate over the key blocks.
   // Each thread block will process one request's one head and one partition (up to 512 tokens)
   // Each warp will process a block of keys for each iteration.
@@ -1036,21 +892,11 @@ __global__ void dattention_kernel(
 
       const cache_t* k_ptr = key_cache + physical_block_offset * x;
 
-    //if(to_profile2) {
-    //  time2 = clock64();
-    //  firstTime += time2 - time1; 
-    //  time1 = time2; 
-    //}
-
     #pragma unroll
       for (int j = 0; j < NUM_VECS_PER_THREAD; j++) {
         const int vec_idx = thread_group_offset + j * THREAD_GROUP_SIZE;
         const int offset1 = (vec_idx * VEC_SIZE) / x;
         const int offset2 = (vec_idx * VEC_SIZE) % x;
-
-    //if(seq_idx == 1 && threadIdx.x < 10) {
-    //  printf("seq_idx-%d: [%d, %d, %d, %d]: k_ptr %p-%p, NUM_VECS_PER_THREAD %d thread_group_offset %d vec_idx %d offset1 %d offset2 %d\n", seq_idx, blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, k_ptr, k_ptr + offset1 * BLOCK_SIZE * x + offset2, NUM_VECS_PER_THREAD, thread_group_offset, vec_idx, offset1, offset2 );
-    //}
 
         if constexpr (KV_DTYPE == Fp8KVCacheDataType::kAuto) {
           k_vecs[j] = *reinterpret_cast<const K_vec*>(
@@ -1064,19 +910,10 @@ __global__ void dattention_kernel(
         }
       }
 
-      if(to_profile2 && to_check) {
-        time1 = clock64();
-      } 
-
       // Compute dot product.
       // This includes a reduction across the threads in the same thread group.
       float qk = scale * Qk_dot<scalar_t, THREAD_GROUP_SIZE>::dot(
                              q_vecs[thread_group_offset], k_vecs);
-
-        if(to_profile2 && to_check) {
-          time2 = clock64(); 
-          firstTime += time2 - time1;  
-        }
 
       // Add the ALiBi bias if slopes are given.
       qk += (alibi_slope != 0) ? alibi_slope * (token_idx - seq_len + 1) : 0;
@@ -1089,30 +926,11 @@ __global__ void dattention_kernel(
         // Update the max value.
         qk_max = mask ? qk_max : fmaxf(qk_max, qk);
       }
-    //if(to_profile2) {
-    //  time2 = clock64();
-    //  fourthTime += time2 - time1; 
-    //  time1 = time2; 
-    //}
     }
-
-    to_check = false; 
   }
-  
-  if(to_profile2) {
-    time2 = clock64();
-    newTime += time2 - time0; 
-    time1 = time2; 
-  } 
   
   // Perform reduction across all threads in the same thread block
   qk_max = propogate_qk_max<NUM_WARPS, THREAD_GROUP_SIZE>(&red_smem[0], qk_max);
-
-  if(to_profile2) {
-    time2 = clock64();
-    secondTime += time2 - time1; 
-    time1 = time2; 
-  }
 
   // Get the sum of the exp values.
   float exp_sum = 0.f;
@@ -1142,12 +960,6 @@ __global__ void dattention_kernel(
     *exp_sums_ptr = exp_sum;
   }
 
-  if(to_profile2) {
-    time2 = clock64();
-    thirdTime += time2 - time1; 
-    time1 = time2; 
-  }
-
   // Each thread will fetch 16 bytes from the value cache at a time.
   constexpr int V_VEC_SIZE = MIN(16 / sizeof(scalar_t), BLOCK_SIZE);
   using V_vec = typename Vec<scalar_t, V_VEC_SIZE>::Type;
@@ -1160,27 +972,15 @@ __global__ void dattention_kernel(
   constexpr int NUM_ROWS_PER_THREAD =
       DIVIDE_ROUND_UP(HEAD_SIZE, NUM_ROWS_PER_ITER);
 
-  //if(to_profile2 && myindex %512 == 0) {
-  //  printf("thread_idx-%d, num_tokens-%d, num_heads-%d, num_kv_heads-%d, USE_PARTITIONING-%d, NUM_ROWS_PER_THREAD-%d\n", thread_idx, num_tokens, num_heads, num_kv_heads, USE_PARTITIONING, NUM_ROWS_PER_THREAD); 
-  //}
-
   // NOTE(woosuk): We use FP32 for the accumulator for better accuracy.
   float accs[NUM_ROWS_PER_THREAD];
 #pragma unroll
   for (int i = 0; i < NUM_ROWS_PER_THREAD; i++) {
     accs[i] = 0.f;
   }
-
  
-
   scalar_t zero_value;
   zero(zero_value);
-
-  if(to_profile2) {
-    time2 = clock64();
-    fourthTime += time2 - time1; 
-    time1 = time2; 
-  }
 
   for (int block_idx = start_block_idx + warp_idx; block_idx < end_block_idx;
        block_idx += NUM_WARPS) {
@@ -1237,12 +1037,6 @@ __global__ void dattention_kernel(
     }
   }
 
-  if(to_profile2) {
-    time2 = clock64();
-    fifthTime += time2 - time1; 
-    time1 = time2; 
-  }
-
   // Perform reduction within each warp.
 #pragma unroll
   for (int i = 0; i < NUM_ROWS_PER_THREAD; i++) {
@@ -1257,13 +1051,6 @@ __global__ void dattention_kernel(
   // NOTE(woosuk): A barrier is required because the shared memory space for
   // logits is reused for the output.
   __syncthreads();
-
-  if(to_profile2) {
-    time2 = clock64();
-    sixthTime += time2 - time1; 
-    time1 = time2; 
-  }
-
 
   // Perform reduction across warps.
   float* out_smem = reinterpret_cast<float*>(shared_mem);
@@ -1312,30 +1099,6 @@ __global__ void dattention_kernel(
       }
     }
   }
-
-  if(to_profile2) {
-    time2 = clock64();
-    seventhTime += time2 - time1; 
-    totalTime += time2 - time0; 
-    time1 = time2; 
-  }
-
-  if(to_profile2) {
-
-    if(myindex %512 == 0) {
-      printf("myindex %lld, firstTime-%lld, newTime-%lld, secondTime-%lld, thirdTime-%lld, fourthTime-%lld, fifthTime-%lld, sixthTime-%lld, seventhTime-%lld, totalTime-%lld\n", myindex, firstTime, newTime, secondTime, thirdTime, fourthTime, fifthTime, sixthTime, seventhTime, totalTime); 
-      firstTime = 0; 
-      newTime = 0; 
-      secondTime = 0; 
-      thirdTime = 0; 
-      fourthTime = 0; 
-      fifthTime = 0; 
-      sixthTime = 0; 
-      seventhTime = 0;
-      totalTime = 0;  
-    }
-  }
-
 }
 }  // namespace vllm
 
@@ -1400,17 +1163,10 @@ void paged_attention_v1_launcher(
   // Keep that in sync with the logic here!
   int shared_mem_size = std::max(logits_size, outputs_size);
 
-  
-  //fprintf(stderr, "thread_blocks %ld num_headds %ld num_seqs %ld max_seq_len %ld\n", num_heads*num_seqs, num_heads, num_seqs, max_seq_len);
   dim3 grid(num_heads, num_seqs, 1);
   dim3 block(NUM_THREADS);
   const at::cuda::OptionalCUDAGuard device_guard(device_of(query));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-
-  if(to_profile) {
-    step_index++; 
-    start_time = std::chrono::high_resolution_clock::now();
-  }
 
   switch (head_size) {
     // NOTE(woosuk): To reduce the compilation time, we only compile for the
@@ -1443,16 +1199,6 @@ void paged_attention_v1_launcher(
     default:
       TORCH_CHECK(false, "Unsupported head size: ", head_size);
       break;
-  }
-
-  if(to_profile) {
-    cudaDeviceSynchronize();
-    end_time = std::chrono::high_resolution_clock::now();
-    total += end_time - start_time; 
-    if(step_index % 512 == 0) {
-      fprintf(stderr, "step_index-%ld time %f\n", step_index, total);  
-      total = std::chrono::duration<double, std::milli>(0); 
-    }
   }
 }
 
@@ -1577,11 +1323,9 @@ void paged_attention_v2_launcher(
   int outputs_size = (NUM_WARPS / 2) * head_size * sizeof(float);
 
   // For paged attention v2 kernel.
-  //fprintf(stderr, "thread_blocks %ld num_headds %ld num_seqs %ld max_num_partitions %ld max_seq_len %ld\n", num_heads*num_seqs*max_num_partitions , num_heads, num_seqs, max_num_partitions, max_seq_len);
   dim3 grid(num_heads, num_seqs, max_num_partitions);
   int shared_mem_size = std::max(logits_size, outputs_size);
 
-  //fprintf(stderr, "reduced thread_blocks %ld \n", num_heads*num_seqs);
   // For paged attention v2 reduce kernel.
   dim3 reduce_grid(num_heads, num_seqs);
   int reduce_shared_mem_size = 2 * max_num_partitions * sizeof(float);
@@ -1589,12 +1333,6 @@ void paged_attention_v2_launcher(
   dim3 block(NUM_THREADS);
   const at::cuda::OptionalCUDAGuard device_guard(device_of(query));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-
-  if(to_profile) {
-    step_index++; 
-    start_time = std::chrono::high_resolution_clock::now();
-  }
-
   switch (head_size) {
     // NOTE(woosuk): To reduce the compilation time, we only compile for the
     // head sizes that we use in the model. However, we can easily extend this
@@ -1626,16 +1364,6 @@ void paged_attention_v2_launcher(
     default:
       TORCH_CHECK(false, "Unsupported head size: ", head_size);
       break;
-  }
-
-  if(to_profile) {
-    cudaDeviceSynchronize();
-    end_time = std::chrono::high_resolution_clock::now();
-    total += end_time - start_time; 
-    if(step_index % 512 == 0) {
-      fprintf(stderr, "step_index-%ld time %f\n", step_index, total);  
-      total = std::chrono::duration<double, std::milli>(0); 
-    }
   }
 }
 
@@ -1814,25 +1542,13 @@ void dattention_launcher(
 
   dim3 grid(num_heads, num_seqs, max_num_partitions);
 
-  //fprintf(stderr, "thread_blocks %ld num_headds %ld num_seqs %ld max_num_partitions %ld max_seq_len %ld\n", num_heads*num_seqs*max_num_partitions , num_heads, num_seqs, max_num_partitions, max_seq_len);
-
   // each thread block will be 128 threads
   dim3 block(NUM_THREADS);
-
-
-  //if(use_reduce)
-    //fprintf(stderr, "reduced thread_blocks %ld \n", num_heads*num_seqs);
-
   dim3 reduce_grid(num_heads, num_seqs);
   int reduce_shared_mem_size = 2 * max_num_partitions * sizeof(float);
 
   const at::cuda::OptionalCUDAGuard device_guard(device_of(query));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-
-  if(to_profile) {
-    step_index++; 
-    start_time = std::chrono::high_resolution_clock::now();
-  }
 
   switch (head_size) {
     // NOTE(woosuk): To reduce the compilation time, we only compile for the
@@ -1863,16 +1579,6 @@ void dattention_launcher(
       TORCH_CHECK(false, "Unsupported head size: ", head_size);
       break;
   }  
-
-  if(to_profile) {
-    cudaDeviceSynchronize();
-    end_time = std::chrono::high_resolution_clock::now();
-    total += end_time - start_time; 
-    if(step_index % 512 == 0) {
-      fprintf(stderr, "step_index-%ld time %f\n", step_index, total);  
-      total = std::chrono::duration<double, std::milli>(0); 
-    }
-  }
 }
 
 void dattention(
