@@ -28,7 +28,8 @@ from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
-from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
+from vllm.model_executor.layers.linear import (LinearBase,
+                                               MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
@@ -668,24 +669,6 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
     possible_config_file_names = ["adapter_config.json"]
 
-    default_target_modules = [
-        ".gate_proj.",
-        ".down_proj.",
-        ".up_proj.",
-        ".q_proj.",
-        ".k_proj.",
-        ".v_proj.",
-        ".o_proj.",
-        '.fc1.',
-        '.fc2.',
-        '.dense.',
-        '.query_key_value.',
-        '.qkv_proj.',
-        '.dense_h_to_4h.',
-        '.dense_4h_to_h.',
-        '.out_proj.',
-    ]
-
     def __init__(self, load_config: LoadConfig):
         super().__init__(load_config)
 
@@ -923,8 +906,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         for weight_name, weight_tensor in self._hf_weight_iter(
                 hf_weights_files, use_safetensors):
 
-            if any(target_module in weight_name for target_module in
-                   self.target_modules) and weight_name.endswith(".weight"):
+            if weight_name.endswith(".weight"):
                 # Without sharding
                 if any(
                         weight_name.startswith(module)
@@ -998,6 +980,37 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
             yield weight_name, processed_weight
 
+    def _get_support_modules(self, model: nn.Module) -> Generator:
+        if self.target_modules:
+            # Determine the supported modules based on `self.target_modules`
+            module_candidate = [(name, module)
+                                for name, module in model.named_modules()
+                                if any(t in name for t in self.target_modules)]
+            assert len(
+                module_candidate
+            ), "vllm currently does not support BNB quantization for"
+            f" {self.target_modules}"
+        else:
+            # All vllm linear modules support quantization.
+            module_candidate = [(name, module)
+                                for name, module in model.named_modules()
+                                if isinstance(module, (LinearBase, ))]
+            assert len(
+                module_candidate
+            ), "vllm currently does not support BNB quantization for"
+            f" {type(model).__name__}"
+
+        for name, module in module_candidate:
+            if isinstance(module, (LinearBase, )):
+                yield name, module
+            else:
+                raise ValueError(
+                    "vllm currently does not support BNB quantization"
+                    "for {%s} in {%s}",
+                    name,
+                    self.target_modules,
+                )
+
     def _load_weights(self, model_config: ModelConfig,
                       model: nn.Module) -> None:
         if not hasattr(model, 'load_weights'):
@@ -1010,17 +1023,11 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 f"Model {type(model).__name__} does not support BitsAndBytes "
                 "quantization yet.")
 
-        if len(self.target_modules) == 0:
-            if hasattr(model, 'default_bitsandbytes_target_modules'):
-                self.target_modules = model.default_bitsandbytes_target_modules
-            else:
-                self.target_modules = self.default_target_modules
-
         # Modules whose weights might have fused on disk
         # we need their output_sizes to make shard in flight correctly with TP
         self.maybe_fused_weights_modules: Dict[str, List[int]] = {}
 
-        for name, module in model.named_modules():
+        for name, module in self._get_support_modules(model):
             # Some modules like `ReplicatedLinear` should not have their weights
             # sharded. The reason for implementing it this way is to avoid new
             # static variable in the model implementation.
