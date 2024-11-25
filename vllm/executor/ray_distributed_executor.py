@@ -100,7 +100,14 @@ class RayDistributedExecutor(DistributedExecutorBase):
             self.driver_exec_method = make_async(
                 self.driver_worker.execute_method)
 
+        self.shutdown_inc = True
+
     def shutdown(self) -> None:
+        if getattr(self, 'shutdown_inc', False):
+            self._run_workers("shutdown_inc")
+            self.shutdown_inc = False
+        for worker in self.workers:
+            worker.__ray_terminate__.remote()
         if hasattr(self, "forward_dag") and self.forward_dag is not None:
             self.forward_dag.teardown()
             import ray
