@@ -230,7 +230,7 @@ class RotaryEmbedding(CustomOp):
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         from habana_frameworks.torch.hpex.kernels import (
             RotaryPosEmbeddingMode, apply_rotary_pos_emb)
-        if not self.sin:
+        if self.sin is None:
             self.prepare_cos_sin(positions, offsets)
         num_tokens = positions.shape[0] * positions.shape[1]
         # HPU RoPE kernel requires hidden dimension for cos and sin to be equal
