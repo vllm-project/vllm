@@ -66,7 +66,7 @@ If you want to access the wheels for previous commits, you can specify the commi
     $ export VLLM_COMMIT=33f460b17a54acb3b6cc0b03f4a17876cff5eafd # use full commit hash from the main branch
     $ pip install https://vllm-wheels.s3.us-west-2.amazonaws.com/${VLLM_COMMIT}/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl
 
-Note that the wheels are built with Python 3.8 ABI (see `PEP 425 <https://peps.python.org/pep-0425/>`_ for more details about ABI), so **they are compatible with Python 3.8 and later**. The version string in the wheel file name (``1.0.0.dev``) is just a placeholder to have a unified URL for the wheels. The actual versions of wheels are contained in the wheel metadata.
+Note that the wheels are built with Python 3.8 ABI (see `PEP 425 <https://peps.python.org/pep-0425/>`_ for more details about ABI), so **they are compatible with Python 3.8 and later**. The version string in the wheel file name (``1.0.0.dev``) is just a placeholder to have a unified URL for the wheels. The actual versions of wheels are contained in the wheel metadata. Although we don't support Python 3.8 any more (because PyTorch 2.5 dropped support for Python 3.8), the wheels are still built with Python 3.8 ABI to keep the same wheel name as before.
 
 Another way to access the latest code is to use the docker images:
 
@@ -168,6 +168,18 @@ To build vLLM using an existing PyTorch installation:
     $ python use_existing_torch.py
     $ pip install -r requirements-build.txt
     $ pip install -e . --no-build-isolation
+
+
+Use the local cutlass for compilation
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Currently, before starting the build process, vLLM fetches cutlass code from GitHub. However, there may be scenarios where you want to use a local version of cutlass instead.
+To achieve this, you can set the environment variable VLLM_CUTLASS_SRC_DIR to point to your local cutlass directory.
+
+.. code-block:: console
+
+    $ git clone https://github.com/vllm-project/vllm.git
+    $ cd vllm
+    $ VLLM_CUTLASS_SRC_DIR=/path/to/cutlass pip install -e .
 
 
 Troubleshooting

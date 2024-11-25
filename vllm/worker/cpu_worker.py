@@ -14,8 +14,9 @@ from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
 from vllm.sequence import ExecuteModelRequest
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
+from vllm.worker.cpu_embedding_model_runner import CPUEmbeddingModelRunner
 from vllm.worker.cpu_enc_dec_model_runner import CPUEncoderDecoderModelRunner
-from vllm.worker.cpu_model_runner import CPUModelRunner
+from vllm.worker.cpu_model_runner import CPUModelRunner, CPUModelRunnerBase
 from vllm.worker.worker_base import (LocalOrDistributedWorkerBase,
                                      LoraNotSupportedWorkerBase, WorkerBase,
                                      WorkerInput)
@@ -150,17 +151,20 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         else:
             self.local_omp_cpuid = omp_cpuids.split("|")[rank]
 
-        ModelRunnerClass: Type[CPUModelRunner] = CPUModelRunner
-        if self._is_encoder_decoder_model():
+        ModelRunnerClass: Type[CPUModelRunnerBase] = CPUModelRunner
+        if self.model_config.task == "embedding":
+            ModelRunnerClass = CPUEmbeddingModelRunner
+        elif self.model_config.is_encoder_decoder:
             ModelRunnerClass = CPUEncoderDecoderModelRunner
-        self.model_runner: CPUModelRunner = ModelRunnerClass(
+        self.model_runner: CPUModelRunnerBase = ModelRunnerClass(
             vllm_config=vllm_config,
             kv_cache_dtype=kv_cache_dtype,
             is_driver_worker=is_driver_worker)
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
         self.cache_engine: List[CPUCacheEngine]
-        self.cpu_cache: List[List[torch.Tensor]]
+        # Initialize cpu_cache as embedding models don't initialize kv_caches
+        self.cpu_cache: Optional[List[List[torch.Tensor]]] = None
 
         # Torch profiler. Enabled and configured through env vars:
         # VLLM_TORCH_PROFILER_DIR=/path/to/save/trace
@@ -187,9 +191,6 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
         if self.profiler is None:
             raise RuntimeError("Profiler is not enabled.")
         self.profiler.stop()
-
-    def _is_encoder_decoder_model(self):
-        return self.model_config.is_encoder_decoder_model
 
     def init_device(self) -> None:
         if self.local_omp_cpuid != "all":

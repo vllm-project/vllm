@@ -9,10 +9,9 @@ import torch
 import triton
 import triton.language as tl
 
-from vllm.triton_utils import libentry
+from vllm.utils import direct_register_custom_op
 
 
-@libentry()
 @triton.jit
 def _sgmv_expand_slice_kernel(
     input_ptr,
@@ -97,7 +96,10 @@ def _sgmv_expand_slice_kernel(
     c_mask = (offset_cm[:, None] < (cur_seq_start + M)) & (offset_cn[None, :] <
                                                            (slice_offset + N))
     if ADD_INPUTS:
-        tiled_out = tl.load(c_ptr, mask=c_mask)
+        # explicitly pass in other=None to tell triton that masked values
+        # can be uninitialized. This is OK because the later tl.store operation
+        # uses the same mask, eliminating the risk of garbage values propagating
+        tiled_out = tl.load(c_ptr, mask=c_mask, other=None)
         tiled_c += tiled_out
     tl.store(c_ptr, tiled_c, mask=c_mask)
 
@@ -209,9 +211,31 @@ def _sgmv_expand_slice(
     return
 
 
+def sgmv_expand_slice_fake(
+    inputs: torch.Tensor,
+    lora_b_weights: torch.Tensor,
+    output_tensor: torch.Tensor,
+    b_seq_start_loc: torch.Tensor,
+    seq_len_tensor: torch.Tensor,
+    lora_indices_tensor: torch.Tensor,
+    batches: int,
+    max_seq_length: int,
+    token_nums: int,
+    slice_offset: int,
+    slice_size: int,
+    add_inputs: bool = False,
+) -> None:
+    return
+
+
 try:
-    sgmv_expand_slice = torch.library.custom_op("lora::sgmv_expand_slice",
-                                                _sgmv_expand_slice,
-                                                mutates_args=["output_tensor"])
+    direct_register_custom_op(
+        op_name="sgmv_expand_slice",
+        op_func=_sgmv_expand_slice,
+        mutates_args=["output_tensor"],
+        fake_impl=sgmv_expand_slice_fake,
+    )
+    sgmv_expand_slice = torch.ops.vllm.sgmv_expand_slice
+
 except AttributeError:
     sgmv_expand_slice = _sgmv_expand_slice

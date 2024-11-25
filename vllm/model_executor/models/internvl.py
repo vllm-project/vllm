@@ -6,7 +6,7 @@
 # --------------------------------------------------------
 import re
 from functools import cached_property, partial
-from typing import (Iterable, List, Literal, Mapping, Optional, Tuple,
+from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,
                     TypedDict, Union)
 
 import torch
@@ -16,17 +16,16 @@ from PIL import Image
 from transformers import PretrainedConfig
 
 from vllm.attention import AttentionMetadata
-from vllm.config import CacheConfig, MultiModalConfig
+from vllm.config import VllmConfig
 from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
                          InputContext, token_inputs)
-from vllm.model_executor.layers.quantization import (AWQConfig,
-                                                     QuantizationConfig)
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
+from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.awq import AWQConfig
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.models.intern_vit import (InternVisionModel,
                                                    InternVisionPatchModel)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.base import MultiModalInputs
+from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.multimodal.utils import cached_get_tokenizer
 from vllm.sequence import IntermediateTensors
 from vllm.utils import is_list_of
@@ -35,7 +34,7 @@ from .clip import (dummy_image_for_clip, dummy_seq_data_for_clip,
                    get_clip_num_patches)
 from .interfaces import SupportsMultiModal, SupportsPP
 from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
-                    merge_multimodal_embeddings)
+                    maybe_prefix, merge_multimodal_embeddings)
 
 IMG_START = '<img>'
 IMG_END = '</img>'
@@ -124,8 +123,15 @@ def calculate_num_blocks(orig_width: int, orig_height: int, min_num: int,
     return blocks, target_width, target_height
 
 
-def calculate_num_blocks_wrapper(hf_config: PretrainedConfig,
-                                 max_dynamic_patch: Optional[int] = None):
+def calculate_num_blocks_wrapper(
+    hf_config: PretrainedConfig,
+    max_dynamic_patch: Optional[int] = None,
+    dynamic_image_size: Optional[bool] = None,
+):
+    if dynamic_image_size is None:
+        dynamic_image_size = hf_config.dynamic_image_size
+
+    max_dynamic_patch = max_dynamic_patch if dynamic_image_size else 1
     if max_dynamic_patch is None:
         max_dynamic_patch = hf_config.max_dynamic_patch
     min_num = hf_config.min_dynamic_patch
@@ -184,10 +190,17 @@ def image_to_pixel_values(image: Image.Image, input_size: int, min_num: int,
     return pixel_values
 
 
-def image_to_pixel_values_wrapper(hf_config: PretrainedConfig,
-                                  max_dynamic_patch: Optional[int] = None):
+def image_to_pixel_values_wrapper(
+    hf_config: PretrainedConfig,
+    max_dynamic_patch: Optional[int] = None,
+    dynamic_image_size: Optional[bool] = None,
+):
     image_size = hf_config.vision_config.image_size
     min_num = hf_config.min_dynamic_patch
+    if dynamic_image_size is None:
+        dynamic_image_size = hf_config.dynamic_image_size
+
+    max_dynamic_patch = max_dynamic_patch if dynamic_image_size else 1
     if max_dynamic_patch is None:
         max_dynamic_patch = hf_config.max_dynamic_patch
     use_thumbnail = hf_config.use_thumbnail
@@ -208,11 +221,17 @@ def get_internvl_num_patches(hf_config: PretrainedConfig):
         (downsample_ratio**2))
 
 
-def get_max_internvl_image_tokens(ctx: InputContext,
-                                  *,
-                                  max_dynamic_patch: Optional[int] = None):
+def get_max_internvl_image_tokens(
+    ctx: InputContext,
+    *,
+    max_dynamic_patch: Optional[int] = None,
+    dynamic_image_size: Optional[bool] = None,
+):
     hf_config = ctx.get_hf_config()
+    if dynamic_image_size is None:
+        dynamic_image_size = hf_config.dynamic_image_size
 
+    max_dynamic_patch = max_dynamic_patch if dynamic_image_size else 1
     if max_dynamic_patch is None:
         max_dynamic_patch = hf_config.max_dynamic_patch
     use_thumbnail = hf_config.use_thumbnail
@@ -223,12 +242,18 @@ def get_max_internvl_image_tokens(ctx: InputContext,
     return num_patches * max_dynamic_patch
 
 
-def get_max_internvl_image_size(ctx: InputContext,
-                                *,
-                                max_dynamic_patch: Optional[int] = None):
+def get_max_internvl_image_size(
+    ctx: InputContext,
+    *,
+    max_dynamic_patch: Optional[int] = None,
+    dynamic_image_size: Optional[bool] = None,
+):
     hf_config = ctx.get_hf_config()
     image_size = hf_config.vision_config.image_size
+    if dynamic_image_size is None:
+        dynamic_image_size = hf_config.dynamic_image_size
 
+    max_dynamic_patch = max_dynamic_patch if dynamic_image_size else 1
     if max_dynamic_patch is None:
         max_dynamic_patch = hf_config.max_dynamic_patch
     use_thumbnail = hf_config.use_thumbnail
@@ -282,6 +307,7 @@ class InternVLInputPipeline:
         inputs: DecoderOnlyInputs,
         *,
         max_dynamic_patch: Optional[int] = None,
+        dynamic_image_size: Optional[bool] = None,
     ) -> DecoderOnlyInputs:
         multi_modal_data = inputs.get("multi_modal_data")
         if multi_modal_data is None or "image" not in multi_modal_data:
@@ -293,7 +319,7 @@ class InternVLInputPipeline:
         image_data = multi_modal_data["image"]
         num_patches = get_internvl_num_patches(hf_config)
         num_blocks_calculator = calculate_num_blocks_wrapper(
-            hf_config, max_dynamic_patch)
+            hf_config, max_dynamic_patch, dynamic_image_size)
         if isinstance(image_data, Image.Image):
             width, height = image_data.size
             num_blocks, _, _ = num_blocks_calculator(width, height)
@@ -333,11 +359,12 @@ class InternVLInputPipeline:
         data: object,
         *,
         max_dynamic_patch: Optional[int] = None,
+        dynamic_image_size: Optional[bool] = None,
     ):
         hf_config = ctx.get_hf_config()
 
         image_pixel_values_mapper = image_to_pixel_values_wrapper(
-            hf_config, max_dynamic_patch)
+            hf_config, max_dynamic_patch, dynamic_image_size)
         if isinstance(data, Image.Image):
             data = image_pixel_values_mapper(data)
             # Add an N dimension for number of images per prompt (currently 1).
@@ -346,7 +373,7 @@ class InternVLInputPipeline:
             # we can't stack here because images may have different num_patches
             data = [image_pixel_values_mapper(img) for img in data]
         else:
-            return MultiModalInputs({"image_embeds": data})
+            return MultiModalKwargs({"image_embeds": data})
         model_config = ctx.model_config
         tokenizer = cached_get_tokenizer(
             model_config.tokenizer,
@@ -355,7 +382,7 @@ class InternVLInputPipeline:
                                           add_special_tokens=False,
                                           return_tensors="pt")[0]
 
-        return MultiModalInputs({
+        return MultiModalKwargs({
             "pixel_values": data,
             "image_token_id": image_token_id
         })
@@ -367,13 +394,17 @@ class InternVLInputPipeline:
         mm_counts: Mapping[str, int],
         *,
         max_dynamic_patch: Optional[int] = None,
+        dynamic_image_size: Optional[bool] = None,
     ):
         num_images = mm_counts["image"]
 
         hf_config = ctx.get_hf_config()
 
         image_feature_size = get_max_internvl_image_tokens(
-            ctx, max_dynamic_patch=max_dynamic_patch)
+            ctx,
+            max_dynamic_patch=max_dynamic_patch,
+            dynamic_image_size=dynamic_image_size,
+        )
         model_config = ctx.model_config
         tokenizer = cached_get_tokenizer(
             model_config.tokenizer,
@@ -389,7 +420,10 @@ class InternVLInputPipeline:
         )
 
         max_image_width, max_image_height = get_max_internvl_image_size(
-            ctx, max_dynamic_patch=max_dynamic_patch)
+            ctx,
+            max_dynamic_patch=max_dynamic_patch,
+            dynamic_image_size=dynamic_image_size,
+        )
 
         mm_data = dummy_image_for_clip(
             hf_config.vision_config,
@@ -410,12 +444,12 @@ input_pipeline = InternVLInputPipeline(IMG_START, IMG_END, IMG_CONTEXT)
 @INPUT_REGISTRY.register_input_processor(input_pipeline.input_processor)
 class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
 
-    def __init__(self,
-                 config: PretrainedConfig,
-                 multimodal_config: MultiModalConfig,
-                 cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
+
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
+        multimodal_config = vllm_config.model_config.multimodal_config
 
         self.config = config
         self.multimodal_config = multimodal_config
@@ -435,14 +469,13 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
             config,
             quant_config=quant_config,
             is_mono=self.is_mono,
-            prefix="vision_model",
+            prefix=maybe_prefix(prefix, "vision_model"),
         )
 
         self.language_model = init_vllm_registered_model(
             config.text_config,
-            cache_config,
-            quant_config,
-            prefix="language_model")
+            vllm_config=vllm_config,
+            prefix=maybe_prefix(prefix, "language_model"))
 
         self.mlp1 = self._init_mlp1(config)
 
@@ -467,7 +500,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
         if hasattr(self.language_model, "sampler"):
             return self.language_model.sampler
 
-        return Sampler()
+        return get_sampler()
 
     def _init_vision_model(
         self,
@@ -665,6 +698,7 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP):
     ) -> Optional[SamplerOutput]:
         return self.language_model.sample(logits, sampling_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         loader = AutoWeightsLoader(self)
-        loader.load_weights(weights)
+        return loader.load_weights(weights)
