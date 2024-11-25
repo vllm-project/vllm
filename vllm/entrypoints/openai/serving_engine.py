@@ -142,8 +142,6 @@ class OpenAIServing:
 
         self._tokenize_prompt_input_async = make_async(
             self._tokenize_prompt_input)
-        self._tokenize_prompt_inputs_async = make_async(
-            self._tokenize_prompt_inputs)
         self._tokenize_prompt_input_or_inputs_async = make_async(
             self._tokenize_prompt_input_or_inputs)
 
