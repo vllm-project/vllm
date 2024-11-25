@@ -295,6 +295,14 @@ class OffloadedTensor(torch.Tensor):
             # we need to call `to()` and then `copy_()`
             raise ValueError("Cannot perform uniform_ on an offloaded tensor")
 
+        if func._schema.is_mutable:
+            # the behavior of mutable ops for offloaded tensor
+            # is not well-defined and needs case-by-case discussion
+            raise ValueError(
+                f"Unrecognized mutable operation {func}"
+                " on an offloaded tensor. Please open an issue to discuss"
+                " the support for this operation.")
+
         # for the rest of the operations, we will load the offloaded tensor
         # on the fly and perform the operation on the device
         new_args = (x.load() if isinstance(x, cls) else x for x in args)
