@@ -15,7 +15,7 @@ from vllm.inputs.data import TokensPrompt
 from vllm.logger import init_logger
 from vllm.outputs import EmbeddingRequestOutput
 from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
-from vllm.utils import merge_async_iterators, random_uuid, make_async
+from vllm.utils import make_async, merge_async_iterators, random_uuid
 
 logger = init_logger(__name__)
 
