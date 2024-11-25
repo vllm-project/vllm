@@ -3,6 +3,7 @@ import enum
 import hashlib
 import json
 import warnings
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Counter, Dict,
@@ -26,7 +27,7 @@ from vllm.transformers_utils.config import (
     get_hf_text_config, get_pooling_config,
     get_sentence_transformer_tokenizer_config, is_encoder_decoder, uses_mrope)
 from vllm.utils import (GiB_bytes, cuda_device_count_stateless, get_cpu_memory,
-                        identity, print_warning_once, resolve_obj_by_qualname)
+                        print_warning_once, resolve_obj_by_qualname)
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
@@ -182,7 +183,7 @@ class ModelConfig:
             hf_overrides_fn = hf_overrides
         else:
             hf_overrides_kw = hf_overrides
-            hf_overrides_fn = identity
+            hf_overrides_fn = None
 
         if rope_scaling is not None:
             hf_override: Dict[str, Any] = {"rope_scaling": rope_scaling}
@@ -211,8 +212,15 @@ class ModelConfig:
         self.skip_tokenizer_init = skip_tokenizer_init
 
         hf_config = get_config(self.model, trust_remote_code, revision,
-                               code_revision, config_format, **hf_overrides_kw)
-        hf_config = hf_overrides_fn(hf_config)
+                               code_revision, config_format)
+
+        if hf_overrides_kw:
+            logger.info("Overriding HF config with %s", hf_overrides_kw)
+            hf_config.update(hf_overrides_kw)
+        if hf_overrides_fn:
+            logger.info("Overriding HF config with %s", hf_overrides_fn)
+            hf_config = hf_overrides_fn(hf_config)
+
         self.hf_config = hf_config
 
         self.hf_text_config = get_hf_text_config(self.hf_config)
@@ -233,15 +241,26 @@ class ModelConfig:
             (self.hf_text_config.model_type in ["gemma2"]))
 
         if (not self.disable_sliding_window and has_interleaved_attention):
-            sliding_window_len_min = get_min_sliding_window(
-                self.hf_text_config.sliding_window)
+            if envs.VLLM_ATTENTION_BACKEND == "XFORMERS":
+                sliding_window_len_min = get_min_sliding_window(
+                    self.hf_text_config.sliding_window)
 
-            print_warning_once(
-                f"{self.hf_text_config.model_type} has interleaved attention, "
-                "which is currently not supported by vLLM. Disabling sliding "
-                "window and capping the max length to the sliding window size "
-                f"({sliding_window_len_min}).")
-            self.disable_sliding_window = True
+                print_warning_once(
+                    f"{self.hf_text_config.model_type} has interleaved "
+                    "attention, which is currently not supported by the "
+                    "XFORMERS backend. Disabling sliding window and capping "
+                    "the max length to the sliding window size "
+                    f"({sliding_window_len_min}).")
+                self.disable_sliding_window = True
+            else:
+                # for a model with interleaved attention,
+                # the scheduler and the model treat it as full attention
+                # (i.e., not dropping any tokens outside the window).
+                # only the attention layer itself is aware of the sliding
+                # window, and use the window size to compute the attention.
+                self.hf_text_config.interleaved_sliding_window = sliding_window
+                delattr(self.hf_text_config, "sliding_window")
+                sliding_window = None
 
         self.max_model_len = _get_and_verify_max_len(
             hf_config=self.hf_text_config,
@@ -376,7 +395,7 @@ class ModelConfig:
         supported_quantization = QUANTIZATION_METHODS
         rocm_supported_quantization = [
             "awq", "gptq", "fp8", "compressed_tensors", "compressed-tensors",
-            "fbgemm_fp8"
+            "fbgemm_fp8", "gguf"
         ]
         optimized_quantization_methods = [
             "fp8", "marlin", "modelopt", "gptq_marlin_24", "gptq_marlin",
@@ -701,6 +720,11 @@ class ModelConfig:
     def is_multimodal_model(self) -> bool:
         return self.multimodal_config is not None
 
+    @property
+    def is_cross_encoder(self) -> bool:
+        architectures = getattr(self.hf_config, "architectures", [])
+        return ModelRegistry.is_cross_encoder_model(architectures)
+
 
 class CacheConfig:
     """Configuration for the KV cache.
@@ -982,20 +1006,15 @@ class ParallelConfig:
                 raise ValueError(f"worker-use-ray can't be used with "
                                  f"distributed executor backend "
                                  f"'{self.distributed_executor_backend}'.")
-
-        if current_platform.is_tpu() and self.world_size > 1:
+        ray_only_devices = ["tpu", "hpu"]
+        if (current_platform.device_type in ray_only_devices
+                and self.world_size > 1):
             if self.distributed_executor_backend is None:
                 self.distributed_executor_backend = "ray"
             if self.distributed_executor_backend != "ray":
                 raise ValueError(
-                    "TPU backend only supports Ray for distributed inference.")
-
-        if current_platform.is_hpu() and self.world_size > 1:
-            if self.distributed_executor_backend is None:
-                self.distributed_executor_backend = "ray"
-            if self.distributed_executor_backend != "ray":
-                raise ValueError(
-                    "HPU backend only supports Ray for distributed inference.")
+                    f"{current_platform.device_type.upper()} backend only "
+                    "supports Ray for distributed inference.")
 
         if self.distributed_executor_backend is None and self.world_size > 1:
             # We use multiprocessing by default if world_size fits on the
@@ -1122,9 +1141,9 @@ class SchedulerConfig:
                     # max_num_batched_tokens.
                     self.max_num_batched_tokens = max(self.max_model_len, 2048)
                 else:
-                    # It is the values that have the best balance between ITL
-                    # and TTFT on A100. Note it is not optimized for throughput.
-                    self.max_num_batched_tokens = 512
+                    # This value is chosen to have a balance between ITL
+                    # and TTFT. Note it is not optimized for throughput.
+                    self.max_num_batched_tokens = 2048
             else:
                 # If max_model_len is too short, use 2048 as the default value
                 # for higher throughput.
@@ -2135,8 +2154,7 @@ class CompilationConfig(BaseModel):
     backend: str = ""
     custom_ops: List[str] = Field(default_factory=list)
     splitting_ops: List[str] = Field(default_factory=lambda: [
-        "vllm.unified_flash_attention",
-        "vllm.unified_flash_infer",
+        "vllm.unified_attention",
         "vllm.unified_v1_flash_attention",
     ])
 
@@ -2197,6 +2215,11 @@ class CompilationConfig(BaseModel):
     enabled_custom_ops: Counter[str] = PrivateAttr
     disabled_custom_ops: Counter[str] = PrivateAttr
 
+    # Per-model forward context
+    # Mainly used to store attention cls
+    # Map from layer name to the attention cls
+    static_forward_context: Dict[str, Any] = PrivateAttr
+
     @classmethod
     def from_cli(cls, cli_value: str) -> "CompilationConfig":
         """Parse the CLI value for the compilation config."""
@@ -2228,6 +2251,7 @@ class CompilationConfig(BaseModel):
 
         self.enabled_custom_ops = Counter()
         self.disabled_custom_ops = Counter()
+        self.static_forward_context = {}
 
     def init_backend(self) -> Union[str, Callable]:
         if self.level == CompilationLevel.NO_COMPILATION:
@@ -2364,6 +2388,16 @@ class VllmConfig:
             self.quant_config = VllmConfig._get_quantization_config(
                 self.model_config, self.load_config)
 
+        if self.scheduler_config is not None and \
+            self.model_config is not None and \
+            self.scheduler_config.chunked_prefill_enabled and \
+            self.model_config.dtype == torch.float32 and \
+            current_platform.get_device_capability() == (7, 5):
+            print_warning_once(
+                "Turing devices tensor cores do not support float32 matmul. "
+                "To workaround this limitation, vLLM will set 'ieee' input "
+                "precision for chunked prefill triton kernels.")
+
         if self.compilation_config is None:
             self.compilation_config = CompilationConfig()
         if envs.VLLM_USE_V1 and not self.model_config.enforce_eager:
@@ -2377,6 +2411,20 @@ class VllmConfig:
             self.compilation_config.pass_config.enable_fusion = False
             self.compilation_config.pass_config.enable_reshape = False
             self.compilation_config.level = CompilationLevel.PIECEWISE
+
+        if self.cache_config is not None and \
+            self.cache_config.cpu_offload_gb > 0 and \
+            self.compilation_config.level != CompilationLevel.NO_COMPILATION:
+            logger.warning(
+                "CPU offload is not supported with `torch.compile` yet."
+                " Disabling `torch.compile`.")
+            self.compilation_config.level = CompilationLevel.NO_COMPILATION
+
+        if self.lora_config is not None and self.compilation_config.level !=\
+             CompilationLevel.NO_COMPILATION:
+            logger.warning("LoRA is not supported with `torch.compile` yet. "
+                           "Disabling `torch.compile`.")
+            self.compilation_config.level = CompilationLevel.NO_COMPILATION
 
         current_platform.check_and_update_config(self)
 
@@ -2420,3 +2468,53 @@ class VllmConfig:
         self.cache_config.enable_prefix_caching,
         self.model_config.use_async_output_proc,
         self.model_config.mm_processor_kwargs)
+
+
+_current_vllm_config: Optional[VllmConfig] = None
+
+
+@contextmanager
+def set_current_vllm_config(vllm_config: VllmConfig):
+    """
+    Temporarily set the current VLLM config.
+    Used during model initialization.
+    We save the current VLLM config in a global variable,
+    so that all modules can access it, e.g. custom ops
+    can access the VLLM config to determine how to dispatch.
+    """
+    global _current_vllm_config
+    old_vllm_config = _current_vllm_config
+    from vllm.compilation.counter import compilation_counter
+    num_models_seen = compilation_counter.num_models_seen
+    try:
+        _current_vllm_config = vllm_config
+        yield
+    finally:
+        logger.debug("enabled custom ops: %s",
+                     vllm_config.compilation_config.enabled_custom_ops)
+        logger.debug("disabled custom ops: %s",
+                     vllm_config.compilation_config.disabled_custom_ops)
+        if vllm_config.compilation_config.level == CompilationLevel.PIECEWISE \
+            and compilation_counter.num_models_seen == num_models_seen:
+            # If the model supports compilation,
+            # compilation_counter.num_models_seen should be increased
+            # by at least 1.
+            # If it is not increased, it means the model does not support
+            # compilation (does not have @support_torch_compile decorator).
+            logger.warning(
+                "`torch.compile` is turned on, but the model %s"
+                " does not support it. Please open an issue on GitHub"
+                "if you want it to be supported.",
+                vllm_config.model_config.model)
+        _current_vllm_config = old_vllm_config
+
+
+def get_current_vllm_config() -> VllmConfig:
+    if _current_vllm_config is None:
+        # in ci, usually when we test custom ops/modules directly,
+        # we don't set the vllm config. In that case, we set a default
+        # config.
+        logger.warning("Current VLLM config is not set.")
+        from vllm.config import VllmConfig
+        return VllmConfig()
+    return _current_vllm_config
