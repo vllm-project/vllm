@@ -451,6 +451,12 @@ class ColumnParallelLinearWithLoRA(BaseLayerWithLoRA):
 
     def __init__(self, base_layer: ColumnParallelLinear) -> None:
         super().__init__()
+        # The base_layer type is ColumnParallelLinear or
+        # MergedColumnParallelLinear, their weight sharding logic is
+        # inconsistent when TP is greater than 1.
+        self.is_merged_col_linear = type(
+            base_layer) is MergedColumnParallelLinear
+
         self.base_layer = base_layer
         self.tp_size = get_tensor_model_parallel_world_size()
         self.input_size = self.base_layer.input_size
@@ -508,14 +514,30 @@ class ColumnParallelLinearWithLoRA(BaseLayerWithLoRA):
         return lora_a
 
     def slice_lora_b(self, lora_b: torch.Tensor) -> torch.Tensor:
-        tensor_model_parallel_rank = get_tensor_model_parallel_rank()
-        shard_size = self.output_dim
-        start_idx = tensor_model_parallel_rank * shard_size
-        end_idx = (tensor_model_parallel_rank + 1) * shard_size
-        lora_b = lora_b[:, start_idx:end_idx]
+        # Applicable to cases where the base_layer is
+        # MergedColumnParallelLinear.
+        if self.is_merged_col_linear:
+            tp_rank = get_tensor_model_parallel_rank()
+            shard_size = self.output_size // 2
+            offset = lora_b.shape[-1] // 2
+
+            left_weight = lora_b[:, tp_rank * shard_size:(tp_rank + 1) *
+                                 shard_size]
+            right_weight = lora_b[:, offset + tp_rank * shard_size:offset +
+                                  (tp_rank + 1) * shard_size]
+            lora_b = torch.cat([left_weight, right_weight], dim=1)
+        # Applicable to cases where the base_layer is
+        # ColumnParallelLinear.
+        else:
+            tensor_model_parallel_rank = get_tensor_model_parallel_rank()
+            shard_size = self.output_dim
+            start_idx = tensor_model_parallel_rank * shard_size
+            end_idx = (tensor_model_parallel_rank + 1) * shard_size
+            lora_b = lora_b[:, start_idx:end_idx]
         return lora_b
 
     def slice_bias(self, bias: torch.Tensor) -> torch.Tensor:
+        # TODO: Fix the slicing logic of bias.
         if bias is None:
             return bias
         tensor_model_parallel_rank = get_tensor_model_parallel_rank()
@@ -779,7 +801,7 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
 class QKVParallelLinearWithLora(ColumnParallelLinearWithLoRA):
     """
     ColumnParallelLinear layer that is specifically designed for
-    qkv_proj. Certain models, such as chtglm3 and baichuan-7b,
+    qkv_proj. Certain models, such as chatglm3 and baichuan-7b,
     only contains a single LoRA within their qkv_proj layer.
 
     During inference with Tensor Parallel, the weights of lora_b

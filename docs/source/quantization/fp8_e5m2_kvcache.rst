@@ -4,7 +4,7 @@ FP8 E5M2 KV Cache
 ==================
 
 The int8/int4 quantization scheme requires additional scale GPU memory storage, which reduces the expected GPU memory benefits.
-The FP8 data format retains 2~3 mantissa bits and can convert float/fp16/bflaot16 and fp8 to each other.
+The FP8 data format retains 2~3 mantissa bits and can convert float/fp16/bfloat16 and fp8 to each other.
 
 Here is an example of how to enable this feature:
 
