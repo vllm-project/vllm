@@ -398,46 +398,49 @@ class OpenAIServing:
                 )
 
     async def _tokenize_prompt_input_async(
-                self,
-                request: AnyRequest,
-                tokenizer: AnyTokenizer,
-                prompt_input: Union[str, List[int]],
-                truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
-                add_special_tokens: bool = True,
-        ) -> TextTokensPrompt:
-        return await make_async(self._tokenize_prompt_input)(request=request,
-                                                             tokenizer=tokenizer,
-                                                             prompt_input=prompt_input,
-                                                             truncate_prompt_tokens=truncate_prompt_tokens,
-                                                             add_special_tokens=add_special_tokens)
+        self,
+        request: AnyRequest,
+        tokenizer: AnyTokenizer,
+        prompt_input: Union[str, List[int]],
+        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
+        add_special_tokens: bool = True,
+    ) -> TextTokensPrompt:
+        return await make_async(self._tokenize_prompt_input)(
+            request=request,
+            tokenizer=tokenizer,
+            prompt_input=prompt_input,
+            truncate_prompt_tokens=truncate_prompt_tokens,
+            add_special_tokens=add_special_tokens)
 
     async def _tokenize_prompt_inputs_async(
-            self,
-            request: AnyRequest,
-            tokenizer: AnyTokenizer,
-            prompt_inputs: Iterable[Union[str, List[int]]],
-            truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
-            add_special_tokens: bool = True,
+        self,
+        request: AnyRequest,
+        tokenizer: AnyTokenizer,
+        prompt_inputs: Iterable[Union[str, List[int]]],
+        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
+        add_special_tokens: bool = True,
     ) -> Iterator[TextTokensPrompt]:
-        return await make_async(self._tokenize_prompt_inputs)(request=request,
-                                                             tokenizer=tokenizer,
-                                                             prompt_inputs=prompt_inputs,
-                                                             truncate_prompt_tokens=truncate_prompt_tokens,
-                                                             add_special_tokens=add_special_tokens)
+        return await make_async(self._tokenize_prompt_inputs)(
+            request=request,
+            tokenizer=tokenizer,
+            prompt_inputs=prompt_inputs,
+            truncate_prompt_tokens=truncate_prompt_tokens,
+            add_special_tokens=add_special_tokens)
 
     async def _tokenize_prompt_input_or_inputs_async(
-            self,
-            request: AnyRequest,
-            tokenizer: AnyTokenizer,
-            input_or_inputs: Union[str, List[str], List[int], List[List[int]]],
-            truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
-            add_special_tokens: bool = True,
+        self,
+        request: AnyRequest,
+        tokenizer: AnyTokenizer,
+        input_or_inputs: Union[str, List[str], List[int], List[List[int]]],
+        truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
+        add_special_tokens: bool = True,
     ) -> Iterator[TextTokensPrompt]:
-        return await make_async(self._tokenize_prompt_input_or_inputs)(request=request,
-                                                                       tokenizer=tokenizer,
-                                                                       input_or_inputs=input_or_inputs,
-                                                                       truncate_prompt_tokens=truncate_prompt_tokens,
-                                                                       add_special_tokens=add_special_tokens)
+        return await make_async(self._tokenize_prompt_input_or_inputs)(
+            request=request,
+            tokenizer=tokenizer,
+            input_or_inputs=input_or_inputs,
+            truncate_prompt_tokens=truncate_prompt_tokens,
+            add_special_tokens=add_special_tokens)
 
     async def _preprocess_completion(
         self,
@@ -448,8 +451,8 @@ class OpenAIServing:
         add_special_tokens: bool = True,
     ) -> Tuple[Sequence[TextTokensPrompt], List[TokensPrompt]]:
         request_prompts = [
-            request_prompt
-            for request_prompt in await self._tokenize_prompt_input_or_inputs_async(
+            request_prompt for request_prompt in await
+            self._tokenize_prompt_input_or_inputs_async(
                 request,
                 tokenizer,
                 input_or_inputs,
