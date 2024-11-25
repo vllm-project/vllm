@@ -21,6 +21,7 @@ from ..utils import check_embeddings_close
                      marks=[pytest.mark.core_model]),
         pytest.param("ssmits/Qwen2-7B-Instruct-embed-base"),
         pytest.param("Alibaba-NLP/gte-Qwen2-1.5B-instruct"),
+        pytest.param("Alibaba-NLP/gte-Qwen2-7B-instruct"),
     ],
 )
 @pytest.mark.parametrize("dtype", ["half"])
@@ -31,6 +32,10 @@ def test_models(
     model,
     dtype: str,
 ) -> None:
+    vllm_extra_kwargs = {}
+    if model == "Alibaba-NLP/gte-Qwen2-7B-instruct":
+        vllm_extra_kwargs["hf_overrides"] = {"is_causal": False}
+
     # The example_prompts has ending "\n", for example:
     # "Write a short story about a robot that dreams for the first time.\n"
     # sentence_transformers will strip the input texts, see:
@@ -43,8 +48,11 @@ def test_models(
                    is_sentence_transformer=True) as hf_model:
         hf_outputs = hf_model.encode(example_prompts)
 
-    with vllm_runner(model, task="embedding", dtype=dtype,
-                     max_model_len=None) as vllm_model:
+    with vllm_runner(model,
+                     task="embedding",
+                     dtype=dtype,
+                     max_model_len=None,
+                     **vllm_extra_kwargs) as vllm_model:
         vllm_outputs = vllm_model.encode(example_prompts)
         # This test is for verifying whether the model's extra_repr
         # can be printed correctly.
