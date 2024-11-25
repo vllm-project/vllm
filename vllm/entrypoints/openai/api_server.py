@@ -499,10 +499,12 @@ def build_app(args: Namespace) -> FastAPI:
 
         @app.middleware("http")
         async def authentication(request: Request, call_next):
-            root_path = "" if args.root_path is None else args.root_path
             if request.method == "OPTIONS":
                 return await call_next(request)
-            if not request.url.path.startswith(f"{root_path}/v1"):
+            url_path = request.url.path
+            if app.root_path and url_path.startswith(app.root_path):
+                url_path = url_path[len(app.root_path):]
+            if not url_path.startswith("/v1"):
                 return await call_next(request)
             if request.headers.get("Authorization") != "Bearer " + token:
                 return JSONResponse(content={"error": "Unauthorized"},
