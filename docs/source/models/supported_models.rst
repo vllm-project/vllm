@@ -325,6 +325,11 @@ Text Embedding
     - Example HF Models
     - :ref:`LoRA <lora>`
     - :ref:`PP <distributed_serving>`
+  * - :code:`BertModel`
+    - BERT-based
+    - :code:`BAAI/bge-base-en-v1.5`, etc.
+    - 
+    - 
   * - :code:`Gemma2Model`
     - Gemma2-based
     - :code:`BAAI/bge-multilingual-gemma2`, etc.
@@ -340,6 +345,16 @@ Text Embedding
     - :code:`ssmits/Qwen2-7B-Instruct-embed-base`, :code:`Alibaba-NLP/gte-Qwen2-1.5B-instruct`, etc.
     - ✅︎
     - ✅︎
+  * - :code:`RobertaModel`, :code:`RobertaForMaskedLM`
+    - RoBERTa-based
+    - :code:`sentence-transformers/all-roberta-large-v1`, :code:`sentence-transformers/all-roberta-large-v1`, etc.
+    - 
+    - 
+  * - :code:`XLMRobertaModel`
+    - XLM-RoBERTa-based
+    - :code:`intfloat/multilingual-e5-large`, etc.
+    - 
+    - 
 
 .. important::
   Some model architectures support both generation and embedding tasks.
@@ -390,6 +405,36 @@ Classification
 .. note::
     As an interim measure, these models are supported in both offline and online inference via Embeddings API.
 
+Sentence Pair Scoring
+---------------------
+
+.. list-table::
+  :widths: 25 25 50 5 5
+  :header-rows: 1
+
+  * - Architecture
+    - Models
+    - Example HF Models
+    - :ref:`LoRA <lora>`
+    - :ref:`PP <distributed_serving>`
+  * - :code:`BertForSequenceClassification`
+    - BERT-based
+    - :code:`cross-encoder/ms-marco-MiniLM-L-6-v2`, etc.
+    - 
+    - 
+  * - :code:`RobertaForSequenceClassification`
+    - RoBERTa-based
+    - :code:`cross-encoder/quora-roberta-base`, etc.
+    - 
+    - 
+  * - :code:`XLMRobertaForSequenceClassification`
+    - XLM-RoBERTa-based
+    - :code:`BAAI/bge-reranker-v2-m3`, etc.
+    - 
+    - 
+
+.. note::
+    These models are supported in both offline and online inference via Score API.
 
 Multimodal Language Models
 ^^^^^^^^^^^^^^^^^^^^^^^^^^
