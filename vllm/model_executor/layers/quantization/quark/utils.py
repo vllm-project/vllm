@@ -1,20 +1,20 @@
+
 import re
-from typing import Iterable, Optional
-
-from compressed_tensors import CompressionFormat
-from torch.nn import Module
-
+from typing import Dict, Any, Optional, Iterable
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     FUSED_LAYER_NAME_MAPPING)
 
-
-def is_activation_quantization_format(format: str) -> bool:
-    _ACTIVATION_QUANTIZATION_FORMATS = [
-        CompressionFormat.naive_quantized.value,
-        CompressionFormat.int_quantized.value,
-        CompressionFormat.float_quantized.value
-    ]
-    return format in _ACTIVATION_QUANTIZATION_FORMATS
+def deep_compare(dict1: Any, dict2: Any) -> bool:
+    if type(dict1) != type(dict2):
+        return False
+    if isinstance(dict1, dict):
+        if dict1.keys() != dict2.keys():
+            return False
+        return all(deep_compare(dict1[k], dict2[k]) for k in dict1)
+    elif isinstance(dict1, list):
+        return set(dict1) == set(dict2)
+    else:
+        return dict1 == dict2
 
 
 def should_ignore_layer(layer_name: Optional[str],
@@ -75,62 +75,6 @@ def check_equal_or_regex_match(layer_name: str,
         if _is_equal_or_regex_match(layer_name, target):
             return True
     return False
-
-
-def find_matched_target(layer_name: Optional[str], module: Module,
-                        targets: Iterable[str]) -> str:
-    """
-    Helper function to look up which "target" in the compressed-tensors
-    config that a layer corresponds to.
-
-    Recall that a compressed-tensors configs has a concept of 
-    config_groups, where each layer can be quantized with with a different
-    scheme.
-
-    targets in each config_group will be a list of either layer names 
-    (or regexes corresponding to layer names) or names of torch Modules.
-
-    First, we try to match the layer_name with a target
-    Second, we try to match the module's name with a target
-
-    :param layer_name: layer name
-    :param module: torch.nn.Module
-    :param targets: list of targets to match the layer against
-    """
-
-    if layer_name is None:
-        layer_name = ""
-
-    matched_target = (_find_first_match(layer_name, targets)
-                      or _find_first_match(module.__class__.__name__, targets,
-                                           True))
-
-    if matched_target is None:
-        raise ValueError(f"Unable to find matching target for {module} in the "
-                         "compressed-tensors config.")
-
-    return matched_target
-
-
-def _find_first_match(value: str,
-                      targets: Iterable[str],
-                      check_contains: bool = False) -> Optional[str]:
-    """
-    Returns first element of target that matches value either
-    exactly or as a regex after 're:'. If check_contains is set to True,
-    additionally checks if the target string is contained within the value.
-
-    :param value: string to compare the list of targets against
-    :param targets: list of targets to match the layer against
-    :param check_contains: whether or not to do a substring match
-    """
-
-    for target in targets:
-        if _is_equal_or_regex_match(value,
-                                    target,
-                                    check_contains=check_contains):
-            return target
-    return None
 
 
 def _is_equal_or_regex_match(value: str,

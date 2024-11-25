@@ -42,9 +42,14 @@ class BasevLLMParameter(Parameter):
     @property
     def weight_loader(self):
         return self._weight_loader
+    
+    def _is_1d_and_scalar(self, loaded_weight: torch.Tensor):
+        cond1 = self.data.ndim == 1 and self.data.numel() == 1
+        cond2 = loaded_weight.ndim == 0 and loaded_weight.numel() == 1
+        return (cond1 and cond2)
 
     def _assert_and_load(self, loaded_weight: torch.Tensor):
-        assert self.data.shape == loaded_weight.shape
+        assert self.data.shape == loaded_weight.shape or self._is_1d_and_scalar(loaded_weight)
         self.data.copy_(loaded_weight)
 
     def load_column_parallel_weight(self, loaded_weight: torch.Tensor):
