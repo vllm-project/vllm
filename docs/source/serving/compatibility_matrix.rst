@@ -393,7 +393,7 @@ Feature x Hardware
      - ✅
      - ✅
      - ✅
-     - ✗
+     - ?
    * - :abbr:`enc-dec (Encoder-Decoder Models)`
      - ✅
      - ✅
