@@ -1092,12 +1092,18 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         lora_logits[-1] = float("-inf")
         lora_logits = lora_logits.mT
         indices_padded = self.punica_wrapper.sampler_indices_padded
+        
+        # KRAI: Temporary change
+        neg_inf = torch.finfo(lora_logits.dtype).min
+        pos_inf = torch.finfo(lora_logits.dtype).max
+        
         lora_logits = (lora_logits.reshape(
             lora_logits.shape[0] * lora_logits.shape[1],
             lora_logits.shape[2],
-        ).index_select(0, indices_padded).nan_to_num_(nan=float("-inf"),
-                                                      posinf=float("inf"),
-                                                      neginf=float("-inf")))
+        ).index_select(0, indices_padded).nan_to_num_(nan=neg_inf,
+                                                      posinf=pos_inf,
+                                                      neginf=neg_inf))
+        print(f"AKSHAT - After index select: {lora_logits.shape}, {indices_padded.shape}")
 
         # HPU needs special handling to prune out dummy samples.
         if current_platform.is_hpu():
