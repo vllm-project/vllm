@@ -18,6 +18,7 @@ from transformers import PretrainedConfig
 
 import vllm.envs as envs
 from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
+from vllm.compilation.utils import use_cc_kernels
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import (QUANTIZATION_METHODS,
                                                      get_quantization_config)
@@ -3196,6 +3197,14 @@ class VllmConfig:
             logger.warning("LoRA is not supported with `torch.compile` yet. "
                            "Disabling `torch.compile`.")
             self.compilation_config.level = CompilationLevel.NO_COMPILATION
+
+        n_slices = self.parallel_config.world_size
+        max_tokens = self.scheduler_config.max_num_batched_tokens
+        if not use_cc_kernels(max_tokens / n_slices, n_slices):
+            logger.info(
+                ("Disabling collective fusion pass since chunked prefill size "
+                 "%d is too small."), max_tokens)
+            self.compilation_config.pass_config.enable_collective_fusion = False
 
         current_platform.check_and_update_config(self)
 

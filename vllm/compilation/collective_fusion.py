@@ -8,7 +8,7 @@ from torch._inductor.pattern_matcher import (Match, PatternMatcherPass,
 
 import vllm.envs as envs
 from vllm.compilation.utils import (find_auto_fn, find_fn, find_getitem,
-                                    last_node_in_match)
+                                    last_node_in_match, use_cc_kernels)
 from vllm.config import CompilationConfig
 from vllm.distributed import (tensor_model_parallel_all_gather,
                               tensor_model_parallel_all_reduce)
@@ -26,23 +26,14 @@ if envs.VLLM_USE_FLUX:
     try:
         import flux
         use_flux = True
-        logger.info("USING FLUX")
+        logger.info("Using flux kernels for collective communication fusion.")
     except ImportError:
+        logger.info("Attempting to use flux but flux not installed.")
         use_flux = False
 
-FLUX_TILE_SIZE: int = 128
 
-
-# TODO: is this ok?
 def get_world_name() -> str:
     return torch.distributed.group.WORLD.group_name
-
-
-# Note: this heuristic is unique to flux
-def should_slice(shape: torch.Size) -> bool:
-    n_slices = get_tensor_model_parallel_world_size()
-    return (shape[0] % (FLUX_TILE_SIZE * n_slices) == 0
-            and shape[0] >= FLUX_TILE_SIZE * n_slices)
 
 
 def residual_slice_shape(residual: torch.Tensor, rank: int) -> int:
@@ -173,7 +164,7 @@ def get_gemm_rs_ag_gemm(use_flux: bool, max_m: int, gemm_1_type: torch.dtype,
             first_layer: bool
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
 
-        if first_layer and should_slice(residual.shape):
+        if first_layer and use_cc_kernels(residual.shape[0]):
             slice_shape = residual_slice_shape(residual, rank)
             residual_chunk = torch.ops.aten.split.Tensor(residual, slice_shape)
             my_residual = residual_chunk[0]
@@ -181,7 +172,7 @@ def get_gemm_rs_ag_gemm(use_flux: bool, max_m: int, gemm_1_type: torch.dtype,
             my_residual = residual
             slice_shape = residual.shape[0]
 
-        if not should_slice(residual.shape):
+        if not use_cc_kernels(residual.shape[0]):
             output = torch.ops.aten.mm.default(gemm_1_activations,
                                                gemm_1_weights.transpose(1, 0))
             reduced_output = tensor_model_parallel_all_reduce(output)
@@ -222,7 +213,7 @@ def get_gemm_rs_ag_gemm(use_flux: bool, max_m: int, gemm_1_type: torch.dtype,
         gemm_2_weights: torch.Tensor,
         first_layer: bool,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        if first_layer and should_slice(gemm_1_activations.shape):
+        if first_layer and use_cc_kernels(gemm_1_activations.shape[0]):
             slice_shape = residual_slice_shape_fake(residual, rank)
             split_1 = torch.ops.aten.split.Tensor(residual, slice_shape)
             my_residual = split_1[0]
@@ -293,7 +284,7 @@ def gemm_ag_final(my_residual: torch.Tensor, gemm_1_weights: torch.Tensor,
 
     reduced = tensor_model_parallel_all_reduce(mm_1)
 
-    if should_slice(gemm_1_activations.shape):
+    if use_cc_kernels(gemm_1_activations.shape[0]):
         wait_tensor = tensor_model_parallel_all_gather(my_residual)
     else:
         wait_tensor = my_residual
