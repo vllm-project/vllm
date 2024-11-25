@@ -77,6 +77,9 @@ def set_current_vllm_config(vllm_config: "VllmConfig"):
     """
     global _current_vllm_config
     old_vllm_config = _current_vllm_config
+    from vllm.compilation.counter import compilation_counter
+    from vllm.config import CompilationLevel
+    num_graphs_seen = compilation_counter.num_graphs_seen
     try:
         _current_vllm_config = vllm_config
         yield
@@ -85,6 +88,13 @@ def set_current_vllm_config(vllm_config: "VllmConfig"):
                      vllm_config.compilation_config.enabled_custom_ops)
         logger.debug("disabled custom ops: %s",
                      vllm_config.compilation_config.disabled_custom_ops)
+        if vllm_config.compilation_config.level == CompilationLevel.PIECEWISE \
+            and compilation_counter.num_graphs_seen == num_graphs_seen:
+            logger.warning(
+                "`torch.compile` is turned on, but the model %s"
+                " does not support it. Please open an issue on GitHub"
+                "if you want it to be supported.",
+                vllm_config.model_config.model)
         _current_vllm_config = old_vllm_config
 
 
