@@ -14,6 +14,14 @@ logger = logging.getLogger(__name__)
 plugins_loaded = False
 
 
+def _force_torch_inductor_compile_threads(thread_num: int):
+    import torch
+
+    # see https://github.com/vllm-project/vllm/issues/10619
+    # A hacky way to limit the number of threads
+    torch._inductor.config.compile_threads = thread_num
+
+
 def load_general_plugins():
     """WARNING: plugins can be loaded for multiple times in different
     processes. They should be designed in a way that they can be loaded
@@ -26,7 +34,7 @@ def load_general_plugins():
 
     # see https://github.com/vllm-project/vllm/issues/10480
     os.environ['TORCHINDUCTOR_COMPILE_THREADS'] = '1'
-
+    _force_torch_inductor_compile_threads(thread_num=1)
     global plugins_loaded
     if plugins_loaded:
         return
