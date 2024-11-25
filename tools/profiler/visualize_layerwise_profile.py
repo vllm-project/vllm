@@ -323,7 +323,14 @@ def plot_trace_df(traces_df: pd.DataFrame,
                   plot_title: str,
                   output: Optional[Path] = None):
 
+    def get_phase_description(traces_df: pd.DataFrame, phase: str) -> str:
+        phase_df = traces_df.query(f'phase == "{phase}"')
+        descs = phase_df['phase_desc'].to_list()
+        assert all([desc == descs[0] for desc in descs])
+        return descs[0]
+
     phases = traces_df['phase'].unique()
+    phase_descs = [get_phase_description(traces_df, p) for p in phases]
     traces_df = traces_df.pivot_table(index="phase",
                                       columns="name",
                                       values=plot_metric,
@@ -341,7 +348,7 @@ def plot_trace_df(traces_df: pd.DataFrame,
     for op in ops:
         values = [traces_df[op][phase] for phase in phases]
         values = list(map(lambda x: 0.0 if math.isnan(x) else x, values))
-        ax.bar(phases, values, label=op, bottom=bottom)
+        ax.bar(phase_descs, values, label=op, bottom=bottom)
         bottom = [bottom[j] + values[j] for j in range(len(phases))]
 
     # Write the values as text on the bars
@@ -399,6 +406,14 @@ def main(
                    ["name"]] = "others"
             return df
 
+        def get_phase_description(key: str) -> str:
+            num_running_seqs = profile_json[key]['metadata'][
+                'num_running_seqs']
+            if num_running_seqs is not None:
+                return f"{key}-seqs-{num_running_seqs}"
+            else:
+                return key
+
         # Get data for each key
         traces = list(map(lambda x: get_entries_and_traces(x), step_keys))
 
@@ -422,6 +437,7 @@ def main(
         # Fill in information about the step-keys
         for trace_df, step_key in zip(trace_dfs, step_keys):
             trace_df['phase'] = step_key
+            trace_df['phase_desc'] = get_phase_description(step_key)
 
         # Combine all data frames so they can be put in a single plot
         traces_df = pd.concat(trace_dfs)
@@ -435,15 +451,16 @@ def main(
     def make_plot_title_suffix(profile_json: dict) -> str:
         context = profile_json["context"]
         sparsity = context.get('sparsity', None)
-        min_output_len = context['min_output_len']
-        max_output_len = context['max_output_len']
-        output_len = f"[{min_output_len}, {max_output_len}]"
+        run_type = \
+            f'Run {context["num_steps"]} steps' if context['num_steps'] else \
+                (f'Complete {context["complete_num_requests_per_step"]} per '
+                 f'step; Run till completion')
         return (f"{context['engine_args']['model']}\n"
                 f"Batch={context['batch_size']}, "
                 f"PromptLen={context['prompt_len']}, "
-                f"OutputLen={output_len},"
                 f"NumGpus={context['engine_args']['tensor_parallel_size']}"
-                f"{', Sparsity ' + sparsity if sparsity else ''}")
+                f"{', Sparsity ' + sparsity if sparsity else ''}\n"
+                f"Run Type: {run_type}")
 
     profile_json = None
     with open(json_trace) as f:
