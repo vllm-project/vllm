@@ -75,8 +75,9 @@ class MMLLMEngine:
         models_load = [model_config.model for model_config in vllm_config.model_configs ]
         self.engines  = []
         
-        for model in models_load:
+        for i, model in enumerate(models_load):
             print(f"create engine for model: {model}")
+            vllm_config.model_config = vllm_config.model_configs[i]
             self.engines.append(LLMEngine(model=model, *args, **kwargs))
         self.log_requests = log_requests
 
