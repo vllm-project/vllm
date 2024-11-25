@@ -120,10 +120,12 @@ class Fp8LinearMethod(LinearMethodBase):
         if current_platform.is_cuda_alike():
             self.cutlass_fp8_supported = cutlass_fp8_supported()
 
-        # For GPUs that lack FP8 hardware support, we can leverage the Marlin
-        # kernel for fast weight-only FP8 quantization
-        self.use_marlin = (not current_platform.has_device_capability(89)
-                           or envs.VLLM_TEST_FORCE_FP8_MARLIN)
+        self.use_marlin = False
+        if not current_platform.is_hpu():
+            # For GPUs that lack FP8 hardware support, we can leverage the
+            # Marlin kernel for fast weight-only FP8 quantization
+            self.use_marlin = (not current_platform.has_device_capability(89)
+                               or envs.VLLM_TEST_FORCE_FP8_MARLIN)
         # Disable marlin for rocm
         if current_platform.is_rocm():
             self.use_marlin = False
