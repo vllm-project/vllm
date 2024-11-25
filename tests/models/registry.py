@@ -44,7 +44,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "ArcticForCausalLM": _HfExamplesInfo("Snowflake/snowflake-arctic-instruct",
                                          trust_remote_code=True),
     "AriaForConditionalGeneration": _HfExamplesInfo("rhymes-ai/Aria",
-                                         trust_remote_code=True),
+                                                    trust_remote_code=True),
     "BaiChuanForCausalLM": _HfExamplesInfo("baichuan-inc/Baichuan-7B",
                                          trust_remote_code=True),
     "BaichuanForCausalLM": _HfExamplesInfo("baichuan-inc/Baichuan2-7B-chat",
