@@ -34,6 +34,7 @@ from vllm.model_executor.models.utils import (AutoWeightsLoader, WeightsMapper,
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.base import MultiModalInputs
 from vllm.multimodal.image import cached_get_image_processor
+from vllm.multimodal.inputs import NestedTensors
 from vllm.multimodal.utils import (cached_get_tokenizer,
                                    repeat_and_pad_placeholder_tokens)
 from vllm.sequence import IntermediateTensors
@@ -617,22 +618,22 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
             pixel_values, pixel_mask=pixel_mask)
         return self.multi_modal_projector(image_feature, image_attn_mask)
 
-    def process_mm_inputs(self, **kwargs):
+    def get_multimodal_embeddings(self, **kwargs) -> Optional[NestedTensors]:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return None
-        vision_embeddings = self._process_image_input(image_input)
-        return vision_embeddings
+        multimodal_embeddings = self._process_image_input(image_input)
+        return multimodal_embeddings
 
     def get_input_embeddings(
         self,
         input_ids: torch.Tensor,
-        vision_embeddings: Optional[torch.Tensor] = None,
+        multimodal_embeddings: Optional[NestedTensors] = None,
     ) -> torch.Tensor:
         inputs_embeds = self.language_model.get_input_embeddings(input_ids)
-        if vision_embeddings is not None:
+        if multimodal_embeddings is not None:
             inputs_embeds = merge_multimodal_embeddings(
-                input_ids, inputs_embeds, vision_embeddings,
+                input_ids, inputs_embeds, multimodal_embeddings,
                 self.config.image_token_index)
         return inputs_embeds
 
@@ -647,11 +648,11 @@ class AriaForConditionalGeneration(nn.Module, SupportsMultiModal):
         **kwargs: object,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         if inputs_embeds is None:
-            vision_embeddings = self.process_mm_inputs(**kwargs)
+            multimodal_embeddings = self.get_multimodal_embeddings(**kwargs)
             # always pass the input via `inputs_embeds`
             # to make sure the computation graph is consistent
             inputs_embeds = self.get_input_embeddings(input_ids,
-                                                      vision_embeddings)
+                                                      multimodal_embeddings)
             input_ids = None
 
         hidden_states = self.language_model(
