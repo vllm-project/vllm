@@ -3,6 +3,7 @@ from typing import Dict, List, Optional, Union
 
 import torch
 
+from vllm.compilation.counter import compilation_counter
 from vllm.compilation.wrapper import TorchCompileWrapperWithCustomDispatcher
 from vllm.config import CompilationLevel, VllmConfig
 from vllm.logger import init_logger
@@ -130,6 +131,7 @@ def _support_torch_compile(cls: type,
         ] or not supports_dynamo()
         if self.do_not_compile:
             return
+        compilation_counter.num_models_seen += 1
         TorchCompileWrapperWithCustomDispatcher.__init__(
             self, compilation_level=vllm_config.compilation_config.level)
 
