@@ -425,9 +425,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
         required_version = version.parse("2.39")
         current_version = version.parse(
             pkg_resources.get_distribution("ray").version)
-        # TODO: check the minimum version as opposed to the exact version
-        # once ray compiled graph is more stable
-        if current_version != required_version:
+        if current_version < required_version:
             raise ValueError(f"Ray version {required_version} is "
                              f"required, but found {current_version}")
 
@@ -453,8 +451,8 @@ class RayGPUExecutor(DistributedGPUExecutor):
 
         logger.info("VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL = %s",
                     envs.VLLM_USE_RAY_COMPILED_DAG_NCCL_CHANNEL)
-        logger.info("VLLM_USE_RAY_COMPILED_DAG_COMM_OVERLAP = %s",
-                    envs.VLLM_USE_RAY_COMPILED_DAG_COMM_OVERLAP)
+        logger.info("VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM = %s",
+                    envs.VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM)
         with InputNode() as input_data:
             # Example DAG: PP=2, TP=4
             # (ExecuteModelReq, None) -> 0 -> (ExecuteModelReq, IntermediateOutput) -> 4 -> SamplerOutput   # noqa: E501
@@ -493,7 +491,7 @@ class RayGPUExecutor(DistributedGPUExecutor):
         return forward_dag.experimental_compile(
             enable_asyncio=enable_asyncio,
             _overlap_gpu_communication=envs.
-            VLLM_USE_RAY_COMPILED_DAG_COMM_OVERLAP)
+            VLLM_USE_RAY_COMPILED_DAG_OVERLAP_COMM)
 
     def __del__(self):
         self.shutdown()
