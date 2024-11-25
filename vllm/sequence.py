@@ -450,6 +450,10 @@ class Sequence:
         return self.inputs.prompt_embeds
 
     @property
+    def token_type_ids(self) -> List[int]:
+        return self.inputs.token_type_ids
+
+    @property
     def multi_modal_data(self) -> "MultiModalDataDict":
         return self.inputs.multi_modal_data
 
@@ -688,6 +692,10 @@ class SequenceGroup:
                 if self.encoder_seq is not None else None)
 
     @property
+    def token_type_ids(self) -> Optional[List[int]]:
+        return self.first_seq.token_type_ids
+
+    @property
     def multi_modal_data(self) -> MultiModalDataDict:
         return self.first_seq.multi_modal_data
 
@@ -909,6 +917,7 @@ class SequenceGroupMetadata(
         default_factory=lambda: SequenceGroupState())
     # "MultiModalDataDict" types. We have to use Any due to msgspec
     # doesn't allow to have union of 2 different dicts.
+    token_type_ids: Optional[List[int]] = None
     multi_modal_data: Optional[Any] = None
     multi_modal_placeholders: Optional[MultiModalPlaceholderDict] = None
     mm_processor_kwargs: Optional[Dict[str, Any]] = None
