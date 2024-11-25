@@ -3,10 +3,8 @@ pynvml. However, it should not initialize cuda context.
 """
 
 import os
-from collections.abc import Iterator
-from contextlib import contextmanager
-from functools import lru_cache
-from typing import List, Tuple, TypeVar
+from functools import lru_cache, wraps
+from typing import Callable, List, Tuple, TypeVar
 
 import pynvml
 import torch
@@ -46,10 +44,11 @@ def device_id_to_physical_device_id(device_id: int) -> int:
         return device_id
 
 
-class BaseContext:
+class CudaPlatformBase(Platform):
+    _enum = PlatformEnum.CUDA
 
     @classmethod
-    def get_device_capability(cls, device_id: int = 0) -> Tuple[int, int]:
+    def get_device_capability(cls, device_id: int = 0) -> DeviceCapability:
         raise NotImplementedError
 
     @classmethod
@@ -73,12 +72,26 @@ class BaseContext:
 # Note that NVML is not affected by `CUDA_VISIBLE_DEVICES`,
 # all the related functions work on real physical device ids.
 # the major benefit of using NVML is that it will not initialize CUDA
-class NVMLContext(BaseContext):
+class NvmlCudaPlatform(CudaPlatformBase):
+
+    @staticmethod
+    def with_nvml_context(fn: Callable[_P, _R]) -> Callable[_P, _R]:
+
+        @wraps(fn)
+        def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> _R:
+            pynvml.nvmlInit()
+            try:
+                return fn(*args, **kwargs)
+            finally:
+                pynvml.nvmlShutdown()
+
+        return wrapper
 
     @classmethod
-    def get_device_capability(cls, device_id: int = 0) -> Tuple[int, int]:
+    def get_device_capability(cls, device_id: int = 0) -> DeviceCapability:
         physical_device_id = device_id_to_physical_device_id(device_id)
-        return cls._get_physical_device_capability(physical_device_id)
+        major, minor = cls._get_physical_device_capability(physical_device_id)
+        return DeviceCapability(major=major, minor=minor)
 
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
@@ -103,8 +116,10 @@ class NVMLContext(BaseContext):
                 if i < j:
                     try:
                         p2p_status = pynvml.nvmlDeviceGetP2PStatus(
-                            handle, peer_handle,
-                            pynvml.NVML_P2P_CAPS_INDEX_NVLINK)
+                            handle,
+                            peer_handle,
+                            pynvml.NVML_P2P_CAPS_INDEX_NVLINK,
+                        )
                         if p2p_status != pynvml.NVML_P2P_STATUS_OK:
                             return False
                     except pynvml.NVMLError:
@@ -116,6 +131,7 @@ class NVMLContext(BaseContext):
 
     @classmethod
     @lru_cache(maxsize=8)
+    @with_nvml_context
     def _get_physical_device_capability(cls,
                                         device_id: int = 0) -> Tuple[int, int]:
         handle = pynvml.nvmlDeviceGetHandleByIndex(device_id)
@@ -123,36 +139,42 @@ class NVMLContext(BaseContext):
 
     @classmethod
     @lru_cache(maxsize=8)
+    @with_nvml_context
     def _get_physical_device_name(cls, device_id: int = 0) -> str:
         handle = pynvml.nvmlDeviceGetHandleByIndex(device_id)
         return pynvml.nvmlDeviceGetName(handle)
 
     @classmethod
     @lru_cache(maxsize=8)
+    @with_nvml_context
     def _get_physical_device_total_memory(cls, device_id: int = 0) -> int:
         handle = pynvml.nvmlDeviceGetHandleByIndex(device_id)
         return int(pynvml.nvmlDeviceGetMemoryInfo(handle).total)
 
     @classmethod
+    @with_nvml_context
     def log_warnings(cls):
         device_ids: int = pynvml.nvmlDeviceGetCount()
         if device_ids > 1:
             device_names = [
                 cls._get_physical_device_name(i) for i in range(device_ids)
             ]
-            if len(set(device_names)) > 1 and os.environ.get(
-                    "CUDA_DEVICE_ORDER") != "PCI_BUS_ID":
+            if (len(set(device_names)) > 1
+                    and os.environ.get("CUDA_DEVICE_ORDER") != "PCI_BUS_ID"):
                 logger.warning(
                     "Detected different devices in the system: \n%s\nPlease"
                     " make sure to set `CUDA_DEVICE_ORDER=PCI_BUS_ID` to "
-                    "avoid unexpected behavior.", "\n".join(device_names))
+                    "avoid unexpected behavior.",
+                    "\n".join(device_names),
+                )
 
 
-class NonNVMLContext(BaseContext):
+class NonNvmlCudaPlatform(CudaPlatformBase):
 
     @classmethod
-    def get_device_capability(cls, device_id: int = 0) -> Tuple[int, int]:
-        return torch.cuda.get_device_capability(device_id)
+    def get_device_capability(cls, device_id: int = 0) -> DeviceCapability:
+        major, minor = torch.cuda.get_device_capability(device_id)
+        return DeviceCapability(major=major, minor=minor)
 
     @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
@@ -171,56 +193,26 @@ class NonNVMLContext(BaseContext):
         return False
 
 
-@contextmanager
-def get_context() -> Iterator[BaseContext]:
-    nvml_init_ok = False
+# Autodetect either NVML-enabled or non-NVML platform
+# based on whether NVML is available.
+nvml_available = False
+try:
     try:
-        try:
-            pynvml.nvmlInit()
-            nvml_init_ok = True
-            yield NVMLContext()
-        except Exception:
-            # On Jetson, NVML is not supported.
-            yield NonNVMLContext()
-    finally:
-        if nvml_init_ok:
-            pynvml.nvmlShutdown()
+        pynvml.nvmlInit()
+        nvml_available = True
+    except Exception:
+        # On Jetson, NVML is not supported.
+        nvml_available = False
+finally:
+    if nvml_available:
+        pynvml.nvmlShutdown()
 
+CudaPlatform = NvmlCudaPlatform if nvml_available else NonNvmlCudaPlatform
 
 try:
     from sphinx.ext.autodoc.mock import _MockModule
 
     if not isinstance(pynvml, _MockModule):
-        with get_context() as context:
-            context.log_warnings()
+        CudaPlatform.log_warnings()
 except ModuleNotFoundError:
-    with get_context() as context:
-        context.log_warnings()
-
-
-class CudaPlatform(Platform):
-    _enum = PlatformEnum.CUDA
-
-    @classmethod
-    def get_device_capability(cls, device_id: int = 0) -> DeviceCapability:
-        with get_context() as context:
-            major, minor = context.get_device_capability(device_id)
-        return DeviceCapability(major=major, minor=minor)
-
-    @classmethod
-    def get_device_name(cls, device_id: int = 0) -> str:
-        with get_context() as context:
-            return context.get_device_name(device_id)
-
-    @classmethod
-    def get_device_total_memory(cls, device_id: int = 0) -> int:
-        with get_context() as context:
-            return context.get_device_total_memory(device_id)
-
-    @classmethod
-    def is_full_nvlink(cls, physical_device_ids: List[int]) -> bool:
-        """
-        query if the set of gpus are fully connected by nvlink (1 hop)
-        """
-        with get_context() as context:
-            return context.is_full_nvlink(physical_device_ids)
+    CudaPlatform.log_warnings()
