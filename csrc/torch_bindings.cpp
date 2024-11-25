@@ -258,6 +258,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "awq_marlin_repack(Tensor b_q_weight, SymInt size_k, "
       "SymInt size_n, int num_bits) -> Tensor");
   // conditionally compiled so impl registrations are in source file
+#endif
 
   // Dequantization for GGML.
   ops.def("ggml_dequantize(Tensor W, int type, SymInt m, SymInt n) -> Tensor");
@@ -274,6 +275,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "ggml_mul_mat_a8(Tensor W, Tensor X, int type, SymInt row) -> Tensor");
   ops.impl("ggml_mul_mat_a8", torch::kCUDA, &ggml_mul_mat_a8);
 
+#ifndef USE_ROCM
   // fp8_marlin Optimized Quantized GEMM for FP8 weight-only.
   ops.def(
       "fp8_marlin_gemm(Tensor a, Tensor b_q_weight, Tensor b_scales, "

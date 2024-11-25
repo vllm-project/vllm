@@ -7,6 +7,8 @@ from typing_extensions import TypeIs
 from vllm.logger import init_logger
 from vllm.utils import supports_kw
 
+from .interfaces_base import is_embedding_model
+
 if TYPE_CHECKING:
     from vllm.attention import AttentionMetadata
     from vllm.config import LoRAConfig, MultiModalConfig, SchedulerConfig
@@ -384,3 +386,37 @@ def is_attention_free(
         return isinstance(model, _IsAttentionFreeType)
 
     return isinstance(model, IsAttentionFree)
+
+
+@runtime_checkable
+class SupportsCrossEncoding(Protocol):
+    """The interface required for all models that support cross encoding."""
+
+    supports_cross_encoding: ClassVar[Literal[True]] = True
+
+
+@overload
+def supports_cross_encoding(
+        model: Type[object]) -> TypeIs[Type[SupportsCrossEncoding]]:
+    ...
+
+
+@overload
+def supports_cross_encoding(model: object) -> TypeIs[SupportsCrossEncoding]:
+    ...
+
+
+def _supports_cross_encoding(
+    model: Union[Type[object], object],
+) -> Union[TypeIs[Type[SupportsCrossEncoding]], TypeIs[SupportsCrossEncoding]]:
+
+    if isinstance(model, type):
+        return isinstance(model, SupportsCrossEncoding)
+
+    return isinstance(model, SupportsCrossEncoding)
+
+
+def supports_cross_encoding(
+    model: Union[Type[object], object],
+) -> Union[TypeIs[Type[SupportsCrossEncoding]], TypeIs[SupportsCrossEncoding]]:
+    return is_embedding_model(model) and _supports_cross_encoding(model)

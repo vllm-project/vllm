@@ -1,64 +1,43 @@
 import asyncio
-import base64
 import time
-from typing import AsyncGenerator, Final, List, Literal, Optional, Union, cast
+from typing import Any, AsyncGenerator, Dict, List, Optional, Union, cast
 
-import numpy as np
 from fastapi import Request
-from typing_extensions import assert_never
 
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.protocol import (EmbeddingChatRequest,
-                                              EmbeddingRequest,
-                                              EmbeddingResponse,
-                                              EmbeddingResponseData,
-                                              ErrorResponse, UsageInfo)
+from vllm.entrypoints.openai.protocol import (ErrorResponse, ScoreRequest,
+                                              ScoreResponse, ScoreResponseData,
+                                              UsageInfo)
 from vllm.entrypoints.openai.serving_engine import BaseModelPath, OpenAIServing
+from vllm.inputs.data import TokensPrompt
 from vllm.logger import init_logger
-from vllm.outputs import EmbeddingOutput, EmbeddingRequestOutput
+from vllm.outputs import EmbeddingRequestOutput
+from vllm.transformers_utils.tokenizers.mistral import MistralTokenizer
 from vllm.utils import merge_async_iterators, random_uuid
 
 logger = init_logger(__name__)
 
 
-def _get_embedding(
-    output: EmbeddingOutput,
-    encoding_format: Literal["float", "base64"],
-) -> Union[List[float], str]:
-    if encoding_format == "float":
-        return output.embedding
-    elif encoding_format == "base64":
-        # Force to use float32 for base64 encoding
-        # to match the OpenAI python client behavior
-        embedding_bytes = np.array(output.embedding, dtype="float32").tobytes()
-        return base64.b64encode(embedding_bytes).decode("utf-8")
-
-    assert_never(encoding_format)
-
-
-def request_output_to_embedding_response(
+def request_output_to_score_response(
         final_res_batch: List[EmbeddingRequestOutput], request_id: str,
-        created_time: int, model_name: str,
-        encoding_format: Literal["float", "base64"]) -> EmbeddingResponse:
-    data: List[EmbeddingResponseData] = []
+        created_time: int, model_name: str) -> ScoreResponse:
+    data: List[ScoreResponseData] = []
+    score = None
     num_prompt_tokens = 0
     for idx, final_res in enumerate(final_res_batch):
-        prompt_token_ids = final_res.prompt_token_ids
-        embedding = _get_embedding(final_res.outputs, encoding_format)
-        embedding_data = EmbeddingResponseData(index=idx, embedding=embedding)
-        data.append(embedding_data)
-
-        num_prompt_tokens += len(prompt_token_ids)
+        if final_res is not None:
+            score = final_res.outputs.embedding
+            score_data = ScoreResponseData(index=idx, score=score)
+            data.append(score_data)
 
     usage = UsageInfo(
         prompt_tokens=num_prompt_tokens,
         total_tokens=num_prompt_tokens,
     )
 
-    return EmbeddingResponse(
+    return ScoreResponse(
         id=request_id,
         created=created_time,
         model=model_name,
@@ -67,7 +46,31 @@ def request_output_to_embedding_response(
     )
 
 
-class OpenAIServingEmbedding(OpenAIServing):
+def make_pairs(text_1: Union[List[str], str], text_2: Union[List[str],
+                                                            str]) -> List:
+    if isinstance(text_1, (str, dict)):
+        # Convert a single prompt to a list.
+        text_1 = [text_1]
+    text_1 = [t for t in text_1]
+
+    if isinstance(text_2, (str, dict)):
+        # Convert a single prompt to a list.
+        text_2 = [text_2]
+    text_2 = [t for t in text_2]
+    if len(text_1) > 1 and len(text_1) != len(text_2):
+        raise ValueError("Input lengths must be either 1:1, 1:N or N:N")
+    if len(text_1) == 0:
+        raise ValueError("At least one text element must be given")
+    if len(text_2) == 0:
+        raise ValueError("At least one text_pair element must be given")
+
+    if len(text_1) == 1:
+        text_1 = text_1 * len(text_2)
+
+    return [(t1, t2) for t1, t2 in zip(text_1, text_2)]
+
+
+class OpenAIServingScores(OpenAIServing):
 
     def __init__(
         self,
@@ -76,8 +79,6 @@ class OpenAIServingEmbedding(OpenAIServing):
         base_model_paths: List[BaseModelPath],
         *,
         request_logger: Optional[RequestLogger],
-        chat_template: Optional[str],
-        chat_template_content_format: ChatTemplateContentFormatOption,
     ) -> None:
         super().__init__(engine_client=engine_client,
                          model_config=model_config,
@@ -86,43 +87,27 @@ class OpenAIServingEmbedding(OpenAIServing):
                          prompt_adapters=None,
                          request_logger=request_logger)
 
-        self.chat_template = chat_template
-        self.chat_template_content_format: Final = chat_template_content_format
-
-    async def create_embedding(
+    async def create_score(
         self,
-        request: EmbeddingRequest,
+        request: ScoreRequest,
         raw_request: Optional[Request] = None,
-    ) -> Union[EmbeddingResponse, ErrorResponse]:
+    ) -> Union[ScoreResponse, ErrorResponse]:
         """
-        Embedding API similar to OpenAI's API.
+        Score API similar to Sentence Transformers cross encoder
 
-        See https://platform.openai.com/docs/api-reference/embeddings/create
-        for the API specification. This API mimics the OpenAI Embedding API.
+        See https://sbert.net/docs/package_reference/cross_encoder
         """
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
 
-        encoding_format = request.encoding_format
-        if request.dimensions is not None:
-            return self.create_error_response(
-                "dimensions is currently not supported")
-
         model_name = request.model
-        request_id = f"embd-{random_uuid()}"
+        request_id = f"score-{random_uuid()}"
         created_time = int(time.monotonic())
+        truncate_prompt_tokens = request.truncate_prompt_tokens
 
-        truncate_prompt_tokens = None
-
-        if request.truncate_prompt_tokens is not None:
-            if request.truncate_prompt_tokens <= self.max_model_len:
-                truncate_prompt_tokens = request.truncate_prompt_tokens
-            else:
-                return self.create_error_response(
-                    "truncate_prompt_tokens value is "
-                    "greater than max_model_len."
-                    " Please, select a smaller truncation size.")
+        request_prompts = []
+        engine_prompts = []
 
         try:
             (
@@ -136,39 +121,40 @@ class OpenAIServingEmbedding(OpenAIServing):
                 raise NotImplementedError("Prompt adapter is not supported "
                                           "for embedding models")
 
-            if isinstance(request, EmbeddingChatRequest):
-                (
-                    _,
-                    request_prompts,
-                    engine_prompts,
-                ) = await self._preprocess_chat(
-                    request,
-                    tokenizer,
-                    request.messages,
-                    chat_template=request.chat_template or self.chat_template,
-                    chat_template_content_format=self.
-                    chat_template_content_format,
-                    # In embedding requests, we are not generating tokens,
-                    # so there is no need to append extra tokens to the input
-                    add_generation_prompt=False,
-                    continue_final_message=False,
-                    truncate_prompt_tokens=truncate_prompt_tokens,
-                    add_special_tokens=request.add_special_tokens,
-                )
-            else:
-                request_prompts, engine_prompts = self._preprocess_completion(
-                    request,
-                    tokenizer,
-                    request.input,
-                    truncate_prompt_tokens=truncate_prompt_tokens,
-                    add_special_tokens=request.add_special_tokens,
-                )
+            if isinstance(tokenizer, MistralTokenizer):
+                raise ValueError(
+                    "MistralTokenizer not supported for cross-encoding")
+
+            if not self.model_config.is_cross_encoder:
+                raise ValueError("Model is not cross encoder.")
+
         except ValueError as e:
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
 
         # Schedule the request and get the result generator.
         generators: List[AsyncGenerator[EmbeddingRequestOutput, None]] = []
+
+        input_pairs = make_pairs(request.text_1, request.text_2)
+
+        for q, t in input_pairs:
+            request_prompt = f"{q}{tokenizer.sep_token}{t}"
+
+            tokenization_kwargs: Dict[str, Any] = {}
+            if truncate_prompt_tokens is not None:
+                tokenization_kwargs["truncation"] = True
+                tokenization_kwargs["max_length"] = truncate_prompt_tokens
+
+            prompt_inputs = tokenizer(text=q,
+                                      text_pair=t,
+                                      **tokenization_kwargs)
+            engine_prompt = TokensPrompt(
+                prompt_token_ids=prompt_inputs["input_ids"],
+                token_type_ids=prompt_inputs.get("token_type_ids"))
+
+            request_prompts.append(request_prompt)
+            engine_prompts.append(engine_prompt)
+
         try:
             pooling_params = request.to_pooling_params()
 
@@ -208,6 +194,7 @@ class OpenAIServingEmbedding(OpenAIServing):
         # Non-streaming response
         final_res_batch: List[Optional[EmbeddingRequestOutput]]
         final_res_batch = [None] * num_prompts
+
         try:
             async for i, res in result_generator:
                 final_res_batch[i] = res
@@ -217,9 +204,8 @@ class OpenAIServingEmbedding(OpenAIServing):
             final_res_batch_checked = cast(List[EmbeddingRequestOutput],
                                            final_res_batch)
 
-            response = request_output_to_embedding_response(
-                final_res_batch_checked, request_id, created_time, model_name,
-                encoding_format)
+            response = request_output_to_score_response(
+                final_res_batch_checked, request_id, created_time, model_name)
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
         except ValueError as e:
