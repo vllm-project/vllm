@@ -15,6 +15,7 @@ from msgspec import msgpack
 from vllm.config import CacheConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
+from vllm.multimodal import MultiModalDataDict, MultiModalKwargs
 from vllm.v1.core.scheduler import Scheduler
 from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
                             EngineCoreProfile, EngineCoreRequest,
@@ -84,14 +85,14 @@ class EngineCore:
 
     def add_request(self, request: EngineCoreRequest):
         """Add request to the scheduler."""
-
         req = Request.from_engine_core_request(request)
-        # FIXME(woosuk): The input mapping (e.g., PIL images to tensors) may
-        # take 10-50 ms, which can cause a spike in the latency. We should
-        # consider moving this to a separate thread.
+
+        # Apply multi-modal mapper (if necessary)
         if req.mm_data:
+            assert req.mm_inputs is None or req.mm_inputs == []
             req.mm_inputs = self.mm_input_mapper.process_inputs(
                 req.mm_data, req.mm_processor_kwargs)
+
         self.scheduler.add_request(req)
 
     def abort_requests(self, request_ids: List[str]):

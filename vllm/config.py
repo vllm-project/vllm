@@ -131,6 +131,8 @@ class ModelConfig:
             HuggingFace config.
         mm_processor_kwargs: Arguments to be forwarded to the model's processor
             for multi-modal data, e.g., image processor.
+        mm_disable_frontend_processor: Disables multi-modal HF preprocessor/mapper 
+            execution in the frontend process (not recommended)
         override_neuron_config: Initialize non default neuron config or
             override default neuron config that are specific to Neuron devices,
             this argument will be used to configure the neuron config that
@@ -169,6 +171,7 @@ class ModelConfig:
             config_format: ConfigFormat = ConfigFormat.AUTO,
             hf_overrides: Optional[HfOverrides] = None,
             mm_processor_kwargs: Optional[Dict[str, Any]] = None,
+            mm_disable_frontend_processor: bool = False,
             override_neuron_config: Optional[Dict[str, Any]] = None,
             override_pooler_config: Optional["PoolerConfig"] = None) -> None:
         self.model = model
@@ -235,6 +238,7 @@ class ModelConfig:
         self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
         self.use_async_output_proc = use_async_output_proc
         self.mm_processor_kwargs = mm_processor_kwargs
+        self.mm_disable_frontend_processor = mm_disable_frontend_processor
 
         # Set enforce_eager to False if the value is unset.
         if self.enforce_eager is None:
@@ -2525,7 +2529,8 @@ class VllmConfig:
         "decoding_config=%r, observability_config=%r, "
         "seed=%d, served_model_name=%s, "
         "num_scheduler_steps=%d, enable_prefix_caching=%s, "
-        "use_async_output_proc=%s, mm_processor_kwargs=%s") % \
+        "use_async_output_proc=%s, mm_processor_kwargs=%s, "
+        "mm_disable_frontend_processor=%s") % \
         (self.model_config.model, self.speculative_config,
         self.model_config.tokenizer,
         self.model_config.skip_tokenizer_init,

@@ -168,6 +168,7 @@ class LLM:
         disable_async_output_proc: bool = False,
         hf_overrides: Optional[HfOverrides] = None,
         mm_processor_kwargs: Optional[Dict[str, Any]] = None,
+        mm_disable_frontend_processor: bool = False,
         # After positional args are removed, move this right below `model`
         task: TaskOption = "auto",
         override_pooler_config: Optional[PoolerConfig] = None,
@@ -219,6 +220,7 @@ class LLM:
             disable_async_output_proc=disable_async_output_proc,
             hf_overrides=hf_overrides,
             mm_processor_kwargs=mm_processor_kwargs,
+            mm_disable_frontend_processor=mm_disable_frontend_processor,
             override_pooler_config=override_pooler_config,
             compilation_config=compilation_config_instance,
             **kwargs,
@@ -549,6 +551,7 @@ class LLM:
         continue_final_message: bool = False,
         tools: Optional[List[Dict[str, Any]]] = None,
         mm_processor_kwargs: Optional[Dict[str, Any]] = None,
+        mm_disable_frontend_processor: bool = False
     ) -> List[RequestOutput]:
         """
         Generate responses for a chat conversation.
@@ -590,6 +593,8 @@ class LLM:
                 ``True`` if ``add_generation_prompt`` is also ``True``.
             mm_processor_kwargs: Multimodal processor kwarg overrides for this
                 chat request. Only used for offline requests.
+            mm_disable_frontend_processor: Disable multi-modal frontend 
+                processing (not recommended)
 
         Returns:
             A list of ``RequestOutput`` objects containing the generated

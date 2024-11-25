@@ -55,7 +55,11 @@ class Request:
         else:
             self.mm_positions = []
         # Output of the mm input mapper (e.g., image tensors).
-        self.mm_inputs: List[MultiModalKwargs] = []
+        # (May be already provided by the frontend)
+        if self.inputs.multi_modal_inputs:
+            self.mm_inputs = self.inputs.multi_modal_inputs
+        else:
+            self.mm_inputs: List[MultiModalKwargs] = []
 
     @classmethod
     def from_engine_core_request(cls, request: EngineCoreRequest) -> "Request":
@@ -65,6 +69,7 @@ class Request:
                 prompt_token_ids=request.prompt_token_ids,
                 prompt=request.prompt,
                 multi_modal_data=request.mm_data,
+                multi_modal_inputs=request.mm_inputs,
                 multi_modal_placeholders=request.mm_placeholders,
                 mm_processor_kwargs=request.mm_processor_kwargs,
             ),
@@ -110,7 +115,7 @@ class Request:
         return RequestStatus.get_finished_reason(self.status)
 
     def has_encoder_inputs(self) -> bool:
-        return len(self.mm_data) > 0
+        return len(self.mm_data) > 0 or len(self.mm_inputs) > 0
 
     @property
     def num_encoder_inputs(self) -> int:
