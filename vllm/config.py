@@ -1446,7 +1446,7 @@ class ModelConfig:
 
 
 BlockSize = Literal[1, 8, 16, 32, 64, 128]
-CacheDType = Literal["auto", "fp8", "fp8_e4m3", "fp8_e5m2"]
+CacheDType = Literal["auto", "fp8", "fp8_e4m3", "fp8_e5m2", "fp8_inc"]
 PrefixCachingHashAlgo = Literal["builtin", "sha256"]
 
 
@@ -1476,7 +1476,7 @@ class CacheConfig:
     cache_dtype: CacheDType = "auto"
     """Data type for kv cache storage. If "auto", will use model data type.
     CUDA 11.8+ supports fp8 (=fp8_e4m3) and fp8_e5m2. ROCm (AMD GPU) supports
-    fp8 (=fp8_e4m3)."""
+    fp8 (=fp8_e4m3). Intel Gaudi (HPU) supports fp8 (using fp8_inc)."""
     is_attention_free: bool = False
     """Whether the model is attention-free. This is primarily set in
     `ModelConfig` and that value should be manually duplicated here."""
@@ -1566,7 +1566,7 @@ class CacheConfig:
                 "Using fp8 data type to store kv cache. It reduces the GPU "
                 "memory footprint and boosts the performance. "
                 "Meanwhile, it may cause accuracy drop without a proper "
-                "scaling factor")
+                "scaling factor.")
         else:
             raise ValueError(f"Unknown kv cache dtype: {self.cache_dtype}")
 
@@ -1685,6 +1685,9 @@ class LoadConfig:
         default_factory=dict)
     """Extra config for model loader. This will be passed to the model loader
     corresponding to the chosen load_format."""
+    device: Optional[str] = None
+    """Device to which model weights will be loaded, default to
+    device_config.device"""
     ignore_patterns: Optional[Union[list[str], str]] = None
     """The list of patterns to ignore when loading the model. Default to
     "original/**/*" to avoid repeated loading of llama's checkpoints."""
