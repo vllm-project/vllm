@@ -484,14 +484,15 @@ class WorkerProc:
         ) as p:
 
             while True:
-                msg = self.scheduler_output_receiver.dequeue(ExecutorMsg)
+                msg = self.scheduler_output_receiver.dequeue_via_msgpack(
+                    ExecutorMsg)
 
                 if msg.message_type == ExecutorMsgType.TERMINATE:
                     return
                 elif msg.message_type == ExecutorMsgType.TOIL:
                     output = self.worker.execute_model(msg.payload)
                     if self.worker.rank == 0:
-                        self.model_output_mq.enqueue(output)
+                        self.model_output_mq.enqueue_via_msgpack(output)
                 else:
                     raise ValueError(
                         f"Unknown RequestType: {msg.message_type}")

@@ -137,9 +137,10 @@ class MultiprocessingGPUExecutor:
         if not self.workers_in_busy_loop:
             self.start_workers()
 
-        self.scheduler_output_mq.enqueue(
+        self.scheduler_output_mq.enqueue_via_msgpack(
             ExecutorMsg(ExecutorMsgType.TOIL.value, scheduler_output))
-        model_output = self.model_output_mq.dequeue(ModelRunnerOutput)
+        model_output = self.model_output_mq.dequeue_via_msgpack(
+            ModelRunnerOutput)
         return model_output
 
     def profile(self, is_start=True):
@@ -151,7 +152,7 @@ class MultiprocessingGPUExecutor:
                 and self.scheduler_output_mq is not None):
             termination_msg = ExecutorMsg(ExecutorMsgType.TERMINATE.value,
                                           None)
-            self.scheduler_output_mq.enqueue(termination_msg)
+            self.scheduler_output_mq.enqueue_via_msgpack(termination_msg)
             self.scheduler_output_mq = None
 
     def __del__(self):

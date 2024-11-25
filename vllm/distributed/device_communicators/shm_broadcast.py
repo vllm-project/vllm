@@ -1,4 +1,5 @@
 import os
+import pickle
 import struct
 import sys
 import time
@@ -167,8 +168,9 @@ class Handle:
 
 class MessageQueue:
 
-    # Use 4 bytes to store size of each message (we omit this for ZMQ).
-    # This is needed for decoding the message.
+    # For msgpack serialization, we use 4 bytes to store the size of each
+    # message, as we need the size of the encoded message while decoding.
+    # This is not needed for zmq or pickle.
     SIZE_PREFIX_FORMAT = '!I'  # unsigned int, 4 bytes, network byte order
     SIZE_PREFIX_LEN = struct.calcsize(SIZE_PREFIX_FORMAT)
 
@@ -431,6 +433,43 @@ class MessageQueue:
                 break
 
     def enqueue(self, obj):
+        """Enqueue obj using pickle serialization"""
+        assert self._is_writer, "Only writers can enqueue"
+        serialized_obj = pickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL)
+        if self.n_local_reader > 0:
+            if len(serialized_obj) >= self.buffer.max_chunk_bytes:
+                with self.acquire_write() as buf:
+                    buf[0] = 1  # overflow
+                self.local_socket.send(serialized_obj)
+            else:
+                with self.acquire_write() as buf:
+                    buf[0] = 0  # not overflow
+                    buf[1:len(serialized_obj) + 1] = serialized_obj
+        if self.n_remote_reader > 0:
+            self.remote_socket.send(serialized_obj)
+
+    def dequeue(self):
+        """Dequeue obj using pickle serialization"""
+        if self._is_local_reader:
+            with self.acquire_read() as buf:
+                overflow = buf[0] == 1
+                if not overflow:
+                    # no need to know the size of serialized object
+                    # pickle format contains the size information internally
+                    # see https://docs.python.org/3/library/pickle.html
+                    obj = pickle.loads(buf[1:])
+            if overflow:
+                recv = self.local_socket.recv()
+                obj = pickle.loads(recv)
+        elif self._is_remote_reader:
+            recv = self.remote_socket.recv()
+            obj = pickle.loads(recv)
+        else:
+            raise RuntimeError("Only readers can dequeue")
+        return obj
+
+    def enqueue_via_msgpack(self, obj: msgspec.Struct):
+        """Enqueue obj using msgpack serialization"""
         assert self._is_writer, "Only writers can enqueue"
 
         encoder = msgspec.msgpack.Encoder()
@@ -456,7 +495,8 @@ class MessageQueue:
         if self.n_remote_reader > 0:
             self.remote_socket.send(serialized_obj)
 
-    def dequeue(self, obj_type):
+    def dequeue_via_msgpack(self, obj_type):
+        """Enqueue obj using msgpack serialization"""
         decoder = msgspec.msgpack.Decoder(obj_type)
 
         if self._is_local_reader:
@@ -484,7 +524,7 @@ class MessageQueue:
             self.enqueue(obj)
             return obj
         else:
-            return self.dequeue(obj)
+            return self.dequeue()
 
     @staticmethod
     def create_from_process_group(pg: ProcessGroup,
