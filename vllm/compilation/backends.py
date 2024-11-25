@@ -21,13 +21,14 @@ from .counter import compilation_counter
 from .inductor_pass import InductorPass
 from .monitor import end_monitoring_torch_compile
 from .pass_manager import PostGradPassManager
+from .utils import dump_graph
 
 logger = init_logger(__name__)
 
 
-def wrap_inductor(graph,
-                  example_inputs,
-                  additional_inductor_config,
+def wrap_inductor(graph: fx.GraphModule,
+                  example_inputs: Sequence[Any],
+                  additional_inductor_config: Optional[Dict] = None,
                   compilation_config: CompilationConfig,
                   graph_index: int = 0,
                   num_graphs: int = 1,
@@ -375,8 +376,14 @@ class VllmBackend:
         self.graph = graph
         self.configure_post_pass()
 
+        dump_graph(self.compilation_configs.pass_config, graph.graph,
+                   "before_split_graph")
+
         self.split_gm, self.piecewise_graphs = split_graph(
             graph, self.compilation_config.splitting_ops)
+
+        dump_graph(self.compilation_configs.pass_config, graph.graph,
+                   "after_split_graph")
 
         from torch._dynamo.utils import lazy_format_graph_code
 

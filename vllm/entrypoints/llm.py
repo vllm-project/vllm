@@ -173,7 +173,8 @@ class LLM:
         # After positional args are removed, move this right below `model`
         task: TaskOption = "auto",
         override_pooler_config: Optional[PoolerConfig] = None,
-        compilation_config: Optional[Union[int, Dict[str, Any], CompilationConfig]] = None,
+        compilation_config: Optional[Union[int, Dict[str, Any],
+                                           CompilationConfig]] = None,
         **kwargs,
     ) -> None:
         '''

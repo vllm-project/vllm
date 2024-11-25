@@ -7,16 +7,17 @@ from torch._inductor.pattern_matcher import (Match, PatternMatcherPass,
                                              fwd_only, register_replacement)
 
 import vllm.envs as envs
-from vllm.config import CompilationConfig
-from .vllm_inductor_pass import VllmInductorPass
 from vllm.compilation.utils import (find_auto_fn, find_fn, find_getitem,
                                     last_node_in_match)
+from vllm.config import CompilationConfig
 from vllm.distributed import (tensor_model_parallel_all_gather,
                               tensor_model_parallel_all_reduce)
 from vllm.distributed.parallel_state import (
     get_group_from_group_name, get_tensor_model_parallel_world_size)
 from vllm.logger import init_logger
 from vllm.utils import direct_register_custom_op
+
+from .vllm_inductor_pass import VllmInductorPass
 
 logger = init_logger(__name__)
 
@@ -62,7 +63,7 @@ def get_match_gemm_rs_ag_gemm(tp_group_name: str, custom_ar: bool) -> Callable:
         residual: torch.Tensor,
         gemm_1_weights: torch.Tensor,
         gemm_1_activations: torch.Tensor,
-        rms_norm_weight: torch.Tensor,
+        rms_norm_weights: torch.Tensor,
         gemm_2_weights: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         gemm_1_w_perm = torch.ops.aten.permute.default(gemm_1_weights, [1, 0])
@@ -84,7 +85,7 @@ def get_match_gemm_rs_ag_gemm(tp_group_name: str, custom_ar: bool) -> Callable:
             torch.ops._C.fused_add_rms_norm.default,
             input=all_reduce,
             residual=residual,
-            weight=rms_norm_weight,
+            weight=rms_norm_weights,
             epsilon=1e-05)
         normalized = norm_res[1]
         new_residual = norm_res[2]
@@ -168,11 +169,9 @@ def get_gemm_rs_ag_gemm(use_flux: bool, max_m: int, gemm_1_type: torch.dtype,
     def gemm_rs_ag_gemm(
             residual: torch.Tensor, old_my_residual: torch.Tensor,
             gemm_1_weights: torch.Tensor, gemm_1_activations: torch.Tensor,
-            rms_norm_weight: torch.Tensor, gemm_2_weights: torch.Tensor,
+            rms_norm_weights: torch.Tensor, gemm_2_weights: torch.Tensor,
             first_layer: bool
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-
-        #print(f"START RESIDUAL {residual.shape}")
 
         if first_layer and should_slice(residual.shape):
             slice_shape = residual_slice_shape(residual, rank)
@@ -182,34 +181,26 @@ def get_gemm_rs_ag_gemm(use_flux: bool, max_m: int, gemm_1_type: torch.dtype,
             my_residual = residual
             slice_shape = residual.shape[0]
 
-        #print(f"MY RESIDUAL {my_residual.shape}")
-
         if not should_slice(residual.shape):
             output = torch.ops.aten.mm.default(gemm_1_activations,
                                                gemm_1_weights.transpose(1, 0))
             reduced_output = tensor_model_parallel_all_reduce(output)
 
-            #print(f"NAIVE GEMM1 {gemm_1_activations.shape}, {gemm_1_weights.shape}, {output.shape}")
-
             torch.ops._C.fused_add_rms_norm.default(input=reduced_output,
                                                     residual=my_residual,
-                                                    weight=rms_norm_weight,
+                                                    weight=rms_norm_weights,
                                                     epsilon=1e-05)
 
             mm_2 = torch.ops.aten.mm.default(reduced_output,
                                              gemm_2_weights.transpose(1, 0))
 
-            #print(f"NAIVE GEMM2 {gemm_2_weights.shape}, {gemm_2_weights.shape}, {output.shape}")
-
             return mm_2, my_residual, my_residual.clone()
         else:
             output = gemm_rs(gemm_1_activations, gemm_1_weights)
 
-            #print(f"FLUX GEMM1 {gemm_1_activations.shape}, {gemm_1_weights.shape}, {output.shape}")
-
             torch.ops._C.fused_add_rms_norm.default(input=output,
                                                     residual=my_residual,
-                                                    weight=rms_norm_weight,
+                                                    weight=rms_norm_weights,
                                                     epsilon=1e-05)
 
             residual_1 = residual if first_layer else old_my_residual
@@ -220,8 +211,6 @@ def get_gemm_rs_ag_gemm(use_flux: bool, max_m: int, gemm_1_type: torch.dtype,
 
             mm_2 = ag_gemm(output, gemm_2_weights)
 
-            #print(f"FLUX GEMM2 {gemm_2_weights.shape}, {gemm_2_weights.shape}, {output.shape}")
-
             return mm_2[0], new_residual, slice_scatter
 
     def gemm_rs_ag_gemm_fake(
@@ -229,7 +218,7 @@ def get_gemm_rs_ag_gemm(use_flux: bool, max_m: int, gemm_1_type: torch.dtype,
         my_residual: torch.Tensor,
         gemm_1_weights: torch.Tensor,
         gemm_1_activations: torch.Tensor,
-        rms_norm_weight: torch.Tensor,
+        rms_norm_weights: torch.Tensor,
         gemm_2_weights: torch.Tensor,
         first_layer: bool,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -309,8 +298,6 @@ def gemm_ag_final(my_residual: torch.Tensor, gemm_1_weights: torch.Tensor,
     else:
         wait_tensor = my_residual
 
-    #print(f"FINAL RESIDUAL {wait_tensor.shape}")
-
     torch.ops._C.fused_add_rms_norm.default(input=reduced,
                                             residual=wait_tensor,
                                             weight=rms_norm_weights,
@@ -362,11 +349,11 @@ class CollectiveFusionPass(VllmInductorPass):
         # Run in fake mode so that we don't call real functions
         # when tracing the patterns.
         with torch._dynamo.utils.detect_fake_mode():
-            x = torch.empty([4, 4], device='cuda')
-            w = torch.empty([4, 4], device='cuda')
-            resid = torch.empty([4, 4], device='cuda')
-            resid_w = torch.empty([4, 4], device='cuda')
-            x2 = torch.empty([4, 4], device='cuda')
+            x = torch.empty([4, 4], device='cuda', dtype=torch.float16)
+            w = torch.empty([4, 4], device='cuda', dtype=torch.float16)
+            resid = torch.empty([4, 4], device='cuda', dtype=torch.float16)
+            resid_w = torch.empty([4, 4], device='cuda', dtype=torch.float16)
+            x2 = torch.empty([4, 4], device='cuda', dtype=torch.float16)
             inputs = [resid, x, w, resid_w, x2]
             final_inputs = [x, w, resid, resid_w]
 
@@ -492,6 +479,8 @@ class CollectiveFusionPass(VllmInductorPass):
                    for node in match.nodes)
 
     def __call__(self, graph: fx.Graph):
+        # TODO: disable if chunk prefill size is too small
+        # or when doing decode.
         self.dump_graph(graph, "before_collective_fusion")
         count = self.gemm_rs_ag_gemm_pattern.apply(graph)
         logger.info("fused gemm match count = %d", len(self.matches))

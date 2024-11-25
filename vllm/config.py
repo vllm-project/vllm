@@ -2738,9 +2738,9 @@ class CompilationConfig(BaseModel):
             Do not include dump_graph_* in the hash - they don't affect
             compilation.
             """
-            dict_ = self.model_dump(
-                include={"enable_collective_fusion", "enable_fusion",
-                         "enable_reshape"})
+            dict_ = self.model_dump(include={
+                "enable_collective_fusion", "enable_fusion", "enable_reshape"
+            })
             encoded = json.dumps(dict_, sort_keys=True).encode("utf-8")
             return hashlib.sha256(encoded).digest()
 
