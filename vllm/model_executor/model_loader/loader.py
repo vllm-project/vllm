@@ -415,13 +415,15 @@ class DefaultModelLoader(BaseModelLoader):
                               allow_patterns_overrides=None)
 
     def load_model(self, vllm_config: VllmConfig) -> nn.Module:
-        device_config = vllm_config.device_config
+        load_config = vllm_config.load_config
         model_config = vllm_config.model_config
-        target_device = torch.device(device_config.device)
+
+        target_device = torch.device(load_config.device)
         with set_default_torch_dtype(model_config.dtype):
             with target_device:
                 model = _initialize_model(vllm_config=vllm_config)
 
+            logger.info("Loading weights on %s ...", load_config.device)
             weights_to_load = {name for name, _ in model.named_parameters()}
             loaded_weights = model.load_weights(
                 self._get_all_weights(model_config, model))
