@@ -64,7 +64,7 @@ class S3Model:
         for sig in (signal.SIGINT, signal.SIGTERM):
             existing_handler = signal.getsignal(sig)
             signal.signal(sig, self.close_by_signal(existing_handler))
-        self.dir = tempfile.mkdtemp(dir='/dev/shm')
+        self.dir = tempfile.mkdtemp()
 
     def __del__(self):
         self.close()
