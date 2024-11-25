@@ -27,9 +27,8 @@ from vllm.transformers_utils.configs import (ChatGLMConfig, DbrxConfig,
                                              MedusaConfig, MllamaConfig,
                                              MLPSpeculatorConfig, MPTConfig,
                                              NemotronConfig, NVLM_D_Config,
-                                             Olmo2Config,
-                                             RWConfig, SolarConfig,
-                                             UltravoxConfig)
+                                             Olmo2Config, RWConfig,
+                                             SolarConfig, UltravoxConfig)
 # yapf: enable
 from vllm.transformers_utils.utils import check_gguf_file
 
