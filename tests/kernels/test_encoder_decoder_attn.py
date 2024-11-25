@@ -18,10 +18,9 @@ from vllm.attention import (Attention, AttentionBackend, AttentionMetadata,
 from vllm.attention.backends.utils import STR_NOT_IMPL_ENC_DEC_ROCM_HIP
 from vllm.attention.selector import (_Backend, _cached_get_attn_backend,
                                      global_force_attn_backend_context_manager)
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.forward_context import set_forward_context
 from vllm.platforms import current_platform
-from vllm.plugins import set_current_vllm_config
 
 # List of support backends for encoder/decoder models
 LIST_ENC_DEC_SUPPORTED_BACKENDS = [_Backend.XFORMERS, _Backend.FLASH_ATTN]
