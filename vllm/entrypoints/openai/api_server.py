@@ -12,7 +12,7 @@ from argparse import Namespace
 from contextlib import asynccontextmanager
 from functools import partial
 from http import HTTPStatus
-from typing import AsyncIterator, Optional, Set
+from typing import AsyncIterator, Optional, Set, Tuple
 
 import uvloop
 from fastapi import APIRouter, FastAPI, Request
@@ -29,6 +29,7 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.multiprocessing.client import MQLLMEngineClient
 from vllm.engine.multiprocessing.engine import run_mp_engine
 from vllm.engine.protocol import EngineClient
+from vllm.entrypoints.chat_utils import load_chat_template
 from vllm.entrypoints.launcher import serve_http
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.cli_args import (make_arg_parser,
@@ -44,6 +45,7 @@ from vllm.entrypoints.openai.protocol import (ChatCompletionRequest,
                                               EmbeddingRequest,
                                               EmbeddingResponse, ErrorResponse,
                                               LoadLoraAdapterRequest,
+                                              ScoreRequest, ScoreResponse,
                                               TokenizeRequest,
                                               TokenizeResponse,
                                               UnloadLoraAdapterRequest)
@@ -52,12 +54,14 @@ from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_completion import OpenAIServingCompletion
 from vllm.entrypoints.openai.serving_embedding import OpenAIServingEmbedding
 from vllm.entrypoints.openai.serving_engine import BaseModelPath, OpenAIServing
+from vllm.entrypoints.openai.serving_score import OpenAIServingScores
 from vllm.entrypoints.openai.serving_tokenization import (
     OpenAIServingTokenization)
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import FlexibleArgumentParser, get_open_zmq_ipc_path
+from vllm.utils import (FlexibleArgumentParser, get_open_zmq_ipc_path,
+                        is_valid_ipv6_address)
 from vllm.version import __version__ as VLLM_VERSION
 
 if envs.VLLM_USE_V1:
@@ -278,6 +282,10 @@ def embedding(request: Request) -> Optional[OpenAIServingEmbedding]:
     return request.app.state.openai_serving_embedding
 
 
+def score(request: Request) -> Optional[OpenAIServingScores]:
+    return request.app.state.openai_serving_scores
+
+
 def tokenization(request: Request) -> OpenAIServingTokenization:
     return request.app.state.openai_serving_tokenization
 
@@ -389,6 +397,23 @@ async def create_embedding(request: EmbeddingRequest, raw_request: Request):
     assert_never(generator)
 
 
+@router.post("/v1/score")
+async def create_score(request: ScoreRequest, raw_request: Request):
+    handler = score(raw_request)
+    if handler is None:
+        return base(raw_request).create_error_response(
+            message="The model does not support Score API")
+
+    generator = await handler.create_score(request, raw_request)
+    if isinstance(generator, ErrorResponse):
+        return JSONResponse(content=generator.model_dump(),
+                            status_code=generator.code)
+    elif isinstance(generator, ScoreResponse):
+        return JSONResponse(content=generator.model_dump())
+
+    assert_never(generator)
+
+
 if envs.VLLM_TORCH_PROFILER_DIR:
     logger.warning(
         "Torch Profiler is enabled in the API server. This should ONLY be "
@@ -464,8 +489,9 @@ def build_app(args: Namespace) -> FastAPI:
 
     @app.exception_handler(RequestValidationError)
     async def validation_exception_handler(_, exc):
-        chat = app.state.openai_serving_chat
-        err = chat.create_error_response(message=str(exc))
+        err = ErrorResponse(message=str(exc),
+                            type="BadRequestError",
+                            code=HTTPStatus.BAD_REQUEST)
         return JSONResponse(err.model_dump(),
                             status_code=HTTPStatus.BAD_REQUEST)
 
@@ -528,6 +554,9 @@ def init_app_state(
     state.engine_client = engine_client
     state.log_stats = not args.disable_log_stats
 
+    resolved_chat_template = load_chat_template(args.chat_template)
+    logger.info("Using supplied chat template:\n%s", resolved_chat_template)
+
     state.openai_serving_chat = OpenAIServingChat(
         engine_client,
         model_config,
@@ -536,10 +565,12 @@ def init_app_state(
         lora_modules=args.lora_modules,
         prompt_adapters=args.prompt_adapters,
         request_logger=request_logger,
-        chat_template=args.chat_template,
+        chat_template=resolved_chat_template,
+        chat_template_content_format=args.chat_template_content_format,
         return_tokens_as_token_ids=args.return_tokens_as_token_ids,
         enable_auto_tools=args.enable_auto_tool_choice,
         tool_parser=args.tool_call_parser,
+        enable_prompt_tokens_details=args.enable_prompt_tokens_details,
     ) if model_config.task == "generate" else None
     state.openai_serving_completion = OpenAIServingCompletion(
         engine_client,
@@ -555,16 +586,37 @@ def init_app_state(
         model_config,
         base_model_paths,
         request_logger=request_logger,
-        chat_template=args.chat_template,
+        chat_template=resolved_chat_template,
+        chat_template_content_format=args.chat_template_content_format,
     ) if model_config.task == "embedding" else None
+    state.openai_serving_scores = OpenAIServingScores(
+        engine_client,
+        model_config,
+        base_model_paths,
+        request_logger=request_logger
+    ) if (model_config.task == "embedding" \
+          and model_config.is_cross_encoder) else None
     state.openai_serving_tokenization = OpenAIServingTokenization(
         engine_client,
         model_config,
         base_model_paths,
         lora_modules=args.lora_modules,
         request_logger=request_logger,
-        chat_template=args.chat_template,
+        chat_template=resolved_chat_template,
+        chat_template_content_format=args.chat_template_content_format,
     )
+
+
+def create_server_socket(addr: Tuple[str, int]) -> socket.socket:
+    family = socket.AF_INET
+    if is_valid_ipv6_address(addr[0]):
+        family = socket.AF_INET6
+
+    sock = socket.socket(family=family, type=socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(addr)
+
+    return sock
 
 
 async def run_server(args, **uvicorn_kwargs) -> None:
@@ -583,9 +635,8 @@ async def run_server(args, **uvicorn_kwargs) -> None:
     # workaround to make sure that we bind the port before the engine is set up.
     # This avoids race conditions with ray.
     # see https://github.com/vllm-project/vllm/issues/8204
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.bind((args.host or "", args.port))
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock_addr = (args.host or "", args.port)
+    sock = create_server_socket(sock_addr)
 
     def signal_handler(*_) -> None:
         # Interrupt server on sigterm while initializing

@@ -1,17 +1,24 @@
 import copy
 import enum
+import hashlib
 import json
 import warnings
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
-from typing import (TYPE_CHECKING, Any, ClassVar, Dict, Final, List, Literal,
-                    Mapping, Optional, Set, Tuple, Type, Union)
+from pathlib import Path
+from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Counter, Dict,
+                    Final, List, Literal, Mapping, Optional, Set, Tuple, Type,
+                    Union)
 
 import torch
+from pydantic import BaseModel, Field, PrivateAttr
 from transformers import PretrainedConfig
 
 import vllm.envs as envs
+from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
+from vllm.model_executor.layers.quantization import (QUANTIZATION_METHODS,
+                                                     get_quantization_config)
 from vllm.model_executor.models import ModelRegistry
 from vllm.platforms import current_platform
 from vllm.tracing import is_otel_available, otel_import_error_traceback
@@ -20,7 +27,7 @@ from vllm.transformers_utils.config import (
     get_hf_text_config, get_pooling_config,
     get_sentence_transformer_tokenizer_config, is_encoder_decoder, uses_mrope)
 from vllm.utils import (GiB_bytes, cuda_device_count_stateless, get_cpu_memory,
-                        print_warning_once)
+                        print_warning_once, resolve_obj_by_qualname)
 
 if TYPE_CHECKING:
     from ray.util.placement_group import PlacementGroup
@@ -43,6 +50,9 @@ TaskOption = Literal["auto", "generate", "embedding"]
 
 # "draft" is only used internally for speculative decoding
 _Task = Literal["generate", "embedding", "draft"]
+
+HfOverrides = Union[Dict[str, Any], Callable[[PretrainedConfig],
+                                             PretrainedConfig]]
 
 
 class ModelConfig:
@@ -107,31 +117,21 @@ class ModelConfig:
             matches the model name exposed via the APIs. If multiple model
             names provided, the first name will be used. If not specified,
             the model name will be the same as `model`.
-        limit_mm_per_prompt: Maximum number of data instances per modality
+        limit_mm_per_prompt: Maximum number of data items per modality
             per prompt. Only applicable for multimodal models.
+        config_format: The config format which shall be loaded.
+            Defaults to 'auto' which defaults to 'hf'.
+        hf_overrides: If a dictionary, contains arguments to be forwarded to the
+            HuggingFace config. If a callable, it is called to update the
+            HuggingFace config.
+        mm_processor_kwargs: Arguments to be forwarded to the model's processor
+            for multi-modal data, e.g., image processor.
         override_neuron_config: Initialize non default neuron config or
             override default neuron config that are specific to Neuron devices,
             this argument will be used to configure the neuron config that
             can not be gathered from the vllm arguments.
-        config_format: The config format which shall be loaded.
-            Defaults to 'auto' which defaults to 'hf'.
-        hf_overrides: Arguments to be forwarded to the HuggingFace config.
-        mm_processor_kwargs: Arguments to be forwarded to the model's processor
-            for multi-modal data, e.g., image processor.
-        pooling_type: Used to configure the pooling method in the embedding 
-            model.
-        pooling_norm: Used to determine whether to normalize the pooled 
-            data in the embedding model.
-        pooling_softmax: Used to determine whether to softmax the pooled 
-            data in the embedding model.
-        pooling_step_tag_id: When pooling_step_tag_id is not -1, it indicates 
-            that the score corresponding to the pooling_step_tag_id in the 
-            generated sentence should be returned. Otherwise, it returns 
-            the scores for all tokens.
-        pooling_returned_token_ids: pooling_returned_token_ids represents a 
-            list of indices for the vocabulary dimensions to be extracted, 
-            such as the token IDs of good_token and bad_token in the 
-            math-shepherd-mistral-7b-prm model.
+        override_pooling_config: Initialize non default pooling config or
+            override default pooling config for the embedding model.
     """
 
     def __init__(
@@ -161,16 +161,11 @@ class ModelConfig:
             served_model_name: Optional[Union[str, List[str]]] = None,
             limit_mm_per_prompt: Optional[Mapping[str, int]] = None,
             use_async_output_proc: bool = True,
-            override_neuron_config: Optional[Dict[str, Any]] = None,
             config_format: ConfigFormat = ConfigFormat.AUTO,
-            chat_template_text_format: str = "string",
-            hf_overrides: Optional[Dict[str, Any]] = None,
+            hf_overrides: Optional[HfOverrides] = None,
             mm_processor_kwargs: Optional[Dict[str, Any]] = None,
-            pooling_type: Optional[str] = None,
-            pooling_norm: Optional[bool] = None,
-            pooling_softmax: Optional[bool] = None,
-            pooling_step_tag_id: Optional[int] = None,
-            pooling_returned_token_ids: Optional[List[int]] = None) -> None:
+            override_neuron_config: Optional[Dict[str, Any]] = None,
+            override_pooler_config: Optional["PoolerConfig"] = None) -> None:
         self.model = model
         self.tokenizer = tokenizer
         self.tokenizer_mode = tokenizer_mode
@@ -182,15 +177,23 @@ class ModelConfig:
 
         if hf_overrides is None:
             hf_overrides = {}
+
+        if callable(hf_overrides):
+            hf_overrides_kw = {}
+            hf_overrides_fn = hf_overrides
+        else:
+            hf_overrides_kw = hf_overrides
+            hf_overrides_fn = None
+
         if rope_scaling is not None:
             hf_override: Dict[str, Any] = {"rope_scaling": rope_scaling}
-            hf_overrides.update(hf_override)
+            hf_overrides_kw.update(hf_override)
             msg = ("`--rope-scaling` will be removed in a future release. "
                    f"'Please instead use `--hf-overrides '{hf_override!r}'`")
             warnings.warn(DeprecationWarning(msg), stacklevel=2)
         if rope_theta is not None:
             hf_override = {"rope_theta": rope_theta}
-            hf_overrides.update(hf_override)
+            hf_overrides_kw.update(hf_override)
             msg = ("`--rope-theta` will be removed in a future release. "
                    f"'Please instead use `--hf-overrides '{hf_override!r}'`")
             warnings.warn(DeprecationWarning(msg), stacklevel=2)
@@ -207,16 +210,25 @@ class ModelConfig:
         self.max_logprobs = max_logprobs
         self.disable_sliding_window = disable_sliding_window
         self.skip_tokenizer_init = skip_tokenizer_init
-        self.hf_config = get_config(self.model, trust_remote_code, revision,
-                                    code_revision, config_format,
-                                    **hf_overrides)
+
+        hf_config = get_config(self.model, trust_remote_code, revision,
+                               code_revision, config_format)
+
+        if hf_overrides_kw:
+            logger.info("Overriding HF config with %s", hf_overrides_kw)
+            hf_config.update(hf_overrides_kw)
+        if hf_overrides_fn:
+            logger.info("Overriding HF config with %s", hf_overrides_fn)
+            hf_config = hf_overrides_fn(hf_config)
+
+        self.hf_config = hf_config
+
         self.hf_text_config = get_hf_text_config(self.hf_config)
         self.encoder_config = self._get_encoder_config()
         self.hf_image_processor_config = get_hf_image_processor_config(
             self.model, revision)
         self.dtype = _get_and_verify_dtype(self.hf_text_config, dtype)
         self.use_async_output_proc = use_async_output_proc
-        self.chat_template_text_format = chat_template_text_format
         self.mm_processor_kwargs = mm_processor_kwargs
 
         # Set enforce_eager to False if the value is unset.
@@ -229,15 +241,26 @@ class ModelConfig:
             (self.hf_text_config.model_type in ["gemma2"]))
 
         if (not self.disable_sliding_window and has_interleaved_attention):
-            sliding_window_len_min = get_min_sliding_window(
-                self.hf_text_config.sliding_window)
+            if envs.VLLM_ATTENTION_BACKEND == "XFORMERS":
+                sliding_window_len_min = get_min_sliding_window(
+                    self.hf_text_config.sliding_window)
 
-            print_warning_once(
-                f"{self.hf_text_config.model_type} has interleaved attention, "
-                "which is currently not supported by vLLM. Disabling sliding "
-                "window and capping the max length to the sliding window size "
-                f"({sliding_window_len_min}).")
-            self.disable_sliding_window = True
+                print_warning_once(
+                    f"{self.hf_text_config.model_type} has interleaved "
+                    "attention, which is currently not supported by the "
+                    "XFORMERS backend. Disabling sliding window and capping "
+                    "the max length to the sliding window size "
+                    f"({sliding_window_len_min}).")
+                self.disable_sliding_window = True
+            else:
+                # for a model with interleaved attention,
+                # the scheduler and the model treat it as full attention
+                # (i.e., not dropping any tokens outside the window).
+                # only the attention layer itself is aware of the sliding
+                # window, and use the window size to compute the attention.
+                self.hf_text_config.interleaved_sliding_window = sliding_window
+                delattr(self.hf_text_config, "sliding_window")
+                sliding_window = None
 
         self.max_model_len = _get_and_verify_max_len(
             hf_config=self.hf_text_config,
@@ -264,13 +287,7 @@ class ModelConfig:
         supported_tasks, task = self._resolve_task(task, self.hf_config)
         self.supported_tasks = supported_tasks
         self.task: Final = task
-        self.pooler_config = self._init_pooler_config(
-            pooling_type,
-            pooling_norm,
-            pooling_softmax,
-            pooling_step_tag_id,
-            pooling_returned_token_ids,
-        )
+        self.pooler_config = self._init_pooler_config(override_pooler_config)
 
         self._verify_quantization()
         self._verify_cuda_graph()
@@ -295,27 +312,21 @@ class ModelConfig:
 
     def _init_pooler_config(
         self,
-        pooling_type: Optional[str] = None,
-        pooling_norm: Optional[bool] = None,
-        pooling_softmax: Optional[bool] = None,
-        pooling_step_tag_id: Optional[int] = None,
-        pooling_returned_token_ids: Optional[List[int]] = None
+        override_pooler_config: Optional["PoolerConfig"],
     ) -> Optional["PoolerConfig"]:
+
         if self.task == "embedding":
-            pooling_config = get_pooling_config(self.model, self.revision)
-            if pooling_config is not None:
-                # override if user does not
-                # specifies pooling_type and/or pooling_norm
-                if pooling_type is None:
-                    pooling_type = pooling_config["pooling_type"]
-                if pooling_norm is None:
-                    pooling_norm = pooling_config["normalize"]
-            return PoolerConfig(
-                pooling_type=pooling_type,
-                pooling_norm=pooling_norm,
-                pooling_softmax=pooling_softmax,
-                pooling_step_tag_id=pooling_step_tag_id,
-                pooling_returned_token_ids=pooling_returned_token_ids)
+            user_config = override_pooler_config or PoolerConfig()
+
+            base_config = get_pooling_config(self.model, self.revision)
+            if base_config is not None:
+                # Only set values that are not overridden by the user
+                for k, v in base_config.items():
+                    if getattr(user_config, k) is None:
+                        setattr(user_config, k, v)
+
+            return user_config
+
         return None
 
     def _init_attention_free(self) -> bool:
@@ -381,10 +392,10 @@ class ModelConfig:
         return quant_cfg
 
     def _verify_quantization(self) -> None:
-        supported_quantization = [*QUANTIZATION_METHODS]
+        supported_quantization = QUANTIZATION_METHODS
         rocm_supported_quantization = [
             "awq", "gptq", "fp8", "compressed_tensors", "compressed-tensors",
-            "fbgemm_fp8"
+            "fbgemm_fp8", "gguf"
         ]
         optimized_quantization_methods = [
             "fp8", "marlin", "modelopt", "gptq_marlin_24", "gptq_marlin",
@@ -403,7 +414,8 @@ class ModelConfig:
             quant_method = quant_cfg.get("quant_method", "").lower()
 
             # Detect which checkpoint is it
-            for _, method in QUANTIZATION_METHODS.items():
+            for name in QUANTIZATION_METHODS:
+                method = get_quantization_config(name)
                 quantization_override = method.override_quantization_method(
                     quant_cfg, self.quantization)
                 if quantization_override:
@@ -708,6 +720,11 @@ class ModelConfig:
     def is_multimodal_model(self) -> bool:
         return self.multimodal_config is not None
 
+    @property
+    def is_cross_encoder(self) -> bool:
+        architectures = getattr(self.hf_config, "architectures", [])
+        return ModelRegistry.is_cross_encoder_model(architectures)
+
 
 class CacheConfig:
     """Configuration for the KV cache.
@@ -933,76 +950,71 @@ class LoadConfig:
                 f"{rocm_supported_load_format}")
 
 
+@dataclass
 class ParallelConfig:
-    """Configuration for the distributed execution.
+    """Configuration for the distributed execution."""
 
-    Args:
-        pipeline_parallel_size: Number of pipeline parallel groups.
-        tensor_parallel_size: Number of tensor parallel groups.
-        worker_use_ray: Deprecated, use distributed_executor_backend instead.
-        max_parallel_loading_workers: Maximum number of multiple batches
-            when load model sequentially. To avoid RAM OOM when using tensor
-            parallel and large models.
-        disable_custom_all_reduce: Disable the custom all-reduce kernel and
-            fall back to NCCL.
-        tokenizer_pool_config: Config for the tokenizer pool.
-            If None, will use synchronous tokenization.
-        ray_workers_use_nsight: Whether to profile Ray workers with nsight, see
-            https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-nsight-profiler.
-        placement_group: ray distributed model workers placement group.
-        distributed_executor_backend: Backend to use for distributed model
-            workers, either "ray" or "mp" (multiprocessing). If the product
-            of pipeline_parallel_size and tensor_parallel_size is less than
-            or equal to the number of GPUs available, "mp" will be used to
-            keep processing on a single host. Otherwise, this will default
-            to "ray" if Ray is installed and fail otherwise. Note that tpu
-            and hpu only support Ray for distributed inference.
-    """
+    pipeline_parallel_size: int = 1  # Number of pipeline parallel groups.
+    tensor_parallel_size: int = 1  # Number of tensor parallel groups.
 
-    def __init__(
-        self,
-        pipeline_parallel_size: int,
-        tensor_parallel_size: int,
-        worker_use_ray: Optional[bool] = None,
-        max_parallel_loading_workers: Optional[int] = None,
-        disable_custom_all_reduce: bool = False,
-        tokenizer_pool_config: Optional[TokenizerPoolConfig] = None,
-        ray_workers_use_nsight: bool = False,
-        placement_group: Optional["PlacementGroup"] = None,
-        distributed_executor_backend: Optional[Union[
-            str, Type["ExecutorBase"]]] = None,
-    ) -> None:
-        self.pipeline_parallel_size = pipeline_parallel_size
-        self.tensor_parallel_size = tensor_parallel_size
-        self.distributed_executor_backend = distributed_executor_backend
-        self.max_parallel_loading_workers = max_parallel_loading_workers
-        self.disable_custom_all_reduce = disable_custom_all_reduce
-        self.tokenizer_pool_config = tokenizer_pool_config
-        self.ray_workers_use_nsight = ray_workers_use_nsight
-        self.placement_group = placement_group
-        self.world_size = pipeline_parallel_size * self.tensor_parallel_size
+    # Deprecated, use distributed_executor_backend instead.
+    worker_use_ray: Optional[bool] = None
 
-        if worker_use_ray:
+    # Maximum number of multiple batches
+    # when load model sequentially. To avoid RAM OOM when using tensor
+    # parallel and large models.
+    max_parallel_loading_workers: Optional[int] = None
+
+    # Disable the custom all-reduce kernel and fall back to NCCL.
+    disable_custom_all_reduce: bool = False
+
+    # Config for the tokenizer pool. If None, will use synchronous tokenization.
+    tokenizer_pool_config: Optional[TokenizerPoolConfig] = None
+
+    # Whether to profile Ray workers with nsight, see https://docs.ray.io/en/latest/ray-observability/user-guides/profiling.html#profiling-nsight-profiler.
+    ray_workers_use_nsight: bool = False
+
+    # ray distributed model workers placement group.
+    placement_group: Optional["PlacementGroup"] = None
+
+    # Backend to use for distributed model
+    # workers, either "ray" or "mp" (multiprocessing). If the product
+    # of pipeline_parallel_size and tensor_parallel_size is less than
+    # or equal to the number of GPUs available, "mp" will be used to
+    # keep processing on a single host. Otherwise, this will default
+    # to "ray" if Ray is installed and fail otherwise. Note that tpu
+    # and hpu only support Ray for distributed inference.
+    distributed_executor_backend: Optional[Union[str,
+                                                 Type["ExecutorBase"]]] = None
+
+    # the full name of the worker class to use. If "auto", the worker class
+    # will be determined based on the platform.
+    worker_cls: str = "auto"
+
+    world_size: int = field(init=False)
+
+    rank: int = 0
+
+    def __post_init__(self) -> None:
+        self.world_size = self.pipeline_parallel_size * \
+            self.tensor_parallel_size
+
+        if self.worker_use_ray:
             if self.distributed_executor_backend is None:
                 self.distributed_executor_backend = "ray"
             elif not self.use_ray:
                 raise ValueError(f"worker-use-ray can't be used with "
                                  f"distributed executor backend "
                                  f"'{self.distributed_executor_backend}'.")
-
-        if current_platform.is_tpu() and self.world_size > 1:
+        ray_only_devices = ["tpu", "hpu"]
+        if (current_platform.device_type in ray_only_devices
+                and self.world_size > 1):
             if self.distributed_executor_backend is None:
                 self.distributed_executor_backend = "ray"
             if self.distributed_executor_backend != "ray":
                 raise ValueError(
-                    "TPU backend only supports Ray for distributed inference.")
-
-        if current_platform.is_hpu() and self.world_size > 1:
-            if self.distributed_executor_backend is None:
-                self.distributed_executor_backend = "ray"
-            if self.distributed_executor_backend != "ray":
-                raise ValueError(
-                    "HPU backend only supports Ray for distributed inference.")
+                    f"{current_platform.device_type.upper()} backend only "
+                    "supports Ray for distributed inference.")
 
         if self.distributed_executor_backend is None and self.world_size > 1:
             # We use multiprocessing by default if world_size fits on the
@@ -1033,7 +1045,6 @@ class ParallelConfig:
                         backend)
 
         self._verify_args()
-        self.rank: int = 0
 
     @property
     def use_ray(self) -> bool:
@@ -1066,100 +1077,97 @@ class ParallelConfig:
                              "run with Ray.")
 
 
+@dataclass
 class SchedulerConfig:
-    """Scheduler configuration.
+    """Scheduler configuration."""
 
-    Args:
-        task: The task to use the model for.
-        max_num_batched_tokens: Maximum number of tokens to be processed in
-            a single iteration.
-        max_num_seqs: Maximum number of sequences to be processed in a single
-            iteration.
-        max_model_len: Maximum length of a sequence (including prompt
-            and generated text).
-        num_lookahead_slots: The number of slots to allocate per sequence per
-            step, beyond the known token ids. This is used in speculative
-            decoding to store KV activations of tokens which may or may not be
-            accepted.
-        delay_factor: Apply a delay (of delay factor multiplied by previous
-            prompt latency) before scheduling next prompt.
-        enable_chunked_prefill: If True, prefill requests can be chunked based
-            on the remaining max_num_batched_tokens.
-        preemption_mode: Whether to perform preemption by swapping or
-            recomputation. If not specified, we determine the mode as follows:
-            We use recomputation by default since it incurs lower overhead than
-            swapping. However, when the sequence group has multiple sequences
-            (e.g., beam search), recomputation is not currently supported. In
-            such a case, we use swapping instead.
-        send_delta_data: Private API. If used, scheduler sends delta data to
-            workers instead of an entire data. It should be enabled only
-            when SPMD worker architecture is enabled. I.e.,
-            VLLM_USE_RAY_SPMD_WORKER=1
-        policy: The scheduling policy to use. "fcfs" (default) or "priority".
-    """
+    task: str = "generate"  # The task to use the model for.
 
-    def __init__(self,
-                 task: _Task,
-                 max_num_batched_tokens: Optional[int],
-                 max_num_seqs: int,
-                 max_model_len: int,
-                 num_lookahead_slots: int = 0,
-                 delay_factor: float = 0.0,
-                 enable_chunked_prefill: bool = False,
-                 is_multimodal_model: bool = False,
-                 preemption_mode: Optional[str] = None,
-                 num_scheduler_steps: int = 1,
-                 multi_step_stream_outputs: bool = False,
-                 send_delta_data: bool = False,
-                 policy: str = "fcfs") -> None:
-        if max_num_batched_tokens is None:
-            if enable_chunked_prefill:
-                if num_scheduler_steps > 1:
+    # Maximum number of tokens to be processed in a single iteration.
+    max_num_batched_tokens: int = field(default=None)  # type: ignore
+
+    # Maximum number of sequences to be processed in a single iteration.
+    max_num_seqs: int = 128
+
+    # Maximum length of a sequence (including prompt and generated text).
+    max_model_len: int = 8192
+
+    # The number of slots to allocate per sequence per
+    # step, beyond the known token ids. This is used in speculative
+    # decoding to store KV activations of tokens which may or may not be
+    # accepted.
+    num_lookahead_slots: int = 0
+
+    # Apply a delay (of delay factor multiplied by previous
+    # prompt latency) before scheduling next prompt.
+    delay_factor: float = 0.0
+
+    # If True, prefill requests can be chunked based
+    # on the remaining max_num_batched_tokens.
+    enable_chunked_prefill: bool = False
+
+    is_multimodal_model: bool = False
+
+    # Whether to perform preemption by swapping or
+    # recomputation. If not specified, we determine the mode as follows:
+    # We use recomputation by default since it incurs lower overhead than
+    # swapping. However, when the sequence group has multiple sequences
+    # (e.g., beam search), recomputation is not currently supported. In
+    # such a case, we use swapping instead.
+    preemption_mode: Optional[str] = None
+
+    num_scheduler_steps: int = 1
+
+    multi_step_stream_outputs: bool = False
+
+    # Private API. If used, scheduler sends delta data to
+    # workers instead of an entire data. It should be enabled only
+    # when SPMD worker architecture is enabled. I.e.,
+    # VLLM_USE_RAY_SPMD_WORKER=1
+    send_delta_data: bool = False
+
+    # The scheduling policy to use. "fcfs" (default) or "priority".
+    policy: str = "fcfs"
+
+    chunked_prefill_enabled: bool = field(init=False)
+
+    def __post_init__(self) -> None:
+        if self.max_num_batched_tokens is None:
+            if self.enable_chunked_prefill:
+                if self.num_scheduler_steps > 1:
                     # Multi-step Chunked-Prefill doesn't allow prompt-chunking
                     # for now. Have max_num_batched_tokens set to max_model_len
                     # so we don't reject sequences on account of a short
                     # max_num_batched_tokens.
-                    max_num_batched_tokens = max(max_model_len, 2048)
+                    self.max_num_batched_tokens = max(self.max_model_len, 2048)
                 else:
-                    # It is the values that have the best balance between ITL
-                    # and TTFT on A100. Note it is not optimized for throughput.
-                    max_num_batched_tokens = 512
+                    # This value is chosen to have a balance between ITL
+                    # and TTFT. Note it is not optimized for throughput.
+                    self.max_num_batched_tokens = 2048
             else:
                 # If max_model_len is too short, use 2048 as the default value
                 # for higher throughput.
-                max_num_batched_tokens = max(max_model_len, 2048)
+                self.max_num_batched_tokens = max(self.max_model_len, 2048)
 
-            if task == "embedding":
+            if self.task == "embedding":
                 # For embedding, choose specific value for higher throughput
-                max_num_batched_tokens = max(
-                    max_num_batched_tokens,
+                self.max_num_batched_tokens = max(
+                    self.max_num_batched_tokens,
                     _EMBEDDING_MODEL_MAX_NUM_BATCHED_TOKENS,
                 )
-            if is_multimodal_model:
+            if self.is_multimodal_model:
                 # The value needs to be at least the number of multimodal tokens
-                max_num_batched_tokens = max(
-                    max_num_batched_tokens,
+                self.max_num_batched_tokens = max(
+                    self.max_num_batched_tokens,
                     _MULTIMODAL_MODEL_MAX_NUM_BATCHED_TOKENS,
                 )
 
-        self.max_num_batched_tokens = max_num_batched_tokens
-
-        if enable_chunked_prefill:
+        if self.enable_chunked_prefill:
             logger.info(
                 "Chunked prefill is enabled with max_num_batched_tokens=%d.",
                 self.max_num_batched_tokens)
 
-        self.task: Final = task
-        self.max_num_seqs = max_num_seqs
-        self.max_model_len = max_model_len
-        self.num_lookahead_slots = num_lookahead_slots
-        self.delay_factor = delay_factor
-        self.chunked_prefill_enabled = enable_chunked_prefill
-        self.preemption_mode = preemption_mode
-        self.num_scheduler_steps = num_scheduler_steps
-        self.multi_step_stream_outputs = multi_step_stream_outputs
-        self.send_delta_data = send_delta_data
-        self.policy = policy
+        self.chunked_prefill_enabled = self.enable_chunked_prefill
         self._verify_args()
 
     def _verify_args(self) -> None:
@@ -1198,25 +1206,13 @@ class SchedulerConfig:
 
 class DeviceConfig:
     device: Optional[torch.device]
+    device_type: str
 
     def __init__(self, device: str = "auto") -> None:
         if device == "auto":
             # Automated device type detection
-            if current_platform.is_cuda_alike():
-                self.device_type = "cuda"
-            elif current_platform.is_neuron():
-                self.device_type = "neuron"
-            elif current_platform.is_hpu():
-                self.device_type = "hpu"
-            elif current_platform.is_openvino():
-                self.device_type = "openvino"
-            elif current_platform.is_tpu():
-                self.device_type = "tpu"
-            elif current_platform.is_cpu():
-                self.device_type = "cpu"
-            elif current_platform.is_xpu():
-                self.device_type = "xpu"
-            else:
+            self.device_type = current_platform.device_type
+            if not self.device_type:
                 raise RuntimeError("Failed to infer device type")
         else:
             # Device type is assigned explicitly
@@ -1687,6 +1683,7 @@ class LoRAConfig:
     # This is a constant.
     lora_vocab_padding_size: ClassVar[int] = 256
     long_lora_scaling_factors: Optional[Tuple[float]] = None
+    bias_enabled: bool = False
 
     def __post_init__(self):
         # Setting the maximum rank to 256 should be able to satisfy the vast
@@ -1769,13 +1766,43 @@ class MultiModalConfig:
 
 @dataclass
 class PoolerConfig:
-    """Controls the behavior of pooler in embedding model"""
+    """Controls the behavior of output pooling in embedding models."""
 
     pooling_type: Optional[str] = None
-    pooling_norm: Optional[bool] = None
-    pooling_softmax: Optional[bool] = None
-    pooling_step_tag_id: Optional[int] = None
-    pooling_returned_token_ids: Optional[List[int]] = None
+    """
+    The pooling method of the embedding model. This should be a key in
+    :class:`vllm.model_executor.layers.pooler.PoolingType`.
+    """
+
+    normalize: Optional[bool] = None
+    """
+    Whether to normalize the pooled outputs. Usually, this should be set to
+    ``True`` for embedding outputs.
+    """
+
+    softmax: Optional[bool] = None
+    """
+    Whether to apply softmax to the pooled outputs. Usually, this should be set
+    to ``True`` for classification outputs.
+    """
+
+    step_tag_id: Optional[int] = None
+    """
+    If set, only the score corresponding to the ``step_tag_id`` in the 
+    generated sentence should be returned. Otherwise, the scores for all tokens
+    are returned.
+    """
+
+    returned_token_ids: Optional[List[int]] = None
+    """
+    A list of indices for the vocabulary dimensions to be extracted, 
+    such as the token IDs of ``good_token`` and ``bad_token`` in the 
+    ``math-shepherd-mistral-7b-prm`` model.
+    """
+
+    @staticmethod
+    def from_json(json_str: str) -> "PoolerConfig":
+        return PoolerConfig(**json.loads(json_str))
 
 
 _STR_DTYPE_TO_TORCH_DTYPE = {
@@ -2035,6 +2062,249 @@ class ObservabilityConfig:
                 f"installed. Original error:\n{otel_import_error_traceback}")
 
 
+class CompilationLevel:
+    # constants for the levels of the compilation process
+    NO_COMPILATION = 0
+    DYNAMO_AS_IS = 1
+    DYNAMO_ONCE = 2
+    PIECEWISE = 3
+
+
+class CompilationConfig(BaseModel):
+    """
+    Configuration for compilation.
+    It has three parts:
+    - Top-level Compilation control:
+        - level: the level of compilation.
+            - 0: no compilation.
+            - 1: dynamo as is.
+            - 2: dynamo once.
+            - 3: piecewise compilation.
+        - backend: the backend for compilation. It needs to be a string.
+            - "" (empty string): use the default backend.
+            - "eager"/"openxla"/...: use the specified backend registered in PyTorch.
+            - "full.module.name": a qualified name which can be used to import the backend function.
+            We use string to avoid serialization issues when using compilation in a distributed setting.
+            When the compilation level is 1 or 2, the backend is used for the compilation directly (it sees the whole graph).
+            When the compilation level is 3, the backend is used for the piecewise compilation (it sees a part of the graph).
+        - custom_ops: fine-grained control over which custom ops to enable/disable.
+            Use 'all' to enable all, 'none' to disable all.
+            Also specify a list of custom op names to enable (prefixed with a '+'),
+            or disable (prefixed with a '-').
+            Examples:
+                - 'all,-op1' to enable all except op1
+                - 'none,+op1,+op2' to enable only op1 and op2
+            By default, all custom ops are enabled when running without Inductor
+                and disabled when running with Inductor (compile_level >= Inductor).
+        - splitting_ops: a list of ops to split the full graph into subgraphs, used in piecewise compilation.
+    - CudaGraph capture:
+        - use_cudagraph: whether to use cudagraph inside compilation.
+            - False: cudagraph inside compilation is not used.
+            - True: cudagraph inside compilation is used. It requires
+                that all input buffers have fixed addresses, and all
+                splitting ops write their outputs to input buffers.
+            Note that this is orthogonal to the cudagraph capture logic
+            outside of compilation.
+            TODO: move outside cudagraph logic into compilation.
+            torch.compile will handle cudagraph capture logic in the future.
+        - cudagraph_capture_sizes: sizes to capture cudagraph.
+            - None: capture sizes are inferred from compilation context.
+            - List[int]: capture sizes are specified.
+        - cudagraph_num_of_warmups: number of warmup runs for cudagraph.
+            It means the first several runs will be treated as warmup runs.
+            Only after that, the execution will be recorded, and the recorded
+            cudagraph will be used for subsequent runs.
+        - cudagraph_copy_inputs: whether to copy input tensors for
+            cudagraph. If the caller can guarantee that the same input buffers
+            are always used, it can set this to False. Otherwise, it should
+            set this to True, and the compiler will copy the input to an
+            internally managed buffer. Default is False.
+    - Inductor compilation:
+        - use_inductor: whether to use inductor compilation.
+            - False: inductor compilation is not used. graph runs in eager.
+            - True: inductor compilation is used. one graph for symbolic shape
+                is compiled. In addition, compile for different sizes specified
+                in inductor_compile_sizes, using configurations
+                in inductor_compile_config.
+        - inductor_compile_sizes: sizes to compile for inductor.
+        - inductor_specialize_for_cudagraph_no_more_than: an optional integer
+            to specialize inductor for cudagraph sizes no more than the
+            specified size. It is useful when we want to specialize inductor
+            with a subset of cudagraph sizes.
+        - inductor_compile_config: additional configurations for inductor.
+            - None: use default configurations.
+        - inductor_passes: additional passes for inductor. It is a dictionary
+            from pass name to pass function qualified name. We use function
+            name because the config uses json format. If we pass the config
+            from Python, functions can also be passed directly via Python object
+            constructor, e.g. `CompilationConfig(inductor_passes={"a": func})`
+        - custom inductor passes: see PassConfig for more details
+    
+    Why we have different sizes for cudagraph and inductor:
+    - cudagraph: a cudagraph captured for a specific size can only be used
+        for the same size. We need to capture all the sizes we want to use.
+    - inductor: a graph compiled by inductor for a general shape can be used
+        for different sizes. Inductor can also compile for specific sizes,
+        where it can have more information to optimize the graph with fully
+        static shapes. However, we find the general shape compilation is
+        sufficient for most cases. It might be beneficial to compile for
+        certain small batchsizes, where inductor is good at optimizing.
+    """ # noqa
+    level: int = 0
+    backend: str = ""
+    custom_ops: List[str] = Field(default_factory=list)
+    splitting_ops: List[str] = Field(default_factory=lambda: [
+        "vllm.unified_attention",
+        "vllm.unified_v1_flash_attention",
+    ])
+
+    use_inductor: bool = True
+    inductor_specialize_for_cudagraph_no_more_than: Optional[int] = None
+    inductor_compile_sizes: Optional[List[int]] = Field(default_factory=dict)
+    inductor_compile_config: Dict = Field(default_factory=dict)
+    inductor_passes: Dict[str, str] = Field(default_factory=dict)
+
+    use_cudagraph: bool = False
+    cudagraph_num_of_warmups: int = 0
+    cudagraph_capture_sizes: Optional[List[int]] = None
+    cudagraph_copy_inputs: bool = False
+
+    class PassConfig(BaseModel):
+        """
+        Configuration for custom Inductor passes.
+        This is separate from general CompilationConfig so that inductor passes
+        don't all have access to full configuration - that would create a cycle
+        as the PassManager is set as a property of config.
+        - dump_graph_stages: list of stages for which we want to dump the graph.
+            Each pass defines its own stages (before, after, maybe in-between).
+        - dump_graph_dir: directory to dump the graphs. Default is .
+        - enable_fusion: whether to enable the custom fusion pass.
+        - enable_reshape: whether to enable the custom reshape elimination pass.
+            TODO better pass enabling system.
+        """
+        dump_graph_stages: List[str] = Field(default_factory=list)
+        dump_graph_dir: Path = Field(default=Path("."))
+        enable_fusion: bool = True
+        enable_reshape: bool = True
+
+        def uuid(self):
+            """
+            Produces a hash unique to the pass configuration.
+            Any new fields that affect compilation should be added to the hash.
+            Do not include dump_graph_* in the hash - they don't affect
+            compilation.
+            """
+            dict_ = self.model_dump(
+                include={"enable_fusion", "enable_reshape"})
+            encoded = json.dumps(dict_, sort_keys=True).encode("utf-8")
+            return hashlib.sha256(encoded).digest()
+
+        def model_post_init(self, __context: Any) -> None:
+            if not self.enable_reshape and self.enable_fusion:
+                print_warning_once(
+                    "Fusion enabled but reshape elimination disabled."
+                    "RMSNorm + quant (fp8) fusion might not work")
+
+    pass_config: PassConfig = Field(default_factory=PassConfig)
+
+    # not configurable, computed after init
+    compile_sizes: List[int] = PrivateAttr
+    capture_sizes: List[int] = PrivateAttr
+
+    # keep track of enabled and disabled custom ops
+    enabled_custom_ops: Counter[str] = PrivateAttr
+    disabled_custom_ops: Counter[str] = PrivateAttr
+
+    # Per-model forward context
+    # Mainly used to store attention cls
+    # Map from layer name to the attention cls
+    static_forward_context: Dict[str, Any] = PrivateAttr
+
+    @classmethod
+    def from_cli(cls, cli_value: str) -> "CompilationConfig":
+        """Parse the CLI value for the compilation config."""
+        if cli_value in ["0", "1", "2", "3"]:
+            return cls(level=int(cli_value))
+        return CompilationConfig.model_validate_json(cli_value)
+
+    def model_post_init(self, __context: Any) -> None:
+
+        count_none = self.custom_ops.count("none")
+        count_all = self.custom_ops.count("all")
+        assert count_none + count_all <= 1, "Can only specify 'none' or 'all'"
+
+        for k, v in self.inductor_passes.items():
+            if not isinstance(v, str):
+                assert callable(v), (
+                    f"pass {k} should be callable or a qualified name")
+                self.inductor_compile_config[k] = v if isinstance(
+                    v, InductorPass) else CallableInductorPass(v)
+                continue
+
+            # resolve function from qualified name
+            names = v.split(".")
+            module = ".".join(names[:-1])
+            func_name = names[-1]
+            func = __import__(module).__dict__[func_name]
+            self.inductor_compile_config[k] = func if isinstance(
+                func, InductorPass) else CallableInductorPass(func)
+
+        self.enabled_custom_ops = Counter()
+        self.disabled_custom_ops = Counter()
+        self.static_forward_context = {}
+
+    def init_backend(self) -> Union[str, Callable]:
+        if self.level == CompilationLevel.NO_COMPILATION:
+            raise ValueError("No compilation level is set.")
+
+        from torch._dynamo.backends.registry import list_backends
+        torch_backends = list_backends(exclude_tags=tuple())
+        if self.level in [
+                CompilationLevel.DYNAMO_AS_IS, CompilationLevel.DYNAMO_ONCE
+        ]:
+            if self.backend == "":
+                return "eager"
+            if self.backend in torch_backends:
+                return self.backend
+            return resolve_obj_by_qualname(self.backend)
+
+        # TODO: pass user-specified backend to piecewise compilation
+        # merge with the config use_inductor
+        assert self.level == CompilationLevel.PIECEWISE
+        from vllm.compilation.backends import VllmBackend
+        return VllmBackend(self)
+
+    def init_during_runtime(self):
+        """To complete the initialization of config,
+        we need to know the compile context, which is only available
+        during the first run of the model.
+        """
+        from vllm.compilation.compile_context import get_compile_context
+        context = get_compile_context()
+        context = copy.deepcopy(context) if context is not None else []
+        sizes_to_specialize: List[int] = context
+        if self.cudagraph_capture_sizes is None:
+            self.capture_sizes = sizes_to_specialize
+        else:
+            self.capture_sizes = self.cudagraph_capture_sizes
+            logger.info(("cudagraph sizes specified by model runner"
+                         " %s is overridden by config %s"),
+                        sizes_to_specialize, self.cudagraph_capture_sizes)
+        if self.inductor_specialize_for_cudagraph_no_more_than is not None:
+            assert self.inductor_compile_sizes is None, (
+                "inductor_compile_sizes should be None when "
+                "inductor_specialize_for_cudagraph_no_more_than is not None")
+            self.compile_sizes = [
+                x for x in self.capture_sizes
+                if x <= self.inductor_specialize_for_cudagraph_no_more_than
+            ]
+        else:
+            assert self.inductor_compile_sizes is not None, (
+                "inductor_compile_sizes should not be None when "
+                "inductor_specialize_for_cudagraph_no_more_than is None")
+            self.compile_sizes = self.inductor_compile_sizes
+
+
 @dataclass
 class VllmConfig:
     """Dataclass which contains all vllm-related configuration. This
@@ -2043,10 +2313,10 @@ class VllmConfig:
 
     model_config: ModelConfig = field(default=None, init=True)  # type: ignore
     cache_config: CacheConfig = field(default=None, init=True)  # type: ignore
-    parallel_config: ParallelConfig = field(default=None,
-                                            init=True)  # type: ignore
-    scheduler_config: SchedulerConfig = field(default=None,
-                                              init=True)  # type: ignore
+    parallel_config: ParallelConfig = field(default_factory=ParallelConfig,
+                                            init=True)
+    scheduler_config: SchedulerConfig = field(default_factory=SchedulerConfig,
+                                              init=True)
     device_config: DeviceConfig = field(default=None,
                                         init=True)  # type: ignore
     load_config: LoadConfig = field(default=None, init=True)  # type: ignore
@@ -2056,6 +2326,8 @@ class VllmConfig:
     observability_config: Optional[ObservabilityConfig] = None
     prompt_adapter_config: Optional[PromptAdapterConfig] = None
     quant_config: Optional[QuantizationConfig] = None
+    compilation_config: CompilationConfig = field(default=None,
+                                                  init=True)  # type: ignore
 
     @staticmethod
     def _get_quantization_config(
@@ -2116,7 +2388,6 @@ class VllmConfig:
             self.quant_config = VllmConfig._get_quantization_config(
                 self.model_config, self.load_config)
 
-
         if self.scheduler_config is not None and \
             self.model_config is not None and \
             self.scheduler_config.chunked_prefill_enabled and \
@@ -2126,6 +2397,36 @@ class VllmConfig:
                 "Turing devices tensor cores do not support float32 matmul. "
                 "To workaround this limitation, vLLM will set 'ieee' input "
                 "precision for chunked prefill triton kernels.")
+            
+        if self.compilation_config is None:
+            self.compilation_config = CompilationConfig()
+        if envs.VLLM_USE_V1 and not self.model_config.enforce_eager:
+            # NOTE(woosuk): Currently, we use inductor because the piecewise
+            # CUDA graphs do not work properly with the custom CUDA kernels.
+            # FIXME(woosuk): Disable inductor to reduce the compilation time
+            # and avoid any potential issues with the inductor.
+            self.compilation_config.custom_ops = ["none"]
+            self.compilation_config.use_cudagraph = True
+            self.compilation_config.use_inductor = True
+            self.compilation_config.pass_config.enable_fusion = False
+            self.compilation_config.pass_config.enable_reshape = False
+            self.compilation_config.level = CompilationLevel.PIECEWISE
+
+        if self.cache_config is not None and \
+            self.cache_config.cpu_offload_gb > 0 and \
+            self.compilation_config.level != CompilationLevel.NO_COMPILATION:
+            logger.warning(
+                "CPU offload is not supported with `torch.compile` yet."
+                " Disabling `torch.compile`.")
+            self.compilation_config.level = CompilationLevel.NO_COMPILATION
+
+        if self.lora_config is not None and self.compilation_config.level !=\
+             CompilationLevel.NO_COMPILATION:
+            logger.warning("LoRA is not supported with `torch.compile` yet. "
+                           "Disabling `torch.compile`.")
+            self.compilation_config.level = CompilationLevel.NO_COMPILATION
+
+        current_platform.check_and_update_config(self)
 
     def __str__(self):
         return ("model=%r, speculative_config=%r, tokenizer=%r, "
@@ -2167,3 +2468,53 @@ class VllmConfig:
         self.cache_config.enable_prefix_caching,
         self.model_config.use_async_output_proc,
         self.model_config.mm_processor_kwargs)
+
+
+_current_vllm_config: Optional[VllmConfig] = None
+
+
+@contextmanager
+def set_current_vllm_config(vllm_config: VllmConfig):
+    """
+    Temporarily set the current VLLM config.
+    Used during model initialization.
+    We save the current VLLM config in a global variable,
+    so that all modules can access it, e.g. custom ops
+    can access the VLLM config to determine how to dispatch.
+    """
+    global _current_vllm_config
+    old_vllm_config = _current_vllm_config
+    from vllm.compilation.counter import compilation_counter
+    num_models_seen = compilation_counter.num_models_seen
+    try:
+        _current_vllm_config = vllm_config
+        yield
+    finally:
+        logger.debug("enabled custom ops: %s",
+                     vllm_config.compilation_config.enabled_custom_ops)
+        logger.debug("disabled custom ops: %s",
+                     vllm_config.compilation_config.disabled_custom_ops)
+        if vllm_config.compilation_config.level == CompilationLevel.PIECEWISE \
+            and compilation_counter.num_models_seen == num_models_seen:
+            # If the model supports compilation,
+            # compilation_counter.num_models_seen should be increased
+            # by at least 1.
+            # If it is not increased, it means the model does not support
+            # compilation (does not have @support_torch_compile decorator).
+            logger.warning(
+                "`torch.compile` is turned on, but the model %s"
+                " does not support it. Please open an issue on GitHub"
+                "if you want it to be supported.",
+                vllm_config.model_config.model)
+        _current_vllm_config = old_vllm_config
+
+
+def get_current_vllm_config() -> VllmConfig:
+    if _current_vllm_config is None:
+        # in ci, usually when we test custom ops/modules directly,
+        # we don't set the vllm config. In that case, we set a default
+        # config.
+        logger.warning("Current VLLM config is not set.")
+        from vllm.config import VllmConfig
+        return VllmConfig()
+    return _current_vllm_config

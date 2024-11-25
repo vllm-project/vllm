@@ -9,6 +9,7 @@ import uvloop
 from openai import OpenAI
 from openai.types.chat import ChatCompletionMessageParam
 
+import vllm.version
 from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.openai.api_server import run_server
 from vllm.entrypoints.openai.cli_args import (make_arg_parser,
@@ -143,6 +144,11 @@ def main():
     env_setup()
 
     parser = FlexibleArgumentParser(description="vLLM CLI")
+    parser.add_argument('-v',
+                        '--version',
+                        action='version',
+                        version=vllm.version.__version__)
+
     subparsers = parser.add_subparsers(required=True, dest="subparser")
 
     serve_parser = subparsers.add_parser(

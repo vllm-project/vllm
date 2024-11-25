@@ -21,7 +21,7 @@
 # limitations under the License.
 """Inference-only MiniCPM model compatible with HuggingFace weights."""
 import math
-from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 import torch
 from torch import nn
@@ -192,6 +192,7 @@ class MiniCPMAttention(nn.Module):
         max_position_embeddings: int = 8192,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -246,7 +247,8 @@ class MiniCPMAttention(nn.Module):
                               self.scaling,
                               num_kv_heads=self.num_kv_heads,
                               cache_config=cache_config,
-                              quant_config=quant_config)
+                              quant_config=quant_config,
+                              prefix=f"{prefix}.attn")
 
     def forward(
         self,
@@ -273,6 +275,7 @@ class MiniCPMDecoderLayer(nn.Module):
         config: PretrainedConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.config = config
@@ -283,6 +286,7 @@ class MiniCPMDecoderLayer(nn.Module):
         self.rope_scaling = getattr(config, "rope_scaling", None)
         self.max_position_embeddings = getattr(config,
                                                "max_position_embeddings", 8192)
+        self.prefix = prefix
         self._init_attn_block()
         self._init_ffn_block()
 
@@ -298,6 +302,7 @@ class MiniCPMDecoderLayer(nn.Module):
             max_position_embeddings=self.max_position_embeddings,
             cache_config=self.cache_config,
             quant_config=self.quant_config,
+            prefix=f"{self.prefix}.self_attn",
         )
 
     def _init_ffn_block(self):
@@ -388,8 +393,8 @@ class MiniCPMModel(nn.Module):
     ):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: MiniCPMDecoderLayer(config, cache_config,
-                                               quant_config),
+            lambda prefix: MiniCPMDecoderLayer(
+                config, cache_config, quant_config, prefix=prefix),
             prefix=f"{prefix}.layers")
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -504,6 +509,9 @@ class MiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self.model = MiniCPMModel(vllm_config=vllm_config,
                                   prefix=maybe_prefix(prefix, "model"))
 
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.get_input_embeddings(input_ids)
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -511,9 +519,11 @@ class MiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         hidden_states = self.model(input_ids, positions, kv_caches,
-                                   attn_metadata, intermediate_tensors)
+                                   attn_metadata, intermediate_tensors,
+                                   inputs_embeds)
         return hidden_states
 
     def compute_logits(
@@ -534,7 +544,8 @@ class MiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -551,6 +562,7 @@ class MiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
             for weight_name in ["w1", "w2", "w3"]
         ]
         params_dict = dict(self.named_parameters())
+        loaded_params: Set[str] = set()
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -601,3 +613,5 @@ class MiniCPMForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                     weight_loader = getattr(param, "weight_loader",
                                             default_weight_loader)
                     weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+        return loaded_params

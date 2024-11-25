@@ -42,7 +42,8 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors, PoolerOutput
 
 from .interfaces import SupportsLoRA, SupportsPP
-from .utils import (AutoWeightsLoader, is_pp_missing_parameter,
+from .utils import (AutoWeightsLoader, extract_layer_index,
+                    is_pp_missing_parameter,
                     make_empty_intermediate_tensors_factory, make_layers,
                     maybe_prefix)
 
@@ -85,7 +86,6 @@ class Gemma2MLP(nn.Module):
 class Gemma2Attention(nn.Module):
 
     def __init__(self,
-                 layer_idx: int,
                  config: Gemma2Config,
                  hidden_size: int,
                  num_heads: int,
@@ -95,9 +95,9 @@ class Gemma2Attention(nn.Module):
                  rope_theta: float,
                  cache_config: Optional[CacheConfig] = None,
                  quant_config: Optional[QuantizationConfig] = None,
-                 attn_logits_soft_cap: Optional[float] = None) -> None:
+                 attn_logits_soft_cap: Optional[float] = None,
+                 prefix: str = "") -> None:
         super().__init__()
-        self.layer_idx = layer_idx
         self.config = config
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
@@ -142,19 +142,22 @@ class Gemma2Attention(nn.Module):
             is_neox_style=True,
         )
 
-        # FIXME(woosuk): While Gemma 2 uses sliding window attention for every
-        # odd layer, vLLM currently ignores it and uses global attention for
-        # all layers.
-        use_sliding_window = (layer_idx % 2 == 1
-                              and config.sliding_window is not None)
-        del use_sliding_window  # Unused.
+        # reference:
+        # https://github.com/huggingface/transformers/blob/54be2d7ae87e873482b984cc956e165ca4dc0ba3/src/transformers/models/gemma2/modeling_gemma2.py#L312 # noqa
+        layer_idx = extract_layer_index(prefix)
+        use_sliding_window = (layer_idx % 2 == 0 and
+                              config.interleaved_sliding_window is not None)
+        sliding_window = config.interleaved_sliding_window if \
+            use_sliding_window else None
         self.attn = Attention(self.num_heads,
                               self.head_dim,
                               self.scaling,
                               num_kv_heads=self.num_kv_heads,
                               cache_config=cache_config,
                               quant_config=quant_config,
-                              logits_soft_cap=attn_logits_soft_cap)
+                              logits_soft_cap=attn_logits_soft_cap,
+                              per_layer_sliding_window=sliding_window,
+                              prefix=f"{prefix}.attn")
 
     def forward(
         self,
@@ -175,15 +178,14 @@ class Gemma2DecoderLayer(nn.Module):
 
     def __init__(
         self,
-        layer_idx: int,
         config: Gemma2Config,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
         self.self_attn = Gemma2Attention(
-            layer_idx=layer_idx,
             config=config,
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
@@ -194,6 +196,7 @@ class Gemma2DecoderLayer(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             attn_logits_soft_cap=config.attn_logit_softcapping,
+            prefix=f"{prefix}.self_attn",
         )
         self.hidden_size = config.hidden_size
         self.mlp = Gemma2MLP(
@@ -257,8 +260,8 @@ class Gemma2Model(nn.Module):
         )
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: Gemma2DecoderLayer(int(prefix.split(".")[
-                -1]), config, cache_config, quant_config),
+            lambda prefix: Gemma2DecoderLayer(
+                config, cache_config, quant_config, prefix=prefix),
             prefix=f"{prefix}.layers")
         self.norm = GemmaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
@@ -271,6 +274,9 @@ class Gemma2Model(nn.Module):
         self.make_empty_intermediate_tensors = (
             make_empty_intermediate_tensors_factory(
                 ["hidden_states", "residual"], config.hidden_size))
+
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.embed_tokens(input_ids)
 
     def forward(
         self,
@@ -285,7 +291,7 @@ class Gemma2Model(nn.Module):
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
-                hidden_states = self.embed_tokens(input_ids)
+                hidden_states = self.get_input_embeddings(input_ids)
             hidden_states *= self.normalizer
             residual = None
         else:
@@ -309,7 +315,8 @@ class Gemma2Model(nn.Module):
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
             ("qkv_proj", "q_proj", "q"),
@@ -351,6 +358,7 @@ class Gemma2Model(nn.Module):
             logger.warning(
                 "Some weights are not initialized from checkpoints: %s",
                 unloaded_params)
+        return loaded_params
 
 
 class Gemma2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
@@ -414,6 +422,9 @@ class Gemma2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors)
 
+    def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.get_input_embeddings(input_ids)
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -421,9 +432,11 @@ class Gemma2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         kv_caches: List[torch.Tensor],
         attn_metadata: AttentionMetadata,
         intermediate_tensors: Optional[IntermediateTensors] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         hidden_states = self.model(input_ids, positions, kv_caches,
-                                   attn_metadata, intermediate_tensors)
+                                   attn_metadata, intermediate_tensors,
+                                   inputs_embeds)
         return hidden_states
 
     def compute_logits(
@@ -443,13 +456,14 @@ class Gemma2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         next_tokens = self.sampler(logits, sampling_metadata)
         return next_tokens
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=(["lm_head."]
                            if self.config.tie_word_embeddings else None),
         )
-        loader.load_weights(weights)
+        return loader.load_weights(weights)
 
 
 class Gemma2EmbeddingModel(nn.Module, SupportsPP):
