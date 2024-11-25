@@ -5,6 +5,7 @@ from torch import nn
 from transformers import BertConfig
 
 from vllm.attention import Attention, AttentionMetadata, AttentionType
+from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, PoolerConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
@@ -92,14 +93,14 @@ class BertPooler(nn.Module):
         return pooled_output
 
 
+@support_torch_compile
 class BertEncoder(nn.Module):
 
-    def __init__(self,
-                 config: BertConfig,
-                 cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional[QuantizationConfig] = None,
-                 prefix: str = ""):
+    def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        config = vllm_config.model_config.hf_config
+        cache_config = vllm_config.cache_config
+        quant_config = vllm_config.quant_config
         self.layer = nn.ModuleList([
             BertLayer(config=config,
                       cache_config=cache_config,
@@ -336,12 +337,8 @@ class BertModel(nn.Module):
                  add_pooling_layer: bool = False):
         super().__init__()
         config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
-        quant_config = vllm_config.quant_config
         self.embeddings = embedding_class(config)
-        self.encoder = BertEncoder(config,
-                                   cache_config,
-                                   quant_config,
+        self.encoder = BertEncoder(vllm_config=vllm_config,
                                    prefix=f"{prefix}.encoder")
         self.pooler = BertPooler(config) if add_pooling_layer else None
 
