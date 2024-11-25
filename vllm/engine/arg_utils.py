@@ -131,6 +131,7 @@ class EngineArgs:
     allowed_local_media_path: str = ""
     download_dir: Optional[str] = LoadConfig.download_dir
     load_format: str = LoadConfig.load_format
+    weights_load_device: Optional[str] = None
     config_format: ConfigFormat = ConfigFormat.AUTO
     dtype: str = 'auto'
     kv_cache_dtype: str = 'auto'
@@ -430,7 +431,8 @@ class EngineArgs:
                                 **load_kwargs["model_loader_extra_config"])
         load_group.add_argument('--use-tqdm-on-load',
                                 **load_kwargs["use_tqdm_on_load"])
-
+        load_group.add_argument('--weights-load-device',
+                                **load_kwargs["weights_load_device"])
         parser.add_argument(
             '--config-format',
             default=EngineArgs.config_format,
@@ -456,11 +458,12 @@ class EngineArgs:
         parser.add_argument(
             '--kv-cache-dtype',
             type=str,
-            choices=['auto', 'fp8', 'fp8_e5m2', 'fp8_e4m3'],
+            choices=['auto', 'fp8', 'fp8_e5m2', 'fp8_e4m3', 'fp8_inc'],
             default=EngineArgs.kv_cache_dtype,
             help='Data type for kv cache storage. If "auto", will use model '
             'data type. CUDA 11.8+ supports fp8 (=fp8_e4m3) and fp8_e5m2. '
-            'ROCm (AMD GPU) supports fp8 (=fp8_e4m3)')
+            'ROCm (AMD GPU) supports fp8 (=fp8_e4m3). '
+            'Intel Gaudi (HPU) supports fp8 (using fp8_inc).')
         parser.add_argument('--max-model-len',
                             type=human_readable_int,
                             default=EngineArgs.max_model_len,
@@ -1104,9 +1107,12 @@ class EngineArgs:
 
         if self.quantization == "bitsandbytes":
             self.load_format = "bitsandbytes"
+        if load_device is None:
+            load_device = DeviceConfig(device=self.device).device
         return LoadConfig(
             load_format=self.load_format,
             download_dir=self.download_dir,
+            device=load_device,
             model_loader_extra_config=self.model_loader_extra_config,
             ignore_patterns=self.ignore_patterns,
             use_tqdm_on_load=self.use_tqdm_on_load,
@@ -1311,7 +1317,9 @@ class EngineArgs:
         if model_config.quantization == "bitsandbytes":
             self.quantization = self.load_format = "bitsandbytes"
 
-        load_config = self.create_load_config()
+        load_device = device_config.device if self.weights_load_device is \
+            None else self.weights_load_device
+        load_config = self.create_load_config(load_device)
 
         prompt_adapter_config = PromptAdapterConfig(
             max_prompt_adapters=self.max_prompt_adapters,
