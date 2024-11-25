@@ -81,7 +81,7 @@ class OpenAIServingTokenization(OpenAIServing):
                     add_special_tokens=request.add_special_tokens,
                 )
             else:
-                request_prompts, engine_prompts = self._preprocess_completion(
+                request_prompts, engine_prompts = await self._preprocess_completion(
                     request,
                     tokenizer,
                     request.prompt,
@@ -134,7 +134,7 @@ class OpenAIServingTokenization(OpenAIServing):
         # Silently ignore prompt adapter since it does not affect tokenization
         # (Unlike in Embeddings API where an error is raised)
 
-        prompt_input = self._tokenize_prompt_input(
+        prompt_input = await self._tokenize_prompt_input_async(
             request,
             tokenizer,
             request.tokens,

@@ -46,7 +46,7 @@ from vllm.sequence import Logprob
 from vllm.tracing import (contains_trace_headers, extract_trace_headers,
                           log_tracing_disabled_warning)
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
-from vllm.utils import AtomicCounter, is_list_of
+from vllm.utils import AtomicCounter, is_list_of, make_async
 
 logger = init_logger(__name__)
 
@@ -397,7 +397,49 @@ class OpenAIServing:
                     truncate_prompt_tokens=truncate_prompt_tokens,
                 )
 
-    def _preprocess_completion(
+    async def _tokenize_prompt_input_async(
+                self,
+                request: AnyRequest,
+                tokenizer: AnyTokenizer,
+                prompt_input: Union[str, List[int]],
+                truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
+                add_special_tokens: bool = True,
+        ) -> TextTokensPrompt:
+        return await make_async(self._tokenize_prompt_input)(request=request,
+                                                             tokenizer=tokenizer,
+                                                             prompt_input=prompt_input,
+                                                             truncate_prompt_tokens=truncate_prompt_tokens,
+                                                             add_special_tokens=add_special_tokens)
+
+    async def _tokenize_prompt_inputs_async(
+            self,
+            request: AnyRequest,
+            tokenizer: AnyTokenizer,
+            prompt_inputs: Iterable[Union[str, List[int]]],
+            truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
+            add_special_tokens: bool = True,
+    ) -> Iterator[TextTokensPrompt]:
+        return await make_async(self._tokenize_prompt_inputs)(request=request,
+                                                             tokenizer=tokenizer,
+                                                             prompt_inputs=prompt_inputs,
+                                                             truncate_prompt_tokens=truncate_prompt_tokens,
+                                                             add_special_tokens=add_special_tokens)
+
+    async def _tokenize_prompt_input_or_inputs_async(
+            self,
+            request: AnyRequest,
+            tokenizer: AnyTokenizer,
+            input_or_inputs: Union[str, List[str], List[int], List[List[int]]],
+            truncate_prompt_tokens: Optional[Annotated[int, Field(ge=1)]] = None,
+            add_special_tokens: bool = True,
+    ) -> Iterator[TextTokensPrompt]:
+        return await make_async(self._tokenize_prompt_input_or_inputs)(request=request,
+                                                                       tokenizer=tokenizer,
+                                                                       input_or_inputs=input_or_inputs,
+                                                                       truncate_prompt_tokens=truncate_prompt_tokens,
+                                                                       add_special_tokens=add_special_tokens)
+
+    async def _preprocess_completion(
         self,
         request: CompletionLikeRequest,
         tokenizer: AnyTokenizer,
@@ -407,7 +449,7 @@ class OpenAIServing:
     ) -> Tuple[Sequence[TextTokensPrompt], List[TokensPrompt]]:
         request_prompts = [
             request_prompt
-            for request_prompt in self._tokenize_prompt_input_or_inputs(
+            for request_prompt in await self._tokenize_prompt_input_or_inputs_async(
                 request,
                 tokenizer,
                 input_or_inputs,
@@ -493,7 +535,7 @@ class OpenAIServing:
                 request=request)
 
         if isinstance(request_prompt, str):
-            prompt_inputs = self._tokenize_prompt_input(
+            prompt_inputs = await self._tokenize_prompt_input_async(
                 request,
                 tokenizer,
                 request_prompt,

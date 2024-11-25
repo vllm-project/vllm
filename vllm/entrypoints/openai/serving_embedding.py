@@ -156,7 +156,7 @@ class OpenAIServingEmbedding(OpenAIServing):
                     add_special_tokens=request.add_special_tokens,
                 )
             else:
-                request_prompts, engine_prompts = self._preprocess_completion(
+                request_prompts, engine_prompts = await self._preprocess_completion(
                     request,
                     tokenizer,
                     request.input,
