@@ -136,7 +136,6 @@ class Worker:
             You may limit the usage of GPU memory
             by adjusting the `gpu_memory_utilization` parameter.
         """
-        logger.info("determining num available blocks.")
         # Profile the memory usage of the model and get the maximum number of
         # cache blocks that can be allocated with the remaining free memory.
         torch.cuda.empty_cache()
@@ -191,8 +190,6 @@ class Worker:
                              "Try increasing `gpu_memory_utilization` when "
                              "initializing the engine.")
 
-        logger.info("initializing cache.")
-
         max_seq_len = self.cache_config.block_size * num_gpu_blocks
         max_model_len = self.model_config.max_model_len
         if max_model_len > max_seq_len:
@@ -206,7 +203,6 @@ class Worker:
         self.model_runner.initialize_kv_cache(num_gpu_blocks)
 
     def compile_or_warm_up_model(self) -> None:
-        logger.info("compiling/warming up model.")
         if not self.model_config.enforce_eager:
             self.model_runner.capture_model()
         # Reset the seed to ensure that the random state is not affected by
@@ -297,7 +293,6 @@ class WorkerProc:
             input_shm_handle, self.worker.rank)
 
         # Send Readiness signal to EngineCore process.
-        logger.info("sending ready.")
         with make_zmq_socket(ready_path, zmq.constants.PUSH) as ready_socket:
             ready_socket.send_string(WorkerProc.READY_STR)
 
@@ -314,16 +309,8 @@ class WorkerProc:
         else:
             self.model_output_mq = None
 
-        logger.info("initializing model.")
         self.worker.initialize()
-        logger.info("loading model.")
         self.worker.load_model()
-        logger.info("done loading model.")
-
-    # TODO: WHY is this needed?
-    def __del__(self):
-        if hasattr(self, "model_output_mq"):
-            del self.model_output_mq
 
     @staticmethod
     def make_worker_process(
@@ -395,9 +382,6 @@ class WorkerProc:
         except BaseException as e:
             logger.exception(e)
             raise e
-        finally:
-            del worker
-            exit(0)
 
     @staticmethod
     def wait_for_startup(
@@ -480,7 +464,6 @@ class WorkerProc:
 
     # Main busy loop for Multiprocessing Workers
     def execute_model_busy_loop(self):
-        logger.info("Begin model execution busy loop.")
         with torch.profiler.profile(
                 activities=[
                     torch.profiler.ProfilerActivity.CPU,
