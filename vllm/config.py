@@ -3200,7 +3200,7 @@ class VllmConfig:
 
         n_slices = self.parallel_config.world_size
         max_tokens = self.scheduler_config.max_num_batched_tokens
-        if not use_cc_kernels(max_tokens / n_slices, n_slices):
+        if not use_cc_kernels(int(max_tokens / n_slices), n_slices):
             logger.info(
                 ("Disabling collective fusion pass since chunked prefill size "
                  "%d is too small."), max_tokens)
