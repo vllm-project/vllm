@@ -565,50 +565,56 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             (seq_id, seq_data) for sg in \
             execute_model_req.seq_group_metadata_list \
             for seq_id, seq_data in sg.seq_data.items()
-            if sg.do_sample # ignore empty token sequences
         ]
         completion_seq_group_output_list: List[
             CompletionSequenceGroupOutput] = []
         output_index = 0
         # Make sure the non-terminal prefill chunks are still aligned with
         # their own empty output.
-        for seq_group_meta in execute_model_req.seq_group_metadata_list:
+        for idx, seq_group_meta in enumerate(execute_model_req.seq_group_metadata_list):
+            needs_prompt_logprobs = seq_output_prompt_logprobs[idx]
+            seq_id, seq_data = seq_data_entries[idx]
+            if needs_prompt_logprobs:
+                prompt_token_ids = seq_data.get_prompt_token_ids()
+                
+                # Some of these sequences may belong to non-terminal chunks, 
+                # which may still have to report logprobs for prompts.
+                start = 1 if seq_data._num_computed_tokens == 0 \
+                    else seq_data._num_computed_tokens
+                end = seq_data._num_computed_tokens+seq_group_meta.token_chunk_size
+                prompt_token_ids = prompt_token_ids[start:end]
+                prompt_logprobs = [
+                    create_logprobs_output(
+                        token_id=p_token_id,
+                        token_id_logprob_rank=-1,
+                        token_id_logprob=0.0,
+                        topk_token_ids=[],
+                        topk_logprobs=[],
+                    )
+                    for p_token_id in prompt_token_ids
+                ]
+            else:
+                prompt_logprobs = None
+            
             # Since we can get chunks here, we dont always have a sampled token
             # (only on last chunk) but we still have to provide an output.
             if not seq_group_meta.do_sample:
                 completion_seq_group_output_list.append(
                     CompletionSequenceGroupOutput(samples=[],
-                                                  prompt_logprobs=None))
-            else:
-                # Sequence with output.
-                seq_id, seq_data = seq_data_entries[output_index]
-                needs_prompt_logprobs = seq_output_prompt_logprobs[
-                    output_index]
-                if needs_prompt_logprobs:
-                    prompt_token_ids = seq_data.get_prompt_token_ids()
-                    prompt_logprobs = [
-                        create_logprobs_output(
-                            token_id=p_token_id,
-                            token_id_logprob_rank=-1,
-                            token_id_logprob=0.0,
-                            topk_token_ids=[],
-                            topk_logprobs=[],
-                        )
-                        # no prompt logprobs for the first token
-                        for p_token_id in prompt_token_ids[1:]
-                    ]
-                else:
-                    prompt_logprobs = None
-                completion_seq_group_output_list.append(
-                    create_sequence_group_output(
-                        token_id=sampled_token_ids_list[output_index][0],
-                        token_id_logprob_rank=-1,
-                        token_id_logprob=0.0,
-                        seq_id=seq_id,
-                        topk_token_ids=[],
-                        topk_logprobs=[],
-                        prompt_logprobs=prompt_logprobs))
-                output_index += 1
+                                                  prompt_logprobs=prompt_logprobs))
+                continue
+            
+            # Sequence with output.
+            completion_seq_group_output_list.append(
+                create_sequence_group_output(
+                    token_id=sampled_token_ids_list[output_index][0],
+                    token_id_logprob_rank=-1,
+                    token_id_logprob=0.0,
+                    seq_id=seq_id,
+                    topk_token_ids=[],
+                    topk_logprobs=[],
+                    prompt_logprobs=prompt_logprobs))
+            output_index += 1
 
         return [SamplerOutput(outputs=completion_seq_group_output_list)]
 

@@ -209,7 +209,7 @@ class BatchExpansionTop1Scorer(SpeculativeScorer):
                 nospec_sampled_token_idxs = torch.cumsum(nospec_sizes, 0).add_(-1)
             else:
                 # In this case only sampled tokens are returned, select all.
-                nospec_sampled_token_idxs = list(range(non_spec_target_token_ids))
+                nospec_sampled_token_idxs = list(range(len(non_spec_target_token_ids)))
 
             all_tokens[non_spec_indices, :1] = \
                 non_spec_target_token_ids[nospec_sampled_token_idxs].unsqueeze(1)
