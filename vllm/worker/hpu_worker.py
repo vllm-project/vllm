@@ -166,7 +166,9 @@ class HPUWorker(LocalOrDistributedWorkerBase):
         if is_fake_hpu():
             cache_block_size = self.get_cache_block_size_bytes()
             fake_hpu_cache_alloc = 4 * 2**30  # take 4 GiB flat on fake hpu
-            return fake_hpu_cache_alloc // cache_block_size, 0
+            num_fake_hpu_blocks = fake_hpu_cache_alloc // cache_block_size
+            self.model_runner.bucketing_ctx.num_hpu_blocks = num_fake_hpu_blocks
+            return num_fake_hpu_blocks, 0
         with HabanaMemoryProfiler() as m:
             self.model_runner.profile_run()
             torch.hpu.synchronize()
@@ -202,6 +204,8 @@ class HPUWorker(LocalOrDistributedWorkerBase):
                              cache_block_size)
         num_hpu_blocks = max(num_hpu_blocks, 0)
         num_cpu_blocks = max(num_cpu_blocks, 0)
+
+        self.model_runner.bucketing_ctx.num_hpu_blocks = num_hpu_blocks
 
         if self.model_runner.lora_manager:
             self.model_runner.remove_all_loras()
