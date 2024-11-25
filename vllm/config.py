@@ -2397,7 +2397,7 @@ class VllmConfig:
                 "Turing devices tensor cores do not support float32 matmul. "
                 "To workaround this limitation, vLLM will set 'ieee' input "
                 "precision for chunked prefill triton kernels.")
-            
+
         if self.compilation_config is None:
             self.compilation_config = CompilationConfig()
         if envs.VLLM_USE_V1 and not self.model_config.enforce_eager:

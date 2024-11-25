@@ -507,7 +507,6 @@ def test_contexted_kv_attention_f32(
                                 sliding_window, dtype, kv_cache_dtype, device)
 
 
-# There are few instances that are failing.
 @pytest.mark.optional
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("num_queries_per_kv", NUM_QUERIES_PER_KV)
