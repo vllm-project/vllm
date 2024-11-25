@@ -68,7 +68,7 @@ class GuidanceLogitsProcessor:
                 "whitespace_flexible", False)
             compiler = llguidance.JsonCompiler(
                 whitespace_flexible=whitespace_flexible)
-            self.serialized_grammar = json.loads(compiler.compile(schema))
+            self.serialized_grammar = compiler.compile(schema)
         elif self.mode.lower() in ["regex", "choice"]:
             compiler = llguidance.RegexCompiler()
             self.serialized_grammar = compiler.compile(regex=self.guide)
