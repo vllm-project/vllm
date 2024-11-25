@@ -22,28 +22,27 @@ from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
 import torch
 from torch import nn
 from transformers import PretrainedConfig
-from vllm.config import CacheConfig, VllmConfig
+
 from vllm.attention import AttentionMetadata
+from vllm.config import CacheConfig, VllmConfig
 from vllm.model_executor.layers.linear import RowParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
 from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    ParallelLMHead)
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader)
+from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.models.llama import (LlamaAttention,
+                                              LlamaDecoderLayer, LlamaMLP,
+                                              LlamaModel)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
-from vllm.model_executor.models.llama import LlamaModel
-from vllm.model_executor.models.llama import LlamaMLP
-from vllm.model_executor.models.llama import LlamaAttention
-from vllm.model_executor.models.llama import LlamaDecoderLayer
-from .utils import (AutoWeightsLoader, 
-    WeightsMapper, make_layers, maybe_prefix)
+
+from .utils import AutoWeightsLoader, WeightsMapper, make_layers, maybe_prefix
 
 
 class TeleChat2MLP(LlamaMLP):
+
     def __init__(
         self,
         hidden_size: int,
@@ -53,33 +52,33 @@ class TeleChat2MLP(LlamaMLP):
         bias: bool = False,
         prefix: str = "",
     ) -> None:
-        super().__init__(hidden_size, intermediate_size, 
-            hidden_act, quant_config, bias, prefix)
+        super().__init__(hidden_size, intermediate_size, hidden_act,
+                         quant_config, bias, prefix)
         self.down_proj = RowParallelLinear(
             input_size=intermediate_size,
             output_size=hidden_size,
-            bias=True, 
+            bias=True,
             quant_config=quant_config,
         )
-    
+
 
 class TeleChat2Attention(LlamaAttention):
-    def __init__(
-        self,
-        config,
-        hidden_size: int,
-        num_heads: int,
-        num_kv_heads: int,
-        rope_theta: float = 10000,
-        rope_scaling: Optional[Dict[str, Any]] = None,
-        max_position_embeddings: int = 8192,
-        quant_config: Optional[QuantizationConfig] = None,
-        bias: bool = False,
-        cache_config: Optional[CacheConfig] = None,
-        prefix: str = "") -> None:
-        super().__init__(config,hidden_size,num_heads,num_kv_heads,
-            rope_theta,rope_scaling,max_position_embeddings,
-            quant_config,bias,cache_config,prefix)
+
+    def __init__(self,
+                 config,
+                 hidden_size: int,
+                 num_heads: int,
+                 num_kv_heads: int,
+                 rope_theta: float = 10000,
+                 rope_scaling: Optional[Dict[str, Any]] = None,
+                 max_position_embeddings: int = 8192,
+                 quant_config: Optional[QuantizationConfig] = None,
+                 bias: bool = False,
+                 cache_config: Optional[CacheConfig] = None,
+                 prefix: str = "") -> None:
+        super().__init__(config, hidden_size, num_heads, num_kv_heads,
+                         rope_theta, rope_scaling, max_position_embeddings,
+                         quant_config, bias, cache_config, prefix)
         self.o_proj = RowParallelLinear(
             input_size=hidden_size,
             output_size=hidden_size,
@@ -91,7 +90,9 @@ class TeleChat2Attention(LlamaAttention):
 
 
 class TeleChat2DecoderLayer(LlamaDecoderLayer):
-    def __init__(self,
+
+    def __init__(
+        self,
         config: PretrainedConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
@@ -132,6 +133,7 @@ class TeleChat2DecoderLayer(LlamaDecoderLayer):
 
 
 class TeleChat2Model(LlamaModel):
+
     def __init__(self, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         config = vllm_config.model_config.hf_config
@@ -140,12 +142,12 @@ class TeleChat2Model(LlamaModel):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: TeleChat2DecoderLayer(config=config,
-                                             cache_config=cache_config,
-                                             quant_config=quant_config,
-                                             prefix=f"{prefix}.layers"),
+                                                 cache_config=cache_config,
+                                                 quant_config=quant_config,
+                                                 prefix=f"{prefix}.layers"),
             prefix=f"{prefix}.layers",
         )
-        
+
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
         stacked_params_mapping = [
@@ -163,11 +165,12 @@ class TeleChat2Model(LlamaModel):
                 v_weight = []
                 #name = name.replace(".self_attention.", ".self_attn.")
                 for i in range(total_num_heads):
-                    start =i * head_dim * 2
-                    k_weight.append(loaded_weight[start:start+head_dim,:])
-                    v_weight.append(loaded_weight[start+head_dim:start+2*head_dim:])
-                k_weight = torch.cat(k_weight,dim=0)
-                v_weight = torch.cat(v_weight,dim=0)
+                    start = i * head_dim * 2
+                    k_weight.append(loaded_weight[start:start + head_dim, :])
+                    v_weight.append(loaded_weight[start + head_dim:start +
+                                                  2 * head_dim:])
+                k_weight = torch.cat(k_weight, dim=0)
+                v_weight = torch.cat(v_weight, dim=0)
                 name = name.replace("key_value", "qkv_proj")
                 param = params_dict[name]
                 weight_loader = param.weight_loader
@@ -192,10 +195,10 @@ class TeleChat2Model(LlamaModel):
                 else:
                     param = params_dict[name]
                     weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
+                                            default_weight_loader)
                     weight_loader(param, loaded_weight)
         return loaded_params
-    
+
 
 class TeleChat2ForCausalLM(nn.Module):
 
@@ -209,16 +212,13 @@ class TeleChat2ForCausalLM(nn.Module):
         config.tie_word_embeddings = False
         self.config = config
         self.model = TeleChat2Model(vllm_config=vllm_config,
-                                prefix=maybe_prefix(prefix, "transformer"))
+                                    prefix=maybe_prefix(prefix, "transformer"))
 
-        self.lm_head = ParallelLMHead(
-            config.vocab_size,
-            config.hidden_size,
-            bias=False,
-            quant_config=quant_config,
-            prefix=maybe_prefix(
-                prefix, "lm_head")
-        )
+        self.lm_head = ParallelLMHead(config.vocab_size,
+                                      config.hidden_size,
+                                      bias=False,
+                                      quant_config=quant_config,
+                                      prefix=maybe_prefix(prefix, "lm_head"))
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
 
@@ -270,12 +270,12 @@ class TeleChat2ForCausalLM(nn.Module):
                 "transformer.": "model.",
             },
             orig_to_new_substr={
-                ".h.":".layers.",
-                ".self_attention.":".self_attn.",
-                ".word_embeddings.":".embed_tokens.",
-                ".dense.":".o_proj.",
-                ".ln_f.":".norm.",
-                },
+                ".h.": ".layers.",
+                ".self_attention.": ".self_attn.",
+                ".word_embeddings.": ".embed_tokens.",
+                ".dense.": ".o_proj.",
+                ".ln_f.": ".norm.",
+            },
         )
         loader = AutoWeightsLoader(
             self,
