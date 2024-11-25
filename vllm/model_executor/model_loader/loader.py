@@ -2,7 +2,6 @@
 import collections
 import copy
 import dataclasses
-import enum
 import fnmatch
 import glob
 import inspect
@@ -12,7 +11,6 @@ import math
 import os
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
-from dataclasses import dataclass
 from typing import Any, Dict, Generator, Iterable, List, Optional, Tuple, cast
 
 import gguf
@@ -30,8 +28,7 @@ from vllm.distributed import (get_tensor_model_parallel_rank,
                               get_tensor_model_parallel_world_size)
 from vllm.envs import VLLM_USE_MODELSCOPE
 from vllm.logger import init_logger
-from vllm.model_executor.layers.linear import (ColumnParallelLinear,
-                                               MergedColumnParallelLinear,
+from vllm.model_executor.layers.linear import (MergedColumnParallelLinear,
                                                QKVParallelLinear,
                                                ReplicatedLinear,
                                                RowParallelLinear)
@@ -52,24 +49,6 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.plugins import set_current_vllm_config
 from vllm.utils import is_pin_memory_available
-
-
-class ShardMethod(str, enum.Enum):
-    # Applicable for `ReplicatedLinear`
-    SHARD_NONE = "no shard"
-    # Applicable for `RowParallelLinear`
-    SHARD_BY_COLUMN = "sharded by column"
-    # Applicable for `ColumnParallelLinear`
-    SHARD_BY_ROW = "sharded by row"
-
-
-@dataclass
-class ModuleProperty:
-    """
-    A class representing linear sharding configuration for a module.
-    """
-    module_name: str
-    shard_method: ShardMethod
 
 
 @contextmanager
@@ -709,8 +688,11 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
     def __init__(self, load_config: LoadConfig):
         super().__init__(load_config)
-        self.support_modules: Dict[str, ModuleProperty] = {}
 
+        # Save the module names without sharding.
+        self.unsharded_weights_modules: List[str] = []
+        # Save the module names that are sharded by column.
+        self.column_sharded_weights_modules: List[str] = []
         # we don't need to quantize the whole model, only the target modules
         # that are specified in the adapter config file. If the adapter config
         # file is not provided, we will quantize the default modules.
@@ -940,15 +922,18 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
         for weight_name, weight_tensor in self._hf_weight_iter(
                 hf_weights_files, use_safetensors):
-            if not weight_name.endswith(".weight"):
-                continue
 
-            if target_module := self.support_modules.get(weight_name, False):
+            if any(target_module in weight_name for target_module in
+                   self.target_modules) and weight_name.endswith(".weight"):
                 # Without sharding
-                if target_module.shard_method == ShardMethod.SHARD_NONE:
+                if any(
+                        weight_name.startswith(module)
+                        for module in self.unsharded_weights_modules):
                     weight_sub_tensor = weight_tensor
                 # Shard by column
-                elif target_module.shard_method == ShardMethod.SHARD_BY_COLUMN:
+                elif any(
+                        weight_name.startswith(module)
+                        for module in self.column_sharded_weights_modules):
                     total_size = weight_tensor.size(-1)
                     start_index = total_size // tp_size * tp_rank
                     end_index = total_size // tp_size * (tp_rank + 1)
@@ -1013,90 +998,8 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
             yield weight_name, processed_weight
 
-    def _get_support_modules(self, model: nn.Module) -> None:
-
-        class ModuleSource(str, enum.Enum):
-            FROM_TARGET = "come from self.target_modules"
-            FROM_MODEL = "come from model"
-
-        def convert_mapping(original_dict):
-            new_dict = {}
-            for param_name, (shard_name, index) in original_dict.items():
-                if shard_name not in new_dict:
-                    new_dict[shard_name] = [None] * (
-                        max(v[1] for v in original_dict.values()
-                            if v[0] == shard_name) + 1)
-                new_dict[shard_name][index] = param_name
-            return new_dict
-
-        #TODO: Maybe we can replace bitsandbytes_stacked_params_mapping with
-        #packed_modules_mapping.
-        stacked_mapping = model.bitsandbytes_stacked_params_mapping
-        inverse_stacked_mapping = convert_mapping(stacked_mapping)
-
-        # If `self.target_modules` is not empty, the module names stored inside
-        #  correspond to the original transformers names, and these names need
-        # to be aligned with vllm's module names.
-        for index in range(len(self.target_modules)):
-            if (maybe_merged_module :=
-                    stacked_mapping.get(self.target_modules[index], None)):
-                self.target_modules[index] = maybe_merged_module[0]
-        self.target_modules = list(set(self.target_modules))
-
-        if self.target_modules:
-            # Determine the supported modules based on `self.target_modules`
-            module_candidate = ((name, module, ModuleSource.FROM_TARGET)
-                                for name, module in model.named_modules()
-                                if any(t in name for t in self.target_modules))
-        else:
-            # All vllm linear modules support quantization.
-            module_candidate = ((name, module, ModuleSource.FROM_MODEL)
-                                for name, module in model.named_modules())
-
-        for name, module, moudle_source in module_candidate:
-            qual_name = name + ".weight"
-            if isinstance(module, (ReplicatedLinear, )):
-                self.support_modules[qual_name] = ModuleProperty(
-                    qual_name, ShardMethod.SHARD_NONE)
-            # In TP, these weights are partitioned along the column
-            # dimension (dim=-1)
-            elif isinstance(module, (RowParallelLinear, )):
-                self.support_modules[qual_name] = ModuleProperty(
-                    qual_name, ShardMethod.SHARD_BY_COLUMN)
-            # In TP, these weights are partitioned along the row
-            # dimension (dim=0)
-            elif isinstance(module, (ColumnParallelLinear, )):
-                if isinstance(
-                        module,
-                    (MergedColumnParallelLinear, QKVParallelLinear),
-                ):
-                    # For these 2 merged linear types, they need to be split
-                    # into 2-3 modules according to stacked_params_mapping,
-                    # for example:
-                    #  "qkv_proj" -> ["q_proj", "k_proj", "v_proj"]
-                    last_name = name.split(".")[-1]
-                    for replaced_name in inverse_stacked_mapping.get(
-                            last_name, []):
-                        replaced_name = qual_name.replace(
-                            last_name, replaced_name)
-                        self.support_modules[replaced_name] = ModuleProperty(
-                            replaced_name, ShardMethod.SHARD_BY_ROW)
-                else:
-                    self.support_modules[qual_name] = ModuleProperty(
-                        qual_name, ShardMethod.SHARD_BY_ROW)
-            # There are BNB quantization modules that current vllm does not
-            # support, providing a warning to help debug.
-            elif moudle_source == ModuleSource.FROM_TARGET:
-                logger.warning(
-                    "vllm currently does not support BNB quantization"
-                    "for {%s} in {%s}",
-                    qual_name,
-                    self.target_modules,
-                )
-
     def _load_weights(self, model_config: ModelConfig,
                       model: nn.Module) -> None:
-
         if not hasattr(model, 'load_weights'):
             raise AttributeError(
                 "The required method 'load_weights' is not defined in class"
