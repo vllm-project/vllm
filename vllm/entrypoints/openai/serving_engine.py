@@ -140,9 +140,12 @@ class OpenAIServing:
         self.request_logger = request_logger
         self.return_tokens_as_token_ids = return_tokens_as_token_ids
 
-        self._tokenize_prompt_input_async = make_async(self._tokenize_prompt_input)
-        self._tokenize_prompt_inputs_async = make_async(self._tokenize_prompt_inputs)
-        self._tokenize_prompt_input_or_inputs_async = make_async(self._tokenize_prompt_input_or_inputs)
+        self._tokenize_prompt_input_async = make_async(
+            self._tokenize_prompt_input)
+        self._tokenize_prompt_inputs_async = make_async(
+            self._tokenize_prompt_inputs)
+        self._tokenize_prompt_input_or_inputs_async = make_async(
+            self._tokenize_prompt_input_or_inputs)
 
     async def show_available_models(self) -> ModelList:
         """Show available models. Right now we only have one model."""
