@@ -829,6 +829,20 @@ async def test_inconsistent_tool_choice_and_tools(client: openai.AsyncOpenAI,
                     "name": "nondefined_function_name"
                 }
             })
+    with pytest.raises(openai.BadRequestError):
+        await client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=messages,
+            max_completion_tokens=1000,
+            tools=[{
+                "type": "function",
+                "function": {
+                    "name": "dummy_function_name",
+                    "description": "This is a dummy function",
+                    "parameters": sample_json_schema
+                }
+            }],
+            tool_choice={})
 
 
 @pytest.mark.asyncio
@@ -899,19 +913,19 @@ async def test_response_format_json_schema(client: openai.AsyncOpenAI):
 
 
 @pytest.mark.asyncio
-async def test_extra_fields(client: openai.AsyncOpenAI):
-    with pytest.raises(BadRequestError) as exc_info:
-        await client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[{
-                "role": "system",
-                "content": "You are a helpful assistant.",
-                "extra_field": "0",
-            }],  # type: ignore
-            temperature=0,
-            seed=0)
+async def test_extra_fields_allowed(client: openai.AsyncOpenAI):
+    resp = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=[{
+            "role": "user",
+            "content": "what is 1+1?",
+            "extra_field": "0",
+        }],  # type: ignore
+        temperature=0,
+        seed=0)
 
-    assert "extra_forbidden" in exc_info.value.message
+    content = resp.choices[0].message.content
+    assert content is not None
 
 
 @pytest.mark.asyncio

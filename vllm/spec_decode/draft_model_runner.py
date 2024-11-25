@@ -18,7 +18,7 @@ except (ModuleNotFoundError, ImportError) as err:
         "CUDA and ROCm flash attention backend.") from err
 
 from vllm.logger import init_logger
-from vllm.multimodal import MultiModalInputs
+from vllm.multimodal import MultiModalKwargs
 from vllm.sequence import ExecuteModelRequest, IntermediateTensors
 from vllm.worker.model_runner import (ModelInputForGPUWithSamplingMetadata,
                                       ModelRunner)
@@ -273,14 +273,15 @@ class TP1DraftModelRunner(ModelRunner):
                 if previous_hidden_states is not None else {}
 
             # Run model
-            with set_forward_context(model_input.attn_metadata):
+            with set_forward_context(model_input.attn_metadata,
+                                     self.vllm_config):
                 hidden_states = model_executable(
                     input_ids=model_input.input_tokens,
                     positions=model_input.input_positions,
                     kv_caches=kv_caches,
                     attn_metadata=model_input.attn_metadata,
                     intermediate_tensors=intermediate_tensors,
-                    **MultiModalInputs.as_kwargs(multi_modal_kwargs,
+                    **MultiModalKwargs.as_kwargs(multi_modal_kwargs,
                                                  device=self.device),
                     **kwargs,
                 )

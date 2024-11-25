@@ -1,13 +1,20 @@
 import functools
 from collections import UserDict
-from typing import TYPE_CHECKING, Any, Dict, Mapping, Optional, Sequence
+from typing import (TYPE_CHECKING, Any, Callable, Dict, Mapping, Optional,
+                    Sequence, Type, TypeVar)
 
+import torch.nn as nn
+from typing_extensions import TypeAlias
+
+from vllm.inputs import InputProcessingContext
 from vllm.logger import init_logger
+from vllm.transformers_utils.tokenizer import AnyTokenizer
 
 from .audio import AudioPlugin
-from .base import (MultiModalDataDict, MultiModalInputMapper, MultiModalInputs,
-                   MultiModalPlugin, MultiModalTokensCalc, NestedTensors)
+from .base import MultiModalInputMapper, MultiModalPlugin, MultiModalTokensCalc
 from .image import ImagePlugin
+from .inputs import MultiModalDataDict, MultiModalKwargs, NestedTensors
+from .processing import MultiModalProcessor
 from .video import VideoPlugin
 
 if TYPE_CHECKING:
@@ -15,8 +22,18 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+N = TypeVar("N", bound=Type[nn.Module])
 
-class _MultiModalLimits(UserDict):
+MultiModalProcessorFactory: TypeAlias = Callable[[InputProcessingContext],
+                                                 MultiModalProcessor]
+"""
+Constructs a :class:`MultiModalProcessor` instance from the context.
+
+The processing metadata should be derived from the context.
+"""
+
+
+class _MultiModalLimits(UserDict["ModelConfig", Dict[str, int]]):
     """
     Wraps `_limits_by_model` for a more informative error message
     when attempting to access a model that does not exist.
@@ -44,6 +61,9 @@ class MultiModalRegistry:
             *,
             plugins: Sequence[MultiModalPlugin] = DEFAULT_PLUGINS) -> None:
         self._plugins = {p.get_data_key(): p for p in plugins}
+
+        self._processor_factories: Dict[Type[nn.Module],
+                                        MultiModalProcessorFactory] = {}
 
         # This is used for non-multimodal models
         self._disabled_limits_per_plugin = {k: 0 for k in self._plugins}
@@ -103,7 +123,7 @@ class MultiModalRegistry:
         model_config: "ModelConfig",
         data: MultiModalDataDict,
         mm_processor_kwargs: Optional[Dict[str, Any]] = None,
-    ) -> MultiModalInputs:
+    ) -> MultiModalKwargs:
         """
         Apply an input mapper to the data passed to the model.
 
@@ -139,7 +159,7 @@ class MultiModalRegistry:
 
                 merged_dict[input_key] = input_tensor
 
-        return MultiModalInputs(merged_dict)
+        return MultiModalKwargs(merged_dict)
 
     def create_input_mapper(self, model_config: "ModelConfig"):
         """
@@ -243,3 +263,59 @@ class MultiModalRegistry:
             This should be called after :meth:`init_mm_limits_per_prompt`.
         """
         return self._limits_by_model[model_config]
+
+    def register_processor(
+        self,
+        factory: MultiModalProcessorFactory,
+    ):
+        """
+        Register a multi-modal processor to a model class.
+
+        When the model receives multi-modal data, the provided function is
+        invoked to transform the data into a dictionary of model inputs.
+
+        See also:
+            - :ref:`input_processing_pipeline`
+            - :ref:`enabling_multimodal_inputs`
+        """
+
+        def wrapper(model_cls: N) -> N:
+            if model_cls in self._processor_factories:
+                logger.warning(
+                    "Model class %s already has an input mapper "
+                    "registered to %s. It is overwritten by the new one.",
+                    model_cls, self)
+
+            self._processor_factories[model_cls] = factory
+
+            return model_cls
+
+        return wrapper
+
+    def has_processor(self, model_config: "ModelConfig") -> bool:
+        """
+        Test whether a multi-modal processor is defined for a specific model.
+        """
+        # Avoid circular import
+        from vllm.model_executor.model_loader import get_model_architecture
+
+        model_cls, _ = get_model_architecture(model_config)
+        return model_cls in self._processor_factories
+
+    def create_processor(
+        self,
+        model_config: "ModelConfig",
+        tokenizer: AnyTokenizer,
+    ) -> MultiModalProcessor:
+        """
+        Create a multi-modal processor for a specific model and tokenizer.
+        """
+
+        # Avoid circular import
+        from vllm.model_executor.model_loader import get_model_architecture
+
+        model_cls, _ = get_model_architecture(model_config)
+        processor_factory = self._processor_factories[model_cls]
+
+        ctx = InputProcessingContext(model_config, tokenizer)
+        return processor_factory(ctx)
