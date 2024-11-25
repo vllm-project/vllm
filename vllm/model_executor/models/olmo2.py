@@ -26,7 +26,6 @@ from typing import Iterable, List, Optional, Tuple, Union
 
 import torch
 from torch import nn
-from transformers import Olmo2Config
 
 from vllm.attention import Attention, AttentionMetadata
 from vllm.config import VllmConfig
@@ -51,6 +50,7 @@ from vllm.model_executor.models.utils import (
     make_layers, maybe_prefix)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.configs.olmo2 import Olmo2Config
 
 
 class Olmo2Attention(nn.Module):
