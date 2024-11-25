@@ -218,7 +218,7 @@ def ipex_attn_chunked_prefill(
     # )
     
     attn_output = torch.ops.torch_ipex.chunked_prefill(
-            query[:num_actual_tokens],
+            query[:num_actual_tokens].contiguous(),
             key_cache,
             value_cache,
             output,
