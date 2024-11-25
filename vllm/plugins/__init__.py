@@ -3,6 +3,8 @@ import os
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Optional
 
+import torch
+
 import vllm.envs as envs
 
 if TYPE_CHECKING:
@@ -12,14 +14,6 @@ logger = logging.getLogger(__name__)
 
 # make sure one process only loads plugins once
 plugins_loaded = False
-
-
-def _force_torch_inductor_compile_threads(thread_num: int):
-    import torch
-
-    # see https://github.com/vllm-project/vllm/issues/10619
-    # A hacky way to limit the number of threads
-    torch._inductor.config.compile_threads = thread_num
 
 
 def load_general_plugins():
@@ -34,7 +28,8 @@ def load_general_plugins():
 
     # see https://github.com/vllm-project/vllm/issues/10480
     os.environ['TORCHINDUCTOR_COMPILE_THREADS'] = '1'
-    _force_torch_inductor_compile_threads(thread_num=1)
+    # see https://github.com/vllm-project/vllm/issues/10619
+    torch._inductor.config.compile_threads = 1
     global plugins_loaded
     if plugins_loaded:
         return
