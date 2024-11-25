@@ -1,15 +1,35 @@
 import enum
 import random
-from typing import NamedTuple, Optional, Tuple, Union
+from typing import TYPE_CHECKING, NamedTuple, Optional, Tuple, Union
 
 import numpy as np
 import torch
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
+else:
+    VllmConfig = None
+
+
+class _Backend(enum.Enum):
+    FLASH_ATTN = enum.auto()
+    FLASH_ATTN_VLLM_V1 = enum.auto()
+    XFORMERS = enum.auto()
+    ROCM_FLASH = enum.auto()
+    TORCH_SDPA = enum.auto()
+    OPENVINO = enum.auto()
+    FLASHINFER = enum.auto()
+    HPU_ATTN = enum.auto()
+    PALLAS = enum.auto()
+    IPEX = enum.auto()
+    NO_ATTENTION = enum.auto()
 
 
 class PlatformEnum(enum.Enum):
     CUDA = enum.auto()
     ROCM = enum.auto()
     TPU = enum.auto()
+    HPU = enum.auto()
     XPU = enum.auto()
     CPU = enum.auto()
     NEURON = enum.auto()
@@ -36,6 +56,11 @@ class DeviceCapability(NamedTuple):
 
 class Platform:
     _enum: PlatformEnum
+    device_type: str
+    # available dispatch keys:
+    # check https://github.com/pytorch/pytorch/blob/313dac6c1ca0fa0cde32477509cce32089f8532a/torchgen/model.py#L134 # noqa
+    # use "CPU" as a fallback for platforms not registered in PyTorch
+    dispatch_key: str = "CPU"
 
     def is_cuda(self) -> bool:
         return self._enum == PlatformEnum.CUDA
@@ -45,6 +70,9 @@ class Platform:
 
     def is_tpu(self) -> bool:
         return self._enum == PlatformEnum.TPU
+
+    def is_hpu(self) -> bool:
+        return self._enum == PlatformEnum.HPU
 
     def is_xpu(self) -> bool:
         return self._enum == PlatformEnum.XPU
@@ -61,6 +89,11 @@ class Platform:
     def is_cuda_alike(self) -> bool:
         """Stateless version of :func:`torch.cuda.is_available`."""
         return self._enum in (PlatformEnum.CUDA, PlatformEnum.ROCM)
+
+    @classmethod
+    def get_default_attn_backend(cls, selected_backend: _Backend):
+        """Get the default attention backend of a device."""
+        return None
 
     @classmethod
     def get_device_capability(
@@ -125,6 +158,20 @@ class Platform:
         np.random.seed(seed)
         torch.manual_seed(seed)
 
+    @classmethod
+    def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
+        """
+        Check and update the configuration for the current platform.
+
+        It can raise an exception if the configuration is not compatible with
+        the current platform, or it can update the configuration to make it
+        compatible with the current platform.
+
+        The config is passed by reference, so it can be modified in place.
+        """
+        pass
+
 
 class UnspecifiedPlatform(Platform):
     _enum = PlatformEnum.UNSPECIFIED
+    device_type = ""

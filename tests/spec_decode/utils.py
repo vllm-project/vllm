@@ -68,12 +68,14 @@ def create_worker(cls: Callable[..., T],
                   seed: int,
                   is_driver_worker: bool = True,
                   enforce_eager: bool = True,
-                  model_runner_cls: Optional[ModelRunner] = None) -> T:
+                  model_runner_cls: Optional[ModelRunner] = None,
+                  dtype: Optional[str] = "auto") -> T:
     engine_args = EngineArgs(
         model=model_name,
         seed=seed,
         block_size=block_size,
         enforce_eager=enforce_eager,
+        dtype=dtype,
     )
     engine_config = engine_args.create_engine_config()
 
@@ -144,6 +146,41 @@ def create_seq_group_metadata_from_prompts(
     return seq_grou_metadata_list
 
 
+def create_chunked_seq_group_metadata_from_prompt(
+        prompt: List[int],
+        num_gpu_blocks: int,
+        chunk_size: int,
+        block_size: int,
+        seq_id: Optional[int] = None) -> List[SequenceGroupMetadata]:
+
+    if seq_id is None:
+        seq_id = 0
+
+    free_gpu_blocks = list(range(num_gpu_blocks))
+
+    block_allocations = [
+        free_gpu_blocks.pop()
+        for _ in range(round_up_to_next_block(len(prompt), block_size))
+    ]
+
+    seq_group_metadata_list = []
+    for i, idx in enumerate(range(0, len(prompt), chunk_size)):
+        chunk_ids = prompt[idx:idx + chunk_size]
+        data = SequenceData.from_seqs(prompt)
+        data.update_num_computed_tokens(idx)
+        seq_data = {i: data}
+        seq_group_metadata_list.append(
+            SequenceGroupMetadata(
+                request_id=str(seq_id),
+                is_prompt=True,
+                do_sample=idx + chunk_size >= len(prompt),  # terminal chunk
+                seq_data=seq_data,
+                sampling_params=SamplingParams(temperature=0.0),
+                block_tables={i: block_allocations},
+                token_chunk_size=len(chunk_ids)))
+    return seq_group_metadata_list
+
+
 def assert_logprobs_dict_allclose(
         actual_logprobs: List[Dict[int, Logprob]],
         expected_logprobs: List[Dict[int, Logprob]]) -> None:
@@ -196,7 +233,8 @@ def create_batch(batch_size,
                  prev_output_token_len: int = 10,
                  seq_ids: Optional[List[int]] = None,
                  num_gpu_blocks: Optional[int] = None,
-                 block_size: Optional[int] = None):
+                 block_size: Optional[int] = None,
+                 prefill_chunk_size: Optional[int] = None):
     if block_size is None:
         block_size = 8
 
@@ -211,15 +249,28 @@ def create_batch(batch_size,
         prompt_lens = prompt_len
 
     prompts = [[next(iterator) for _ in range(p_len)] for p_len in prompt_lens]
-    prev_output_tokens = [[
-        next(iterator) for _ in range(prev_output_token_len)
-    ] for _ in range(batch_size)]
-    final_prompt_lens = [
-        len(prompt) + len(prev_output_token) + k + 1
-        for prompt, prev_output_token in zip(prompts, prev_output_tokens)
-    ]
 
-    seq_group_metadata_list = create_seq_group_metadata_from_prompts(
-        prompts, num_gpu_blocks, block_size, final_prompt_lens,
-        prev_output_tokens, seq_ids)
+    if prefill_chunk_size:
+        # Create a batch of chunked prompts.
+        if not seq_ids:
+            seq_ids = list(range(len(prompts)))
+        seq_group_metadata_list = []
+        for p, sid in zip(prompts, seq_ids):
+            seq_group_metadata_list += \
+                create_chunked_seq_group_metadata_from_prompt(
+                p, num_gpu_blocks, prefill_chunk_size, block_size, sid)
+        seq_group_metadata_list = seq_group_metadata_list[:batch_size]
+        prev_output_tokens = []
+    else:
+        prev_output_tokens = [[
+            next(iterator) for _ in range(prev_output_token_len)
+        ] for _ in range(batch_size)]
+        final_prompt_lens = [
+            len(prompt) + len(prev_output_token) + k + 1
+            for prompt, prev_output_token in zip(prompts, prev_output_tokens)
+        ]
+
+        seq_group_metadata_list = create_seq_group_metadata_from_prompts(
+            prompts, num_gpu_blocks, block_size, final_prompt_lens,
+            prev_output_tokens, seq_ids)
     return seq_group_metadata_list, prompts, prev_output_tokens

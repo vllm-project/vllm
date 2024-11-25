@@ -6,7 +6,7 @@ import torch
 from PIL.Image import Image
 
 from vllm.inputs import InputContext, token_inputs
-from vllm.multimodal.base import MultiModalInputs
+from vllm.multimodal import MultiModalKwargs
 from vllm.multimodal.utils import cached_get_tokenizer
 
 from .....conftest import IMAGE_ASSETS
@@ -96,7 +96,7 @@ def test_input_mapper_valid_mm_data(input_mapper_for_qwen,
     mapped_img_data = input_mapper_for_qwen(qwen_vl_context, img_data)
     # Ensure that we get the appropriately shaped pixel_values
     # for images and image embeddings, respectively.
-    assert isinstance(mapped_img_data, MultiModalInputs)
+    assert isinstance(mapped_img_data, MultiModalKwargs)
     assert "pixel_values" in mapped_img_data
     assert mapped_img_data["pixel_values"].shape == expected_shape
 
@@ -104,7 +104,7 @@ def test_input_mapper_valid_mm_data(input_mapper_for_qwen,
 # Sad path tests for the multimodal input processor and mapper, respectively
 @pytest.mark.parametrize("mm_data", [
     {
-        "image": torch.rand((5))
+        "image": torch.rand(5)
     },
     {
         "image": torch.rand((5, 5, 5, 5, 5))

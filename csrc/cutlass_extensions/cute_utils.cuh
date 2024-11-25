@@ -20,9 +20,9 @@ CUTE_HOST_DEVICE static constexpr auto permute_layout(Layout l) {
 // is the layout f(x) = x
 template <typename Layout>
 CUTE_HOST_DEVICE static constexpr bool is_identity_layout() {
-  if constexpr (std::is_same_v<Layout, void>)
+  if constexpr (std::is_same_v<Layout, void>) {
     return true;
-  else {
+  } else {
     constexpr auto coalesced_layout = coalesce(Layout{});
     if constexpr (rank(coalesced_layout) == 1 &&
                   stride<0>(coalesced_layout) == 1) {

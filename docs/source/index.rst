@@ -43,7 +43,7 @@ vLLM is flexible and easy to use with:
 * Tensor parallelism and pipeline parallelism support for distributed inference
 * Streaming outputs
 * OpenAI-compatible API server
-* Support NVIDIA GPUs, AMD CPUs and GPUs, Intel CPUs and GPUs, PowerPC CPUs, TPU, and AWS Trainium and Inferentia Accelerators.
+* Support NVIDIA GPUs, AMD CPUs and GPUs, Intel CPUs, Gaudi® accelerators and GPUs, PowerPC CPUs, TPU, and AWS Trainium and Inferentia Accelerators.
 * Prefix caching support
 * Multi-lora support
 
@@ -66,6 +66,7 @@ Documentation
    getting_started/amd-installation
    getting_started/openvino-installation
    getting_started/cpu-installation
+   getting_started/gaudi-installation
    getting_started/neuron-installation
    getting_started/tpu-installation
    getting_started/xpu-installation
@@ -100,6 +101,7 @@ Documentation
    models/engine_args
    models/lora
    models/vlm
+   models/structured_outputs
    models/spec_decode
    models/performance
 
@@ -125,23 +127,11 @@ Documentation
 
 .. toctree::
    :maxdepth: 1
-   :caption: Performance benchmarks
+   :caption: Performance
 
-   performance_benchmark/benchmarks
+   performance/benchmarks
 
-.. toctree::
-   :maxdepth: 2
-   :caption: Developer Documentation
-
-   dev/sampling_params
-   dev/pooling_params
-   dev/offline_inference/offline_index
-   dev/engine/engine_index
-   dev/kernel/paged_attention
-   dev/input_processing/model_inputs_index
-   dev/multimodal/multimodal_index
-   dev/dockerfile/dockerfile
-   dev/profiling/profiling_index
+.. Community: User community resources
 
 .. toctree::
    :maxdepth: 1
@@ -149,6 +139,40 @@ Documentation
 
    community/meetups
    community/sponsors
+
+.. API Documentation: API reference aimed at vllm library usage
+
+.. toctree::
+   :maxdepth: 2
+   :caption: API Documentation
+
+   dev/sampling_params
+   dev/pooling_params
+   dev/offline_inference/offline_index
+   dev/engine/engine_index
+
+.. Design: docs about vLLM internals
+
+.. toctree::
+   :maxdepth: 2
+   :caption: Design
+
+   design/arch_overview
+   design/huggingface_integration
+   design/plugin_system
+   design/input_processing/model_inputs_index
+   design/kernel/paged_attention
+   design/multimodal/multimodal_index
+
+.. For Developers: contributing to the vLLM project
+
+.. toctree::
+   :maxdepth: 2
+   :caption: For Developers
+
+   contributing/overview
+   contributing/profiling/profiling_index
+   contributing/dockerfile/dockerfile
 
 Indices and tables
 ==================

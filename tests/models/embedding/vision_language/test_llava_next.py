@@ -88,6 +88,7 @@ def _run_test(
 
 @pytest.mark.skipif(transformers.__version__.startswith("4.46"),
                     reason="Model broken with changes in transformers 4.46")
+@pytest.mark.core_model
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 def test_models_text(
@@ -112,6 +113,7 @@ def test_models_text(
 
 
 @large_gpu_test(min_gb=48)
+@pytest.mark.core_model
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
 def test_models_image(

@@ -1,7 +1,7 @@
 import asyncio
 import base64
 import time
-from typing import AsyncGenerator, List, Literal, Optional, Union, cast
+from typing import AsyncGenerator, Final, List, Literal, Optional, Union, cast
 
 import numpy as np
 from fastapi import Request
@@ -9,7 +9,7 @@ from typing_extensions import assert_never
 
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.chat_utils import load_chat_template
+from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (EmbeddingChatRequest,
                                               EmbeddingRequest,
@@ -77,7 +77,8 @@ class OpenAIServingEmbedding(OpenAIServing):
         *,
         request_logger: Optional[RequestLogger],
         chat_template: Optional[str],
-    ):
+        chat_template_content_format: ChatTemplateContentFormatOption,
+    ) -> None:
         super().__init__(engine_client=engine_client,
                          model_config=model_config,
                          base_model_paths=base_model_paths,
@@ -85,7 +86,8 @@ class OpenAIServingEmbedding(OpenAIServing):
                          prompt_adapters=None,
                          request_logger=request_logger)
 
-        self.chat_template = load_chat_template(chat_template)
+        self.chat_template = chat_template
+        self.chat_template_content_format: Final = chat_template_content_format
 
     async def create_embedding(
         self,
@@ -144,8 +146,12 @@ class OpenAIServingEmbedding(OpenAIServing):
                     tokenizer,
                     request.messages,
                     chat_template=request.chat_template or self.chat_template,
-                    add_generation_prompt=request.add_generation_prompt,
-                    continue_final_message=request.continue_final_message,
+                    chat_template_content_format=self.
+                    chat_template_content_format,
+                    # In embedding requests, we are not generating tokens,
+                    # so there is no need to append extra tokens to the input
+                    add_generation_prompt=False,
+                    continue_final_message=False,
                     truncate_prompt_tokens=truncate_prompt_tokens,
                     add_special_tokens=request.add_special_tokens,
                 )
@@ -205,12 +211,8 @@ class OpenAIServingEmbedding(OpenAIServing):
         try:
             async for i, res in result_generator:
                 final_res_batch[i] = res
-        except asyncio.CancelledError:
-            return self.create_error_response("Client disconnected")
 
-        try:
-            for final_res in final_res_batch:
-                assert final_res is not None
+            assert all(final_res is not None for final_res in final_res_batch)
 
             final_res_batch_checked = cast(List[EmbeddingRequestOutput],
                                            final_res_batch)
@@ -218,6 +220,8 @@ class OpenAIServingEmbedding(OpenAIServing):
             response = request_output_to_embedding_response(
                 final_res_batch_checked, request_id, created_time, model_name,
                 encoding_format)
+        except asyncio.CancelledError:
+            return self.create_error_response("Client disconnected")
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))

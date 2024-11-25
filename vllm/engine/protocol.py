@@ -1,11 +1,12 @@
 import asyncio
 from abc import ABC, abstractmethod
-from typing import AsyncGenerator, List, Mapping, Optional, Union
+from typing import AsyncGenerator, List, Mapping, Optional
 
 from vllm.beam_search import BeamSearchSequence, create_sort_beams_key_function
 from vllm.config import DecodingConfig, ModelConfig
 from vllm.core.scheduler import SchedulerOutputs
 from vllm.inputs.data import PromptType, TokensPrompt
+from vllm.inputs.parse import is_explicit_encoder_decoder_prompt
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -60,8 +61,7 @@ class EngineClient(ABC):
 
     async def beam_search(
         self,
-        prompt: Union[PromptType, List[int]],
-        model_config: ModelConfig,
+        prompt: PromptType,
         request_id: str,
         params: BeamSearchParams,
     ) -> AsyncGenerator[RequestOutput, None]:
@@ -73,14 +73,23 @@ class EngineClient(ABC):
         length_penalty = params.length_penalty
         include_stop_str_in_output = params.include_stop_str_in_output
 
-        tokenizer = await self.get_tokenizer()
-        input_preprocessor = InputPreprocessor(model_config, tokenizer)
+        preprocessor = await self.get_input_preprocessor()
+        tokenizer_group = preprocessor.get_tokenizer_group()
+        tokenizer = await tokenizer_group.get_lora_tokenizer_async()
 
-        (prompt_text, prompt_token_ids, multi_modal_data,
-         mm_processor_kwargs) = input_preprocessor._extract_prompt_components(
-             prompt,
-             request_id=request_id,
-         )
+        if is_explicit_encoder_decoder_prompt(prompt):
+            raise NotImplementedError
+        else:
+            processed_inputs = preprocessor._prompt_to_llm_inputs(
+                prompt,
+                request_id=request_id,
+            )
+
+        prompt_token_ids = processed_inputs["prompt_token_ids"]
+        prompt_text = processed_inputs.get("prompt")
+        multi_modal_data = processed_inputs.get("multi_modal_data")
+        mm_processor_kwargs = processed_inputs.get("mm_processor_kwargs")
+
         tokenized_length = len(prompt_token_ids)
 
         sort_beams_key = create_sort_beams_key_function(
@@ -211,6 +220,7 @@ class EngineClient(ABC):
         Args:
             request_id: The unique id of the request.
         """
+        ...
 
     @abstractmethod
     async def get_model_config(self) -> ModelConfig:
@@ -219,8 +229,13 @@ class EngineClient(ABC):
 
     @abstractmethod
     async def get_decoding_config(self) -> DecodingConfig:
-        ...
         """Get the decoding configuration of the vLLM engine."""
+        ...
+
+    @abstractmethod
+    async def get_input_preprocessor(self) -> InputPreprocessor:
+        """Get the input processor of the vLLM engine."""
+        ...
 
     @abstractmethod
     async def get_tokenizer(
