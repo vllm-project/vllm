@@ -3,6 +3,8 @@ import os
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Optional
 
+import torch
+
 import vllm.envs as envs
 
 if TYPE_CHECKING:
@@ -26,7 +28,8 @@ def load_general_plugins():
 
     # see https://github.com/vllm-project/vllm/issues/10480
     os.environ['TORCHINDUCTOR_COMPILE_THREADS'] = '1'
-
+    # see https://github.com/vllm-project/vllm/issues/10619
+    torch._inductor.config.compile_threads = 1
     global plugins_loaded
     if plugins_loaded:
         return
