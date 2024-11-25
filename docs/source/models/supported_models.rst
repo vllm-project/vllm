@@ -342,7 +342,7 @@ Text Embedding
     - ✅︎
   * - :code:`Qwen2Model`, :code:`Qwen2ForCausalLM`
     - Qwen2-based
-    - :code:`ssmits/Qwen2-7B-Instruct-embed-base`, :code:`Alibaba-NLP/gte-Qwen2-1.5B-instruct`, etc.
+    - :code:`ssmits/Qwen2-7B-Instruct-embed-base`, :code:`Alibaba-NLP/gte-Qwen2-7B-instruct` (see note), etc.
     - ✅︎
     - ✅︎
   * - :code:`RobertaModel`, :code:`RobertaForMaskedLM`
@@ -362,6 +362,13 @@ Text Embedding
 
 .. tip::
   You can override the model's pooling method by passing :code:`--override-pooler-config`.
+
+.. note::
+  Unlike base Qwen2, :code:`Alibaba-NLP/gte-Qwen2-7B-instruct` uses bi-directional attention.
+  You can set `--hf-overrides '{"is_decoder": false}'` to change the attention mask accordingly.
+
+  On the other hand, its 1.5B variant (:code:`Alibaba-NLP/gte-Qwen2-1.5B-instruct`) uses decoder-only attention
+  despite being described otherwise on its model card.
 
 Reward Modeling
 ---------------
@@ -606,10 +613,10 @@ Text Generation
 | :sup:`+` Multiple items can be inputted per text prompt for this modality.
 
 .. note::
-  vLLM currently only supports adding LoRA to the language backbone of multimodal models.               
+  vLLM currently only supports adding LoRA to the language backbone of multimodal models.
 
 .. note::
-  For :code:`openbmb/MiniCPM-V-2`, the official repo doesn't work yet, so we need to use a fork (:code:`HwwwH/MiniCPM-V-2`) for now.
+  The official :code:`openbmb/MiniCPM-V-2` doesn't work yet, so we need to use a fork (:code:`HwwwH/MiniCPM-V-2`) for now.
   For more details, please see: https://github.com/vllm-project/vllm/pull/4087#issuecomment-2250397630
 
 Multimodal Embedding
