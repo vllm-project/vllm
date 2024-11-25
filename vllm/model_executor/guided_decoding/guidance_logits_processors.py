@@ -98,6 +98,7 @@ class GuidanceLogitsProcessor:
             self.ll_tokenizer,
             self.serialized_grammar,
             enable_backtrack=False,
+            enable_ff_tokens=False,
             log_level=int(os.environ.get("LLGUIDANCE_LOG_LEVEL", "1")),
         )
 
@@ -115,9 +116,6 @@ class GuidanceLogitsProcessor:
 
         if self.is_stopped:
             return logits
-
-        if len(past_tokens_ids) == 0:
-            self.ll_interpreter.process_prompt(prompt_tokens_ids)
 
         if self.new_sampling and len(past_tokens_ids) > 0:
             backtrack, ff_tokens = self.ll_interpreter.commit_token(
