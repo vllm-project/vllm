@@ -114,7 +114,7 @@ class IPEXAttentionImpl(AttentionImpl):
             "key/v_scale is not supported in IPEXAttention.")
 
         output = torch.empty_like(query)
-        torch.ops.vllm.ipex_attn(
+        torch.ops.vllm.ipex_attn_chunked_prefill(
         # ipex_attn(
             output,
             query,
@@ -179,7 +179,8 @@ def ipex_attn_chunked_prefill(
     alibi_slopes: Optional[torch.Tensor] = None,
     logits_soft_cap: Optional[float] = None,
 ) -> None:
-    current_metadata = get_forward_context()
+    context = get_forward_context()
+    current_metadata = context.dynamic_forward_context
     if current_metadata is None:
         # Profiling run.
         return
@@ -197,35 +198,43 @@ def ipex_attn_chunked_prefill(
     key_cache = kv_cache[0]
     value_cache = kv_cache[1]
     
-    ipex_ops.reshape_and_cache(
-        key[:num_actual_tokens],
-        value[:num_actual_tokens],
-        key_cache,
-        value_cache,
-        attn_metadata.slot_mapping,
-        kv_cache_dtype,
-        k_scale,
-        v_scale,
-    )
+    for i in range(num_actual_tokens):
+        slot_idx = attn_metadata.slot_mapping[i]
+        block_idx = slot_idx // key_cache.shape[1]
+        block_offset = slot_idx % key_cache.shape[1]
+        key_cache[block_idx, block_offset] = key[:num_actual_tokens][i]
+        value_cache[block_idx, block_offset] = value[:num_actual_tokens][i]
+    
+
+    # ipex_ops.reshape_and_cache(
+    #     key[:num_actual_tokens],
+    #     value[:num_actual_tokens],
+    #     key_cache,
+    #     value_cache,
+    #     attn_metadata.slot_mapping,
+    #     kv_cache_dtype,
+    #     k_scale,
+    #     v_scale,
+    # )
     
     attn_output = torch.ops.torch_ipex.chunked_prefill(
-            query=query[:num_actual_tokens],
-            key=key,
-            value=value,
-            out_=output,
-            cu_seqlens_q=attn_metadata.query_start_loc,
-            cu_seqlens_k=attn_metadata.seq_start_loc,
-            seqused_k=None,
-            block_table=attn_metadata.block_table,
-            alibi_slopes_=alibi_slopes,
-            max_seqlen_q=attn_metadata.max_query_len,
-            max_seqlen_k=attn_metadata.max_seq_len,
-            p_dropout=0.0,
-            softmax_scale=scale,
-            zero_tensors=False,
-            is_causal=True,
-            return_softmax=False,
-            gen_=None,
+            query[:num_actual_tokens],
+            key_cache,
+            value_cache,
+            output,
+            attn_metadata.query_start_loc,
+            attn_metadata.seq_start_loc,
+            None,
+            attn_metadata.block_table,
+            alibi_slopes,
+            attn_metadata.max_query_len,
+            attn_metadata.max_seq_len,
+            0.0,
+            scale,
+            False,
+            True,
+            False,
+            None,
         )
     attn_output = attn_output.view(num_actual_tokens, -1)
     output[:num_actual_tokens].copy_(attn_output)
@@ -314,12 +323,10 @@ def ipex_attn(output: torch.Tensor, query: torch.Tensor, key: torch.Tensor,
     elif attn_metadata.is_decode_only:
         block_size = value_cache.shape[3]
         actual_blocks_used = (attn_metadata.seq_len_q + block_size - 1) // block_size
-        # print(actual_blocks_used)
         
         ipex_ops.paged_attention_v1(output, query, key_cache, value_cache, num_kv_heads, scale, attn_metadata.block_table, attn_metadata.seq_len_q,
                                     block_size, attn_metadata.max_seq_len, alibi_slopes, kv_cache_dtype, k_scale, v_scale)
     else:
-        # print()
         raise ValueError("Invalid attention mode.")
 
     
