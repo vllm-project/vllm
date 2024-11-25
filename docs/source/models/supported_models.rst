@@ -367,7 +367,7 @@ Text Embedding
   Unlike base Qwen2, :code:`Alibaba-NLP/gte-Qwen2-7B-instruct` uses bi-directional attention.
   You can set `--hf-overrides '{"is_causal": false}'` to change the attention mask accordingly.
 
-  On the other hand, its 1.5B variant (:code:`Alibaba-NLP/gte-Qwen2-1.5B-instruct`) uses decoder-only attention
+  On the other hand, its 1.5B variant (:code:`Alibaba-NLP/gte-Qwen2-1.5B-instruct`) uses causal attention
   despite being described otherwise on its model card.
 
 Reward Modeling

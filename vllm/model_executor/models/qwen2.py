@@ -216,7 +216,7 @@ class Qwen2DecoderLayer(nn.Module):
         self.post_attention_layernorm = RMSNorm(config.hidden_size,
                                                 eps=config.rms_norm_eps)
 
-        # NOTE: By default, Qwen2 is a decoder-only model.
+        # By default, Qwen2 uses causal attention as it is a decoder-only model.
         # You can override the HF config with `is_causal=False` to enable
         # bidirectional attention, which is used in some embedding models
         # (e.g. Alibaba-NLP/gte-Qwen2-7B-instruct)
