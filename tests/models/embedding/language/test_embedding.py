@@ -34,7 +34,7 @@ def test_models(
 ) -> None:
     vllm_extra_kwargs = {}
     if model == "Alibaba-NLP/gte-Qwen2-7B-instruct":
-        vllm_extra_kwargs["hf_overrides"] = {"is_decoder": False}
+        vllm_extra_kwargs["hf_overrides"] = {"is_causal": False}
 
     # The example_prompts has ending "\n", for example:
     # "Write a short story about a robot that dreams for the first time.\n"
