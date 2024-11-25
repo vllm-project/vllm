@@ -305,7 +305,8 @@ def run_profile(context: ProfileContext, csv_output: Optional[str],
         decode_results_list[0].print_summary_table()
 
     if csv_output:
-        csv_filename_base = csv_output.rstrip(".csv")
+        csv_filename_base = csv_output[:-4] \
+                if csv_output.endswith('.csv') else csv_output
         prefill_results.export_model_stats_table_csv(
             csv_filename_base + "_prefill_model_table.csv")
         prefill_results.export_summary_stats_table_csv(
@@ -338,7 +339,10 @@ def run_profile(context: ProfileContext, csv_output: Optional[str],
             for idx, dr in enumerate(decode_results_list):
                 json_dict[f"decode_{idx + 1}"] = dr.convert_stats_to_dict()
 
-        with open(json_output.rstrip(".json") + ".json", "w+") as f:
+        # Add .json to json_output filename if it doesn't exist already.
+        json_output_file = json_output if json_output.endswith(
+            '.json') else json_output + '.json'
+        with open(json_output_file, "w+") as f:
             json.dump(json_dict, f, indent=2)
         pass
 
