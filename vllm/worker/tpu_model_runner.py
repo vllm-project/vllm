@@ -44,7 +44,7 @@ _ENABLE_TOP_P = False
 # FIXME(woosuk): A temporary hack to support `n > 1`.
 # This can significantly affect the performance if too large.
 _MAX_NUM_SAMPLES = 128
-
+LORA_WARMUP_RANK = 8 # KRAI: TODO: Should this not be max rank - so we have better startup times?
 
 class ExecutionMode(enum.Enum):
     PREFILL = enum.auto()
@@ -53,7 +53,6 @@ class ExecutionMode(enum.Enum):
 
     def is_prefill(self) -> bool:
         return self in (ExecutionMode.PREFILL, ExecutionMode.PREFIX_PREFILL)
-
 
 @dataclass(frozen=True)
 class ModelInputForTPU(ModelRunnerInputBase):
@@ -282,6 +281,27 @@ class TPUModelRunner(ModelRunnerBase[ModelInputForTPU]):
         t = torch.ones((batch_size, ), dtype=torch.float32, device=self.device)
         p = torch.ones((batch_size, ), dtype=torch.float32, device=self.device)
         num_samples = _MAX_NUM_SAMPLES if exec_mode.is_prefill() else 1
+        
+        # Create a series of dummy loras and requests for them. Make to fill all lora slots.        
+        if self.lora_config:
+            dummy_lora_requests: Set[LoRARequest] = set()
+            dummy_lora_mapping: LoRAMapping
+            
+            assert self.lora_manager is not None
+            with self.lora_manager.dummy_lora_cache():
+                for lora_id in range(1, self.lora_config.max_loras + 1):
+                    dummy_lora_request = LoRARequest(
+                        lora_name=f"warmup_{lora_id}",
+                        lora_int_id=lora_id,
+                        lora_path="/not/a/real/path",
+                    )
+                    self.lora_manager.add_dummy_lora(dummy_lora_request,
+                                                     rank=LORA_WARMUP_RANK)
+                    dummy_lora_requests.add(dummy_lora_request)
+                    dummy_lora_mapping = LoRAMapping(
+                        [lora_id] * seq_len, [lora_id], is_prefill=exec_mode.is_prefill()
+                    )
+            self.set_active_loras(dummy_lora_requests, dummy_lora_mapping)
 
         # NOTE(woosuk): There are two stages of compilation: torch.compile and
         # XLA compilation. Using `mark_dynamic` can reduce the torch.compile
