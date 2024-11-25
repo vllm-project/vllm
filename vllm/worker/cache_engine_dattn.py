@@ -241,10 +241,9 @@ class CacheEngineDAttn:
 
         #print(f"CACHE_ENGINE: update_cache_blocks!!!", file=sys.stderr)
         if len(to_free_caches) > 0 or len(to_alloc_blocks) > 0: 
-            self.steps += 1 
-            if self.steps < 2: 
-                self.device_cache_allocator.update_cache_blocks(is_prefill_phase, to_free_caches, to_alloc_blocks)
-                print(f"CACHE_ENGINE: update_cache_blocks self.step-{self.steps}, len(to_free_caches):{len(to_free_caches)}, len(to_alloc_blocks):{len(to_alloc_blocks)}!!!", file=sys.stderr)
+            self.steps+=1
+            self.device_cache_allocator.update_cache_blocks(is_prefill_phase, to_free_caches, to_alloc_blocks)
+            #print(f"CACHE_ENGINE-{self.steps}: update_cache_blocks len(to_free_caches):{len(to_free_caches)}, len(to_alloc_blocks):{len(to_alloc_blocks)}!!!", file=sys.stderr)
         
 
 def _get_dtype_size(dtype: torch.dtype) -> int:

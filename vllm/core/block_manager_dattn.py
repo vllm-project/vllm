@@ -136,7 +136,7 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         need_blocks = self._get_seq_num_required_blocks(seq)
         
         # DEBUGGING DEBUG
-        need_blocks = 128
+        #need_blocks = 128
 
         cache_id, to_allocate_num, allocated_num = self._allocate_cache(need_blocks)
         #print(f"cache_id: {cache_id}, need_blocks:{need_blocks}, to_allocate_num:{to_allocate_num}, allocated_num:{allocated_num}") 

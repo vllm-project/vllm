@@ -130,7 +130,7 @@ int64_t kvCacheRegion::allocCacheBlocks(uint64_t blocks, uint64_t * used_pages, 
 
     // Allocate physical pages, which will exit if can't allocate successfully
     if (toallocPages > 0 && allocatePhyPages(this->nextUnmapedAddr, allocSize) == 0) {
-      //fprintf(stderr, "allocSize %lx toallocPages %ld this->nextUnmapedAddr %p\n", allocSize, toallocPages, this->nextUnmapedAddr);
+      //fprintf(stderr, "blocks %ld this->block_size %ld size %lx allocSize %lx toallocPages %ld this->nextUnmapedAddr %p this->page_size %ld\n", blocks, this->block_size, size, allocSize, toallocPages, this->nextUnmapedAddr, this->page_size);
       
       // Touch this page in order to initiate page allocation
       // This is important to avoid the memory allocation overhead on the critical path. 

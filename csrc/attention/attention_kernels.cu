@@ -126,7 +126,7 @@ inline __device__ float propogate_qk_max(float* red_smem, float qk_max) {
   return qk_max; 
 }
 
-__device__ unsigned long long firstTime = 0, newTime = 0, secondTime = 0, thirdTime = 0, fourthTime = 0, fifthTime = 0, sixthTime = 0, seventhTime = 0; 
+__device__ unsigned long long firstTime = 0, newTime = 0, secondTime = 0, thirdTime = 0, fourthTime = 0, fifthTime = 0, sixthTime = 0, seventhTime = 0, totalTime = 0; 
 __device__ unsigned long myindex = 0; 
 
 // TODO(woosuk): Merge the last two dimensions of the grid.
@@ -293,7 +293,8 @@ __device__ void paged_attention_kernel(
     time0 = time1; 
     myindex++; 
   }
-  
+
+  bool to_check = true;  
   for (int block_idx = start_block_idx + warp_idx; block_idx < end_block_idx;
        block_idx += NUM_WARPS) {
     // NOTE(woosuk): The block number is stored in int32. However, we cast it to
@@ -366,12 +367,20 @@ __device__ void paged_attention_kernel(
         }
       }
 
+      if(to_profile2 && to_check) {
+        time1 = clock64();
+      } 
 
       // Compute dot product.
       // This includes a reduction across the threads in the same thread group.
       float qk = scale * Qk_dot<scalar_t, THREAD_GROUP_SIZE>::dot(
                              q_vecs[thread_group_offset], k_vecs);
-      
+
+        if(to_profile2 && to_check) {
+          time2 = clock64(); 
+          firstTime += time2 - time1;  
+        }   
+
       // Add the ALiBi bias if slopes are given.
       qk += (alibi_slope != 0) ? alibi_slope * (token_idx - seq_len + 1) : 0;
 
@@ -384,6 +393,8 @@ __device__ void paged_attention_kernel(
         // Update the max value.
         qk_max = mask ? qk_max : fmaxf(qk_max, qk);
       }
+
+      to_check = false; 
     }
   }
   
@@ -425,9 +436,6 @@ __device__ void paged_attention_kernel(
   }
   __syncthreads();
 
-  if(to_profile2 && myindex %512 == 0) {
-    printf("thread_idx-%d, num_tokens-%d, num_heads-%d, num_kv_heads-%d, USE_PARTITIONING-%d\n", thread_idx, num_tokens, num_heads, num_kv_heads, USE_PARTITIONING); 
-  }
   // If partitioning is enabled, store the max logit and exp_sum.
   if (USE_PARTITIONING && thread_idx == 0) {
     float* max_logits_ptr = max_logits +
@@ -455,6 +463,10 @@ __device__ void paged_attention_kernel(
   constexpr int NUM_ROWS_PER_ITER = WARP_SIZE / NUM_V_VECS_PER_ROW;
   constexpr int NUM_ROWS_PER_THREAD =
       DIVIDE_ROUND_UP(HEAD_SIZE, NUM_ROWS_PER_ITER);
+  
+  //if(to_profile2 && myindex %512 == 0) {
+  //  printf("thread_idx-%d, num_tokens-%d, num_heads-%d, num_kv_heads-%d, USE_PARTITIONING-%d, NUM_ROWS_PER_THREAD-%d\n", thread_idx, num_tokens, num_heads, num_kv_heads, USE_PARTITIONING, NUM_ROWS_PER_THREAD); 
+  //}
 
   // NOTE(woosuk): We use FP32 for the accumulator for better accuracy.
   float accs[NUM_ROWS_PER_THREAD];
@@ -606,12 +618,13 @@ __device__ void paged_attention_kernel(
     time2 = clock64();
     seventhTime += time2 - time1; 
     time1 = time2; 
+    totalTime += time2 - time0; 
   }
 
     if(to_profile2) {
 
     if(myindex %512 == 0) {
-      printf("myindex %lld, firstTime-%lld, newTime-%lld, secondTime-%lld, thirdTime-%lld, fourthTime-%lld, fifthTime-%lld, sixthTime-%lld, seventhTime-%lld\n", myindex, firstTime, newTime, secondTime, thirdTime, fourthTime, fifthTime, sixthTime, seventhTime); 
+      printf("myindex %lld, firstTime-%lld, newTime-%lld, secondTime-%lld, thirdTime-%lld, fourthTime-%lld, fifthTime-%lld, sixthTime-%lld, seventhTime-%lld, totalTime-%lld, q_vecs-%p\n", myindex, firstTime, newTime, secondTime, thirdTime, fourthTime, fifthTime, sixthTime, seventhTime, totalTime, q_vecs); 
       firstTime = 0; 
       newTime = 0; 
       secondTime = 0; 
@@ -620,6 +633,7 @@ __device__ void paged_attention_kernel(
       fifthTime = 0; 
       sixthTime = 0; 
       seventhTime = 0; 
+      totalTime = 0; 
     }
   }
 }
@@ -828,7 +842,7 @@ __global__ void dattention_kernel(
 ) {
   bool to_profile2 = blockIdx.x == 0 && blockIdx.y ==0 && blockIdx.z == 0 && threadIdx.x == 0; 
   //bool to_profile2 = false; 
-  unsigned long long time0, time1, time2; 
+  uint64_t time0, time1, time2; 
 
 
   const int seq_idx = blockIdx.y;
@@ -900,6 +914,7 @@ __global__ void dattention_kernel(
   const int thread_group_idx = thread_idx / THREAD_GROUP_SIZE;
   const int thread_group_offset = thread_idx % THREAD_GROUP_SIZE;
 
+
   //if(blockIdx.x ==0 && blockIdx.y == 0 && blockIdx.z == 0 && threadIdx.x == 0) {
     //printf("[%d, %d, %d, %d]: gridDim.x-%d, gridDim.y-%d,gridDim.z-%d, blockDim.x-%d\n", blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, gridDim.x, gridDim.y, gridDim.z, blockDim.x); 
     //int tbs = gridDim.x * gridDim.y * gridDim.z;
@@ -923,6 +938,9 @@ __global__ void dattention_kernel(
     q_vecs[thread_group_offset][i] =
         *reinterpret_cast<const Q_vec*>(q_ptr + vec_idx * VEC_SIZE);
   }
+  
+  //if(to_profile2)
+  //  printf("Q_vec-%ld, q_vecs-%ld\n", sizeof(Q_vec), sizeof(q_vecs));
   __syncthreads();  // TODO(naed90): possible speedup if this is replaced with a
                     // memory wall right before we use q_vecs
 
@@ -962,11 +980,12 @@ __global__ void dattention_kernel(
   const cache_t * cache_start = reinterpret_cast<cache_t *>(cache_row_mapping[seq_idx]) + layer_offset + kv_head_idx * KV_HEAD_STRIDE;
 
   if(to_profile2) {
-    time1 = clock64();
-    time0= time1; 
+    time0 = clock64();
     myindex++; 
   }
 
+  
+  bool to_check = true;  
   // Iterate over the key blocks.
   // Each thread block will process one request's one head and one partition (up to 512 tokens)
   // Each warp will process a block of keys for each iteration.
@@ -1029,8 +1048,8 @@ __global__ void dattention_kernel(
         const int offset1 = (vec_idx * VEC_SIZE) / x;
         const int offset2 = (vec_idx * VEC_SIZE) % x;
 
-    //if((seq_idx == 1 || seq_idx == 2)&& threadIdx.x < 6) {
-    //  printf("seq_idx-%d: [%d, %d, %d, %d]: k_ptr %p NUM_VECS_PER_THREAD %d thread_group_offset %d vec_idx %d offset1 %d offset2 %d\n", seq_idx, blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, k_ptr, NUM_VECS_PER_THREAD, thread_group_offset, vec_idx, offset1, offset2 );
+    //if(seq_idx == 1 && threadIdx.x < 10) {
+    //  printf("seq_idx-%d: [%d, %d, %d, %d]: k_ptr %p-%p, NUM_VECS_PER_THREAD %d thread_group_offset %d vec_idx %d offset1 %d offset2 %d\n", seq_idx, blockIdx.x, blockIdx.y, blockIdx.z, threadIdx.x, k_ptr, k_ptr + offset1 * BLOCK_SIZE * x + offset2, NUM_VECS_PER_THREAD, thread_group_offset, vec_idx, offset1, offset2 );
     //}
 
         if constexpr (KV_DTYPE == Fp8KVCacheDataType::kAuto) {
@@ -1045,10 +1064,19 @@ __global__ void dattention_kernel(
         }
       }
 
+      if(to_profile2 && to_check) {
+        time1 = clock64();
+      } 
+
       // Compute dot product.
       // This includes a reduction across the threads in the same thread group.
       float qk = scale * Qk_dot<scalar_t, THREAD_GROUP_SIZE>::dot(
                              q_vecs[thread_group_offset], k_vecs);
+
+        if(to_profile2 && to_check) {
+          time2 = clock64(); 
+          firstTime += time2 - time1;  
+        }
 
       // Add the ALiBi bias if slopes are given.
       qk += (alibi_slope != 0) ? alibi_slope * (token_idx - seq_len + 1) : 0;
@@ -1067,6 +1095,8 @@ __global__ void dattention_kernel(
     //  time1 = time2; 
     //}
     }
+
+    to_check = false; 
   }
   
   if(to_profile2) {
@@ -1100,9 +1130,6 @@ __global__ void dattention_kernel(
   }
   __syncthreads();
 
-  if(to_profile2 && myindex %512 == 0) {
-    printf("thread_idx-%d, num_tokens-%d, num_heads-%d, num_kv_heads-%d, USE_PARTITIONING-%d\n", thread_idx, num_tokens, num_heads, num_kv_heads, USE_PARTITIONING); 
-  }
 
   // If partitioning is enabled, store the max logit and exp_sum.
   if (USE_PARTITIONING && thread_idx == 0) {
@@ -1117,7 +1144,7 @@ __global__ void dattention_kernel(
 
   if(to_profile2) {
     time2 = clock64();
-    thirdTime += time2 - time0; 
+    thirdTime += time2 - time1; 
     time1 = time2; 
   }
 
@@ -1133,6 +1160,10 @@ __global__ void dattention_kernel(
   constexpr int NUM_ROWS_PER_THREAD =
       DIVIDE_ROUND_UP(HEAD_SIZE, NUM_ROWS_PER_ITER);
 
+  //if(to_profile2 && myindex %512 == 0) {
+  //  printf("thread_idx-%d, num_tokens-%d, num_heads-%d, num_kv_heads-%d, USE_PARTITIONING-%d, NUM_ROWS_PER_THREAD-%d\n", thread_idx, num_tokens, num_heads, num_kv_heads, USE_PARTITIONING, NUM_ROWS_PER_THREAD); 
+  //}
+
   // NOTE(woosuk): We use FP32 for the accumulator for better accuracy.
   float accs[NUM_ROWS_PER_THREAD];
 #pragma unroll
@@ -1140,12 +1171,14 @@ __global__ void dattention_kernel(
     accs[i] = 0.f;
   }
 
+ 
+
   scalar_t zero_value;
   zero(zero_value);
 
   if(to_profile2) {
     time2 = clock64();
-    fourthTime += time2 - time0; 
+    fourthTime += time2 - time1; 
     time1 = time2; 
   }
 
@@ -1214,7 +1247,7 @@ __global__ void dattention_kernel(
 #pragma unroll
   for (int i = 0; i < NUM_ROWS_PER_THREAD; i++) {
     float acc = accs[i];
-#pragma unroll
+    #pragma unroll
     for (int mask = NUM_V_VECS_PER_ROW / 2; mask >= 1; mask /= 2) {
       acc += VLLM_SHFL_XOR_SYNC(acc, mask);
     }
@@ -1283,13 +1316,14 @@ __global__ void dattention_kernel(
   if(to_profile2) {
     time2 = clock64();
     seventhTime += time2 - time1; 
+    totalTime += time2 - time0; 
     time1 = time2; 
   }
 
   if(to_profile2) {
 
     if(myindex %512 == 0) {
-      printf("myindex %lld, firstTime-%lld, newTime-%lld, secondTime-%lld, thirdTime-%lld, fourthTime-%lld, fifthTime-%lld, sixthTime-%lld, seventhTime-%lld\n", myindex, firstTime, newTime, secondTime, thirdTime, fourthTime, fifthTime, sixthTime, seventhTime); 
+      printf("myindex %lld, firstTime-%lld, newTime-%lld, secondTime-%lld, thirdTime-%lld, fourthTime-%lld, fifthTime-%lld, sixthTime-%lld, seventhTime-%lld, totalTime-%lld\n", myindex, firstTime, newTime, secondTime, thirdTime, fourthTime, fifthTime, sixthTime, seventhTime, totalTime); 
       firstTime = 0; 
       newTime = 0; 
       secondTime = 0; 
@@ -1297,7 +1331,8 @@ __global__ void dattention_kernel(
       fourthTime = 0; 
       fifthTime = 0; 
       sixthTime = 0; 
-      seventhTime = 0; 
+      seventhTime = 0;
+      totalTime = 0;  
     }
   }
 
