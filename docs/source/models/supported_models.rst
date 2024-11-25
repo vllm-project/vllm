@@ -235,8 +235,8 @@ Text Generation
     -
     - ✅︎
   * - :code:`OLMo2ForCausalLM`
-    - OLMo November 2024
-    - :code:`shanearora/OLMo-7B-1124-hf`, etc.
+    - OLMo2
+    - :code:`allenai/OLMo2-7B-1124`, etc.
     -
     - ✅︎
   * - :code:`OLMoEForCausalLM`
