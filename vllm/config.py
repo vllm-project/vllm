@@ -3198,13 +3198,20 @@ class VllmConfig:
                            "Disabling `torch.compile`.")
             self.compilation_config.level = CompilationLevel.NO_COMPILATION
 
-        n_slices = self.parallel_config.world_size
-        max_tokens = self.scheduler_config.max_num_batched_tokens
-        if not use_cc_kernels(int(max_tokens / n_slices), n_slices):
-            logger.info(
-                ("Disabling collective fusion pass since chunked prefill size "
-                 "%d is too small."), max_tokens)
-            self.compilation_config.pass_config.enable_collective_fusion = False
+        if self.compilation_config.pass_config.enable_collective_fusion:
+            n_slices = self.parallel_config.world_size
+            max_tokens = self.scheduler_config.max_num_batched_tokens
+            if not use_cc_kernels(int(max_tokens / n_slices), n_slices):
+                logger.info(
+                    ("Disabling collective fusion pass since chunked prefill "
+                     "size %d is too small."), max_tokens)
+                self.compilation_config.pass_config.enable_collective_fusion = \
+                    False
+            if n_slices == 1:
+                logger.info("Disabling collective fusion pass since tensor "
+                            "parallelism is not enabled.")
+                self.compilation_config.pass_config.enable_collective_fusion = \
+                    False
 
         current_platform.check_and_update_config(self)
 
