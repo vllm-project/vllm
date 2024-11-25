@@ -60,7 +60,6 @@ class EmbeddingOutput:
         embedding: The embedding vector, which is a list of floats. The
         length of vector depends on the model as listed in the embedding guide.
     """
-
     embedding: List[float]
 
     def __repr__(self) -> str:
@@ -361,6 +360,50 @@ class EmbeddingRequestOutput:
                 f"outputs={repr(self.outputs)}, "
                 f"prompt_token_ids={self.prompt_token_ids}, "
                 f"finished={self.finished})")
+
+
+@dataclass
+class ScoreOutput:
+    """The output data of one completion output of a request.
+
+    Args:
+        score: The score, which is a list of floats. 
+        index: The correspondent text index of the score.
+    """
+    index: int
+    score: List[float]
+
+    def __repr__(self) -> str:
+        return (f"ScoreOutput("
+                f"score={self.score}), "
+                f"index={self.index})")
+
+
+class ScoreRequestOutput:
+    """
+    The output data of an score request to the LLM.
+
+    Args:
+        request_id (str): A unique identifier for the score request.
+        outputs (score): The embedding results for the given input.
+    """
+
+    def __init__(self, request_id: str, outputs: "ScoreOutput"):
+        self.request_id = request_id
+        self.outputs = outputs
+
+    def __repr__(self):
+        """
+        Returns a string representation of an ScoreRequestOutput instance.
+
+        The representation includes the request_id and the number of outputs,
+        providing a quick overview of the embedding request's results.
+
+        Returns:
+            str: A string representation of the ScoreRequestOutput instance.
+        """
+        return (f"ScoreRequestOutput(request_id='{self.request_id}', "
+                f"outputs={repr(self.outputs)}")
 
 
 class RequestOutputFactory:
