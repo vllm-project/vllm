@@ -339,6 +339,8 @@ class LlamaModel(nn.Module):
             residual = intermediate_tensors["residual"]
 
         if is_hpu:
+            for i in range(self.start_layer, self.end_layer):
+                self.layers[i].self_attn.rotary_emb.prepare_cos_sin(positions)
             import habana_frameworks.torch as htorch
             htorch.core.mark_step()
 
