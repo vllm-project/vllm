@@ -292,7 +292,7 @@ For more information about the parameters, please run
 
     /app/vllm/benchmarks/benchmark_throughput.py -h
 
-Tensor parallism (TP) parameters depends on the model size. For Llama 3.1 70B and 8B model, TP 1 can be used as well for MI300X. In general, TP 8 and 1 is recommended to achieve the optimum performance. 
+Tensor parallelism (TP) parameters depends on the model size. For Llama 3.1 70B and 8B model, TP 1 can be used as well for MI300X. In general, TP 8 and 1 is recommended to achieve the optimum performance. 
 
 ##### Online Server Benchmark
  
