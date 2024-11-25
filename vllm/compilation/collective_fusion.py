@@ -470,10 +470,14 @@ class CollectiveFusionPass(VllmInductorPass):
                    for node in match.nodes)
 
     def __call__(self, graph: fx.Graph):
+        if not (model_parallel_is_initialized() and
+                get_tensor_model_parallel_world_size() > 1):
+            return
+
         # TODO: disable if chunk prefill size is too small
         # or when doing decode.
         self.dump_graph(graph, "before_collective_fusion")
-        count = self.gemm_rs_ag_gemm_pattern.apply(graph)
+        self.gemm_rs_ag_gemm_pattern.apply(graph)
         logger.info("fused gemm match count = %d", len(self.matches))
 
         # Don't apply final pattern unless we've matched and replaced the

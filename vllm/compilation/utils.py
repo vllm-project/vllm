@@ -1,5 +1,6 @@
 import operator
 import os
+from pathlib import Path
 from typing import Dict, Iterable, Optional
 
 import torch.fx as fx
@@ -62,7 +63,7 @@ def dump_graph(pass_config, graph: fx.Graph, name: str) -> None:
     # Make sure filename includes rank in the distributed setting
     parallel = p_is_init() and get_tp_world_size() > 1
     rank = f"-{get_tp_rank()}" if parallel else ""
-    filepath = pass_config.dump_graph_dir / f"{name}{rank}-{count}.py"
+    filepath = Path(pass_config.dump_graph_dir) / f"{name}{rank}-{count}.py"
     COUNTS[name] = count + 1
 
     os.makedirs(pass_config.dump_graph_dir, exist_ok=True)

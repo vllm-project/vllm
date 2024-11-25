@@ -471,7 +471,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
 
     # If set, try to use the flux fused collective communication gemm kernels.
     "VLLM_USE_FLUX":
-    lambda: bool(int(os.getenv("VLLM_USE_FLUX", "0"))),
+    lambda: bool(int(os.getenv("VLLM_USE_FLUX", "1"))),
 }
 
 # end-env-vars-definition
