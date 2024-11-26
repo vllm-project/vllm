@@ -35,7 +35,7 @@ class QuarkMoEMethod(FusedMoEMethodBase):
         input_config = layer_quant_config.input_tensors
         
         if quant_config._is_fp8_w8a8(weight_config, input_config):
-            return QuarkW8A8Fp8MoEMethod(quant_config)
+            return QuarkW8A8Fp8MoEMethod(weight_config, input_config)
         else:
             raise RuntimeError("Unsupported FusedMoe scheme")
 
