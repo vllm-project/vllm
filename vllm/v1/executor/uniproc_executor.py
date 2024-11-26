@@ -10,7 +10,7 @@ from vllm.v1.worker.gpu_worker import Worker
 logger = init_logger(__name__)
 
 
-class GPUExecutor:
+class UniprocExecutor:
 
     def __init__(self, vllm_config: VllmConfig) -> None:
         self.vllm_config = vllm_config
@@ -75,6 +75,6 @@ class GPUExecutor:
         self.worker.profile(is_start)
 
     def check_health(self) -> None:
-        # GPUExecutor will always be healthy as long as
+        # UniprocExecutor will always be healthy as long as
         # it's running.
         return

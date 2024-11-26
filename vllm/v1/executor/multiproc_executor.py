@@ -18,7 +18,7 @@ from vllm.v1.worker.gpu_worker import WorkerProc, WorkerProcHandle
 logger = init_logger(__name__)
 
 
-class MultiprocessingGPUExecutor:
+class MultiprocExecutor:
 
     def __init__(self, vllm_config: VllmConfig) -> None:
         # Register self.shutdown so we can make sure to call it on exit
@@ -158,6 +158,6 @@ class MultiprocessingGPUExecutor:
             self.shutdown()
 
     def check_health(self) -> None:
-        # GPUExecutor will always be healthy as long as
+        # MultiprocExecutor will always be healthy as long as
         # it's running.
         return

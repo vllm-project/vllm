@@ -101,13 +101,12 @@ class LLMEngine:
         distributed_executor_backend = (
             vllm_config.parallel_config.distributed_executor_backend)
         if distributed_executor_backend == "mp":
-            from vllm.v1.executor.multiproc_gpu_executor import (
-                MultiprocessingGPUExecutor)
-            executor_class = MultiprocessingGPUExecutor
+            from vllm.v1.executor.multiproc_executor import MultiprocExecutor
+            executor_class = MultiprocExecutor
         else:
             assert (distributed_executor_backend is None)
-            from vllm.v1.executor.gpu_executor import GPUExecutor
-            executor_class = GPUExecutor
+            from vllm.v1.executor.monoproc_executor import MonoprocExecutor
+            executor_class = MonoprocExecutor
 
         return executor_class
 
