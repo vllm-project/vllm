@@ -137,24 +137,34 @@ async def run_vllm_async(requests: List[SampleRequest],
                 ))
 
         generators = []
+        start_time = []
+        latencies = []
         start = time.perf_counter()
         for i, (prompt, sp) in enumerate(zip(prompts, sampling_params)):
             generator = llm.generate(prompt, sp, request_id=f"test{i}")
             generators.append(generator)
+            start_time.append(time.perf_counter())
+            latencies.append([])
         all_gens = merge_async_iterators(*generators)
         generated_texts = [''] * len(requests)
         async for i, res in all_gens:
             generated_texts[i] = res.outputs[0].text
+            lat = time.perf_counter() - start_time[i]
+            latencies[i].append(lat)
         ret = [{
             'generated': gt,
             'expected': req.completion
         } for gt, req in zip(generated_texts, requests)]
+        first_latency = sum([lat[0]
+                             for lat in latencies]) / len(latencies) * 1000
+        next_latency = sum([(lat[-1] - lat[0]) / len(lat[1:])
+                            for lat in latencies]) / len(latencies) * 1000
         end = time.perf_counter()
         if result_file_name:
             with open(result_file_name, 'w') as f:
                 json.dump(ret, f, indent=4)
                 f.write("\n")
-        return end - start
+        return end - start, (first_latency, next_latency)
 
 
 def sample_requests(tokenizer: PreTrainedTokenizerBase,
@@ -288,7 +298,7 @@ def main(args: argparse.Namespace):
 
     if args.async_engine:
         engine_args = AsyncEngineArgs.from_cli_args(args)
-        elapsed_time = uvloop.run(
+        elapsed_time, (first_latency, next_latency) = uvloop.run(
             run_vllm_async(
                 requests,
                 engine_args,
@@ -308,14 +318,19 @@ def main(args: argparse.Namespace):
             args.warmup,
             result_file_name,
         )
+        first_latency, next_latency = None, None
 
     total_num_tokens = sum(request.prompt_len + request.expected_output_len
                            for request in requests)
     total_output_tokens = sum(request.expected_output_len
                               for request in requests)
-    print(f"Throughput: {len(requests) / elapsed_time:.2f} requests/s, "
-          f"{total_num_tokens / elapsed_time:.2f} total tokens/s, "
-          f"{total_output_tokens / elapsed_time:.2f} output tokens/s")
+    latency_breakdown = f"First token latency: {first_latency:.2f} msecs"
+    latency_breakdown += f"Next token latency: {next_latency:.2f} msecs"
+    print(
+        f"Throughput: {len(requests) / elapsed_time:.2f} requests/s, "
+        f"{total_num_tokens / elapsed_time:.2f} total tokens/s, "
+        f"{total_output_tokens / elapsed_time:.2f} output tokens/s",
+        f"{latency_breakdown if first_latency is not None else ''}")
 
     # Output JSON results if specified
     if args.output_json or result_file_name:
@@ -335,6 +350,9 @@ def main(args: argparse.Namespace):
             "output_tokens_per_second":
             f"{total_output_tokens / elapsed_time:.2f}",
         }
+        if first_latency is not None:
+            results["first_token_latency"] = first_latency
+            results["next_token_latency"] = next_latency
         if args.output_json:
             with open(args.output_json, "w") as f:
                 json.dump(results, f, indent=4)
