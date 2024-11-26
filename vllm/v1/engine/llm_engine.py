@@ -82,7 +82,7 @@ class LLMEngine:
         """Creates an LLM engine from the engine arguments."""
 
         # Create the engine configs.
-        vllm_config = engine_args.create_engine_config()
+        vllm_config = engine_args.create_engine_config(usage_context)
         executor_class = cls._get_executor_cls(vllm_config)
 
         if VLLM_ENABLE_V1_MULTIPROCESSING:
