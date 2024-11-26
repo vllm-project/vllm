@@ -385,6 +385,52 @@ class Scheduler:
             encoder_inputs_to_schedule.append(i)
         return encoder_inputs_to_schedule, num_new_tokens, encoder_budget
 
+    def _pythonize_logprobs(
+        self,
+        do_logprobs: bool,
+        do_prompt_logprobs: bool,
+        model_runner_output: "ModelRunnerOutput",
+    ) -> Tuple[List, List, List, List]:
+        """Convert logprobs tensors to Python data structures.
+        
+        Args:
+          do_logprobs: sample logprobs are required
+          do_prompt_logprobs: prompt logprobs are required
+          model_runner_output: model runner output contains CPU logprobs tensors
+
+        Returns:
+          logprob_token_ids_list
+          logprob_values_list
+          prompt_logprob_token_ids_list
+          prompt_logprob_values_list
+        """
+        if do_logprobs:
+            # Pythonize sample logprobs if needed
+            assert model_runner_output.logprob_token_ids_cpu is not None
+            logprob_token_ids_list = (
+                model_runner_output.logprob_token_ids_cpu.tolist())
+            logprob_values_list = (model_runner_output.logprobs_cpu.tolist())
+        else:
+            (
+                logprob_token_ids_list,
+                logprob_values_list,
+            ) = (None, None)
+        if do_prompt_logprobs:
+            # Pythonize prompt logprobs if needed
+            assert model_runner_output.prompt_logprob_token_ids_cpu is not None
+            prompt_logprob_token_ids_list = (
+                model_runner_output.prompt_logprob_token_ids_cpu.tolist())
+            prompt_logprob_values_list = (
+                model_runner_output.prompt_logprobs_cpu.tolist())
+        else:
+            (
+                prompt_logprob_token_ids_list,
+                prompt_logprob_values_list,
+            ) = (None, None)
+
+        return (logprob_token_ids_list, logprob_values_list,
+                prompt_logprob_token_ids_list, prompt_logprob_values_list)
+
     def update_from_output(
         self,
         scheduler_output: "SchedulerOutput",
@@ -397,17 +443,19 @@ class Scheduler:
         do_prompt_logprobs = (
             model_runner_output.prompt_logprobs_cpu is not None
             and len(model_runner_output.prompt_logprobs_cpu) > 0)
-        if do_logprobs:
-            assert model_runner_output.logprob_token_ids_cpu is not None
-            logprob_token_ids_list = (
-                model_runner_output.logprob_token_ids_cpu.tolist())
-            logprob_values_list = (model_runner_output.logprobs_cpu.tolist())
+
+        # Get logprobs as Python data structures
+        (
+            logprob_token_ids_list,
+            logprob_values_list,
+            prompt_logprob_token_ids_list,
+            prompt_logprob_values_list,
+        ) = self._pythonize_logprobs(do_logprobs, do_prompt_logprobs,
+                                     model_runner_output)
+
         if do_prompt_logprobs:
-            assert model_runner_output.prompt_logprob_token_ids_cpu is not None
-            prompt_logprob_token_ids_list = (
-                model_runner_output.prompt_logprob_token_ids_cpu.tolist())
-            prompt_logprob_values_list = (
-                model_runner_output.prompt_logprobs_cpu.tolist())
+            # Index into prompt tokens, for building
+            # prompt logprobs output data structure
             curr_prompt_base_idx = 0
         new_running: List[Request] = []
         engine_core_outputs: List[EngineCoreOutput] = []
