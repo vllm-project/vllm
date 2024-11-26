@@ -17,27 +17,23 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, Iterable, Optional, Set, Tuple
 
 import torch
-from torch import nn
 from transformers import PretrainedConfig
 
-from vllm.attention import AttentionMetadata
 from vllm.config import CacheConfig, VllmConfig
 from vllm.model_executor.layers.linear import RowParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig)
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
+from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.llama import (LlamaAttention,
                                               LlamaDecoderLayer,
                                               LlamaForCausalLM, LlamaMLP,
                                               LlamaModel)
-from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.sequence import IntermediateTensors
 
 from .utils import AutoWeightsLoader, WeightsMapper, make_layers, maybe_prefix
 
