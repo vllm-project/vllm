@@ -101,8 +101,7 @@ class Sampler(nn.Module):
                 (maybe_sample_topk_indices, maybe_sampled.unsqueeze(-1)),
                 dim=-1)
         elif do_logprobs:
-            logprobs = self.get_logprobs(
-                logits_w_tmp_tpk_tpp[maybe_sample_logits_indices, :])
+            logprobs = self.get_logprobs(maybe_sample_logits_w_tmp_tpk_tpp)
 
             maybe_sampled_logprobs = logprobs[
                 torch.arange(maybe_sampled.shape[0]), maybe_sampled]
