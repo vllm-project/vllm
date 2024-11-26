@@ -8,7 +8,7 @@ from torch._inductor.pattern_matcher import (Match, PatternMatcherPass,
 
 import vllm.envs as envs
 from vllm.compilation.utils import (find_auto_fn, find_fn, find_getitem,
-                                    last_node_in_match, use_cc_kernels)
+                                    last_node_in_match)
 from vllm.config import CompilationConfig
 from vllm.distributed import (tensor_model_parallel_all_gather,
                               tensor_model_parallel_all_reduce)
@@ -30,6 +30,17 @@ if envs.VLLM_USE_FLUX:
     except ImportError:
         logger.info("Attempting to use flux but flux not installed.")
         use_flux = False
+
+
+# Depends on arch, see auto_tile_shape in include/flux/gemm_hparams.h
+# Can be 256 on sm80.
+FLUX_TILE_SIZE: int = 128
+
+
+def use_cc_kernels(m_shape: int) -> bool:
+    n_slices = get_tensor_model_parallel_world_size()
+    return (m_shape % (FLUX_TILE_SIZE * n_slices) == 0
+            and m_shape >= FLUX_TILE_SIZE * n_slices)
 
 
 def get_world_name() -> str:
@@ -134,8 +145,11 @@ def get_gemm_rs_ag_gemm(use_flux: bool, max_m: int, gemm_1_type: torch.dtype,
             local_copy=False,
         )
 
-        gemm_rs = lambda act, wt: gemm_rs_op.forward(act, wt).squeeze(0)
-        ag_gemm = lambda act, wt: ag_gemm_op.forward(act, wt)
+        def gemm_rs(act, wt):
+            return gemm_rs_op.forward(act, wt).squeeze(0)
+
+        def ag_gemm(act, wt):
+            return ag_gemm_op.forward(act, wt)
 
         gemm_1_str = str(gemm_1_type).removeprefix("torch.")
         gemm_2_str = str(gemm_2_type).removeprefix("torch.")
@@ -146,12 +160,12 @@ def get_gemm_rs_ag_gemm(use_flux: bool, max_m: int, gemm_1_type: torch.dtype,
     else:
         world_group_name = get_world_name()
 
-        gemm_rs = lambda act, wt: \
-            torch.ops.symm_mem.fused_matmul_reduce_scatter.default(
+        def gemm_rs(act, wt):
+            return torch.ops.symm_mem.fused_matmul_reduce_scatter.default(
                 act, wt.transpose(1, 0), 'avg', 0, world_group_name)
 
-        ag_gemm = lambda act, wt: \
-            torch.ops.symm_mem.fused_all_gather_matmul.default(
+        def ag_gemm(act, wt):
+            return torch.ops.symm_mem.fused_all_gather_matmul.default(
                 act, [wt.transpose(1, 0)], 0, world_group_name)[1]
 
         group_str = tp_group_name.replace(":", "_")
