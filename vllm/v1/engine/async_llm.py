@@ -94,7 +94,7 @@ class AsyncLLM(EngineClient):
 
         # Create the engine configs.
         if engine_config is None:
-            vllm_config = engine_args.create_engine_config()
+            vllm_config = engine_args.create_engine_config(usage_context)
         else:
             vllm_config = engine_config
 
@@ -346,10 +346,10 @@ class AsyncLLM(EngineClient):
         logger.debug("Called check_health.")
 
     async def start_profile(self) -> None:
-        raise ValueError("Not supported on V1 yet.")
+        await self.engine_core.profile(True)
 
     async def stop_profile(self) -> None:
-        raise ValueError("Not supported on V1 yet.")
+        await self.engine_core.profile(False)
 
     @property
     def is_running(self) -> bool:

@@ -81,8 +81,9 @@ def test_engine_core_client(monkeypatch, multiprocessing_mode: bool):
     with monkeypatch.context() as m:
         m.setenv("VLLM_USE_V1", "1")
 
-        engine_args = EngineArgs(model=MODEL_NAME)
-        vllm_config = engine_args.create_engine_config()
+        engine_args = EngineArgs(model=MODEL_NAME, compilation_config=3)
+        vllm_config = engine_args.create_engine_config(
+            UsageContext.UNKNOWN_CONTEXT)
         executor_class = AsyncLLM._get_executor_cls(vllm_config)
         client = EngineCoreClient.make_client(
             vllm_config,
@@ -153,7 +154,8 @@ async def test_engine_core_client_asyncio(monkeypatch):
         m.setenv("VLLM_USE_V1", "1")
 
         engine_args = EngineArgs(model=MODEL_NAME)
-        vllm_config = engine_args.create_engine_config()
+        vllm_config = engine_args.create_engine_config(
+            usage_context=UsageContext.UNKNOWN_CONTEXT)
         executor_class = AsyncLLM._get_executor_cls(vllm_config)
         client = EngineCoreClient.make_client(
             vllm_config,

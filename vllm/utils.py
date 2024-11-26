@@ -19,7 +19,8 @@ import uuid
 import warnings
 import weakref
 from asyncio import FIRST_COMPLETED, AbstractEventLoop, Future, Task
-from collections.abc import Mapping
+from collections import defaultdict
+from collections.abc import Iterable, Mapping
 from functools import lru_cache, partial, wraps
 from platform import uname
 from typing import (Any, AsyncGenerator, Awaitable, Callable, Dict, Generic,
@@ -466,6 +467,13 @@ async def collect_from_async_generator(
 
 def get_ip() -> str:
     host_ip = envs.VLLM_HOST_IP
+    if "HOST_IP" in os.environ and "VLLM_HOST_IP" not in os.environ:
+        logger.warning(
+            "The environment variable HOST_IP is deprecated and ignored, as"
+            " it is often used by Docker and other software to"
+            "interact with the container's network stack. Please"
+            "use VLLM_HOST_IP instead to set the IP address for vLLM processes"
+            " to communicate with each other.")
     if host_ip:
         return host_ip
 
@@ -903,6 +911,23 @@ def json_map_leaves(func: Callable[[T], U], value: JSONTree[T]) -> JSONTree[U]:
 def flatten_2d_lists(lists: List[List[T]]) -> List[T]:
     """Flatten a list of lists to a single list."""
     return [item for sublist in lists for item in sublist]
+
+
+_K = TypeVar("_K", bound=Hashable)
+_V = TypeVar("_V")
+
+
+def full_groupby(values: Iterable[_V], *, key: Callable[[_V], _K]):
+    """
+    Unlike :class:`itertools.groupby`, groups are not broken by
+    non-contiguous data.
+    """
+    groups = defaultdict[_K, list[_V]](list)
+
+    for value in values:
+        groups[key(value)].append(value)
+
+    return groups.items()
 
 
 # TODO: This function can be removed if transformer_modules classes are
@@ -1573,6 +1598,7 @@ def direct_register_custom_op(
     mutates_args: List[str],
     fake_impl: Optional[Callable] = None,
     target_lib: Optional[Library] = None,
+    dispatch_key: str = "CUDA",
 ):
     """
     `torch.library.custom_op` can have significant overhead because it
@@ -1601,7 +1627,7 @@ def direct_register_custom_op(
         schema_str = torch._custom_op.impl.infer_schema(op_func, mutates_args)
     my_lib = target_lib or vllm_lib
     my_lib.define(op_name + schema_str)
-    my_lib.impl(op_name, op_func, "CUDA")
+    my_lib.impl(op_name, op_func, dispatch_key=dispatch_key)
     if fake_impl is not None:
         my_lib._register_fake(op_name, fake_impl)
 

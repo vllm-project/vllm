@@ -16,8 +16,8 @@ from torch.library import Library
 from vllm.compilation.compile_context import set_compile_context
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CompilationConfig, CompilationLevel, VllmConfig
-from vllm.plugins import set_current_vllm_config
+from vllm.config import (CompilationConfig, CompilationLevel, VllmConfig,
+                         set_current_vllm_config)
 from vllm.utils import direct_register_custom_op
 
 # create a library to hold the custom op

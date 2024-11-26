@@ -234,6 +234,11 @@ Text Generation
     - :code:`allenai/OLMo-1B-hf`, :code:`allenai/OLMo-7B-hf`, etc.
     -
     - ✅︎
+  * - :code:`OLMo2ForCausalLM`
+    - OLMo2
+    - :code:`allenai/OLMo2-7B-1124`, etc.
+    -
+    - ✅︎
   * - :code:`OLMoEForCausalLM`
     - OLMoE
     - :code:`allenai/OLMoE-1B-7B-0924`, :code:`allenai/OLMoE-1B-7B-0924-Instruct`, etc.
@@ -325,6 +330,11 @@ Text Embedding
     - Example HF Models
     - :ref:`LoRA <lora>`
     - :ref:`PP <distributed_serving>`
+  * - :code:`BertModel`
+    - BERT-based
+    - :code:`BAAI/bge-base-en-v1.5`, etc.
+    - 
+    - 
   * - :code:`Gemma2Model`
     - Gemma2-based
     - :code:`BAAI/bge-multilingual-gemma2`, etc.
@@ -337,9 +347,19 @@ Text Embedding
     - ✅︎
   * - :code:`Qwen2Model`, :code:`Qwen2ForCausalLM`
     - Qwen2-based
-    - :code:`ssmits/Qwen2-7B-Instruct-embed-base`, :code:`Alibaba-NLP/gte-Qwen2-1.5B-instruct`, etc.
+    - :code:`ssmits/Qwen2-7B-Instruct-embed-base`, :code:`Alibaba-NLP/gte-Qwen2-7B-instruct` (see note), etc.
     - ✅︎
     - ✅︎
+  * - :code:`RobertaModel`, :code:`RobertaForMaskedLM`
+    - RoBERTa-based
+    - :code:`sentence-transformers/all-roberta-large-v1`, :code:`sentence-transformers/all-roberta-large-v1`, etc.
+    - 
+    - 
+  * - :code:`XLMRobertaModel`
+    - XLM-RoBERTa-based
+    - :code:`intfloat/multilingual-e5-large`, etc.
+    - 
+    - 
 
 .. important::
   Some model architectures support both generation and embedding tasks.
@@ -347,6 +367,13 @@ Text Embedding
 
 .. tip::
   You can override the model's pooling method by passing :code:`--override-pooler-config`.
+
+.. note::
+  Unlike base Qwen2, :code:`Alibaba-NLP/gte-Qwen2-7B-instruct` uses bi-directional attention.
+  You can set :code:`--hf-overrides '{"is_causal": false}'` to change the attention mask accordingly.
+
+  On the other hand, its 1.5B variant (:code:`Alibaba-NLP/gte-Qwen2-1.5B-instruct`) uses causal attention
+  despite being described otherwise on its model card.
 
 Reward Modeling
 ---------------
@@ -390,6 +417,36 @@ Classification
 .. note::
     As an interim measure, these models are supported in both offline and online inference via Embeddings API.
 
+Sentence Pair Scoring
+---------------------
+
+.. list-table::
+  :widths: 25 25 50 5 5
+  :header-rows: 1
+
+  * - Architecture
+    - Models
+    - Example HF Models
+    - :ref:`LoRA <lora>`
+    - :ref:`PP <distributed_serving>`
+  * - :code:`BertForSequenceClassification`
+    - BERT-based
+    - :code:`cross-encoder/ms-marco-MiniLM-L-6-v2`, etc.
+    - 
+    - 
+  * - :code:`RobertaForSequenceClassification`
+    - RoBERTa-based
+    - :code:`cross-encoder/quora-roberta-base`, etc.
+    - 
+    - 
+  * - :code:`XLMRobertaForSequenceClassification`
+    - XLM-RoBERTa-based
+    - :code:`BAAI/bge-reranker-v2-m3`, etc.
+    - 
+    - 
+
+.. note::
+    These models are supported in both offline and online inference via Score API.
 
 Multimodal Language Models
 ^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -424,6 +481,12 @@ Text Generation
     - Example HF Models
     - :ref:`LoRA <lora>`
     - :ref:`PP <distributed_serving>`
+  * - :code:`AriaForConditionalGeneration`
+    - Aria
+    - T + I
+    - :code:`rhymes-ai/Aria`
+    - 
+    - ✅︎
   * - :code:`Blip2ForConditionalGeneration`
     - BLIP-2
     - T + I\ :sup:`E`
@@ -561,10 +624,10 @@ Text Generation
 | :sup:`+` Multiple items can be inputted per text prompt for this modality.
 
 .. note::
-  vLLM currently only supports adding LoRA to the language backbone of multimodal models.               
+  vLLM currently only supports adding LoRA to the language backbone of multimodal models.
 
 .. note::
-  For :code:`openbmb/MiniCPM-V-2`, the official repo doesn't work yet, so we need to use a fork (:code:`HwwwH/MiniCPM-V-2`) for now.
+  The official :code:`openbmb/MiniCPM-V-2` doesn't work yet, so we need to use a fork (:code:`HwwwH/MiniCPM-V-2`) for now.
   For more details, please see: https://github.com/vllm-project/vllm/pull/4087#issuecomment-2250397630
 
 Multimodal Embedding
