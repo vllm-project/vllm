@@ -299,22 +299,6 @@ class GroupCoordinator:
             stream.wait_stream(curr_stream)
 
         with torch.cuda.stream(stream), maybe_ca_context:
-            # In graph mode, we have to be very careful about the collective
-            # operations. The current status is:
-            #     allreduce \ Mode   |  Eager  |  Graph  |
-            # --------------------------------------------
-            # custom allreduce       | enabled | enabled |
-            # PyNccl                 | disabled| enabled |
-            #
-            # Note that custom allreduce will have a runtime check, if the
-            #  tensor size is too large, it will fallback to the next
-            #  available option.
-            # In summary: When using CUDA graph, we use
-            #  either custom all-reduce kernel or pynccl. When not using
-            #  CUDA graph, we use either custom all-reduce kernel or
-            #  PyTorch NCCL. We always prioritize using custom all-reduce
-            #  kernel but fall back to PyTorch or pynccl if it is
-            #  disabled or not supported.
             pynccl_comm = self.pynccl_comm
             maybe_pynccl_context: Any
             if not pynccl_comm:
@@ -337,8 +321,8 @@ class GroupCoordinator:
          coordinator.
 
         In addition, PyTorch custom ops do not support mutation or returning
-        a new tensor in the same op. So we need to figure out if the op is
-        in-place or out-of-place ahead of time.
+        a new tensor in the same op. So we always make the all-reduce operation
+        out-of-place.
         """
         # Bypass the function if we are using only 1 GPU.
         if self.world_size == 1:
@@ -365,9 +349,11 @@ class GroupCoordinator:
         return torch.ops.vllm.all_reduce(input_, group_name=self.unique_name)
 
     def _all_reduce_out_place(self, input_: torch.Tensor) -> torch.Tensor:
+        # always try custom allreduce first,
+        # and then pynccl.
         ca_comm = self.ca_comm
-        if ca_comm is not None and not ca_comm.disabled and ca_comm.should_custom_ar(
-                input_):
+        if ca_comm is not None and not ca_comm.disabled and \
+            ca_comm.should_custom_ar(input_):
             out = ca_comm.custom_all_reduce(input_)
             assert out is not None
             return out
