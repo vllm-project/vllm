@@ -86,7 +86,6 @@ If GPU/CPU communication cannot be established, you can use the following Python
     from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 
     pynccl = PyNcclCommunicator(group=gloo_group, device=local_rank)
-    pynccl.disabled = False
 
     s = torch.cuda.Stream()
     with torch.cuda.stream(s):
