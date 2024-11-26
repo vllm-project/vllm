@@ -33,9 +33,9 @@ def get_threadsafe_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:
     lock = threading.Lock()
 
     class ThreadsafeTokenizer(tokenizer.__class__):  # type: ignore
+
         def __call__(self, *args, **kwargs):
             with lock:
-                logger.info(f"using lock in thread {threading.get_ident()}")
                 return super().__call__(*args, **kwargs)
 
     ThreadsafeTokenizer.__name__ = f"Threadsafe{tokenizer.__class__.__name__}"
