@@ -10,6 +10,7 @@
 # add these directories to sys.path here. If the directory is relative to the
 # documentation root, use os.path.abspath to make it absolute, like shown here.
 
+import inspect
 import logging
 import os
 import sys
@@ -34,6 +35,7 @@ author = 'the vLLM Team'
 extensions = [
     "sphinx.ext.napoleon",
     "sphinx.ext.viewcode",
+    "sphinx.ext.linkcode",
     "sphinx.ext.intersphinx",
     "sphinx_copybutton",
     "sphinx.ext.autodoc",
@@ -92,6 +94,25 @@ if READTHEDOCS_VERSION_TYPE == "tag":
 def setup(app):
     from docs.source.generate_examples import generate_examples
     generate_examples()
+
+
+def linkcode_resolve(domain, info):
+    if domain != 'py':
+        return None
+    if not info['module']:
+        return None
+    filename = info['module'].replace('.', '/')
+    module = info['module']
+    try:
+        obj = sys.modules[module]
+        for part in info['fullname'].split('.'):
+            obj = getattr(obj, part)
+        lineno = inspect.getsourcelines(obj)[1]
+        filename = (inspect.getsourcefile(obj)
+                    or f"{filename}.py").split("vllm/", 1)[1]
+        return f"https://github.com/vllm-project/vllm/blob/main/{filename}#L{lineno}"
+    except Exception:
+        return f"https://github.com/vllm-project/vllm/blob/main/{filename}.py"
 
 
 # Mock out external dependencies here, otherwise the autodoc pages may be blank.
