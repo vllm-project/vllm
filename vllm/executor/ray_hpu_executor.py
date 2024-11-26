@@ -192,8 +192,8 @@ class RayHPUExecutor(DistributedGPUExecutor):
                 f"Every node should have a unique IP address. Got {n_nodes}"
                 f" nodes with node ids {list(node_workers.keys())} and "
                 f"{n_ips} unique IP addresses {all_ips}. Please check your"
-                " network configuration. If you set `VLLM_HOST_IP` or "
-                "`HOST_IP` environment variable, make sure it is unique for"
+                " network configuration. If you set `VLLM_HOST_IP` "
+                "environment variable, make sure it is unique for"
                 " each node.")
 
         VLLM_INSTANCE_ID = get_vllm_instance_id()
