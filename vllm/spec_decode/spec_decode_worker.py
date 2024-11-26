@@ -417,7 +417,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             all_zero_spec_tokens = all_zero_spec_tokens and (
                 sgm.num_speculative_tokens == 0)
 
-        if all_prompt:
+        if all_prompt and execute_model_req.seq_group_metadata_list:
             assert num_lookahead_slots == 0, (
                 "Prompt only runs should have num_lookahead_slots equal to 0. "
                 "This should never happen, please file a bug at "
