@@ -167,7 +167,7 @@ class GGUFUninitializedParameter(UninitializedParameter):
 
     def materialize_nested(self) -> Parameter:
         dtype = {data.dtype for data in self.data_container}
-        assert len(dtype) != 1, ValueError(
+        assert len(dtype) == 1, ValueError(
             f"Data container has mixed dtypes: {dtype}")
         nested_data = torch.nested.nested_tensor(self.data_container,
                                                  device=self.device,
