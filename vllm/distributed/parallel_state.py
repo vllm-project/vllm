@@ -358,11 +358,11 @@ class GroupCoordinator:
             return out
         pynccl_comm = self.pynccl_comm
         assert pynccl_comm is not None
-        with pynccl_comm.change_state(enable=True,
-                                      stream=torch.cuda.current_stream()):
-            out = pynccl_comm.all_reduce(input_)
-            assert out is not None
-            return out
+        # TODO: pynccl should not use `stream=`
+        # it can just always use the current stream.
+        out = pynccl_comm.all_reduce(input_, stream=torch.cuda.current_stream())
+        assert out is not None
+        return out
 
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
         world_size = self.world_size
