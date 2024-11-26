@@ -11,14 +11,14 @@ class SamplerOutput:
     sampled_token_ids: torch.Tensor
 
     # [num_reqs, max_num_logprobs + 1]
-    logprob_token_ids: Optional[torch.Tensor]
+    logprob_token_ids: Optional[torch.Tensor] = None
     # [num_reqs, max_num_logprobs + 1]
-    logprobs: Optional[torch.Tensor]
+    logprobs: Optional[torch.Tensor] = None
 
     # [num_prompt_tokens, max_num_prompt_logprobs + 1]
-    prompt_logprob_token_ids: Optional[torch.Tensor]
+    prompt_logprobs: Optional[torch.Tensor] = None
     # [num_prompt_tokens, max_num_prompt_logprobs + 1]
-    prompt_logprobs: Optional[torch.Tensor]
+    prompt_logprob_token_ids: Optional[torch.Tensor] = None
 
 
 @dataclass
