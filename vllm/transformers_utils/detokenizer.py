@@ -41,7 +41,7 @@ class Detokenizer:
         seq = seq_group.get_seqs()[0]
         # Only prompt, without the generated token.
         all_token_ids = seq.get_token_ids()
-        prompt_token_ids = all_token_ids[:-1] 
+        prompt_token_ids = all_token_ids[:-1]
         tokenizer = self.get_tokenizer_for_seq(seq)
         prefix_offset = 0
         read_offset = 0

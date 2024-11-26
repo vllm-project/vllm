@@ -3,8 +3,6 @@ from vllm.sequence import (ExecuteModelRequest, SequenceData,
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeScorer, SpeculativeScores)
 
-from vllm.sequence import VLLM_INVALID_TOKEN_ID
-
 SeqId = int
 TargetSeqId = int
 
@@ -80,7 +78,9 @@ class MQAScorer(SpeculativeScorer):
         # the for loop to build output for better performance.
         if min(all_proposal_lengths) == k:
             # Regular decodes only.
-            assert all((not sg.is_prompt for sg in target_seq_group_metadata_list if sg.is_prompt))
+            assert all(not sg.is_prompt
+                       for sg in target_seq_group_metadata_list
+                       if sg.is_prompt)
             bs, _ = proposals.proposal_token_ids.shape
             all_tokens = target_token_ids.reshape(bs, k + 1)
             all_probs = target_probs.reshape(bs, k + 1, self._vocab_size)
@@ -94,19 +94,25 @@ class MQAScorer(SpeculativeScorer):
             all_logprobs = target_logprobs.new_full(size=all_probs.shape,
                                                     fill_value=-float("inf"))
             target_token_ids = target_token_ids.flatten()
-            
-            # When prompt logprobs is enabled, lens of returned tensors go from 
+
+            # When prompt logprobs is enabled, lens of returned tensors go from
             # n_sampled (requests with do_sample=True) to n_prompt+n_prefills.
-            # We adjust stride accordingly to get the generated tokens and 
-            # their probs, but pass on prompt_logprobs as is, since it may be 
-            # that n_prompts >> K. 
-            has_prompt_log = any(((sg.sampling_params.prompt_logprobs and sg.sampling_params.prompt_logprobs>0) for sg in target_seq_group_metadata_list))
-            if not self._scorer_worker.model_runner.disable_logprobs and has_prompt_log:
-                prompt_logprobs = [o.prompt_logprobs for o in target_sampler_output.outputs]
-                
+            # We adjust stride accordingly to get the generated tokens and
+            # their probs, but pass on prompt_logprobs as is, since it may be
+            # that n_prompts >> K.
+            has_prompt_log = any((sg.sampling_params.prompt_logprobs
+                                  and sg.sampling_params.prompt_logprobs > 0)
+                                 for sg in target_seq_group_metadata_list)
+            if (not self._scorer_worker.model_runner.disable_logprobs\
+                and has_prompt_log):
+                prompt_logprobs = [
+                    o.prompt_logprobs for o in target_sampler_output.outputs
+                ]
+
             # Split loop into prefill|decode for readability.
-            start_loc, i = 0, 0 
-            while i<len(target_seq_group_metadata_list) and target_seq_group_metadata_list[i].is_prompt:
+            start_loc, i = 0, 0
+            while i < len(target_seq_group_metadata_list
+                          ) and target_seq_group_metadata_list[i].is_prompt:
                 seq_meta = target_seq_group_metadata_list[i]
                 end_loc = start_loc
                 if has_prompt_log:
@@ -116,17 +122,17 @@ class MQAScorer(SpeculativeScorer):
 
                 # Skip chunks with no output tokens.
                 if seq_meta.do_sample:
-                    # only sampling final token of the chunk
-                    all_tokens[i, 0] = target_token_ids[end_loc-1]
-                    # NOTE These probs are wrt OUTPUT TOKENS ONLY, the prompt ones wouldnt fit (n_prompts>>n_generated)
-                    all_probs[i, 0] = target_probs[end_loc-1]
-                    all_logprobs[i, 0] = target_logprobs[end_loc-1]
-                    
-                i+=1
+                    # Get sampled token (last position in chunk) and its prob.
+                    all_tokens[i, 0] = target_token_ids[end_loc - 1]
+                    all_probs[i, 0] = target_probs[end_loc - 1]
+                    all_logprobs[i, 0] = target_logprobs[end_loc - 1]
+
+                i += 1
                 start_loc = end_loc
             # Decodes.
-            while i<len(target_seq_group_metadata_list):
-                proposed_len, seq_meta = all_proposal_lengths[i], target_seq_group_metadata_list[i]
+            while i < len(target_seq_group_metadata_list):
+                proposed_len, seq_meta = all_proposal_lengths[
+                    i], target_seq_group_metadata_list[i]
                 output_len = proposed_len + 1
                 end_loc = start_loc + output_len
                 all_tokens[

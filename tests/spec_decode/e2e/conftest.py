@@ -1,8 +1,8 @@
 from itertools import cycle
 from typing import List, Optional, Sequence, Tuple, Union
-import torch
 
 import pytest
+import torch
 
 from vllm import LLM, SamplingParams
 from vllm.distributed import cleanup_dist_env_and_memory

@@ -22,14 +22,11 @@ from .conftest import run_equality_correctness_test
                              "speculative_model": "JackFram/llama-160m",
                              "num_speculative_tokens": 3,
                              "disable_logprobs_during_spec_decoding": False,
-                         }, 
-                         {
-                            # TODO HERE fails when disabling logprobs and still requesting them
+                         }, {
                              "speculative_model": "JackFram/llama-160m",
                              "num_speculative_tokens": 3,
                              "disable_logprobs_during_spec_decoding": True,
-                         } 
-                         ])
+                         }])
 @pytest.mark.parametrize("batch_size", [4])
 @pytest.mark.parametrize(
     "output_len",
