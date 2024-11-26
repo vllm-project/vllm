@@ -54,7 +54,7 @@ class UniprocExecutor:
         """
         return self.worker.determine_num_available_blocks()
 
-    def initialize_cache(self, num_gpu_blocks: int) -> None:
+    def initialize(self, num_gpu_blocks: int) -> None:
         """Initialize the KV cache by invoking the underlying worker.
         """
         # NOTE: This is logged in the executor because there can be >1 worker

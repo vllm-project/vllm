@@ -93,14 +93,6 @@ class MultiprocExecutor:
         model_output_mq_handle = self.workers[0].model_output_mq_handle
         self.model_output_mq = MessageQueue.create_from_handle(
             model_output_mq_handle, 0)
-        self.workers_in_busy_loop = False
-
-    def start_workers(self):
-        for w in self.workers:
-            w.start_busy_loop()
-        self.scheduler_output_mq.wait_until_ready()
-        self.model_output_mq.wait_until_ready()
-        self.workers_in_busy_loop = True
 
     def run_on_workers(self, fn: str, *args) -> List:
         with ThreadPoolExecutor() as executor:
@@ -111,12 +103,21 @@ class MultiprocExecutor:
             result = [f.result() for f in futures]  # Wait for all to complete
         return result
 
-    def initialize_cache(self, num_gpu_blocks: int) -> None:
-        """Initialize the KV caches by invoking the underlying worker."""
-        self.run_on_workers('initialize_cache', num_gpu_blocks)
+    def initialize(self, num_gpu_blocks: int) -> None:
+        """
+        Initialize the KV caches and begin the model execution loop of the
+        underlying workers.
+        """
+        success_vals = self.run_on_workers('initialize', num_gpu_blocks)
+        if not all(success_vals):
+            raise RuntimeError("Worker initialization failed.")
+        
+        self.scheduler_output_mq.wait_until_ready()
+        self.model_output_mq.wait_until_ready()
 
     def determine_num_available_blocks(self) -> Tuple[int, int]:
-        """Determine the number of available KV blocks by invoking the
+        """
+        Determine the number of available KV blocks by invoking the
         underlying worker.
         """
         # Get the maximum number of blocks that can be allocated on GPU and CPU.
@@ -134,9 +135,6 @@ class MultiprocExecutor:
         self,
         scheduler_output,
     ) -> ModelRunnerOutput:
-        if not self.workers_in_busy_loop:
-            self.start_workers()
-
         self.scheduler_output_mq.enqueue(
             ExecutorMsg(ExecutorMsgType.WORK, scheduler_output))
         model_output = self.model_output_mq.dequeue()

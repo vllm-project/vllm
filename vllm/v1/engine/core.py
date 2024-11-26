@@ -92,7 +92,7 @@ class EngineCore:
             num_gpu_blocks = num_gpu_blocks_override
 
         num_cpu_blocks = 0
-        self.model_executor.initialize_cache(num_gpu_blocks)
+        self.model_executor.initialize(num_gpu_blocks)
         return num_gpu_blocks, num_cpu_blocks
 
     def add_request(self, request: EngineCoreRequest):
