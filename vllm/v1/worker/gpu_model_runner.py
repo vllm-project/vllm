@@ -537,27 +537,19 @@ class GPUModelRunner:
                     # This relies on cuda-specific torch-internal impl details
                     generator.set_offset(generator.get_offset() - 4)
 
-        (
-            logprob_token_ids,
-            logprobs,
-        ) = ((sampler_output.logprob_token_ids.cpu(),
-              sampler_output.logprobs.cpu()) if do_logprobs else (None, None))
-
-        (
-            prompt_logprob_token_ids,
-            prompt_logprobs,
-        ) = ((sampler_output.prompt_logprob_token_ids.cpu(),
-              sampler_output.prompt_logprobs.cpu()) if do_prompt_logprobs else
-             (None, None))
-
         model_runner_output = ModelRunnerOutput(
             req_ids=self.input_batch.req_ids[:num_reqs],
             req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids_cpu=sampled_token_ids,
-            logprob_token_ids_cpu=logprob_token_ids,
-            logprobs_cpu=logprobs,
-            prompt_logprob_token_ids_cpu=prompt_logprob_token_ids,
-            prompt_logprobs_cpu=prompt_logprobs)
+            logprob_token_ids_cpu=(sampler_output.logprob_token_ids.cpu()
+                                   if do_logprobs else None),
+            logprobs_cpu=(sampler_output.logprobs.cpu()
+                          if do_logprobs else None),
+            prompt_logprob_token_ids_cpu=(
+                sampler_output.prompt_logprob_token_ids.cpu()
+                if do_prompt_logprobs else None),
+            prompt_logprobs_cpu=(sampler_output.prompt_logprobs.cpu()
+                                 if do_prompt_logprobs else None))
         return model_runner_output
 
     def load_model(self) -> None:
