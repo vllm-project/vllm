@@ -1148,7 +1148,8 @@ class EngineArgs:
             policy=self.scheduling_policy,
             max_num_partial_prefills=self.max_num_partial_prefills,
             max_long_partial_prefills=self.max_long_partial_prefills,
-            long_prefill_threshold=self.long_prefill_threshold)
+            long_prefill_threshold=self.long_prefill_threshold,
+        )
         lora_config = LoRAConfig(
             bias_enabled=self.enable_lora_bias,
             max_lora_rank=self.max_lora_rank,
