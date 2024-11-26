@@ -2,7 +2,7 @@ from typing import (TYPE_CHECKING, ClassVar, Dict, List, Literal, Optional,
                     Protocol, Type, Union, overload, runtime_checkable)
 
 import torch
-from typing_extensions import TypeIs
+from typing_extensions import TypeIs, TypeVar
 
 from vllm.logger import init_logger
 from vllm.utils import supports_kw
@@ -10,9 +10,13 @@ from vllm.utils import supports_kw
 from .interfaces_base import is_embedding_model
 
 if TYPE_CHECKING:
+    from vllm.attention import AttentionMetadata
+    from vllm.multimodal.inputs import NestedTensors  # noqa: F401
     from vllm.sequence import IntermediateTensors
 
 logger = init_logger(__name__)
+
+T = TypeVar("T", default="NestedTensors")
 
 
 @runtime_checkable
@@ -27,6 +31,36 @@ class SupportsMultiModal(Protocol):
         There is no need to redefine this flag if this class is in the
         MRO of your model class.
     """
+
+    def get_multimodal_embeddings(self, **kwargs) -> Optional[T]:
+        """
+        Returns multimodal embeddings generated from multimodal kwargs 
+        to be merged with text embeddings.
+        """
+        ...
+
+    # Only for models that support v0 chunked prefill
+    # TODO(ywang96): Remove this overload once v0 is deprecated
+    @overload
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: Optional[T] = None,
+        attn_metadata: Optional["AttentionMetadata"] = None,
+    ) -> torch.Tensor:
+        ...
+
+    def get_input_embeddings(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: Optional[T] = None,
+    ) -> torch.Tensor:
+        """
+        Returns the input embeddings merged from the text embeddings from 
+        input_ids and the multimodal embeddings generated from multimodal 
+        kwargs.
+        """
+        ...
 
 
 # We can't use runtime_checkable with ClassVar for issubclass checks

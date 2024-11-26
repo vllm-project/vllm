@@ -363,7 +363,8 @@ class GPUModelRunner:
         # 2. A list (length: num_images) of tensors, each of shape
         # [feature_size, hidden_size] in case when the feature size is
         # dynamic depending on input images.
-        encoder_outputs = self.model.process_mm_inputs(**batched_mm_inputs)
+        encoder_outputs = self.model.get_multimodal_embeddings(
+            **batched_mm_inputs)
 
         # Cache the encoder outputs.
         for (req_id, input_id), output in zip(req_input_ids, encoder_outputs):
