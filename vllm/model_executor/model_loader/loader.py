@@ -710,9 +710,12 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
         with open(config_file_path) as f:
             config = json.load(f)
-            # TODO: target_modules could be either a list or a regex string
-            # pattern - we need to handle both cases.
             self.target_modules = config["target_modules"]
+            # TODO: target_modules could be either a list or a regex string.
+            # We need to handle both cases.
+            assert isinstance(self.target_modules,
+                              list), "Unsupported target_modules: "
+            f"{self.target_modules}"
 
     def _get_config_file(self, qlora_adapter: str) -> str:
         is_local = os.path.isdir(qlora_adapter)
@@ -1005,6 +1008,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             yield weight_name, processed_weight
 
     def _get_support_modules(self, model: nn.Module) -> None:
+
         # TODO: Maybe we can replace bitsandbytes_stacked_params_mapping with
         # packed_modules_mapping.
         inverse_stacked_mapping: Dict[str, List[str]] = {}
