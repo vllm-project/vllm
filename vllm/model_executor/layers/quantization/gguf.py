@@ -171,7 +171,7 @@ class GGUFUninitializedParameter(UninitializedParameter):
             f"Data container has mixed dtypes: {dtype}")
         nested_data = torch.nested.nested_tensor(self.data_container,
                                                  device=self.device,
-                                                 dtype=dtype)
+                                                 dtype=dtype[0])
         self.data_container.clear()
         param = torch.Tensor._make_subclass(self.cls_to_become,
                                             nested_data,
