@@ -686,6 +686,38 @@ class InputBatch:
         self.top_k_cpu = self.top_k_cpu_tensor.numpy()
         self.top_k_reqs: Set[str] = set()
 
+        self.presence_penalties = torch.empty((max_num_reqs, ),
+                                              dtype=torch.float,
+                                              device=device)
+        self.presence_penalties_cpu_tensor = torch.empty((max_num_reqs, ),
+                                                         dtype=torch.float,
+                                                         device="cpu",
+                                                         pin_memory=pin_memory)
+        self.presence_penalties_cpu = \
+            self.presence_penalties_cpu_tensor.numpy()
+
+        self.frequency_penalties = torch.empty((max_num_reqs, ),
+                                               dtype=torch.float,
+                                               device=device)
+        self.frequency_penalties_cpu_tensor = torch.empty(
+            (max_num_reqs, ),
+            dtype=torch.float,
+            device="cpu",
+            pin_memory=pin_memory)
+        self.frequency_penalties_cpu = \
+            self.frequency_penalties_cpu_tensor.numpy()
+
+        self.repetition_penalties = torch.empty((max_num_reqs, ),
+                                                dtype=torch.float,
+                                                device=device)
+        self.repetition_penalties_cpu_tensor = torch.empty(
+            (max_num_reqs, ),
+            dtype=torch.float,
+            device="cpu",
+            pin_memory=pin_memory)
+        self.repetition_penalties_cpu = \
+            self.repetition_penalties_cpu_tensor.numpy()
+
         # req_index -> generator
         self.generators: Dict[int, torch.Generator] = {}
 
@@ -730,6 +762,22 @@ class InputBatch:
             self.top_p_reqs.add(req_id)
         self.top_k_cpu[req_index] = sampling_params.top_k
         if sampling_params.top_k > 0:
+            self.top_k_reqs.add(req_id)
+
+        self.presence_penalties_cpu[req_index] = \
+            sampling_params.presence_penalty
+        if sampling_params.presence_penalty > 0:
+            self.top_k_reqs.add(req_id)
+        
+
+        self.frequency_penalties_cpu[req_index] = \
+            sampling_params.frequency_penalty
+        if sampling_params.frequency_penalty > 0:
+            self.top_k_reqs.add(req_id)
+
+        self.repetition_penalties_cpu[req_index] = \
+            sampling_params.repetition_penalty
+        if sampling_params.repetition_penalty > 0:
             self.top_k_reqs.add(req_id)
 
         self.generators[req_index] = request.generator

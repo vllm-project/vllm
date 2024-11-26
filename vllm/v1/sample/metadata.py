@@ -19,3 +19,8 @@ class SamplingMetadata:
     generators: Dict[int, torch.Generator]
 
     max_num_logprobs: int
+
+    min_tokens: int = 0
+    presence_penalty: float = 0.0
+    frequency_penalty: float = 0.0
+    repetition_penalty: float = 1.0
