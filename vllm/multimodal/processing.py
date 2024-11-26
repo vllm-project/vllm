@@ -500,7 +500,7 @@ def iter_placeholders(
 ) -> Iterable[_PlaceholderInfo]:
     """Yield each set of placeholder tokens found in :code:`token_ids`."""
     if min_unit_count <= 0:
-        raise ValueError("`min_placeholder_count` must be a positive integer")
+        raise ValueError("`min_unit_count` must be a positive integer")
 
     matches = [
         _PromptReplacementTokenMatch(prompt_repl, match)
