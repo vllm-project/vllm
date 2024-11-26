@@ -38,4 +38,7 @@ ENV VLLM_TARGET_DEVICE neuron
 RUN --mount=type=bind,source=.git,target=.git \
     pip install --no-build-isolation -v -e .
 
+# install development dependencies (for testing)
+RUN python3 -m pip install -e tests/vllm_test_utils
+
 CMD ["/bin/bash"]
