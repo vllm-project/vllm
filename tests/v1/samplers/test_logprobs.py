@@ -57,7 +57,7 @@ def _get_test_batch(batch_logprobs_composition: str) -> List[Tuple]:
             (None, 0),
             (0, None),
             (0, 0),
-            (None, 7),
+            (None, 6),
             (0, 5),
         ]
     elif batch_logprobs_composition == "SAMPLE_PROMPT":
@@ -67,7 +67,7 @@ def _get_test_batch(batch_logprobs_composition: str) -> List[Tuple]:
             (0, 0),
             (5, None),
             (3, 0),
-            (7, 3),
+            (6, 3),
             (None, 6),
             (0, 5),
         ]
@@ -243,7 +243,7 @@ def _test_case_get_logprobs_and_prompt_logprobs(
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype",
                          ["half"])  # needed for comparing logprobs with HF
-# @pytest.mark.parametrize("detokenize", [True, False])
+@pytest.mark.parametrize("detokenize", [True, False])
 @pytest.mark.parametrize("max_num_batched_tokens", [128, 256, 1024])
 @pytest.mark.parametrize("batch_logprobs_composition",
                          ["NONE", "SAMPLE", "PROMPT", "SAMPLE_PROMPT"])
@@ -252,7 +252,7 @@ def test_get_logprobs_and_prompt_logprobs(
     vllm_runner,
     model: str,
     dtype: str,
-    # detokenize: bool,
+    detokenize: bool,
     batch_logprobs_composition: str,
     max_num_batched_tokens: int,
     example_prompts,
@@ -279,6 +279,7 @@ def test_get_logprobs_and_prompt_logprobs(
       dtype
       detokenize: if False, return generated tokens bypassing detokenizer
       batch_logprobs_composition: logprobs configuration for test batch
+      max_num_batched_tokens: token budget for scheduling
       example_prompts
       monkeypatch
     """
@@ -301,8 +302,7 @@ def test_get_logprobs_and_prompt_logprobs(
                          ["half"])  # needed for comparing logprobs with HF
 # @pytest.mark.parametrize("detokenize", [True, False])
 @pytest.mark.parametrize("max_num_batched_tokens", [128])
-@pytest.mark.parametrize("batch_logprobs_composition",
-                         ["NONE", "SAMPLE", "PROMPT", "SAMPLE_PROMPT"])
+@pytest.mark.parametrize("batch_logprobs_composition", ["SAMPLE_PROMPT"])
 def test_fast_get_logprobs_and_prompt_logprobs(
     hf_runner,
     vllm_runner,
