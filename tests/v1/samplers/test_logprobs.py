@@ -33,14 +33,12 @@ def _get_test_batch(batch_logprobs_composition: str) -> List[Tuple]:
     no logprobs
 
     Args:
-      
       batch_logprobs_composition: types of logprobs configs to include in batch
 
     Returns:
 
       List of (Optional[num_sample_logprobs], Optional[num_prompt_logprobs])
       tuples
-    
     """
     if batch_logprobs_composition == "NONE":
         # No requests with sample or prompt logprobs

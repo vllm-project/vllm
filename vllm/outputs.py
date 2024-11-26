@@ -131,7 +131,18 @@ class RequestOutput:
         prompt_logprobs: Optional[PromptLogprobs],
         finished: bool = False,
     ) -> "RequestOutput":
-        """Initialize a new RequestOutput object."""
+        """Initialize a new RequestOutput object.
+        
+        Args:
+          request_id
+          prompt: optional single prompt string
+          prompt_token_ids: optional list of prompt tokens
+          text: completion text
+          token_ids: completion token ids
+          logprobs: completion sample logprobs
+          prompt_logprobs: prompt logprobs
+          finished
+        """
 
         # TODO: Support `n` > 1.
         completion_output = CompletionOutput(index=0,
