@@ -1,5 +1,6 @@
 from typing import (TYPE_CHECKING, ClassVar, Dict, List, Literal, Optional,
-                    Protocol, Tuple, Type, Union, overload, runtime_checkable)
+                    Protocol, Type, TypeVar, Union, overload,
+                    runtime_checkable)
 
 import torch
 from typing_extensions import TypeIs
@@ -11,10 +12,11 @@ from .interfaces_base import is_embedding_model
 
 if TYPE_CHECKING:
     from vllm.attention import AttentionMetadata
-    from vllm.multimodal.inputs import NestedTensors
     from vllm.sequence import IntermediateTensors
 
 logger = init_logger(__name__)
+
+T = TypeVar("T")
 
 
 @runtime_checkable
@@ -30,9 +32,7 @@ class SupportsMultiModal(Protocol):
         MRO of your model class.
     """
 
-    def get_multimodal_embeddings(
-        self, **kwargs
-    ) -> Optional[Union["NestedTensors", List[Tuple["NestedTensors", str]]]]:
+    def get_multimodal_embeddings(self, **kwargs) -> Optional[T]:
         """
         Returns multimodal embeddings generated from multimodal kwargs 
         to be merged with text embeddings.
@@ -45,7 +45,7 @@ class SupportsMultiModal(Protocol):
     def get_input_embeddings(
         self,
         input_ids: torch.Tensor,
-        multimodal_embeddings: Optional["NestedTensors"] = None,
+        multimodal_embeddings: Optional[T] = None,
         attn_metadata: Optional["AttentionMetadata"] = None,
     ) -> torch.Tensor:
         ...
@@ -53,7 +53,7 @@ class SupportsMultiModal(Protocol):
     def get_input_embeddings(
         self,
         input_ids: torch.Tensor,
-        multimodal_embeddings: Optional["NestedTensors"] = None,
+        multimodal_embeddings: Optional[T] = None,
     ) -> torch.Tensor:
         """
         Returns the input embeddings merged from the text embeddings from 
