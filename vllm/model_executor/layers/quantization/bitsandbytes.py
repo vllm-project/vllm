@@ -41,10 +41,8 @@ class BitsAndBytesConfig(QuantizationConfig):
         self.llm_int8_threshold = llm_int8_threshold
 
         if self.bnb_4bit_quant_storage not in ["uint8"]:
-            raise ValueError(
-                "Unsupported bnb_4bit_quant_storage: "
-                f"{self.bnb_4bit_quant_storage}"
-            )
+            raise ValueError("Unsupported bnb_4bit_quant_storage: "
+                             f"{self.bnb_4bit_quant_storage}")
 
     def __repr__(self) -> str:
         return (f"BitsAndBytesConfig(load_in_8bit={self.load_in_8bit}, "
