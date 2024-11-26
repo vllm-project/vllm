@@ -14,7 +14,7 @@ from .audio import AudioPlugin
 from .base import MultiModalInputMapper, MultiModalPlugin, MultiModalTokensCalc
 from .image import ImagePlugin
 from .inputs import MultiModalDataDict, MultiModalKwargs, NestedTensors
-from .processing import MultiModalProcessor
+from .processing import MultiModalProcessingMetadata, MultiModalProcessor
 from .video import VideoPlugin
 
 if TYPE_CHECKING:
@@ -309,6 +309,31 @@ class MultiModalRegistry:
             return model_cls
 
         return wrapper
+
+    def register_processor_by_metadata(
+        self,
+        metadata_factory: Callable[[InputProcessingContext],
+                                   MultiModalProcessingMetadata],
+    ):
+        """
+        Convenience method to register a multi-modal processor to a model class
+        according to a function that constructs its metadata.
+
+        When the model receives multi-modal data, the provided function is
+        invoked to transform the data into a dictionary of model inputs.
+
+        See also:
+            - :ref:`input_processing_pipeline`
+            - :ref:`enabling_multimodal_inputs`
+        """
+
+        def factory(ctx: InputProcessingContext):
+            return MultiModalProcessor(
+                ctx=ctx,
+                metadata=metadata_factory(ctx),
+            )
+
+        return self.register_processor(factory)
 
     def has_processor(self, model_config: "ModelConfig") -> bool:
         """

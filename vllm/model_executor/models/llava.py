@@ -4,34 +4,34 @@ from typing import (Iterable, List, Literal, Mapping, Optional, Protocol, Set,
 
 import torch
 import torch.nn as nn
-from PIL import Image
-from transformers import (CLIPVisionConfig, LlavaConfig, PixtralVisionConfig,
-                          PretrainedConfig, SiglipVisionConfig)
+from PIL.Image import Image
+from transformers import (BatchFeature, CLIPVisionConfig, LlavaConfig,
+                          PixtralVisionConfig, PretrainedConfig,
+                          SiglipVisionConfig)
 
 from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
-from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
-                         InputContext)
+from vllm.inputs import INPUT_REGISTRY, DummyData, InputContext
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import NestedTensors
+from vllm.multimodal.processing import (InputProcessingContext,
+                                        ModalityProcessingMetadata,
+                                        MultiModalProcessingMetadata,
+                                        PromptReplacement)
 from vllm.sequence import IntermediateTensors
-from vllm.utils import is_list_of
 
 from .clip import (CLIPVisionModel, dummy_image_for_clip,
-                   dummy_seq_data_for_clip, get_max_clip_image_tokens,
-                   input_processor_for_clip)
+                   dummy_seq_data_for_clip, get_max_clip_image_tokens)
 from .interfaces import SupportsMultiModal, SupportsPP
 from .pixtral import (PixtralHFVisionModel, dummy_image_for_pixtral_hf,
                       dummy_seq_data_for_pixtral_hf,
-                      get_max_pixtral_hf_image_tokens,
-                      input_processor_for_pixtral_hf)
+                      get_max_pixtral_hf_image_tokens)
 from .siglip import (SiglipVisionModel, dummy_image_for_siglip,
-                     dummy_seq_data_for_siglip, get_max_siglip_image_tokens,
-                     input_processor_for_siglip)
+                     dummy_seq_data_for_siglip, get_max_siglip_image_tokens)
 from .utils import (AutoWeightsLoader, flatten_bn, init_vllm_registered_model,
                     maybe_prefix, merge_multimodal_embeddings)
 
@@ -150,56 +150,26 @@ def dummy_data_for_llava(ctx: InputContext, seq_len: int,
     raise NotImplementedError(msg)
 
 
-def input_processor_for_llava(ctx: InputContext, inputs: DecoderOnlyInputs):
-    multi_modal_data = inputs.get("multi_modal_data")
-    if multi_modal_data is None or "image" not in multi_modal_data:
-        return inputs
-
-    model_config = ctx.model_config
+def create_metadata(
+        ctx: InputProcessingContext) -> MultiModalProcessingMetadata:
     hf_config = ctx.get_hf_config(LlavaConfig)
-    vision_config = hf_config.vision_config
+    image_token_id = hf_config.image_token_index
 
-    image_data = multi_modal_data["image"]
-    if isinstance(image_data, Image.Image):
-        image_feature_size = get_max_llava_image_tokens(ctx)
-    elif is_list_of(image_data, Image.Image):
-        image_feature_size = [get_max_llava_image_tokens(ctx)
-                              ] * len(image_data)
-    elif isinstance(image_data, torch.Tensor):
-        num_images, image_feature_size, hidden_size = image_data.shape
-    elif is_list_of(image_data, torch.Tensor):
-        image_feature_size = [item.shape[1] for item in image_data]
-    else:
-        raise TypeError(f"Invalid image type: {type(image_data)}")
+    def get_repl_count(
+        mm_items: list[Image],
+        hf_inputs: BatchFeature,
+        item_idx: int,
+    ) -> int:
+        return get_max_llava_image_tokens(ctx)
 
-    if isinstance(vision_config, CLIPVisionConfig):
-        return input_processor_for_clip(
-            model_config,
-            vision_config,
-            inputs,
-            image_token_id=hf_config.image_token_index,
-            image_feature_size_override=image_feature_size,
-        )
-    elif isinstance(vision_config, SiglipVisionConfig):
-        return input_processor_for_siglip(
-            model_config,
-            vision_config,
-            inputs,
-            image_token_id=hf_config.image_token_index,
-            image_feature_size_override=image_feature_size,
-        )
-    elif isinstance(vision_config, PixtralVisionConfig):
-        # We ignore image_feature_size_override since we have non-uniform
-        # image sizes for Pixtral
-        return input_processor_for_pixtral_hf(
-            model_config,
-            vision_config,
-            inputs,
-            image_token_id=hf_config.image_token_index,
-        )
-
-    msg = f"Unsupported vision config: {type(vision_config)}"
-    raise NotImplementedError(msg)
+    return {
+        "image":
+        ModalityProcessingMetadata(prompt_repls=[
+            PromptReplacement(target=[image_token_id],
+                              repl_unit=[image_token_id],
+                              repl_count=get_repl_count),
+        ]),
+    }
 
 
 class LlavaLikeConfig(Protocol):
@@ -282,10 +252,9 @@ def init_vision_tower_for_llava(
     raise NotImplementedError(msg)
 
 
-@MULTIMODAL_REGISTRY.register_image_input_mapper()
 @MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_llava_image_tokens)
 @INPUT_REGISTRY.register_dummy_data(dummy_data_for_llava)
-@INPUT_REGISTRY.register_input_processor(input_processor_for_llava)
+@MULTIMODAL_REGISTRY.register_processor_by_metadata(create_metadata)
 class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
