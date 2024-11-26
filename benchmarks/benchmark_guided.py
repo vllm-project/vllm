@@ -41,8 +41,7 @@ def run_vllm(requests: List[SampleRequest],
              engine_args: EngineArgs,
              n: int,
              guided_decoding: bool = False,
-             warmup: bool = False,
-             result_file_name: str = None) -> float:
+             warmup: bool = False) -> float:
     from vllm import LLM, SamplingParams
     llm = LLM(**vars(engine_args))
 
@@ -73,21 +72,16 @@ def run_vllm(requests: List[SampleRequest],
             "expected": request.completion
         })
     end = time.perf_counter()
-    # save ret list into a json
-    if result_file_name:
-        with open(result_file_name, 'w') as f:
-            json.dump(ret, f, indent=4)
-            f.write("\n")
-    return end - start
+    return end - start, ret
 
 
-async def run_vllm_async(requests: List[SampleRequest],
-                         engine_args: AsyncEngineArgs,
-                         n: int,
-                         guided_decoding: bool = False,
-                         warmup: bool = False,
-                         disable_frontend_multiprocessing: bool = False,
-                         result_file_name: str = None) -> float:
+async def run_vllm_async(
+        requests: List[SampleRequest],
+        engine_args: AsyncEngineArgs,
+        n: int,
+        guided_decoding: bool = False,
+        warmup: bool = False,
+        disable_frontend_multiprocessing: bool = False) -> float:
     from vllm import SamplingParams
 
     async with build_async_engine_client_from_engine_args(
@@ -160,11 +154,7 @@ async def run_vllm_async(requests: List[SampleRequest],
         next_latency = sum([(lat[-1] - lat[0]) / len(lat[1:])
                             for lat in latencies]) / len(latencies) * 1000
         end = time.perf_counter()
-        if result_file_name:
-            with open(result_file_name, 'w') as f:
-                json.dump(ret, f, indent=4)
-                f.write("\n")
-        return end - start, (first_latency, next_latency)
+        return end - start, ret, (first_latency, next_latency)
 
 
 def sample_requests(tokenizer: PreTrainedTokenizerBase,
@@ -185,7 +175,7 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
                           prompt_len=input_len,
                           expected_output_len=args.output_len,
                           schema=schema,
-                          structure_type='json')
+                          structure_type=args.structure_type)
             for _ in range(args.num_prompts)
         ]
 
@@ -213,12 +203,13 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
                           prompt_len=input_len,
                           expected_output_len=args.output_len,
                           schema=schema,
-                          structure_type='grammar')
+                          structure_type=args.structure_type)
             for _ in range(args.num_prompts)
         ]
 
     elif args.dataset == "regex":
         regex = r"\w+@\w+\.com\n"
+        args.regex = regex
         prompt = "Generate an email address for Alan Turing, \
             who works in Enigma. End in .com and new line. \
                 Example result: alan.turing@enigma.com\n"
@@ -230,12 +221,13 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
                           prompt_len=input_len,
                           expected_output_len=args.output_len,
                           schema=regex,
-                          structure_type='regex')
+                          structure_type=args.structure_type)
             for _ in range(args.num_prompts)
         ]
 
     elif args.dataset == "choice":
         choice = ["Positive", "Negative"]
+        args.choice = choice
         prompt = "Classify this sentiment: vLLM is wonderful!"
         input_len = len(tokenizer(prompt).input_ids)
         print(f"Input length of the prompt: {input_len} tokens")
@@ -244,7 +236,7 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
                           prompt_len=input_len,
                           expected_output_len=args.output_len,
                           schema=choice,
-                          structure_type='choice')
+                          structure_type=args.structure_type)
             for _ in range(args.num_prompts)
         ]
 
@@ -274,9 +266,69 @@ def sample_requests(tokenizer: PreTrainedTokenizerBase,
     return requests
 
 
+def evaluate(ret, args):
+
+    def _eval_correctness_json(expected, actual):
+        # extract json string from string using regex
+        import re
+        actual = actual.replace('\n', '').replace(' ', '').strip()
+        actual = re.search(r'\{.*\}', actual).group()
+        try:
+            actual = json.loads(actual)
+        except Exception:
+            return False
+        if expected is not None:
+            expected = expected.replace('\n', '').replace(' ', '').strip()
+            expected = json.loads(expected)
+            return expected.keys() == actual.keys()
+
+        return True
+
+    def _eval_correctness_choice(expected, actual):
+        return actual in args.choice
+
+    def _eval_correctness_regex(expected, actual):
+        import re
+        return re.match(args.regex, actual) is not None
+
+    def _eval_correctness(expected, actual):
+        if args.structure_type == 'json':
+            return _eval_correctness_json(expected, actual)
+        elif args.structure_type == 'regex':
+            return _eval_correctness_regex(expected, actual)
+        elif args.structure_type == 'choice':
+            return _eval_correctness_choice(expected, actual)
+        else:
+            return None
+
+    scores = []
+    for res in ret:
+        score = _eval_correctness(res['expected'], res['generated'])
+        res['correctness'] = score
+        scores.append(score)
+
+    not_none_scores = [score for score in scores if score is not None]
+
+    return (sum(not_none_scores) / len(not_none_scores) *
+            100) if len(not_none_scores) > 0 else None
+
+
 def main(args: argparse.Namespace):
     print(args)
     random.seed(args.seed)
+
+    # async engine is working for 'regex', 'choice' and 'grammar'
+    if args.dataset == 'grammar':
+        args.structure_type = 'grammar'
+        args.async_engine = False
+    elif args.dataset == 'regex':
+        args.structure_type = 'regex'
+        args.async_engine = False
+    elif args.dataset == 'choice':
+        args.structure_type = 'choice'
+        args.async_engine = False
+    else:
+        args.structure_type = 'json'
 
     if args.save_results:
         result_file_name = 'guided' if args.guided_decoding else 'no_guided'
@@ -298,66 +350,52 @@ def main(args: argparse.Namespace):
 
     if args.async_engine:
         engine_args = AsyncEngineArgs.from_cli_args(args)
-        elapsed_time, (first_latency, next_latency) = uvloop.run(
-            run_vllm_async(
-                requests,
-                engine_args,
-                args.n,
-                args.guided_decoding,
-                args.warmup,
-                args.disable_frontend_multiprocessing,
-                result_file_name,
-            ))
+        elapsed_time, ret, (first_latency, next_latency) = uvloop.run(
+            run_vllm_async(requests, engine_args, args.n, args.guided_decoding,
+                           args.warmup, args.disable_frontend_multiprocessing))
     else:
         engine_args = EngineArgs.from_cli_args(args)
-        elapsed_time = run_vllm(
-            requests,
-            engine_args,
-            args.n,
-            args.guided_decoding,
-            args.warmup,
-            result_file_name,
-        )
+        elapsed_time, ret = run_vllm(requests, engine_args, args.n,
+                                     args.guided_decoding, args.warmup)
         first_latency, next_latency = None, None
 
+    score = evaluate(ret, args)
     total_num_tokens = sum(request.prompt_len + request.expected_output_len
                            for request in requests)
     total_output_tokens = sum(request.expected_output_len
                               for request in requests)
-    latency_breakdown = f"First token latency: {first_latency:.2f} msecs"
-    latency_breakdown += f"Next token latency: {next_latency:.2f} msecs"
+    if first_latency is not None:
+        latency_breakdown = f"First token latency: {first_latency:.2f} msecs"
+        latency_breakdown += f"Next token latency: {next_latency:.2f} msecs"
     print(
         f"Throughput: {len(requests) / elapsed_time:.2f} requests/s, "
         f"{total_num_tokens / elapsed_time:.2f} total tokens/s, "
         f"{total_output_tokens / elapsed_time:.2f} output tokens/s",
+        f"Correct rate is {score} %",
         f"{latency_breakdown if first_latency is not None else ''}")
 
     # Output JSON results if specified
     if args.output_json or result_file_name:
         results = {
-            "elapsed_time":
-            elapsed_time,
-            "num_requests":
-            len(requests),
-            "total_num_tokens":
-            total_num_tokens,
-            "total_output_tokens":
-            total_output_tokens,
-            "requests_per_second":
-            len(requests) / elapsed_time,
-            "tokens_per_second":
-            f"{total_num_tokens / elapsed_time:.2f}",
+            "elapsed_time": elapsed_time,
+            "num_requests": len(requests),
+            "total_num_tokens": total_num_tokens,
+            "total_output_tokens": total_output_tokens,
+            "requests_per_second": len(requests) / elapsed_time,
+            "tokens_per_second": f"{total_num_tokens / elapsed_time:.2f}",
             "output_tokens_per_second":
             f"{total_output_tokens / elapsed_time:.2f}",
+            "correct_rate(%)": score
         }
+        results = {"outputs": ret, **results}
         if first_latency is not None:
-            results["first_token_latency"] = first_latency
-            results["next_token_latency"] = next_latency
+            results["first_token_latency(msecs)"] = first_latency
+            results["next_token_latency(msecs)"] = next_latency
         if args.output_json:
             with open(args.output_json, "w") as f:
                 json.dump(results, f, indent=4)
         elif result_file_name:
-            with open(result_file_name, "a") as f:
+            with open(result_file_name, "w") as f:
                 json.dump(results, f, indent=4)
 
 
