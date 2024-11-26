@@ -3,7 +3,7 @@
 # this needs to be a standalone script
 import sys
 
-from vllm_utils import blame
+from vllm_test_utils import blame
 
 module_name = "torch._inductor.async_compile"
 

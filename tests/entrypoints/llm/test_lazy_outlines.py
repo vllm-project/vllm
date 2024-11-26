@@ -1,6 +1,6 @@
 import sys
 
-from vllm_utils import blame
+from vllm_test_utils import blame
 
 from vllm import LLM, SamplingParams
 from vllm.distributed import cleanup_dist_env_and_memory
