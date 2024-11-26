@@ -160,10 +160,7 @@ class LLMEngine:
         return request_outputs
 
     def get_model_config(self):
-        """Gets the model configuration."""
         return self.model_config
-
-    # TODO(rob): Can we get rid of these?
 
     def start_profile(self):
         self.engine_core.profile(True)
