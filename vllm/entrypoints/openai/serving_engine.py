@@ -1,5 +1,6 @@
 import json
 import pathlib
+from concurrent.futures.thread import ThreadPoolExecutor
 from dataclasses import dataclass
 from http import HTTPStatus
 from typing import (Any, Callable, Dict, Iterable, Iterator, List, Mapping,
@@ -140,10 +141,13 @@ class OpenAIServing:
         self.request_logger = request_logger
         self.return_tokens_as_token_ids = return_tokens_as_token_ids
 
+        self._tokenizer_executor = ThreadPoolExecutor(max_workers=1)
+
         self._tokenize_prompt_input_async = make_async(
-            self._tokenize_prompt_input)
+            self._tokenize_prompt_input, executor=self._tokenizer_executor)
         self._tokenize_prompt_input_or_inputs_async = make_async(
-            self._tokenize_prompt_input_or_inputs)
+            self._tokenize_prompt_input_or_inputs,
+            executor=self._tokenizer_executor)
 
     async def show_available_models(self) -> ModelList:
         """Show available models. Right now we only have one model."""

@@ -94,7 +94,6 @@ class MQLLMEngineClient(EngineClient):
             scheduler_config=engine_config.scheduler_config,
             parallel_config=engine_config.parallel_config,
             enable_lora=bool(engine_config.lora_config),
-            use_threadsafe=True,
         )
         self.input_preprocessor = InputPreprocessor(self.model_config,
                                                     self.tokenizer)

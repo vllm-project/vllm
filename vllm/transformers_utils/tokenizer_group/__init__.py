@@ -16,16 +16,14 @@ else:
 def init_tokenizer_from_configs(model_config: ModelConfig,
                                 scheduler_config: SchedulerConfig,
                                 parallel_config: ParallelConfig,
-                                enable_lora: bool,
-                                use_threadsafe: bool = False):
+                                enable_lora: bool):
     init_kwargs = dict(tokenizer_id=model_config.tokenizer,
                        enable_lora=enable_lora,
                        max_num_seqs=scheduler_config.max_num_seqs,
                        max_input_length=None,
                        tokenizer_mode=model_config.tokenizer_mode,
                        trust_remote_code=model_config.trust_remote_code,
-                       revision=model_config.tokenizer_revision,
-                       use_threadsafe=use_threadsafe)
+                       revision=model_config.tokenizer_revision)
 
     if (model_config.encoder_config is not None
             and "do_lower_case" in model_config.encoder_config):

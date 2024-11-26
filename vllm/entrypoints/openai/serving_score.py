@@ -145,7 +145,8 @@ class OpenAIServingScores(OpenAIServing):
                 tokenization_kwargs["truncation"] = True
                 tokenization_kwargs["max_length"] = truncate_prompt_tokens
 
-            tokenize_async = make_async(tokenizer.__call__)
+            tokenize_async = make_async(tokenizer.__call__,
+                                        executor=self._tokenizer_executor)
             prompt_inputs = await tokenize_async(text=q,
                                                  text_pair=t,
                                                  **tokenization_kwargs)
