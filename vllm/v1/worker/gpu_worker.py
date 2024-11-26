@@ -234,7 +234,8 @@ class WorkerInitRequestType:
     without separate encoding step.
     """
     DETERMINE_NUM_BLOCKS = b'\x00'
-    INITIALIZE = b'\x01' # Initialize cache and begin worker execution
+    INITIALIZE = b'\x01'  # Initialize cache and begin worker execution
+
 
 @dataclass
 class WorkerInitResponseType:
@@ -264,7 +265,7 @@ class WorkerProcHandle:
             send_socket.send_multipart(
                 (WorkerInitRequestType.DETERMINE_NUM_BLOCKS, ))
 
-            # Receive response 
+            # Receive response
             type_frame, data_frame = recv_socket.recv_multipart(copy=False)
             response_type = type_frame.buffer
             response_data = data_frame.buffer
@@ -278,7 +279,7 @@ class WorkerProcHandle:
                              zmq.constants.PUSH) as send_socket, \
              make_zmq_socket(self.initialization_input_path,
                              zmq.constants.PULL) as recv_socket:
-            
+
             # Send initialization message
             msg = pickle.dumps(num_gpu_blocks,
                                protocol=pickle.HIGHEST_PROTOCOL)
@@ -291,6 +292,7 @@ class WorkerProcHandle:
             if response_type != WorkerInitResponseType.INITIALIZE_SUCCESS:
                 raise ValueError(f"Unknown RequestType: {response_type}")
             return pickle.loads(response_data)
+
 
 class WorkerProc:
     """Wrapper that runs one Worker in a separate process."""
@@ -326,7 +328,8 @@ class WorkerProc:
                              zmq.constants.PUSH) as ready_socket:
             payload = pickle.dumps(output_mq_handle,
                                    protocol=pickle.HIGHEST_PROTOCOL)
-            ready_socket.send_multipart((WorkerInitResponseType.READY, payload))
+            ready_socket.send_multipart(
+                (WorkerInitResponseType.READY, payload))
 
         self.worker.initialize()
         self.worker.load_model()
@@ -434,7 +437,7 @@ class WorkerProc:
                         copy=False)
                 elif request_type == WorkerInitRequestType.INITIALIZE:
                     # Initialize cache with the number of requested gpu blocks
-                    try: 
+                    try:
                         request_data = request[1].buffer
                         num_gpu_blocks = pickle.loads(request_data)
                         self.worker.initialize_cache(num_gpu_blocks)
@@ -451,19 +454,18 @@ class WorkerProc:
                         raise e
 
                     # Send a success response. Order is important:
-                    # The executor will call wait_until_ready() on its 
+                    # The executor will call wait_until_ready() on its
                     # message queues after receiving this message.
                     send_socket.send_multipart(
                         (WorkerInitResponseType.INITIALIZE_SUCCESS,
                          pickle.dumps(True)),
                         copy=False)
 
-                    # Ensure message queues are ready. 
+                    # Ensure message queues are ready.
                     # Must happen after sending the INITIALIZE_SUCESS message.
                     self.scheduler_output_receiver.wait_until_ready()
                     if self.model_output_mq is not None:
                         self.model_output_mq.wait_until_ready()
-
 
                     # Exit initialization loop to begin model execution loop
                     return

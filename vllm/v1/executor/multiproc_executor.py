@@ -111,7 +111,7 @@ class MultiprocExecutor:
         success_vals = self.run_on_workers('initialize', num_gpu_blocks)
         if not all(success_vals):
             raise RuntimeError("Worker initialization failed.")
-        
+
         self.scheduler_output_mq.wait_until_ready()
         self.model_output_mq.wait_until_ready()
 
