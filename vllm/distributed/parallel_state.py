@@ -304,7 +304,8 @@ class GroupCoordinator:
             if not pynccl_comm:
                 maybe_pynccl_context = nullcontext()
             else:
-                maybe_pynccl_context = pynccl_comm.change_state(stream=torch.cuda.current_stream())
+                maybe_pynccl_context = pynccl_comm.change_state(
+                    stream=torch.cuda.current_stream())
             with maybe_pynccl_context:
                 yield graph_capture_context
 
@@ -360,8 +361,15 @@ class GroupCoordinator:
         assert pynccl_comm is not None
         # TODO: pynccl should not use `stream=`
         # it can just always use the current stream.
-        out = pynccl_comm.all_reduce(input_, stream=torch.cuda.current_stream())
-        assert out is not None
+        out = pynccl_comm.all_reduce(input_,
+                                     stream=torch.cuda.current_stream())
+        if out is None:
+            # fall back to the default all-reduce using PyTorch.
+            # this usually happens during testing.
+            # when we run the model, allreduce only happens for the TP
+            # group, where we always have either custom allreduce or pynccl.
+            out = input_.clone()
+            torch.distributed.all_reduce(out, group=self.device_group)
         return out
 
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
