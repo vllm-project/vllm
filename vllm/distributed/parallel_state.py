@@ -118,7 +118,7 @@ def get_group_from_group_name(group_name: str) -> "GroupCoordinator":
 
 
 def all_reduce(tensor: torch.Tensor, group_name: str) -> torch.Tensor:
-    group = get_group_from_name(group_name)
+    group = get_group_from_group_name(group_name)
     return group._all_reduce_out_place(tensor)
 
 

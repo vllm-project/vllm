@@ -72,16 +72,16 @@ def get_match_gemm_rs_ag_gemm(tp_group_name: str, custom_ar: bool) -> Callable:
         mm_1 = torch.ops.aten.mm.default(gemm_1_activations, gemm_1_w_perm)
 
         # It would be nice to do this instead of having two separate patterns.
-        # all_reduce = tensor_model_parallel_all_reduce(mm_1)
-        if custom_ar:
-            all_reduce = torch.ops.vllm.outplace_all_reduce.default(
-                mm_1, tp_group_name)
-        else:
-            all_reduce = torch.ops.higher_order.auto_functionalized(
-                torch.ops.vllm.inplace_all_reduce.default,
-                tensor=mm_1,
-                group_name=tp_group_name)
-            all_reduce = all_reduce[1]
+        all_reduce = tensor_model_parallel_all_reduce(mm_1)
+        #if custom_ar:
+        #    all_reduce = torch.ops.vllm.outplace_all_reduce.default(
+        #        mm_1, tp_group_name)
+        #else:
+        #    all_reduce = torch.ops.higher_order.auto_functionalized(
+        #        torch.ops.vllm.inplace_all_reduce.default,
+        #        tensor=mm_1,
+        #        group_name=tp_group_name)
+        #    all_reduce = all_reduce[1]
 
         norm_res = torch.ops.higher_order.auto_functionalized(
             torch.ops._C.fused_add_rms_norm.default,
@@ -265,16 +265,16 @@ def get_match_final(tp_group_name: str, use_custom_ar: bool) -> Callable:
         mm_1 = torch.ops.aten.mm.default(gemm_1_activations, gemm_1_w_perm)
 
         # TODO: it would be nice to be able to use the official api directly.
-        # all_reduce = tensor_model_parallel_all_reduce(mm_1)
-        if use_custom_ar:
-            all_reduce = torch.ops.vllm.outplace_all_reduce.default(
-                mm_1, tp_group_name)
-        else:
-            all_reduce = torch.ops.higher_order.auto_functionalized(
-                torch.ops.vllm.inplace_all_reduce.default,
-                tensor=mm_1,
-                group_name=tp_group_name)
-            all_reduce = all_reduce[1]
+        all_reduce = tensor_model_parallel_all_reduce(mm_1)
+        #if use_custom_ar:
+        #    all_reduce = torch.ops.vllm.outplace_all_reduce.default(
+        #        mm_1, tp_group_name)
+        #else:
+        #    all_reduce = torch.ops.higher_order.auto_functionalized(
+        #        torch.ops.vllm.inplace_all_reduce.default,
+        #        tensor=mm_1,
+        #        group_name=tp_group_name)
+        #    all_reduce = all_reduce[1]
 
         norm_res = torch.ops.higher_order.auto_functionalized(
             torch.ops._C.fused_add_rms_norm.default,
@@ -366,10 +366,18 @@ class CollectiveFusionPass(VllmInductorPass):
             world_size = get_tensor_model_parallel_world_size()
             group_names = [f"tp:{rank}" for rank in range(world_size)]
 
+            m = get_match_gemm_rs_ag_gemm(group_names[0], False)
+            register_replacement(
+                m,
+                m,
+                inputs,
+                fwd_only, [self.gemm_rs_ag_gemm_pattern],
+                extra_check=lambda m: self.record_match(m))
+
             for group_name in group_names:
                 for m in [
-                        get_match_gemm_rs_ag_gemm(group_name, False),
-                        get_match_gemm_rs_ag_gemm(group_name, True)
+                        #get_match_gemm_rs_ag_gemm(group_name, False),
+                        #get_match_gemm_rs_ag_gemm(group_name, True)
                 ]:
                     register_replacement(
                         m,
@@ -380,9 +388,11 @@ class CollectiveFusionPass(VllmInductorPass):
 
                 for m in [
                         get_match_final(group_name, False),
-                        get_match_final(group_name, True)
+                        #get_match_final(group_name, True)
                 ]:
-                    register_replacement(m, torch.ops.vllm.gemm_ag_final,
+                    torch._inductor.pattern_matcher._seen_patterns.clear()
+                    register_replacement(m,
+                                         torch.ops.vllm.gemm_ag_final,
                                          final_inputs, fwd_only,
                                          [self.final_pattern])
 
@@ -435,14 +445,14 @@ class CollectiveFusionPass(VllmInductorPass):
 
                 # Extract group_name from matched code.  Use to
                 # generate proper replacement code.
-                ar_node = find_auto_fn(
-                    match.nodes, torch.ops.vllm.inplace_all_reduce.default)
+                #ar_node = find_auto_fn(match.nodes, torch.ops.vllm.inplace_all_reduce.default)
+                ar_node = None
                 if ar_node is not None:
                     tp_group_name = ar_node.kwargs["group_name"]
                 else:
                     ar_node = find_fn(
                         match.nodes,
-                        torch.ops.vllm.outplace_all_reduce.default)
+                        torch.ops.vllm.all_reduce.default)
                     assert ar_node is not None
                     tp_group_name = ar_node.args[1]
 
