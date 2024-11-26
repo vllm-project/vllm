@@ -51,6 +51,9 @@ class GGUFConfig(QuantizationConfig):
 
 def _fuse_mul_mat(x: torch.Tensor, qweight: torch.Tensor,
                   qweight_type: int) -> torch.Tensor:
+    # there is no need to call any kernel for fp16/bf16
+    if qweight_type < 2:
+        return x @ qweight.T
     # use dequantize mulmat for IQmatrix, mmq for k-quants
     if x.shape[0] == 1:
         # enable mmvq in contiguous batching
@@ -121,9 +124,9 @@ class GGUFLinearMethod(LinearMethodBase):
             shard_id = ["q", "k", "v"] if "q" in shard_id else shard_id
             qweight = layer.qweight.unbind(0)
             result = []
-            for id in shard_id:
-                q_idx = layer.qweight.shard_id_map[id]
-                qweight_type = layer.qweight_type.shard_weight_type[id]
+            for idx in shard_id:
+                q_idx = layer.qweight.shard_id_map[idx]
+                qweight_type = layer.qweight_type.shard_weight_type[idx]
                 result.append(_fuse_mul_mat(x, qweight[q_idx], qweight_type))
             out = torch.cat(result, axis=1)
         else:
@@ -163,9 +166,12 @@ class GGUFUninitializedParameter(UninitializedParameter):
     data_container: List[torch.Tensor]
 
     def materialize_nested(self) -> Parameter:
+        dtype = {data.dtype for data in self.data_container}
+        assert len(dtype) != 1, ValueError(
+            f"Data container has mixed dtypes: {dtype}")
         nested_data = torch.nested.nested_tensor(self.data_container,
                                                  device=self.device,
-                                                 dtype=torch.uint8)
+                                                 dtype=dtype)
         self.data_container.clear()
         param = torch.Tensor._make_subclass(self.cls_to_become,
                                             nested_data,
