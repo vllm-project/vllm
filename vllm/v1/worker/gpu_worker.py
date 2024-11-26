@@ -2,11 +2,11 @@
 import gc
 import multiprocessing
 import os
+import pickle
 from dataclasses import dataclass
 from multiprocessing.process import BaseProcess
 from typing import TYPE_CHECKING, Optional, Tuple
 
-import msgspec
 import torch
 import torch.distributed
 import zmq
@@ -24,9 +24,7 @@ from vllm.platforms import current_platform
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size,
                         get_open_zmq_ipc_path)
 from vllm.v1.core.scheduler_output import ExecutorMsgType
-from vllm.v1.outputs import (ModelRunnerOutput, NumBlocksMsg, NumGPUBlocks,
-                             ShmHandleMsg, WorkerInitOutputType,
-                             WorkerInitRequestType)
+from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.utils import make_zmq_socket
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
@@ -227,6 +225,29 @@ class Worker:
             self.profiler.stop()
 
 
+# Below are data structures used for serializing initiailization-related
+# data structures to send between workers and the core engine process
+@dataclass
+class WorkerInitRequestType:
+    """
+    Request types defined as hex byte strings, so it can be sent over sockets
+    without separate encoding step.
+    """
+    DETERMINE_NUM_BLOCKS = b'\x00'
+    INIT_CACHE = b'\x01'
+    BEGIN_MODEL_EXECUTION = b'\x02'
+
+
+@dataclass
+class WorkerInitOutputType:
+    """
+    Request types defined as hex byte strings, so it can be sent over sockets
+    without separate encoding step.
+    """
+    NUM_BLOCKS = b'\x00'
+    MODEL_OUTPUT_MSG_QUEUE = b'\x01'
+
+
 @dataclass
 class WorkerProcHandle:
     proc: BaseProcess
@@ -241,15 +262,14 @@ class WorkerProcHandle:
                              zmq.constants.PULL) as recv_socket:
 
             send_socket.send_multipart(
-                (WorkerInitRequestType.DETERMINE_NUM_BLOCKS.value, ))
+                (WorkerInitRequestType.DETERMINE_NUM_BLOCKS, ))
             type_frame, data_frame = recv_socket.recv_multipart(copy=False)
 
             request_type = type_frame.buffer
             request_data = data_frame.buffer
 
-            if request_type == WorkerInitOutputType.NUM_BLOCKS.value:
-                decoder = msgspec.msgpack.Decoder(NumBlocksMsg)
-                num_blocks = decoder.decode(request_data).num_blocks
+            if request_type == WorkerInitOutputType.NUM_BLOCKS:
+                num_blocks = pickle.loads(request_data)
                 return num_blocks
             else:
                 raise ValueError(f"Unknown RequestType: {request_type}")
@@ -257,16 +277,15 @@ class WorkerProcHandle:
     def initialize_cache(self, num_gpu_blocks: int) -> int:
         with make_zmq_socket(self.initialization_output_path,
                              zmq.constants.PUSH) as socket:
-            encoder = msgspec.msgpack.Encoder()
-            msg = encoder.encode(NumGPUBlocks(num_gpu_blocks))
-            socket.send_multipart(
-                (WorkerInitRequestType.INIT_CACHE.value, msg))
+            msg = pickle.dumps(num_gpu_blocks,
+                               protocol=pickle.HIGHEST_PROTOCOL)
+            socket.send_multipart((WorkerInitRequestType.INIT_CACHE, msg))
 
     def start_busy_loop(self) -> None:
         with make_zmq_socket(self.initialization_output_path,
                              zmq.constants.PUSH) as socket:
             socket.send_multipart(
-                (WorkerInitRequestType.BEGIN_MODEL_EXECUTION.value, ))
+                (WorkerInitRequestType.BEGIN_MODEL_EXECUTION, ))
 
 
 class WorkerProc:
@@ -303,10 +322,10 @@ class WorkerProc:
             output_mq_handle = self.model_output_mq.export_handle()
             with make_zmq_socket(initialization_output_path,
                                  zmq.constants.PUSH) as socket:
-                encoder = msgspec.msgpack.Encoder()
-                msg = encoder.encode(ShmHandleMsg(output_mq_handle))
+                msg = pickle.dumps(output_mq_handle,
+                                   protocol=pickle.HIGHEST_PROTOCOL)
                 socket.send_multipart(
-                    (WorkerInitOutputType.MODEL_OUTPUT_MSG_QUEUE.value, msg))
+                    (WorkerInitOutputType.MODEL_OUTPUT_MSG_QUEUE, msg))
         else:
             self.model_output_mq = None
 
@@ -410,48 +429,38 @@ class WorkerProc:
             request_type = type_frame.buffer
             request_data = data_frame.buffer
 
-            if (request_type ==
-                    WorkerInitOutputType.MODEL_OUTPUT_MSG_QUEUE.value):
-                decoder = msgspec.msgpack.Decoder(ShmHandleMsg)
-                handle = decoder.decode(request_data).handle
+            if (request_type == WorkerInitOutputType.MODEL_OUTPUT_MSG_QUEUE):
+                handle = pickle.loads(request_data)
                 return handle
             else:
                 raise ValueError(f"Unknown RequestType: {request_type}")
 
     # Busy loop used for initializing Multiprocessing Workers
     def model_initialization_loop(self, init_input_path, init_output_path):
-        # Msgpack serialization encoding.
-        encoder = msgspec.msgpack.Encoder()
-        # Reuse send buffer.
-        buffer = bytearray()
-
         with make_zmq_socket(init_output_path,
                              zmq.constants.PUSH) as send_socket, \
              make_zmq_socket(init_input_path,
                              zmq.constants.PULL) as recv_socket:
             while True:
                 # (RequestType, RequestData)
-                thing = recv_socket.recv_multipart(copy=False)
-                request_type = thing[0].buffer
+                request = recv_socket.recv_multipart(copy=False)
+                request_type = request[0].buffer
 
                 # Deserialize the request data.
-                if (request_type ==
-                        WorkerInitRequestType.DETERMINE_NUM_BLOCKS.value):
+                if (request_type == WorkerInitRequestType.DETERMINE_NUM_BLOCKS
+                    ):
                     num_blocks = self.worker.determine_num_available_blocks()
-                    output = NumBlocksMsg(num_blocks)
-                    encoder.encode_into(output, buffer)
                     send_socket.send_multipart(
-                        (WorkerInitOutputType.NUM_BLOCKS.value, buffer),
+                        (WorkerInitOutputType.NUM_BLOCKS,
+                         pickle.dumps(num_blocks)),
                         copy=False)
-                elif request_type == WorkerInitRequestType.INIT_CACHE.value:
-                    request_data = thing[1].buffer
-                    decoder = msgspec.msgpack.Decoder(NumGPUBlocks)
-                    num_gpu_blocks = decoder.decode(
-                        request_data).num_gpu_blocks
+                elif request_type == WorkerInitRequestType.INIT_CACHE:
+                    request_data = request[1].buffer
+                    num_gpu_blocks = pickle.loads(request_data)
                     self.worker.initialize_cache(num_gpu_blocks)
                     self.worker.compile_or_warm_up_model()
                 elif (request_type ==
-                      WorkerInitRequestType.BEGIN_MODEL_EXECUTION.value):
+                      WorkerInitRequestType.BEGIN_MODEL_EXECUTION):
                     # Make sure message queues are ready.
                     self.scheduler_output_receiver.wait_until_ready()
 

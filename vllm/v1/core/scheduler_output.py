@@ -1,7 +1,6 @@
+from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Optional
-
-import msgspec
 
 from vllm.v1.core.scheduler import SchedulerOutput
 
@@ -12,10 +11,8 @@ class ExecutorMsgType(Enum):
     TERMINATE = auto()
 
 
-class ExecutorMsg(msgspec.Struct,
-                  array_like=True,
-                  omit_defaults=True,
-                  gc=False):
+@dataclass
+class ExecutorMsg:
     """A directive from the core process to its worker processes.
     
 	Wraps SchedulerOutput with a message type to distinguish between
