@@ -9,8 +9,8 @@ from vllm.config import VllmConfig
 from vllm.distributed.device_communicators.shm_broadcast import MessageQueue
 from vllm.logger import init_logger
 from vllm.triton_utils import maybe_set_triton_cache_manager
-from vllm.utils import (get_distributed_init_method, get_open_port,
-                        get_vllm_instance_id)
+from vllm.utils import (cuda_is_initialized, get_distributed_init_method,
+                        get_open_port, get_vllm_instance_id)
 from vllm.v1.core.scheduler_output import ExecutorMsg, ExecutorMsgType
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker.gpu_worker import WorkerProc, WorkerProcHandle
@@ -42,6 +42,13 @@ class MultiprocExecutor:
             f"world_size ({world_size}) must be equal to the "
             f"tensor_parallel_size ({tensor_parallel_size}) -- pipeline "
             f"parallelism is not yet implemented in v1")
+
+        if (cuda_is_initialized()
+                and os.environ.get("VLLM_WORKER_MULTIPROC_METHOD") != "spawn"):
+            logger.warning("CUDA was previously initialized. We must use "
+                           "the `spawn` multiprocessing start method. Setting "
+                           "VLLM_WORKER_MULTIPROC_METHOD to 'spawn'.")
+            os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
         # Ensure that VLLM_INSTANCE_ID is set, to be inherited by workers
         os.environ["VLLM_INSTANCE_ID"] = get_vllm_instance_id()

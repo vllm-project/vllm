@@ -1,6 +1,5 @@
 """A GPU worker class."""
 import gc
-import multiprocessing
 import os
 import pickle
 from dataclasses import dataclass
@@ -19,6 +18,7 @@ from vllm.distributed import (destroy_tp_mq_broadcaster,
                               set_custom_all_reduce)
 from vllm.distributed.device_communicators.shm_broadcast import (Handle,
                                                                  MessageQueue)
+from vllm.executor.multiproc_worker_utils import get_mp_context
 from vllm.logger import init_logger
 from vllm.model_executor import set_random_seed
 from vllm.platforms import current_platform
@@ -343,13 +343,7 @@ class WorkerProc:
             distributed_init_method: str,
             input_shm_handle,  # Receive SchedulerOutput
     ) -> WorkerProcHandle:
-        # The current process might have CUDA context,
-        # so we need to spawn a new process.
-        # NOTE(rob): this is a problem for using EngineCoreProc w/
-        # LLM, since we need a if __name__ == "__main__" guard.
-
-        # TODO(tms): fix before landing
-        context = multiprocessing.get_context("fork")
+        context = get_mp_context()
 
         # ZMQ paths to send back and forth to worker process
         # Used for initialization.
