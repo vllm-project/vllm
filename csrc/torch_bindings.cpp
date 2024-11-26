@@ -54,8 +54,11 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "    int layer_idx, int num_layers, int block_size, int max_seq_len,"
       "    Tensor seq_lens, Tensor row_mapping, Tensor col_mapping,"
       "    str kv_cache_dtype, int num_kv_heads, float scale,"
-      "    Tensor? alibi_slopes, float kscale, float v_scale) -> ()"
-    );
+      "    Tensor? alibi_slopes, float kscale, float v_scale,"
+      "    int tp_rank, int blocksparse_local_blocks,"
+      "    int blocksparse_vert_stride, int blocksparse_block_size,"
+      "    int blocksparse_head_sliding_step) -> ()");
+
   ops.impl("dattention", torch::kCUDA, &dattention);
   // Activation ops
   // Activation function used in SwiGLU.

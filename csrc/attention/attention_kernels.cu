@@ -703,7 +703,7 @@ __global__ void paged_attention_v2_reduce_kernel(
 
 template <typename scalar_t, typename cache_t, vllm::Fp8KVCacheDataType KV_DTYPE, 
          int BLOCK_SIZE, int HEAD_SIZE,
-         int NUM_THREADS, int PARTITION_SIZE = 0>   
+         int NUM_THREADS, bool IS_BLOCK_SPARSE, int PARTITION_SIZE = 0>   
 __global__ void dattention_kernel(
   float* __restrict__ exp_sums,  // [num_seqs, num_heads, max_num_partitions]
   float* __restrict__ max_logits,  // [num_seqs, num_heads,
@@ -721,8 +721,10 @@ __global__ void dattention_kernel(
   const float scale,
   const float* __restrict__ alibi_slopes,  // [num_heads]
   const float k_scale,
-  const float v_scale 
-) {
+  const float v_scale,
+  const int tp_rank,
+  const int blocksparse_local_blocks, const int blocksparse_vert_stride,
+  const int blocksparse_block_size, const int blocksparse_head_sliding_step) {
   const int seq_idx = blockIdx.y;
   const int partition_idx = blockIdx.z;
   const int max_num_partitions = gridDim.z;
@@ -819,7 +821,6 @@ __global__ void dattention_kernel(
   constexpr int x = 16 / sizeof(cache_t);
   float qk_max = -FLT_MAX;
 
-#if 0
   // blocksparse specific vars
   int bs_block_offset;
   int q_bs_block_id;
@@ -837,7 +838,6 @@ __global__ void dattention_kernel(
                             (-blocksparse_head_sliding_step) +
                         1;
   }
-#endif
 
   // NOTE: cache_row_idx or cache_col_idx can be -1 if the token is padded
   const cache_t * cache_start = reinterpret_cast<cache_t *>(cache_row_mapping[seq_idx]) + layer_offset + kv_head_idx * KV_HEAD_STRIDE;
@@ -848,8 +848,6 @@ __global__ void dattention_kernel(
   // Each thread group in a warp fetches a key from the block, and computes dot product with the query.
   for (int block_idx = start_block_idx + warp_idx; block_idx < end_block_idx;
        block_idx += NUM_WARPS) {
-
-  #if 0
     // NOTE(woosuk): The block number is stored in int32. However, we cast it to
     // int64 because int32 can lead to overflow when this variable is multiplied
     // by large numbers (e.g., kv_block_stride).
@@ -878,7 +876,7 @@ __global__ void dattention_kernel(
         continue;
       }
     }
-  #endif
+  
     // computing the starting address of the block for the given layer
     const cache_t * key_cache = cache_start + block_idx*whole_block_size;
     //const cache_t * key_cache = cache_start + block_idx*whole_block_size + layer_offset;
@@ -984,7 +982,11 @@ __global__ void dattention_kernel(
 
   for (int block_idx = start_block_idx + warp_idx; block_idx < end_block_idx;
        block_idx += NUM_WARPS) {
-#if 0
+    // NOTE(woosuk): The block number is stored in int32. However, we cast it to
+    // int64 because int32 can lead to overflow when this variable is multiplied
+    // by large numbers (e.g., kv_block_stride).
+    // For blocksparse attention: skip computation on blocks that are not
+    // attended
     if constexpr (IS_BLOCK_SPARSE) {
       int v_bs_block_id = block_idx * BLOCK_SIZE / blocksparse_block_size;
       if (!((v_bs_block_id + bs_block_offset) % blocksparse_vert_stride == 0) &&
@@ -992,7 +994,6 @@ __global__ void dattention_kernel(
         continue;
       }
     }
-#endif
 
     // Load a key to registers. Inside a block, each thread group will fetch lane/THREAD_GROUP_SIZe
     // Each thread in a thread group has a different part of the key.    
@@ -1430,12 +1431,12 @@ void paged_attention_v2(
                              CALL_V2_LAUNCHER_BLOCK_SIZE)
 }
 
-#define LAUNCH_DATTENTION(HEAD_SIZE)   \
+#define LAUNCH_DATTENTION(HEAD_SIZE, IS_BLOCK_SPARSE)   \
   if(use_reduce) { \
     VLLM_DevFuncAttribute_SET_MaxDynamicSharedMemorySize( \
-      ((void*)vllm::dattention_kernel<scalar_t, cache_t, KV_DTYPE, BLOCK_SIZE, HEAD_SIZE, NUM_THREADS, PARTITION_SIZE>), \
+      ((void*)vllm::dattention_kernel<scalar_t, cache_t, KV_DTYPE, BLOCK_SIZE, HEAD_SIZE, NUM_THREADS, IS_BLOCK_SPARSE, PARTITION_SIZE>), \
       shared_mem_size);  \
-    vllm::dattention_kernel<scalar_t, cache_t, KV_DTYPE, BLOCK_SIZE, HEAD_SIZE, NUM_THREADS, PARTITION_SIZE> \
+    vllm::dattention_kernel<scalar_t, cache_t, KV_DTYPE, BLOCK_SIZE, HEAD_SIZE, NUM_THREADS, IS_BLOCK_SPARSE, PARTITION_SIZE> \
         <<<grid, block, shared_mem_size, stream>>>( \
               exp_sums_ptr, max_logits_ptr, tmp_out_ptr,\
               query_ptr, \
@@ -1445,7 +1446,10 @@ void paged_attention_v2(
               col_ptr, \
               seq_lens_ptr, \
               q_stride, num_kv_heads, scale,  \
-              alibi_slopes_ptr, k_scale, v_scale);  \
+              alibi_slopes_ptr, k_scale, v_scale,  \
+              tp_rank, blocksparse_local_blocks,   \
+              blocksparse_vert_stride, blocksparse_block_size, \
+              blocksparse_head_sliding_step); \
     vllm::paged_attention_v2_reduce_kernel<cache_t, HEAD_SIZE, NUM_THREADS,     \
                                          PARTITION_SIZE>                       \
       <<<reduce_grid, block, reduce_shared_mem_size, stream>>>(                \
@@ -1454,9 +1458,9 @@ void paged_attention_v2(
   } \
   else { \
     VLLM_DevFuncAttribute_SET_MaxDynamicSharedMemorySize( \
-      ((void*)vllm::dattention_kernel<scalar_t, cache_t, KV_DTYPE, BLOCK_SIZE, HEAD_SIZE, NUM_THREADS>), \
+      ((void*)vllm::dattention_kernel<scalar_t, cache_t, KV_DTYPE, BLOCK_SIZE, HEAD_SIZE, NUM_THREADS, IS_BLOCK_SPARSE>), \
       shared_mem_size);  \
-    vllm::dattention_kernel<scalar_t, cache_t, KV_DTYPE, BLOCK_SIZE, HEAD_SIZE, NUM_THREADS> \
+    vllm::dattention_kernel<scalar_t, cache_t, KV_DTYPE, BLOCK_SIZE, HEAD_SIZE, NUM_THREADS, IS_BLOCK_SPARSE> \
         <<<grid, block, shared_mem_size, stream>>>( \
               nullptr, nullptr, out_ptr,\
               query_ptr, \
@@ -1466,8 +1470,11 @@ void paged_attention_v2(
               col_ptr, \
               seq_lens_ptr, \
               q_stride, num_kv_heads, scale,  \
-              alibi_slopes_ptr, k_scale, v_scale);  \
-   }
+              alibi_slopes_ptr, k_scale, v_scale, \
+              tp_rank, blocksparse_local_blocks,   \
+              blocksparse_vert_stride, blocksparse_block_size, \
+              blocksparse_head_sliding_step); \
+        }
           
 template <typename scalar_t, typename cache_t, vllm::Fp8KVCacheDataType KV_DTYPE, 
           int BLOCK_SIZE, int NUM_THREADS = 128, int PARTITION_SIZE = 512>
@@ -1487,9 +1494,10 @@ void dattention_launcher(
   int num_kv_heads,
   double  scale,
   const c10::optional<torch::Tensor>&  alibi_slopes,
-  double k_scale,
-  double v_scale 
-) {
+  double k_scale, double v_scale, const int tp_rank, const int blocksparse_local_blocks,
+  const int blocksparse_vert_stride, const int blocksparse_block_size,
+  const int blocksparse_head_sliding_step) {
+  const bool is_block_sparse = (blocksparse_vert_stride > 1); 
   const int num_seqs = query.size(0);
   const int num_heads = query.size(1);
   const int head_size = query.size(2);
@@ -1555,25 +1563,53 @@ void dattention_launcher(
     // head sizes that we use in the model. However, we can easily extend this
     // to support any head size which is a multiple of 16.
     case 64:
-      LAUNCH_DATTENTION(64);
+      if(is_block_sparse) {
+        LAUNCH_DATTENTION(64, true);
+      } else {
+        LAUNCH_DATTENTION(64, false); 
+      }
       break;
     case 80:
-      LAUNCH_DATTENTION(80);
+      if(is_block_sparse) {
+        LAUNCH_DATTENTION(80, true);
+      } else {
+        LAUNCH_DATTENTION(80, false);
+      }
       break;
     case 96:
-      LAUNCH_DATTENTION(96);
+      if(is_block_sparse) {
+        LAUNCH_DATTENTION(96, true);
+      } else {
+        LAUNCH_DATTENTION(96, false);
+      }
       break;
     case 112:
-      LAUNCH_DATTENTION(112);
+      if(is_block_sparse) {
+        LAUNCH_DATTENTION(112, true);
+      } else {
+        LAUNCH_DATTENTION(112, false);
+      }
       break;
     case 128:
-      LAUNCH_DATTENTION(128);
+      if(is_block_sparse) {
+        LAUNCH_DATTENTION(128, true);
+      } else {
+        LAUNCH_DATTENTION(128, false);
+      }
       break;
     case 192:
-      LAUNCH_DATTENTION(192);
+      if(is_block_sparse) {
+        LAUNCH_DATTENTION(192, true);
+      } else {
+        LAUNCH_DATTENTION(192, false);
+      }
       break;
     case 256:
-      LAUNCH_DATTENTION(256);
+      if(is_block_sparse) {
+        LAUNCH_DATTENTION(256, true);
+      } else {
+        LAUNCH_DATTENTION(256, false);
+      }
       break;
     default:
       TORCH_CHECK(false, "Unsupported head size: ", head_size);
@@ -1599,9 +1635,10 @@ void dattention(
     int64_t num_kv_heads,
     double scale,
     const c10::optional<torch::Tensor>&  alibi_slopes,
-    double k_scale,
-    double v_scale 
-  ) {
+    double k_scale, double v_scale,
+    const int64_t tp_rank, const int64_t blocksparse_local_blocks,
+    const int64_t blocksparse_vert_stride, const int64_t blocksparse_block_size,
+    const int64_t blocksparse_head_sliding_step) { 
   assert(block_size == 16 || block_size == 32);
 
   if (kv_cache_dtype == "auto" && block_size == 16) {                                                 
@@ -1609,12 +1646,16 @@ void dattention(
       dattention_launcher<float, float, vllm::Fp8KVCacheDataType::kAuto, 16>( 
           output, exp_sums, max_logits, tmp_out, query, use_reduce, layer_idx, num_layers, max_seq_len,  
           seq_lens, cache_row_mapping, cache_col_mapping, 
-          num_kv_heads, scale, alibi_slopes, k_scale, v_scale);
+          num_kv_heads, scale, alibi_slopes, k_scale, v_scale,
+          tp_rank, blocksparse_local_blocks, blocksparse_vert_stride,
+          blocksparse_block_size, blocksparse_head_sliding_step);
     } else if (query.dtype() == at::ScalarType::Half) {
         dattention_launcher<uint16_t, uint16_t, vllm::Fp8KVCacheDataType::kAuto, 16>( 
           output, exp_sums, max_logits, tmp_out, query, use_reduce, layer_idx, num_layers, max_seq_len,  
           seq_lens, cache_row_mapping, cache_col_mapping, 
-          num_kv_heads, scale, alibi_slopes, k_scale, v_scale); 
+          num_kv_heads, scale, alibi_slopes, k_scale, v_scale,
+          tp_rank, blocksparse_local_blocks, blocksparse_vert_stride,
+          blocksparse_block_size, blocksparse_head_sliding_step); 
     } 
   }
   else if (kv_cache_dtype == "auto" && block_size == 32) {                                                 
@@ -1622,12 +1663,16 @@ void dattention(
       dattention_launcher<float, float, vllm::Fp8KVCacheDataType::kAuto, 32>( 
           output, exp_sums, max_logits, tmp_out, query, use_reduce, layer_idx, num_layers, max_seq_len,  
           seq_lens, cache_row_mapping, cache_col_mapping, 
-          num_kv_heads, scale, alibi_slopes, k_scale, v_scale);
+          num_kv_heads, scale, alibi_slopes, k_scale, v_scale,
+          tp_rank, blocksparse_local_blocks, blocksparse_vert_stride,
+          blocksparse_block_size, blocksparse_head_sliding_step);
     } else if (query.dtype() == at::ScalarType::Half) {
         dattention_launcher<uint16_t, uint16_t, vllm::Fp8KVCacheDataType::kAuto, 32>( 
           output, exp_sums, max_logits, tmp_out, query, use_reduce, layer_idx, num_layers, max_seq_len,  
           seq_lens, cache_row_mapping, cache_col_mapping, 
-          num_kv_heads, scale, alibi_slopes, k_scale, v_scale); 
+          num_kv_heads, scale, alibi_slopes, k_scale, v_scale,
+          tp_rank, blocksparse_local_blocks, blocksparse_vert_stride,
+          blocksparse_block_size, blocksparse_head_sliding_step); 
     } 
   }
   else {                     

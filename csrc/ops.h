@@ -46,8 +46,11 @@ void dattention(
     int64_t num_kv_heads,
     double  scale,
     const c10::optional<torch::Tensor>&  alibi_slopes,
-    double k_scale,
-    double v_scale);
+    double k_scale, double v_scale, 
+    const int64_t tp_rank, const int64_t blocksparse_local_blocks,
+    const int64_t blocksparse_vert_stride, const int64_t blocksparse_block_size,
+    const int64_t blocksparse_head_sliding_step);
+
 
 void rms_norm(torch::Tensor& out, torch::Tensor& input, torch::Tensor& weight,
               double epsilon);

@@ -148,7 +148,12 @@ def dattention(
     scale: float,
     alibi_slopes: Optional[torch.Tensor],
     k_scale: float,
-    v_scale: float, 
+    v_scale: float,
+    tp_rank: int = 0,
+    blocksparse_local_blocks: int = 0,
+    blocksparse_vert_stride: int = 0,
+    blocksparse_block_size: int = 64,
+    blocksparse_head_sliding_step: int = 0, 
 ) -> None:
     #print(f"before calling torch.ops._C.dattention, scale:{scale}, kv_scale:{kv_scale}\n")
     torch.ops._C.dattention(
@@ -170,7 +175,12 @@ def dattention(
             scale,
             alibi_slopes,
             k_scale,
-            v_scale,    
+            v_scale, 
+            tp_rank, 
+            blocksparse_local_blocks,
+            blocksparse_vert_stride, 
+            blocksparse_block_size,
+            blocksparse_head_sliding_step,   
         )
 
 def paged_attention_rocm(
