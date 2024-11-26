@@ -207,7 +207,15 @@ class GPUModelRunner:
         if removed_req_indices:
             self.input_batch.condense(removed_req_indices)
 
-    def _prepare_inputs(self, scheduler_output: "SchedulerOutput"):
+    def _prepare_inputs(
+        self,
+        scheduler_output: "SchedulerOutput",
+        sampling_metadata: SamplingMetadata,
+        num_input_tokens: int,
+    ) -> Tuple[torch.Tensor, FlashAttentionMetadata, torch.Tensor,
+               torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+        do_prompt_logprobs = sampling_metadata.max_num_prompt_logprobs > 0
+
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
         num_reqs = self.input_batch.num_reqs
@@ -240,8 +248,9 @@ class GPUModelRunner:
         # E.g., [2, 5, 3] -> [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
         arange_matrix = np.tile(np.arange(max_num_scheduled_tokens),
                                 (num_reqs, 1))
-        mask = arange_matrix < num_scheduled_tokens[:, np.newaxis]
-        arange = arange_matrix[mask]
+        prompt_logits_mask = arange_matrix < num_scheduled_tokens[:,
+                                                                  np.newaxis]
+        arange = arange_matrix[prompt_logits_mask]
 
         # Get positions.
         positions = torch.empty((total_num_scheduled_tokens, ),
@@ -321,8 +330,27 @@ class GPUModelRunner:
         # partial request, we do so for simplicity. We will ignore the sampled
         # token from the partial request.
         # TODO: Support prompt logprobs.
-        logits_indices = query_start_loc[1:] - 1
-        return input_ids, attn_metadata, logits_indices
+        maybe_sample_logits_indices = query_start_loc[1:] - 1
+        num_query_tokens = torch.diff(query_start_loc)
+        num_sampled_tokens = torch.tensor(
+            scheduler_output.partial_running_reqs, device=self.device)
+
+        # One or more requests require prompt logprobs
+        complete_req_mask = torch.tensor(
+            [not x for x in scheduler_output.partial_running_reqs])
+
+        if do_prompt_logprobs:
+            prompt_logits_mask = torch.ones(num_input_tokens, dtype=torch.bool)
+            prompt_logits_mask[
+                maybe_sample_logits_indices[complete_req_mask]] = False
+
+            return (input_ids, attn_metadata, num_query_tokens,
+                    num_sampled_tokens, maybe_sample_logits_indices,
+                    prompt_logits_mask)
+        else:
+            # No requests require prompt logprobs
+            return (input_ids, attn_metadata, num_query_tokens,
+                    num_sampled_tokens, maybe_sample_logits_indices, None)
 
     def _prepare_sampling(
         self,
@@ -421,9 +449,8 @@ class GPUModelRunner:
         self._execute_encoder(scheduler_output)
         encoder_outputs = self._gather_encoder_outputs(scheduler_output)
 
-        # Prepare the decoder inputs.
-        input_ids, attn_metadata, logits_indices = self._prepare_inputs(
-            scheduler_output)
+        sampling_metadata = self._prepare_sampling(scheduler_output)
+
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if (self.use_cuda_graph
                 and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
@@ -434,6 +461,21 @@ class GPUModelRunner:
         else:
             # Eager mode.
             num_input_tokens = num_scheduled_tokens
+
+        do_logprobs = sampling_metadata.max_num_logprobs > 0
+        do_prompt_logprobs = sampling_metadata.max_num_prompt_logprobs > 0
+
+        # Prepare the decoder inputs.
+        (
+            input_ids,
+            attn_metadata,
+            num_query_tokens,
+            num_sampled_tokens,
+            maybe_sample_logits_indices,
+            prompt_logits_mask,
+        ) = self._prepare_inputs(scheduler_output=scheduler_output,
+                                 sampling_metadata=sampling_metadata,
+                                 num_input_tokens=num_input_tokens)
 
         # Get the inputs embeds.
         if encoder_outputs:
@@ -456,14 +498,18 @@ class GPUModelRunner:
                 attn_metadata=None,
                 inputs_embeds=self.inputs_embeds[:num_input_tokens],
             )
+
         hidden_states = hidden_states[:num_scheduled_tokens]
-        hidden_states = hidden_states[logits_indices]
-        logits = self.model.compute_logits(hidden_states, None)
+
+        sampling_metadata.num_query_tokens = num_query_tokens
+        sampling_metadata.num_sampled_tokens = num_sampled_tokens
+        sampling_metadata.maybe_sample_logits_indices = (
+            maybe_sample_logits_indices)
+        sampling_metadata.prompt_logits_mask = prompt_logits_mask
 
         # Sample the next token and get logprobs if needed.
-        sampling_metadata = self._prepare_sampling(scheduler_output)
         sampler_output = self.model.sample(
-            logits=logits,
+            logits=self.model.compute_logits(hidden_states, None),
             sampling_metadata=sampling_metadata,
         )
 
@@ -491,21 +537,27 @@ class GPUModelRunner:
                     # This relies on cuda-specific torch-internal impl details
                     generator.set_offset(generator.get_offset() - 4)
 
-        if sampler_output.logprob_token_ids is None:
-            logprob_token_ids = None
-        else:
-            logprob_token_ids = sampler_output.logprob_token_ids.cpu()
-        if sampler_output.logprobs is None:
-            logprobs = None
-        else:
-            logprobs = sampler_output.logprobs.cpu()
+        (
+            logprob_token_ids,
+            logprobs,
+        ) = ((sampler_output.logprob_token_ids.cpu(),
+              sampler_output.logprobs.cpu()) if do_logprobs else (None, None))
+
+        (
+            prompt_logprob_token_ids,
+            prompt_logprobs,
+        ) = ((sampler_output.prompt_logprob_token_ids.cpu(),
+              sampler_output.prompt_logprobs.cpu()) if do_prompt_logprobs else
+             (None, None))
+
         model_runner_output = ModelRunnerOutput(
             req_ids=self.input_batch.req_ids[:num_reqs],
             req_id_to_index=self.input_batch.req_id_to_index,
             sampled_token_ids_cpu=sampled_token_ids,
             logprob_token_ids_cpu=logprob_token_ids,
             logprobs_cpu=logprobs,
-        )
+            prompt_logprob_token_ids_cpu=prompt_logprob_token_ids,
+            prompt_logprobs_cpu=prompt_logprobs)
         return model_runner_output
 
     def load_model(self) -> None:
@@ -692,6 +744,7 @@ class InputBatch:
         self.generators: Dict[int, torch.Generator] = {}
 
         self.num_logprobs: Dict[str, int] = {}
+        self.num_prompt_logprobs: Dict[str, int] = {}
         self.prompt_logprob_reqs: Set[str] = set()
 
     def add_request(
@@ -737,8 +790,11 @@ class InputBatch:
         self.generators[req_index] = request.generator
 
         num_logprobs = sampling_params.logprobs
+        num_prompt_logprobs = sampling_params.prompt_logprobs
         if num_logprobs is not None and num_logprobs > 0:
             self.num_logprobs[req_id] = num_logprobs
+        if num_prompt_logprobs is not None and num_prompt_logprobs > 0:
+            self.num_prompt_logprobs[req_id] = num_prompt_logprobs
         if sampling_params.prompt_logprobs:
             self.prompt_logprob_reqs.add(req_id)
 
@@ -754,6 +810,7 @@ class InputBatch:
         self.top_k_reqs.discard(req_id)
         self.generators.pop(req_index, None)
         self.num_logprobs.pop(req_id, None)
+        self.num_prompt_logprobs.pop(req_id, None)
         self.prompt_logprob_reqs.discard(req_id)
         return req_index
 
@@ -766,6 +823,7 @@ class InputBatch:
         self.top_k_reqs.clear()
         self.generators.clear()
         self.num_logprobs.clear()
+        self.num_prompt_logprobs.clear()
         self.prompt_logprob_reqs.clear()
 
     def condense(self, empty_req_indices: List[int]) -> None:
@@ -832,7 +890,7 @@ class InputBatch:
             no_top_k=self.no_top_k,
             generators=self.generators,
             max_num_logprobs=self.max_num_logprobs,
-        )
+            max_num_prompt_logprobs=self.max_num_prompt_logprobs)
 
     @property
     def num_reqs(self) -> int:
@@ -857,6 +915,11 @@ class InputBatch:
     @property
     def max_num_logprobs(self) -> int:
         return max(self.num_logprobs.values()) if self.num_logprobs else 0
+
+    @property
+    def max_num_prompt_logprobs(self) -> int:
+        return (max(self.num_prompt_logprobs.values())
+                if self.num_prompt_logprobs else 0)
 
     @property
     def no_logprob(self) -> bool:

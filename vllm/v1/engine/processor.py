@@ -39,6 +39,28 @@ class Processor:
         self.input_processor = input_registry.create_input_processor(
             model_config)
 
+    def _assert_valid_logprobs_prompt_logprobs(
+        self,
+        params: Union[SamplingParams, PoolingParams],
+        max_logprobs: int,
+    ):
+        """Validate requested number of sample logprobs & prompt logprobs
+        
+        Fails with ValueError if to many logprobs are requested.
+
+        Args:
+          params: Sampling parameters
+          max_logprobs: max number of logprobs or prompt logprobs
+        """
+
+        if isinstance(params, SamplingParams) and (
+            (params.logprobs and params.logprobs > max_logprobs) or
+            (params.prompt_logprobs
+             and params.prompt_logprobs > max_logprobs)):
+
+            raise ValueError(f"Cannot request more than "
+                             f"{max_logprobs} logprobs or prompt logprobs.")
+
     # TODO: run in an ThreadpoolExecutor or BackgroundProcess.
     # This ideally should releases the GIL, so we should not block the
     # asyncio loop while this is running.
@@ -48,6 +70,7 @@ class Processor:
         prompt: PromptType,
         params: Union[SamplingParams, PoolingParams],
         arrival_time: float,
+        max_logprobs: int,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
@@ -55,8 +78,9 @@ class Processor:
     ) -> Tuple[DetokenizerRequest, EngineCoreRequest]:
 
         # TODO(woosuk): Support embedding mode.
-        # TODO(woosuk): Check max_logprobs
         # TODO(woosuk): Support encoder-decoder models.
+
+        self._assert_valid_logprobs_prompt_logprobs(params, max_logprobs)
 
         if lora_request is not None and not self.lora_config:
             raise ValueError(f"Got lora_request {lora_request} but LoRA is "
@@ -106,6 +130,8 @@ class Processor:
             sampling_params.output_kind,
             sampling_params.stop,
             sampling_params.include_stop_str_in_output,
+            sampling_params.logprobs,
+            sampling_params.prompt_logprobs,
         )
 
         # Make Request for EngineCore.
