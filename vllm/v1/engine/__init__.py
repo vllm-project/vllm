@@ -7,6 +7,7 @@ import msgspec
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MultiModalDataDict, MultiModalPlaceholderDict
 from vllm.sampling_params import RequestOutputKind, SamplingParams
+from vllm.v1.engine.stats import EngineCoreStats
 
 
 @dataclass
@@ -66,6 +67,8 @@ class EngineCoreOutputs(msgspec.Struct,
 
     # [num_reqs]
     outputs: List[EngineCoreOutput]
+
+    stats: Optional[EngineCoreStats] = None
 
 
 @dataclass

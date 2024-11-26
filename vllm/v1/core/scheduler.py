@@ -9,6 +9,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.engine import EngineCoreOutput
+from vllm.v1.engine.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 
@@ -500,6 +501,12 @@ class Scheduler:
 
     def has_unfinished_requests(self) -> bool:
         return self.get_num_unfinished_requests() > 0
+
+    def get_stats(self) -> SchedulerStats:
+        return SchedulerStats(
+            num_running_reqs=len(self.running),
+            num_waiting_reqs=len(self.waiting),
+        )
 
 
 @dataclass

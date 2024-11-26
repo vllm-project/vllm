@@ -65,7 +65,7 @@ class EngineCoreClient:
     def abort_requests(self, request_ids: List[str]) -> None:
         raise NotImplementedError
 
-    async def get_output_async(self) -> List[EngineCoreOutput]:
+    async def get_output_async(self) -> EngineCoreOutputs:
         raise NotImplementedError
 
     async def add_request_async(self, request: EngineCoreRequest) -> None:
@@ -178,10 +178,10 @@ class SyncMPClient(MPClient):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, asyncio_mode=False, **kwargs)
 
-    def get_output(self) -> List[EngineCoreOutput]:
+    def get_output(self) -> EngineCoreOutputs:
 
         (frame, ) = self.output_socket.recv_multipart(copy=False)
-        engine_core_outputs = self.decoder.decode(frame.buffer).outputs
+        engine_core_outputs = self.decoder.decode(frame.buffer)
         return engine_core_outputs
 
     def _send_input(
@@ -210,10 +210,10 @@ class AsyncMPClient(MPClient):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, asyncio_mode=True, **kwargs)
 
-    async def get_output_async(self) -> List[EngineCoreOutput]:
+    async def get_output_async(self) -> EngineCoreOutputs:
 
         frames = await self.output_socket.recv_multipart(copy=False)
-        engine_core_outputs = self.decoder.decode(frames[0].buffer).outputs
+        engine_core_outputs = self.decoder.decode(frames[0].buffer)
 
         return engine_core_outputs
 

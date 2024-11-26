@@ -3,7 +3,7 @@ from typing import AsyncGenerator, Dict, List, Mapping, Optional, Type, Union
 
 from vllm.config import ModelConfig, VllmConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.engine.metrics_types import StatLoggerBase
+from vllm.engine.metrics_types import StatLoggerBase, Stats
 from vllm.engine.protocol import EngineClient
 from vllm.inputs import INPUT_REGISTRY, InputRegistry, PromptType
 from vllm.inputs.preprocess import InputPreprocessor
@@ -16,10 +16,13 @@ from vllm.sampling_params import SamplingParams
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
+from vllm.v1.engine import EngineCoreOutputs
 from vllm.v1.engine.async_stream import AsyncStream
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.detokenizer import Detokenizer
 from vllm.v1.engine.processor import Processor
+from vllm.v1.engine.stats import (EngineCoreStats, initialize_stats_loggers,
+                                  make_stats)
 from vllm.v1.executor.gpu_executor import GPUExecutor
 
 logger = init_logger(__name__)
@@ -76,7 +79,18 @@ class AsyncLLM(EngineClient):
             asyncio_mode=True,
         )
 
-        self.output_handler = None
+        # Async tasks that run in the background.
+        self.output_handler: Optional[asyncio.Task] = None
+
+        # Stats loggers. If not provided, initialize from defaults.
+        self.stat_loggers: Dict[str, StatLoggerBase] = {}
+        if self.log_stats:
+            if stat_loggers is not None:
+                self.stat_loggers = stat_loggers
+            else:
+                self.stat_loggers = initialize_stats_loggers(vllm_config)
+        if self.stat_loggers:
+            logger.info("Logging stats to: %s", list(self.stat_loggers.keys()))
 
     def __del__(self):
         self.shutdown()
@@ -281,10 +295,13 @@ class AsyncLLM(EngineClient):
         try:
             while True:
                 # 1) Pull EngineCoreOutput from the EngineCore.
-                outputs = await self.engine_core.get_output_async()
+                outputs: EngineCoreOutputs = (
+                    await self.engine_core.get_output_async())
+                self._log_stats(outputs.stats)
 
                 # 2) Detokenize based on the output.
-                request_outputs, reqs_to_abort = self.detokenizer.step(outputs)
+                request_outputs, reqs_to_abort = self.detokenizer.step(
+                    outputs.outputs)
 
                 # 3) Put the RequestOutputs into the per-request AsyncStreams.
                 self._process_request_outputs(request_outputs)
@@ -295,11 +312,27 @@ class AsyncLLM(EngineClient):
                 # 5) Abort any requests due to client cancellations.
                 await self._process_cancellations()
 
+        except asyncio.CancelledError:
+            logger.info("Engine shutting down.")
+            self.shutdown()
         except BaseException as e:
             logger.error(e)
             raise e
 
-    # TODO: can we eliminate these?
+    def _log_stats(self, engine_core_stats: EngineCoreStats):
+        if not self.stat_loggers:
+            # No stats to log.
+            return
+
+        stats: Stats = make_stats(engine_core_stats=engine_core_stats)
+        for stat_logger in self.stat_loggers.values():
+            # TODO(rickyx): we here assume loggers are lightweight and
+            # non-blocking. To make this more robust, we should really
+            # have an async logger interface, which implements actual
+            # logging that could be cpu-heavy in a separate process
+            # to minimize the latency impact on the frontend engine's
+            # event loop.
+            stat_logger.log(stats)
 
     async def abort(self, request_id: str) -> None:
         # Note: Who Calls this? I dont think this is actually used.
@@ -340,7 +373,9 @@ class AsyncLLM(EngineClient):
         scheduler_outputs=None,
         model_output=None,
     ) -> None:
-        logger.debug("Called do_log_stats.")
+        raise NotImplementedError(
+            "V1 stats logging should not be called by user. "
+            "The engine client handles logging internally.")
 
     async def check_health(self) -> None:
         logger.debug("Called check_health.")

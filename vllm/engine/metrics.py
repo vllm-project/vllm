@@ -451,9 +451,14 @@ class LoggingStatLogger(StatLoggerBase):
                 last_log=self.last_local_log)
 
             log_fn = logger.info
-            if not any((prompt_throughput, generation_throughput,
-                        self.last_prompt_throughput,
-                        self.last_generation_throughput)):
+            if not any((
+                    prompt_throughput,
+                    generation_throughput,
+                    self.last_prompt_throughput,
+                    self.last_generation_throughput,
+                    stats.num_running_sys,
+                    stats.num_waiting_sys,
+            )):
                 # Avoid log noise on an idle production system
                 log_fn = logger.debug
 

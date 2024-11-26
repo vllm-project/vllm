@@ -20,6 +20,7 @@ from vllm.v1.engine import (EngineCoreOutput, EngineCoreOutputs,
                             EngineCoreProfile, EngineCoreRequest,
                             EngineCoreRequestType)
 from vllm.v1.engine.mm_input_mapper import MMInputMapper
+from vllm.v1.engine.stats import EngineCoreStats
 from vllm.v1.executor.gpu_executor import GPUExecutor
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import PickleEncoder
@@ -56,8 +57,11 @@ class EngineCore:
 
         assert vllm_config.model_config.task != "embedding"
 
-        logger.info("Initializing an LLM engine (v%s) with config: %s",
-                    VLLM_VERSION, vllm_config)
+        logger.info(
+            "Initializing an LLM engine (v%s) with config: %s",
+            VLLM_VERSION,
+            vllm_config,
+        )
 
         # Setup Model.
         self.model_executor = executor_class(vllm_config)
@@ -72,9 +76,11 @@ class EngineCore:
         self.mm_input_mapper = MMInputMapper(vllm_config.model_config)
 
         # Setup scheduler.
-        self.scheduler = Scheduler(vllm_config.scheduler_config,
-                                   vllm_config.cache_config,
-                                   vllm_config.lora_config)
+        self.scheduler = Scheduler(
+            vllm_config.scheduler_config,
+            vllm_config.cache_config,
+            vllm_config.lora_config,
+        )
 
         self._last_logging_time = time.time()
 
@@ -87,8 +93,10 @@ class EngineCore:
             num_gpu_blocks_override = cache_config.num_gpu_blocks_override
             logger.info(
                 "Overriding num_gpu_blocks=%d with "
-                "num_gpu_blocks_override=%d", num_gpu_blocks,
-                num_gpu_blocks_override)
+                "num_gpu_blocks_override=%d",
+                num_gpu_blocks,
+                num_gpu_blocks_override,
+            )
             num_gpu_blocks = num_gpu_blocks_override
 
         num_cpu_blocks = 0
@@ -172,7 +180,7 @@ class EngineCoreProc(EngineCore):
 
     @contextmanager
     def make_socket(self, path: str, type: Any) -> Iterator[zmq.Socket]:
-        """Context manager for use """
+        """Context manager for use"""
 
         ctx = zmq.Context()
         try:
@@ -245,7 +253,7 @@ class EngineCoreProc(EngineCore):
             "vllm_config": vllm_config,
             "executor_class": executor_class,
             "usage_context": usage_context,
-            "should_shutdown": should_shutdown
+            "should_shutdown": should_shutdown,
         }
         # Run EngineCore busy loop in background process.
         proc = context.Process(target=EngineCoreProc.run_engine_core,
@@ -284,7 +292,7 @@ class EngineCoreProc(EngineCore):
                         self._handle_client_request(req)
                         break
                     except queue.Empty:
-                        self._log_stats()
+                        self._log_stats(self._make_stats(engine_outputs=[]))
                         logger.debug("EngineCore busy loop waiting.")
                         if self.should_shutdown:
                             return
@@ -297,12 +305,18 @@ class EngineCoreProc(EngineCore):
             # 3) Step the engine core.
             outputs = self.step()
 
+            stats = self._make_stats(engine_outputs=outputs, )
+
             # 4) Put EngineCoreOutputs into the output queue.
-            self.output_queue.put_nowait(outputs)
+            self.output_queue.put_nowait((outputs, stats))
 
-            self._log_stats()
+            self._log_stats(stats)
 
-    def _log_stats(self):
+    def _make_stats(self,
+                    engine_outputs: List[EngineCoreOutput]) -> EngineCoreStats:
+        return EngineCoreStats(scheduler_stats=self.scheduler.get_stats(), )
+
+    def _log_stats(self, stats: EngineCoreStats):
         """Log basic stats every LOGGING_TIME_S"""
 
         now = time.time()
@@ -310,8 +324,8 @@ class EngineCoreProc(EngineCore):
         if now - self._last_logging_time > LOGGING_TIME_S:
             logger.info(
                 "RUNNING: %s | WAITING: %s",
-                len(self.scheduler.running),
-                len(self.scheduler.waiting),
+                stats.scheduler_stats.num_running_reqs,
+                stats.scheduler_stats.num_waiting_reqs,
             )
 
             self._last_logging_time = now
@@ -367,7 +381,11 @@ class EngineCoreProc(EngineCore):
 
         with self.make_socket(output_path, zmq.constants.PUSH) as socket:
             while True:
-                engine_core_outputs = self.output_queue.get()
-                outputs = EngineCoreOutputs(outputs=engine_core_outputs)
+                engine_core_outputs, engine_core_stats = self.output_queue.get(
+                )
+                outputs = EngineCoreOutputs(
+                    outputs=engine_core_outputs,
+                    stats=engine_core_stats,
+                )
                 encoder.encode_into(outputs, buffer)
                 socket.send_multipart((buffer, ), copy=False)
