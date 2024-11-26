@@ -172,7 +172,7 @@ steps:
     - vllm/
     - tests/v1
   commands:
-    - pytest -v -s v1
+    - VLLM_USE_V1=1 pytest -v -s v1
 
 - label: Examples Test # 15min
   working_dir: "/vllm-workspace/examples"
