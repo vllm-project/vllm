@@ -10,6 +10,7 @@ import torch.nn as nn
 
 from vllm.compilation.compile_context import set_compile_context
 from vllm.config import CompilationLevel, VllmConfig
+from vllm.distributed.parallel_state import graph_capture
 from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.logger import init_logger
@@ -570,8 +571,9 @@ class GPUModelRunner:
         # Trigger CUDA graph capture for specific shapes.
         # Capture the large shapes first so that the smaller shapes
         # can reuse the memory pool allocated for the large shapes.
-        for num_tokens in reversed(self.cudagraph_batch_sizes):
-            self._dummy_run(self.model, num_tokens, self.kv_caches)
+        with graph_capture():
+            for num_tokens in reversed(self.cudagraph_batch_sizes):
+                self._dummy_run(self.model, num_tokens, self.kv_caches)
 
         end_time = time.perf_counter()
         end_free_gpu_memory = torch.cuda.mem_get_info()[0]
