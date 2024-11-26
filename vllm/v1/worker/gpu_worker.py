@@ -13,7 +13,8 @@ import zmq
 
 import vllm.envs as envs
 from vllm.config import CacheConfig, ModelConfig, ParallelConfig, VllmConfig
-from vllm.distributed import (ensure_model_parallel_initialized,
+from vllm.distributed import (destroy_tp_mq_broadcaster,
+                              ensure_model_parallel_initialized,
                               init_distributed_environment,
                               set_custom_all_reduce)
 from vllm.distributed.device_communicators.shm_broadcast import (Handle,
@@ -389,6 +390,10 @@ class WorkerProc:
                 kwargs["initialization_output_path"])
 
             worker.execute_model_busy_loop()
+
+            # Clean up once worker exits busy loop
+            worker = None
+            destroy_tp_mq_broadcaster()
 
         except KeyboardInterrupt:
             logger.debug("Worker interrupted.")

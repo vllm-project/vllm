@@ -105,8 +105,8 @@ class LLMEngine:
             executor_class = MultiprocExecutor
         else:
             assert (distributed_executor_backend is None)
-            from vllm.v1.executor.monoproc_executor import MonoprocExecutor
-            executor_class = MonoprocExecutor
+            from vllm.v1.executor.uniproc_executor import UniprocExecutor
+            executor_class = UniprocExecutor
 
         return executor_class
 

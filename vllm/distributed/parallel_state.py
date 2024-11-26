@@ -1174,6 +1174,16 @@ def destroy_model_parallel():
     _PP = None
 
 
+# In V1, Calling _TP.destroy() results in 2 leaked shared memory objects. This
+# is related to the torch.distributed.destroy_process_group calls. However, not
+# cleaning up its mq_broadcaster results in 1 leaked shm object.
+# TODO: Fix up this hack
+def destroy_tp_mq_broadcaster():
+    global _TP
+    if _TP:
+        _TP.mq_broadcaster = None
+
+
 def destroy_distributed_environment():
     global _WORLD
     if _WORLD:
