@@ -57,7 +57,7 @@ def _get_test_batch(batch_logprobs_composition: str) -> List[Tuple]:
             (None, 0),
             (0, None),
             (0, 0),
-            (None, 6),
+            (None, 7),
             (0, 5),
         ]
     elif batch_logprobs_composition == "SAMPLE_PROMPT":
@@ -67,7 +67,7 @@ def _get_test_batch(batch_logprobs_composition: str) -> List[Tuple]:
             (0, 0),
             (5, None),
             (3, 0),
-            (6, 3),
+            (7, 3),
             (None, 6),
             (0, 5),
         ]
@@ -301,7 +301,8 @@ def test_get_logprobs_and_prompt_logprobs(
                          ["half"])  # needed for comparing logprobs with HF
 # @pytest.mark.parametrize("detokenize", [True, False])
 @pytest.mark.parametrize("max_num_batched_tokens", [128])
-@pytest.mark.parametrize("batch_logprobs_composition", ["SAMPLE_PROMPT"])
+@pytest.mark.parametrize("batch_logprobs_composition",
+                         ["NONE", "SAMPLE", "PROMPT", "SAMPLE_PROMPT"])
 def test_fast_get_logprobs_and_prompt_logprobs(
     hf_runner,
     vllm_runner,

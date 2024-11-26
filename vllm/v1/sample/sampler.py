@@ -36,14 +36,26 @@ class Sampler(nn.Module):
         # Use int32 to reduce the tensor size.
         return sampled.to(torch.int32)
 
-    def _topk_logprobs_indices(
+    def _top_logprobs_token_indices(
         self,
         logprobs: torch.Tensor,
-        sampling_metadata: SamplingMetadata,
+        max_num_logprobs: int,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Compute top logprobs and associated token indices
+        
+        Args:
+          logprobs: total_tokens x vocab tensor
+          max_num_logprobs: Max number of top {sample,prompt} logprobs
+                            requested in batch (depending on whether top sample
+                            logprobs or top prompt logprobs are being computed)
 
-        topk_logprobs, topk_indices = torch.topk(
-            logprobs, sampling_metadata.max_num_logprobs, dim=-1)
+        Returns:
+          Top logprobs, total_tokens x max_num_logprobs tensor
+          Top logprob token indices, total_tokens x max_num_logprobs tensor
+        """
+        topk_logprobs, topk_indices = torch.topk(logprobs,
+                                                 max_num_logprobs,
+                                                 dim=-1)
         # Use int32 to reduce the tensor size.
         return topk_logprobs, topk_indices.to(torch.int32)
 
@@ -97,28 +109,33 @@ class Sampler(nn.Module):
                          top-p applied.
 
           Returns:
-            Sample logprobs (`None` if `do_logprobs == False`)
-            Sample logprobs token indices (`None` if `do_logprobs == False`)
-            Prompt logprobs (`None` if `do_prompt_logprobs == False`)
-            Prompt logprobs token indices
-                (`None` if `do_prompt_logprobs == False`)
+            Sample logprobs (`None` if `do_logprobs == False`,
+                             o/w num_samples x max_num_logprobs tensor)
+            Sample logprobs token indices (`None` if `do_logprobs == False`,
+                             o/w num_samples x max_num_logprobs tensor)
+            Prompt logprobs (`None` if `do_prompt_logprobs == False`,
+                             o/w num_prompt_tokens x max_num_prompt_logprobs
+                             tensor)
+            Prompt logprobs token indices (`None` if
+                 `do_prompt_logprobs == False`, o/w
+                 num_prompt_tokens x max_num_prompt_logprobs tensor)
         """
 
         assert do_logprobs or do_prompt_logprobs
         if do_logprobs and do_prompt_logprobs:
             # Batch requires sample and prompt logprobs
 
-            # - Compute top logprobs for all sequence offsets
+            # - Compute logprobs for all sequence offsets
             logprobs = self.get_logprobs(logits_w_tmp_tpk_tpp)
-            topk_logprobs, topk_indices = self._topk_logprobs_indices(
-                logprobs, sampling_metadata)
 
-            # - Gather logprobs for sequence offsets where new tokens are
-            #   decoded
-            maybe_sample_topk_logprobs = topk_logprobs[
-                maybe_sample_logits_indices, :]
-            maybe_sample_topk_indices = topk_indices[
-                maybe_sample_logits_indices, :]
+            # - Compute *top* logprobs for sequence offsets
+            #   where a new token is being decoded
+            (
+                maybe_sample_topk_logprobs,
+                maybe_sample_topk_indices,
+            ) = self._top_logprobs_token_indices(
+                logprobs[maybe_sample_logits_indices, :],
+                sampling_metadata.max_num_logprobs)
 
             # - In case sampled tokens are not in the top logprobs at their
             #   respective sequence offsets, gather logprobs associated with
@@ -126,7 +143,7 @@ class Sampler(nn.Module):
             maybe_sampled_logprobs = logprobs[maybe_sample_logits_indices,
                                               maybe_sampled]
 
-            return (
+            return ((
                 # Sample logprobs (including sampled tokens)
                 torch.cat((maybe_sample_topk_logprobs,
                            maybe_sampled_logprobs.unsqueeze(-1)),
@@ -134,11 +151,11 @@ class Sampler(nn.Module):
                 # Sample logprobs token indices (including sampled tokens)
                 torch.cat(
                     (maybe_sample_topk_indices, maybe_sampled.unsqueeze(-1)),
-                    dim=-1),
-                # Prompt logprobs
-                topk_logprobs[prompt_logits_mask, :],
-                # Prompt logprob token indices
-                topk_indices[prompt_logits_mask, :])
+                    dim=-1)) +
+                    # Prompt logprobs and token indices
+                    self._top_logprobs_token_indices(
+                        logprobs[prompt_logits_mask, :],
+                        sampling_metadata.max_num_prompt_logprobs))
         elif do_logprobs:
             # Batch requires only sample logprobs
 
@@ -148,7 +165,8 @@ class Sampler(nn.Module):
             (
                 maybe_sample_topk_logprobs,
                 maybe_sample_topk_indices,
-            ) = self._topk_logprobs_indices(logprobs, sampling_metadata)
+            ) = self._top_logprobs_token_indices(
+                logprobs, sampling_metadata.max_num_logprobs)
 
             # - In case sampled tokens are not in the top logprobs at their
             #   respective sequence offsets, gather logprobs associated with
@@ -178,8 +196,8 @@ class Sampler(nn.Module):
                 logits_w_tmp_tpk_tpp[prompt_logits_mask, :])
 
             # Return prompt logprobs
-            return ((None, None) +
-                    self._topk_logprobs_indices(logprobs, sampling_metadata))
+            return ((None, None) + self._top_logprobs_token_indices(
+                logprobs, sampling_metadata.max_num_prompt_logprobs))
 
     def forward(
         self,
