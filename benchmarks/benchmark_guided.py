@@ -280,8 +280,8 @@ def evaluate(ret, args):
         # extract json string from string using regex
         import re
         actual = actual.replace('\n', '').replace(' ', '').strip()
-        actual = re.search(r'\{.*\}', actual).group()
         try:
+            actual = re.search(r'\{.*\}', actual).group()
             actual = json.loads(actual)
         except Exception:
             return False
