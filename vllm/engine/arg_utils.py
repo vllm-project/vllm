@@ -20,6 +20,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
 from vllm.platforms import current_platform
 from vllm.transformers_utils.utils import check_gguf_file
+from vllm.usage.usage_lib import UsageContext
 from vllm.utils import FlexibleArgumentParser, StoreBoolean
 
 if TYPE_CHECKING:
@@ -113,7 +114,7 @@ class EngineArgs:
     # NOTE(kzawora): default block size for Gaudi should be 128
     # smaller sizes still work, but very inefficiently
     block_size: int = 16 if not current_platform.is_hpu() else 128
-    enable_prefix_caching: bool = False
+    enable_prefix_caching: Optional[bool] = None
     disable_sliding_window: bool = False
     use_v2_block_manager: bool = True
     swap_space: float = 4  # GiB
@@ -196,6 +197,11 @@ class EngineArgs:
     def __post_init__(self):
         if not self.tokenizer:
             self.tokenizer = self.model
+
+        # Override the default value of enable_prefix_caching if it's not set
+        # by user.
+        if self.enable_prefix_caching is None:
+            self.enable_prefix_caching = bool(envs.VLLM_USE_V1)
 
         # support `EngineArgs(compilation_config={...})`
         # without having to manually construct a
@@ -953,7 +959,12 @@ class EngineArgs:
             ignore_patterns=self.ignore_patterns,
         )
 
-    def create_engine_config(self) -> VllmConfig:
+    def create_engine_config(self,
+                             usage_context: Optional[UsageContext] = None
+                             ) -> VllmConfig:
+        if envs.VLLM_USE_V1:
+            self._override_v1_engine_args(usage_context)
+
         # gguf file needs a specific model loader and doesn't use hf_repo
         if check_gguf_file(self.model):
             self.quantization = self.load_format = "gguf"
@@ -1170,7 +1181,7 @@ class EngineArgs:
             or "all" in detailed_trace_modules,
         )
 
-        return VllmConfig(
+        config = VllmConfig(
             model_config=model_config,
             cache_config=cache_config,
             parallel_config=parallel_config,
@@ -1184,6 +1195,42 @@ class EngineArgs:
             prompt_adapter_config=prompt_adapter_config,
             compilation_config=self.compilation_config,
         )
+
+        if envs.VLLM_USE_V1:
+            self._override_v1_engine_config(config)
+        return config
+
+    def _override_v1_engine_args(self, usage_context: UsageContext) -> None:
+        """
+        Override the EngineArgs's args based on the usage context for V1.
+        """
+        assert envs.VLLM_USE_V1, "V1 is not enabled"
+
+        if self.max_num_batched_tokens is None:
+            # When no user override, set the default values based on the
+            # usage context.
+            if usage_context == UsageContext.LLM_CLASS:
+                logger.warning("Setting max_num_batched_tokens to 8192 "
+                               "for LLM_CLASS usage context.")
+                self.max_num_seqs = 1024
+                self.max_num_batched_tokens = 8192
+            elif usage_context == UsageContext.OPENAI_API_SERVER:
+                logger.warning("Setting max_num_batched_tokens to 2048 "
+                               "for OPENAI_API_SERVER usage context.")
+                self.max_num_seqs = 1024
+                self.max_num_batched_tokens = 2048
+
+    def _override_v1_engine_config(self, engine_config: VllmConfig) -> None:
+        """
+        Override the EngineConfig's configs based on the usage context for V1.
+        """
+        assert envs.VLLM_USE_V1, "V1 is not enabled"
+        # TODO (ywang96): Enable APC by default when VLM supports it.
+        if engine_config.model_config.is_multimodal_model:
+            logger.warning(
+                "Prefix caching is currently not supported for multimodal "
+                "models and has been disabled.")
+            engine_config.cache_config.enable_prefix_caching = False
 
 
 @dataclass
