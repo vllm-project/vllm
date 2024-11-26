@@ -7,33 +7,32 @@ from typing import (Any, AsyncGenerator, Callable, Coroutine, Dict, Iterable,
 from weakref import ReferenceType
 
 import vllm.envs as envs
-from vllm.config import (DecodingConfig, EngineConfig, LoRAConfig, ModelConfig,
-                         ParallelConfig, SchedulerConfig)
+from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
+                         ParallelConfig, SchedulerConfig, VllmConfig)
 from vllm.core.scheduler import SchedulerOutputs
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_timeout import asyncio_timeout
 from vllm.engine.llm_engine import LLMEngine, SchedulerOutputState
 from vllm.engine.metrics_types import StatLoggerBase
-from vllm.entrypoints.llm import BeamSearchSequence
+from vllm.engine.protocol import EngineClient
 from vllm.executor.executor_base import ExecutorAsyncBase
 from vllm.executor.gpu_executor import GPUExecutorAsync
 from vllm.executor.ray_utils import initialize_ray_cluster
-from vllm.inputs import PromptType, TokensPrompt
+from vllm.inputs import PromptType
+from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.guided_decoding import (
     get_guided_decoding_logits_processor)
 from vllm.model_executor.layers.sampler import SamplerOutput
-from vllm.outputs import (CompletionOutput, EmbeddingRequestOutput,
-                          RequestOutput)
+from vllm.outputs import EmbeddingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.sampling_params import BeamSearchParams, SamplingParams
+from vllm.sampling_params import SamplingParams
 from vllm.sequence import ExecuteModelRequest
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils import (collect_from_async_generator, deprecate_kwargs,
-                        random_uuid, weak_bind)
+from vllm.utils import deprecate_kwargs, weak_bind
 
 logger = init_logger(__name__)
 ENGINE_ITERATION_TIMEOUT_S = envs.VLLM_ENGINE_ITERATION_TIMEOUT_S
@@ -414,6 +413,12 @@ class _AsyncLLMEngine(LLMEngine):
         """Stop the remote worker execution loop."""
         await self.model_executor.stop_remote_worker_execution_loop_async()
 
+    async def get_tokenizer_async(self,
+                                  lora_request: Optional[LoRARequest] = None
+                                  ) -> AnyTokenizer:
+        return await (
+            self.get_tokenizer_group().get_lora_tokenizer_async(lora_request))
+
     @overload  # DEPRECATED
     async def add_request_async(
         self,
@@ -474,6 +479,10 @@ class _AsyncLLMEngine(LLMEngine):
         if arrival_time is None:
             arrival_time = time.time()
 
+        if self.tokenizer is not None:
+            tokenizer = await self.get_tokenizer_async(lora_request)
+            self._validate_token_prompt(prompt, tokenizer=tokenizer)
+
         preprocessed_inputs = await self.input_preprocessor.preprocess_async(
             prompt,
             request_id=request_id,
@@ -490,7 +499,7 @@ class _AsyncLLMEngine(LLMEngine):
             # implementation in the LLMEngine
             params = await build_guided_decoding_logits_processor_async(
                 sampling_params=params,
-                tokenizer=self.get_tokenizer(lora_request),
+                tokenizer=await self.get_tokenizer_async(lora_request),
                 default_guided_backend=self.decoding_config.
                 guided_decoding_backend)
 
@@ -541,7 +550,7 @@ async def build_guided_decoding_logits_processor_async(
     return sampling_params
 
 
-class AsyncLLMEngine:
+class AsyncLLMEngine(EngineClient):
     """An asynchronous wrapper for :class:`LLMEngine`.
 
     This class is used to wrap the :class:`LLMEngine` class to make it
@@ -596,7 +605,7 @@ class AsyncLLMEngine:
 
     @classmethod
     def _get_executor_cls(
-            cls, engine_config: EngineConfig) -> Type[ExecutorAsyncBase]:
+            cls, engine_config: VllmConfig) -> Type[ExecutorAsyncBase]:
         distributed_executor_backend = (
             engine_config.parallel_config.distributed_executor_backend)
         if isinstance(distributed_executor_backend, type):
@@ -619,6 +628,14 @@ class AsyncLLMEngine:
         elif engine_config.device_config.device_type == "cpu":
             from vllm.executor.cpu_executor import CPUExecutorAsync
             executor_class = CPUExecutorAsync
+        elif engine_config.device_config.device_type == "hpu":
+            if distributed_executor_backend == "ray":
+                initialize_ray_cluster(engine_config.parallel_config)
+                from vllm.executor.ray_hpu_executor import RayHPUExecutorAsync
+                executor_class = RayHPUExecutorAsync
+            else:
+                from vllm.executor.hpu_executor import HPUExecutorAsync
+                executor_class = HPUExecutorAsync
         elif engine_config.device_config.device_type == "openvino":
             assert distributed_executor_backend is None, (
                 "Distributed execution is not supported with "
@@ -655,7 +672,7 @@ class AsyncLLMEngine:
     def from_engine_args(
         cls,
         engine_args: AsyncEngineArgs,
-        engine_config: Optional[EngineConfig] = None,
+        engine_config: Optional[VllmConfig] = None,
         start_engine_loop: bool = True,
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: Optional[Dict[str, StatLoggerBase]] = None,
@@ -663,7 +680,7 @@ class AsyncLLMEngine:
         """Creates an async LLM engine from the engine arguments."""
         # Create the engine configs.
         if engine_config is None:
-            engine_config = engine_args.create_engine_config()
+            engine_config = engine_args.create_engine_config(usage_context)
 
         executor_class = cls._get_executor_cls(engine_config)
 
@@ -672,7 +689,7 @@ class AsyncLLMEngine:
 
         # Create the async LLM engine.
         engine = cls(
-            **engine_config.to_dict(),
+            vllm_config=engine_config,
             executor_class=executor_class,
             log_requests=not engine_args.disable_log_requests,
             log_stats=not engine_args.disable_log_stats,
@@ -713,12 +730,14 @@ class AsyncLLMEngine:
         self.set_errored(exc)
         self._request_tracker.propagate_exception(exc)
 
+    async def get_input_preprocessor(self) -> InputPreprocessor:
+        return self.engine.input_preprocessor
+
     async def get_tokenizer(
         self,
         lora_request: Optional[LoRARequest] = None,
     ) -> AnyTokenizer:
-        return await (self.engine.get_tokenizer_group().
-                      get_lora_tokenizer_async(lora_request))
+        return await self.engine.get_tokenizer_async(lora_request)
 
     def start_background_loop(self) -> None:
         """Start the background loop."""
@@ -805,7 +824,7 @@ class AsyncLLMEngine:
     async def run_engine_loop(engine_ref: ReferenceType):
         """We use a weakref to the engine so that the running loop
         doesn't prevent the engine being garbage collected."""
-        engine: Optional["AsyncLLMEngine"] = engine_ref()
+        engine: Optional[AsyncLLMEngine] = engine_ref()
         if not engine:
             return
 
@@ -1001,6 +1020,7 @@ class AsyncLLMEngine:
             >>> # the complete example.
             >>>
             >>> # initialize the engine and the example input
+            >>> # note that engine_args here is AsyncEngineArgs instance
             >>> engine = AsyncLLMEngine.from_engine_args(engine_args)
             >>> example_input = {
             >>>     "prompt": "What is LLM?",
@@ -1038,102 +1058,6 @@ class AsyncLLMEngine:
                 priority=priority,
         ):
             yield LLMEngine.validate_output(output, RequestOutput)
-
-    async def beam_search(
-        self,
-        prompt: Union[PromptType, List[int]],
-        request_id: str,
-        params: BeamSearchParams,
-    ) -> AsyncGenerator[RequestOutput, None]:
-
-        beam_width = params.beam_width
-        max_tokens = params.max_tokens
-        ignore_eos = params.ignore_eos
-        temperature = params.temperature
-
-        tokenizer = await self.get_tokenizer()
-        tokenizedPrompt = prompt if isinstance(
-            prompt, list) else tokenizer.encode(prompt)
-        tokenizedLength = len(tokenizedPrompt)
-
-        beam_search_params = SamplingParams(logprobs=2 * beam_width,
-                                            max_tokens=1,
-                                            temperature=temperature)
-        all_beams = [BeamSearchSequence(tokens=tokenizedPrompt, cum_logprob=0)]
-        completed = []
-
-        for _ in range(max_tokens):
-            prompts_batch = [
-                TokensPrompt(prompt_token_ids=beam.tokens)
-                for beam in all_beams
-            ]
-
-            tasks = []
-
-            request_id = f"beam_search-{random_uuid()}"
-            for i, individual_prompt in enumerate(prompts_batch):
-                request_id_item = f"{request_id}-{i}"
-                task = asyncio.create_task(
-                    collect_from_async_generator(
-                        self.generate(individual_prompt, beam_search_params,
-                                      request_id_item)))
-                tasks.append(task)
-
-            output = await asyncio.gather(*tasks)
-
-            output = [x[0] for x in output]
-
-            logger.info(output)
-
-            new_beams = []
-            for i, current_beam in enumerate(all_beams):
-                result = output[i]
-
-                if result.outputs[0].logprobs is not None:
-                    logprobs = result.outputs[0].logprobs[0]
-                    for token_id, logprob_obj in logprobs.items():
-                        new_beam = BeamSearchSequence(
-                            tokens=current_beam.tokens + [token_id],
-                            cum_logprob=current_beam.cum_logprob +
-                            logprob_obj.logprob)
-
-                        if token_id == tokenizer.eos_token_id and \
-                            not ignore_eos:
-                            completed.append(new_beam)
-                        else:
-                            new_beams.append(new_beam)
-
-            sorted_beams = sorted(new_beams,
-                                  key=lambda x: x.cum_logprob,
-                                  reverse=True)
-            all_beams = sorted_beams[:beam_width]
-
-        completed.extend(all_beams)
-        sorted_completed = sorted(completed,
-                                  key=lambda x: x.cum_logprob,
-                                  reverse=True)
-        best_beams = sorted_completed[:beam_width]
-
-        for beam in best_beams:
-            beam.text = tokenizer.decode(beam.tokens[tokenizedLength:])
-
-        beam_search_output = RequestOutput(
-            request_id=request_id,
-            prompt=prompt,
-            outputs=[
-                CompletionOutput(
-                    text=beam.text,
-                    cumulative_logprob=beam.cum_logprob,
-                    token_ids=beam.tokens,
-                    index=i,
-                    logprobs=beam.cum_logprob,
-                ) for (i, beam) in enumerate(best_beams)
-            ],
-            finished=True,
-            prompt_token_ids=tokenizedPrompt,
-            prompt_logprobs=None)
-
-        yield LLMEngine.validate_output(beam_search_output, RequestOutput)
 
     async def encode(
         self,
@@ -1180,6 +1104,7 @@ class AsyncLLMEngine:
             >>> # the complete example.
             >>>
             >>> # initialize the engine and the example input
+            >>> # note that engine_args here is AsyncEngineArgs instance
             >>> engine = AsyncLLMEngine.from_engine_args(engine_args)
             >>> example_input = {
             >>>     "input": "What is LLM?",

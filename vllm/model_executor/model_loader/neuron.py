@@ -6,7 +6,6 @@ from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
-import transformers
 from transformers import PretrainedConfig
 
 from vllm.config import ModelConfig, ParallelConfig, SchedulerConfig
@@ -38,7 +37,7 @@ _NEURON_SUPPORTED_MODELS: Dict[str, Tuple[str, str, str]] = {
 }
 
 
-class NeuronCasualLM(nn.Module):
+class NeuronCausalLM(nn.Module):
 
     def __init__(self,
                  config: PretrainedConfig,
@@ -108,37 +107,9 @@ class NeuronCasualLM(nn.Module):
         neuronx_module = importlib.import_module(neuronx_module_path)
         neuronx_model_cls = getattr(neuronx_module, neuronx_model_cls_name)
 
-        split_model_dir = f"{model_name_or_path}-split"
-        if _is_pretrained_neuron_checkpoint(model_name_or_path):
-            split_model_dir = model_name_or_path
-        elif not os.path.exists(f"{model_name_or_path}-split"):
-            hf_model_cls = getattr(transformers, hf_model_cls_name)
-            from transformers_neuronx.module import save_pretrained_split
-
-            hf_model = hf_model_cls.from_pretrained(model_name_or_path,
-                                                    low_cpu_mem_usage=True)
-            save_pretrained_split(hf_model, f"{model_name_or_path}-split")
-
-        self.model = neuronx_model_cls.from_pretrained(split_model_dir,
+        self.model = neuronx_model_cls.from_pretrained(model_name_or_path,
                                                        **kwargs)
         self.model.to_neuron()
-
-
-def _is_pretrained_neuron_checkpoint(model_name_or_path: str) -> bool:
-    # Checking if the neuron checkpoint is saved in the old format.
-    if os.path.isdir(os.path.join(model_name_or_path, "pytorch_model.bin")):
-        return True
-    # Checking if the neuron checkpoint is saved in the new format.
-    pretrained_split_files = ["config.json", "generation_config.json"]
-    pretrained_split_format = ".safetensors"
-    for file in pretrained_split_files:
-        file_path = os.path.join(model_name_or_path, file)
-        if not os.path.isfile(file_path):
-            return False
-    for file in os.listdir(model_name_or_path):
-        if file.endswith(pretrained_split_format):
-            return True
-    return False
 
 
 def _get_model_architecture(config: PretrainedConfig) -> str:
@@ -213,7 +184,7 @@ def get_neuron_model(model_config: ModelConfig,
                      scheduler_config: SchedulerConfig) -> nn.Module:
 
     # Create a model instance.
-    model = NeuronCasualLM(
+    model = NeuronCausalLM(
         model_config.hf_config,
         _is_neuron_on_device_sampling_disabled(model_config))
 

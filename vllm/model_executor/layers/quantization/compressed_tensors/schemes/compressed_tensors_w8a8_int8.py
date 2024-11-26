@@ -1,13 +1,12 @@
 from typing import Callable, List, Optional
 
 import torch
+from compressed_tensors.quantization import QuantizationStrategy
 from torch.nn import Parameter
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme)
-from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
-    QuantizationStrategy)
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     apply_int8_linear, convert_to_channelwise)
 from vllm.model_executor.parameter import (BasevLLMParameter,
@@ -83,9 +82,13 @@ class CompressedTensorsW8A8Int8(CompressedTensorsScheme):
         # For more details, see csrc/quantization/cutlass_w8a8/Epilogues.md
         # https://github.com/vllm-project/vllm/blob/8d59dbb00044a588cab96bcdc028006ed922eb06/csrc/quantization/cutlass_w8a8/Epilogues.md
         if not self.input_symmetric:
-            layer.azp_adj = layer.weight.sum(dim=0,
-                                             keepdim=True,
-                                             dtype=torch.int32)
+            azp_adj = layer.weight.sum(dim=0, keepdim=True, dtype=torch.int32)
+            if self.is_static_input_scheme:
+                # cutlass_w8a8 requires azp to be folded into azp_adj
+                #  in the per-tensor case
+                azp_adj = layer.input_zero_point * azp_adj
+
+            layer.azp_adj = azp_adj
         else:
             layer.azp_adj = None
 
@@ -139,7 +142,6 @@ class CompressedTensorsW8A8Int8(CompressedTensorsScheme):
 
     def apply_weights(self, layer: torch.nn.Module, x: torch.Tensor,
                       bias: Optional[torch.Tensor]) -> torch.Tensor:
-
         return apply_int8_linear(input=x,
                                  weight=layer.weight,
                                  weight_scale=layer.weight_scale,

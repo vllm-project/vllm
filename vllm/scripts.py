@@ -9,9 +9,11 @@ import uvloop
 from openai import OpenAI
 from openai.types.chat import ChatCompletionMessageParam
 
+import vllm.version
 from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.openai.api_server import run_server
-from vllm.entrypoints.openai.cli_args import make_arg_parser
+from vllm.entrypoints.openai.cli_args import (make_arg_parser,
+                                              validate_parsed_serve_args)
 from vllm.logger import init_logger
 from vllm.utils import FlexibleArgumentParser
 
@@ -142,7 +144,12 @@ def main():
     env_setup()
 
     parser = FlexibleArgumentParser(description="vLLM CLI")
-    subparsers = parser.add_subparsers(required=True)
+    parser.add_argument('-v',
+                        '--version',
+                        action='version',
+                        version=vllm.version.__version__)
+
+    subparsers = parser.add_subparsers(required=True, dest="subparser")
 
     serve_parser = subparsers.add_parser(
         "serve",
@@ -186,6 +193,9 @@ def main():
     chat_parser.set_defaults(dispatch_function=interactive_cli, command="chat")
 
     args = parser.parse_args()
+    if args.subparser == "serve":
+        validate_parsed_serve_args(args)
+
     # One of the sub commands should be executed.
     if hasattr(args, "dispatch_function"):
         args.dispatch_function(args)

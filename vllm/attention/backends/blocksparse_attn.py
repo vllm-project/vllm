@@ -88,6 +88,11 @@ class BlocksparseParams:
 class BlocksparseFlashAttentionBackend(AttentionBackend):
 
     @staticmethod
+    def get_name() -> str:
+        # For attention layer compatibility
+        return "FLASH_ATTN"
+
+    @staticmethod
     def get_impl_cls() -> Type["BlocksparseFlashAttentionImpl"]:
         return BlocksparseFlashAttentionImpl
 
@@ -186,11 +191,8 @@ class BlocksparseFlashAttentionMetadata(AttentionMetadata):
     # TODO(woosuk): Move `use_cuda_graph` out since it's unrelated to attention.
     use_cuda_graph: bool
 
-    # Number of query tokens for each request in the batch.
-    # Currently, we require that all requests have the same number of query
-    # tokens during the decoding phase. When speculavie decoding is enabled,
-    # decode_query_len might be greater than 1. In all other cases, it is 1.
-    decode_query_len: Optional[int] = None
+    # Max number of query tokens for among request in the batch.
+    max_decode_query_len: Optional[int] = None
 
     _cached_prefill_metadata: Optional[
         "BlocksparseFlashAttentionMetadata"] = None
@@ -218,6 +220,8 @@ class BlocksparseFlashAttentionMetadata(AttentionMetadata):
             num_prefill_tokens=self.num_prefill_tokens,
             num_decode_tokens=0,
             slot_mapping=self.slot_mapping[:self.num_prefill_tokens],
+            multi_modal_placeholder_index_maps=self.
+            multi_modal_placeholder_index_maps,
             seq_lens=self.seq_lens[:self.num_prefills],
             seq_lens_tensor=self.seq_lens_tensor[:self.num_prefills],
             max_query_len=self.max_query_len,
@@ -246,6 +250,7 @@ class BlocksparseFlashAttentionMetadata(AttentionMetadata):
             num_prefill_tokens=0,
             num_decode_tokens=self.num_decode_tokens,
             slot_mapping=self.slot_mapping[self.num_prefill_tokens:],
+            multi_modal_placeholder_index_maps=None,
             seq_lens=None,
             seq_lens_tensor=self.seq_lens_tensor[self.num_prefills:],
             max_query_len=None,
@@ -354,7 +359,7 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
         attn_metadata: BlocksparseFlashAttentionMetadata,
         k_scale: float = 1.0,
         v_scale: float = 1.0,
-        attn_type: AttentionType = AttentionType.DECODER,
+        attn_type: str = AttentionType.DECODER,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention and PagedAttention.
 

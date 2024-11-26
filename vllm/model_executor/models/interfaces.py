@@ -1,4 +1,3 @@
-import inspect
 from typing import (TYPE_CHECKING, ClassVar, Dict, List, Literal, Optional,
                     Protocol, Type, Union, overload, runtime_checkable)
 
@@ -6,10 +5,11 @@ import torch
 from typing_extensions import TypeIs
 
 from vllm.logger import init_logger
+from vllm.utils import supports_kw
+
+from .interfaces_base import is_embedding_model
 
 if TYPE_CHECKING:
-    from vllm.attention import AttentionMetadata
-    from vllm.config import LoRAConfig, MultiModalConfig, SchedulerConfig
     from vllm.sequence import IntermediateTensors
 
 logger = init_logger(__name__)
@@ -28,18 +28,12 @@ class SupportsMultiModal(Protocol):
         MRO of your model class.
     """
 
-    def __init__(self, *, multimodal_config: "MultiModalConfig") -> None:
-        ...
-
 
 # We can't use runtime_checkable with ClassVar for issubclass checks
 # so we need to treat the class as an instance and use isinstance instead
 @runtime_checkable
 class _SupportsMultiModalType(Protocol):
     supports_multimodal: Literal[True]
-
-    def __call__(self, *, multimodal_config: "MultiModalConfig") -> None:
-        ...
 
 
 @overload
@@ -80,10 +74,6 @@ class SupportsLoRA(Protocol):
     embedding_modules: ClassVar[Dict[str, str]]
     embedding_padding_modules: ClassVar[List[str]]
 
-    # lora_config is None when LoRA is not enabled
-    def __init__(self, *, lora_config: Optional["LoRAConfig"] = None) -> None:
-        ...
-
 
 # We can't use runtime_checkable with ClassVar for issubclass checks
 # so we need to treat the class as an instance and use isinstance instead
@@ -95,9 +85,6 @@ class _SupportsLoRAType(Protocol):
     supported_lora_modules: List[str]
     embedding_modules: Dict[str, str]
     embedding_padding_modules: List[str]
-
-    def __call__(self, *, lora_config: Optional["LoRAConfig"] = None) -> None:
-        ...
 
 
 @overload
@@ -142,9 +129,7 @@ def supports_lora(
     return result
 
 
-def _supports_lora(
-    model: Union[Type[object], object],
-) -> Union[TypeIs[Type[SupportsLoRA]], TypeIs[SupportsLoRA]]:
+def _supports_lora(model: Union[Type[object], object]) -> bool:
     if isinstance(model, type):
         return isinstance(model, _SupportsLoRAType)
 
@@ -175,10 +160,7 @@ class SupportsPP(Protocol):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
-        position_ids: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: "AttentionMetadata",
+        *,
         intermediate_tensors: Optional["IntermediateTensors"],
     ) -> Union[torch.Tensor, "IntermediateTensors"]:
         """
@@ -205,10 +187,7 @@ class _SupportsPPType(Protocol):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
-        position_ids: torch.Tensor,
-        kv_caches: List[torch.Tensor],
-        attn_metadata: "AttentionMetadata",
+        *,
         intermediate_tensors: Optional["IntermediateTensors"],
     ) -> Union[torch.Tensor, "IntermediateTensors"]:
         ...
@@ -257,24 +236,19 @@ def supports_pp(
     return supports_attributes and supports_inspect
 
 
-def _supports_pp_attributes(
-    model: Union[Type[object], object],
-) -> Union[bool, TypeIs[Type[SupportsPP]], TypeIs[SupportsPP]]:
+def _supports_pp_attributes(model: Union[Type[object], object]) -> bool:
     if isinstance(model, type):
         return isinstance(model, _SupportsPPType)
 
     return isinstance(model, SupportsPP)
 
 
-def _supports_pp_inspect(
-    model: Union[Type[object], object],
-) -> Union[bool, TypeIs[Type[SupportsPP]], TypeIs[SupportsPP]]:
+def _supports_pp_inspect(model: Union[Type[object], object]) -> bool:
     model_forward = getattr(model, "forward", None)
     if not callable(model_forward):
         return False
 
-    forward_params = inspect.signature(model_forward).parameters
-    return "intermediate_tensors" in forward_params
+    return supports_kw(model_forward, "intermediate_tensors")
 
 
 @runtime_checkable
@@ -285,23 +259,13 @@ class HasInnerState(Protocol):
     """
         A flag that indicates this model has inner state.
         Models that has inner state usually need access to the scheduler_config
-        for max_num_seqs ,etc... (Currently only used by Jamba)
+        for max_num_seqs, etc. True for e.g. both Mamba and Jamba.
     """
-
-    def __init__(self,
-                 *,
-                 scheduler_config: Optional["SchedulerConfig"] = None) -> None:
-        ...
 
 
 @runtime_checkable
 class _HasInnerStateType(Protocol):
     has_inner_state: ClassVar[Literal[True]]
-
-    def __init__(self,
-                 *,
-                 scheduler_config: Optional["SchedulerConfig"] = None) -> None:
-        ...
 
 
 @overload
@@ -321,3 +285,74 @@ def has_inner_state(
         return isinstance(model, _HasInnerStateType)
 
     return isinstance(model, HasInnerState)
+
+
+@runtime_checkable
+class IsAttentionFree(Protocol):
+    """The interface required for all models like Mamba that lack attention,
+    but do have state whose size is constant wrt the number of tokens."""
+
+    is_attention_free: ClassVar[Literal[True]] = True
+    """
+        A flag that indicates this model has no attention.
+        Used for block manager and attention backend selection.
+        True for Mamba but not Jamba.
+    """
+
+
+@runtime_checkable
+class _IsAttentionFreeType(Protocol):
+    is_attention_free: ClassVar[Literal[True]]
+
+
+@overload
+def is_attention_free(model: object) -> TypeIs[IsAttentionFree]:
+    ...
+
+
+@overload
+def is_attention_free(model: Type[object]) -> TypeIs[Type[IsAttentionFree]]:
+    ...
+
+
+def is_attention_free(
+    model: Union[Type[object], object]
+) -> Union[TypeIs[Type[IsAttentionFree]], TypeIs[IsAttentionFree]]:
+    if isinstance(model, type):
+        return isinstance(model, _IsAttentionFreeType)
+
+    return isinstance(model, IsAttentionFree)
+
+
+@runtime_checkable
+class SupportsCrossEncoding(Protocol):
+    """The interface required for all models that support cross encoding."""
+
+    supports_cross_encoding: ClassVar[Literal[True]] = True
+
+
+@overload
+def supports_cross_encoding(
+        model: Type[object]) -> TypeIs[Type[SupportsCrossEncoding]]:
+    ...
+
+
+@overload
+def supports_cross_encoding(model: object) -> TypeIs[SupportsCrossEncoding]:
+    ...
+
+
+def _supports_cross_encoding(
+    model: Union[Type[object], object],
+) -> Union[TypeIs[Type[SupportsCrossEncoding]], TypeIs[SupportsCrossEncoding]]:
+
+    if isinstance(model, type):
+        return isinstance(model, SupportsCrossEncoding)
+
+    return isinstance(model, SupportsCrossEncoding)
+
+
+def supports_cross_encoding(
+    model: Union[Type[object], object],
+) -> Union[TypeIs[Type[SupportsCrossEncoding]], TypeIs[SupportsCrossEncoding]]:
+    return is_embedding_model(model) and _supports_cross_encoding(model)

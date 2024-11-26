@@ -35,6 +35,7 @@ def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:
         tokenizer.all_special_tokens_extended)
     tokenizer_all_special_tokens = set(tokenizer.all_special_tokens)
     tokenizer_len = len(tokenizer)
+    max_token_id = max(tokenizer.get_vocab().values())
 
     class CachedTokenizer(tokenizer.__class__):  # type: ignore
 
@@ -50,6 +51,10 @@ def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:
         def all_special_tokens_extended(self):
             return tokenizer_all_special_tokens_extended
 
+        @property
+        def max_token_id(self):
+            return max_token_id
+
         def __len__(self):
             return tokenizer_len
 
@@ -57,6 +62,26 @@ def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:
 
     tokenizer.__class__ = CachedTokenizer
     return tokenizer
+
+
+def patch_padding_side(tokenizer: PreTrainedTokenizer) -> None:
+    """Patch _pad method to accept `padding_side` for older tokenizers."""
+    orig_pad = tokenizer._pad
+
+    def _pad(
+        self: PreTrainedTokenizer,
+        *args,
+        padding_side: Optional[str] = None,
+        **kwargs,
+    ):
+        if padding_side is not None and padding_side != self.padding_side:
+            msg = ("`padding_side` argument is not supported by "
+                   f"{type(tokenizer).__name__} and will be ignored.")
+            warnings.warn(msg, stacklevel=2)
+
+        return orig_pad(*args, **kwargs)
+
+    tokenizer._pad = MethodType(_pad, tokenizer)
 
 
 def get_tokenizer(
@@ -143,24 +168,7 @@ def get_tokenizer(
         if type(tokenizer).__name__ in ("ChatGLMTokenizer",
                                         "ChatGLM4Tokenizer"):
             assert isinstance(tokenizer, PreTrainedTokenizer)
-            orig_pad = tokenizer._pad
-
-            # Patch _pad method to accept `padding_side`
-            def _pad(
-                self: PreTrainedTokenizer,
-                *args,
-                padding_side: Optional[str] = None,
-                **kwargs,
-            ):
-                if (padding_side is not None
-                        and padding_side != self.padding_side):
-                    msg = ("`padding_side` argument is not supported by "
-                           "ChatGLMTokenizer and will be ignored.")
-                    warnings.warn(msg, stacklevel=2)
-
-                return orig_pad(*args, **kwargs)
-
-            tokenizer._pad = MethodType(_pad, tokenizer)
+            patch_padding_side(tokenizer)
 
         if not isinstance(tokenizer, PreTrainedTokenizerFast):
             logger.warning(

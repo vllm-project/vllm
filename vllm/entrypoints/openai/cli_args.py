@@ -7,9 +7,11 @@ purposes.
 import argparse
 import json
 import ssl
-from typing import List, Optional, Sequence, Union
+from typing import List, Optional, Sequence, Union, get_args
 
 from vllm.engine.arg_utils import AsyncEngineArgs, nullable_str
+from vllm.entrypoints.chat_utils import (ChatTemplateContentFormatOption,
+                                         validate_chat_template)
 from vllm.entrypoints.openai.serving_engine import (LoRAModulePath,
                                                     PromptAdapterPath)
 from vllm.entrypoints.openai.tool_parsers import ToolParserManager
@@ -131,6 +133,18 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
                         help="The file path to the chat template, "
                         "or the template in single-line form "
                         "for the specified model")
+    parser.add_argument(
+        '--chat-template-content-format',
+        type=str,
+        default="auto",
+        choices=get_args(ChatTemplateContentFormatOption),
+        help='The format to render message content within a chat template.'
+        '\n\n'
+        '* "string" will render the content as a string. '
+        'Example: "Hello World"\n'
+        '* "openai" will render the content as a list of dictionaries, '
+        'similar to OpenAI schema. '
+        'Example: [{"type": "text", "text": "Hello world!"}]')
     parser.add_argument("--response-role",
                         type=nullable_str,
                         default="assistant",
@@ -189,7 +203,7 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         default=False,
         help=
         "Enable auto tool choice for supported models. Use --tool-call-parser"
-        "to specify which parser to use")
+        " to specify which parser to use")
 
     valid_tool_parsers = ToolParserManager.tool_parsers.keys()
     parser.add_argument(
@@ -227,8 +241,27 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         default=False,
         help="Disable FastAPI's OpenAPI schema, Swagger UI, and ReDoc endpoint"
     )
+    parser.add_argument(
+        "--enable-prompt-tokens-details",
+        action='store_true',
+        default=False,
+        help="If set to True, enable prompt_tokens_details in usage.")
 
     return parser
+
+
+def validate_parsed_serve_args(args: argparse.Namespace):
+    """Quick checks for model serve args that raise prior to loading."""
+    if hasattr(args, "subparser") and args.subparser != "serve":
+        return
+
+    # Ensure that the chat template is valid; raises if it likely isn't
+    validate_chat_template(args.chat_template)
+
+    # Enable auto tool needs a tool call parser to be valid
+    if args.enable_auto_tool_choice and not args.tool_call_parser:
+        raise TypeError("Error: --enable-auto-tool-choice requires "
+                        "--tool-call-parser")
 
 
 def create_parser_for_docs() -> FlexibleArgumentParser:

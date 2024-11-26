@@ -2,9 +2,8 @@
 """PyTorch Ultravox model."""
 
 import math
-from array import array
 from functools import cached_property, lru_cache
-from typing import (Iterable, List, Literal, Mapping, Optional, Tuple,
+from typing import (Iterable, List, Literal, Mapping, Optional, Set, Tuple,
                     TypedDict, Union, cast)
 
 import numpy as np
@@ -16,31 +15,27 @@ from transformers.models.whisper import WhisperFeatureExtractor
 from transformers.models.whisper.modeling_whisper import WhisperEncoder
 
 from vllm.attention import AttentionMetadata
-from vllm.config import CacheConfig, MultiModalConfig
-from vllm.inputs import INPUT_REGISTRY
-from vllm.inputs.data import LLMInputs
-from vllm.inputs.registry import InputContext
+from vllm.config import VllmConfig
+from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
+                         InputContext, token_inputs)
 from vllm.model_executor.layers.activation import SiluAndMul, get_act_fn
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.sampler import Sampler, SamplerOutput
+from vllm.model_executor.layers.sampler import SamplerOutput, get_sampler
 from vllm.model_executor.model_loader.loader import DefaultModelLoader
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.utils import (flatten_bn,
-                                              group_weights_with_prefix,
-                                              init_vllm_registered_model,
-                                              merge_multimodal_embeddings)
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.base import MultiModalInputs, NestedTensors
+from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalKwargs,
+                             NestedTensors)
 from vllm.multimodal.utils import (cached_get_tokenizer,
+                                   consecutive_placeholder_ranges,
                                    repeat_and_pad_placeholder_tokens)
-from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
-                           SequenceData)
+from vllm.sequence import IntermediateTensors, SequenceData
 from vllm.transformers_utils.configs.ultravox import UltravoxConfig
 from vllm.utils import is_list_of
 
 from .interfaces import SupportsMultiModal, SupportsPP
+from .utils import (AutoWeightsLoader, WeightsMapper, flatten_bn,
+                    init_vllm_registered_model, maybe_prefix,
+                    merge_multimodal_embeddings_from_map)
 
 _AUDIO_PLACEHOLDER_TOKEN = 128002
 _AUDIO_TOKENS_PER_SECOND = 6.25
@@ -49,13 +44,13 @@ _AUDIO_TOKENS_PER_SECOND = 6.25
 class UltravoxAudioFeatureInputs(TypedDict):
     type: Literal["audio_features"]
     data: NestedTensors
-    """Shape: `(batch_size, num_audios, 80, M)"""
+    """Shape: `(batch_size, num_audios, 80, M)`"""
 
 
 class UltravoxAudioEmbeddingInputs(TypedDict):
     type: Literal["audio_embeds"]
     data: NestedTensors
-    """Shape: `(batch_size, num_audios, audio_feature_size, hidden_size)"""
+    """Shape: `(batch_size, num_audios, audio_feature_size, hidden_size)`"""
 
 
 UltravoxAudioInputs = Union[UltravoxAudioFeatureInputs,
@@ -82,17 +77,16 @@ def dummy_seq_data_for_ultravox(
     seq_len: int,
     audio_count: int,
 ):
-    audio_placeholder = array(
-        VLLM_TOKEN_ID_ARRAY_TYPE,
-        [_AUDIO_PLACEHOLDER_TOKEN]) * get_ultravox_max_audio_tokens(ctx)
+    audio_length = min(get_ultravox_max_audio_tokens(ctx),
+                       seq_len // audio_count)
 
-    # Add a separator between each chunk.
-    audio_token_ids = (audio_placeholder +
-                       array(VLLM_TOKEN_ID_ARRAY_TYPE, [0])) * audio_count
-    other_token_ids = array(VLLM_TOKEN_ID_ARRAY_TYPE,
-                            [0]) * (seq_len - len(audio_token_ids))
-
-    return SequenceData(audio_token_ids + other_token_ids)
+    return SequenceData.from_prompt_token_counts(
+        (_AUDIO_PLACEHOLDER_TOKEN, audio_length * audio_count),
+        (0, seq_len - audio_length * audio_count)), {
+            "audio":
+            consecutive_placeholder_ranges(num_items=audio_count,
+                                           item_size=audio_length)
+        }
 
 
 def dummy_audio_for_ultravox(
@@ -110,19 +104,22 @@ def dummy_data_for_ultravox(
     mm_counts: Mapping[str, int],
 ):
     audio_count = mm_counts["audio"]
-    seq_data = dummy_seq_data_for_ultravox(ctx, seq_len, audio_count)
+    seq_data, ranges = dummy_seq_data_for_ultravox(ctx, seq_len, audio_count)
     mm_dict = dummy_audio_for_ultravox(ctx, audio_count)
 
-    return (seq_data, mm_dict)
+    return DummyData(seq_data, mm_dict, ranges)
 
 
 def input_mapper_for_ultravox(ctx: InputContext, data: object):
     if not isinstance(data, list):
         data = [data]
 
+    if len(data) == 0:
+        return MultiModalKwargs()
+
     # If the audio inputs are embeddings, no need for preprocessing
     if is_list_of(data, torch.Tensor, check="all"):
-        return MultiModalInputs({"audio_embeds": data})
+        return MultiModalKwargs({"audio_embeds": data})
 
     audio_features = []
     for audio_input in data:
@@ -136,9 +133,9 @@ def input_mapper_for_ultravox(ctx: InputContext, data: object):
         if sr != feature_extractor.sampling_rate:
             try:
                 import librosa
-            except ImportError:
+            except ImportError as exc:
                 raise ImportError(
-                    "Please install vllm[audio] for audio support.") from None
+                    "Please install vllm[audio] for audio support.") from exc
             audio = librosa.resample(audio,
                                      orig_sr=sr,
                                      target_sr=feature_extractor.sampling_rate)
@@ -156,13 +153,18 @@ def input_mapper_for_ultravox(ctx: InputContext, data: object):
         # Remove the batch dimension because we're wrapping it in a list.
         audio_features.append(single_audio_features.squeeze(0))
 
-    return MultiModalInputs({"audio_features": audio_features})
+    return MultiModalKwargs({"audio_features": audio_features})
 
 
-def input_processor_for_ultravox(ctx: InputContext, llm_inputs: LLMInputs):
-    multi_modal_data = llm_inputs.get("multi_modal_data")
+def input_processor_for_ultravox(ctx: InputContext, inputs: DecoderOnlyInputs):
+    multi_modal_data = inputs.get("multi_modal_data")
     if multi_modal_data is None or "audio" not in multi_modal_data:
-        return llm_inputs
+        return inputs
+
+    if "multi_modal_placeholders" in inputs and "audio" in inputs[
+            "multi_modal_placeholders"]:
+        # The inputs already have placeholders.
+        return inputs
 
     feature_extractor = whisper_feature_extractor(ctx)
     audios = multi_modal_data["audio"]
@@ -197,18 +199,19 @@ def input_processor_for_ultravox(ctx: InputContext, llm_inputs: LLMInputs):
 
     tokenizer = cached_get_tokenizer(ctx.model_config.tokenizer)
 
-    new_prompt, new_token_ids = repeat_and_pad_placeholder_tokens(
+    new_prompt, new_token_ids, ranges = repeat_and_pad_placeholder_tokens(
         tokenizer,
-        llm_inputs.get("prompt"),
-        llm_inputs["prompt_token_ids"],
+        inputs.get("prompt"),
+        inputs["prompt_token_ids"],
         placeholder_token_id=_AUDIO_PLACEHOLDER_TOKEN,
         repeat_count=audio_token_counts,
     )
 
     # NOTE: Create a defensive copy of the original inputs
-    return LLMInputs(prompt_token_ids=new_token_ids,
-                     prompt=new_prompt,
-                     multi_modal_data=multi_modal_data)
+    return token_inputs(prompt_token_ids=new_token_ids,
+                        prompt=new_prompt,
+                        multi_modal_data=multi_modal_data,
+                        multi_modal_placeholders={"audio": ranges})
 
 
 class StackAudioFrames(nn.Module):
@@ -336,12 +339,10 @@ class ModifiedWhisperEncoder(WhisperEncoder):
 @INPUT_REGISTRY.register_input_processor(input_processor_for_ultravox)
 class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP):
 
-    def __init__(self,
-                 config: UltravoxConfig,
-                 multimodal_config: MultiModalConfig,
-                 cache_config: Optional[CacheConfig] = None,
-                 quant_config: Optional["QuantizationConfig"] = None):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        config = vllm_config.model_config.hf_config
+        multimodal_config = vllm_config.model_config.multimodal_config
         self.config = config
         self.multi_modal_config = multimodal_config
         assert self.multi_modal_config
@@ -349,6 +350,8 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP):
         self.secondary_weights = []
         self.audio_tower = ModifiedWhisperEncoder(config.audio_config)
         if config.audio_model_id is not None:
+            # this prefix is not for initialization, but for loading weights
+            # note the trailing dot
             self.secondary_weights.append(
                 DefaultModelLoader.Source(
                     model_or_path=config.audio_model_id,
@@ -357,8 +360,12 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP):
                 ))
         self.multi_modal_projector = UltravoxProjector(config)
         self.language_model = init_vllm_registered_model(
-            config.text_config, cache_config, quant_config)
+            config.text_config,
+            vllm_config=vllm_config,
+            prefix=maybe_prefix(prefix, "language_model"))
         if config.text_model_id is not None:
+            # this prefix is not for initialization, but for loading weights
+            # note the trailing dot
             self.secondary_weights.append(
                 DefaultModelLoader.Source(model_or_path=config.text_model_id,
                                           revision=None,
@@ -372,7 +379,7 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP):
         if hasattr(self.language_model, "sampler"):
             return self.language_model.sampler
 
-        return Sampler()
+        return get_sampler()
 
     def _audio_features_to_embeddings(
             self, input_features: torch.Tensor) -> torch.Tensor:
@@ -469,9 +476,9 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP):
                 inputs_embeds = self.language_model.model.get_input_embeddings(
                     input_ids)
 
-                inputs_embeds = merge_multimodal_embeddings(
-                    input_ids, inputs_embeds, audio_embeddings,
-                    _AUDIO_PLACEHOLDER_TOKEN)
+                merge_multimodal_embeddings_from_map(
+                    inputs_embeds, audio_embeddings,
+                    attn_metadata.multi_modal_placeholder_index_maps["audio"])
                 input_ids = None
             else:
                 inputs_embeds = None
@@ -497,31 +504,11 @@ class UltravoxModel(nn.Module, SupportsMultiModal, SupportsPP):
     ) -> Optional[SamplerOutput]:
         return self.language_model.sample(logits, sampling_metadata)
 
-    def load_weights(self, weights: Iterable[Tuple[str, torch.Tensor]]):
-        # prepare weight iterators for components
-        weights_group = group_weights_with_prefix(weights)
+    def load_weights(self, weights: Iterable[Tuple[str,
+                                                   torch.Tensor]]) -> Set[str]:
+        hf_to_vllm_mapper = WeightsMapper(
+            orig_to_new_prefix={"audio_tower.model.encoder.": "audio_tower."})
 
-        # load audio tower weights
-        audio_tower_weights = weights_group["audio_tower"]
-        audio_tower_params_dict = dict(
-            self.audio_tower.named_parameters(
-                prefix=self.audio_tower.base_model_prefix))
-        for name, loaded_weight in audio_tower_weights:
-            if name in audio_tower_params_dict:
-                param = audio_tower_params_dict[name]
-                weight_loader = getattr(param, "weight_loader",
-                                        default_weight_loader)
-                weight_loader(param, loaded_weight)
-
-        # load projector weights
-        projector_weights = weights_group["multi_modal_projector"]
-        projector_params_dict = dict(
-            self.multi_modal_projector.named_parameters())
-        for name, loaded_weight in projector_weights:
-            param = projector_params_dict[name]
-            weight_loader = getattr(param, "weight_loader",
-                                    default_weight_loader)
-            weight_loader(param, loaded_weight)
-
-        # load llm backbone
-        self.language_model.load_weights(weights_group["language_model"])
+        loader = AutoWeightsLoader(self,
+                                   ignore_unexpected_prefixes=["audio_tower."])
+        return loader.load_weights(weights, mapper=hf_to_vllm_mapper)

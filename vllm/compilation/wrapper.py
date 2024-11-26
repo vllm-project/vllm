@@ -3,11 +3,12 @@ import sys
 from abc import abstractmethod
 from contextlib import contextmanager
 from types import CodeType
-from typing import Callable, List
+from typing import Callable, List, Optional
 
 import torch
 
 import vllm.envs as envs
+from vllm.config import CompilationLevel, get_current_vllm_config
 
 
 class TorchCompileWrapperWithCustomDispatcher:
@@ -23,7 +24,22 @@ class TorchCompileWrapperWithCustomDispatcher:
         `torch.compile` over the forward method.
     """
 
-    def __init__(self, compiled_callable: Callable):
+    def __init__(self,
+                 compiled_callable: Optional[Callable] = None,
+                 compilation_level: int = 0):
+
+        if compiled_callable is None:
+            # default compilation settings
+            # compiling the forward method
+
+            backend = get_current_vllm_config(
+            ).compilation_config.init_backend()
+
+            compiled_callable = torch.compile(
+                self.forward,
+                fullgraph=envs.VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE,
+                backend=backend)
+
         self.compiled_callable = compiled_callable
         self.original_code_object = self.__class__.forward.__code__
         self.compiled_codes: List[CodeType] = []
@@ -33,7 +49,7 @@ class TorchCompileWrapperWithCustomDispatcher:
         # subclasses can use this to switch between the custom dispatcher
         # and the default Dynamo guard mechanism.
         self.use_custom_dispatcher: bool = \
-            envs.VLLM_DYNAMO_USE_CUSTOM_DISPATCHER
+            compilation_level >= CompilationLevel.DYNAMO_ONCE
 
     def __call__(self, *args, **kwargs):
         """Implement the dispatch logic here, beyond the torch.compile level.
@@ -52,7 +68,7 @@ class TorchCompileWrapperWithCustomDispatcher:
             return
         # code borrowed from https://github.com/thuml/depyf/blob/f4ad79fadee27ea113b4c75202db1eb1a11c0dbc/depyf/explain/enable_debugging.py#L25
         frame = sys._getframe()
-        while True:
+        while frame and frame.f_back:
             frame = frame.f_back
             code_name = frame.f_code.co_name
             file_name = frame.f_code.co_filename.split(os.path.sep)[-1]

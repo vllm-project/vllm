@@ -5,6 +5,30 @@
 
 #include "core/scalar_type.hpp"
 
+#include <vector>
+
+torch::Tensor weak_ref_tensor(torch::Tensor& tensor) {
+  // Ensure tensor is on CUDA
+  if (!tensor.is_cuda()) {
+    throw std::runtime_error("Tensor must be on CUDA device");
+  }
+
+  // Get the raw data pointer
+  void* data_ptr = tensor.data_ptr();
+
+  // Get tensor sizes and strides
+  std::vector<int64_t> sizes = tensor.sizes().vec();
+  std::vector<int64_t> strides = tensor.strides().vec();
+
+  // Get tensor options (dtype, device)
+  auto options = tensor.options();
+
+  // Create a new tensor from the raw data pointer
+  auto new_tensor = torch::from_blob(data_ptr, sizes, strides, options);
+
+  return new_tensor;
+}
+
 void paged_attention_v1(
     torch::Tensor& out, torch::Tensor& query, torch::Tensor& key_cache,
     torch::Tensor& value_cache, int64_t num_kv_heads, double scale,
@@ -32,6 +56,16 @@ void rms_norm(torch::Tensor& out, torch::Tensor& input, torch::Tensor& weight,
 void fused_add_rms_norm(torch::Tensor& input, torch::Tensor& residual,
                         torch::Tensor& weight, double epsilon);
 
+void rms_norm_static_fp8_quant(torch::Tensor& out, torch::Tensor& input,
+                               torch::Tensor& weight, torch::Tensor& scale,
+                               double epsilon);
+
+void fused_add_rms_norm_static_fp8_quant(torch::Tensor& out,
+                                         torch::Tensor& input,
+                                         torch::Tensor& residual,
+                                         torch::Tensor& weight,
+                                         torch::Tensor& scale, double epsilon);
+
 void rotary_embedding(torch::Tensor& positions, torch::Tensor& query,
                       torch::Tensor& key, int64_t head_size,
                       torch::Tensor& cos_sin_cache, bool is_neox);
@@ -47,6 +81,9 @@ void silu_and_mul(torch::Tensor& out, torch::Tensor& input);
 void gelu_and_mul(torch::Tensor& out, torch::Tensor& input);
 
 void gelu_tanh_and_mul(torch::Tensor& out, torch::Tensor& input);
+
+void fatrelu_and_mul(torch::Tensor& out, torch::Tensor& input,
+                     double threshold);
 
 void gelu_new(torch::Tensor& out, torch::Tensor& input);
 
@@ -91,6 +128,7 @@ torch::Tensor awq_dequantize(torch::Tensor _kernel,
                              int64_t thx, int64_t thy);
 
 torch::Tensor permute_cols(torch::Tensor const& A, torch::Tensor const& perm);
+#endif
 
 torch::Tensor ggml_dequantize(torch::Tensor W, int64_t type, int64_t m,
                               int64_t n);
@@ -101,6 +139,7 @@ torch::Tensor ggml_mul_mat_vec_a8(torch::Tensor W, torch::Tensor X,
 torch::Tensor ggml_mul_mat_a8(torch::Tensor W, torch::Tensor X, int64_t type,
                               int64_t row);
 
+#ifndef USE_ROCM
 bool cutlass_scaled_mm_supports_fp8(int64_t cuda_device_capability);
 
 void cutlass_scaled_mm(torch::Tensor& out, torch::Tensor const& a,
@@ -142,11 +181,6 @@ void dynamic_per_token_scaled_fp8_quant(
     torch::Tensor& out, torch::Tensor const& input, torch::Tensor& scale,
     c10::optional<torch::Tensor> const& scale_ub);
 
-void moe_align_block_size(torch::Tensor topk_ids, int64_t num_experts,
-                          int64_t block_size, torch::Tensor sorted_token_ids,
-                          torch::Tensor experts_ids,
-                          torch::Tensor num_tokens_post_pad);
-
 void selective_scan_fwd(const torch::Tensor& u, const torch::Tensor& delta,
                         const torch::Tensor& A, const torch::Tensor& B,
                         const torch::Tensor& C,
@@ -157,38 +191,36 @@ void selective_scan_fwd(const torch::Tensor& u, const torch::Tensor& delta,
                         const c10::optional<torch::Tensor>& query_start_loc,
                         const c10::optional<torch::Tensor>& cache_indices,
                         const c10::optional<torch::Tensor>& has_initial_state,
-                        const torch::Tensor& ssm_states);
+                        const torch::Tensor& ssm_states, int64_t pad_slot_id);
 
-at::Tensor causal_conv1d_update(
-    const at::Tensor& x, const at::Tensor& conv_state, const at::Tensor& weight,
-    const c10::optional<at::Tensor>& bias_, bool silu_activation,
-    const c10::optional<at::Tensor>& cache_seqlens_,
-    const c10::optional<at::Tensor>& conv_state_indices_);
+void causal_conv1d_update(const at::Tensor& x, const at::Tensor& conv_state,
+                          const at::Tensor& weight,
+                          const c10::optional<at::Tensor>& bias_,
+                          bool silu_activation,
+                          const c10::optional<at::Tensor>& cache_seqlens_,
+                          const c10::optional<at::Tensor>& conv_state_indices_,
+                          int64_t pad_slot_id);
 
-at::Tensor causal_conv1d_fwd(const at::Tensor& x, const at::Tensor& weight,
-                             const c10::optional<at::Tensor>& bias_,
-                             const c10::optional<at::Tensor>& conv_states,
-                             const c10::optional<at::Tensor>& query_start_loc,
-                             const c10::optional<at::Tensor>& cache_indices,
-                             const c10::optional<at::Tensor>& has_initial_state,
-                             bool silu_activation);
+void causal_conv1d_fwd(const at::Tensor& x, const at::Tensor& weight,
+                       const c10::optional<at::Tensor>& bias_,
+                       const c10::optional<at::Tensor>& conv_states,
+                       const c10::optional<at::Tensor>& query_start_loc,
+                       const c10::optional<at::Tensor>& cache_indices,
+                       const c10::optional<at::Tensor>& has_initial_state,
+                       bool silu_activation, int64_t pad_slot_id);
 
 #ifndef USE_ROCM
 using fptr_t = int64_t;
-fptr_t init_custom_ar(torch::Tensor& meta, torch::Tensor& rank_data,
-                      const std::vector<std::string>& handles,
-                      const std::vector<int64_t>& offsets, int64_t rank,
-                      bool full_nvlink);
-void all_reduce_reg(fptr_t _fa, torch::Tensor& inp, torch::Tensor& out);
-void all_reduce_unreg(fptr_t _fa, torch::Tensor& inp, torch::Tensor& reg_buffer,
-                      torch::Tensor& out);
+fptr_t init_custom_ar(const std::vector<int64_t>& fake_ipc_ptrs,
+                      torch::Tensor& rank_data, int64_t rank, bool full_nvlink);
+void all_reduce(fptr_t _fa, torch::Tensor& inp, torch::Tensor& out,
+                fptr_t reg_buffer, int64_t reg_buffer_sz_bytes);
 void dispose(fptr_t _fa);
 int64_t meta_size();
-void register_buffer(fptr_t _fa, torch::Tensor& t,
-                     const std::vector<std::string>& handles,
-                     const std::vector<int64_t>& offsets);
-std::tuple<torch::Tensor, std::vector<int64_t>> get_graph_buffer_ipc_meta(
-    fptr_t _fa);
-void register_graph_buffers(fptr_t _fa, const std::vector<std::string>& handles,
+void register_buffer(fptr_t _fa, const std::vector<int64_t>& fake_ipc_ptrs);
+std::tuple<std::vector<int64_t>, std::vector<int64_t>>
+get_graph_buffer_ipc_meta(fptr_t _fa);
+void register_graph_buffers(fptr_t _fa,
+                            const std::vector<std::vector<int64_t>>& handles,
                             const std::vector<std::vector<int64_t>>& offsets);
 #endif
