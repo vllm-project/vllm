@@ -18,13 +18,13 @@ class SamplingMetadata:
 
     generators: Dict[int, torch.Generator]
 
+    # Max number of sample or prompt logprobs
+    # (respectiely) at the batch level
     max_num_logprobs: int
     max_num_prompt_logprobs: int
 
+    # Attributes which support logprob computation
     query_start_loc: Optional[torch.Tensor]
     num_query_tokens: Optional[torch.Tensor]
-    #maybe_sample_logits_indices: Optional[torch.Tensor] = None
-    #prompt_logits_mask: Optional[torch.Tensor] = None
-
     num_input_tokens: int
     partial_req_index: int  # >0 if there is a partial request, -1 o/w
