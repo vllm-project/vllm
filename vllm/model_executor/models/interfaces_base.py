@@ -71,7 +71,7 @@ def _check_vllm_model_forward(model: Union[Type[object], object]) -> bool:
                         and issubclass(model, nn.Module)):
         logger.warning(
             "The model (%s) is missing "
-            "vLLM-specific keywords from its initializer: %s",
+            "vLLM-specific keywords from its `forward` method: %s",
             model,
             missing_kws,
         )

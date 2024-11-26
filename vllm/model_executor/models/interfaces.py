@@ -10,7 +10,6 @@ from vllm.utils import supports_kw
 from .interfaces_base import is_embedding_model
 
 if TYPE_CHECKING:
-    from vllm.config import LoRAConfig, MultiModalConfig, SchedulerConfig
     from vllm.sequence import IntermediateTensors
 
 logger = init_logger(__name__)
@@ -29,18 +28,12 @@ class SupportsMultiModal(Protocol):
         MRO of your model class.
     """
 
-    def __init__(self, *, multimodal_config: "MultiModalConfig") -> None:
-        ...
-
 
 # We can't use runtime_checkable with ClassVar for issubclass checks
 # so we need to treat the class as an instance and use isinstance instead
 @runtime_checkable
 class _SupportsMultiModalType(Protocol):
     supports_multimodal: Literal[True]
-
-    def __call__(self, *, multimodal_config: "MultiModalConfig") -> None:
-        ...
 
 
 @overload
@@ -81,10 +74,6 @@ class SupportsLoRA(Protocol):
     embedding_modules: ClassVar[Dict[str, str]]
     embedding_padding_modules: ClassVar[List[str]]
 
-    # lora_config is None when LoRA is not enabled
-    def __init__(self, *, lora_config: Optional["LoRAConfig"] = None) -> None:
-        ...
-
 
 # We can't use runtime_checkable with ClassVar for issubclass checks
 # so we need to treat the class as an instance and use isinstance instead
@@ -96,9 +85,6 @@ class _SupportsLoRAType(Protocol):
     supported_lora_modules: List[str]
     embedding_modules: Dict[str, str]
     embedding_padding_modules: List[str]
-
-    def __call__(self, *, lora_config: Optional["LoRAConfig"] = None) -> None:
-        ...
 
 
 @overload
@@ -276,20 +262,10 @@ class HasInnerState(Protocol):
         for max_num_seqs, etc. True for e.g. both Mamba and Jamba.
     """
 
-    def __init__(self,
-                 *,
-                 scheduler_config: Optional["SchedulerConfig"] = None) -> None:
-        ...
-
 
 @runtime_checkable
 class _HasInnerStateType(Protocol):
     has_inner_state: ClassVar[Literal[True]]
-
-    def __init__(self,
-                 *,
-                 scheduler_config: Optional["SchedulerConfig"] = None) -> None:
-        ...
 
 
 @overload
@@ -323,16 +299,10 @@ class IsAttentionFree(Protocol):
         True for Mamba but not Jamba.
     """
 
-    def __init__(self) -> None:
-        ...
-
 
 @runtime_checkable
 class _IsAttentionFreeType(Protocol):
     is_attention_free: ClassVar[Literal[True]]
-
-    def __init__(self) -> None:
-        ...
 
 
 @overload
