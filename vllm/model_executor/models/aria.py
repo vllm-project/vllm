@@ -29,7 +29,7 @@ from vllm.model_executor.models.llama import (LlamaDecoderLayer, LlamaMLP,
                                               LlamaModel)
 from vllm.model_executor.models.utils import (AutoWeightsLoader, WeightsMapper,
                                               is_pp_missing_parameter,
-                                              make_layers, maybe_prefix,
+                                              maybe_prefix,
                                               merge_multimodal_embeddings)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.base import MultiModalInputs
@@ -363,27 +363,9 @@ class AriaMoELMModel(LlamaModel):
     """
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
-        super().__init__(vllm_config=vllm_config, prefix=prefix)
-
-        config = vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
-        quant_config = vllm_config.quant_config
-
-        # FIXME: this is a hack to disable the compilation of the model
-        self.do_not_compile = True
-
-        self.layers = None
-
-        self.start_layer, self.end_layer, self.layers = make_layers(
-            config.num_hidden_layers,
-            lambda prefix: MoEDecoderLayer(
-                config=config,
-                cache_config=cache_config,
-                quant_config=quant_config,
-                prefix=prefix,
-            ),
-            prefix=f"{prefix}.layers",
-        )
+        super().__init__(vllm_config=vllm_config,
+                         prefix=prefix,
+                         layer_type=MoEDecoderLayer)
 
     # Adapted from LlamaModel.load_weights with the modification of adding
     # the expert weights mapping to `stacked_params_mapping`
