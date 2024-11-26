@@ -1,12 +1,11 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Optional, Set, List
+from typing import List, Optional, Set
 
 import torch
 
-from vllm.sequence import ExecuteModelRequest
+from vllm.sequence import ExecuteModelRequest, PromptLogprobs
 from vllm.worker.worker_base import WorkerBase
-from vllm.sequence import PromptLogprobs
 
 
 @dataclass

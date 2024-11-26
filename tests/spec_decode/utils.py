@@ -275,6 +275,7 @@ def create_batch(batch_size,
             prev_output_tokens, seq_ids)
     return seq_group_metadata_list, prompts, prev_output_tokens
 
+
 def maybe_enable_chunked_prefill(prefill_chunk_size, llm_kwargs):
     if prefill_chunk_size > 0:
         llm_kwargs.update(

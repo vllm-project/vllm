@@ -149,22 +149,20 @@ def test_spec_decode_e2e_with_detokenization(test_llm_generator,
         },
     ])
 @pytest.mark.parametrize("baseline_llm_kwargs", [{}])
-@pytest.mark.parametrize("test_llm_kwargs", [
-    {
-        "speculative_model": "JackFram/llama-68m",
-        "num_speculative_tokens": 5,
-        "enable_chunked_prefill": False,
-        "disable_logprobs_during_spec_decoding": False
-    },
-    {
-        "speculative_model": "JackFram/llama-68m",
-        "num_speculative_tokens": 3,
-        "enable_chunked_prefill": True,
-        "max_num_batched_tokens": 4,
-        "max_num_seqs": 4,
-        "disable_logprobs_during_spec_decoding": False
-    }
-])
+@pytest.mark.parametrize("test_llm_kwargs",
+                         [{
+                             "speculative_model": "JackFram/llama-68m",
+                             "num_speculative_tokens": 5,
+                             "enable_chunked_prefill": False,
+                             "disable_logprobs_during_spec_decoding": False
+                         }, {
+                             "speculative_model": "JackFram/llama-68m",
+                             "num_speculative_tokens": 3,
+                             "enable_chunked_prefill": True,
+                             "max_num_batched_tokens": 4,
+                             "max_num_seqs": 4,
+                             "disable_logprobs_during_spec_decoding": False
+                         }])
 @pytest.mark.parametrize(
     "output_len",
     [
