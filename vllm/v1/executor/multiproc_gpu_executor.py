@@ -102,7 +102,7 @@ class MultiprocessingGPUExecutor:
         self.model_output_mq.wait_until_ready()
         self.workers_in_busy_loop = True
 
-    def run_on_workers(self, fn: str, *args):
+    def run_on_workers(self, fn: str, *args) -> List:
         with ThreadPoolExecutor() as executor:
             futures = [
                 executor.submit(getattr(type(w), fn), w, *args)
