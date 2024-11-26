@@ -109,7 +109,6 @@ class Scheduler:
         # V1 model runner.
         # TODO(woosuk): Remove this constraint after refactoring model runner.
         has_partial_request = False
-        partial_req_index = -1
         req_index = 0
         while req_index < len(self.running):
             # Only the last request in the RUNNING queue can be "partial".
@@ -159,10 +158,8 @@ class Scheduler:
             ]
             num_scheduled_tokens[request.request_id] = num_new_tokens
             token_budget -= num_new_tokens
-            if (request.num_computed_tokens + num_new_tokens <
-                    request.num_tokens):
-                has_partial_request = True
-                partial_req_index = req_index
+            has_partial_request = (request.num_computed_tokens + num_new_tokens
+                                   < request.num_tokens)
             req_index += 1
 
             # Encoder-related.
@@ -239,10 +236,8 @@ class Scheduler:
                 token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
-                if (request.num_computed_tokens + num_new_tokens <
-                        request.num_tokens):
-                    has_partial_request = True
-                    partial_req_index = req_index
+                has_partial_request = (request.num_computed_tokens +
+                                       num_new_tokens < request.num_tokens)
 
                 # Encoder-related.
                 if encoder_inputs_to_schedule:
@@ -279,6 +274,17 @@ class Scheduler:
                 req.num_computed_tokens) for req in scheduled_running_reqs
         ]
         preempted_req_ids = {req.request_id for req in preempted_reqs}
+
+        partial_req_indices = [
+            idx for idx, request in enumerate(self.running)
+            if request.num_computed_tokens +
+            num_scheduled_tokens[request.request_id] < request.num_tokens
+        ]
+        num_partial_reqs = len(partial_req_indices)
+        assert num_partial_reqs < 2
+        partial_req_index = (partial_req_indices[0]
+                             if num_partial_reqs > 0 else -1)
+
         scheduler_output = SchedulerOutput(
             scheduled_new_reqs=new_reqs_data,
             scheduled_resumed_reqs=resumed_reqs_data,

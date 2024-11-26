@@ -237,9 +237,10 @@ class Sampler(nn.Module):
                                         dtype=torch.bool)
         # Sequence offsets where a token is being decoded are *not* prompt
         # tokens...
+        pdx = sampling_metadata.partial_req_index
         prompt_logits_mask[maybe_sample_logits_indices] = False
-        # ...unless the request in question is partial.
-        prompt_logits_mask[sampling_metadata.partial_req_index] = True
+        # ...unless the request in question is partial
+        prompt_logits_mask[maybe_sample_logits_indices[pdx]] = True
 
         # Apply temperature, top-k and top-p to logits at sequence offsets
         # where a new token is being decoded.
