@@ -108,12 +108,13 @@ def all_reduce_fake(tensor: torch.Tensor, group_name: str) -> torch.Tensor:
     return torch.empty_like(tensor)
 
 
-direct_register_custom_op(
-    op_name="all_reduce",
-    op_func=all_reduce,
-    mutates_args=[],
-    fake_impl=all_reduce_fake,
-)
+if supports_custom_op():
+    direct_register_custom_op(
+        op_name="all_reduce",
+        op_func=all_reduce,
+        mutates_args=[],
+        fake_impl=all_reduce_fake,
+    )
 
 
 class GroupCoordinator:
@@ -304,7 +305,6 @@ class GroupCoordinator:
             # --------------------------------------------
             # custom allreduce       | enabled | enabled |
             # PyNccl                 | disabled| enabled |
-            # torch.distributed      | enabled | disabled|
             #
             # Note that custom allreduce will have a runtime check, if the
             #  tensor size is too large, it will fallback to the next
@@ -349,10 +349,6 @@ class GroupCoordinator:
             ipex.distributed.all_reduce(input_, group=self.device_group)
             return input_
 
-        if not supports_custom_op():
-            return torch.ops.vllm.all_reduce(input_,
-                                             group_name=self.unique_name)
-
         if self.tpu_communicator is not None and \
             not self.tpu_communicator.disabled:
             # TPU handles Dynamo with its own logic.
@@ -365,16 +361,16 @@ class GroupCoordinator:
         if self.xpu_communicator is not None and \
                 not self.xpu_communicator.disabled:
             return self.xpu_communicator.all_reduce(input_)
+
         return torch.ops.vllm.all_reduce(input_, group_name=self.unique_name)
 
     def _all_reduce_out_place(self, input_: torch.Tensor) -> torch.Tensor:
-        # if supports_custom_op():
-        #     ca_comm = self.ca_comm
-        #     if ca_comm is not None and not ca_comm.disabled and ca_comm.should_custom_ar(
-        #             input_):
-        #         out = ca_comm.custom_all_reduce(input_)
-        #         assert out is not None
-        #         return out
+        ca_comm = self.ca_comm
+        if ca_comm is not None and not ca_comm.disabled and ca_comm.should_custom_ar(
+                input_):
+            out = ca_comm.custom_all_reduce(input_)
+            assert out is not None
+            return out
         pynccl_comm = self.pynccl_comm
         assert pynccl_comm is not None
         with pynccl_comm.change_state(enable=True,
@@ -421,7 +417,8 @@ class GroupCoordinator:
         output_tensor = output_tensor.reshape((world_size, ) + input_size)
         output_tensor = output_tensor.movedim(0, dim)
         output_tensor = output_tensor.reshape(input_size[:dim] +
-                                              (world_size * input_size[dim], ) +
+                                              (world_size *
+                                               input_size[dim], ) +
                                               input_size[dim + 1:])
         return output_tensor
 
@@ -445,8 +442,8 @@ class GroupCoordinator:
             dim += input_.dim()
         if self.xpu_communicator is not None and \
                 not self.xpu_communicator.disabled:
-            return self.xpu_communicator.gather(input_, self.rank_in_group, dst,
-                                                dim)
+            return self.xpu_communicator.gather(input_, self.rank_in_group,
+                                                dst, dim)
         # Allocate output tensor.
         if self.rank_in_group == dst:
             gather_list = [torch.empty_like(input_) for _ in range(world_size)]
@@ -557,7 +554,8 @@ class GroupCoordinator:
         assert src < self.world_size, f"Invalid src rank ({src})"
 
         assert src != self.rank_in_group, (
-            "Invalid source rank. Source rank is the same as the current rank.")
+            "Invalid source rank. Source rank is the same as the current rank."
+        )
 
         size_tensor = torch.empty(1, dtype=torch.long, device="cpu")
 
@@ -719,7 +717,9 @@ class GroupCoordinator:
                                        group=metadata_group)
             else:
                 # use group for GPU tensors
-                torch.distributed.send(tensor, dst=self.ranks[dst], group=group)
+                torch.distributed.send(tensor,
+                                       dst=self.ranks[dst],
+                                       group=group)
         return None
 
     def recv_tensor_dict(
@@ -903,7 +903,8 @@ _PP: Optional[GroupCoordinator] = None
 
 
 def get_pp_group() -> GroupCoordinator:
-    assert _PP is not None, ("pipeline model parallel group is not initialized")
+    assert _PP is not None, (
+        "pipeline model parallel group is not initialized")
     return _PP
 
 
@@ -1044,7 +1045,8 @@ def initialize_model_parallel(
     num_pipeline_model_parallel_groups: int = (world_size //
                                                pipeline_model_parallel_size)
     global _PP
-    assert _PP is None, ("pipeline model parallel group is already initialized")
+    assert _PP is None, (
+        "pipeline model parallel group is already initialized")
     group_ranks = []
     for i in range(num_pipeline_model_parallel_groups):
         ranks = list(range(i, world_size, num_pipeline_model_parallel_groups))
