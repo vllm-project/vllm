@@ -228,9 +228,19 @@ class Sampler(nn.Module):
         do_any_logprobs = do_logprobs or do_prompt_logprobs
 
         num_query_tokens = sampling_metadata.num_query_tokens
-        maybe_sample_logits_indices = (
-            sampling_metadata.maybe_sample_logits_indices)
-        prompt_logits_mask = sampling_metadata.prompt_logits_mask
+        # NOTE(woosuk): Due to chunked prefills, there can be at most 1 partial
+        # request in the batch. While we should not sample any token from this
+        # partial request, we do so for simplicity. We will ignore the sampled
+        # token from the partial request.
+        maybe_sample_logits_indices = sampling_metadata.query_start_loc[1:] - 1
+        prompt_logits_mask = torch.ones(sampling_metadata.num_input_tokens,
+                                        dtype=torch.bool)
+        # Sequence offsets where a token is being decoded are *not* prompt
+        # tokens...
+        pdx = sampling_metadata.partial_req_index
+        prompt_logits_mask[maybe_sample_logits_indices] = False
+        # ...unless the request in question is partial
+        prompt_logits_mask[maybe_sample_logits_indices[pdx]] = True
 
         # Apply temperature, top-k and top-p to logits at sequence offsets
         # where a new token is being decoded.

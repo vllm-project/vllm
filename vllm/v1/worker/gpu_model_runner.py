@@ -211,10 +211,8 @@ class GPUModelRunner:
         self,
         scheduler_output: "SchedulerOutput",
         sampling_metadata: SamplingMetadata,
-        num_input_tokens: int,
     ) -> Tuple[torch.Tensor, FlashAttentionMetadata, torch.Tensor,
                torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
-        do_prompt_logprobs = sampling_metadata.max_num_prompt_logprobs > 0
 
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
@@ -291,14 +289,7 @@ class GPUModelRunner:
                   out=slot_mapping)
 
         # Prepare the attention metadata.
-        query_start_loc = torch.empty((num_reqs + 1, ),
-                                      dtype=torch.int32,
-                                      device="cpu",
-                                      pin_memory=self.pin_memory)
-        query_start_loc_np = query_start_loc.numpy()
-        query_start_loc_np[0] = 0
-        np.cumsum(num_scheduled_tokens, out=query_start_loc_np[1:])
-
+        query_start_loc = sampling_metadata.query_start_loc
         seq_lens = (self.input_batch.num_computed_tokens_cpu[:num_reqs] +
                     num_scheduled_tokens)
         max_seq_len = seq_lens.max()
@@ -313,7 +304,6 @@ class GPUModelRunner:
         input_ids = input_ids.to(self.device, non_blocking=True)
         self.positions[:total_num_scheduled_tokens].copy_(positions,
                                                           non_blocking=True)
-        query_start_loc = query_start_loc.to(self.device, non_blocking=True)
         seq_start_loc = seq_start_loc.to(self.device, non_blocking=True)
         slot_mapping = slot_mapping.to(self.device, non_blocking=True).long()
         attn_metadata = FlashAttentionMetadata(
@@ -329,29 +319,12 @@ class GPUModelRunner:
         # request in the batch. While we should not sample any token from this
         # partial request, we do so for simplicity. We will ignore the sampled
         # token from the partial request.
-        # TODO: Support prompt logprobs.
-        maybe_sample_logits_indices = query_start_loc[1:] - 1
-        num_query_tokens = torch.diff(query_start_loc)
-
-        # One or more requests require prompt logprobs
-        complete_req_mask = torch.tensor(
-            [not x for x in scheduler_output.partial_running_reqs])
-
-        if do_prompt_logprobs:
-            prompt_logits_mask = torch.ones(num_input_tokens, dtype=torch.bool)
-            prompt_logits_mask[
-                maybe_sample_logits_indices[complete_req_mask]] = False
-
-            return (input_ids, attn_metadata, num_query_tokens,
-                    maybe_sample_logits_indices, prompt_logits_mask)
-        else:
-            # No requests require prompt logprobs
-            return (input_ids, attn_metadata, num_query_tokens,
-                    maybe_sample_logits_indices, None)
+        return (input_ids, attn_metadata)
 
     def _prepare_sampling(
         self,
         scheduler_output: "SchedulerOutput",
+        num_input_tokens: int,
     ) -> SamplingMetadata:
         skip_copy = True
         if (scheduler_output.finished_req_ids
@@ -361,7 +334,11 @@ class GPUModelRunner:
                 or scheduler_output.scheduled_resumed_reqs):
             skip_copy = False
         # Create the sampling metadata.
-        sampling_metadata = self.input_batch.make_sampling_metadata(skip_copy)
+        sampling_metadata = self.input_batch.make_sampling_metadata(
+            scheduler_output,
+            num_input_tokens,
+            skip_copy,
+        )
         return sampling_metadata
 
     def _execute_encoder(self, scheduler_output: "SchedulerOutput"):
@@ -446,8 +423,6 @@ class GPUModelRunner:
         self._execute_encoder(scheduler_output)
         encoder_outputs = self._gather_encoder_outputs(scheduler_output)
 
-        sampling_metadata = self._prepare_sampling(scheduler_output)
-
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if (self.use_cuda_graph
                 and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
@@ -459,6 +434,8 @@ class GPUModelRunner:
             # Eager mode.
             num_input_tokens = num_scheduled_tokens
 
+        sampling_metadata = self._prepare_sampling(scheduler_output,
+                                                   num_input_tokens)
         do_logprobs = sampling_metadata.max_num_logprobs > 0
         do_prompt_logprobs = sampling_metadata.max_num_prompt_logprobs > 0
 
@@ -466,12 +443,8 @@ class GPUModelRunner:
         (
             input_ids,
             attn_metadata,
-            num_query_tokens,
-            maybe_sample_logits_indices,
-            prompt_logits_mask,
         ) = self._prepare_inputs(scheduler_output=scheduler_output,
-                                 sampling_metadata=sampling_metadata,
-                                 num_input_tokens=num_input_tokens)
+                                 sampling_metadata=sampling_metadata)
 
         # Get the inputs embeds.
         if encoder_outputs:
@@ -496,11 +469,6 @@ class GPUModelRunner:
             )
 
         hidden_states = hidden_states[:num_scheduled_tokens]
-
-        sampling_metadata.num_query_tokens = num_query_tokens
-        sampling_metadata.maybe_sample_logits_indices = (
-            maybe_sample_logits_indices)
-        sampling_metadata.prompt_logits_mask = prompt_logits_mask
 
         # Sample the next token and get logprobs if needed.
         sampler_output = self.model.sample(
@@ -858,6 +826,8 @@ class InputBatch:
 
     def make_sampling_metadata(
         self,
+        scheduler_output: "SchedulerOutput",
+        num_input_tokens: int,
         skip_copy: bool = False,
     ) -> SamplingMetadata:
         if not skip_copy:
@@ -867,8 +837,36 @@ class InputBatch:
                 self.top_p_cpu_tensor[:self.num_reqs], non_blocking=True)
             self.top_k[:self.num_reqs].copy_(
                 self.top_k_cpu_tensor[:self.num_reqs], non_blocking=True)
+
+        num_reqs = self.num_reqs
+
+        # Get the number of scheduled tokens for each request.
+        # TODO: The Python loop can be slow. Optimize.
+        num_scheduled_tokens = []
+        max_num_scheduled_tokens = 0
+        for req_id in self.req_ids[:num_reqs]:
+            num_tokens = scheduler_output.num_scheduled_tokens[req_id]
+            num_scheduled_tokens.append(num_tokens)
+            max_num_scheduled_tokens = max(max_num_scheduled_tokens,
+                                           num_tokens)
+        num_scheduled_tokens = np.array(num_scheduled_tokens, dtype=np.int32)
+        assert max_num_scheduled_tokens > 0
+
+        # Compute query start offsets. It makes sense to compute this here
+        # rather than in model runner _prepare_inputs() because query start
+        # offsets are required for computing num_query_tokens in the scenario
+        # where prompt logprobs are required by the batch.
+        query_start_loc = torch.empty((num_reqs + 1, ),
+                                      dtype=torch.int32,
+                                      device="cpu",
+                                      pin_memory=self.pin_memory)
+        query_start_loc_np = query_start_loc.numpy()
+        query_start_loc_np[0] = 0
+        np.cumsum(num_scheduled_tokens, out=query_start_loc_np[1:])
+        query_start_loc = query_start_loc.to(self.device, non_blocking=True)
+
         return SamplingMetadata(
-            temperature=self.temperature[:self.num_reqs],
+            temperature=self.temperature[:num_reqs],
             all_greedy=self.all_greedy,
             all_random=self.all_random,
             top_p=self.top_p[:self.num_reqs],
@@ -877,7 +875,15 @@ class InputBatch:
             no_top_k=self.no_top_k,
             generators=self.generators,
             max_num_logprobs=self.max_num_logprobs,
-            max_num_prompt_logprobs=self.max_num_prompt_logprobs)
+            max_num_prompt_logprobs=self.max_num_prompt_logprobs,
+            query_start_loc=query_start_loc,
+            num_input_tokens=num_input_tokens,
+            partial_req_index=scheduler_output.partial_req_index,
+            # Required for prompt logprobs temperature computation.
+            # If prompt logprobs is not required for this batch, then
+            # avoid storing num_query_tokens
+            num_query_tokens=(torch.diff(query_start_loc)
+                              if self.max_num_prompt_logprobs > 0 else None))
 
     @property
     def num_reqs(self) -> int:
