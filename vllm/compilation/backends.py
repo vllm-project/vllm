@@ -376,16 +376,18 @@ class VllmBackend:
         self.graph = graph
         self.configure_post_pass()
 
-        if "before_split_graph" in self.compilation_configs.pass_config.dump_graph_stages:
+        if ("before_split_graph"
+                in self.compilation_configs.pass_config.dump_graph_stages):
             dump_graph(self.compilation_configs.pass_config, graph.graph,
                        "before_split_graph")
 
         self.split_gm, self.piecewise_graphs = split_graph(
             graph, self.compilation_config.splitting_ops)
 
-        if "after_split_graph" in self.compilation_configs.pass_config.dump_graph_stages:
-            dump_graph(self.compilation_configs.pass_config, self.split_gm.graph,
-                       "after_split_graph")
+        if ("after_split_graph"
+                in self.compilation_configs.pass_config.dump_graph_stages):
+            dump_graph(self.compilation_configs.pass_config,
+                       self.split_gm.graph, "after_split_graph")
 
         from torch._dynamo.utils import lazy_format_graph_code
 

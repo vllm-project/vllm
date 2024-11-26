@@ -31,7 +31,6 @@ if envs.VLLM_USE_FLUX:
         logger.info("Attempting to use flux but flux not installed.")
         use_flux = False
 
-
 # Depends on arch, see auto_tile_shape in include/flux/gemm_hparams.h
 # Can be 256 on sm80.
 FLUX_TILE_SIZE: int = 128
@@ -60,11 +59,11 @@ def residual_slice_shape_fake(residual: torch.Tensor, rank: int) -> int:
 
 
 def match_gemm_rs_ag_gemm(
-        residual: torch.Tensor,
-        gemm_1_weights: torch.Tensor,
-        gemm_1_activations: torch.Tensor,
-        rms_norm_weights: torch.Tensor,
-        gemm_2_weights: torch.Tensor,
+    residual: torch.Tensor,
+    gemm_1_weights: torch.Tensor,
+    gemm_1_activations: torch.Tensor,
+    rms_norm_weights: torch.Tensor,
+    gemm_2_weights: torch.Tensor,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     gemm_1_w_perm = torch.ops.aten.permute.default(gemm_1_weights, [1, 0])
     mm_1 = torch.ops.aten.mm.default(gemm_1_activations, gemm_1_w_perm)
@@ -239,10 +238,10 @@ def get_gemm_rs_ag_gemm(use_flux: bool, max_m: int, gemm_1_type: torch.dtype,
 
 
 def match_final(
-        my_residual: torch.Tensor,
-        gemm_1_weights: torch.Tensor,
-        gemm_1_activations: torch.Tensor,
-        rms_norm_weights: torch.Tensor,
+    my_residual: torch.Tensor,
+    gemm_1_weights: torch.Tensor,
+    gemm_1_activations: torch.Tensor,
+    rms_norm_weights: torch.Tensor,
 ) -> torch.Tensor:
     gemm_1_w_perm = torch.ops.aten.permute.default(gemm_1_weights, [1, 0])
     mm_1 = torch.ops.aten.mm.default(gemm_1_activations, gemm_1_w_perm)
@@ -260,7 +259,7 @@ def match_final(
     return normalized
 
 
-# Register this as a custom op since all reduce cannot be torch.compiled yet.
+# Register this as a custom op since all gather cannot be torch.compiled yet.
 def gemm_ag_final(my_residual: torch.Tensor, gemm_1_weights: torch.Tensor,
                   gemm_1_activations: torch.Tensor,
                   rms_norm_weights: torch.Tensor) -> torch.Tensor:
@@ -333,17 +332,14 @@ class CollectiveFusionPass(VllmInductorPass):
             inputs = [resid, x, w, resid_w, x2]
             final_inputs = [x, w, resid, resid_w]
 
-            register_replacement(
-                match_gemm_rs_ag_gemm,
-                match_gemm_rs_ag_gemm,
-                inputs,
-                fwd_only, [self.gemm_rs_ag_gemm_pattern],
-                extra_check=lambda m: self.record_match(m))
+            register_replacement(match_gemm_rs_ag_gemm,
+                                 match_gemm_rs_ag_gemm,
+                                 inputs,
+                                 fwd_only, [self.gemm_rs_ag_gemm_pattern],
+                                 extra_check=lambda m: self.record_match(m))
 
-            register_replacement(match_final
-                                 torch.ops.vllm.gemm_ag_final,
-                                 final_inputs, fwd_only,
-                                 [self.final_pattern])
+            register_replacement(match_final, torch.ops.vllm.gemm_ag_final,
+                                 final_inputs, fwd_only, [self.final_pattern])
 
     def record_match(self, match: Match) -> bool:
         # Hijack the extra_check to record the match and
@@ -394,16 +390,10 @@ class CollectiveFusionPass(VllmInductorPass):
 
                 # Extract group_name from matched code.  Use to
                 # generate proper replacement code.
-                #ar_node = find_auto_fn(match.nodes, torch.ops.vllm.inplace_all_reduce.default)
-                ar_node = None
-                if ar_node is not None:
-                    tp_group_name = ar_node.kwargs["group_name"]
-                else:
-                    ar_node = find_fn(
-                        match.nodes,
-                        torch.ops.vllm.all_reduce.default)
-                    assert ar_node is not None
-                    tp_group_name = ar_node.args[1]
+                ar_node = find_fn(match.nodes,
+                                  torch.ops.vllm.all_reduce.default)
+                assert ar_node is not None
+                tp_group_name = ar_node.args[1]
 
                 fused_gemm_func = get_gemm_rs_ag_gemm(
                     use_flux, max_m, gemm_1.dtype, gemm_1.shape, gemm_2.dtype,
