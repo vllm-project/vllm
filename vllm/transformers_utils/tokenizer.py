@@ -1,4 +1,5 @@
 import os
+import threading
 import warnings
 from pathlib import Path
 from types import MethodType
@@ -19,6 +20,28 @@ logger = init_logger(__name__)
 
 AnyTokenizer = Union[PreTrainedTokenizer, PreTrainedTokenizerFast,
                      MistralTokenizer]
+
+
+def get_threadsafe_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:
+    """Get a threadsafe tokenizer.
+
+    This will patch the tokenizer object in place.
+
+    This is necessary because transformers tokenizers are not threadsafe
+    by default, and can lead to crashes when used in a multithreaded."""
+
+    lock = threading.Lock()
+
+    class ThreadsafeTokenizer(tokenizer.__class__):  # type: ignore
+        def __call__(self, *args, **kwargs):
+            with lock:
+                logger.info(f"using lock in thread {threading.get_ident()}")
+                return super().__call__(*args, **kwargs)
+
+    ThreadsafeTokenizer.__name__ = f"Threadsafe{tokenizer.__class__.__name__}"
+
+    tokenizer.__class__ = ThreadsafeTokenizer
+    return tokenizer
 
 
 def get_cached_tokenizer(tokenizer: AnyTokenizer) -> AnyTokenizer:
@@ -91,6 +114,7 @@ def get_tokenizer(
     trust_remote_code: bool = False,
     revision: Optional[str] = None,
     download_dir: Optional[str] = None,
+    use_threadsafe: bool = False,
     **kwargs,
 ) -> AnyTokenizer:
     """Gets a tokenizer for the given model name via HuggingFace or ModelScope.
@@ -175,6 +199,9 @@ def get_tokenizer(
                 "Using a slow tokenizer. This might cause a significant "
                 "slowdown. Consider using a fast tokenizer instead.")
         tokenizer = get_cached_tokenizer(tokenizer)
+
+    if use_threadsafe:
+        tokenizer = get_threadsafe_tokenizer(tokenizer)
 
     return tokenizer
 
