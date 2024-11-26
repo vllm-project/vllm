@@ -243,7 +243,6 @@ def _test_case_get_logprobs_and_prompt_logprobs(
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype",
                          ["half"])  # needed for comparing logprobs with HF
-@pytest.mark.parametrize("detokenize", [True, False])
 @pytest.mark.parametrize("max_num_batched_tokens", [128, 256, 1024])
 @pytest.mark.parametrize("batch_logprobs_composition",
                          ["NONE", "SAMPLE", "PROMPT", "SAMPLE_PROMPT"])
@@ -252,7 +251,6 @@ def test_get_logprobs_and_prompt_logprobs(
     vllm_runner,
     model: str,
     dtype: str,
-    detokenize: bool,
     batch_logprobs_composition: str,
     max_num_batched_tokens: int,
     example_prompts,
@@ -277,20 +275,17 @@ def test_get_logprobs_and_prompt_logprobs(
       vllm_runner
       model
       dtype
-      detokenize: if False, return generated tokens bypassing detokenizer
       batch_logprobs_composition: logprobs configuration for test batch
       max_num_batched_tokens: token budget for scheduling
       example_prompts
       monkeypatch
     """
-    detokenize = True
-
     _test_case_get_logprobs_and_prompt_logprobs(
         hf_runner=hf_runner,
         vllm_runner=vllm_runner,
         model=model,
         dtype=dtype,
-        detokenize=detokenize,
+        detokenize=True,
         batch_logprobs_composition=batch_logprobs_composition,
         max_num_batched_tokens=max_num_batched_tokens,
         example_prompts=example_prompts,
@@ -300,15 +295,14 @@ def test_get_logprobs_and_prompt_logprobs(
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype",
                          ["half"])  # needed for comparing logprobs with HF
-# @pytest.mark.parametrize("detokenize", [True, False])
 @pytest.mark.parametrize("max_num_batched_tokens", [128])
-@pytest.mark.parametrize("batch_logprobs_composition", ["SAMPLE_PROMPT"])
+@pytest.mark.parametrize("batch_logprobs_composition",
+                         ["NONE", "SAMPLE", "PROMPT", "SAMPLE_PROMPT"])
 def test_fast_get_logprobs_and_prompt_logprobs(
     hf_runner,
     vllm_runner,
     model: str,
     dtype: str,
-    # detokenize: bool,
     batch_logprobs_composition: str,
     max_num_batched_tokens: int,
     example_prompts,
@@ -319,14 +313,13 @@ def test_fast_get_logprobs_and_prompt_logprobs(
     Faster version of `test_get_logprobs_and_prompt_logprobs` with
     fewer test cases.
     """
-    detokenize = True
 
     _test_case_get_logprobs_and_prompt_logprobs(
         hf_runner=hf_runner,
         vllm_runner=vllm_runner,
         model=model,
         dtype=dtype,
-        detokenize=detokenize,
+        detokenize=True,
         batch_logprobs_composition=batch_logprobs_composition,
         max_num_batched_tokens=max_num_batched_tokens,
         example_prompts=example_prompts,
@@ -356,15 +349,12 @@ def test_max_logprobs(monkeypatch):
 
 
 @pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("detokenize", [True, False])
-def test_none_logprobs(vllm_runner, model, detokenize: bool, example_prompts,
-                       monkeypatch):
+def test_none_logprobs(vllm_runner, model, example_prompts, monkeypatch):
     """Engine should return `logprobs` and `prompt_logprobs` as `None`
     
     Args:
       vllm_runner
       model
-      detokenize: whether to feed generated tokens to detokenizer
       example_prompts
       monkeypatch
     """
@@ -385,8 +375,7 @@ def test_none_logprobs(vllm_runner, model, detokenize: bool, example_prompts,
         sampling_params_logprobs_none = SamplingParams(max_tokens=max_tokens,
                                                        logprobs=None,
                                                        prompt_logprobs=None,
-                                                       temperature=0.0,
-                                                       detokenize=detokenize)
+                                                       temperature=0.0)
         results_logprobs_none = vllm_model.model.generate(
             example_prompts, sampling_params=sampling_params_logprobs_none)
 
