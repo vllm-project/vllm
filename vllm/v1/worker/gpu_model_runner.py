@@ -332,8 +332,6 @@ class GPUModelRunner:
         # TODO: Support prompt logprobs.
         maybe_sample_logits_indices = query_start_loc[1:] - 1
         num_query_tokens = torch.diff(query_start_loc)
-        num_sampled_tokens = torch.tensor(
-            scheduler_output.partial_running_reqs, device=self.device)
 
         # One or more requests require prompt logprobs
         complete_req_mask = torch.tensor(
@@ -345,12 +343,11 @@ class GPUModelRunner:
                 maybe_sample_logits_indices[complete_req_mask]] = False
 
             return (input_ids, attn_metadata, num_query_tokens,
-                    num_sampled_tokens, maybe_sample_logits_indices,
-                    prompt_logits_mask)
+                    maybe_sample_logits_indices, prompt_logits_mask)
         else:
             # No requests require prompt logprobs
             return (input_ids, attn_metadata, num_query_tokens,
-                    num_sampled_tokens, maybe_sample_logits_indices, None)
+                    maybe_sample_logits_indices, None)
 
     def _prepare_sampling(
         self,
@@ -470,7 +467,6 @@ class GPUModelRunner:
             input_ids,
             attn_metadata,
             num_query_tokens,
-            num_sampled_tokens,
             maybe_sample_logits_indices,
             prompt_logits_mask,
         ) = self._prepare_inputs(scheduler_output=scheduler_output,
@@ -502,7 +498,6 @@ class GPUModelRunner:
         hidden_states = hidden_states[:num_scheduled_tokens]
 
         sampling_metadata.num_query_tokens = num_query_tokens
-        sampling_metadata.num_sampled_tokens = num_sampled_tokens
         sampling_metadata.maybe_sample_logits_indices = (
             maybe_sample_logits_indices)
         sampling_metadata.prompt_logits_mask = prompt_logits_mask

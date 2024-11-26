@@ -22,6 +22,5 @@ class SamplingMetadata:
     max_num_prompt_logprobs: int
 
     num_query_tokens: Optional[torch.Tensor] = None
-    num_sampled_tokens: Optional[torch.Tensor] = None
     maybe_sample_logits_indices: Optional[torch.Tensor] = None
     prompt_logits_mask: Optional[torch.Tensor] = None
