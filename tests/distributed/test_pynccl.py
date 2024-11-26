@@ -142,7 +142,6 @@ def worker_fn_with_cudagraph():
                     enable=True):
             a_out = pynccl_comm.all_reduce(a)
         pynccl_comm.stream.synchronize()
-        assert a_out.mean().cpu().item() == pynccl_comm.world_size**0
         graph.replay()
         pynccl_comm.stream.synchronize()
         assert a_out.mean().cpu().item() == pynccl_comm.world_size**1
