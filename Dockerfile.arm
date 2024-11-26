@@ -1,6 +1,6 @@
-# This vLLM Dockerfile is used to construct image that can build and run vLLM on x86 CPU platform.
+# This vLLM Dockerfile is used to construct an image that can build and run vLLM on ARM CPU platform.
 
-FROM ubuntu:22.04 AS cpu-test-1
+FROM ubuntu:22.04 AS cpu-test-arm
 
 ENV CCACHE_DIR=/root/.cache/ccache
 
@@ -12,17 +12,14 @@ RUN --mount=type=cache,target=/var/cache/apt \
     && apt-get install -y ffmpeg libsm6 libxext6 libgl1 \
     && update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 10 --slave /usr/bin/g++ g++ /usr/bin/g++-12
 
-# https://intel.github.io/intel-extension-for-pytorch/cpu/latest/tutorials/performance_tuning/tuning_guide.html
-# intel-openmp provides additional performance improvement vs. openmp
-# tcmalloc provides better memory allocation efficiency, e.g, holding memory in caches to speed up access of commonly-used objects.
+# tcmalloc provides better memory allocation efficiency, e.g., holding memory in caches to speed up access of commonly-used objects.
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install intel-openmp
+    pip install py-cpuinfo  # Use this to gather CPU info and optimize based on ARM Neoverse cores
 
-ENV LD_PRELOAD="/usr/lib/x86_64-linux-gnu/libtcmalloc_minimal.so.4:/usr/local/lib/libiomp5.so"
+# Set LD_PRELOAD for tcmalloc on ARM
+ENV LD_PRELOAD="/usr/lib/aarch64-linux-gnu/libtcmalloc_minimal.so.4"
 
 RUN echo 'ulimit -c 0' >> ~/.bashrc
-
-RUN pip install intel_extension_for_pytorch==2.5.0
 
 WORKDIR /workspace
 
@@ -33,7 +30,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --upgrade pip && \
     pip install -r requirements-build.txt
 
-FROM cpu-test-1 AS build
+FROM cpu-test-arm AS build
 
 WORKDIR /workspace/vllm
 
@@ -47,8 +44,8 @@ ARG GIT_REPO_CHECK=0
 RUN --mount=type=bind,source=.git,target=.git \
     if [ "$GIT_REPO_CHECK" != 0 ]; then bash tools/check_repo.sh ; fi
 
-# Support for building with non-AVX512 vLLM: docker build --build-arg VLLM_CPU_DISABLE_AVX512="true" ...
-ARG VLLM_CPU_DISABLE_AVX512
+# Disabling AVX512 specific optimizations for ARM
+ARG VLLM_CPU_DISABLE_AVX512="true"
 ENV VLLM_CPU_DISABLE_AVX512=${VLLM_CPU_DISABLE_AVX512}
 
 RUN --mount=type=cache,target=/root/.cache/pip \
@@ -61,9 +58,5 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 WORKDIR /workspace/
 
 RUN ln -s /workspace/vllm/tests && ln -s /workspace/vllm/examples && ln -s /workspace/vllm/benchmarks
-
-# install development dependencies (for testing)
-RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install -e tests/vllm_test_utils
 
 ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
