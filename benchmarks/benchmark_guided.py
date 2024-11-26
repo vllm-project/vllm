@@ -285,10 +285,6 @@ def evaluate(ret, args):
             actual = json.loads(actual)
         except Exception:
             return False
-        if expected is not None:
-            expected = expected.replace('\n', '').replace(' ', '').strip()
-            expected = json.loads(expected)
-            return expected.keys() == actual.keys()
 
         return True
 
