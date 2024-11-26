@@ -7,6 +7,7 @@ import msgspec
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MultiModalDataDict, MultiModalPlaceholderDict
 from vllm.sampling_params import RequestOutputKind, SamplingParams
+from vllm.sequence import PromptLogprobs, SampleLogprobs
 
 
 @dataclass
@@ -21,6 +22,11 @@ class DetokenizerRequest:
 
     stop: List[str]
     include_stop_str_in_output: bool
+
+    # Per-request logprobs & prompt logprobs
+    # counts; None is equivalent to 0
+    logprobs: Optional[int]
+    prompt_logprobs: Optional[int]
 
 
 @dataclass
@@ -52,6 +58,9 @@ class EngineCoreOutput(msgspec.Struct,
     request_id: str
     new_token_ids: List[int]
     finished: bool
+    logprobs: Optional[SampleLogprobs]
+    prompt_logprobs: Optional[PromptLogprobs]
+    prompt_logprobs_token_ids: Optional[List[int]]
     finish_reason: Optional[str] = None
     stop_reason: Union[int, str, None] = None
 

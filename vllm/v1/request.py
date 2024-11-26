@@ -5,7 +5,7 @@ from vllm.inputs import DecoderOnlyInputs, SingletonInputsAdapter, token_inputs
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MultiModalKwargs
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import RequestMetrics
+from vllm.sequence import PromptLogprobs, RequestMetrics, SampleLogprobs
 from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.utils import ConstantList
 
@@ -43,6 +43,12 @@ class Request:
         self.num_prompt_tokens = len(self.prompt_token_ids)
         self._output_token_ids: List[int] = []
         self._all_token_ids: List[int] = self.prompt_token_ids.copy()
+        self.max_logprobs = sampling_params.logprobs
+        self.max_prompt_logprobs = sampling_params.prompt_logprobs
+        self.logprobs: Optional[SampleLogprobs] = (
+            None if self.max_logprobs is None else [])
+        self.prompt_logprobs: Optional[PromptLogprobs] = (
+            None if self.max_prompt_logprobs is None else [])
         self.num_computed_tokens = 0
 
         # Raw multimodal data before the mm input mapper (e.g., PIL images).

@@ -15,8 +15,9 @@ class SamplerOutput:
     # [num_reqs, max_num_logprobs + 1]
     logprobs: Optional[torch.Tensor]
 
-    # TODO: Support prompt logprobs.
+    # [num_prompt_tokens, max_num_prompt_logprobs + 1]
     prompt_logprob_token_ids: Optional[torch.Tensor]
+    # [num_prompt_tokens, max_num_prompt_logprobs + 1]
     prompt_logprobs: Optional[torch.Tensor]
 
 
@@ -35,3 +36,8 @@ class ModelRunnerOutput:
     logprob_token_ids_cpu: Optional[torch.Tensor]
     # [num_reqs, max_num_logprobs + 1]
     logprobs_cpu: Optional[torch.Tensor]
+
+    # [num_reqs, max_num_prompt_logprobs]
+    prompt_logprob_token_ids_cpu: Optional[torch.Tensor]
+    # [num_reqs, max_num_prompt_logprobs]
+    prompt_logprobs_cpu: Optional[torch.Tensor]
