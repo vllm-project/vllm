@@ -14,7 +14,7 @@ usage() {
 
 SUCCESS=0
 
-while getopts "c:t:j:" OPT; do
+while getopts "c:t:" OPT; do
   case ${OPT} in
     c ) 
         CONFIG="$OPTARG"
@@ -30,7 +30,7 @@ while getopts "c:t:j:" OPT; do
 done
 
 # Parse list of configs.
-IFS=$'\n' read -d '' -r -a MODEL_CONFIGS < $CONFIG
+IFS=$'\n' read -d '' -r -a MODEL_CONFIGS < "$CONFIG"
 
 for MODEL_CONFIG in "${MODEL_CONFIGS[@]}"
 do
@@ -46,11 +46,11 @@ do
     JUNIT_SUFFIX=""
     if [[ -n "$TEST_RESULTS_DIR" ]]; then
         LOG_DIR=$TEST_RESULTS_DIR
-        LOG_FILENAME="$test_${MODEL_CONFIG}_${RANDOM_SUFFIX}.xml"
+        LOG_FILENAME="test_${MODEL_CONFIG}_${RANDOM_SUFFIX}.xml"
         LOG_PATH="${LOG_DIR}/${LOG_FILENAME}"
         JUNIT_SUFFIX="-o junit_family=xunit1 --junitxml=${LOG_PATH}"
     fi
-    pytest -s test_lm_eval_correctness.py $JUNIT_SUFFIX || LOCAL_SUCCESS=$?
+    pytest -s test_lm_eval_correctness.py "$JUNIT_SUFFIX" || LOCAL_SUCCESS=$?
 
     if [[ $LOCAL_SUCCESS == 0 ]]; then
         echo "=== PASSED MODEL: ${MODEL_CONFIG} ==="
