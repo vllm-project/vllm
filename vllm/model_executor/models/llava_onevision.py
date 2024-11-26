@@ -831,9 +831,11 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal,
         if not modalities:
             return None
 
-        # We append modality representation to each embedding. This is a
-        # temporary workaround for models that can handle multiple modalities
-        # at the same time.
+        # We make a tuple of each embedding with its modality string. This is a
+        # temporary workaround for models to handle mixed modalities when
+        # get_multimodal_embeddings and get_input_embeddings are called
+        # separately.
+        # TODO(ywang96): Add support for mixed-modality inference for v1.
         multimodal_embeddings: List[Tuple[NestedTensors, str]] = []
 
         if "images" in modalities:
