@@ -8,7 +8,7 @@ from vllm.v1.core.scheduler import SchedulerOutput
 
 #TODO: Move this file
 class ExecutorMsgType(Enum):
-    TOIL = auto()
+    WORK = auto()
     TERMINATE = auto()
 
 

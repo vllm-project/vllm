@@ -137,10 +137,9 @@ class MultiprocessingGPUExecutor:
         if not self.workers_in_busy_loop:
             self.start_workers()
 
-        self.scheduler_output_mq.enqueue_via_msgpack(
-            ExecutorMsg(ExecutorMsgType.TOIL.value, scheduler_output))
-        model_output = self.model_output_mq.dequeue_via_msgpack(
-            ModelRunnerOutput)
+        self.scheduler_output_mq.enqueue(
+            ExecutorMsg(ExecutorMsgType.WORK, scheduler_output))
+        model_output = self.model_output_mq.dequeue()
         return model_output
 
     def profile(self, is_start=True):
@@ -150,9 +149,8 @@ class MultiprocessingGPUExecutor:
         """Properly shut down the executor and its workers"""
         if (hasattr(self, 'scheduler_output_mq')
                 and self.scheduler_output_mq is not None):
-            termination_msg = ExecutorMsg(ExecutorMsgType.TERMINATE.value,
-                                          None)
-            self.scheduler_output_mq.enqueue_via_msgpack(termination_msg)
+            termination_msg = ExecutorMsg(ExecutorMsgType.TERMINATE, None)
+            self.scheduler_output_mq.enqueue(termination_msg)
             self.scheduler_output_mq = None
 
     def __del__(self):

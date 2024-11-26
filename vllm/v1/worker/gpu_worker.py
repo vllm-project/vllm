@@ -23,7 +23,7 @@ from vllm.model_executor import set_random_seed
 from vllm.platforms import current_platform
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size,
                         get_open_zmq_ipc_path)
-from vllm.v1.core.scheduler_output import ExecutorMsg, ExecutorMsgType
+from vllm.v1.core.scheduler_output import ExecutorMsgType
 from vllm.v1.outputs import (ModelRunnerOutput, NumBlocksMsg, NumGPUBlocks,
                              ShmHandleMsg, WorkerInitOutputType,
                              WorkerInitRequestType)
@@ -484,15 +484,14 @@ class WorkerProc:
         ) as p:
 
             while True:
-                msg = self.scheduler_output_receiver.dequeue_via_msgpack(
-                    ExecutorMsg)
+                msg = self.scheduler_output_receiver.dequeue()
 
                 if msg.message_type == ExecutorMsgType.TERMINATE:
                     return
-                elif msg.message_type == ExecutorMsgType.TOIL:
+                elif msg.message_type == ExecutorMsgType.WORK:
                     output = self.worker.execute_model(msg.payload)
                     if self.worker.rank == 0:
-                        self.model_output_mq.enqueue_via_msgpack(output)
+                        self.model_output_mq.enqueue(output)
                 else:
                     raise ValueError(
                         f"Unknown RequestType: {msg.message_type}")

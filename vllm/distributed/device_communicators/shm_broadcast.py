@@ -1,6 +1,5 @@
 import os
 import pickle
-import struct
 import sys
 import time
 from contextlib import contextmanager
@@ -9,7 +8,6 @@ from multiprocessing import shared_memory
 from typing import List, Optional, Tuple
 from unittest.mock import patch
 
-import msgspec
 import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
@@ -84,7 +82,7 @@ class ShmRingBuffer:
         NOTE: the order is important here, first reset the reader flags (so that we are still in case 1), then mark the block as written. The state transition is atomic. If we do it in the reverse order, it will go through case 3 and then back to case 2, and readers might read the intermediate case 3, which is not correct.
 
         During creation, `name` is None and the buffer is created. We can pass the
-        created object to other processes by serializing it. The other processes will
+        created object to other processes by pickling it. The other processes will
         get the name of the shared memory and open it, so that they can access the
         same shared memory buffer.
         """# noqa
@@ -131,8 +129,7 @@ class ShmRingBuffer:
     def __reduce__(self):
         return (
             self.__class__,
-            (self.n_reader, self.max_chunk_bytes, self.max_chunks,
-             self.shared_memory.name),
+            self.handle(),
         )
 
     def __del__(self):
@@ -167,12 +164,6 @@ class Handle:
 
 
 class MessageQueue:
-
-    # For msgpack serialization, we use 4 bytes to store the size of each
-    # message, as we need the size of the encoded message while decoding.
-    # This is not needed for zmq or pickle.
-    SIZE_PREFIX_FORMAT = '!I'  # unsigned int, 4 bytes, network byte order
-    SIZE_PREFIX_LEN = struct.calcsize(SIZE_PREFIX_FORMAT)
 
     def __init__(
         self,
@@ -433,7 +424,6 @@ class MessageQueue:
                 break
 
     def enqueue(self, obj):
-        """Enqueue obj using pickle serialization"""
         assert self._is_writer, "Only writers can enqueue"
         serialized_obj = pickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL)
         if self.n_local_reader > 0:
@@ -449,7 +439,6 @@ class MessageQueue:
             self.remote_socket.send(serialized_obj)
 
     def dequeue(self):
-        """Dequeue obj using pickle serialization"""
         if self._is_local_reader:
             with self.acquire_read() as buf:
                 overflow = buf[0] == 1
@@ -464,57 +453,6 @@ class MessageQueue:
         elif self._is_remote_reader:
             recv = self.remote_socket.recv()
             obj = pickle.loads(recv)
-        else:
-            raise RuntimeError("Only readers can dequeue")
-        return obj
-
-    def enqueue_via_msgpack(self, obj: msgspec.Struct):
-        """Enqueue obj using msgpack serialization"""
-        assert self._is_writer, "Only writers can enqueue"
-
-        encoder = msgspec.msgpack.Encoder()
-        serialized_obj = encoder.encode(obj)
-        size_to_write = self.SIZE_PREFIX_LEN + len(serialized_obj)
-
-        if self.n_local_reader > 0:
-            if size_to_write >= self.buffer.max_chunk_bytes:
-                with self.acquire_write() as buf:
-                    buf[0] = 1  # overflow
-                self.local_socket.send(serialized_obj)
-            else:
-                with self.acquire_write() as buf:
-                    buf[0] = 0  # not overflow
-                    obj_offset = 1 + self.SIZE_PREFIX_LEN
-
-                    # Write size prefix
-                    buf[1:obj_offset] = struct.pack(self.SIZE_PREFIX_FORMAT,
-                                                    len(serialized_obj))
-
-                    buf[obj_offset:obj_offset +
-                        len(serialized_obj)] = serialized_obj
-        if self.n_remote_reader > 0:
-            self.remote_socket.send(serialized_obj)
-
-    def dequeue_via_msgpack(self, obj_type):
-        """Enqueue obj using msgpack serialization"""
-        decoder = msgspec.msgpack.Decoder(obj_type)
-
-        if self._is_local_reader:
-            with self.acquire_read() as buf:
-                overflow = buf[0] == 1
-                if not overflow:
-                    obj_offset = 1 + self.SIZE_PREFIX_LEN
-                    size_bytes = buf[1:obj_offset]
-                    msg_size = struct.unpack(self.SIZE_PREFIX_FORMAT,
-                                             size_bytes)[0]
-
-                    obj = decoder.decode(buf[obj_offset:obj_offset + msg_size])
-            if overflow:
-                recv = self.local_socket.recv()
-                obj = decoder.decode(recv)
-        elif self._is_remote_reader:
-            recv = self.remote_socket.recv()
-            obj = decoder.decode(recv)
         else:
             raise RuntimeError("Only readers can dequeue")
         return obj
