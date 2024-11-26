@@ -39,6 +39,8 @@ SystemEnv = namedtuple(
         'cuda_module_loading',
         'nvidia_driver_version',
         'nvidia_gpu_models',
+        'habana_hpu_models',
+        'habana_driver_version',
         'cudnn_version',
         'pip_version',  # 'pip' or 'pip3'
         'pip_packages',
@@ -252,6 +254,37 @@ def get_nvidia_smi():
                 smi = '"{}"'.format(candidate_smi)
                 break
     return smi
+
+
+def get_hpu_info():
+    try:
+        command = ["hl-smi", "-q", "-d", "PRODUCT"]
+        lines = subprocess.Popen(command, stdout=subprocess.PIPE, universal_newlines=True).stdout.readlines()
+        lines = [l.strip('\t') for l in lines]
+        hpu_count = None
+        hpu_model = None
+        hpu_driver = None
+        model_re = re.compile(r'Product Name.+?: (.+)')
+        count_re = re.compile(r'Attached AIPs.+?: (\d+)')
+        driver_re = re.compile(r'Driver Version.+?: (.+)')
+        for line in lines:            
+            if hpu_c := count_re.match(line):
+                hpu_count = hpu_c.group(1)
+
+            if hpu_m := model_re.match(line):
+                hpu_model = hpu_m.group(1)
+
+            if hpu_d := driver_re.match(line):
+                hpu_driver = hpu_d.group(1)
+
+            if hpu_model and hpu_count and hpu_driver:
+                break
+
+        if hpu_model is None:
+            return ('N/A', hpu_driver)
+        return (f'{hpu_count}x {hpu_model}', hpu_driver)
+    except:
+        return ('N/A', 'N/A')
 
 
 def get_rocm_version(run_lambda):
@@ -568,6 +601,7 @@ def get_env_info():
     vllm_version = get_vllm_version()
     vllm_build_flags = summarize_vllm_build_flags()
     gpu_topo = get_gpu_topo(run_lambda)
+    hpu_info = get_hpu_info()
 
     return SystemEnv(
         torch_version=version_str,
@@ -583,6 +617,8 @@ def get_env_info():
         nvidia_gpu_models=get_gpu_info(run_lambda),
         nvidia_driver_version=get_nvidia_driver_version(run_lambda),
         cudnn_version=get_cudnn_version(run_lambda),
+        habana_hpu_models=hpu_info[0],
+        habana_driver_version=hpu_info[1],
         hip_compiled_version=hip_compiled_version,
         hip_runtime_version=hip_runtime_version,
         miopen_runtime_version=miopen_runtime_version,
@@ -626,6 +662,8 @@ CUDA_MODULE_LOADING set to: {cuda_module_loading}
 GPU models and configuration: {nvidia_gpu_models}
 Nvidia driver version: {nvidia_driver_version}
 cuDNN version: {cudnn_version}
+HPU devices: {habana_hpu_models}
+HPU driver version: {habana_driver_version}
 HIP runtime version: {hip_runtime_version}
 MIOpen runtime version: {miopen_runtime_version}
 Is XNNPACK available: {is_xnnpack_available}
