@@ -161,13 +161,13 @@ class LLMEngine:
     # TODO(rob): Can we get rid of these?
 
     def get_model_config(self):
-        pass
+        return self.model_config
 
     def start_profile(self):
-        pass
+        self.engine_core.profile(True)
 
     def stop_profile(self):
-        pass
+        self.engine_core.profile(False)
 
     def get_tokenizer_group(self, group_type):
         pass
