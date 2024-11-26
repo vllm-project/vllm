@@ -234,6 +234,11 @@ Text Generation
     - :code:`allenai/OLMo-1B-hf`, :code:`allenai/OLMo-7B-hf`, etc.
     -
     - ✅︎
+  * - :code:`OLMo2ForCausalLM`
+    - OLMo2
+    - :code:`allenai/OLMo2-7B-1124`, etc.
+    -
+    - ✅︎
   * - :code:`OLMoEForCausalLM`
     - OLMoE
     - :code:`allenai/OLMoE-1B-7B-0924`, :code:`allenai/OLMoE-1B-7B-0924-Instruct`, etc.
@@ -365,7 +370,7 @@ Text Embedding
 
 .. note::
   Unlike base Qwen2, :code:`Alibaba-NLP/gte-Qwen2-7B-instruct` uses bi-directional attention.
-  You can set `--hf-overrides '{"is_causal": false}'` to change the attention mask accordingly.
+  You can set :code:`--hf-overrides '{"is_causal": false}'` to change the attention mask accordingly.
 
   On the other hand, its 1.5B variant (:code:`Alibaba-NLP/gte-Qwen2-1.5B-instruct`) uses causal attention
   despite being described otherwise on its model card.
@@ -476,6 +481,12 @@ Text Generation
     - Example HF Models
     - :ref:`LoRA <lora>`
     - :ref:`PP <distributed_serving>`
+  * - :code:`AriaForConditionalGeneration`
+    - Aria
+    - T + I
+    - :code:`rhymes-ai/Aria`
+    - 
+    - ✅︎
   * - :code:`Blip2ForConditionalGeneration`
     - BLIP-2
     - T + I\ :sup:`E`
