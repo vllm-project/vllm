@@ -75,50 +75,17 @@ def _get_test_batch(batch_logprobs_composition: str) -> List[Tuple]:
         raise ValueError("Invalid logprobs batch configuration for test.")
 
 
-@pytest.mark.parametrize("model", MODELS)
-@pytest.mark.parametrize("dtype",
-                         ["half"])  # needed for comparing logprobs with HF
-# @pytest.mark.parametrize("detokenize", [True, False])
-@pytest.mark.parametrize("max_num_batched_tokens", [128, 256, 1024])
-@pytest.mark.parametrize("batch_logprobs_composition",
-                         ["NONE", "SAMPLE", "PROMPT", "SAMPLE_PROMPT"])
-def test_get_logprobs_and_prompt_logprobs(
+def _test_case_get_logprobs_and_prompt_logprobs(
     hf_runner,
     vllm_runner,
     model: str,
     dtype: str,
-    # detokenize: bool,
+    detokenize: bool,
     batch_logprobs_composition: str,
     max_num_batched_tokens: int,
     example_prompts,
     monkeypatch,
-):
-    """Test V1 Engine logprobs & prompt logprobs
-    
-    Exercise a variety of combinations of `logprobs` and `prompt_logprobs`
-    settings and validate that
-    * The generated logprobs and prompt logprobs are consistent with the
-      configuration settings, in terms of whether or not the logprobs
-      (of either type) were requested and how many were requested
-    * The generated logprobs are consistent with the generated tokens
-    * The generated (prompt)logprobs are consistent with HuggingFace
-      (prompt)logprobs, as a reference
-
-    batch_logprobs_composition controls the logprobs configurations for
-    requests in the batch under test.
-
-    Args:
-      hf_runner
-      vllm_runner
-      model
-      dtype
-      detokenize: if False, return generated tokens bypassing detokenizer
-      batch_logprobs_composition: logprobs configuration for test batch
-      example_prompts
-      monkeypatch
-    """
-    detokenize = True
-
+) -> None:
     test_prompts = example_prompts
 
     # LLM engine v1
@@ -271,6 +238,98 @@ def test_get_logprobs_and_prompt_logprobs(
                         rtol=1e-2)
         else:
             assert vllm_result.prompt_logprobs is None
+
+
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("dtype",
+                         ["half"])  # needed for comparing logprobs with HF
+# @pytest.mark.parametrize("detokenize", [True, False])
+@pytest.mark.parametrize("max_num_batched_tokens", [128, 256, 1024])
+@pytest.mark.parametrize("batch_logprobs_composition",
+                         ["NONE", "SAMPLE", "PROMPT", "SAMPLE_PROMPT"])
+def test_get_logprobs_and_prompt_logprobs(
+    hf_runner,
+    vllm_runner,
+    model: str,
+    dtype: str,
+    # detokenize: bool,
+    batch_logprobs_composition: str,
+    max_num_batched_tokens: int,
+    example_prompts,
+    monkeypatch,
+) -> None:
+    """Test V1 Engine logprobs & prompt logprobs
+    
+    Exercise a variety of combinations of `logprobs` and `prompt_logprobs`
+    settings and validate that
+    * The generated logprobs and prompt logprobs are consistent with the
+      configuration settings, in terms of whether or not the logprobs
+      (of either type) were requested and how many were requested
+    * The generated logprobs are consistent with the generated tokens
+    * The generated (prompt)logprobs are consistent with HuggingFace
+      (prompt)logprobs, as a reference
+
+    batch_logprobs_composition controls the logprobs configurations for
+    requests in the batch under test.
+
+    Args:
+      hf_runner
+      vllm_runner
+      model
+      dtype
+      detokenize: if False, return generated tokens bypassing detokenizer
+      batch_logprobs_composition: logprobs configuration for test batch
+      example_prompts
+      monkeypatch
+    """
+    detokenize = True
+
+    _test_case_get_logprobs_and_prompt_logprobs(
+        hf_runner=hf_runner,
+        vllm_runner=vllm_runner,
+        model=model,
+        dtype=dtype,
+        detokenize=detokenize,
+        batch_logprobs_composition=batch_logprobs_composition,
+        max_num_batched_tokens=max_num_batched_tokens,
+        example_prompts=example_prompts,
+        monkeypatch=monkeypatch)
+
+
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("dtype",
+                         ["half"])  # needed for comparing logprobs with HF
+# @pytest.mark.parametrize("detokenize", [True, False])
+@pytest.mark.parametrize("max_num_batched_tokens", [128])
+@pytest.mark.parametrize("batch_logprobs_composition", ["SAMPLE_PROMPT"])
+def test_fast_get_logprobs_and_prompt_logprobs(
+    hf_runner,
+    vllm_runner,
+    model: str,
+    dtype: str,
+    # detokenize: bool,
+    batch_logprobs_composition: str,
+    max_num_batched_tokens: int,
+    example_prompts,
+    monkeypatch,
+) -> None:
+    """Fast test: V1 Engine logprobs & prompt logprobs
+    
+    Faster version of `test_get_logprobs_and_prompt_logprobs` with
+    fewer test cases.
+    """
+    detokenize = True
+
+    _test_case_get_logprobs_and_prompt_logprobs(
+        hf_runner=hf_runner,
+        vllm_runner=vllm_runner,
+        model=model,
+        dtype=dtype,
+        detokenize=detokenize,
+        batch_logprobs_composition=batch_logprobs_composition,
+        max_num_batched_tokens=max_num_batched_tokens,
+        example_prompts=example_prompts,
+        monkeypatch=monkeypatch)
 
 
 def test_max_logprobs(monkeypatch):
