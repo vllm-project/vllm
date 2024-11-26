@@ -6,6 +6,7 @@ from functools import lru_cache
 from typing import Any, Generic, NamedTuple, Optional, Protocol, TypeVar, Union
 
 import numpy as np
+import torch
 from transformers import BatchFeature
 from typing_extensions import TypeAlias, TypedDict
 
@@ -581,17 +582,34 @@ class MultiModalProcessor:
         mm_processor_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         hf_processor = self.ctx.get_hf_processor()
+    
+        processor_data = dict[str, Any]()
+        passthrough_data = dict[str, Any]()
+        for k, v in mm_data.items():
+            # TODO: Make a separate modality for embedding inputs
+            # to avoid confusion
+            if k in ("image", "video", "audio"):
+                if isinstance(v, torch.Tensor) and v.ndim == 3:
+                    # Pass through embedding inputs (single)
+                    passthrough_data[f"{k}_embeds"] = [v]
+                elif is_list_of(v, torch.Tensor) and v[0].ndim == 3:
+                    # Pass through embedding inputs (multi)
+                    passthrough_data[f"{k}_embeds"] = v
+                else:
+                    # Map keys to plural form, e.g.: image -> images
+                    processor_data[f"{k}s"] = v
+            else:
+                processor_data[k] = v
 
-        # Map keys to plural form, e.g.: image -> images
-        mm_data = {(k if k.endswith("s") else f"{k}s"): v
-                   for k, v in mm_data.items()}
-
-        return hf_processor(
+        hf_inputs = hf_processor(
             text=prompt,  # type: ignore
-            **mm_data,
+            **processor_data,
             **mm_processor_kwargs,
             return_tensors="pt",
         )
+        hf_inputs.update(passthrough_data)
+
+        return hf_inputs
 
     def _bind_prompt_replacements(
         self,
