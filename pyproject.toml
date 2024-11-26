@@ -98,4 +98,5 @@ markers = [
     "quant_model: run this model test under Quantized category",
     "distributed_2_gpus: run this test only in distributed tests for 2 GPUs",
     "skip_v1: do not run this test with v1",
+    "optional: optional tests that are automatically skipped, include --optional to run them",
 ]
