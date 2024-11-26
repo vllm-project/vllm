@@ -28,7 +28,15 @@ try:
     finally:
         pynvml.nvmlShutdown()
 except Exception:
-    pass
+    # CUDA is supported on Jetson, but NVML may not be.
+    import os
+
+    def cuda_is_jetson() -> bool:
+        return os.path.isfile("/etc/nv_tegra_release") \
+            or os.path.exists("/sys/class/tegra-firmware")
+
+    if cuda_is_jetson():
+        is_cuda = True
 
 is_rocm = False
 
