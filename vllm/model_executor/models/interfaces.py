@@ -11,7 +11,6 @@ from .interfaces_base import is_embedding_model
 
 if TYPE_CHECKING:
     from vllm.attention import AttentionMetadata
-    from vllm.config import LoRAConfig, MultiModalConfig, SchedulerConfig
     from vllm.multimodal.inputs import NestedTensors
     from vllm.sequence import IntermediateTensors
 
@@ -30,9 +29,6 @@ class SupportsMultiModal(Protocol):
         There is no need to redefine this flag if this class is in the
         MRO of your model class.
     """
-
-    def __init__(self, *, multimodal_config: "MultiModalConfig") -> None:
-        ...
 
     def get_multimodal_embeddings(
         self, **kwargs
