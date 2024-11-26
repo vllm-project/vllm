@@ -191,6 +191,10 @@ ADD . /vllm-workspace/
 RUN --mount=type=cache,target=/root/.cache/pip \
     python3 -m pip install -r requirements-dev.txt
 
+# install development dependencies (for testing)
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python3 -m pip install -e tests/vllm_test_utils
+
 # enable fast downloads from hf (for testing)
 RUN --mount=type=cache,target=/root/.cache/pip \
     python3 -m pip install hf_transfer

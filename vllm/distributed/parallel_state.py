@@ -96,42 +96,24 @@ def _register_group(group: "GroupCoordinator") -> None:
     _groups[group.unique_name] = weakref.ref(group)
 
 
+def all_reduce(tensor: torch.Tensor, group_name: str) -> torch.Tensor:
+    assert group_name in _groups, f"Group {group_name} is not found."
+    group = _groups[group_name]()
+    if group is None:
+        raise ValueError(f"Group {group_name} is destroyed.")
+    return group._all_reduce_out_place(tensor)
+
+
+def all_reduce_fake(tensor: torch.Tensor, group_name: str) -> torch.Tensor:
+    return torch.empty_like(tensor)
+
+
 if supports_custom_op():
-
-    def inplace_all_reduce(tensor: torch.Tensor, group_name: str) -> None:
-        assert group_name in _groups, f"Group {group_name} is not found."
-        group = _groups[group_name]()
-        if group is None:
-            raise ValueError(f"Group {group_name} is destroyed.")
-        group._all_reduce_in_place(tensor)
-
-    def inplace_all_reduce_fake(tensor: torch.Tensor, group_name: str) -> None:
-        return
-
     direct_register_custom_op(
-        op_name="inplace_all_reduce",
-        op_func=inplace_all_reduce,
-        mutates_args=["tensor"],
-        fake_impl=inplace_all_reduce_fake,
-    )
-
-    def outplace_all_reduce(tensor: torch.Tensor,
-                            group_name: str) -> torch.Tensor:
-        assert group_name in _groups, f"Group {group_name} is not found."
-        group = _groups[group_name]()
-        if group is None:
-            raise ValueError(f"Group {group_name} is destroyed.")
-        return group._all_reduce_out_place(tensor)
-
-    def outplace_all_reduce_fake(tensor: torch.Tensor,
-                                 group_name: str) -> torch.Tensor:
-        return torch.empty_like(tensor)
-
-    direct_register_custom_op(
-        op_name="outplace_all_reduce",
-        op_func=outplace_all_reduce,
+        op_name="all_reduce",
+        op_func=all_reduce,
         mutates_args=[],
-        fake_impl=outplace_all_reduce_fake,
+        fake_impl=all_reduce_fake,
     )
 
 
@@ -317,30 +299,13 @@ class GroupCoordinator:
             stream.wait_stream(curr_stream)
 
         with torch.cuda.stream(stream), maybe_ca_context:
-            # In graph mode, we have to be very careful about the collective
-            # operations. The current status is:
-            #     allreduce \ Mode   |  Eager  |  Graph  |
-            # --------------------------------------------
-            # custom allreduce       | enabled | enabled |
-            # PyNccl                 | disabled| enabled |
-            # torch.distributed      | enabled | disabled|
-            #
-            # Note that custom allreduce will have a runtime check, if the
-            #  tensor size is too large, it will fallback to the next
-            #  available option.
-            # In summary: When using CUDA graph, we use
-            #  either custom all-reduce kernel or pynccl. When not using
-            #  CUDA graph, we use either custom all-reduce kernel or
-            #  PyTorch NCCL. We always prioritize using custom all-reduce
-            #  kernel but fall back to PyTorch or pynccl if it is
-            #  disabled or not supported.
             pynccl_comm = self.pynccl_comm
             maybe_pynccl_context: Any
             if not pynccl_comm:
                 maybe_pynccl_context = nullcontext()
             else:
                 maybe_pynccl_context = pynccl_comm.change_state(
-                    enable=True, stream=torch.cuda.current_stream())
+                    stream=torch.cuda.current_stream())
             with maybe_pynccl_context:
                 yield graph_capture_context
 
@@ -356,8 +321,8 @@ class GroupCoordinator:
          coordinator.
 
         In addition, PyTorch custom ops do not support mutation or returning
-        a new tensor in the same op. So we need to figure out if the op is
-        in-place or out-of-place ahead of time.
+        a new tensor in the same op. So we always make the all-reduce operation
+        out-of-place.
         """
         # Bypass the function if we are using only 1 GPU.
         if self.world_size == 1:
@@ -366,10 +331,6 @@ class GroupCoordinator:
         if input_.is_cpu:
             import intel_extension_for_pytorch as ipex
             ipex.distributed.all_reduce(input_, group=self.device_group)
-            return input_
-
-        if not supports_custom_op():
-            self._all_reduce_in_place(input_)
             return input_
 
         if self.tpu_communicator is not None and \
@@ -385,30 +346,31 @@ class GroupCoordinator:
                 not self.xpu_communicator.disabled:
             return self.xpu_communicator.all_reduce(input_)
 
-        if self.ca_comm is not None and \
-            not self.ca_comm.disabled and \
-                self.ca_comm.should_custom_ar(input_):
-            return torch.ops.vllm.outplace_all_reduce(
-                input_, group_name=self.unique_name)
-        else:
-            torch.ops.vllm.inplace_all_reduce(input_,
-                                              group_name=self.unique_name)
-            return input_
+        return torch.ops.vllm.all_reduce(input_, group_name=self.unique_name)
 
     def _all_reduce_out_place(self, input_: torch.Tensor) -> torch.Tensor:
+        # always try custom allreduce first,
+        # and then pynccl.
         ca_comm = self.ca_comm
-        assert ca_comm is not None
-        assert not ca_comm.disabled
-        out = ca_comm.custom_all_reduce(input_)
-        assert out is not None
-        return out
-
-    def _all_reduce_in_place(self, input_: torch.Tensor) -> None:
+        if ca_comm is not None and not ca_comm.disabled and \
+            ca_comm.should_custom_ar(input_):
+            out = ca_comm.custom_all_reduce(input_)
+            assert out is not None
+            return out
         pynccl_comm = self.pynccl_comm
-        if (pynccl_comm is not None and not pynccl_comm.disabled):
-            pynccl_comm.all_reduce(input_)
-        else:
-            torch.distributed.all_reduce(input_, group=self.device_group)
+        assert pynccl_comm is not None
+        # TODO: pynccl should not use `stream=`
+        # it can just always use the current stream.
+        out = pynccl_comm.all_reduce(input_,
+                                     stream=torch.cuda.current_stream())
+        if out is None:
+            # fall back to the default all-reduce using PyTorch.
+            # this usually happens during testing.
+            # when we run the model, allreduce only happens for the TP
+            # group, where we always have either custom allreduce or pynccl.
+            out = input_.clone()
+            torch.distributed.all_reduce(out, group=self.device_group)
+        return out
 
     def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
         world_size = self.world_size
