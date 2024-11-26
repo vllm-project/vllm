@@ -11,7 +11,7 @@ from .interfaces_base import is_embedding_model
 
 if TYPE_CHECKING:
     from vllm.attention import AttentionMetadata
-    from vllm.multimodal.inputs import NestedTensors # noqa: F401
+    from vllm.multimodal.inputs import NestedTensors  # noqa: F401
     from vllm.sequence import IntermediateTensors
 
 logger = init_logger(__name__)
