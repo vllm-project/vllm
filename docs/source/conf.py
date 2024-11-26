@@ -16,6 +16,7 @@ import os
 import sys
 from typing import List
 
+import requests
 from sphinx.ext import autodoc
 
 logger = logging.getLogger(__name__)
@@ -96,6 +97,27 @@ def setup(app):
     generate_examples()
 
 
+_cached_base: str = ""
+_cached_branch: str = ""
+
+
+def get_repo_base_and_branch(pr_number):
+    global _cached_base, _cached_branch
+    if _cached_base and _cached_branch:
+        return _cached_base, _cached_branch
+
+    url = f"https://api.github.com/repos/vllm-project/vllm/pulls/{pr_number}"
+    response = requests.get(url)
+    if response.status_code == 200:
+        data = response.json()
+        _cached_base = data['head']['repo']['full_name']
+        _cached_branch = data['head']['ref']
+        return _cached_base, _cached_branch
+    else:
+        logger.error("Failed to fetch PR details: %s", response)
+        return None, None
+
+
 def linkcode_resolve(domain, info):
     if domain != 'py':
         return None
@@ -103,16 +125,34 @@ def linkcode_resolve(domain, info):
         return None
     filename = info['module'].replace('.', '/')
     module = info['module']
+
+    # try to determine the correct file and line number to link to
+    obj = sys.modules[module]
+
+    # get as specific as we can
+    lineno: int = 0
+    filename: str = ""
     try:
-        obj = sys.modules[module]
         for part in info['fullname'].split('.'):
             obj = getattr(obj, part)
-        lineno = inspect.getsourcelines(obj)[1]
-        filename = (inspect.getsourcefile(obj)
-                    or f"{filename}.py").split("vllm/", 1)[1]
-        return f"https://github.com/vllm-project/vllm/blob/main/{filename}#L{lineno}"
+            lineno = inspect.getsourcelines(obj)[1]
+            filename = (inspect.getsourcefile(obj)
+                        or f"{filename}.py").split("vllm/", 1)[1]
     except Exception:
-        return f"https://github.com/vllm-project/vllm/blob/main/{filename}.py"
+        # For some things, like a class member, won't work, so
+        # we'll use the line number of the parent (the class)
+        pass
+
+    if filename.startswith("checkouts/"):
+        # a PR build on readthedocs
+        pr_number = filename.split("/")[1]
+        filename = filename.split("/", 2)[2]
+        base, branch = get_repo_base_and_branch(pr_number)
+        if base and branch:
+            return f"https://github.com/{base}/blob/{branch}/{filename}#L{lineno}"
+
+    # Otherwise, link to the source file on the main branch
+    return f"https://github.com/vllm-project/vllm/blob/main/{filename}#L{lineno}"
 
 
 # Mock out external dependencies here, otherwise the autodoc pages may be blank.
