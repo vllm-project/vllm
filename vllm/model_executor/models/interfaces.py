@@ -1,9 +1,8 @@
 from typing import (TYPE_CHECKING, ClassVar, Dict, List, Literal, Optional,
-                    Protocol, Type, TypeVar, Union, overload,
-                    runtime_checkable)
+                    Protocol, Type, Union, overload, runtime_checkable)
 
 import torch
-from typing_extensions import TypeIs
+from typing_extensions import TypeIs, TypeVar
 
 from vllm.logger import init_logger
 from vllm.utils import supports_kw
@@ -12,11 +11,12 @@ from .interfaces_base import is_embedding_model
 
 if TYPE_CHECKING:
     from vllm.attention import AttentionMetadata
+    from vllm.multimodal.inputs import NestedTensors
     from vllm.sequence import IntermediateTensors
 
 logger = init_logger(__name__)
 
-T = TypeVar("T")
+T = TypeVar("T", default=NestedTensors)
 
 
 @runtime_checkable
