@@ -497,9 +497,12 @@ class CPUModelRunner(CPUModelRunnerBase[ModelInputForCPUWithSamplingMetadata]):
                                                      pin_memory=False,
                                                      generators=generators)
 
+        is_prompt = (seq_group_metadata_list[0].is_prompt
+                     if seq_group_metadata_list else None)
         return dataclasses.replace(model_input,
                                    sampling_metadata=sampling_metadata,
-                                   virtual_engine=virtual_engine)
+                                   virtual_engine=virtual_engine,
+                                   is_prompt=is_prompt)
 
     @torch.no_grad()
     def execute_model(

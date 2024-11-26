@@ -167,14 +167,14 @@ class CPUWorker(LoraNotSupportedWorkerBase, LocalOrDistributedWorkerBase):
             ModelRunnerClass = CPUEmbeddingModelRunner
         elif self.model_config.is_encoder_decoder:
             ModelRunnerClass = CPUEncoderDecoderModelRunner
-        elif model_runner_cls is not None:
-            ModelRunnerClass = model_runner_cls
         self.model_runner: CPUModelRunnerBase = ModelRunnerClass(
             vllm_config=vllm_config,
             kv_cache_dtype=kv_cache_dtype,
             is_driver_worker=is_driver_worker,
             **speculative_args,
         )
+        if model_runner_cls is not None:
+            self.model_runner = model_runner_cls(self.model_runner)
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
         self.cache_engine: List[CPUCacheEngine]
