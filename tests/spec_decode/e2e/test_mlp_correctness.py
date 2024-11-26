@@ -127,6 +127,11 @@ def test_mlp_e2e_greedy_logprobs(vllm_runner, common_llm_kwargs,
                                  logprobs: int, prefill_chunk_size: int):
     """Verify greedy equality with different batch size."""
     maybe_enable_chunked_prefill(prefill_chunk_size, test_llm_kwargs)
+    # NOTE Test is sensitive enough st if we don't enable chunked prefill
+    # scheduling on baseline too, we get slightly different logprobs, ending
+    # up sampling different tokens at the tail (ie top tokens don't change).
+    # TL;DR: sd+cp == org+cp but sd+cp != org..is this expected? 
+    maybe_enable_chunked_prefill(prefill_chunk_size, baseline_llm_kwargs)
     run_equality_correctness_test(vllm_runner,
                                   common_llm_kwargs,
                                   per_test_common_llm_kwargs,
@@ -222,6 +227,7 @@ def test_mlp_e2e_seeded_correctness(vllm_runner, common_llm_kwargs,
                                     prefill_chunk_size: int, seed: int):
     """Verify seeded runs produce the same output."""
     maybe_enable_chunked_prefill(prefill_chunk_size, test_llm_kwargs)
+    maybe_enable_chunked_prefill(prefill_chunk_size, baseline_llm_kwargs)
     run_equality_correctness_test(vllm_runner,
                                   common_llm_kwargs,
                                   per_test_common_llm_kwargs,
@@ -438,6 +444,7 @@ def test_mlp_different_k(vllm_runner, common_llm_kwargs,
         # Use smaller output len for fast test.
         32,
     ])
+# test with chunk size >= `speculative_disable_by_batch_size`
 @pytest.mark.parametrize("prefill_chunk_size", [-1, 4])
 @pytest.mark.parametrize("seed", [1])
 def test_mlp_disable_queue(vllm_runner, common_llm_kwargs,
