@@ -632,29 +632,22 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         assert len(sampler_output) == 1
         sampler_output = sampler_output[0]
 
-        # Store hidden states from target model execution.
+        # Store hidden states from target model execution, BxD.
         hidden_states = sampler_output.hidden_states
-        # TODO prefills store the entire hidden state for some reason..
-        # HIDDEN STATE DIM torch.Size([27, 768]) => I THINK THIS MAY BE BxD, so 27 seqs together, all their final dim
         if hidden_states is not None:
-            # ==>Only terminal chunks will have a hidden state.
-            # TODO Enable `return_hidden_states`: prefill chunks hidden states
-            # are pruned by the logits processor. Also, they should be arranged
-            # back into full-prefill latent. Address it to enable MLPSpeculator.
-            new_sg = [sg for sg in execute_model_req.seq_group_metadata_list if sg.do_sample and sg.is_prompt]
-            if any(seq.is_prompt and seq.do_sample
-                   for seq in execute_model_req.seq_group_metadata_list):
-                # remove hidden_states for prompt tokens DOES NOTHING FOR PREFILLS WITH DO_SAMPLE as they return a token
+            # Only decodes and prefill terminal chunks need a hidden state.
+            seq_group_meta_with_hidden = [sg for sg in execute_model_req.seq_group_metadata_list if sg.do_sample]
+            if any(seq.is_prompt for seq in seq_group_meta_with_hidden):
+                # Drop hidden_states with no prediction (eg non-terminal chunks)
                 hidden_states = hidden_states[
                     torch.where(sampler_output.sampled_token_ids -
                                 VLLM_INVALID_TOKEN_ID)[0]]
-            if self.previous_hidden_states is None and len(new_sg):
-                # NOTE hidden state of last token, 1x768
+            if self.previous_hidden_states is None and len(seq_group_meta_with_hidden):
                 self.previous_hidden_states = HiddenStates(
-                    hidden_states, new_sg)
-            elif len(new_sg):
+                    hidden_states, seq_group_meta_with_hidden)
+            elif len(seq_group_meta_with_hidden):
                 self.previous_hidden_states.update(
-                    hidden_states, new_sg)
+                    hidden_states, seq_group_meta_with_hidden)
 
         if not skip_proposer:
             # We prepare the prefill hidden states here so that there no
