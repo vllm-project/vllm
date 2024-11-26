@@ -106,11 +106,6 @@ class PyNcclCommunicator:
             self.stream.synchronize()
             del data
 
-        # by default it is disabled, e.g. in profiling models and prefill phase.
-        # to use it, use under `with obj.change_state(enable=True)`, usually
-        # when we are using CUDA graph.
-        self.disabled = True
-
     def all_reduce(self,
                    in_tensor: torch.Tensor,
                    op: ReduceOp = ReduceOp.SUM,
