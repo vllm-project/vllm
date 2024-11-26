@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-T = TypeVar("T", default=NestedTensors)
+T = TypeVar("T", default="NestedTensors")
 
 
 @runtime_checkable
