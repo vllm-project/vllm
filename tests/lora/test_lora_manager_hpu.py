@@ -36,7 +36,7 @@ def test_from_lora_tensors(sql_lora_files):
         8,
         16,
         tensors,
-        "hpu",
+        torch.device("hpu"),
         embeddings=new_embeddings,
         embedding_modules=EMBEDDING_MODULES,
         embedding_padding_modules=EMBEDDING_PADDING_MODULES)
@@ -104,7 +104,8 @@ def test_replace_submodules(dist_init, dummy_model):
     model.packed_modules_mapping = {}
     manager = LoRAModelManager(
         model, 1, 1, 1,
-        LoRAConfig(max_lora_rank=8, max_cpu_loras=8, max_loras=8))
+        LoRAConfig(max_lora_rank=8, max_cpu_loras=8, max_loras=8),
+        torch.device("hpu"))
     model = manager.model
 
     assert isinstance(model.get_submodule("dense1"),
@@ -125,7 +126,8 @@ def test_lora_model_manager(dist_init, dummy_model):
     model_lora3 = create_lora(3, model, ["dense1", "dense2", "lm_head"])
     manager = LoRAModelManager(
         model, 2, 2, 2,
-        LoRAConfig(max_lora_rank=8, max_cpu_loras=3, max_loras=2))
+        LoRAConfig(max_lora_rank=8, max_cpu_loras=3, max_loras=2),
+        torch.device("hpu"))
     assert all(x is None for x in manager.lora_index_to_id)
     assert manager.add_adapter(model_lora1)
     assert manager.activate_adapter(1)
@@ -171,7 +173,8 @@ def test_lora_lru_cache_model_manager(dist_init, dummy_model):
     model_lora3 = create_lora(3, model, ["dense1", "dense2", "lm_head"])
     manager = LRUCacheLoRAModelManager(
         model, 2, 2, 2,
-        LoRAConfig(max_lora_rank=8, max_cpu_loras=3, max_loras=2))
+        LoRAConfig(max_lora_rank=8, max_cpu_loras=3, max_loras=2),
+        torch.device("hpu"))
     assert all(x is None for x in manager.lora_index_to_id)
     assert manager.add_adapter(model_lora1)
     assert manager.activate_adapter(1)
@@ -251,7 +254,8 @@ def test_lru_lora_model_manager(dist_init, dummy_model):
     model_lora4 = create_lora(4, model, ["dense1", "dense2", "lm_head"])
     manager = LRUCacheLoRAModelManager(
         model, 2, 2, 2,
-        LoRAConfig(max_lora_rank=8, max_cpu_loras=2, max_loras=2))
+        LoRAConfig(max_lora_rank=8, max_cpu_loras=2, max_loras=2),
+        torch.device("hpu"))
 
     assert all(x is None for x in manager.lora_index_to_id)
 
@@ -522,7 +526,8 @@ def test_packed_loras(dist_init, dummy_model_gate_up):
 
     manager = LoRAModelManager(
         model, 2, 2, 2,
-        LoRAConfig(max_lora_rank=8, max_cpu_loras=2, max_loras=2))
+        LoRAConfig(max_lora_rank=8, max_cpu_loras=2, max_loras=2),
+        torch.device("hpu"))
     model = manager.model
 
     assert isinstance(model.get_submodule("gate_up_proj"),
