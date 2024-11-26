@@ -1117,6 +1117,7 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
         super().__init__()
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
+        self.quant_config = quant_config
         self.vocab_size = config.text_config.vocab_size
         self.hidden_size = config.text_config.hidden_size
         self.max_num_tiles = config.vision_config.max_num_tiles
@@ -1430,6 +1431,16 @@ class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
                 name = name.replace('patch_embedding.weight',
                                     'patch_embedding._linear.weight')
                 loaded_weight = loaded_weight.view(loaded_weight.shape[0], -1)
+            if scale_names := self.quant_config.get_cache_scale(name):
+                # Loading kv cache scales for compressed-tensors quantization
+                for scale_name in scale_names:
+                    param = params_dict[scale_name]
+                    weight_loader = getattr(param, "weight_loader",
+                                            default_weight_loader)
+                    loaded_weight = loaded_weight if loaded_weight.dim()==0 else loaded_weight[0]
+                    weight_loader(param, loaded_weight)
+                    updated_params.add(scale_name)
+                continue
             for (param_name, weight_name, shard_id) in stacked_params_mapping:
                 if weight_name not in name:
                     continue

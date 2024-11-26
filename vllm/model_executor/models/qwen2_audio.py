@@ -454,6 +454,16 @@ class Qwen2AudioForConditionalGeneration(nn.Module, SupportsMultiModal,
             if (self.config.text_config.tie_word_embeddings
                     and "lm_head.weight" in name):
                 continue
+            if scale_names := self.quant_config.get_cache_scale(name):
+                # Loading kv cache scales for compressed-tensors quantization
+                for scale_name in scale_names:
+                    param = params_dict[scale_name]
+                    weight_loader = getattr(param, "weight_loader",
+                                            default_weight_loader)
+                    loaded_weight = loaded_weight if loaded_weight.dim()==0 else loaded_weight[0]
+                    weight_loader(param, loaded_weight)
+                    loaded_params.add(scale_name)
+                continue
             for key_to_modify, new_key in _KEYS_TO_MODIFY_MAPPING.items():
                 if key_to_modify in name:
                     name = name.replace(key_to_modify, new_key)
