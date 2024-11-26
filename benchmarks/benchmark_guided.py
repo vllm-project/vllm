@@ -40,7 +40,7 @@ class SampleRequest:
 def run_vllm(requests: List[SampleRequest],
              engine_args: EngineArgs,
              n: int,
-             guided_decoding: bool = False,
+             guided_decoding_rate: float = 1.0,
              warmup: bool = False) -> float:
     from vllm import LLM, SamplingParams
     llm = LLM(**vars(engine_args))
@@ -48,7 +48,11 @@ def run_vllm(requests: List[SampleRequest],
     # Add the requests to the engine.
     prompts: List[str] = []
     sampling_params: List[SamplingParams] = []
-    for request in requests:
+    # create a list containing random selected true or false
+    guided_decoding_req_idx = random.sample(
+        range(len(requests)), int(len(requests) * guided_decoding_rate))
+
+    for i, request in enumerate(requests):
         prompts.append(request.prompt)
         sampling_params.append(
             SamplingParams(
@@ -59,7 +63,7 @@ def run_vllm(requests: List[SampleRequest],
                 max_tokens=request.expected_output_len,
                 guided_decoding=GuidedDecodingParams(
                     **{request.structure_type: request.schema})
-                if guided_decoding else None,
+                if i in guided_decoding_req_idx else None,
             ))
 
     start = time.perf_counter()
@@ -79,7 +83,7 @@ async def run_vllm_async(
         requests: List[SampleRequest],
         engine_args: AsyncEngineArgs,
         n: int,
-        guided_decoding: bool = False,
+        guided_decoding_rate: float = 1.0,
         warmup: bool = False,
         disable_frontend_multiprocessing: bool = False) -> float:
     from vllm import SamplingParams
@@ -90,12 +94,15 @@ async def run_vllm_async(
         # Add the requests to the engine.
         prompts: List[str] = []
         sampling_params: List[SamplingParams] = []
+        guided_decoding_req_idx = random.sample(
+            range(len(requests)), int(len(requests) * guided_decoding_rate))
+
         if warmup:
             print("Running warmup prompt, for the first 5")
             # We setup the first 5 requests to warmup FSM
             warmup_requests = requests[:5]
             requests = requests[5:]
-            for request in warmup_requests:
+            for i, request in enumerate(warmup_requests):
                 prompts.append(request.prompt)
                 sampling_params.append(
                     SamplingParams(
@@ -105,7 +112,8 @@ async def run_vllm_async(
                         ignore_eos=True,
                         max_tokens=request.expected_output_len,
                         guided_decoding=GuidedDecodingParams(
-                            json=request.schema) if guided_decoding else None,
+                            json=request.schema)
+                        if i in guided_decoding_req_idx else None,
                     ))
             generators = []
             for i, (prompt, sp) in enumerate(zip(prompts, sampling_params)):
@@ -117,7 +125,7 @@ async def run_vllm_async(
 
         prompts = []
         sampling_params = []
-        for request in requests:
+        for i, request in enumerate(requests):
             prompts.append(request.prompt)
             sampling_params.append(
                 SamplingParams(
@@ -126,8 +134,8 @@ async def run_vllm_async(
                     top_p=1.0,
                     ignore_eos=True,
                     max_tokens=request.expected_output_len,
-                    guided_decoding=GuidedDecodingParams(
-                        json=request.schema) if guided_decoding else None,
+                    guided_decoding=GuidedDecodingParams(json=request.schema)
+                    if i in guided_decoding_req_idx else None,
                 ))
 
         generators = []
@@ -330,8 +338,10 @@ def main(args: argparse.Namespace):
     else:
         args.structure_type = 'json'
 
+    if args.no_guided_decoding:
+        args.guided_decoding_ratio = 0
     if args.save_results:
-        result_file_name = 'guided' if args.guided_decoding else 'no_guided'
+        result_file_name = f'{args.guided_decoding_ratio}guided'
         result_file_name += f"_{args.model.split('/')[-1]}"
         result_file_name += f"_{args.dataset}"
         result_file_name += f"_{args.num_prompts}"
@@ -351,12 +361,13 @@ def main(args: argparse.Namespace):
     if args.async_engine:
         engine_args = AsyncEngineArgs.from_cli_args(args)
         elapsed_time, ret, (first_latency, next_latency) = uvloop.run(
-            run_vllm_async(requests, engine_args, args.n, args.guided_decoding,
-                           args.warmup, args.disable_frontend_multiprocessing))
+            run_vllm_async(requests, engine_args, args.n,
+                           args.guided_decoding_ratio, args.warmup,
+                           args.disable_frontend_multiprocessing))
     else:
         engine_args = EngineArgs.from_cli_args(args)
         elapsed_time, ret = run_vllm(requests, engine_args, args.n,
-                                     args.guided_decoding, args.warmup)
+                                     args.guided_decoding_ratio, args.warmup)
         first_latency, next_latency = None, None
 
     score = evaluate(ret, args)
@@ -405,10 +416,12 @@ if __name__ == "__main__":
 
     parser.add_argument("--output-len",
                         type=int,
+                        default=512,
                         help="Output length for each request. Overrides the "
                         "output length from the dataset.")
     parser.add_argument(
         "--dataset",
+        default='json',
         choices=['json', 'grammar', 'regex', 'choice', 'xgrammar_bench'])
     parser.add_argument("--json_schema_path",
                         type=str,
@@ -431,10 +444,14 @@ if __name__ == "__main__":
                         action='store_true',
                         default=False,
                         help="Use vLLM async engine rather than LLM class.")
-    parser.add_argument("--guided-decoding",
+    parser.add_argument("--no-guided-decoding",
                         action='store_true',
                         default=False,
-                        help="Whether to enable JSON decoding or not.")
+                        help="Whether to disable JSON decoding or not.")
+    parser.add_argument("--guided-decoding-ratio",
+                        type=float,
+                        default=1.0,
+                        help="Ratio of Guided Decoding requests")
     parser.add_argument("--disable-frontend-multiprocessing",
                         action='store_true',
                         default=False,
