@@ -867,7 +867,8 @@ def test_chunked_prefill_flow(k: int, batch_size: int, batch_composition: str):
     target_group_metadata_list = prefill + decodes
     execute_model_req = ExecuteModelRequest(
         seq_group_metadata_list=target_group_metadata_list,
-        num_lookahead_slots=k)
+        # For prefill only batches we expect num_lookahead_slots = 0.
+        num_lookahead_slots=k if n_decodes > 0 else 0)
 
     target_token_ids = torch.randint(low=0,
                                      high=vocab_size,

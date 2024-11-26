@@ -118,7 +118,7 @@ Feature x Feature
      - 
      - 
    * - :ref:`SD <spec_decode>`
-     - ✗
+     - ✅
      - ✅
      - ✗
      - ✅

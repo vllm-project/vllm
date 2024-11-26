@@ -408,7 +408,20 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         disable_all_speculation = self._should_disable_all_speculation(
             execute_model_req)
         num_lookahead_slots = execute_model_req.num_lookahead_slots
+        all_prompt = True
+        atleast_one_prompt = False
+        all_zero_spec_tokens = True
+        for sgm in execute_model_req.seq_group_metadata_list:
+            all_prompt = all_prompt and sgm.is_prompt
+            atleast_one_prompt = atleast_one_prompt or sgm.is_prompt
+            all_zero_spec_tokens = all_zero_spec_tokens and (
+                sgm.num_speculative_tokens == 0)
 
+        if all_prompt and execute_model_req.seq_group_metadata_list:
+            assert num_lookahead_slots == 0, (
+                "Prompt only runs should have num_lookahead_slots equal to 0. "
+                "This should never happen, please file a bug at "
+                "https://github.com/vllm-project/vllm/issues")
         # Speculative decoding is disabled in the following cases:
         # 1. Prefill phase: Speculative decoding is not
         #    used during the prefill phase.
@@ -419,11 +432,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         # In any of these cases, the proposer and scorer workers
         # are called normally.
         # We expect `num_speculative_tokens` to be None for prefills.
-        no_spec = all(
-            sgm.is_prompt for sgm in execute_model_req.seq_group_metadata_list
-        ) or num_lookahead_slots == 0 or disable_all_speculation or all(
-            sgm.num_speculative_tokens == 0
-            for sgm in execute_model_req.seq_group_metadata_list)
+        no_spec = (num_lookahead_slots == 0 or disable_all_speculation
+                   or all_zero_spec_tokens)
 
         # Broadcast how many lookahead slots are scheduled for this step, and
         # whether all speculation is disabled, to all non-driver workers.
@@ -442,6 +452,15 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             num_lookahead_slots=num_lookahead_slots,
             no_spec=no_spec,
             disable_all_speculation=disable_all_speculation,
+            # When both chunked prefill and speculative decoding are enabled
+            # it is possible that the same batch contains both prefill
+            # and decodes. If that happens in the scorer we run the batch
+            # as one single forward pass. However, in the proposer we
+            # run them as 2 different batches - one for prefill and
+            # the other for decodes. The variable indicates to the non-driver
+            # worker that there are prefills as part of the speculative batch
+            # and hence it needs to run an extra prefill forward pass.
+            run_spec_proposer_for_prefill=atleast_one_prompt,
         )
         broadcast_tensor_dict(broadcast_dict, src=self._driver_rank)
 
@@ -653,6 +672,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
         if not data["no_spec"]:
             self.scorer_worker.execute_model()
+            if data["run_spec_proposer_for_prefill"]:
+                self.proposer_worker.execute_model()
 
         return True
 
