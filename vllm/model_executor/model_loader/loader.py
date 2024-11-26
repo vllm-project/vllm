@@ -1025,6 +1025,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
             if isinstance(module, (LinearBase, )):
                 last_name = name.split(".")[-1]
                 if sub_modules := inverse_stacked_mapping.get(last_name, []):
+                    # Map vllm's names to transformers' names.
                     for sub_name in sub_modules:
                         linear_module_lst.append(
                             name.replace(last_name, sub_name))
