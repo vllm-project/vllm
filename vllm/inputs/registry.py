@@ -230,21 +230,38 @@ class InputRegistry:
             This should be called after
             :meth:`~MultiModalRegistry.init_mm_limits_per_prompt`.
         """
-        # Avoid circular import
-        from vllm.model_executor.model_loader import get_model_architecture
+        if mm_registry.has_processor(model_config):
+            # Avoid circular import
+            from vllm.multimodal.utils import cached_get_tokenizer
 
-        model_cls, _ = get_model_architecture(model_config)
-        if is_encoder_data:
-            dummy_factory = self._get_dummy_encoder_data_factory(model_cls)
+            tokenizer = cached_get_tokenizer(
+                model_config.tokenizer,
+                trust_remote_code=model_config.trust_remote_code,
+            )
+            processor = mm_registry.create_processor(model_config, tokenizer)
+
+            mm_counts = mm_registry.get_mm_limits_per_prompt(model_config)
+            mm_max_tokens = mm_registry.get_max_tokens_by_modality(
+                model_config)
+
+            dummy_data = processor.get_dummy_data(seq_len, mm_counts,
+                                                  mm_max_tokens)
         else:
-            dummy_factory = self._get_dummy_data_factory(model_cls)
-        mm_counts = mm_registry.get_mm_limits_per_prompt(model_config)
-        mm_processor_kwargs = get_allowed_kwarg_only_overrides(
-            dummy_factory, overrides=model_config.mm_processor_kwargs)
+            # Avoid circular import
+            from vllm.model_executor.model_loader import get_model_architecture
 
-        dummy_data = dummy_factory(InputContext(model_config), seq_len,
-                                   _MultiModalCounts(mm_counts),
-                                   **mm_processor_kwargs)
+            model_cls, _ = get_model_architecture(model_config)
+            if is_encoder_data:
+                dummy_factory = self._get_dummy_encoder_data_factory(model_cls)
+            else:
+                dummy_factory = self._get_dummy_data_factory(model_cls)
+            mm_counts = mm_registry.get_mm_limits_per_prompt(model_config)
+            mm_processor_kwargs = get_allowed_kwarg_only_overrides(
+                dummy_factory, overrides=model_config.mm_processor_kwargs)
+
+            dummy_data = dummy_factory(InputContext(model_config), seq_len,
+                                       _MultiModalCounts(mm_counts),
+                                       **mm_processor_kwargs)
 
         # Having more tokens is over-conservative but otherwise fine
         num_tokens = dummy_data.seq_data.prompt_token_ids

@@ -199,6 +199,27 @@ class MultiModalRegistry:
         """
         return self.register_max_multimodal_tokens("image", max_mm_tokens)
 
+    def get_max_tokens_by_modality(
+        self,
+        model_config: "ModelConfig",
+    ) -> Mapping[str, int]:
+        """
+        Get the maximum number of tokens from each modality
+        for profiling the memory usage of a model.
+
+        See :meth:`MultiModalPlugin.get_max_multimodal_tokens` for more details.
+
+        Note:
+            This should be called after :meth:`init_mm_limits_per_prompt`.
+        """
+        limits_per_plugin = self._limits_by_model[model_config]
+
+        return {
+            key: (limits_per_plugin[key] *
+                  plugin.get_max_multimodal_tokens(model_config))
+            for key, plugin in self._plugins.items()
+        }
+
     def get_max_multimodal_tokens(self, model_config: "ModelConfig") -> int:
         """
         Get the maximum number of multi-modal tokens
@@ -209,11 +230,7 @@ class MultiModalRegistry:
         Note:
             This should be called after :meth:`init_mm_limits_per_prompt`.
         """
-        limits_per_plugin = self._limits_by_model[model_config]
-
-        return sum((limits_per_plugin[key] *
-                    plugin.get_max_multimodal_tokens(model_config))
-                   for key, plugin in self._plugins.items())
+        return sum(self.get_max_tokens_by_modality(model_config).values())
 
     def init_mm_limits_per_prompt(
         self,
@@ -269,7 +286,8 @@ class MultiModalRegistry:
         factory: MultiModalProcessorFactory,
     ):
         """
-        Register a multi-modal processor to a model class.
+        Register a multi-modal processor to a model class. The processor
+        is constructed lazily, hence a factory method should be passed.
 
         When the model receives multi-modal data, the provided function is
         invoked to transform the data into a dictionary of model inputs.
