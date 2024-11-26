@@ -361,6 +361,12 @@ class MMLLMEngineClient(EngineClient):
     async def get_tokenizer(self, lora_request: Optional[LoRARequest] = None):
         return await self.tokenizer.get_lora_tokenizer_async(lora_request)
 
+    async def get_tokenizer_mm(self, model, lora_request: Optional[LoRARequest] = None):
+        for tokenizer in self.tokenizers:
+            if tokenizer.tokenizer_id == model:
+                return await tokenizer.get_lora_tokenizer_async(lora_request)
+        raise ValueError(f"Tokenizer for model {model} not found.")
+
     async def get_decoding_config(self) -> DecodingConfig:
         return self.decoding_config
 
@@ -458,6 +464,7 @@ class MMLLMEngineClient(EngineClient):
         prompt: Optional[PromptType] = None,
         sampling_params: Optional[SamplingParams] = None,
         request_id: Optional[str] = None,
+        model: Optional[str] = None,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
@@ -489,7 +496,7 @@ class MMLLMEngineClient(EngineClient):
         assert (prompt is not None and sampling_params is not None
                 and request_id is not None)
 
-        return self._process_request(prompt, sampling_params, request_id,
+        return self._process_request(prompt, sampling_params, request_id, model,
                                      lora_request, trace_headers,
                                      prompt_adapter_request, priority)
 
@@ -570,6 +577,7 @@ class MMLLMEngineClient(EngineClient):
         prompt: PromptType,
         params: Union[SamplingParams, PoolingParams],
         request_id: str,
+        model: str,
         lora_request: Optional[LoRARequest] = None,
         trace_headers: Optional[Mapping[str, str]] = None,
         prompt_adapter_request: Optional[PromptAdapterRequest] = None,
@@ -618,6 +626,7 @@ class MMLLMEngineClient(EngineClient):
                     prompt=prompt,
                     params=params,
                     request_id=request_id,
+                    model=model,
                     lora_request=lora_request,
                     trace_headers=trace_headers,
                     prompt_adapter_request=prompt_adapter_request,

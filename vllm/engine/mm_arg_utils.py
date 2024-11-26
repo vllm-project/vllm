@@ -911,7 +911,7 @@ class EngineArgs:
             model=model if model is not None else self.model,
             task=self.task,
             # We know this is not None because we set it in __post_init__
-            tokenizer=cast(str, self.tokenizer),
+            tokenizer=cast(str, model),
             tokenizer_mode=self.tokenizer_mode,
             trust_remote_code=self.trust_remote_code,
             allowed_local_media_path=self.allowed_local_media_path,

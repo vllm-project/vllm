@@ -99,7 +99,7 @@ class OpenAIServingCompletion(OpenAIServing):
                 prompt_adapter_request,
             ) = self._maybe_get_adapters(request)
 
-            tokenizer = await self.engine_client.get_tokenizer(lora_request)
+            tokenizer = await self.engine_client.get_tokenizer_mm(request.model, lora_request)
 
             request_prompts, engine_prompts = self._preprocess_completion(
                 request,
@@ -148,6 +148,7 @@ class OpenAIServingCompletion(OpenAIServing):
                         engine_prompt,
                         sampling_params,
                         request_id_item,
+                        request.model,
                         lora_request=lora_request,
                         prompt_adapter_request=prompt_adapter_request,
                         trace_headers=trace_headers,

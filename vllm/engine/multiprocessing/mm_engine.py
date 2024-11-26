@@ -71,20 +71,19 @@ class MMLLMEngine:
         
         # get configs from args and kwargs, determine how many models to load
         vllm_config = kwargs.get('vllm_config')
-        print(f"aaaa {vllm_config}")
         models_load = [model_config.model for model_config in vllm_config.model_configs ]
         self.engines  = []
         
         for i, model in enumerate(models_load):
-            print(f"create engine for model: {model}")
             vllm_config.model_config = vllm_config.model_configs[i]
             self.engines.append(LLMEngine(model=model, *args, **kwargs))
         self.log_requests = log_requests
 
         self.use_async_sockets = use_async_sockets
-        # if self.use_async_sockets:
-        #     self.engine.process_request_outputs_callback = \
-        #         self._async_socket_engine_callback
+        if self.use_async_sockets:
+            for engine in self.engines:
+                engine.process_request_outputs_callback = \
+                self._async_socket_engine_callback
 
         self.ctx = zmq.Context()  # type: ignore[attr-defined]
 
@@ -215,7 +214,7 @@ class MMLLMEngine:
         try:
             res = []
             for engine in self.engines:
-                res.append(engine.step())
+                res += engine.step()
             return res
         except SystemExit:
             raise
@@ -269,14 +268,16 @@ class MMLLMEngine:
             self._send_outputs(rpc_err)
 
         try:
-            self.engine.add_request(
-                request_id=request_id,
-                prompt=request.prompt,
-                params=request.params,
-                lora_request=request.lora_request,
-                trace_headers=request.trace_headers,
-                prompt_adapter_request=request.prompt_adapter_request,
-                priority=request.priority)
+            for engine in self.engines:
+                if engine.model_config.model == request.model:
+                    engine.add_request(
+                        request_id=request_id,
+                        prompt=request.prompt,
+                        params=request.params,
+                        lora_request=request.lora_request,
+                        trace_headers=request.trace_headers,
+                        prompt_adapter_request=request.prompt_adapter_request,
+                        priority=request.priority)
 
             if self.log_requests:
                 logger.info("Added request %s.", request.request_id)
@@ -372,7 +373,6 @@ def signal_handler(*_) -> None:
 def run_mm_engine(engine_args: AsyncEngineArgs, usage_context: UsageContext,
                   ipc_path: str, engine_alive):
     try:
-        print(f"bbbb {engine_args}")
         engine = MMLLMEngine.from_engine_args(engine_args=engine_args,
                                               usage_context=usage_context,
                                               ipc_path=ipc_path)

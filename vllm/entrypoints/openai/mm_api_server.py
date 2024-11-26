@@ -128,7 +128,6 @@ async def build_async_engine_client_from_engine_args(
 
     Returns the Client or None if the creation failed.
     """
-
     # Fall back
     # TODO: fill out feature matrix.
     if (MMLLMEngineClient.is_unsupported_config(engine_args)
