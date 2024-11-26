@@ -450,6 +450,17 @@ class DbrxForCausalLM(nn.Module, SupportsPP):
         loaded_params: Set[str] = set()
         
         for name, loaded_weight in weights:
+            if scale_names := self.quant_config.get_cache_scale(name):
+                # Loading kv cache scales for compressed-tensors quantization
+                for scale_name in scale_names:
+                    param = params_dict[scale_name]
+                    weight_loader = getattr(param, "weight_loader",
+                                            default_weight_loader)
+                    loaded_weight = loaded_weight if loaded_weight.dim()==0 else loaded_weight[0]
+                    weight_loader(param, loaded_weight)
+                    loaded_params.add(scale_name)
+                continue
+            
             if name.endswith(("w1", "w2", "v1")):
                 name = name + "_weight"
             for param_name, weight_name in expert_params_mapping:
