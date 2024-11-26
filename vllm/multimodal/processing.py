@@ -582,7 +582,7 @@ class MultiModalProcessor:
         mm_processor_kwargs: Mapping[str, object],
     ) -> BatchFeature:
         hf_processor = self.ctx.get_hf_processor()
-    
+
         processor_data = dict[str, Any]()
         passthrough_data = dict[str, Any]()
         for k, v in mm_data.items():
