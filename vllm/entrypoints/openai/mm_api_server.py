@@ -515,7 +515,7 @@ def init_app_state(
     if args.served_model_name is not None:
         served_model_names = args.served_model_name
     else:
-        served_model_names = [args.model]
+        served_model_names = [model for model in args.model]
 
     if args.disable_log_requests:
         request_logger = None
@@ -523,8 +523,8 @@ def init_app_state(
         request_logger = RequestLogger(max_log_len=args.max_log_len)
 
     base_model_paths = [
-        BaseModelPath(name=name, model_path=args.model)
-        for name in served_model_names
+        BaseModelPath(name=name, model_path=path)
+        for name, path in zip(served_model_names, args.model)
     ]
 
     state.engine_client = engine_client
@@ -615,7 +615,6 @@ async def run_server(args, **uvicorn_kwargs) -> None:
 
     async with build_async_engine_client(args) as engine_client:
         app = build_app(args)
-        print(f"args: {args}")
 
         model_config = await engine_client.get_model_config()
         init_app_state(engine_client, model_config, app.state, args)
