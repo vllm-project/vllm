@@ -59,7 +59,7 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
     kwargs["model_runner_cls"] = TargetModelRunner
     target_worker_config = copy.deepcopy(vllm_config)
     target_worker_config.parallel_config.worker_cls =\
-        target_worker_config.parallel_config.actual_worker_cls
+        target_worker_config.parallel_config.sd_worker_cls
     target_worker = WorkerWrapperBase(vllm_config=target_worker_config)
     target_worker.init_worker(*args, **kwargs)
     # Set the disable_logprobs variable in the TargetModelRunner instance
@@ -74,7 +74,7 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
         vllm_config.load_config,
     )
     speculative_config.draft_parallel_config.worker_cls =\
-        draft_worker_config.parallel_config.actual_worker_cls
+        draft_worker_config.parallel_config.sd_worker_cls
     draft_worker_config.parallel_config = speculative_config.draft_parallel_config  # noqa
     # TODO allow draft-model specific load config.
 

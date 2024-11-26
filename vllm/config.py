@@ -990,7 +990,7 @@ class ParallelConfig:
     # the full name of the worker class to use. If "auto", the worker class
     # will be determined based on the platform.
     worker_cls: str = "auto"
-    actual_worker_cls: str = "auto"
+    sd_worker_cls: str = "auto"
 
     world_size: int = field(init=False)
 
