@@ -1,4 +1,6 @@
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
+
+from vllm.sequence import Logprob
 
 from .tokenizer import AnyTokenizer
 
@@ -165,3 +167,50 @@ def detokenize_incrementally(
 
     new_text = new_text[len(prefix_text):]
     return new_tokens, new_text, read_offset, len(output_tokens)
+
+
+def detokenize_logprob_incrementally_in_place(
+    tokenizer: AnyTokenizer,
+    logprob_dict: Dict[int, Logprob],
+    input_ids_prefix: List[int],
+    prev_tokens: Optional[List[str]],
+    prefix_offset: int,
+    read_offset: int,
+    skip_special_tokens: bool = False,
+    spaces_between_special_tokens: bool = True,
+) -> None:
+    """Detokenizes the logprobs at a single token offset incrementally.
+
+    For each top-token in `logprob_dict`, apply incremental detokenization
+    to the token list `input_ids_prefix + [top-token id]`
+
+    The logprob data structure is modified in-place with the string
+    representation of each decoded top-token.
+    
+    Args:
+        tokenizer: The tokenizer to use.
+        logprob_dict: logprob data structure for a single token position
+        input_ids_prefix: The input ids *preceding* the token offset under
+                          consideration
+        prev_tokens: The previous tokens. If None, this function will convert
+            the input ids to tokens and return the tokens and the new text.
+        prefix_offset: The prefix offset.
+        read_offset: The read offset.
+        skip_special_tokens: Whether to skip special tokens.
+        spaces_between_special_tokens: Whether to add spaces between special
+            tokens.
+    """
+
+    for token_id in logprob_dict:
+        # Detokenize logprob for a particular top
+        # token at a particular token offset
+
+        logprob_dict[token_id].decoded_token = detokenize_incrementally(
+            tokenizer=tokenizer,
+            all_input_ids=input_ids_prefix + [token_id],
+            prev_tokens=prev_tokens,
+            prefix_offset=prefix_offset,
+            read_offset=read_offset,
+            skip_special_tokens=skip_special_tokens,
+            spaces_between_special_tokens=spaces_between_special_tokens,
+        )[1]

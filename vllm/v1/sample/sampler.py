@@ -1,5 +1,5 @@
 """A layer that samples the next tokens from the model's outputs."""
-from typing import Dict
+from typing import Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -12,41 +12,150 @@ _SAMPLING_EPS = 1e-5
 
 class Sampler(nn.Module):
 
+    def _apply_temperature_top_k_top_p(
+        self,
+        logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+        num_query_tokens: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+
+        temperature = (sampling_metadata.temperature if
+                       num_query_tokens is None else torch.repeat_interleave(
+                           sampling_metadata.temperature, num_query_tokens))
+
+        return self._apply_top_k_top_p(
+            self._apply_temperature(logits, temperature), sampling_metadata)
+
+    def _probs_sample(
+        self,
+        maybe_sample_logits: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> torch.Tensor:
+        probs = self.get_probs(maybe_sample_logits)
+        sampled = self.sample(probs, sampling_metadata)
+        # Use int32 to reduce the tensor size.
+        return sampled.to(torch.int32)
+
+    def _topk_logprobs_indices(
+        self,
+        logprobs: torch.Tensor,
+        sampling_metadata: SamplingMetadata,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+
+        topk_logprobs, topk_indices = torch.topk(
+            logprobs, sampling_metadata.max_num_logprobs, dim=-1)
+        # Use int32 to reduce the tensor size.
+        return topk_logprobs, topk_indices.to(torch.int32)
+
     def forward(
         self,
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
     ) -> SamplerOutput:
-        logits = self.apply_temperature(logits, sampling_metadata.temperature)
-        logits = self.apply_top_k_top_p(logits, sampling_metadata)
 
-        probs = self.get_probs(logits)
-        sampled = self.sample(probs, sampling_metadata)
-        # Use int32 to reduce the tensor size.
-        sampled = sampled.to(torch.int32)
+        do_logprobs = sampling_metadata.max_num_logprobs > 0
+        do_prompt_logprobs = sampling_metadata.max_num_prompt_logprobs > 0
+        num_query_tokens = sampling_metadata.num_query_tokens
+        maybe_sample_logits_indices = (
+            sampling_metadata.maybe_sample_logits_indices)
+        prompt_logits_mask = sampling_metadata.prompt_logits_mask
 
-        if sampling_metadata.max_num_logprobs > 0:
-            logprobs = self.get_logprobs(logits)
-            # FIXME: Mask the sampled token_id, get topk logprobs,
-            # and concatenate the topk with the sampled token_id.
-            topk_logprobs, topk_indices = torch.topk(
-                logprobs, sampling_metadata.max_num_logprobs, dim=-1)
-            # Use int32 to reduce the tensor size.
-            topk_indices = topk_indices.to(torch.int32)
+        if do_prompt_logprobs:
+            logits_w_tmp_tpk_tpp = self._apply_temperature_top_k_top_p(
+                logits, sampling_metadata, num_query_tokens)
+
+            maybe_sample_logits_w_tmp_tpk_tpp = (
+                logits_w_tmp_tpk_tpp[maybe_sample_logits_indices])
         else:
-            topk_logprobs = None
-            topk_indices = None
+            maybe_sample_logits_w_tmp_tpk_tpp = (
+                self._apply_temperature_top_k_top_p(
+                    logits[maybe_sample_logits_indices], sampling_metadata,
+                    None))
+
+        maybe_sampled = self._probs_sample(maybe_sample_logits_w_tmp_tpk_tpp,
+                                           sampling_metadata)
+
+        if do_logprobs and do_prompt_logprobs:
+            logprobs = self.get_logprobs(logits_w_tmp_tpk_tpp)
+
+            maybe_sampled_logprobs = logprobs[maybe_sample_logits_indices,
+                                              maybe_sampled]
+
+            topk_logprobs, topk_indices = self._topk_logprobs_indices(
+                logprobs, sampling_metadata)
+
+            maybe_sample_topk_logprobs = topk_logprobs[
+                maybe_sample_logits_indices, :]
+            maybe_sample_topk_indices = topk_indices[
+                maybe_sample_logits_indices, :]
+            prompt_topk_logprobs = topk_logprobs[prompt_logits_mask, :]
+            prompt_topk_indices = topk_indices[prompt_logits_mask, :]
+
+            # Concat sampled token logprobs
+            maybe_sample_topk_logprobs = torch.cat(
+                (maybe_sample_topk_logprobs,
+                 maybe_sampled_logprobs.unsqueeze(-1)),
+                dim=-1)
+            #Concat sampled token id
+            maybe_sample_topk_indices = torch.cat(
+                (maybe_sample_topk_indices, maybe_sampled.unsqueeze(-1)),
+                dim=-1)
+        elif do_logprobs:
+            logprobs = self.get_logprobs(
+                logits_w_tmp_tpk_tpp[maybe_sample_logits_indices, :])
+
+            maybe_sampled_logprobs = logprobs[
+                torch.arange(maybe_sampled.shape[0]), maybe_sampled]
+
+            (
+                maybe_sample_topk_logprobs,
+                maybe_sample_topk_indices,
+            ) = self._topk_logprobs_indices(logprobs, sampling_metadata)
+
+            # Concat sampled token logprobs
+            maybe_sample_topk_logprobs = torch.cat(
+                (maybe_sample_topk_logprobs,
+                 maybe_sampled_logprobs.unsqueeze(-1)),
+                dim=-1)
+            #Concat sampled token id
+            maybe_sample_topk_indices = torch.cat(
+                (maybe_sample_topk_indices, maybe_sampled.unsqueeze(-1)),
+                dim=-1)
+
+            (
+                prompt_topk_logprobs,
+                prompt_topk_indices,
+            ) = (None, None)
+
+        elif do_prompt_logprobs:
+            logprobs = self.get_logprobs(
+                logits_w_tmp_tpk_tpp[prompt_logits_mask, :])
+
+            prompt_topk_logprobs, prompt_topk_indices = (
+                self._topk_logprobs_indices(logprobs, sampling_metadata))
+
+            (
+                maybe_sample_topk_logprobs,
+                maybe_sample_topk_indices,
+            ) = (None, None)
+        else:
+            (
+                maybe_sample_topk_logprobs,
+                maybe_sample_topk_indices,
+                prompt_topk_logprobs,
+                prompt_topk_indices,
+            ) = (None, None, None, None)
 
         sampler_output = SamplerOutput(
-            sampled_token_ids=sampled,
-            logprob_token_ids=topk_indices,
-            logprobs=topk_logprobs,
-            prompt_logprob_token_ids=None,
-            prompt_logprobs=None,
-        )
+            sampled_token_ids=maybe_sampled,
+            logprob_token_ids=maybe_sample_topk_indices,
+            logprobs=maybe_sample_topk_logprobs,
+            prompt_logprob_token_ids=prompt_topk_indices,
+            prompt_logprobs=prompt_topk_logprobs)
+
         return sampler_output
 
-    def apply_temperature(
+    def _apply_temperature(
         self,
         logits: torch.Tensor,
         temp: torch.Tensor,
@@ -59,7 +168,7 @@ class Sampler(nn.Module):
         logits.div_(temp.unsqueeze(dim=1))
         return logits
 
-    def apply_top_k_top_p(
+    def _apply_top_k_top_p(
         self,
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,

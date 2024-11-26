@@ -6,6 +6,7 @@ from typing import (TYPE_CHECKING, Deque, Dict, Iterable, List, Optional, Set,
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
+from vllm.sequence import Logprob
 from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.engine import EngineCoreOutput
@@ -247,6 +248,13 @@ class Scheduler:
                         self.encoder_cache_manager.allocate(request, i)
                     encoder_budget = new_encoder_budget
 
+        # Now that requests are scheduled, generate a mask indicating which
+        # request is partial
+        partial_running_reqs = [
+            (req.num_computed_tokens + num_scheduled_tokens[req.request_id] <
+             req.num_tokens) for req in self.running
+        ]
+
         # Check if the scheduling constraints are satisfied.
         total_num_scheduled_tokens = sum(num_scheduled_tokens.values())
         assert total_num_scheduled_tokens <= self.max_num_scheduled_tokens
@@ -277,6 +285,7 @@ class Scheduler:
             scheduled_new_reqs=new_reqs_data,
             scheduled_resumed_reqs=resumed_reqs_data,
             scheduled_running_reqs=running_reqs_data,
+            partial_running_reqs=partial_running_reqs,
             num_scheduled_tokens=num_scheduled_tokens,
             total_num_scheduled_tokens=total_num_scheduled_tokens,
             scheduled_encoder_inputs=scheduled_encoder_inputs,
@@ -384,11 +393,85 @@ class Scheduler:
         # NOTE(woosuk): This method doesn't consider speculative decoding.
         sampled_token_ids = model_runner_output.sampled_token_ids_cpu.tolist()
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
+        do_logprobs = model_runner_output.logprobs_cpu is not None
+        do_prompt_logprobs = (
+            model_runner_output.prompt_logprobs_cpu is not None
+            and len(model_runner_output.prompt_logprobs_cpu) > 0)
+        if do_logprobs:
+            assert model_runner_output.logprob_token_ids_cpu is not None
+            logprob_token_ids_list = (
+                model_runner_output.logprob_token_ids_cpu.tolist())
+            logprob_values_list = (model_runner_output.logprobs_cpu.tolist())
+        if do_prompt_logprobs:
+            assert model_runner_output.prompt_logprob_token_ids_cpu is not None
+            prompt_logprob_token_ids_list = (
+                model_runner_output.prompt_logprob_token_ids_cpu.tolist())
+            prompt_logprob_values_list = (
+                model_runner_output.prompt_logprobs_cpu.tolist())
+            curr_prompt_base_idx = 0
         new_running: List[Request] = []
         engine_core_outputs: List[EngineCoreOutput] = []
         for request in self.running:
             req_id = request.request_id
             request.num_computed_tokens += num_scheduled_tokens[req_id]
+            req_index = model_runner_output.req_id_to_index[req_id]
+            num_new_tokens = 1
+            max_logprobs = request.max_logprobs
+            request_do_logprobs = (do_logprobs and max_logprobs is not None
+                                   and max_logprobs > 0)
+
+            if do_prompt_logprobs:
+                max_prompt_logprobs = request.max_prompt_logprobs
+                num_new_prompt_tokens = (
+                    num_scheduled_tokens[request.request_id] -
+                    int(not scheduler_output.partial_running_reqs[req_index]))
+
+                request_do_prompt_logprobs = (max_prompt_logprobs is not None
+                                              and max_prompt_logprobs > 0
+                                              and num_new_prompt_tokens > 0)
+
+                if request_do_prompt_logprobs:
+
+                    # Construct prompt logprobs, under the condition that
+                    # prompt logprobs were requested & a nonzero number of
+                    # prompt tokens were computed in this step for this request.
+                    #
+                    # Note that this scenario returns an EngineCoreOutput which
+                    # is empty except for the prompt logprobs which were
+                    # computed for these prompt tokens.
+
+                    slice_upper_index = (curr_prompt_base_idx +
+                                         num_new_prompt_tokens)
+                    prompt_logprob_token_ids = prompt_logprob_token_ids_list[
+                        curr_prompt_base_idx:slice_upper_index]
+                    prompt_logprob_values = prompt_logprob_values_list[
+                        curr_prompt_base_idx:slice_upper_index]
+                    curr_prompt_base_idx = slice_upper_index
+
+                    logprob_cnt = max_prompt_logprobs
+                    prompt_logprobs = [{
+                        lpt: Logprob(lpv, (idx + 1), None)
+                        for idx, (lpv, lpt) in enumerate(
+                            zip(plp_tok_values[0:logprob_cnt],
+                                plp_tok_token_ids[0:logprob_cnt]))
+                    } for plp_tok_values, plp_tok_token_ids in zip(
+                        prompt_logprob_values, prompt_logprob_token_ids)]
+
+                    if not request.prompt_logprobs:
+                        # Ensure that None is the first prompt logprob
+                        prompt_logprobs = [None] + prompt_logprobs
+
+                    curr_prompt_base_idx = slice_upper_index
+
+                    prompt_slice_range_upper = request.num_computed_tokens
+                    prompt_slice_range_lower = (prompt_slice_range_upper -
+                                                num_new_prompt_tokens)
+                    request.prompt_logprobs.extend(prompt_logprobs)
+                else:
+                    curr_prompt_base_idx += num_new_prompt_tokens
+            else:
+                request_do_prompt_logprobs = False
+
             # When the request's num_computed_tokens catches up its num_tokens,
             # the request generates output tokens. Otherwise, we ignore the
             # sampler output for the request.
@@ -405,12 +488,45 @@ class Scheduler:
                     self.encoder_cache_manager.free(request, input_id)
 
             if request.num_computed_tokens == request.num_tokens:
-                req_index = model_runner_output.req_id_to_index[req_id]
                 # NOTE(woosuk): Currently, we assume that each request
                 # generates at most one token at each step.
                 token_id = sampled_token_ids[req_index]
+                if request_do_logprobs:
+                    # Construct logprobs, if requested (TODO: assumes one
+                    # generated token).
+                    logprob_token_ids = logprob_token_ids_list[req_index]
+                    logprob_values = logprob_values_list[req_index]
+                    logprob_cnt = max_logprobs
+                    if token_id not in logprob_token_ids[0:max_logprobs]:
+                        # Sampled token is not in the in the top logprobs;
+                        # inject it & resort, ensuring that excess logprobs
+                        # not requested by the user have -inf probability
+                        logprob_values[max_logprobs:-1] = (
+                            [float('-inf')] *
+                            (len(logprob_values) - 1 - max_logprobs))
+
+                        indices = sorted(range(len(logprob_values)),
+                                         key=lambda k: logprob_values[k],
+                                         reverse=True)
+                        logprob_values = [logprob_values[i] for i in indices]
+                        logprob_token_ids = [
+                            logprob_token_ids[i] for i in indices
+                        ]
+
+                        # There will be one more logprob than the user requested
+                        logprob_cnt = max_logprobs + 1
+
+                    # Only keep the number of logprobs specified by the request
+                    # (plus possibly the sampled token id & its logprob)
+                    logprob_values = logprob_values[0:logprob_cnt]
+                    logprob_token_ids = logprob_token_ids[0:logprob_cnt]
+
+                    request.logprobs.append({
+                        lpt: Logprob(lpv, (idx + 1), None)
+                        for idx, (lpv, lpt) in enumerate(
+                            zip(logprob_values, logprob_token_ids))
+                    })
                 request.append_output_token_ids(token_id)
-                num_new_tokens = 1
                 # TODO: Update the KV cache manager for prefix caching.
 
                 # Check for stop and update request state.
@@ -418,17 +534,46 @@ class Scheduler:
                 stopped = self._check_stop(request)
 
                 # Add EngineCoreOutput for this Request.
+                # Return the logprob for the most recently computed tokens.
+                # Return no prompt logprobs in decode-phase.
                 output = EngineCoreOutput(
                     request_id=req_id,
                     new_token_ids=request.output_token_ids[-num_new_tokens:],
                     finished=request.is_finished(),
                     finish_reason=request.get_finished_reason(),
-                    stop_reason=request.stop_reason)
+                    stop_reason=request.stop_reason,
+                    logprobs=(request.logprobs[-num_new_tokens:]
+                              if request_do_logprobs else None),
+                    prompt_logprobs=(prompt_logprobs
+                                     if request_do_prompt_logprobs else None),
+                    prompt_logprobs_token_ids=(request.prompt_token_ids
+                                               if request_do_prompt_logprobs
+                                               else None))
                 engine_core_outputs.append(output)
 
                 # Breakout of the loop.
                 if stopped:
                     continue
+
+            elif request_do_prompt_logprobs:
+                # This request is still partial but prompt logprobs were
+                # requested
+                engine_core_outputs.append(
+                    EngineCoreOutput(
+                        request_id=req_id,
+                        new_token_ids=[],
+                        finished=request.is_finished(),
+                        finish_reason=request.get_finished_reason(),
+                        stop_reason=request.stop_reason,
+                        logprobs=[] if request_do_logprobs else None,
+                        prompt_logprobs=(
+                            prompt_logprobs if request_do_prompt_logprobs else
+                            ([] if request_do_prompt_logprobs else None)),
+                        prompt_logprobs_token_ids=(
+                            request.prompt_token_ids[prompt_slice_range_lower:
+                                                     prompt_slice_range_upper]
+                            if request_do_prompt_logprobs else
+                            ([] if request_do_prompt_logprobs else None))))
 
             new_running.append(request)
         self.running = new_running
@@ -581,6 +726,7 @@ class SchedulerOutput:
     scheduled_new_reqs: List[NewRequestData]
     scheduled_resumed_reqs: List[ResumedRequestData]
     scheduled_running_reqs: List[RunningRequestData]
+    partial_running_reqs: List[bool]  # True if running req is partial
 
     num_scheduled_tokens: Dict[str, int]
     total_num_scheduled_tokens: int

@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Dict
+from typing import Dict, Optional
 
 import torch
 
@@ -19,3 +19,9 @@ class SamplingMetadata:
     generators: Dict[int, torch.Generator]
 
     max_num_logprobs: int
+    max_num_prompt_logprobs: int
+
+    num_query_tokens: Optional[torch.Tensor] = None
+    num_sampled_tokens: Optional[torch.Tensor] = None
+    maybe_sample_logits_indices: Optional[torch.Tensor] = None
+    prompt_logits_mask: Optional[torch.Tensor] = None
