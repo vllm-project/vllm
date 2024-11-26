@@ -220,10 +220,6 @@ class GPTBigCodeModel(nn.Module):
         self.make_empty_intermediate_tensors = (
             make_empty_intermediate_tensors_factory(["hidden_states"],
                                                     config.n_embd))
-        if is_hpu:
-            import os
-            self.config_hidden_layers = int(
-                os.getenv('VLLM_CONFIG_HIDDEN_LAYERS', '1'))
 
     def get_input_embeddings(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.wte(input_ids)
@@ -252,8 +248,6 @@ class GPTBigCodeModel(nn.Module):
             hidden_states = layer(hidden_states,
                                   kv_caches[i - self.start_layer],
                                   attn_metadata)
-            if is_hpu and i % self.config_hidden_layers == 0:
-                htorch.core.mark_step()
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({"hidden_states": hidden_states})
         hidden_states = self.ln_f(hidden_states)

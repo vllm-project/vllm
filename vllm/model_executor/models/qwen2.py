@@ -328,9 +328,6 @@ class Qwen2Model(nn.Module):
                 attn_metadata,
                 residual,
             )
-            if current_platform.is_hpu():
-                htorch.core.mark_step()
-
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({
                 "hidden_states": hidden_states,

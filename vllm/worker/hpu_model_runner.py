@@ -131,17 +131,38 @@ def flatten(in_list):
     return list(itertools.chain(*in_list))
 
 
-def modify_decoder_layer(module: torch.nn.Module, suffix="DecoderLayer"):
-    if module.__class__.__name__.endswith(suffix):
+def get_decoder_layer_suffix(model_type):
+    # This sets the suffix for the hidden layer name, which is controlled by
+    # VLLM_CONFIG_HIDDEN_LAYERS. The default suffix is "DecoderLayer," which is
+    # applicable for most language models such as LLaMA, Qwen, and BART. If the
+    # model's decoder layer name differs from the default, it will need to
+    # be specified here.
+    decoder_layer_table = {
+        "gpt_bigcode": "BigCodeBlock",
+    }
 
-        def forward_hook(module, args, output):
-            htorch.core.mark_step()
-            return output
+    return decoder_layer_table.get(model_type, "DecoderLayer")
 
-        module.register_forward_hook(forward_hook)
+
+def modify_decoder_layer(module: torch.nn.Module,
+                         suffix="DecoderLayer",
+                         n=1,
+                         counter=None):
+
+    def forward_hook(module, args, output):
+        htorch.core.mark_step()
+        return output
+
+    if counter is None:
+        counter = [0]
 
     for child_name, child_module in module.named_children():
-        modify_decoder_layer(child_module)
+        if child_module.__class__.__name__.endswith(suffix):
+            counter[0] += 1
+            if counter[0] % n == 0:
+                child_module.register_forward_hook(forward_hook)
+        else:
+            modify_decoder_layer(child_module, suffix, n, counter)
 
 
 class HpuModelAdapter:
@@ -613,7 +634,13 @@ class HPUModelRunnerBase(ModelRunnerBase[TModelInputForHPU]):
             elif not is_fake_hpu():
                 self.model = self.model.to("hpu")
                 htcore.mark_step()
-            modify_decoder_layer(self.model)
+
+            hidden_layer_markstep_interval = int(
+                os.getenv('VLLM_CONFIG_HIDDEN_LAYERS', '1'))
+            modify_decoder_layer(
+                self.model,
+                get_decoder_layer_suffix(self.model.config.model_type),
+                hidden_layer_markstep_interval)
             torch.hpu.synchronize()
 
             with HabanaMemoryProfiler() as m_wrap:
