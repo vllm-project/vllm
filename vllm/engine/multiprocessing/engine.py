@@ -111,7 +111,7 @@ class MQLLMEngine:
         from vllm.plugins import load_general_plugins
         load_general_plugins()
 
-        engine_config = engine_args.create_engine_config()
+        engine_config = engine_args.create_engine_config(usage_context)
         executor_class = LLMEngine._get_executor_cls(engine_config)
 
         use_async_sockets = engine_config.model_config.use_async_output_proc
