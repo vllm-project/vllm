@@ -21,6 +21,10 @@ class SamplingMetadata:
     max_num_logprobs: int
     max_num_prompt_logprobs: int
 
-    num_query_tokens: Optional[torch.Tensor] = None
-    maybe_sample_logits_indices: Optional[torch.Tensor] = None
-    prompt_logits_mask: Optional[torch.Tensor] = None
+    query_start_loc: Optional[torch.Tensor]
+    num_query_tokens: Optional[torch.Tensor]
+    #maybe_sample_logits_indices: Optional[torch.Tensor] = None
+    #prompt_logits_mask: Optional[torch.Tensor] = None
+
+    num_input_tokens: int
+    partial_req_index: int  # >0 if there is a partial request, -1 o/w
