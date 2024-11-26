@@ -206,7 +206,10 @@ class EngineArgs:
         # support `EngineArgs(compilation_config={...})`
         # without having to manually construct a
         # CompilationConfig object
-        if isinstance(self.compilation_config, (int, dict)):
+        if isinstance(self.compilation_config, (int)):
+            self.compilation_config = CompilationConfig.from_cli(
+                str(self.compilation_config))
+        elif isinstance(self.compilation_config, (dict)):
             self.compilation_config = CompilationConfig.from_cli(
                 json.dumps(self.compilation_config))
 
