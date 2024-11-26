@@ -12,6 +12,7 @@ class MMInputMapper:
         model_config: ModelConfig,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
     ):
+        self.model_config = model_config
         self.mm_registry = mm_registry
         self.multi_modal_input_mapper = mm_registry.create_input_mapper(
             model_config)
@@ -22,6 +23,9 @@ class MMInputMapper:
         mm_data: MultiModalDataDict,
         mm_processor_kwargs: Optional[Dict[str, Any]],
     ) -> List[MultiModalKwargs]:
+        if self.mm_registry.has_processor(self.model_config):
+            return [MultiModalKwargs(mm_data)]  # Already processed
+
         image_inputs = mm_data["image"]
         if not isinstance(image_inputs, list):
             image_inputs = [image_inputs]
