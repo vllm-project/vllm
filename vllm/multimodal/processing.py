@@ -725,7 +725,7 @@ class MultiModalProcessor:
     ) -> DummyData:
         # Avoid circular import
         from vllm.sequence import SequenceData
-    
+
         tokenizer = self.ctx.tokenizer
 
         mm_placeholders = dict[str, list[_PlaceholderInfo]]()
