@@ -26,7 +26,7 @@ class BitsAndBytesConfig(QuantizationConfig):
         llm_int8_enable_fp32_cpu_offload: bool = False,
         llm_int8_has_fp16_weight: bool = False,
         llm_int8_skip_modules: Optional[List[str]] = None,
-        llm_int8_threshold: float = 0.0,
+        llm_int8_threshold: float = 6.0,
     ) -> None:
 
         self.load_in_8bit = load_in_8bit
@@ -103,7 +103,7 @@ class BitsAndBytesConfig(QuantizationConfig):
                                                ["llm_int8_skip_modules"],
                                                default_value=[])
         llm_int8_threshold = get_safe_value(config, ["llm_int8_threshold"],
-                                            default_value=0.0)
+                                            default_value=6.0)
 
         return cls(
             load_in_8bit=load_in_8bit,
