@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 
 from vllm.attention.backends.abstract import AttentionMetadata
+from vllm.config import VllmConfig
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -12,7 +13,8 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models import ModelRegistry
 from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.eagle import EAGLEConfig
+
+from .utils import maybe_prefix
 
 
 class EAGLE(nn.Module):
@@ -34,17 +36,19 @@ class EAGLE(nn.Module):
        in the draft checkpoint (using key token_map). Also, the draft config
        needs to have truncated_vocab_size (=k) as an attribute."""
 
-    def __init__(self, config: EAGLEConfig, *args, **kwargs) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        config = vllm_config.model_config.hf_config
         self.config = config
 
         architectures = getattr(self.config.model, "architectures", [])
         model_cls, _ = ModelRegistry.resolve_model_cls(architectures)
 
-        self.model = model_cls(self.config.model, *args, **kwargs)
+        self.model = model_cls(vllm_config=vllm_config,
+                               prefix=maybe_prefix(prefix, "model"))
         self.fc = nn.Linear(config.model.hidden_size * 2,
                             config.model.hidden_size,
-                            bias=getattr(self.config, "bias", False))
+                            bias=getattr(self.config, "eagle_fc_bias", False))
 
         self.orig_vocab_size = config.vocab_size
         self.truncated_vocab_size = config.truncated_vocab_size

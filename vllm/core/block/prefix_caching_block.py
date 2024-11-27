@@ -7,7 +7,7 @@ from vllm.core.block.common import (CacheMetricData, CopyOnWriteTracker,
 from vllm.core.block.interfaces import Block, BlockAllocator, BlockId, Device
 from vllm.core.block.naive_block import (BlockPool, NaiveBlock,
                                          NaiveBlockAllocator)
-from vllm.core.evictor_v2 import EvictionPolicy, Evictor, make_evictor
+from vllm.core.evictor import EvictionPolicy, Evictor, make_evictor
 
 PrefixHash = int
 

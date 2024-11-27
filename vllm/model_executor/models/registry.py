@@ -1,4 +1,9 @@
+"""
+Whenever you add an architecture to this page, please also update
+`tests/models/registry.py` with example HuggingFace models for it.
+"""
 import importlib
+import os
 import pickle
 import subprocess
 import sys
@@ -6,13 +11,14 @@ import tempfile
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import Callable, Dict, List, Optional, Tuple, Type, TypeVar, Union
+from typing import (AbstractSet, Callable, Dict, List, Optional, Tuple, Type,
+                    TypeVar, Union)
 
 import cloudpickle
 import torch.nn as nn
 
 from vllm.logger import init_logger
-from vllm.utils import is_hip
+from vllm.platforms import current_platform
 
 from .interfaces import (has_inner_state, is_attention_free,
                          supports_multimodal, supports_pp)
@@ -26,8 +32,10 @@ _TEXT_GENERATION_MODELS = {
     "AquilaModel": ("llama", "LlamaForCausalLM"),
     "AquilaForCausalLM": ("llama", "LlamaForCausalLM"),  # AquilaChat2
     "ArcticForCausalLM": ("arctic", "ArcticForCausalLM"),
-    "BaiChuanForCausalLM": ("baichuan", "BaiChuanForCausalLM"),  # baichuan-7b
-    "BaichuanForCausalLM": ("baichuan", "BaichuanForCausalLM"),  # baichuan-13b
+    # baichuan-7b, upper case 'C' in the class name
+    "BaiChuanForCausalLM": ("baichuan", "BaiChuanForCausalLM"),
+    # baichuan-13b, lower case 'c' in the class name
+    "BaichuanForCausalLM": ("baichuan", "BaichuanForCausalLM"),
     "BloomForCausalLM": ("bloom", "BloomForCausalLM"),
     # ChatGLMModel supports multimodal
     "CohereForCausalLM": ("commandr", "CohereForCausalLM"),
@@ -47,20 +55,22 @@ _TEXT_GENERATION_MODELS = {
     "GraniteMoeForCausalLM": ("granitemoe", "GraniteMoeForCausalLM"),
     "InternLMForCausalLM": ("llama", "LlamaForCausalLM"),
     "InternLM2ForCausalLM": ("internlm2", "InternLM2ForCausalLM"),
+    "InternLM2VEForCausalLM": ("internlm2_ve", "InternLM2VEForCausalLM"),
     "JAISLMHeadModel": ("jais", "JAISLMHeadModel"),
     "JambaForCausalLM": ("jamba", "JambaForCausalLM"),
     "LlamaForCausalLM": ("llama", "LlamaForCausalLM"),
     # For decapoda-research/llama-*
     "LLaMAForCausalLM": ("llama", "LlamaForCausalLM"),
     "MambaForCausalLM": ("mamba", "MambaForCausalLM"),
+    "FalconMambaForCausalLM": ("mamba", "MambaForCausalLM"),
+    "MiniCPMForCausalLM": ("minicpm", "MiniCPMForCausalLM"),
+    "MiniCPM3ForCausalLM": ("minicpm3", "MiniCPM3ForCausalLM"),
     "MistralForCausalLM": ("llama", "LlamaForCausalLM"),
     "MixtralForCausalLM": ("mixtral", "MixtralForCausalLM"),
     "QuantMixtralForCausalLM": ("mixtral_quant", "MixtralForCausalLM"),
     # transformers's mpt class has lower case
     "MptForCausalLM": ("mpt", "MPTForCausalLM"),
     "MPTForCausalLM": ("mpt", "MPTForCausalLM"),
-    "MiniCPMForCausalLM": ("minicpm", "MiniCPMForCausalLM"),
-    "MiniCPM3ForCausalLM": ("minicpm3", "MiniCPM3ForCausalLM"),
     "NemotronForCausalLM": ("nemotron", "NemotronForCausalLM"),
     "OlmoForCausalLM": ("olmo", "OlmoForCausalLM"),
     "OlmoeForCausalLM": ("olmoe", "OlmoeForCausalLM"),
@@ -83,15 +93,32 @@ _TEXT_GENERATION_MODELS = {
     # [Encoder-decoder]
     "BartModel": ("bart", "BartForConditionalGeneration"),
     "BartForConditionalGeneration": ("bart", "BartForConditionalGeneration"),
+    "Florence2ForConditionalGeneration": ("florence2", "Florence2ForConditionalGeneration"),  # noqa: E501
 }
 
 _EMBEDDING_MODELS = {
     # [Text-only]
+    "BertModel": ("bert", "BertEmbeddingModel"),
+    "RobertaModel": ("roberta", "RobertaEmbeddingModel"),
+    "XLMRobertaModel": ("roberta", "RobertaEmbeddingModel"),
+    "DeciLMForCausalLM": ("decilm", "DeciLMForCausalLM"),
     "Gemma2Model": ("gemma2", "Gemma2EmbeddingModel"),
+    "LlamaModel": ("llama", "LlamaEmbeddingModel"),
+    **{
+        # Multiple models share the same architecture, so we include them all
+        k: (mod, arch) for k, (mod, arch) in _TEXT_GENERATION_MODELS.items()
+        if arch == "LlamaForCausalLM"
+    },
     "MistralModel": ("llama", "LlamaEmbeddingModel"),
+    "Phi3ForCausalLM": ("phi3", "Phi3ForCausalLM"),
+    "Qwen2Model": ("qwen2", "Qwen2EmbeddingModel"),
+    "Qwen2ForCausalLM": ("qwen2", "Qwen2ForCausalLM"),
     "Qwen2ForRewardModel": ("qwen2_rm", "Qwen2ForRewardModel"),
+    "Qwen2ForSequenceClassification": ("qwen2_cls", "Qwen2ForSequenceClassification"),  # noqa: E501
     # [Multimodal]
+    "LlavaNextForConditionalGeneration": ("llava_next", "LlavaNextForConditionalGeneration"),  # noqa: E501
     "Phi3VForCausalLM": ("phi3v", "Phi3VForCausalLM"),
+    "Qwen2VLForConditionalGeneration": ("qwen2_vl", "Qwen2VLForConditionalGeneration") # noqa: E501,
 }
 
 _MULTIMODAL_MODELS = {
@@ -101,7 +128,9 @@ _MULTIMODAL_MODELS = {
     "ChatGLMModel": ("chatglm", "ChatGLMForCausalLM"),
     "ChatGLMForConditionalGeneration": ("chatglm", "ChatGLMForCausalLM"),
     "FuyuForCausalLM": ("fuyu", "FuyuForCausalLM"),
+    "H2OVLChatModel": ("h2ovl", "H2OVLChatModel"),
     "InternVLChatModel": ("internvl", "InternVLChatModel"),
+    "Idefics3ForConditionalGeneration":("idefics3","Idefics3ForConditionalGeneration"),
     "LlavaForConditionalGeneration": ("llava", "LlavaForConditionalGeneration"),
     "LlavaNextForConditionalGeneration": ("llava_next", "LlavaNextForConditionalGeneration"),  # noqa: E501
     "LlavaNextVideoForConditionalGeneration": ("llava_next_video", "LlavaNextVideoForConditionalGeneration"),  # noqa: E501
@@ -114,6 +143,7 @@ _MULTIMODAL_MODELS = {
     "PixtralForConditionalGeneration": ("pixtral", "PixtralForConditionalGeneration"),  # noqa: E501
     "QWenLMHeadModel": ("qwen", "QWenLMHeadModel"),
     "Qwen2VLForConditionalGeneration": ("qwen2_vl", "Qwen2VLForConditionalGeneration"),  # noqa: E501
+    "Qwen2AudioForConditionalGeneration": ("qwen2_audio", "Qwen2AudioForConditionalGeneration"),  # noqa: E501
     "UltravoxModel": ("ultravox", "UltravoxModel"),
     # [Encoder-decoder]
     "MllamaForConditionalGeneration": ("mllama", "MllamaForConditionalGeneration"),  # noqa: E501
@@ -237,7 +267,7 @@ def _try_load_model_cls(
     model_arch: str,
     model: _BaseRegisteredModel,
 ) -> Optional[Type[nn.Module]]:
-    if is_hip():
+    if current_platform.is_rocm():
         if model_arch in _ROCM_UNSUPPORTED_MODELS:
             raise ValueError(f"Model architecture '{model_arch}' is not "
                              "supported by ROCm for now.")
@@ -274,8 +304,8 @@ class _ModelRegistry:
     # Keyed by model_arch
     models: Dict[str, _BaseRegisteredModel] = field(default_factory=dict)
 
-    def get_supported_archs(self) -> List[str]:
-        return list(self.models.keys())
+    def get_supported_archs(self) -> AbstractSet[str]:
+        return self.models.keys()
 
     def register_model(
         self,
@@ -313,6 +343,11 @@ class _ModelRegistry:
 
     def _raise_for_unsupported(self, architectures: List[str]):
         all_supported_archs = self.get_supported_archs()
+
+        if any(arch in all_supported_archs for arch in architectures):
+            raise ValueError(
+                f"Model architectures {architectures} failed "
+                "to be inspected. Please check the logs for more details.")
 
         raise ValueError(
             f"Model architectures {architectures} are not supported for now. "
@@ -413,9 +448,13 @@ _T = TypeVar("_T")
 
 
 def _run_in_subprocess(fn: Callable[[], _T]) -> _T:
-    with tempfile.NamedTemporaryFile() as output_file:
+    # NOTE: We use a temporary directory instead of a temporary file to avoid
+    # issues like https://stackoverflow.com/questions/23212435/permission-denied-to-write-to-my-temporary-file
+    with tempfile.TemporaryDirectory() as tempdir:
+        output_filepath = os.path.join(tempdir, "registry_output.tmp")
+
         # `cloudpickle` allows pickling lambda functions directly
-        input_bytes = cloudpickle.dumps((fn, output_file.name))
+        input_bytes = cloudpickle.dumps((fn, output_filepath))
 
         # cannot use `sys.executable __file__` here because the script
         # contains relative imports
@@ -432,7 +471,7 @@ def _run_in_subprocess(fn: Callable[[], _T]) -> _T:
             raise RuntimeError(f"Error raised in subprocess:\n"
                                f"{returned.stderr.decode()}") from e
 
-        with open(output_file.name, "rb") as f:
+        with open(output_filepath, "rb") as f:
             return pickle.load(f)
 
 

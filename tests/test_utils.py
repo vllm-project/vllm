@@ -6,7 +6,7 @@ from typing import AsyncIterator, Tuple
 
 import pytest
 
-from vllm.utils import (FlexibleArgumentParser, deprecate_kwargs,
+from vllm.utils import (FlexibleArgumentParser, StoreBoolean, deprecate_kwargs,
                         get_open_port, merge_async_iterators, supports_kw)
 
 from .utils import error_on_warning
@@ -59,7 +59,7 @@ def test_deprecate_kwargs_always():
     with pytest.warns(DeprecationWarning, match="'old_arg'"):
         dummy(old_arg=1)
 
-    with error_on_warning():
+    with error_on_warning(DeprecationWarning):
         dummy(new_arg=1)
 
 
@@ -69,10 +69,10 @@ def test_deprecate_kwargs_never():
     def dummy(*, old_arg: object = None, new_arg: object = None):
         pass
 
-    with error_on_warning():
+    with error_on_warning(DeprecationWarning):
         dummy(old_arg=1)
 
-    with error_on_warning():
+    with error_on_warning(DeprecationWarning):
         dummy(new_arg=1)
 
 
@@ -86,15 +86,15 @@ def test_deprecate_kwargs_dynamic():
     with pytest.warns(DeprecationWarning, match="'old_arg'"):
         dummy(old_arg=1)
 
-    with error_on_warning():
+    with error_on_warning(DeprecationWarning):
         dummy(new_arg=1)
 
     is_deprecated = False
 
-    with error_on_warning():
+    with error_on_warning(DeprecationWarning):
         dummy(old_arg=1)
 
-    with error_on_warning():
+    with error_on_warning(DeprecationWarning):
         dummy(new_arg=1)
 
 
@@ -141,6 +141,8 @@ def parser_with_config():
     parser.add_argument('--config', type=str)
     parser.add_argument('--port', type=int)
     parser.add_argument('--tensor-parallel-size', type=int)
+    parser.add_argument('--trust-remote-code', action='store_true')
+    parser.add_argument('--multi-step-stream-outputs', action=StoreBoolean)
     return parser
 
 
@@ -214,6 +216,8 @@ def test_config_args(parser_with_config):
     args = parser_with_config.parse_args(
         ['serve', 'mymodel', '--config', './data/test_config.yaml'])
     assert args.tensor_parallel_size == 2
+    assert args.trust_remote_code
+    assert not args.multi_step_stream_outputs
 
 
 def test_config_file(parser_with_config):

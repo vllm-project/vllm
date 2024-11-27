@@ -23,6 +23,8 @@ TEST_IMAGE_URLS = [
 @pytest.fixture(scope="module")
 def server():
     args = [
+        "--task",
+        "generate",
         "--dtype",
         "bfloat16",
         "--max-model-len",
@@ -76,11 +78,12 @@ async def test_single_chat_session_image(client: openai.AsyncOpenAI,
     }]
 
     # test single completion
-    chat_completion = await client.chat.completions.create(model=model_name,
-                                                           messages=messages,
-                                                           max_tokens=10,
-                                                           logprobs=True,
-                                                           top_logprobs=5)
+    chat_completion = await client.chat.completions.create(
+        model=model_name,
+        messages=messages,
+        max_completion_tokens=10,
+        logprobs=True,
+        top_logprobs=5)
     assert len(chat_completion.choices) == 1
 
     choice = chat_completion.choices[0]
@@ -99,10 +102,46 @@ async def test_single_chat_session_image(client: openai.AsyncOpenAI,
     chat_completion = await client.chat.completions.create(
         model=model_name,
         messages=messages,
-        max_tokens=10,
+        max_completion_tokens=10,
     )
     message = chat_completion.choices[0].message
     assert message.content is not None and len(message.content) >= 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
+async def test_single_chat_session_image_beamsearch(client: openai.AsyncOpenAI,
+                                                    model_name: str,
+                                                    image_url: str):
+    messages = [{
+        "role":
+        "user",
+        "content": [
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": image_url
+                }
+            },
+            {
+                "type": "text",
+                "text": "What's in this image?"
+            },
+        ],
+    }]
+
+    chat_completion = await client.chat.completions.create(
+        model=model_name,
+        messages=messages,
+        n=2,
+        max_completion_tokens=10,
+        logprobs=True,
+        top_logprobs=5,
+        extra_body=dict(use_beam_search=True))
+    assert len(chat_completion.choices) == 2
+    assert chat_completion.choices[
+        0].message.content != chat_completion.choices[1].message.content
 
 
 @pytest.mark.asyncio
@@ -131,11 +170,12 @@ async def test_single_chat_session_image_base64encoded(
     }]
 
     # test single completion
-    chat_completion = await client.chat.completions.create(model=model_name,
-                                                           messages=messages,
-                                                           max_tokens=10,
-                                                           logprobs=True,
-                                                           top_logprobs=5)
+    chat_completion = await client.chat.completions.create(
+        model=model_name,
+        messages=messages,
+        max_completion_tokens=10,
+        logprobs=True,
+        top_logprobs=5)
     assert len(chat_completion.choices) == 1
 
     choice = chat_completion.choices[0]
@@ -154,10 +194,45 @@ async def test_single_chat_session_image_base64encoded(
     chat_completion = await client.chat.completions.create(
         model=model_name,
         messages=messages,
-        max_tokens=10,
+        max_completion_tokens=10,
     )
     message = chat_completion.choices[0].message
     assert message.content is not None and len(message.content) >= 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.parametrize("image_url", TEST_IMAGE_URLS)
+async def test_single_chat_session_image_base64encoded_beamsearch(
+        client: openai.AsyncOpenAI, model_name: str, image_url: str,
+        base64_encoded_image: Dict[str, str]):
+
+    messages = [{
+        "role":
+        "user",
+        "content": [
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url":
+                    f"data:image/jpeg;base64,{base64_encoded_image[image_url]}"
+                }
+            },
+            {
+                "type": "text",
+                "text": "What's in this image?"
+            },
+        ],
+    }]
+    chat_completion = await client.chat.completions.create(
+        model=model_name,
+        messages=messages,
+        n=2,
+        max_completion_tokens=10,
+        extra_body=dict(use_beam_search=True))
+    assert len(chat_completion.choices) == 2
+    assert chat_completion.choices[
+        0].message.content != chat_completion.choices[1].message.content
 
 
 @pytest.mark.asyncio
@@ -186,7 +261,7 @@ async def test_chat_streaming_image(client: openai.AsyncOpenAI,
     chat_completion = await client.chat.completions.create(
         model=model_name,
         messages=messages,
-        max_tokens=10,
+        max_completion_tokens=10,
         temperature=0.0,
     )
     output = chat_completion.choices[0].message.content
@@ -196,7 +271,7 @@ async def test_chat_streaming_image(client: openai.AsyncOpenAI,
     stream = await client.chat.completions.create(
         model=model_name,
         messages=messages,
-        max_tokens=10,
+        max_completion_tokens=10,
         temperature=0.0,
         stream=True,
     )
@@ -247,7 +322,7 @@ async def test_multi_image_input(client: openai.AsyncOpenAI, model_name: str,
             await client.chat.completions.create(
                 model=model_name,
                 messages=messages,
-                max_tokens=10,
+                max_completion_tokens=10,
                 temperature=0.0,
             )
 
@@ -264,7 +339,7 @@ async def test_multi_image_input(client: openai.AsyncOpenAI, model_name: str,
         chat_completion = await client.chat.completions.create(
             model=model_name,
             messages=messages,
-            max_tokens=10,
+            max_completion_tokens=10,
             temperature=0.0,
         )
         message = chat_completion.choices[0].message

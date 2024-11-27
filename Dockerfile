@@ -191,6 +191,14 @@ ADD . /vllm-workspace/
 RUN --mount=type=cache,target=/root/.cache/pip \
     python3 -m pip install -r requirements-dev.txt
 
+# enable fast downloads from hf (for testing)
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python3 -m pip install hf_transfer
+ENV HF_HUB_ENABLE_HF_TRANSFER 1
+
+# Copy in the v1 package for testing (it isn't distributed yet)
+COPY vllm/v1 /usr/local/lib/python3.12/dist-packages/vllm/v1
+
 # doc requires source code
 # we hide them inside `test_docs/` , so that this source code
 # will not be imported by other tests
@@ -206,7 +214,7 @@ FROM vllm-base AS vllm-openai
 
 # install additional dependencies for openai api server
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install accelerate hf_transfer 'modelscope!=1.15.0' bitsandbytes>=0.44.0 timm==0.9.10
+    pip install accelerate hf_transfer 'modelscope!=1.15.0' 'bitsandbytes>=0.44.0' timm==0.9.10
 
 ENV VLLM_USAGE_SOURCE production-docker-image
 

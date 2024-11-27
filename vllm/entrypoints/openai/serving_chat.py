@@ -10,11 +10,7 @@ from fastapi import Request
 
 from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.chat_utils import (ConversationMessage,
-                                         apply_hf_chat_template,
-                                         apply_mistral_chat_template,
-                                         load_chat_template,
-                                         parse_chat_messages_futures)
+from vllm.entrypoints.chat_utils import ConversationMessage, load_chat_template
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionLogProb, ChatCompletionLogProbs,
@@ -22,23 +18,20 @@ from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest, ChatCompletionResponse,
     ChatCompletionResponseChoice, ChatCompletionResponseStreamChoice,
     ChatCompletionStreamResponse, ChatMessage, DeltaFunctionCall, DeltaMessage,
-    DeltaToolCall, ErrorResponse, FunctionCall, RequestResponseMetadata,
-    ToolCall, UsageInfo)
+    DeltaToolCall, ErrorResponse, FunctionCall, PromptTokenUsageInfo,
+    RequestResponseMetadata, ToolCall, UsageInfo)
 from vllm.entrypoints.openai.serving_engine import (BaseModelPath,
                                                     LoRAModulePath,
                                                     OpenAIServing,
-                                                    PromptAdapterPath,
-                                                    TextTokensPrompt)
+                                                    PromptAdapterPath)
 from vllm.entrypoints.openai.tool_parsers import ToolParser, ToolParserManager
-from vllm.inputs import TokensPrompt
 from vllm.logger import init_logger
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.sequence import Logprob
-from vllm.tracing import (contains_trace_headers, extract_trace_headers,
-                          log_tracing_disabled_warning)
 from vllm.transformers_utils.tokenizer import AnyTokenizer, MistralTokenizer
-from vllm.utils import iterate_with_cancellation, random_uuid
+from vllm.transformers_utils.tokenizers import maybe_serialize_tool_calls
+from vllm.utils import iterate_with_cancellation
 
 logger = init_logger(__name__)
 
@@ -57,7 +50,8 @@ class OpenAIServingChat(OpenAIServing):
                  chat_template: Optional[str],
                  return_tokens_as_token_ids: bool = False,
                  enable_auto_tools: bool = False,
-                 tool_parser: Optional[str] = None):
+                 tool_parser: Optional[str] = None,
+                 enable_prompt_tokens_details: bool = False):
         super().__init__(engine_client=engine_client,
                          model_config=model_config,
                          base_model_paths=base_model_paths,
@@ -81,6 +75,11 @@ class OpenAIServingChat(OpenAIServing):
         self.tool_parser: Optional[Callable[[AnyTokenizer], ToolParser]] = None
         if self.enable_auto_tools:
             try:
+                if (tool_parser == "pythonic" and
+                        model_config.model.startswith("meta-llama/Llama-3.2")):
+                    logger.warning(
+                        "Llama3.2 models may struggle to emit valid pythonic"
+                        " tool calls")
                 self.tool_parser = ToolParserManager.get_tool_parser(
                     tool_parser)
             except Exception as e:
@@ -88,18 +87,20 @@ class OpenAIServingChat(OpenAIServing):
                                 f"tool_parser:'{tool_parser}' which has not "
                                 "been registered") from e
 
+        self.enable_prompt_tokens_details = enable_prompt_tokens_details
+
     async def create_chat_completion(
         self,
         request: ChatCompletionRequest,
         raw_request: Optional[Request] = None,
     ) -> Union[AsyncGenerator[str, None], ChatCompletionResponse,
                ErrorResponse]:
-        """Completion API similar to OpenAI's API.
+        """
+        Chat Completion API similar to OpenAI's API.
 
         See https://platform.openai.com/docs/api-reference/chat/create
         for the API specification. This API mimics the OpenAI
-        ChatCompletion API.
-
+        Chat Completion API.
         """
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
@@ -118,141 +119,110 @@ class OpenAIServingChat(OpenAIServing):
                 prompt_adapter_request,
             ) = self._maybe_get_adapters(request)
 
-            model_config = self.model_config
             tokenizer = await self.engine_client.get_tokenizer(lora_request)
+            tool_parser = self.tool_parser
 
-            conversation, mm_data_future = parse_chat_messages_futures(
-                request.messages, model_config, tokenizer)
+            # validation for OpenAI tools
+            # tool_choice = "required" is not supported
+            if request.tool_choice == "required":
+                return self.create_error_response(
+                    "tool_choice = \"required\" is not supported!")
+
+            # because of issues with pydantic we need to potentially
+            # re-serialize the tool_calls field of the request
+            # for more info: see comment in `maybe_serialize_tool_calls`
+            if isinstance(tokenizer, MistralTokenizer):
+                maybe_serialize_tool_calls(request)
+
+            if (request.tool_choice == "auto" and
+                    not (self.enable_auto_tools and tool_parser is not None)
+                    and not isinstance(tokenizer, MistralTokenizer)):
+                # for hf tokenizers, "auto" tools requires
+                # --enable-auto-tool-choice and --tool-call-parser
+                return self.create_error_response(
+                    "\"auto\" tool choice requires "
+                    "--enable-auto-tool-choice and --tool-call-parser to be set"
+                )
 
             tool_dicts = None if request.tools is None else [
                 tool.model_dump() for tool in request.tools
             ]
 
-            prompt: Union[str, List[int]]
-            is_mistral_tokenizer = isinstance(tokenizer, MistralTokenizer)
-            if is_mistral_tokenizer:
-                prompt = apply_mistral_chat_template(
-                    tokenizer,
-                    messages=request.messages,
-                    chat_template=request.chat_template or self.chat_template,
-                    add_generation_prompt=request.add_generation_prompt,
-                    continue_final_message=request.continue_final_message,
-                    tools=tool_dicts,
-                    documents=request.documents,
-                    **(request.chat_template_kwargs or {}),
-                )
-            else:
-                prompt = apply_hf_chat_template(
-                    tokenizer,
-                    conversation=conversation,
-                    chat_template=request.chat_template or self.chat_template,
-                    add_generation_prompt=request.add_generation_prompt,
-                    continue_final_message=request.continue_final_message,
-                    tools=tool_dicts,
-                    documents=request.documents,
-                    **(request.chat_template_kwargs or {}),
-                )
-        except Exception as e:
-            logger.exception("Error in applying chat template from request")
+            (
+                conversation,
+                request_prompts,
+                engine_prompts,
+            ) = await self._preprocess_chat(
+                request,
+                tokenizer,
+                request.messages,
+                chat_template=request.chat_template or self.chat_template,
+                add_generation_prompt=request.add_generation_prompt,
+                continue_final_message=request.continue_final_message,
+                tool_dicts=tool_dicts,
+                documents=request.documents,
+                chat_template_kwargs=request.chat_template_kwargs,
+                tool_parser=tool_parser,
+                truncate_prompt_tokens=request.truncate_prompt_tokens,
+                add_special_tokens=request.add_special_tokens,
+            )
+        except ValueError as e:
+            logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
 
-        try:
-            mm_data = await mm_data_future
-        except Exception as e:
-            logger.exception("Error in loading multi-modal data")
-            return self.create_error_response(str(e))
-
-        # validation for OpenAI tools
-        # tool_choice = "required" is not supported
-        if request.tool_choice == "required":
-            return self.create_error_response(
-                "tool_choice = \"required\" is not supported!")
-
-        if not is_mistral_tokenizer and request.tool_choice == "auto" and not (
-                self.enable_auto_tools and self.tool_parser is not None):
-            # for hf tokenizers, "auto" tools requires
-            # --enable-auto-tool-choice and --tool-call-parser
-            return self.create_error_response(
-                "\"auto\" tool choice requires "
-                "--enable-auto-tool-choice and --tool-call-parser to be set")
-
-        request_id = f"chat-{random_uuid()}"
+        request_id = f"chatcmpl-{request.request_id}"
 
         request_metadata = RequestResponseMetadata(request_id=request_id)
         if raw_request:
             raw_request.state.request_metadata = request_metadata
 
+        # Schedule the request and get the result generator.
+        generators: List[AsyncGenerator[RequestOutput, None]] = []
         try:
-            if self.enable_auto_tools and self.tool_parser:
-                request = self.tool_parser(tokenizer).adjust_request(
-                    request=request)
+            for i, engine_prompt in enumerate(engine_prompts):
+                sampling_params: Union[SamplingParams, BeamSearchParams]
+                default_max_tokens = self.max_model_len - len(
+                    engine_prompt["prompt_token_ids"])
+                if request.use_beam_search:
+                    sampling_params = request.to_beam_search_params(
+                        default_max_tokens)
+                else:
+                    sampling_params = request.to_sampling_params(
+                        default_max_tokens)
 
-            if isinstance(prompt, str):
-                prompt_inputs = self._tokenize_prompt_input(
-                    request,
-                    tokenizer,
-                    prompt,
-                    truncate_prompt_tokens=request.truncate_prompt_tokens,
-                    add_special_tokens=request.add_special_tokens,
-                )
-            else:
-                assert isinstance(prompt, list) and isinstance(
-                    prompt[0], int
-                ), "Prompt has to be either a string or a list of token ids"
-                prompt_inputs = TextTokensPrompt(
-                    prompt=tokenizer.decode(prompt), prompt_token_ids=prompt)
+                self._log_inputs(request_id,
+                                 request_prompts[i],
+                                 params=sampling_params,
+                                 lora_request=lora_request,
+                                 prompt_adapter_request=prompt_adapter_request)
 
-            assert prompt_inputs is not None
+                trace_headers = (None if raw_request is None else await
+                                 self._get_trace_headers(raw_request.headers))
 
-            sampling_params: Union[SamplingParams, BeamSearchParams]
-            default_max_tokens = self.max_model_len - len(
-                prompt_inputs["prompt_token_ids"])
-            if request.use_beam_search:
-                sampling_params = request.to_beam_search_params(
-                    default_max_tokens)
-            else:
-                sampling_params = request.to_sampling_params(
-                    default_max_tokens)
+                if isinstance(sampling_params, BeamSearchParams):
+                    generator = self.engine_client.beam_search(
+                        prompt=engine_prompt,
+                        request_id=request_id,
+                        params=sampling_params,
+                    )
+                else:
+                    generator = self.engine_client.generate(
+                        engine_prompt,
+                        sampling_params,
+                        request_id,
+                        lora_request=lora_request,
+                        trace_headers=trace_headers,
+                        prompt_adapter_request=prompt_adapter_request,
+                        priority=request.priority,
+                    )
 
-            self._log_inputs(request_id,
-                             prompt_inputs,
-                             params=sampling_params,
-                             lora_request=lora_request,
-                             prompt_adapter_request=prompt_adapter_request)
-
-            engine_inputs = TokensPrompt(
-                prompt_token_ids=prompt_inputs["prompt_token_ids"])
-            if mm_data is not None:
-                engine_inputs["multi_modal_data"] = mm_data
-
-            is_tracing_enabled = (await
-                                  self.engine_client.is_tracing_enabled())
-            trace_headers = None
-            if is_tracing_enabled and raw_request:
-                trace_headers = extract_trace_headers(raw_request.headers)
-            if (not is_tracing_enabled and raw_request
-                    and contains_trace_headers(raw_request.headers)):
-                log_tracing_disabled_warning()
-
-            if isinstance(sampling_params, BeamSearchParams):
-                result_generator = self.engine_client.beam_search(
-                    engine_inputs['prompt_token_ids'],
-                    request_id,
-                    sampling_params,
-                )
-            else:
-                result_generator = self.engine_client.generate(
-                    engine_inputs,
-                    sampling_params,
-                    request_id,
-                    lora_request=lora_request,
-                    trace_headers=trace_headers,
-                    prompt_adapter_request=prompt_adapter_request,
-                    priority=request.priority,
-                )
+                generators.append(generator)
         except ValueError as e:
             # TODO: Use a vllm-specific Validation Error
             return self.create_error_response(str(e))
+
+        assert len(generators) == 1
+        result_generator, = generators
 
         if raw_request:
             result_generator = iterate_with_cancellation(
@@ -296,6 +266,7 @@ class OpenAIServingChat(OpenAIServing):
         previous_num_tokens = [0] * num_choices
         finish_reason_sent = [False] * num_choices
         num_prompt_tokens = 0
+        num_cached_tokens = None
 
         if isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam):
             tool_choice_function_name = request.tool_choice.function.name
@@ -349,6 +320,7 @@ class OpenAIServingChat(OpenAIServing):
                 # the result_generator, it needs to be sent as the FIRST
                 # response (by the try...catch).
                 if first_iteration:
+                    num_cached_tokens = res.num_cached_tokens
                     # Send first response for each request.n (index) with
                     # the role
                     role = self.get_chat_request_role(request)
@@ -384,7 +356,7 @@ class OpenAIServingChat(OpenAIServing):
                     # Send response to echo the input portion of the
                     # last message
                     if request.echo or request.continue_final_message:
-                        last_msg_content: str = ""
+                        last_msg_content: Union[str, List[Dict[str, str]]] = ""
                         if conversation and "content" in conversation[
                                 -1] and conversation[-1].get("role") == role:
                             last_msg_content = conversation[-1]["content"] or ""
@@ -574,11 +546,13 @@ class OpenAIServingChat(OpenAIServing):
             # is sent, send the usage
             if include_usage:
                 completion_tokens = sum(previous_num_tokens)
-                final_usage = UsageInfo(
-                    prompt_tokens=num_prompt_tokens,
-                    completion_tokens=completion_tokens,
-                    total_tokens=num_prompt_tokens + completion_tokens,
-                )
+                final_usage = UsageInfo(prompt_tokens=num_prompt_tokens,
+                                        completion_tokens=completion_tokens,
+                                        total_tokens=num_prompt_tokens +
+                                        completion_tokens)
+                if self.enable_prompt_tokens_details and num_cached_tokens:
+                    final_usage.prompt_tokens_details = PromptTokenUsageInfo(
+                        cached_tokens=num_cached_tokens)
 
                 final_usage_chunk = ChatCompletionStreamResponse(
                     id=request_id,
@@ -625,6 +599,9 @@ class OpenAIServingChat(OpenAIServing):
                 final_res = res
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
+        except ValueError as e:
+            # TODO: Use a vllm-specific Validation Error
+            return self.create_error_response(str(e))
 
         assert final_res is not None
 
@@ -724,10 +701,13 @@ class OpenAIServingChat(OpenAIServing):
             choices.append(choice_data)
 
         if request.echo or request.continue_final_message:
-            last_msg_content = ""
+            last_msg_content: Union[str, List[Dict[str, str]]] = ""
             if conversation and "content" in conversation[-1] and conversation[
                     -1].get("role") == role:
                 last_msg_content = conversation[-1]["content"] or ""
+            if isinstance(last_msg_content, list):
+                last_msg_content = "\n".join(msg['text']
+                                             for msg in last_msg_content)
 
             for choice in choices:
                 full_message = last_msg_content + (choice.message.content
@@ -740,11 +720,13 @@ class OpenAIServingChat(OpenAIServing):
             num_prompt_tokens += len(final_res.encoder_prompt_token_ids)
         num_generated_tokens = sum(
             len(output.token_ids) for output in final_res.outputs)
-        usage = UsageInfo(
-            prompt_tokens=num_prompt_tokens,
-            completion_tokens=num_generated_tokens,
-            total_tokens=num_prompt_tokens + num_generated_tokens,
-        )
+        usage = UsageInfo(prompt_tokens=num_prompt_tokens,
+                          completion_tokens=num_generated_tokens,
+                          total_tokens=num_prompt_tokens +
+                          num_generated_tokens)
+        if self.enable_prompt_tokens_details and final_res.num_cached_tokens:
+            usage.prompt_tokens_details = PromptTokenUsageInfo(
+                cached_tokens=final_res.num_cached_tokens)
 
         request_metadata.final_usage_info = usage
 

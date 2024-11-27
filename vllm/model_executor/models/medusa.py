@@ -3,13 +3,13 @@ from typing import Iterable, List, Optional, Tuple
 import torch
 import torch.nn as nn
 
+from vllm.config import VllmConfig
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     DEFAULT_VOCAB_PADDING_SIZE, ParallelLMHead)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.sampling_metadata import SamplingMetadata
-from vllm.transformers_utils.configs.medusa import MedusaConfig
 
 
 class ResidualBlock(nn.Module):
@@ -44,7 +44,8 @@ class Medusa(nn.Module):
        in the draft checkpoint (using key token_map). Also, the draft config
        needs to have truncated_vocab_size (=k) as an attribute."""
 
-    def __init__(self, config: MedusaConfig, **_) -> None:
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
+        config = vllm_config.model_config.hf_config
         super().__init__()
         self.config = config
         self.blocks = nn.ModuleList([
