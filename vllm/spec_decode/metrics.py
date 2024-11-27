@@ -1,5 +1,5 @@
 import time
-from typing import Callable, Optional
+from typing import Callable, Optional, Union
 
 import msgspec
 import torch
@@ -82,8 +82,12 @@ class AsyncMetricsCollector:
         self._rank = rank
         self._copy_stream = torch.cuda.Stream()
 
-    def init_tensors(self, rank: int, device_type: str = 'cuda') -> None:
+    def init_tensors(self,
+                     rank: int,
+                     device_type: Union[torch.device, str] = 'cuda') -> None:
         self._rank = rank
+        if isinstance(device_type, torch.device):
+            device_type = device_type.type
         if device_type == 'cuda':
             self._copy_stream = torch.cuda.Stream()
 

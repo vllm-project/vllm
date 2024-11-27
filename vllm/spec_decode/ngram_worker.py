@@ -22,7 +22,7 @@ class NGramWorker(NonLLMProposerWorkerBase):
         # Get local_rank/vocab_size from kwargs attribute
         self.local_rank = kwargs["local_rank"]
         self.vocab_size = kwargs["vllm_config"].model_config.get_vocab_size()
-        self.device_type = kwargs["device_type"]
+        self.device_type = kwargs.get("device_type", "cuda")
 
         # Lazy initialization list.
         self._proposer: Top1Proposer

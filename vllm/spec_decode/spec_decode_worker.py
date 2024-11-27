@@ -319,9 +319,9 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         self.scorer_worker.load_model()
         self.proposer_worker.load_model()
 
-        self._metrics.init_tensors(self.rank, device_type=self.device.type)
+        self._metrics.init_tensors(self.rank, device_type=self.device)
         self.spec_decode_sampler.init_tensors(self.rank,
-                                              device_type=self.device.type)
+                                              device_type=self.device)
 
         scorer_cls: Type[SpeculativeScorer]
         if self.disable_mqa_scorer:
@@ -334,7 +334,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                 "[Speculative Decoding] Use MQA scorer for scoring proposals.")
 
         self.scorer = scorer_cls(scorer_worker=self.scorer_worker,
-                                 device=self.device.type,
+                                 device=self.device,
                                  vocab_size=self._vocab_size)
 
         self._configure_model_sampler_for_spec_decode()
