@@ -334,8 +334,10 @@ class SamplingParams(
         if self.stop and not self.include_stop_str_in_output:
             self.output_text_buffer_length = max(len(s) for s in self.stop) - 1
 
-        if self.guided_decoding and not isinstance(self.guided_decoding, GuidedDecodingParams):
-            self.guided_decoding = GuidedDecodingParams.from_optional(**self.guided_decoding)
+        if self.guided_decoding and not isinstance(self.guided_decoding,
+                                                   GuidedDecodingParams):
+            self.guided_decoding = (GuidedDecodingParams
+                                    .from_optional(**self.guided_decoding))
 
         self._verify_args()
 
