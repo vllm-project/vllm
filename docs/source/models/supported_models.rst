@@ -234,6 +234,11 @@ Text Generation
     - :code:`allenai/OLMo-1B-hf`, :code:`allenai/OLMo-7B-hf`, etc.
     -
     - ✅︎
+  * - :code:`OLMo2ForCausalLM`
+    - OLMo2
+    - :code:`allenai/OLMo2-7B-1124`, etc.
+    -
+    - ✅︎
   * - :code:`OLMoEForCausalLM`
     - OLMoE
     - :code:`allenai/OLMoE-1B-7B-0924`, :code:`allenai/OLMoE-1B-7B-0924-Instruct`, etc.
@@ -302,6 +307,11 @@ Text Generation
   * - :code:`SolarForCausalLM`
     - Solar Pro
     - :code:`upstage/solar-pro-preview-instruct`, etc.
+    - ✅︎
+    - ✅︎
+  * - :code:`TeleChat2ForCausalLM`
+    - TeleChat2
+    - :code:`TeleAI/TeleChat2-3B`, :code:`TeleAI/TeleChat2-7B`, :code:`TeleAI/TeleChat2-35B`, etc.
     - ✅︎
     - ✅︎
   * - :code:`XverseForCausalLM`

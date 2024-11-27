@@ -10,6 +10,7 @@ import torch.nn as nn
 
 from vllm.compilation.compile_context import set_compile_context
 from vllm.config import CompilationLevel, VllmConfig
+from vllm.distributed.parallel_state import graph_capture
 from vllm.forward_context import set_forward_context
 from vllm.inputs import INPUT_REGISTRY, InputRegistry
 from vllm.logger import init_logger
@@ -362,7 +363,8 @@ class GPUModelRunner:
         # 2. A list (length: num_images) of tensors, each of shape
         # [feature_size, hidden_size] in case when the feature size is
         # dynamic depending on input images.
-        encoder_outputs = self.model.process_mm_inputs(**batched_mm_inputs)
+        encoder_outputs = self.model.get_multimodal_embeddings(
+            **batched_mm_inputs)
 
         # Cache the encoder outputs.
         for (req_id, input_id), output in zip(req_input_ids, encoder_outputs):
@@ -570,8 +572,9 @@ class GPUModelRunner:
         # Trigger CUDA graph capture for specific shapes.
         # Capture the large shapes first so that the smaller shapes
         # can reuse the memory pool allocated for the large shapes.
-        for num_tokens in reversed(self.cudagraph_batch_sizes):
-            self._dummy_run(self.model, num_tokens, self.kv_caches)
+        with graph_capture():
+            for num_tokens in reversed(self.cudagraph_batch_sizes):
+                self._dummy_run(self.model, num_tokens, self.kv_caches)
 
         end_time = time.perf_counter()
         end_free_gpu_memory = torch.cuda.mem_get_info()[0]

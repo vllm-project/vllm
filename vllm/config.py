@@ -990,6 +990,7 @@ class ParallelConfig:
     # the full name of the worker class to use. If "auto", the worker class
     # will be determined based on the platform.
     worker_cls: str = "auto"
+    sd_worker_cls: str = "auto"
 
     world_size: int = field(init=False)
 
@@ -1408,16 +1409,6 @@ class SpeculativeConfig:
                     speculative_draft_tensor_parallel_size,
                     draft_hf_config
             )
-
-            if (enable_chunked_prefill and \
-                 speculative_draft_tensor_parallel_size != 1):
-                # TODO - Investigate why the error reported in
-                # https://github.com/vllm-project/vllm/pull/9291#issuecomment-2463266258
-                # is happening and re-enable it.
-                raise ValueError(
-                    "Chunked prefill and speculative decoding can be enabled "
-                    "simultaneously only for draft models with tensor "
-                    "parallel size 1.")
 
             draft_model_config.max_model_len = (
                 SpeculativeConfig._maybe_override_draft_max_model_len(
@@ -2160,7 +2151,7 @@ class CompilationConfig(BaseModel):
 
     use_inductor: bool = True
     inductor_specialize_for_cudagraph_no_more_than: Optional[int] = None
-    inductor_compile_sizes: Optional[List[int]] = Field(default_factory=dict)
+    inductor_compile_sizes: Optional[List[int]] = Field(default=None)
     inductor_compile_config: Dict = Field(default_factory=dict)
     inductor_passes: Dict[str, str] = Field(default_factory=dict)
 
@@ -2299,9 +2290,8 @@ class CompilationConfig(BaseModel):
                 if x <= self.inductor_specialize_for_cudagraph_no_more_than
             ]
         else:
-            assert self.inductor_compile_sizes is not None, (
-                "inductor_compile_sizes should not be None when "
-                "inductor_specialize_for_cudagraph_no_more_than is None")
+            if self.inductor_compile_sizes is None:
+                self.inductor_compile_sizes = []
             self.compile_sizes = self.inductor_compile_sizes
 
 

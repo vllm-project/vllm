@@ -154,7 +154,7 @@ environment_variables: Dict[str, Callable[[], Any]] = {
     # If you are using multi-node inference, you should set this differently
     # on each node.
     'VLLM_HOST_IP':
-    lambda: os.getenv('VLLM_HOST_IP', "") or os.getenv("HOST_IP", ""),
+    lambda: os.getenv('VLLM_HOST_IP', ""),
 
     # used in distributed environment to manually set the communication port
     # Note: if VLLM_PORT is set, and some code asks for multiple ports, the
