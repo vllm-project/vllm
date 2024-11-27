@@ -28,7 +28,8 @@ from vllm.transformers_utils.configs import (ChatGLMConfig, DbrxConfig,
                                              MedusaConfig, MllamaConfig,
                                              MLPSpeculatorConfig, MPTConfig,
                                              NemotronConfig, NVLM_D_Config,
-                                             RWConfig, SolarConfig,
+                                             Olmo2Config, RWConfig,
+                                             SolarConfig, Telechat2Config,
                                              UltravoxConfig)
 # yapf: enable
 from vllm.transformers_utils.utils import check_gguf_file
@@ -62,7 +63,9 @@ _CONFIG_REGISTRY: Dict[str, Type[PretrainedConfig]] = {
     "internvl_chat": InternVLChatConfig,
     "nemotron": NemotronConfig,
     "NVLM_D": NVLM_D_Config,
+    "olmo2": Olmo2Config,
     "solar": SolarConfig,
+    "telechat": Telechat2Config,
     "ultravox": UltravoxConfig,
     "grok-1": Grok1Config,
     **_CONFIG_REGISTRY_OVERRIDE_HF

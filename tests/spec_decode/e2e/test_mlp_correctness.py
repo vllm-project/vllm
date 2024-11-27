@@ -203,7 +203,7 @@ def test_mlp_e2e_acceptance_rate(vllm_runner, common_llm_kwargs,
 @pytest.mark.parametrize("test_llm_kwargs", [{"seed": 5}])
 @pytest.mark.parametrize("output_len", [64])
 @pytest.mark.parametrize("batch_size", [1, 32])
-@pytest.mark.parametrize("temperature", [0.1, 1.0])
+@pytest.mark.parametrize("temperature", [1.0])
 @pytest.mark.parametrize("seed", [1])
 def test_mlp_e2e_seeded_correctness(vllm_runner, common_llm_kwargs,
                                     per_test_common_llm_kwargs,

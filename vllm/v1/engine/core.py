@@ -41,19 +41,6 @@ class EngineCore:
         executor_class: Type[GPUExecutor],
         usage_context: UsageContext,
     ):
-        # Override the configs for V1.
-        # FIXME
-        if usage_context == UsageContext.LLM_CLASS:
-            vllm_config.scheduler_config.max_num_seqs = 1024
-            vllm_config.scheduler_config.max_num_batched_tokens = 8192
-        elif usage_context == UsageContext.OPENAI_API_SERVER:
-            vllm_config.scheduler_config.max_num_seqs = 1024
-            vllm_config.scheduler_config.max_num_batched_tokens = 2048
-
-        # TODO (ywang96): Enable APC by default when VLM supports it.
-        if not vllm_config.model_config.is_multimodal_model:
-            vllm_config.cache_config.enable_prefix_caching = True
-
         assert vllm_config.model_config.task != "embedding"
 
         logger.info("Initializing an LLM engine (v%s) with config: %s",
