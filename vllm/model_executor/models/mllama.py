@@ -1104,20 +1104,6 @@ class MllamaForCausalLM(nn.Module):
 @INPUT_REGISTRY.register_input_processor(input_processor_for_mllama)
 class MllamaForConditionalGeneration(nn.Module, SupportsMultiModal):
     # BitandBytes specific attributes
-    default_bitsandbytes_target_modules = [
-        ".gate_proj.",
-        ".down_proj.",
-        ".up_proj.",
-        ".q_proj.",
-        ".k_proj.",
-        ".v_proj.",
-        ".o_proj.",
-        ".fc1.",
-        ".fc2.",
-        # The `multi_modal_projector` is at the top level of the model,
-        # so we can't add a dot in front of it.
-        "multi_modal_projector."
-    ]
     bitsandbytes_stacked_params_mapping = {
         # shard_name, weight_name, index
         "q_proj": ("qkv_proj", 0),

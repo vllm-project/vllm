@@ -412,12 +412,6 @@ class FalconForCausalLM(nn.Module, SupportsPP):
 
     # BitandBytes specific attributes
     bitsandbytes_stacked_params_mapping = {}
-    default_bitsandbytes_target_modules = [
-        ".query_key_value.",
-        ".dense.",
-        ".dense_h_to_4h.",
-        ".dense_4h_to_h.",
-    ]
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()

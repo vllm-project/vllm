@@ -337,9 +337,6 @@ class OPTForCausalLM(nn.Module, SupportsPP):
         "k_proj": ("qkv_proj", 1),
         "v_proj": ("qkv_proj", 2),
     }
-    default_bitsandbytes_target_modules = [
-        ".q_proj.", ".k_proj.", ".v_proj.", ".out_proj.", ".fc1.", ".fc2."
-    ]
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
