@@ -409,7 +409,6 @@ class SamplingParams(
         if self.best_of != self._real_n and self.output_kind == (
                 RequestOutputKind.DELTA):
             raise ValueError("best_of must equal n to use output_kind=DELTA")
-        assert isinstance(self.guided_decoding, GuidedDecodingParams)
 
     def _verify_greedy_sampling(self) -> None:
         if self.n > 1:
