@@ -39,7 +39,8 @@ class TeleChat2Model(LlamaModel):
         vllm_config.model_config.hf_config.mlp_bias = True
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         # 2. Remove the bias from the qkv_proj and gate_up_proj based on config
-        # FIXME: Handle qkv_bias etc
+        # Telechat2's gate_up_proj and qkv_proj don't have bias
+        # see: https://github.com/vllm-project/vllm/pull/10311#issuecomment-2490297566
         for layer in self.layers:
             layer.self_attn.qkv_proj.bias = layer.mlp.gate_up_proj.bias = None
             layer.self_attn.qkv_proj.skip_bias_add = True
