@@ -1007,7 +1007,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
             yield weight_name, processed_weight
 
-    def _get_support_modules(self, model: nn.Module) -> None:
+    def _get_bnb_target_modules(self, model: nn.Module) -> None:
 
         # TODO: Maybe we can replace bitsandbytes_stacked_params_mapping with
         # packed_modules_mapping.
@@ -1058,7 +1058,7 @@ class BitsAndBytesModelLoader(BaseModelLoader):
         # Modules whose weights might have fused on disk
         # we need their output_sizes to make shard in flight correctly with TP
         self.maybe_fused_weights_modules: Dict[str, List[int]] = {}
-        self._get_support_modules(model)
+        self._get_bnb_target_modules(model)
         for name, module in model.named_modules():
             # Some modules like `ReplicatedLinear` should not have their weights
             # sharded. The reason for implementing it this way is to avoid new
