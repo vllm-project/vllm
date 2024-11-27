@@ -49,7 +49,7 @@ def compute_request_output_lengths(batch_size: int, step_requests: List[int]) \
     output lengths of the requests such that step_request is honoured.
 
     Example: 
-    if batch size = 32 and step_request = [128, 128, 96, 64, 32, 1]
+    if batch size = 128 and step_request = [128, 128, 96, 64, 32, 1]
     then return,
     {2 : 32, 3 : 32, 4 : 32, 5 : 31, 6 : 1}, meaning,
     32 requests should have output length 2,
