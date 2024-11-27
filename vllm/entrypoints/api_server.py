@@ -18,7 +18,7 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.async_llm_engine import AsyncLLMEngine
 from vllm.entrypoints.launcher import serve_http
 from vllm.logger import init_logger
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import SamplingParams, GuidedDecodingParams
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils import (FlexibleArgumentParser, iterate_with_cancellation,
                         random_uuid)
@@ -49,7 +49,13 @@ async def generate(request: Request) -> Response:
     request_dict = await request.json()
     prompt = request_dict.pop("prompt")
     stream = request_dict.pop("stream", False)
-    sampling_params = SamplingParams(**request_dict)
+    guided_decoding_params = request_dict.pop("guided_decoding", None)
+    guided_decoding = None
+    if guided_decoding_params:
+        guided_decoding = GuidedDecodingParams.from_optional(
+            **guided_decoding_params)
+    sampling_params = SamplingParams(guided_decoding=guided_decoding,
+                                     **request_dict)
     request_id = random_uuid()
 
     assert engine is not None
