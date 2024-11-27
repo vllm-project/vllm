@@ -351,14 +351,6 @@ class BaiChuanBaseForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
     embedding_padding_modules = []
 
     # BitandBytes specific attributes
-    default_bitsandbytes_target_modules = [
-        ".W_pack.",
-        ".o_proj.",
-        ".down_proj.",
-        ".up_proj.",
-        ".gate_proj.",
-        ".up_proj.",
-    ]
     bitsandbytes_stacked_params_mapping = {
         # shard_name, weight_name, index
         "gate_proj": ("gate_up_proj", 0),
