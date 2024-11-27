@@ -5,7 +5,7 @@ import torch
 from tests.quantization.utils import is_quant_method_supported
 from vllm import LLM, SamplingParams
 from vllm.compilation.levels import CompilationLevel
-from vllm.utils import is_hip
+from vllm.platforms import current_platform
 
 TEST_MODELS = [
     ("facebook/opt-125m", {}),
@@ -23,13 +23,12 @@ TEST_MODELS = [
     ("meta-llama/Meta-Llama-3-8B", {}),
 ]
 
-# TODO: enable in pytorch 2.5
-if False and is_quant_method_supported("aqlm"):  # noqa: SIM223
+if is_quant_method_supported("aqlm"):
     TEST_MODELS.append(("ISTA-DASLab/Llama-2-7b-AQLM-2Bit-1x16-hf", {
         "quantization": "aqlm"
     }))
 
-# TODO: enable in pytorch 2.5
+# TODO: figure out why this fails.
 if False and is_quant_method_supported("gguf"):  # noqa: SIM223
     TEST_MODELS.append(("TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF", {
         "quantization": "gguf"
@@ -55,7 +54,7 @@ if is_quant_method_supported("marlin"):
         "quantization": "marlin"
     }))
 
-if not is_hip() and is_quant_method_supported("awq"):
+if not current_platform.is_rocm() and is_quant_method_supported("awq"):
     TEST_MODELS.append(("TheBloke/TinyLlama-1.1B-Chat-v0.3-AWQ", {
         "quantization": "AWQ"
     }))
@@ -69,12 +68,12 @@ def check_full_graph_support(model,
     os.environ["VLLM_TORCH_COMPILE_LEVEL"] = str(optimization_level)
     os.environ["VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE"] = "1"
 
-    # Inductor doesn't support fp8/gptq_marlin_24 yet.
-    quantization = model_kwargs.get("quantization")
-    if (quantization == "fp8" or quantization == "gptq_marlin"
-            or quantization == "gptq_marlin_24"
-        ) and optimization_level >= CompilationLevel.INDUCTOR:
+    # The base meta llama uses too much memory.
+    if (model == "meta-llama/Meta-Llama-3-8B"
+            and optimization_level >= CompilationLevel.PIECEWISE):
         return
+
+    print(f"MODEL={model}")
 
     prompts = [
         "Hello, my name is",

@@ -25,6 +25,7 @@ ShareGPT example usage:
         --input-length-range 128:256
 """
 
+import dataclasses
 import json
 import random
 import time
@@ -33,6 +34,7 @@ from typing import List, Optional, Tuple
 from transformers import PreTrainedTokenizerBase
 
 from vllm import LLM, SamplingParams
+from vllm.engine.arg_utils import EngineArgs
 from vllm.utils import FlexibleArgumentParser
 
 try:
@@ -116,7 +118,7 @@ def main(args):
     random.seed(args.seed)
     if args.dataset_path is not None:
         print(f"Start to sample {args.num_prompts} prompts"
-              "from {args.dataset_path}")
+              f"from {args.dataset_path}")
         filtered_datasets = sample_requests(
             dataset_path=args.dataset_path,
             num_requests=args.num_prompts,
@@ -129,12 +131,9 @@ def main(args):
         filtered_datasets = [(PROMPT, prompt_len, args.output_len)
                              ] * args.num_prompts
 
-    llm = LLM(model=args.model,
-              tokenizer_mode='auto',
-              trust_remote_code=True,
-              enforce_eager=True,
-              tensor_parallel_size=args.tensor_parallel_size,
-              enable_prefix_caching=args.enable_prefix_caching)
+    engine_args = EngineArgs.from_cli_args(args)
+
+    llm = LLM(**dataclasses.asdict(engine_args))
 
     sampling_params = SamplingParams(temperature=0, max_tokens=args.output_len)
 
@@ -142,13 +141,6 @@ def main(args):
     prompts = repeat_and_sort_requests(filtered_datasets,
                                        repeat_count=args.repeat_count,
                                        sort=args.sort)
-
-    print("------warm up------")
-    test_prefix(
-        llm=llm,
-        prompts=prompts,
-        sampling_params=sampling_params,
-    )
 
     print("------start generating------")
     test_prefix(
@@ -162,18 +154,11 @@ if __name__ == "__main__":
     parser = FlexibleArgumentParser(
         description=
         'Benchmark the performance with or without automatic prefix caching.')
-    parser.add_argument('--model',
-                        type=str,
-                        default='baichuan-inc/Baichuan2-13B-Chat')
     parser.add_argument("--dataset-path",
                         type=str,
                         default=None,
                         help="Path to the dataset.")
-    parser.add_argument('--tensor-parallel-size', '-tp', type=int, default=1)
     parser.add_argument('--output-len', type=int, default=10)
-    parser.add_argument('--enable-prefix-caching',
-                        action='store_true',
-                        help='enable prefix caching')
     parser.add_argument('--num-prompts',
                         type=int,
                         default=1,
@@ -190,9 +175,7 @@ if __name__ == "__main__":
                         default='128:256',
                         help='Range of input lengths for sampling prompts,'
                         'specified as "min:max" (e.g., "128:256").')
-    parser.add_argument("--seed",
-                        type=int,
-                        default=0,
-                        help='Random seed for reproducibility')
+
+    parser = EngineArgs.add_cli_args(parser)
     args = parser.parse_args()
     main(args)

@@ -1,14 +1,13 @@
 import time
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Dict, List, Optional
 from typing import Sequence as GenericSequence
 from typing import Union
 
-from vllm.inputs import PromptType
 from vllm.lora.request import LoRARequest
 from vllm.sampling_params import RequestOutputKind
 from vllm.sequence import (PromptLogprobs, RequestMetrics, SampleLogprobs,
-                           SequenceGroup, SequenceStatus)
+                           SequenceGroup, SequenceGroupBase, SequenceStatus)
 
 
 @dataclass
@@ -84,16 +83,17 @@ class RequestOutput:
         finished: Whether the whole request is finished.
         metrics: Metrics associated with the request.
         lora_request: The LoRA request that was used to generate the output.
-        encoder_prompt: The encoder prompt string of the request; 
-                        None if decoder-only
-        encoder_prompt_token_ids: The token IDs of the encoder prompt;
-                                  None if decoder-only
+        encoder_prompt: The encoder prompt string of the request.
+                        None if decoder-only.
+        encoder_prompt_token_ids: The token IDs of the encoder prompt.
+                                  None if decoder-only.
+        num_cached_tokens: The number of tokens with prefix cache hit.
     """
 
     def __init__(
         self,
         request_id: str,
-        prompt: Optional[PromptType],
+        prompt: Optional[str],
         prompt_token_ids: Optional[List[int]],
         prompt_logprobs: Optional[PromptLogprobs],
         outputs: List[CompletionOutput],
@@ -102,6 +102,7 @@ class RequestOutput:
         lora_request: Optional[LoRARequest] = None,
         encoder_prompt: Optional[str] = None,
         encoder_prompt_token_ids: Optional[List[int]] = None,
+        num_cached_tokens: Optional[int] = None,
     ) -> None:
         self.request_id = request_id
         self.prompt = prompt
@@ -113,16 +114,61 @@ class RequestOutput:
         self.lora_request = lora_request
         self.encoder_prompt = encoder_prompt
         self.encoder_prompt_token_ids = encoder_prompt_token_ids
+        self.num_cached_tokens = num_cached_tokens
 
     @classmethod
-    def from_seq_group(cls, seq_group: SequenceGroup,
-                       use_cache: bool) -> Optional["RequestOutput"]:
+    def new(
+        cls,
+        request_id: str,
+        prompt: Optional[str],
+        prompt_token_ids: Optional[List[int]],
+        text: str,
+        token_ids: List[int],
+        finished: bool = False,
+    ) -> "RequestOutput":
+        """Initialize a new RequestOutput object."""
+
+        # TODO: Support `n` > 1.
+        completion_output = CompletionOutput(
+            index=0,
+            text=text,
+            token_ids=token_ids,
+            cumulative_logprob=None,
+            logprobs=None,  # TODO
+        )
+
+        return RequestOutput(
+            request_id=request_id,
+            prompt=prompt,
+            prompt_token_ids=prompt_token_ids,
+            prompt_logprobs=None,  # TODO
+            outputs=[completion_output],
+            finished=finished,
+        )
+
+    @classmethod
+    def from_seq_group(
+        cls, seq_group: SequenceGroup, use_cache: bool,
+        seq_id_to_seq_group: Dict[str, SequenceGroupBase]
+    ) -> Optional["RequestOutput"]:
+        finished = seq_group.is_finished()
+
+        if seq_group.request_id in seq_id_to_seq_group:
+            group: SequenceGroupBase = seq_id_to_seq_group[
+                seq_group.request_id]
+            if finished:
+                group.finish_seq(seq_group)
+            assembled_seq_group = group.maybe_assemble_group(seq_group)
+            if assembled_seq_group is None:
+                return None
+            return cls.from_seq_group(assembled_seq_group, use_cache,
+                                      seq_id_to_seq_group)
+
         sampling_params = seq_group.sampling_params
         if sampling_params is None:
             raise ValueError(
                 "Sampling parameters are missing for a CompletionRequest.")
 
-        finished = seq_group.is_finished()
         if sampling_params.output_kind == RequestOutputKind.FINAL_ONLY and (
                 not finished):
             return None
@@ -137,15 +183,7 @@ class RequestOutput:
                 outputs=[],
                 finished=False)
 
-        seqs = seq_group.get_seqs()
-        if len(seqs) == 1:
-            top_n_seqs = seqs
-        else:
-            # Get the top-n sequences.
-            n = sampling_params._real_n or sampling_params.n
-            sorting_key = lambda seq: seq.get_cumulative_logprob()
-            sorted_seqs = sorted(seqs, key=sorting_key, reverse=True)
-            top_n_seqs = sorted_seqs[:n]
+        top_n_seqs = seq_group.get_seqs()
 
         # Create the outputs.
         # NOTE: We need omit logprobs here explicitly because the sequence
@@ -157,6 +195,8 @@ class RequestOutput:
 
         outputs = []
         include_prompt = True
+        # num_cached_tokens should be the same for all the sequences
+        num_cached_tokens = None
         for i, seq in enumerate(top_n_seqs):
             output_text = seq.get_output_text_to_return(
                 text_buffer_length, delta)
@@ -164,6 +204,7 @@ class RequestOutput:
             output_token_ids = seq.get_output_token_ids_to_return(delta)
             num_output_tokens = 1 if isinstance(output_token_ids,
                                                 int) else len(output_token_ids)
+            num_cached_tokens = seq.data.get_num_cached_tokens()
 
             output_logprobs = seq.output_logprobs if include_logprobs else None
 
@@ -209,7 +250,7 @@ class RequestOutput:
 
             else:
                 output = CompletionOutput(
-                    seqs.index(seq), output_text, [output_token_ids]
+                    top_n_seqs.index(seq), output_text, [output_token_ids]
                     if isinstance(output_token_ids, int) else output_token_ids,
                     seq.get_cumulative_logprob() if include_logprobs else None,
                     output_logprobs,
@@ -237,7 +278,7 @@ class RequestOutput:
         init_args = (seq_group.request_id, prompt, prompt_token_ids,
                      prompt_logprobs, outputs, finished, seq_group.metrics,
                      seq_group.lora_request, encoder_prompt,
-                     encoder_prompt_token_ids)
+                     encoder_prompt_token_ids, num_cached_tokens)
 
         if use_cache:
             request_output = seq_group.cached_request_output
@@ -258,7 +299,8 @@ class RequestOutput:
                 f"outputs={self.outputs}, "
                 f"finished={self.finished}, "
                 f"metrics={self.metrics}, "
-                f"lora_request={self.lora_request})")
+                f"lora_request={self.lora_request}, "
+                f"num_cached_tokens={self.num_cached_tokens})")
 
 
 class EmbeddingRequestOutput:
@@ -310,10 +352,13 @@ class EmbeddingRequestOutput:
 class RequestOutputFactory:
 
     @staticmethod
-    def create(seq_group: SequenceGroup, use_cache: bool = False):
+    def create(seq_group: SequenceGroup,
+               seq_id_to_seq_group: Dict[str, SequenceGroupBase],
+               use_cache: bool = False):
         # Determine the type based on a condition, for example:
         if hasattr(seq_group,
                    'embeddings') and seq_group.embeddings is not None:
             return EmbeddingRequestOutput.from_seq_group(seq_group)
         else:
-            return RequestOutput.from_seq_group(seq_group, use_cache)
+            return RequestOutput.from_seq_group(seq_group, use_cache,
+                                                seq_id_to_seq_group)

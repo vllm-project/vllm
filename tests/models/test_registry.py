@@ -14,6 +14,7 @@ from vllm.model_executor.models.registry import (_EMBEDDING_MODELS,
 from vllm.platforms import current_platform
 
 from ..utils import fork_new_process_for_each_test
+from .registry import HF_EXAMPLE_MODELS
 
 
 @pytest.mark.parametrize("model_arch", ModelRegistry.get_supported_archs())
@@ -73,3 +74,12 @@ def test_registry_is_pp(model_arch, is_pp, init_cuda):
                 "This model no longer initializes CUDA on import. "
                 "Please test using a different one.",
                 stacklevel=2)
+
+
+def test_hf_registry_coverage():
+    untested_archs = (ModelRegistry.get_supported_archs() -
+                      HF_EXAMPLE_MODELS.get_supported_archs())
+
+    assert not untested_archs, (
+        "Please add the following architectures to "
+        f"`tests/models/registry.py`: {untested_archs}")

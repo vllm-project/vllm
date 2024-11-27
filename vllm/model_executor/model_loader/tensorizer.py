@@ -17,8 +17,6 @@ from vllm.config import ModelConfig, ParallelConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.llm_engine import LLMEngine
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization.base_config import (
-    QuantizationConfig)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding)
 from vllm.utils import FlexibleArgumentParser
@@ -268,8 +266,7 @@ class TensorizerAgent:
     in vllm/model_executor/model_loader/weight_utils.py
     """
 
-    def __init__(self, tensorizer_config: TensorizerConfig,
-                 quant_config: QuantizationConfig, **extra_kwargs):
+    def __init__(self, tensorizer_config: TensorizerConfig, vllm_config):
         if tensorizer_error_msg is not None:
             raise ImportError(
                 "Tensorizer is not installed. Please install tensorizer "
@@ -279,11 +276,7 @@ class TensorizerAgent:
         self.tensorizer_config = tensorizer_config
         self.tensorizer_args = (
             self.tensorizer_config._construct_tensorizer_args())
-        self.extra_kwargs = extra_kwargs
-        if extra_kwargs.get("quant_config", None) is not None:
-            self.quant_config = extra_kwargs["quant_config"]
-        else:
-            self.quant_config = quant_config
+        self.vllm_config = vllm_config
         self.model = self._init_model()
 
     def _init_model(self):
@@ -293,9 +286,7 @@ class TensorizerAgent:
         assert self.tensorizer_config.model_class is not None
         with no_init_or_tensor():
             return self.tensorizer_config.model_class(
-                config=model_args,
-                quant_config=self.quant_config,
-                **self.extra_kwargs)
+                vllm_config=self.vllm_config, )
 
     def _resize_lora_embeddings(self):
         """Modify LoRA embedding layers to use bigger tensors
@@ -380,8 +371,7 @@ def tensorizer_weights_iterator(
     stream = open_stream(tensorizer_args.tensorizer_uri, **stream_params)
     with TensorDeserializer(stream, **deserializer_args,
                             device="cpu") as state:
-        for name, param in state.items():
-            yield name, param
+        yield from state.items()
     del state
 
 
