@@ -285,13 +285,9 @@ def test_multistep(
 ) -> None:
     # This test is verifying that multistep works correctly
     #on mamba-like models
-    try:
-        with vllm_runner(model, num_scheduler_steps=8,
-                         max_num_seqs=2) as vllm_model:
-            vllm_model.generate_greedy([example_prompts[0]] * 10, 1)
-    except ValueError:
-        pytest.fail("Jamba inner state wasn't cleaned up between states, "
-                    "could be related to finished_requests_ids")
+    with vllm_runner(model, num_scheduler_steps=8,
+                     max_num_seqs=2) as vllm_model:
+        vllm_model.generate_greedy([example_prompts[0]] * 10, 1)
 
 
 @pytest.mark.parametrize("model", MODELS)
