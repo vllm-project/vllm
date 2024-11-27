@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING, List, Optional, Tuple, Union
 if TYPE_CHECKING:
     from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
 
+import os
 from copy import deepcopy
 
 import torch
@@ -33,6 +34,9 @@ import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.distributed.kv_transfer.kv_lookup_buffer.base import (
     KVLookupBufferBase)
+from vllm.distributed.kv_transfer.kv_pipe.base import KVPipeBase
+from vllm.distributed.kv_transfer.kv_pipe.mooncake_distributed_pipe import (
+    MooncakeDistributedPipe)
 from vllm.distributed.kv_transfer.kv_pipe.torch_distributed_pipe import (
     TorchDistributedPipe)
 from vllm.logger import init_logger
@@ -80,7 +84,16 @@ class KV_transfer_agent:
         self.send_buffer: Optional[KVLookupBufferBase] = None
         self.recv_buffer: Optional[KVLookupBufferBase] = None
 
+        self.send_pipe: Optional[KVPipeBase] = None
+        self.recv_pipe: Optional[KVPipeBase] = None
+        self.send_signal_pipe: Optional[KVPipeBase] = None
+        self.recv_signal_pipe: Optional[KVPipeBase] = None
+
         SimpleKVLookupBuffer = sklb.SimpleKVLookupBuffer
+
+        # Check if MOONCAKE_CONFIG_PATH is set
+        use_mooncake_distributed_pipe = os.getenv(
+            'MOONCAKE_CONFIG_PATH') is not None
 
         # In disaggregated prefill, the prefill vLLM only uses send pipe
         # and the decode vLLM only uses recv pipe
@@ -88,26 +101,38 @@ class KV_transfer_agent:
         # So we build both send pipe and recv pipe for simplicity.
         if IS_KV_PRODUCER:
 
-            self.send_pipe = TorchDistributedPipe(
-                group_ranks,
-                local_rank,
-                DISTRIBUTED_BACKEND,
-            )
-            self.send_signal_pipe = TorchDistributedPipe(
-                group_ranks,
-                local_rank,
-                "gloo",
-            )
-            self.recv_pipe = TorchDistributedPipe(
-                group_ranks,
-                local_rank,
-                DISTRIBUTED_BACKEND,
-            )
-            self.recv_signal_pipe = TorchDistributedPipe(
-                group_ranks,
-                local_rank,
-                "gloo",
-            )
+            if use_mooncake_distributed_pipe:
+                # Use MooncakeDistributedPipe if environment variable is set
+                self.send_pipe = MooncakeDistributedPipe(
+                    group_ranks,
+                    local_rank,
+                )
+                self.recv_pipe = self.send_pipe
+                self.send_signal_pipe = self.send_pipe
+                self.recv_signal_pipe = self.send_pipe
+            else:
+                # Use TorchDistributedPipe as default
+                self.send_pipe = TorchDistributedPipe(
+                    group_ranks,
+                    local_rank,
+                    DISTRIBUTED_BACKEND,
+                )
+                self.recv_pipe = TorchDistributedPipe(
+                    group_ranks,
+                    local_rank,
+                    DISTRIBUTED_BACKEND,
+                )
+
+                self.send_signal_pipe = TorchDistributedPipe(
+                    group_ranks,
+                    local_rank,
+                    "gloo",
+                )
+                self.recv_signal_pipe = TorchDistributedPipe(
+                    group_ranks,
+                    local_rank,
+                    "gloo",
+                )
             self.send_buffer = SimpleKVLookupBuffer(self.send_signal_pipe,
                                                     self.send_pipe,
                                                     self.lookup_buffer_size)
@@ -120,26 +145,40 @@ class KV_transfer_agent:
             # the current vLLM instance is KV consumer, so it needs to connect
             # its recv pipe to the send pipe of KV producder
 
-            self.recv_pipe = TorchDistributedPipe(
-                group_ranks,
-                local_rank,
-                DISTRIBUTED_BACKEND,
-            )
-            self.recv_signal_pipe = TorchDistributedPipe(
-                group_ranks,
-                local_rank,
-                "gloo",
-            )
-            self.send_pipe = TorchDistributedPipe(
-                group_ranks,
-                local_rank,
-                DISTRIBUTED_BACKEND,
-            )
-            self.send_signal_pipe = TorchDistributedPipe(
-                group_ranks,
-                local_rank,
-                "gloo",
-            )
+            if use_mooncake_distributed_pipe:
+                # Use MooncakeDistributedPipe if environment variable is set
+                self.recv_pipe = MooncakeDistributedPipe(
+                    group_ranks,
+                    local_rank,
+                )
+                # We only need to initialize MooncakeDistributedPipe once, it
+                # supports bidirectional transmission
+                self.send_pipe = self.recv_pipe
+                self.recv_signal_pipe = self.recv_pipe
+                self.send_signal_pipe = self.recv_pipe
+            else:
+                # Use TorchDistributedPipe as default
+                self.recv_pipe = TorchDistributedPipe(
+                    group_ranks,
+                    local_rank,
+                    DISTRIBUTED_BACKEND,
+                )
+                self.send_pipe = TorchDistributedPipe(
+                    group_ranks,
+                    local_rank,
+                    DISTRIBUTED_BACKEND,
+                )
+
+                self.recv_signal_pipe = TorchDistributedPipe(
+                    group_ranks,
+                    local_rank,
+                    "gloo",
+                )
+                self.send_signal_pipe = TorchDistributedPipe(
+                    group_ranks,
+                    local_rank,
+                    "gloo",
+                )
             self.send_buffer = SimpleKVLookupBuffer(self.send_signal_pipe,
                                                     self.send_pipe,
                                                     self.lookup_buffer_size)
@@ -163,6 +202,13 @@ class KV_transfer_agent:
         start_layer = model_executable.model.start_layer
         end_layer = model_executable.model.end_layer
 
+        # fix potential bugs on Volta and Turing GPUs
+        model_config = model_executable.model.config
+        hidden_size = model_config.hidden_size
+        num_heads = model_config.num_key_value_heads
+        num_hidden_layers = model_config.num_attention_heads
+        head_size = int(hidden_size/num_hidden_layers)
+
         # query_lens contains new KV caches that are added to vLLM.
         # so we will send them to decode instance
         # FIXME(Kuntai): This assume that all requests are prefill.
@@ -175,8 +221,6 @@ class KV_transfer_agent:
 
             for layer_id in range(start_layer, end_layer):
                 kv_cache = kv_caches[layer_id - start_layer]
-
-                _, _, num_heads, head_size = kv_cache[0].shape
 
                 key_cache = kv_cache[0].reshape(-1, num_heads, head_size)
                 value_cache = kv_cache[1].reshape(-1, num_heads, head_size)
