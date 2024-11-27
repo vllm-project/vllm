@@ -19,10 +19,10 @@ context = blame(
 with context as result:
     import vllm  # noqa
 
-assert module_name not in sys.modules, (
-    f"Module {module_name} is imported. To see the first"
-    f" import location, run the test with `use_blame=True`.")
-
 if use_blame:
     assert isinstance(result, BlameResult)
     print(f"the first import location is:\n{result.trace_stack}")
+
+assert module_name not in sys.modules, (
+    f"Module {module_name} is imported. To see the first"
+    f" import location, run the test with `use_blame=True`.")
