@@ -355,7 +355,12 @@ class InternVLInputPipeline:
         new_prompt = self._expand_image_prompt(prompt, image_feature_sizes,
                                                num_patches)
         new_prompt_token_ids = tokenizer.encode(new_prompt)
-        img_context_token_id = tokenizer.encode(self.img_context_token)[1]
+        img_context_token_id = tokenizer.encode(self.img_context_token,
+                                                add_special_tokens=False)
+        assert len(img_context_token_id) == 1, \
+            (f"Invalid image token '{self.img_context_token}': A valid image "
+            f"token encodes to a single token ID, got {img_context_token_id}.")
+        img_context_token_id = img_context_token_id[0]
 
         # Get precise tracking of placeholder positions
         token_idx = image_idx = 0
