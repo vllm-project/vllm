@@ -3,6 +3,7 @@ import gc
 import os
 import pickle
 from dataclasses import dataclass
+from enum import Enum, auto
 from multiprocessing.process import BaseProcess
 from typing import TYPE_CHECKING, Optional, Tuple
 
@@ -24,7 +25,7 @@ from vllm.model_executor import set_random_seed
 from vllm.platforms import current_platform
 from vllm.utils import (STR_DTYPE_TO_TORCH_DTYPE, get_dtype_size,
                         get_open_zmq_ipc_path)
-from vllm.v1.core.scheduler_output import ExecutorMsgType
+from vllm.v1.core.scheduler import SchedulerOutput
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.utils import make_zmq_socket
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
@@ -226,8 +227,6 @@ class Worker:
             self.profiler.stop()
 
 
-# Below are data structures used for serializing initiailization-related
-# data structures to send between workers and the core engine process
 @dataclass
 class WorkerInitRequestType:
     """
@@ -247,6 +246,21 @@ class WorkerInitResponseType:
     READY = b'\x00'
     NUM_BLOCKS = b'\x01'
     INITIALIZE_SUCCESS = b'\x02'
+
+
+@dataclass
+class WorkerExecRequest:
+    """A directive from the core process to its worker processes.
+    
+	Wraps SchedulerOutput with a message type to distinguish between
+	regular work assignments and termination orders."""
+
+    class Type(Enum):
+        WORK = auto()
+        TERMINATE = auto()
+
+    message_type: Type
+    payload: Optional[SchedulerOutput]
 
 
 @dataclass
@@ -476,9 +490,9 @@ class WorkerProc:
         while True:
             msg = self.scheduler_output_receiver.dequeue()
 
-            if msg.message_type == ExecutorMsgType.TERMINATE:
+            if msg.message_type == WorkerExecRequest.Type.TERMINATE:
                 return
-            if msg.message_type == ExecutorMsgType.WORK:
+            if msg.message_type == WorkerExecRequest.Type.WORK:
                 output = self.worker.execute_model(msg.payload)
                 if self.worker.rank == 0:
                     self.model_output_mq.enqueue(output)

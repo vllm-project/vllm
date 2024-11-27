@@ -11,9 +11,9 @@ from vllm.logger import init_logger
 from vllm.triton_utils import maybe_set_triton_cache_manager
 from vllm.utils import (cuda_is_initialized, get_distributed_init_method,
                         get_open_port, get_vllm_instance_id)
-from vllm.v1.core.scheduler_output import ExecutorMsg, ExecutorMsgType
 from vllm.v1.outputs import ModelRunnerOutput
-from vllm.v1.worker.gpu_worker import WorkerProc, WorkerProcHandle
+from vllm.v1.worker.gpu_worker import (WorkerExecRequest, WorkerProc,
+                                       WorkerProcHandle)
 
 logger = init_logger(__name__)
 
@@ -143,7 +143,7 @@ class MultiprocExecutor:
         scheduler_output,
     ) -> ModelRunnerOutput:
         self.scheduler_output_mq.enqueue(
-            ExecutorMsg(ExecutorMsgType.WORK, scheduler_output))
+            WorkerExecRequest(WorkerExecRequest.Type.WORK, scheduler_output))
         model_output = self.model_output_mq.dequeue()
         return model_output
 
@@ -154,7 +154,8 @@ class MultiprocExecutor:
         """Properly shut down the executor and its workers"""
         if (hasattr(self, 'scheduler_output_mq')
                 and self.scheduler_output_mq is not None):
-            termination_msg = ExecutorMsg(ExecutorMsgType.TERMINATE, None)
+            termination_msg = WorkerExecRequest(
+                WorkerExecRequest.Type.TERMINATE, None)
             self.scheduler_output_mq.enqueue(termination_msg)
             self.scheduler_output_mq = None
 
