@@ -286,9 +286,6 @@ class PhiForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         "k_proj": ("qkv_proj", 1),
         "v_proj": ("qkv_proj", 2),
     }
-    default_bitsandbytes_target_modules = [
-        ".q_proj.", ".k_proj.", ".v_proj.", ".fc1.", ".fc2.", ".dense."
-    ]
 
     embedding_modules = {}
     embedding_padding_modules = []

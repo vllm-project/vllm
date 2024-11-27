@@ -94,7 +94,7 @@ class AsyncLLM(EngineClient):
 
         # Create the engine configs.
         if engine_config is None:
-            vllm_config = engine_args.create_engine_config()
+            vllm_config = engine_args.create_engine_config(usage_context)
         else:
             vllm_config = engine_config
 
