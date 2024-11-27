@@ -532,7 +532,7 @@ Text Generation
   * - :code:`LlavaForConditionalGeneration`
     - LLaVA-1.5
     - T + I\ :sup:`E+`
-    - :code:`llava-hf/llava-1.5-7b-hf`, :code:`llava-hf/llava-1.5-13b-hf`, etc.
+    - :code:`llava-hf/llava-1.5-7b-hf`, :code:`TIGER-Lab/Mantis-8B-siglip-llama3` (see note), etc.
     -
     - ✅︎
   * - :code:`LlavaNextForConditionalGeneration`
@@ -625,6 +625,10 @@ Text Generation
 
 .. note::
   vLLM currently only supports adding LoRA to the language backbone of multimodal models.
+
+.. note::
+  To use :code:`TIGER-Lab/Mantis-8B-siglip-llama3`, you have to install their GitHub repo (:code:`pip install git+https://github.com/TIGER-AI-Lab/Mantis.git`)
+  and pass :code:`--hf_overrides '{"architectures": ["MantisForConditionalGeneration"]}'` when running vLLM.
 
 .. note::
   The official :code:`openbmb/MiniCPM-V-2` doesn't work yet, so we need to use a fork (:code:`HwwwH/MiniCPM-V-2`) for now.
