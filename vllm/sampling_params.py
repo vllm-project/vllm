@@ -334,6 +334,9 @@ class SamplingParams(
         if self.stop and not self.include_stop_str_in_output:
             self.output_text_buffer_length = max(len(s) for s in self.stop) - 1
 
+        if self.guided_decoding and not isinstance(self.guided_decoding, GuidedDecodingParams):
+            self.guided_decoding = GuidedDecodingParams.from_optional(**self.guided_decoding)
+
         self._verify_args()
 
         if self.temperature < _SAMPLING_EPS:
@@ -404,6 +407,7 @@ class SamplingParams(
         if self.best_of != self._real_n and self.output_kind == (
                 RequestOutputKind.DELTA):
             raise ValueError("best_of must equal n to use output_kind=DELTA")
+        assert isinstance(self.guided_decoding, GuidedDecodingParams)
 
     def _verify_greedy_sampling(self) -> None:
         if self.n > 1:
