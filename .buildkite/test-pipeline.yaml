@@ -334,7 +334,6 @@ steps:
   commands:
     - pytest -v -s models/decoder_only/language -m 'core_model or quant_model'
     - pytest -v -s models/embedding/language -m core_model
-    - pytest -v -s models/embedding/vision_language -m core_model
 
 - label: Language Models Test (Extended) # 50min
   optional: true
@@ -346,7 +345,6 @@ steps:
   commands:
     - pytest -v -s models/decoder_only/language -m 'not core_model and not quant_model'
     - pytest -v -s models/embedding/language -m 'not core_model'
-    - pytest -v -s models/embedding/vision_language -m 'not core_model'
 
 - label: Multi-Modal Models Test (Standard) # 26min
   #mirror_hardwares: [amd]
@@ -357,8 +355,10 @@ steps:
   - tests/models/embedding/vision_language
   - tests/models/encoder_decoder/vision_language
   commands:
+    - python -m pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pytest -v -s models/decoder_only/audio_language -m 'core_model or quant_model'
     - pytest -v -s --ignore models/decoder_only/vision_language/test_phi3v.py models/decoder_only/vision_language -m 'core_model or quant_model'
+    - pytest -v -s models/embedding/vision_language -m core_model
     - pytest -v -s models/encoder_decoder/language -m core_model
     - pytest -v -s models/encoder_decoder/vision_language -m core_model
 
@@ -371,11 +371,13 @@ steps:
   - tests/models/embedding/vision_language
   - tests/models/encoder_decoder/vision_language
   commands:
+    - python -m pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
     - pytest -v -s models/decoder_only/audio_language -m 'not core_model and not quant_model'
     # HACK - run phi3v tests separately to sidestep this transformers bug
     # https://github.com/huggingface/transformers/issues/34307
     - pytest -v -s models/decoder_only/vision_language/test_phi3v.py
     - pytest -v -s --ignore models/decoder_only/vision_language/test_phi3v.py models/decoder_only/vision_language -m 'not core_model and not quant_model'
+    - pytest -v -s models/embedding/vision_language -m 'not core_model'
     - pytest -v -s models/encoder_decoder/language -m 'not core_model'
     - pytest -v -s models/encoder_decoder/vision_language -m 'not core_model'
 

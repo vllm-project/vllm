@@ -419,6 +419,22 @@ def run_aria(question: str, modality: str):
     return llm, prompt, stop_token_ids
 
 
+# Mantis
+def run_mantis(question: str, modality: str):
+    assert modality == "image"
+
+    llama3_template = '<|start_header_id|>user<|end_header_id|>\n\n{}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n'  # noqa: E501
+    prompt = llama3_template.format(f"{question}\n<image>")
+
+    llm = LLM(
+        model="TIGER-Lab/Mantis-8B-siglip-llama3",
+        max_model_len=4096,
+        hf_overrides={"architectures": ["MantisForConditionalGeneration"]},
+    )
+    stop_token_ids = [128009]
+    return llm, prompt, stop_token_ids
+
+
 model_example_map = {
     "llava": run_llava,
     "llava-next": run_llava_next,
@@ -441,6 +457,7 @@ model_example_map = {
     "glm4v": run_glm4v,
     "idefics3": run_idefics3,
     "aria": run_aria,
+    "mantis": run_mantis,
 }
 
 

@@ -147,6 +147,7 @@ _MULTIMODAL_MODELS = {
     "LlavaNextForConditionalGeneration": ("llava_next", "LlavaNextForConditionalGeneration"),  # noqa: E501
     "LlavaNextVideoForConditionalGeneration": ("llava_next_video", "LlavaNextVideoForConditionalGeneration"),  # noqa: E501
     "LlavaOnevisionForConditionalGeneration": ("llava_onevision", "LlavaOnevisionForConditionalGeneration"),  # noqa: E501
+    "MantisForConditionalGeneration": ("llava", "MantisForConditionalGeneration"),  # noqa: E501
     "MiniCPMV": ("minicpmv", "MiniCPMV"),
     "MolmoForCausalLM": ("molmo", "MolmoForCausalLM"),
     "NVLM_D": ("nvlm_d", "NVLM_D_Model"),

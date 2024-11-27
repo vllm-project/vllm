@@ -34,7 +34,7 @@ COMMON_BROADCAST_SETTINGS = {
     "dtype": "half",
     "max_tokens": 5,
     "tensor_parallel_size": 2,
-    "model_kwargs": {"device_map": "auto"},
+    "hf_model_kwargs": {"device_map": "auto"},
     "image_size_factors": [(.25, 0.5, 1.0)],
     "distributed_executor_backend": (
         "ray",
@@ -108,7 +108,7 @@ VLM_TEST_SETTINGS = {
             "cherry_blossom": "What is in the picture?",
         }),
         auto_cls=AutoModelForVision2Seq,
-        postprocess_inputs=model_utils.get_key_type_post_processor(
+        postprocess_inputs=model_utils.cast_dtype_post_processor(
             "pixel_values"
         ),
         vllm_output_post_proc=model_utils.paligemma_vllm_to_hf_output,
@@ -148,7 +148,7 @@ VLM_TEST_SETTINGS = {
         prompt_formatter=lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:",
         max_model_len=4096,
         auto_cls=AutoModelForVision2Seq,
-        postprocess_inputs=model_utils.get_key_type_post_processor(
+        postprocess_inputs=model_utils.cast_dtype_post_processor(
             "pixel_values"
         ),
         # For chameleon, we only compare the sequences
@@ -264,7 +264,7 @@ VLM_TEST_SETTINGS = {
         prompt_formatter=lambda vid_prompt: f"<|im_start|>user\n{vid_prompt}<|im_end|>\n<|im_start|>assistant\n",   # noqa: E501
         num_video_frames=16,
         max_model_len=16384,
-        postprocess_inputs=model_utils.get_key_type_post_processor(
+        postprocess_inputs=model_utils.cast_dtype_post_processor(
             "pixel_values_videos"
         ),
         auto_cls=AutoModelForVision2Seq,
@@ -295,6 +295,20 @@ VLM_TEST_SETTINGS = {
             )
         ],
     ),
+    "mantis": VLMTestInfo(
+        models=["TIGER-Lab/Mantis-8B-siglip-llama3"],
+        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
+        prompt_formatter=lambda img_prompt: f"<|start_header_id|>user<|end_header_id|>\n\n{img_prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n",  # noqa: E501
+        max_model_len=4096,
+        postprocess_inputs=model_utils.cast_dtype_post_processor(
+            "pixel_values"
+        ),
+        vllm_runner_kwargs={"hf_overrides": {"architectures": ["MantisForConditionalGeneration"]}},  # noqa: E501
+        get_stop_token_ids=lambda tok: [128009],
+        auto_cls=AutoModelForVision2Seq,
+        vllm_output_post_proc=model_utils.mantis_vllm_to_hf_output,
+        patch_hf_runner=model_utils.mantis_patch_hf_runner,
+    ),
     "minicpmv": VLMTestInfo(
         models=["openbmb/MiniCPM-Llama3-V-2_5"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
@@ -318,7 +332,7 @@ VLM_TEST_SETTINGS = {
     #     max_num_seqs=2,
     #     task="generate",
     #     # use eager mode for hf runner since phi3v didn't work with flash_attn
-    #     model_kwargs={"_attn_implementation": "eager"},
+    #     hf_model_kwargs={"_attn_implementation": "eager"},
     #     use_tokenizer_eos=True,
     #     vllm_output_post_proc=model_utils.phi3v_vllm_to_hf_output,
     #     num_logprobs=10,
@@ -349,7 +363,7 @@ VLM_TEST_SETTINGS = {
         prompt_formatter=lambda img_prompt: f"USER: {img_prompt}\nASSISTANT:",
         max_model_len=4096,
         auto_cls=AutoModelForVision2Seq,
-        postprocess_inputs=model_utils.get_key_type_post_processor(
+        postprocess_inputs=model_utils.cast_dtype_post_processor(
             "pixel_values"
         ),
         vllm_output_post_proc = lambda vllm_output, model: vllm_output[:2],
@@ -418,7 +432,7 @@ VLM_TEST_SETTINGS = {
         test_type=VLMTestType.CUSTOM_INPUTS,
         max_model_len=16384,
         max_num_seqs=2,
-        postprocess_inputs=model_utils.get_key_type_post_processor(
+        postprocess_inputs=model_utils.cast_dtype_post_processor(
             "pixel_values"
         ),
         auto_cls=AutoModelForVision2Seq,

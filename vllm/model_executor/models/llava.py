@@ -7,7 +7,7 @@ import torch.nn as nn
 from PIL.Image import Image
 from transformers import (BatchFeature, CLIPVisionConfig, LlavaConfig,
                           PixtralVisionConfig, PretrainedConfig,
-                          SiglipVisionConfig)
+                          ProcessorMixin, SiglipVisionConfig)
 
 from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
@@ -21,7 +21,7 @@ from vllm.multimodal.inputs import NestedTensors
 from vllm.multimodal.processing import (InputProcessingContext,
                                         ModalityProcessingMetadata,
                                         MultiModalProcessingMetadata,
-                                        PromptReplacement)
+                                        MultiModalProcessor, PromptReplacement)
 from vllm.sequence import IntermediateTensors
 
 from .clip import CLIPVisionModel, get_max_clip_image_tokens
@@ -499,3 +499,31 @@ class LlavaForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
                                                    torch.Tensor]]) -> Set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
+
+
+class MantisProcessor(MultiModalProcessor):
+
+    def _get_hf_processor(self) -> ProcessorMixin:
+        try:
+            from mantis.models.mllava import MLlavaProcessor
+        except ModuleNotFoundError as exc:
+            raise ModuleNotFoundError(
+                "You need to `pip install "
+                "git+https://github.com/TIGER-AI-Lab/Mantis.git` "
+                "to use this model") from exc
+
+        processor = MLlavaProcessor.from_pretrained(
+            self.ctx.model_config.tokenizer)
+        assert isinstance(processor, ProcessorMixin)
+        return processor
+
+
+# To use this model, please use
+# `--hf_overrides '{"architectures": ["MantisForConditionalGeneration"]}'`
+@MULTIMODAL_REGISTRY.register_max_image_tokens(get_max_llava_image_tokens)
+@MULTIMODAL_REGISTRY.register_processor(lambda ctx: MantisProcessor(
+    ctx=ctx,
+    metadata=create_metadata_for_llava(ctx),
+))
+class MantisForConditionalGeneration(LlavaForConditionalGeneration):
+    pass
