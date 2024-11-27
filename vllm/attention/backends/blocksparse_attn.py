@@ -88,6 +88,11 @@ class BlocksparseParams:
 class BlocksparseFlashAttentionBackend(AttentionBackend):
 
     @staticmethod
+    def get_name() -> str:
+        # For attention layer compatibility
+        return "FLASH_ATTN"
+
+    @staticmethod
     def get_impl_cls() -> Type["BlocksparseFlashAttentionImpl"]:
         return BlocksparseFlashAttentionImpl
 
@@ -354,7 +359,7 @@ class BlocksparseFlashAttentionImpl(AttentionImpl):
         attn_metadata: BlocksparseFlashAttentionMetadata,
         k_scale: float = 1.0,
         v_scale: float = 1.0,
-        attn_type: AttentionType = AttentionType.DECODER,
+        attn_type: str = AttentionType.DECODER,
         fp8_out_scale: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with FlashAttention and PagedAttention.

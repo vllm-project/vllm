@@ -230,6 +230,7 @@ set(VLLM_EXT_SRC
   "csrc/quantization/gptq/q_gemm.cu"
   "csrc/quantization/compressed_tensors/int8_quant_kernels.cu"
   "csrc/quantization/fp8/common.cu"
+  "csrc/quantization/gguf/gguf_kernel.cu"
   "csrc/cuda_utils_kernels.cu"
   "csrc/prepare_inputs/advance_step.cu"
   "csrc/torch_bindings.cpp")
@@ -240,7 +241,19 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # Set CUTLASS_REVISION manually -- its revision detection doesn't work in this case.
   set(CUTLASS_REVISION "v3.5.1" CACHE STRING "CUTLASS revision to use")
 
-  FetchContent_Declare(
+  # Use the specified CUTLASS source directory for compilation if VLLM_CUTLASS_SRC_DIR is provided
+  if (DEFINED ENV{VLLM_CUTLASS_SRC_DIR})
+    set(VLLM_CUTLASS_SRC_DIR $ENV{VLLM_CUTLASS_SRC_DIR})
+  endif()
+
+  if(VLLM_CUTLASS_SRC_DIR)
+    if(NOT IS_ABSOLUTE VLLM_CUTLASS_SRC_DIR)
+      get_filename_component(VLLM_CUTLASS_SRC_DIR "${VLLM_CUTLASS_SRC_DIR}" ABSOLUTE)
+    endif()
+    message(STATUS "The VLLM_CUTLASS_SRC_DIR is set, using ${VLLM_CUTLASS_SRC_DIR} for compilation")
+    FetchContent_Declare(cutlass SOURCE_DIR ${VLLM_CUTLASS_SRC_DIR})
+  else()
+    FetchContent_Declare(
         cutlass
         GIT_REPOSITORY https://github.com/nvidia/cutlass.git
         GIT_TAG v3.5.1
@@ -250,7 +263,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
         # Important: If GIT_SHALLOW is enabled then GIT_TAG works only with branch names and tags.
         # So if the GIT_TAG above is updated to a commit hash, GIT_SHALLOW must be set to FALSE
         GIT_SHALLOW TRUE
-  )
+    )
+  endif()
   FetchContent_MakeAvailable(cutlass)
 
   list(APPEND VLLM_EXT_SRC
@@ -258,7 +272,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     "csrc/mamba/causal_conv1d/causal_conv1d.cu"
     "csrc/quantization/aqlm/gemm_kernels.cu"
     "csrc/quantization/awq/gemm_kernels.cu"
-    "csrc/quantization/gguf/gguf_kernel.cu"
     "csrc/custom_all_reduce.cu"
     "csrc/permute_cols.cu"
     "csrc/quantization/cutlass_w8a8/scaled_mm_entry.cu")

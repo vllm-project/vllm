@@ -230,6 +230,7 @@ class GLMAttention(nn.Module):
         config: ChatGLMConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -285,7 +286,8 @@ class GLMAttention(nn.Module):
                               self.scaling,
                               num_kv_heads=self.num_kv_heads,
                               cache_config=cache_config,
-                              quant_config=quant_config)
+                              quant_config=quant_config,
+                              prefix=f"{prefix}.attn")
 
     def forward(
         self,
@@ -364,6 +366,7 @@ class GLMBlock(nn.Module):
         config: ChatGLMConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.apply_residual_connection_post_layernorm = (
@@ -377,7 +380,10 @@ class GLMBlock(nn.Module):
                                                eps=config.layernorm_epsilon)
 
         # Self attention.
-        self.self_attention = GLMAttention(config, cache_config, quant_config)
+        self.self_attention = GLMAttention(config,
+                                           cache_config,
+                                           quant_config,
+                                           prefix=f"{prefix}.self_attention")
         self.hidden_dropout = config.hidden_dropout
 
         # Layernorm on the attention output
@@ -446,7 +452,8 @@ class GLMTransformer(nn.Module):
         # Transformer layers.
         self.start_layer, self.end_layer, self.layers = make_layers(
             self.num_layers,
-            lambda prefix: GLMBlock(config, cache_config, quant_config),
+            lambda prefix: GLMBlock(
+                config, cache_config, quant_config, prefix=prefix),
             prefix=f"{prefix}.layers",
         )
 
@@ -500,16 +507,22 @@ class ChatGLMModel(nn.Module):
         self.num_layers = config.num_layers
         self.multi_query_group_num = config.multi_query_group_num
         self.kv_channels = config.kv_channels
-        self.encoder = GLMTransformer(config, cache_config, quant_config)
+        self.encoder = GLMTransformer(config,
+                                      cache_config,
+                                      quant_config,
+                                      prefix=f"{prefix}.encoder")
 
         self.output_layer = ParallelLMHead(config.padded_vocab_size,
                                            config.hidden_size,
-                                           quant_config=quant_config)
+                                           quant_config=quant_config,
+                                           prefix=f"{prefix}.output_layer")
 
         vision_config_flag = getattr(config, 'vision_config', None)
         if vision_config_flag is not None:
             self.vision_config = Namespace(**config.vision_config)
-            self.vision = EVA2CLIPModel(self.config, quant_config)
+            self.vision = EVA2CLIPModel(self.config,
+                                        quant_config,
+                                        prefix=f"{prefix}.vision")
         else:
             self.vision = None
 
@@ -575,8 +588,7 @@ class ChatGLMModel(nn.Module):
         return hidden_states
 
 
-class ChatGLMBaseModel(nn.Module, SupportsLoRA, SupportsPP,
-                       SupportsMultiModal):
+class ChatGLMBaseModel(nn.Module, SupportsLoRA, SupportsPP):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -695,7 +707,7 @@ class ChatGLM(ChatGLMBaseModel):
     embedding_padding_modules = []
 
 
-class ChatGLMV(ChatGLMBaseModel):
+class ChatGLMV(ChatGLMBaseModel, SupportsMultiModal):
     packed_modules_mapping = {
         "query_key_value": ["query_key_value"],
         "dense_h_to_4h": ["dense_h_to_4h"],
@@ -748,7 +760,7 @@ class ChatGLMForCausalLM(ChatGLMBaseModel, SupportsLoRA, SupportsPP,
         config = vllm_config.model_config.hf_config
         # Initialize VL
         if hasattr(config, "visual"):
-            return ChatGLM(vllm_config=vllm_config, prefix=prefix)
+            return ChatGLMV(vllm_config=vllm_config, prefix=prefix)
         # Initialize LLM
         else:
-            return ChatGLMV(vllm_config=vllm_config, prefix=prefix)
+            return ChatGLM(vllm_config=vllm_config, prefix=prefix)

@@ -17,6 +17,7 @@ from transformers.models.pixtral.modeling_pixtral import (
 
 from vllm.attention import AttentionMetadata
 from vllm.config import ModelConfig, VllmConfig
+from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.inputs import (INPUT_REGISTRY, DecoderOnlyInputs, DummyData,
                          InputContext, token_inputs)
 from vllm.model_executor.layers.activation import get_act_and_mul_fn
@@ -32,7 +33,8 @@ from vllm.model_executor.sampling_metadata import SamplingMetadata
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.multimodal.inputs import PlaceholderRange
 from vllm.multimodal.utils import (cached_get_tokenizer,
-                                   consecutive_placeholder_ranges)
+                                   consecutive_placeholder_ranges,
+                                   resolve_visual_encoder_outputs)
 from vllm.sequence import IntermediateTensors, SequenceData
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.utils import is_list_of
@@ -330,6 +332,7 @@ class VisionEncoderArgs:
     num_attention_heads: int
     rope_theta: float  # for rope-2D
     image_token_id: int
+    adapter_bias: bool = True
 
 
 def _reshape_for_broadcast(freqs_cis: torch.Tensor,
@@ -594,10 +597,10 @@ class VisionLanguageAdapter(nn.Module):
         self.w_in = nn.Linear(
             args.hidden_size,
             dim,
-            bias=True,
+            bias=args.adapter_bias,
         )
         self.gelu = nn.GELU()
-        self.w_out = nn.Linear(dim, dim, bias=True)
+        self.w_out = nn.Linear(dim, dim, bias=args.adapter_bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.w_out(self.gelu(self.w_in(x)))
@@ -843,17 +846,20 @@ class PixtralHFAttention(nn.Module):
 
         self.config = config
         assert not config.hidden_size % config.num_attention_heads
-        self.n_heads = config.num_attention_heads
+        self.total_num_heads = config.num_attention_heads
+        tp_size = get_tensor_model_parallel_world_size()
+        self.n_heads = divide(config.num_attention_heads, tp_size)
         self.head_dim = config.hidden_size // config.num_attention_heads
 
         self.qkv_proj = QKVParallelLinear(
             hidden_size=config.hidden_size,
             head_size=self.head_dim,
-            total_num_heads=self.n_heads,
+            total_num_heads=self.total_num_heads,
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj",
         )
+        assert self.total_num_heads * self.head_dim == config.hidden_size
         self.o_proj = RowParallelLinear(
             input_size=config.hidden_size,
             output_size=config.hidden_size,
@@ -965,9 +971,18 @@ class PixtralHFTransformer(nn.Module):
         x: torch.Tensor,
         attention_mask: torch.Tensor,
         position_embeddings: torch.Tensor,
+        return_all_hidden_states: bool,
     ) -> torch.Tensor:
+        hidden_states_pool = []
+
         for layer in self.layers:
             x = layer(x, attention_mask, position_embeddings)
+            if return_all_hidden_states:
+                hidden_states_pool.append(x)
+        # If we have multiple feature sample layers, we return all hidden
+        # states in order and grab the ones we need by index.
+        if return_all_hidden_states:
+            return hidden_states_pool
         return x
 
 
@@ -985,6 +1000,7 @@ class PixtralHFVisionModel(nn.Module):
         super().__init__()
 
         self.config = config
+
         self.patch_conv = nn.Conv2d(
             in_channels=config.num_channels,
             out_channels=config.hidden_size,
@@ -1019,6 +1035,7 @@ class PixtralHFVisionModel(nn.Module):
     def forward(
         self,
         pixel_values: List[torch.Tensor],
+        feature_sample_layers: Optional[list[int]] = None,
     ) -> torch.Tensor:
         """
         Args:
@@ -1026,6 +1043,9 @@ class PixtralHFVisionModel(nn.Module):
                 in pixel_values. This means it will be a list of tensors
                 because multiple requests batched can have multiple images,
                 each with their own shape potentially
+            feature_sample_layers: Layer indices whose features should be
+                concatenated and used as the visual encoder output. If none
+                are provided, the last layer is used.
 
         Returns:
             image_features: tensor of token features for
@@ -1060,8 +1080,15 @@ class PixtralHFVisionModel(nn.Module):
                 [p.shape[-2] * p.shape[-1] for p in patch_embeds_list],
                 patch_embeds)
 
-        out = self.transformer(patch_embeds, attention_mask,
-                               position_embedding)
+        return_all_hidden_states = feature_sample_layers is not None
+        out = self.transformer(
+            patch_embeds,
+            attention_mask,
+            position_embedding,
+            return_all_hidden_states=return_all_hidden_states)
+
+        out = resolve_visual_encoder_outputs(out, feature_sample_layers, None,
+                                             self.config.num_hidden_layers)
 
         return out
 

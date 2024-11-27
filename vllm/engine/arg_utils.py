@@ -8,12 +8,13 @@ from typing import (TYPE_CHECKING, Any, Dict, List, Literal, Mapping, Optional,
 import torch
 
 import vllm.envs as envs
-from vllm.config import (CacheConfig, ConfigFormat, DecodingConfig,
-                         DeviceConfig, HfOverrides, LoadConfig, LoadFormat,
-                         LoRAConfig, ModelConfig, ObservabilityConfig,
-                         ParallelConfig, PoolerConfig, PromptAdapterConfig,
-                         SchedulerConfig, SpeculativeConfig, TaskOption,
-                         TokenizerPoolConfig, VllmConfig)
+from vllm.config import (CacheConfig, CompilationConfig, ConfigFormat,
+                         DecodingConfig, DeviceConfig, HfOverrides, LoadConfig,
+                         LoadFormat, LoRAConfig, ModelConfig,
+                         ObservabilityConfig, ParallelConfig, PoolerConfig,
+                         PromptAdapterConfig, SchedulerConfig,
+                         SpeculativeConfig, TaskOption, TokenizerPoolConfig,
+                         VllmConfig)
 from vllm.executor.executor_base import ExecutorBase
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QUANTIZATION_METHODS
@@ -189,10 +190,19 @@ class EngineArgs:
 
     override_neuron_config: Optional[Dict[str, Any]] = None
     override_pooler_config: Optional[PoolerConfig] = None
+    compilation_config: Optional[CompilationConfig] = None
+    worker_cls: str = "auto"
 
     def __post_init__(self):
         if not self.tokenizer:
             self.tokenizer = self.model
+
+        # support `EngineArgs(compilation_config={...})`
+        # without having to manually construct a
+        # CompilationConfig object
+        if isinstance(self.compilation_config, (int, dict)):
+            self.compilation_config = CompilationConfig.from_cli(
+                json.dumps(self.compilation_config))
 
         # Setup plugins
         from vllm.plugins import load_general_plugins
@@ -793,7 +803,7 @@ class EngineArgs:
             type=str,
             default=[],
             help="The pattern(s) to ignore when loading the model."
-            "Default to 'original/**/*' to avoid repeated loading of llama's "
+            "Default to `original/**/*` to avoid repeated loading of llama's "
             "checkpoints.")
         parser.add_argument(
             '--preemption-mode',
@@ -867,6 +877,29 @@ class EngineArgs:
             default=None,
             help="Override or set the pooling method in the embedding model. "
             "e.g. {\"pooling_type\": \"mean\", \"normalize\": false}.'")
+
+        parser.add_argument('--compilation-config',
+                            '-O',
+                            type=CompilationConfig.from_cli,
+                            default=None,
+                            help='torch.compile configuration for the model.'
+                            'When it is a number (0, 1, 2, 3), it will be '
+                            'interpreted as the optimization level.\n'
+                            'NOTE: level 0 is the default level without '
+                            'any optimization. level 1 and 2 are for internal '
+                            'testing only. level 3 is the recommended level '
+                            'for production.\n'
+                            'To specify the full compilation config, '
+                            'use a JSON string.\n'
+                            'Following the convention of traditional '
+                            'compilers, using -O without space is also '
+                            'supported. -O3 is equivalent to -O 3.')
+
+        parser.add_argument(
+            '--worker-cls',
+            type=str,
+            default="auto",
+            help='The worker class to use for distributed execution.')
 
         return parser
 
@@ -980,7 +1013,9 @@ class EngineArgs:
                 self.tokenizer_pool_extra_config,
             ),
             ray_workers_use_nsight=self.ray_workers_use_nsight,
-            distributed_executor_backend=self.distributed_executor_backend)
+            distributed_executor_backend=self.distributed_executor_backend,
+            worker_cls=self.worker_cls,
+        )
 
         max_model_len = model_config.max_model_len
         use_long_context = max_model_len > 32768
@@ -998,7 +1033,8 @@ class EngineArgs:
                 use_spec_decode = self.speculative_model is not None
                 if (is_gpu and not use_sliding_window and not use_spec_decode
                         and not self.enable_lora
-                        and not self.enable_prompt_adapter):
+                        and not self.enable_prompt_adapter
+                        and model_config.task != "embedding"):
                     self.enable_chunked_prefill = True
                     logger.warning(
                         "Chunked prefill is enabled by default for models with "
@@ -1015,6 +1051,10 @@ class EngineArgs:
                 "errors during the initial memory profiling phase, or result "
                 "in low performance due to small KV cache space. Consider "
                 "setting --max-model-len to a smaller value.", max_model_len)
+        elif self.enable_chunked_prefill and model_config.task == "embedding":
+            msg = "Chunked prefill is not supported for embedding models"
+            raise ValueError(msg)
+
 
         speculative_config = SpeculativeConfig.maybe_create_spec_config(
             target_model_config=model_config,
@@ -1142,6 +1182,7 @@ class EngineArgs:
             decoding_config=decoding_config,
             observability_config=observability_config,
             prompt_adapter_config=prompt_adapter_config,
+            compilation_config=self.compilation_config,
         )
 
 

@@ -8,7 +8,7 @@ import torch.distributed
 from vllm.attention.backends.abstract import (AttentionBackend,
                                               AttentionMetadata)
 from vllm.attention.backends.utils import PAD_SLOT_ID
-from vllm.attention.selector import (_Backend, get_env_variable_attn_backend,
+from vllm.attention.selector import (get_env_variable_attn_backend,
                                      get_global_forced_attn_backend)
 from vllm.config import VllmConfig
 from vllm.forward_context import set_forward_context
@@ -18,6 +18,7 @@ from vllm.model_executor import SamplingMetadata
 from vllm.model_executor.layers.sampler import SamplerOutput
 from vllm.multimodal import (MULTIMODAL_REGISTRY, MultiModalKwargs,
                              MultiModalRegistry)
+from vllm.platforms import _Backend
 from vllm.sampling_params import SamplingParams
 from vllm.sequence import (IntermediateTensors, PoolerOutput,
                            SequenceGroupMetadata)
@@ -175,7 +176,7 @@ class EncoderDecoderModelRunner(GPUModelRunnerBase[EncoderDecoderModelInput]):
         } if self.has_inner_state else {}
 
         multi_modal_kwargs = model_input.multi_modal_kwargs or {}
-        with set_forward_context(model_input.attn_metadata):
+        with set_forward_context(model_input.attn_metadata, self.vllm_config):
             hidden_or_intermediate_states = model_executable(
                 input_ids=model_input.input_tokens,
                 positions=model_input.input_positions,

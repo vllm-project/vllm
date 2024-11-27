@@ -13,7 +13,6 @@ from torch.nn import functional as F
 from transformers import PretrainedConfig
 
 from vllm.attention import Attention, AttentionMetadata
-from vllm.attention.selector import _Backend
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (get_pp_group, get_tensor_model_parallel_rank,
@@ -38,6 +37,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargs
 from vllm.multimodal.utils import cached_get_tokenizer
+from vllm.platforms import _Backend
 from vllm.sequence import (VLLM_TOKEN_ID_ARRAY_TYPE, IntermediateTensors,
                            SequenceData)
 from vllm.transformers_utils.processor import get_processor
@@ -370,6 +370,7 @@ class MolmoAttention(nn.Module):
         config: PretrainedConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -427,7 +428,8 @@ class MolmoAttention(nn.Module):
                               self.scaling,
                               num_kv_heads=self.num_kv_heads,
                               cache_config=cache_config,
-                              quant_config=quant_config)
+                              quant_config=quant_config,
+                              prefix=f"{prefix}.attn")
 
         # Attention output projection.
         self.o_proj = RowParallelLinear(
@@ -517,10 +519,14 @@ class MolmoDecoderLayer(nn.Module):
         config: PretrainedConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ) -> None:
         super().__init__()
         # Attention block.
-        self.self_attn = MolmoAttention(config, cache_config, quant_config)
+        self.self_attn = MolmoAttention(config,
+                                        cache_config,
+                                        quant_config,
+                                        prefix=f"{prefix}.self_attn")
 
         # MLP block.
         self.mlp = MolmoMLP(config, quant_config=quant_config)
@@ -738,7 +744,8 @@ class MolmoModel(nn.Module):
             else MolmoDecoderLayer
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: decoder_layer(config, cache_config, quant_config),
+            lambda prefix: decoder_layer(
+                config, cache_config, quant_config, prefix=prefix),
             prefix=f"{prefix}.layers",
         )
 

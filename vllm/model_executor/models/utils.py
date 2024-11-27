@@ -9,13 +9,13 @@ from torch.func import functional_call
 from transformers import PretrainedConfig
 
 import vllm.envs as envs
-from vllm.attention.selector import (_Backend, backend_name_to_enum,
+from vllm.attention.selector import (backend_name_to_enum,
                                      get_global_forced_attn_backend)
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MultiModalPlaceholderMap, NestedTensors
-from vllm.platforms import current_platform
+from vllm.platforms import _Backend, current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils import is_pin_memory_available
 
@@ -629,3 +629,24 @@ def maybe_prefix(prefix: str, name: str) -> str:
         The string "prefix.name" if prefix was non-empty, otherwise just "name".
     """
     return name if not prefix else f"{prefix}.{name}"
+
+
+def extract_layer_index(layer_name: str) -> int:
+    """
+    Extract the layer index from the module name.
+    Examples:
+    - "encoder.layers.0" -> 0
+    - "encoder.layers.1.self_attn" -> 1
+    - "2.self_attn" -> 2
+    - "model.encoder.layers.0.sub.1" -> ValueError
+    """
+    subnames = layer_name.split(".")
+    int_vals: List[int] = []
+    for subname in subnames:
+        try:
+            int_vals.append(int(subname))
+        except ValueError:
+            continue
+    assert len(int_vals) == 1, (f"layer name {layer_name} should"
+                                " only contain one integer")
+    return int_vals[0]

@@ -52,6 +52,7 @@ class GPTBigCodeAttention(nn.Module):
         config: GPTBigCodeConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -92,7 +93,8 @@ class GPTBigCodeAttention(nn.Module):
                               scale=self.scale,
                               num_kv_heads=self.num_kv_heads,
                               cache_config=cache_config,
-                              quant_config=quant_config)
+                              quant_config=quant_config,
+                              prefix=f"{prefix}.attn")
 
     def forward(
         self,
@@ -151,6 +153,7 @@ class GPTBigCodeBlock(nn.Module):
         config: GPTBigCodeConfig,
         cache_config: Optional[CacheConfig] = None,
         quant_config: Optional[QuantizationConfig] = None,
+        prefix: str = "",
     ):
         super().__init__()
         hidden_size = config.hidden_size
@@ -158,7 +161,10 @@ class GPTBigCodeBlock(nn.Module):
                      hidden_size)
 
         self.ln_1 = nn.LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
-        self.attn = GPTBigCodeAttention(config, cache_config, quant_config)
+        self.attn = GPTBigCodeAttention(config,
+                                        cache_config,
+                                        quant_config,
+                                        prefix=f"{prefix}.attn")
         self.ln_2 = nn.LayerNorm(hidden_size, eps=config.layer_norm_epsilon)
         self.mlp = GPTBigMLP(inner_dim, config, quant_config)
 
@@ -210,7 +216,8 @@ class GPTBigCodeModel(nn.Module):
         self.wpe = nn.Embedding(config.max_position_embeddings, self.embed_dim)
         self.start_layer, self.end_layer, self.h = make_layers(
             config.num_hidden_layers,
-            lambda prefix: GPTBigCodeBlock(config, cache_config, quant_config),
+            lambda prefix: GPTBigCodeBlock(
+                config, cache_config, quant_config, prefix=prefix),
             prefix=f"{prefix}.h",
         )
         self.ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)

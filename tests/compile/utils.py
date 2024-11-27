@@ -65,7 +65,6 @@ def check_full_graph_support(model,
                              optimization_level,
                              tp_size=1):
     # make sure these models can be captured in full graph mode
-    os.environ["VLLM_TORCH_COMPILE_LEVEL"] = str(optimization_level)
     os.environ["VLLM_TEST_DYNAMO_FULLGRAPH_CAPTURE"] = "1"
 
     # The base meta llama uses too much memory.
@@ -86,6 +85,7 @@ def check_full_graph_support(model,
               enforce_eager=True,
               tensor_parallel_size=tp_size,
               disable_custom_all_reduce=True,
+              compilation_config=optimization_level,
               **model_kwargs)
 
     outputs = llm.generate(prompts, sampling_params)

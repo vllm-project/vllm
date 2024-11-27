@@ -21,7 +21,8 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
 from .interfaces import (has_inner_state, is_attention_free,
-                         supports_multimodal, supports_pp)
+                         supports_cross_encoding, supports_multimodal,
+                         supports_pp)
 from .interfaces_base import is_embedding_model, is_text_generation_model
 
 logger = init_logger(__name__)
@@ -101,6 +102,7 @@ _EMBEDDING_MODELS = {
     # [Text-only]
     "BertModel": ("bert", "BertEmbeddingModel"),
     "RobertaModel": ("roberta", "RobertaEmbeddingModel"),
+    "RobertaForMaskedLM": ("roberta", "RobertaEmbeddingModel"),
     "XLMRobertaModel": ("roberta", "RobertaEmbeddingModel"),
     "DeciLMForCausalLM": ("decilm", "DeciLMForCausalLM"),
     "Gemma2Model": ("gemma2", "Gemma2EmbeddingModel"),
@@ -122,8 +124,17 @@ _EMBEDDING_MODELS = {
     "Qwen2VLForConditionalGeneration": ("qwen2_vl", "Qwen2VLForConditionalGeneration") # noqa: E501,
 }
 
+_CROSS_ENCODER_MODELS = {
+    "BertForSequenceClassification": ("bert", "BertForSequenceClassification"),
+    "RobertaForSequenceClassification": ("roberta",
+                                         "RobertaForSequenceClassification"),
+    "XLMRobertaForSequenceClassification": ("roberta",
+                                            "RobertaForSequenceClassification"),
+}
+
 _MULTIMODAL_MODELS = {
     # [Decoder-only]
+    "AriaForConditionalGeneration": ("aria", "AriaForConditionalGeneration"),
     "Blip2ForConditionalGeneration": ("blip2", "Blip2ForConditionalGeneration"),
     "ChameleonForConditionalGeneration": ("chameleon", "ChameleonForConditionalGeneration"),  # noqa: E501
     "ChatGLMModel": ("chatglm", "ChatGLMForCausalLM"),
@@ -160,6 +171,7 @@ _SPECULATIVE_DECODING_MODELS = {
 _VLLM_MODELS = {
     **_TEXT_GENERATION_MODELS,
     **_EMBEDDING_MODELS,
+    **_CROSS_ENCODER_MODELS,
     **_MULTIMODAL_MODELS,
     **_SPECULATIVE_DECODING_MODELS,
 }
@@ -194,6 +206,7 @@ _ROCM_PARTIALLY_SUPPORTED_MODELS: Dict[str, str] = {
 class _ModelInfo:
     is_text_generation_model: bool
     is_embedding_model: bool
+    supports_cross_encoding: bool
     supports_multimodal: bool
     supports_pp: bool
     has_inner_state: bool
@@ -204,6 +217,7 @@ class _ModelInfo:
         return _ModelInfo(
             is_text_generation_model=is_text_generation_model(model),
             is_embedding_model=is_embedding_model(model),
+            supports_cross_encoding=supports_cross_encoding(model),
             supports_multimodal=supports_multimodal(model),
             supports_pp=supports_pp(model),
             has_inner_state=has_inner_state(model),
@@ -415,6 +429,12 @@ class _ModelRegistry:
         architectures: Union[str, List[str]],
     ) -> bool:
         return self.inspect_model_cls(architectures).is_embedding_model
+
+    def is_cross_encoder_model(
+        self,
+        architectures: Union[str, List[str]],
+    ) -> bool:
+        return self.inspect_model_cls(architectures).supports_cross_encoding
 
     def is_multimodal_model(
         self,
