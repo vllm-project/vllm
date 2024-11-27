@@ -81,12 +81,13 @@ class OpenAIServingTokenization(OpenAIServing):
                     add_special_tokens=request.add_special_tokens,
                 )
             else:
-                request_prompts, engine_prompts = self._preprocess_completion(
-                    request,
-                    tokenizer,
-                    request.prompt,
-                    add_special_tokens=request.add_special_tokens,
-                )
+                (request_prompts,
+                 engine_prompts) = await self._preprocess_completion(
+                     request,
+                     tokenizer,
+                     request.prompt,
+                     add_special_tokens=request.add_special_tokens,
+                 )
         except ValueError as e:
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
@@ -134,7 +135,7 @@ class OpenAIServingTokenization(OpenAIServing):
         # Silently ignore prompt adapter since it does not affect tokenization
         # (Unlike in Embeddings API where an error is raised)
 
-        prompt_input = self._tokenize_prompt_input(
+        prompt_input = await self._tokenize_prompt_input_async(
             request,
             tokenizer,
             request.tokens,
