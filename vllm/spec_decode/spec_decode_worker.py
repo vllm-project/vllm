@@ -14,12 +14,16 @@ from vllm.model_executor.layers.spec_decode_base_sampler import (
     SpecDecodeBaseSampler, SpecDecodeStochasticBaseSampler)
 from vllm.model_executor.layers.typical_acceptance_sampler import (
     TypicalAcceptanceSampler)
+from vllm.platforms import current_platform
 from vllm.sequence import (VLLM_INVALID_TOKEN_ID,
                            CompletionSequenceGroupOutput, ExecuteModelRequest,
                            HiddenStates, SequenceGroupMetadata,
                            get_all_seq_ids_and_request_ids)
 from vllm.spec_decode.batch_expansion import BatchExpansionTop1Scorer
-from vllm.spec_decode.draft_model_runner import TP1DraftModelRunner
+
+if current_platform.is_cuda_alike():
+    from vllm.spec_decode.draft_model_runner import TP1DraftModelRunner
+
 from vllm.spec_decode.interfaces import (SpeculativeProposals,
                                          SpeculativeScorer, SpeculativeScores)
 from vllm.spec_decode.medusa_worker import MedusaWorker
@@ -36,8 +40,8 @@ from vllm.spec_decode.util import (Timer, create_logprobs_output,
                                    get_all_num_logprobs,
                                    get_sampled_token_logprobs, nvtx_range,
                                    split_batch_by_proposal_len)
-from vllm.worker.worker import Worker
-from vllm.worker.worker_base import LoraNotSupportedWorkerBase, WorkerBase
+from vllm.worker.worker_base import (LoraNotSupportedWorkerBase, WorkerBase,
+                                     WorkerWrapperBase)
 
 logger = init_logger(__name__)
 
@@ -53,7 +57,11 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
     draft_worker_kwargs = kwargs.copy()
 
     kwargs["model_runner_cls"] = TargetModelRunner
-    target_worker = Worker(*args, **kwargs)
+    target_worker_config = copy.deepcopy(vllm_config)
+    target_worker_config.parallel_config.worker_cls =\
+        target_worker_config.parallel_config.sd_worker_cls
+    target_worker = WorkerWrapperBase(vllm_config=target_worker_config)
+    target_worker.init_worker(*args, **kwargs)
     # Set the disable_logprobs variable in the TargetModelRunner instance
     # as per its value specified in the SpeculativeConfig.
     target_worker.model_runner.disable_logprobs =\
@@ -65,6 +73,8 @@ def create_spec_worker(*args, **kwargs) -> "SpecDecodeWorker":
         draft_worker_config.model_config,
         vllm_config.load_config,
     )
+    speculative_config.draft_parallel_config.worker_cls =\
+        draft_worker_config.parallel_config.sd_worker_cls
     draft_worker_config.parallel_config = speculative_config.draft_parallel_config  # noqa
     # TODO allow draft-model specific load config.
 
@@ -125,7 +135,7 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
     @classmethod
     def create_worker(
         cls,
-        scorer_worker: Worker,
+        scorer_worker: WorkerBase,
         draft_worker_kwargs: Dict[str, Any],
         disable_mqa_scorer: bool,
         disable_by_batch_size: Optional[int],
@@ -145,6 +155,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         draft_parallel_config: ParallelConfig = draft_worker_kwargs[
             'vllm_config'].parallel_config
         if ngram_prompt_lookup_max > 0:
+            draft_worker_kwargs[
+                "device_type"] = scorer_worker.device_config.device.type
             proposer_worker = NGramWorker(**draft_worker_kwargs)
             proposer_worker.set_ngram_window_size(ngram_prompt_lookup_min,
                                                   ngram_prompt_lookup_max)
@@ -158,8 +170,9 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
                 proposer_worker = MedusaWorker(**draft_worker_kwargs)
             else:
                 if draft_tp == 1:
-                    draft_worker_kwargs[
-                        "model_runner_cls"] = TP1DraftModelRunner
+                    if current_platform.is_cuda_alike():
+                        draft_worker_kwargs[
+                            "model_runner_cls"] = TP1DraftModelRunner
                 else:
                     if draft_model_config.hf_config.model_type == "eagle":
                         raise NotImplementedError(
@@ -306,8 +319,9 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         self.scorer_worker.load_model()
         self.proposer_worker.load_model()
 
-        self._metrics.init_gpu_tensors(self.rank)
-        self.spec_decode_sampler.init_gpu_tensors(self.rank)
+        self._metrics.init_tensors(self.rank, device_type=self.device)
+        self.spec_decode_sampler.init_tensors(self.rank,
+                                              device_type=self.device)
 
         scorer_cls: Type[SpeculativeScorer]
         if self.disable_mqa_scorer:
@@ -408,7 +422,20 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         disable_all_speculation = self._should_disable_all_speculation(
             execute_model_req)
         num_lookahead_slots = execute_model_req.num_lookahead_slots
+        all_prompt = True
+        atleast_one_prompt = False
+        all_zero_spec_tokens = True
+        for sgm in execute_model_req.seq_group_metadata_list:
+            all_prompt = all_prompt and sgm.is_prompt
+            atleast_one_prompt = atleast_one_prompt or sgm.is_prompt
+            all_zero_spec_tokens = all_zero_spec_tokens and (
+                sgm.num_speculative_tokens == 0)
 
+        if all_prompt and execute_model_req.seq_group_metadata_list:
+            assert num_lookahead_slots == 0, (
+                "Prompt only runs should have num_lookahead_slots equal to 0. "
+                "This should never happen, please file a bug at "
+                "https://github.com/vllm-project/vllm/issues")
         # Speculative decoding is disabled in the following cases:
         # 1. Prefill phase: Speculative decoding is not
         #    used during the prefill phase.
@@ -419,11 +446,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         # In any of these cases, the proposer and scorer workers
         # are called normally.
         # We expect `num_speculative_tokens` to be None for prefills.
-        no_spec = all(
-            sgm.is_prompt for sgm in execute_model_req.seq_group_metadata_list
-        ) or num_lookahead_slots == 0 or disable_all_speculation or all(
-            sgm.num_speculative_tokens == 0
-            for sgm in execute_model_req.seq_group_metadata_list)
+        no_spec = (num_lookahead_slots == 0 or disable_all_speculation
+                   or all_zero_spec_tokens)
 
         # Broadcast how many lookahead slots are scheduled for this step, and
         # whether all speculation is disabled, to all non-driver workers.
@@ -442,6 +466,15 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
             num_lookahead_slots=num_lookahead_slots,
             no_spec=no_spec,
             disable_all_speculation=disable_all_speculation,
+            # When both chunked prefill and speculative decoding are enabled
+            # it is possible that the same batch contains both prefill
+            # and decodes. If that happens in the scorer we run the batch
+            # as one single forward pass. However, in the proposer we
+            # run them as 2 different batches - one for prefill and
+            # the other for decodes. The variable indicates to the non-driver
+            # worker that there are prefills as part of the speculative batch
+            # and hence it needs to run an extra prefill forward pass.
+            run_spec_proposer_for_prefill=atleast_one_prompt,
         )
         broadcast_tensor_dict(broadcast_dict, src=self._driver_rank)
 
@@ -653,6 +686,8 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
 
         if not data["no_spec"]:
             self.scorer_worker.execute_model()
+            if data["run_spec_proposer_for_prefill"]:
+                self.proposer_worker.execute_model()
 
         return True
 
@@ -1090,11 +1125,11 @@ class SpecDecodeWorker(LoraNotSupportedWorkerBase):
         raise NotImplementedError
 
     def start_profile(self):
-        if isinstance(self.scorer_worker, Worker):
+        if isinstance(self.scorer_worker, WorkerBase):
             self.scorer_worker.start_profile()
 
     def stop_profile(self):
-        if isinstance(self.scorer_worker, Worker):
+        if isinstance(self.scorer_worker, WorkerBase):
             self.scorer_worker.stop_profile()
 
 
