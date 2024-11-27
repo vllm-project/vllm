@@ -283,6 +283,12 @@ int64_t kvCacheAllocator::reserveRegion(int64_t region_id) {
     region = new kvCacheRegion(this->region_size, this->block_size, this->page_size, ptr);
   }
 
+  // Allocate one block the first region
+  if(region_id == 0) {
+    uint64_t total_pages; 
+    region->allocCacheBlocks(1, &total_pages, nullptr); 
+  }
+
   std::lock_guard<std::mutex> lock(this->mutex);
   
   // Record the region information

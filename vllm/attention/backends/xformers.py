@@ -578,6 +578,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         if (attn_type != AttentionType.ENCODER and kv_cache is not None):
             
             if attn_metadata.use_dattn != True:
+                # print(f"attn_metadata.use_dattn is NOT TRUE, kv_cache.shape:{kv_cache.shape}")
                 # KV-cache during decoder-self- or
                 # encoder-decoder-cross-attention, but not
                 # during encoder attention.
@@ -599,6 +600,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                         # Update self-attention KV cache (prefill/decode)
                         updated_slot_mapping = attn_metadata.slot_mapping
 
+                    #print(f"updated_slot_mapping:{updated_slot_mapping.shape}, key:{key.shape}, value:{value.shape}")
                     # Reshape the input keys and values and store them in the cache.
                     # If kv_cache is not provided, the new key and value tensors are
                     # not cached. This happens during the initial memory
@@ -614,6 +616,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 # not cached. This happens during the initial memory profiling run.
                 layer_idx = kv_cache.item()
 
+                #print(f"layer_idx is {layer_idx}")
                 #torch.set_printoptions(precision=2, sci_mode=False)
                 #print(f"key.shape:{key.shape}, type:{key.dtype}, key.elements:{key.numel()}, key.size:{key.storage().nbytes() } stride:{key.stride(0)}") 
                 #print(f"value.shape:{value.shape}, type:{key.dtype} \n{value[:3,:1,]}") 
@@ -625,7 +628,8 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 #    if attn_metadata.cache_row_mapping.shape == torch.Size([1]):
                 #        print(f"attn_metadata.cache_row_mapping:{hex(attn_metadata.cache_row_mapping)}, col_mapping:{hex(attn_metadata.cache_col_mapping)}", file=sys.stderr)
                 #        print(f"attn_metadata.cache_row_mapping at 0x{attn_metadata.cache_row_mapping.data_ptr():X}, col_mapping at 0x{attn_metadata.cache_col_mapping.data_ptr():X}", file=sys.stderr)
-                #    print(f"attn_metadata.cache_col_mapping:{attn_metadata.cache_col_mapping}", file=sys.stderr)
+                
+                #print(f"attn_metadata.cache_col_mapping:{attn_metadata.cache_col_mapping}", file=sys.stderr)
                 PagedAttention.write_to_paged_cache_dattn(key, value, layer_idx,
                                                           attn_metadata.num_layers,
                                                           attn_metadata.block_size,  
@@ -673,6 +677,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         assert decode_query.shape[0] == num_decode_tokens
         layer_idx = 0
 
+        #print(f"num_prefill_tokens:{num_prefill_tokens}, num_decode_tokens:{num_decode_tokens}")
         if prefill_meta := attn_metadata.prefill_metadata:
             # Prompt run.
             if kv_cache is None or prefill_meta.use_dattn or prefill_meta.block_tables.numel() == 0:
@@ -747,7 +752,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 #print(f"decoding: layer_idx:{layer_idx} after printing\n", file=sys.stderr)
                 #print(f"decoding: layer_idx:{layer_idx}, decode_meta.num_layers:{decode_meta.num_layers}, decode_meta.block_size:{decode_meta.block_size}, decode_meta.cache_row_mapping:{decode_meta.cache_row_mapping.shape}, decode_meta.cache_col_mapping:{decode_meta.cache_col_mapping}")
                 #print(f"decoding: layer_idx:{layer_idx}, decode_meta.num_layers:{decode_meta.num_layers}", file=sys.stderr)
-                #print(f"decoding: layer_idx:{layer_idx}, cache_row_mapping:{decode_meta.cache_row_mapping.shape}, cache_col_mapping:{decode_meta.cache_col_mapping}", file=sys.stderr)
+                #print(f"decoding: layer_idx:{layer_idx}, cache_row_mapping:{decode_meta.cache_row_mapping}, cache_col_mapping:{decode_meta.cache_col_mapping}", file=sys.stderr)
                 #print(f"decode_meta.seq_lens_tensor:{decode_meta.seq_lens_tensor}, decode_meta.max_decode_seq_len:{decode_meta.max_decode_seq_len}", file=sys.stderr) 
                 output[num_prefill_tokens:] = PagedAttention.forward_decode_dattn(
                     decode_query,

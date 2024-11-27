@@ -134,8 +134,10 @@ class CacheEngineDAttn:
 
         for i in range(self.max_batch_size):
             kv_cache_ptrs.append(self.device_cache_allocator.reserve_cache_region(i))
-            #print(f"i:{i}, virtual address:{hex(kv_cache[i])}")
+            #print(f"i:{i}, virtual address:{hex(kv_cache_ptrs[i])}")
 
+        #print(f"0: virtual address:{hex(kv_cache_ptrs[0])}")
+        # Allocate one block for region-0, as it will be used in _warm_up_model()?
         return kv_cache_ptrs
 
     def swap_in(self, src_to_dst: torch.Tensor) -> None:

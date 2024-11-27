@@ -1037,15 +1037,6 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             .create_input_mapper(model_config)
         self.mm_registry.init_mm_limits_per_prompt(self.model_config)
 
-        # support dattn
-        self.use_dattn = cache_config.use_dattn
-        if self.use_dattn:
-            if self.lora_config:
-                #TODO:
-                raise NotImplementedError("DATTN is not supported with LoRA ")
-            if self.sliding_window:
-                #TODO:
-                raise NotImplementedError("DATTN is not supported with sliding window")
             
         # Lazy initialization
         self.model: nn.Module  # Set after load_model
@@ -1062,8 +1053,20 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             SamplingMetadataCache()
 
         # Add dAttention support
+        self.use_dattn = cache_config.use_dattn
+        if self.use_dattn:
+            if self.lora_config:
+                #TODO:
+                raise NotImplementedError("DATTN is not supported with LoRA ")
+            if self.sliding_window:
+                #TODO:
+                raise NotImplementedError("DATTN is not supported with sliding window")
+
         self.kv_cache_ptrs: Optional[List[int]] = None
         self.num_layers: int = 0
+
+        # The default cache index used for _warm_up_model()
+        self.default_cache_idx: int = 0
 
     # Initialize kv_cache_ptrs when dAttention is used
     def init_kv_cache_attribute(self, kv_cache_ptrs: List[int], block_size: int, num_layers: int) -> None:
@@ -1207,7 +1210,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         #print(f"in _prepare_model_input_tensors: size:{len(seq_group_metadata_list)}", file=sys.stderr)
         for seq_group_metadata in seq_group_metadata_list:
             request_id = int(seq_group_metadata.request_id)
-            cache_id =seq_group_metadata.seq_data[request_id].cache_id 
+            cache_id = seq_group_metadata.seq_data[request_id].cache_id 
             builder.add_seq_group(seq_group_metadata, self._get_kv_ptr(cache_id) if self.use_dattn else 0)
 
         builder.reset_cached_inter_data()
@@ -1405,14 +1408,17 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     "`gpu_memory_utilization` or enforcing eager mode. "
                     "You can also reduce the `max_num_seqs` as needed "
                     "to decrease memory usage.")
+        
         start_time = time.perf_counter()
-
         # Prepare dummy inputs. These will be reused for all batch sizes.
         max_batch_size = self.max_batchsize_to_capture
         input_tokens = torch.zeros(max_batch_size, dtype=torch.long).cuda()
         input_positions = torch.zeros(max_batch_size, dtype=torch.long).cuda()
         if self.model_is_mrope:
             input_positions = torch.tile(input_positions, (3, 1))
+        
+        #print(f"input_tokens:{input_tokens.shape},input_positions:{input_positions.shape} ")
+        
         # Prepare dummy previous_hidden_states only if needed by the model.
         # This is used by draft models such as EAGLE.
         previous_hidden_states = None
@@ -1448,12 +1454,34 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             # memory usage of CUDA graph.
             for virtual_engine in range(
                     self.parallel_config.pipeline_parallel_size):
+                if self.use_dattn:
+                    cache_batch_idx = self.default_cache_idx
+                    cache_address = self._get_kv_ptr(cache_batch_idx) 
+                
                 for batch_size in reversed(batch_size_capture_list):
+                    #print(f"batch_size_capture_list:{len(batch_size_capture_list)}, batch_size:{batch_size}")
                     attn_metadata = (
                         self.attn_state.graph_capture_get_metadata_for_batch(
                             batch_size,
                             is_encoder_decoder_model=self.model_config.
                             is_encoder_decoder_model))
+
+                    if self.use_dattn:
+                        #print(f"attn_metadata:{attn_metadata.seq_lens}, context_len:{attn_metadata}")
+                        attn_metadata.cache_batch_idx = torch.tensor([cache_batch_idx]*batch_size,
+                                                                    dtype=torch.int32,
+                                                                    device=self.device)
+                        attn_metadata.cache_row_mapping = torch.tensor([cache_address]*batch_size,
+                                                                    dtype=torch.int64,
+                                                                    device=self.device)
+                        attn_metadata.cache_col_mapping = torch.tensor([0] * batch_size,
+                                                                    dtype=torch.int64,
+                                                                    device=self.device)
+
+                        #print(f"attn_metadata.cache_batch_idx:{attn_metadata.cache_batch_idx.shape}, row_mapping:{attn_metadata.cache_row_mapping.shape}, col_mapping:{attn_metadata.cache_col_mapping}") 
+                        attn_metadata.use_dattn = True
+                        attn_metadata.block_size = self.block_size
+                        attn_metadata.num_layers = self.num_layers  
 
                     if self.lora_config:
                         lora_mapping = LoRAMapping(
@@ -1469,6 +1497,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         )
                         self.set_active_prompt_adapters(
                             set(), prompt_adapter_mapping)
+
                     graph_runner = CUDAGraphRunner(
                         self.model, self.attn_backend.get_name(),
                         self.attn_state.graph_clone(batch_size),
@@ -1839,6 +1868,7 @@ class CUDAGraphRunner:
         **kwargs,
     ) -> Union[torch.Tensor, IntermediateTensors]:
         assert self._graph is None
+        #print(f"_NUM_WARMUP_ITERS:{_NUM_WARMUP_ITERS}, kv_caches:{kv_caches}")
         # Run the model a few times without capturing the graph.
         # This is to make sure that the captured graph does not include the
         # kernel launches for initial benchmarking (e.g., Triton autotune).
@@ -1921,7 +1951,8 @@ class CUDAGraphRunner:
         # Copy the input tensors to the input buffers.
         self.input_buffers["input_ids"].copy_(input_ids, non_blocking=True)
         self.input_buffers["positions"].copy_(positions, non_blocking=True)
-        self.input_buffers["slot_mapping"].copy_(attn_metadata.slot_mapping,
+        if not attn_metadata.use_dattn:
+            self.input_buffers["slot_mapping"].copy_(attn_metadata.slot_mapping,
                                                  non_blocking=True)
         self.attn_state.prepare_graph_input_buffers(
             self.input_buffers, attn_metadata, self._is_encoder_decoder_model)

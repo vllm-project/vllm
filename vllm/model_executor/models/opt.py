@@ -320,7 +320,6 @@ class OPTDecoder(nn.Module):
 
         for i in range(len(self.layers)):
             layer = self.layers[i]
-            
             hidden_states = layer(hidden_states, kv_caches[i], attn_metadata)
 
         if self.profile == True:

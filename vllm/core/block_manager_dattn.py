@@ -67,7 +67,9 @@ class BlockSpaceManagerDAttn(BlockSpaceManager):
         self.watermark_blocks = int(watermark * num_gpu_blocks)
 
         # Mapping from cache buffer ID to the number of allocated blocks.
-        self.allocated_blocks: Dict[int, int] = {} # Maintains the state of every used kv_cache 
+        self.allocated_blocks: Dict[int, int] = {} # Maintains the state of every used kv_cache
+        # We will pre-allocate one block for the first cache, due to the support of 
+        self.allocated_blocks[0] = 1 
         self.free_kv_caches: Dict[int, int] = {}
         
         self.cached_free_blocks: int = 0

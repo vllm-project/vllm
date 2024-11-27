@@ -213,6 +213,8 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
         num_decode_tokens = self.num_decode_tokens
 
         if not use_dattn and use_captured_graph:
+            print(f"IN use_captured_graph!!!")
+            exit(0)
             self.slot_mapping.extend([PAD_SLOT_ID] * cuda_graph_pad_size)
             self.block_tables.extend([] * cuda_graph_pad_size)
             num_decode_tokens = batch_size
@@ -366,8 +368,9 @@ class CommonAttentionState(AttentionState):
             is_encoder_decoder_model: bool = False) -> None:
         input_buffers["seq_lens_tensor"].copy_(
             attn_metadata.decode_metadata.seq_lens_tensor, non_blocking=True)
-        input_buffers["block_tables"].copy_(
-            attn_metadata.decode_metadata.block_tables, non_blocking=True)
+        if not attn_metadata.use_dattn:
+            input_buffers["block_tables"].copy_(
+                attn_metadata.decode_metadata.block_tables, non_blocking=True)
         if is_encoder_decoder_model:
             # The encoder decoder model works only with XFormers backend.
             # Assert the same.

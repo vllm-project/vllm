@@ -65,7 +65,7 @@ class kvCacheAllocator:
 
     
     #def reserve_cache_ptr(self, ptr:CacheDevicePtr, page_num:int = 1):
-    def reserve_cache_region(self, req_id:int = 1):
+    def reserve_cache_region(self, req_id:int = 0):
         #print(f"NOOW, in reserve_cache_region, with req_id:{req_id}")
         ptr = self._allocator.reserveRegion(req_id)
         #print(f"NOOW, in reserve_cache_region, with req_id:{req_id}, ptr:{ptr}")
