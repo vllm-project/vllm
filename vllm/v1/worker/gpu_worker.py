@@ -471,40 +471,19 @@ class WorkerProc:
                 else:
                     raise ValueError(f"Unknown RequestType: {request_type}")
 
-    # Main busy loop for Multiprocessing Workers
     def execute_model_busy_loop(self):
-        with torch.profiler.profile(
-                activities=[
-                    torch.profiler.ProfilerActivity.CPU,
-                    torch.profiler.ProfilerActivity.CUDA,
-                ],
-                schedule=torch.profiler.schedule(
-                    wait=1000,  # Wait 1000 steps so we profile middle iters
-                    warmup=10,  # Warm up the scheduler
-                    active=3,  # Run a small number of steps so it's legible
-                    repeat=1,
-                ),
-                on_trace_ready=torch.profiler.tensorboard_trace_handler(
-                    "./traces/",
-                    worker_name=f"worker_{self.worker.rank}",
-                ),
-                with_stack=True,
-        ) as p:
+        """Main busy loop for Multiprocessing Workers"""
+        while True:
+            msg = self.scheduler_output_receiver.dequeue()
 
-            while True:
-                msg = self.scheduler_output_receiver.dequeue()
-
-                if msg.message_type == ExecutorMsgType.TERMINATE:
-                    return
-                if msg.message_type == ExecutorMsgType.WORK:
-                    output = self.worker.execute_model(msg.payload)
-                    if self.worker.rank == 0:
-                        self.model_output_mq.enqueue(output)
-                else:
-                    raise ValueError(
-                        f"Unknown RequestType: {msg.message_type}")
-
-                p.step()
+            if msg.message_type == ExecutorMsgType.TERMINATE:
+                return
+            if msg.message_type == ExecutorMsgType.WORK:
+                output = self.worker.execute_model(msg.payload)
+                if self.worker.rank == 0:
+                    self.model_output_mq.enqueue(output)
+            else:
+                raise ValueError(f"Unknown RequestType: {msg.message_type}")
 
 
 def init_worker_distributed_environment(
