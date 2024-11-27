@@ -80,19 +80,24 @@ class KVCacheManager:
 
         computed_blocks = []
 
-        # TODO(rickyx): potentially we could cache this so we don't have to
-        # recompute it every time.
-        block_hashes = hash_request_tokens(self.block_size,
-                                           request.all_token_ids)
-
-        for block_hash in block_hashes:
+        req_blocks = self.req_to_blocks[request.request_id]
+        num_full_blocks = len(request.all_token_ids) // self.block_size
+        parent_block_hash = None
+        for idx in range(num_full_blocks):
             # block_hashes is a chain of block hashes. If a block hash is not
             # in the cached_block_hash_to_id, the following block hashes are
             # not computed yet for sure.
-            if cached_block := self._get_cached_block(block_hash):
+            if cached_block := req_blocks[idx]:
                 computed_blocks.append(cached_block)
+                parent_block_hash = cached_block.block_hash
+                assert parent_block_hash
             else:
-                break
+                block_token_ids = tuple(request.all_token_ids[idx * self.block_size : (idx + 1) * self.block_size])
+                block_hash = hash_block_tokens(parent_block_hash, block_token_ids)
+                if cached_block := self._get_cached_block(block_hash):
+                    computed_blocks.append(cached_block)
+                else:
+                    break
 
         return computed_blocks
 
