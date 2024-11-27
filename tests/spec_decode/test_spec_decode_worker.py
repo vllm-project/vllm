@@ -595,8 +595,8 @@ def test_init_device(acceptance_sampler_method: str):
 
     target_worker.init_device.assert_called_once()
 
-    metrics_collector.init_gpu_tensors.assert_called_once()
-    spec_decode_sampler.init_gpu_tensors.assert_called_once()
+    metrics_collector.init_tensors.assert_called_once()
+    spec_decode_sampler.init_tensors.assert_called_once()
 
 
 @pytest.mark.parametrize("acceptance_sampler_method",

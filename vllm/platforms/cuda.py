@@ -106,6 +106,8 @@ class CudaPlatformBase(Platform):
             elif vllm_config.speculative_config:
                 parallel_config.worker_cls = \
                     "vllm.spec_decode.spec_decode_worker.create_spec_worker"
+                parallel_config.sd_worker_cls = \
+                    "vllm.worker.worker.Worker"
             else:
                 parallel_config.worker_cls = "vllm.worker.worker.Worker"
 

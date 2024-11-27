@@ -466,6 +466,9 @@ class WorkerWrapperBase:
             logger.exception(msg)
             raise e
 
+    def __getattr__(self, attr):
+        return getattr(self.worker, attr)
+
 
 def extract_previous_hidden_states(
         data: Union[ExecuteModelRequest, Dict[str, torch.Tensor]]) -> \

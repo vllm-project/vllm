@@ -80,6 +80,7 @@ class ModelInputForCPUWithSamplingMetadata(ModelInputForCPU):
     Used by the ModelRunner.
     """
     sampling_metadata: Optional["SamplingMetadata"] = None
+    is_prompt: Optional[bool] = None
 
     def as_broadcastable_tensor_dict(self) -> Dict[str, Any]:
         tensor_dict = {
@@ -395,6 +396,7 @@ class CPUModelRunnerBase(ModelRunnerBase[TModelInputForCPU]):
         vllm_config: VllmConfig,
         kv_cache_dtype: Optional[str] = "auto",
         is_driver_worker: bool = False,
+        return_hidden_states: bool = False,
         *args,
         **kwargs,
     ):
@@ -403,19 +405,25 @@ class CPUModelRunnerBase(ModelRunnerBase[TModelInputForCPU]):
         cache_config = self.cache_config
 
         self.is_driver_worker = is_driver_worker
+        self.return_hidden_states = return_hidden_states
 
         self.device = self.device_config.device
+        self.pin_memory = False
 
         self.kv_cache_dtype = kv_cache_dtype
         self.sliding_window = model_config.get_sliding_window()
         self.block_size = cache_config.block_size
+        num_attn_heads = self.model_config.get_num_attention_heads(
+            self.parallel_config)
+        needs_attn_backend = (num_attn_heads != 0
+                              or self.model_config.is_attention_free)
         self.attn_backend = get_attn_backend(
             self.model_config.get_head_size(),
             self.model_config.dtype,
             self.kv_cache_dtype,
             self.block_size,
             self.model_config.is_attention_free,
-        )
+        ) if needs_attn_backend else None
 
         # Multi-modal data support
         self.mm_registry = MULTIMODAL_REGISTRY
@@ -443,6 +451,15 @@ class CPUModelRunnerBase(ModelRunnerBase[TModelInputForCPU]):
         builder.set_seq_group_list(seq_group_metadata_list)
 
         return builder.build()  # type: ignore
+
+    # sampler property will be used by spec_decode_worker
+    @property
+    def sampler(self):
+        return self.model.sampler
+
+    @property
+    def vocab_size(self) -> int:
+        return self.model_config.get_vocab_size()
 
 
 class CPUModelRunner(CPUModelRunnerBase[ModelInputForCPUWithSamplingMetadata]):
@@ -480,9 +497,12 @@ class CPUModelRunner(CPUModelRunnerBase[ModelInputForCPUWithSamplingMetadata]):
                                                      pin_memory=False,
                                                      generators=generators)
 
+        is_prompt = (seq_group_metadata_list[0].is_prompt
+                     if seq_group_metadata_list else None)
         return dataclasses.replace(model_input,
                                    sampling_metadata=sampling_metadata,
-                                   virtual_engine=virtual_engine)
+                                   virtual_engine=virtual_engine,
+                                   is_prompt=is_prompt)
 
     @torch.no_grad()
     def execute_model(
@@ -491,16 +511,22 @@ class CPUModelRunner(CPUModelRunnerBase[ModelInputForCPUWithSamplingMetadata]):
         kv_caches: List[torch.Tensor],
         intermediate_tensors: Optional[IntermediateTensors] = None,
         num_steps: int = 1,
+        previous_hidden_states: Optional[torch.Tensor] = None,
     ) -> Optional[List[SamplerOutput]]:
         if num_steps > 1:
             raise ValueError(
                 "CPU worker does not support multi-step execution.")
 
         model_executable = self.model
+
         multimodal_kwargs = {}
         if model_input.multi_modal_kwargs is not None:
             multimodal_kwargs = MultiModalKwargs.as_kwargs(
                 model_input.multi_modal_kwargs, device=self.device)
+        execute_model_kwargs = {}
+        if previous_hidden_states is not None:
+            execute_model_kwargs.update(
+                {"previous_hidden_states": previous_hidden_states})
 
         with set_forward_context(model_input.attn_metadata, self.vllm_config):
             hidden_states = model_executable(
@@ -509,6 +535,7 @@ class CPUModelRunner(CPUModelRunnerBase[ModelInputForCPUWithSamplingMetadata]):
                 kv_caches=kv_caches,
                 attn_metadata=model_input.attn_metadata,
                 intermediate_tensors=intermediate_tensors,
+                **execute_model_kwargs,
                 **multimodal_kwargs,
             )
 
@@ -525,4 +552,12 @@ class CPUModelRunner(CPUModelRunnerBase[ModelInputForCPUWithSamplingMetadata]):
             logits=logits,
             sampling_metadata=model_input.sampling_metadata,
         )
+        if self.return_hidden_states:
+            # we only need to pass hidden states of most recent token
+            if model_input.is_prompt:
+                output.prefill_hidden_states = hidden_states
+            output.hidden_states = hidden_states
         return [output]
+
+    def generate_proposals(self, *args, **kwargs):
+        return self.model.generate_proposals(*args, **kwargs)
