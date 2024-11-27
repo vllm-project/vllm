@@ -390,11 +390,12 @@ def _resolve_matches(
     Resolve :code:`matches` to ensure that there are no overlapping matches,
     and sort them such that earlier matches take priority over later ones.
     """
-    seen_matches = dict[int, _PromptReplacementMatch[_T, _S]]()
+    seen_matches: list[Optional[_PromptReplacementMatch[_T, _S]]] \
+        = [None] * len(prompt)
 
     for match in matches:
         for idx in range(match.start_idx, match.end_idx):
-            if idx in seen_matches:
+            if seen_matches[idx] is not None:
                 raise ValueError("Found overlapping matches "
                                  f"({seen_matches[idx]} and {match}) "
                                  f"at index={idx} of prompt={prompt}")
