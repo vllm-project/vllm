@@ -93,20 +93,21 @@ __device__ __forceinline__ T gelu_tanh_kernel(const T& x) {
 
 // Launch activation and gating kernel.
 #ifdef USE_ROCM
-#define LAUNCH_SCALED_ACTIVATION_GATE_KERNEL(KERNEL)                           \
-  int d = input.size(-1) / 2;                                                  \
-  int64_t num_tokens = input.numel() / input.size(-1);                         \
-  dim3 grid(num_tokens);                                                       \
-  dim3 block(std::min(d, 1024));                                               \
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));            \
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();                \
-  VLLM_DISPATCH_FLOATING_TYPES(                                                \
-      input.scalar_type(), "scaled_act_and_mul_kernel", [&] {                  \
-        vllm::scaled_act_and_mul_kernel<scalar_t, KERNEL<scalar_t>>            \
-            <<<grid, block, 0, stream>>>(out.data_ptr<c10::Float8_e4m3fnuz>(), \
-                                         input.data_ptr<scalar_t>(), d,        \
-                                         1.0 / (*scale.data_ptr<float>()));    \
-      });
+  #define LAUNCH_SCALED_ACTIVATION_GATE_KERNEL(KERNEL)                \
+    int d = input.size(-1) / 2;                                       \
+    int64_t num_tokens = input.numel() / input.size(-1);              \
+    dim3 grid(num_tokens);                                            \
+    dim3 block(std::min(d, 1024));                                    \
+    const at::cuda::OptionalCUDAGuard device_guard(device_of(input)); \
+    const cudaStream_t stream = at::cuda::getCurrentCUDAStream();     \
+    VLLM_DISPATCH_FLOATING_TYPES(                                     \
+        input.scalar_type(), "scaled_act_and_mul_kernel", [&] {       \
+          vllm::scaled_act_and_mul_kernel<scalar_t, KERNEL<scalar_t>> \
+              <<<grid, block, 0, stream>>>(                           \
+                  out.data_ptr<c10::Float8_e4m3fnuz>(),               \
+                  input.data_ptr<scalar_t>(), d,                      \
+                  1.0 / (*scale.data_ptr<float>()));                  \
+        });
 #endif
 
 void silu_and_mul(torch::Tensor& out,    // [..., d]

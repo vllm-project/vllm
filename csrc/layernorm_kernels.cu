@@ -247,7 +247,7 @@ void rms_norm(torch::Tensor& out,     // [..., hidden_size]
     LAUNCH_RMS_NORM(0);
   }
 #else
-    LAUNCH_RMS_NORM(0);
+  LAUNCH_RMS_NORM(0);
 #endif
 }
 
