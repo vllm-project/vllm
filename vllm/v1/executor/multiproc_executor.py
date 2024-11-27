@@ -159,8 +159,7 @@ class MultiprocExecutor:
             self.scheduler_output_mq = None
 
     def __del__(self):
-        if hasattr(self, 'shutdown'):
-            self.shutdown()
+        self.shutdown()
 
     def check_health(self) -> None:
         # MultiprocExecutor will always be healthy as long as

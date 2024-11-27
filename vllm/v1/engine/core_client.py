@@ -105,6 +105,9 @@ class InprocClient(EngineCoreClient):
     async def profile(self, is_start=True) -> None:
         self.engine_core.profile(is_start)
 
+    def __del__(self):
+        self.shutdown()
+
 
 class MPClient(EngineCoreClient):
     """

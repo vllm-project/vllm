@@ -44,7 +44,6 @@ def test_vllm_gc_ed():
     assert weak_llm() is None
 
 
-@pytest.mark.skip_v1
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("backend", ["FLASH_ATTN", "XFORMERS", "FLASHINFER"])
 @pytest.mark.parametrize("dtype", ["half"])
@@ -127,6 +126,11 @@ def test_models_distributed(
     if attention_backend:
         os.environ["VLLM_ATTENTION_BACKEND"] = attention_backend
 
+    # Import VLLM_USE_V1 dynamically to handle patching
+    from vllm.envs import VLLM_USE_V1
+    if VLLM_USE_V1 and distributed_executor_backend != "mp":
+        pytest.skip(f"Skip {distributed_executor_backend} for V1")
+
     dtype = "half"
     max_tokens = 5
 
@@ -137,8 +141,8 @@ def test_models_distributed(
     with vllm_runner(model,
                      dtype=dtype,
                      tensor_parallel_size=2,
-                     distributed_executor_backend=distributed_executor_backend
-                     ) as vllm_model:
+                     distributed_executor_backend=distributed_executor_backend,
+                     enforce_eager=True) as vllm_model:
         vllm_outputs = vllm_model.generate_greedy(example_prompts, max_tokens)
 
     with hf_runner(model, dtype=dtype) as hf_model:
