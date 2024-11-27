@@ -23,6 +23,7 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.pooler import Pooler, PoolingType
 from vllm.model_executor.layers.sampler import Sampler
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -100,6 +101,7 @@ class TeleChat2ForCausalLM(LlamaForCausalLM):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super(LlamaForCausalLM, self).__init__()
         config = vllm_config.model_config.hf_config
+        pooler_config = vllm_config.model_config.pooler_config
         quant_config = vllm_config.quant_config
         config.intermediate_size = config.ffn_hidden_size
         config.hidden_act = "silu"
@@ -116,6 +118,11 @@ class TeleChat2ForCausalLM(LlamaForCausalLM):
                                       prefix=maybe_prefix(prefix, "lm_head"))
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
+        self._pooler = Pooler.from_config_with_defaults(
+            pooler_config,
+            pooling_type=PoolingType.STEP,
+            normalize=False,
+            softmax=False)
 
     def load_weights(self, weights: Iterable[Tuple[str,
                                                    torch.Tensor]]) -> Set[str]:
